@@ -85,6 +85,47 @@ The `Submit` method supports all HTCondor submit file features:
 - Queue with variables: `queue name from (Alice Bob Charlie)`
 - Full submit file syntax with macros and expressions
 
+### HTTP API Server
+
+The library includes an HTTP API server for RESTful access to HTCondor:
+
+```bash
+# Start the API server with demo mode (includes mini HTCondor)
+cd cmd/htcondor-api
+go build
+./htcondor-api --demo
+
+# Or use with existing HTCondor
+./htcondor-api
+```
+
+**API Endpoints:**
+- `POST /api/v1/jobs` - Submit jobs
+- `GET /api/v1/jobs` - List jobs (with constraint and projection)
+- `GET /api/v1/jobs/{id}` - Get job details
+- `PUT /api/v1/jobs/{id}/input` - Upload input files (tarball)
+- `GET /api/v1/jobs/{id}/output` - Download output files (tarball)
+- `GET /openapi.json` - OpenAPI 3.0 specification
+
+**Example Usage:**
+```bash
+# Submit a job
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"submit_file": "executable=/bin/echo\narguments=Hello\nqueue"}'
+
+# List jobs
+curl http://localhost:8080/api/v1/jobs?constraint=Owner==\"user\" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Get job details
+curl http://localhost:8080/api/v1/jobs/1.0 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+See [httpserver/README.md](httpserver/README.md) for full documentation and [HTTP_API_TODO.md](HTTP_API_TODO.md) for implementation status.
+
 ## Development
 
 ### Building
@@ -121,11 +162,14 @@ This project is under active development.
 - ✅ Job ad generation from submit files
 - ✅ QMGMT (Queue Management) protocol implementation
 - ✅ Job submission via Schedd.Submit() with submit file strings
+- ✅ Remote job submission with file spooling (Schedd.SubmitRemote)
+- ✅ HTTP API server with RESTful job management
 - ⏳ Collector Advertise method (pending)
 - ⏳ Collector LocateDaemon method (pending)
 - ⏳ Schedd Query implementation (pending)
 - ⏳ Schedd Act/Edit methods (pending)
 - 🚧 File transfer protocol (proof-of-concept complete, see below)
+- 🚧 HTTP API token authentication integration (partial, see HTTP_API_TODO.md)
 
 ### File Transfer Protocol
 
