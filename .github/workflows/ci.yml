@@ -32,7 +32,7 @@ jobs:
 
         # Update and install HTCondor
         sudo apt-get update
-        sudo apt-get install -y htcondor
+        sudo apt-get install -y condor
 
     - name: Download dependencies
       run: go mod download
