@@ -74,6 +74,14 @@ func getScheddAddress(t *testing.T, harness *condorTestHarness) (string, int) {
 	return scheddHost, scheddPort
 }
 
+// minInt returns the minimum of two integers
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // TestSpoolJobFilesIntegration tests submitting a job and then spooling input files
 // This verifies the complete workflow of:
 // 1. Creating a job with proper spooling attributes using SubmitRemote
@@ -595,11 +603,4 @@ queue
 			}
 		}
 	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

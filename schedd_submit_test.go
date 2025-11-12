@@ -117,9 +117,14 @@ func TestScheddSubmitIntegration(t *testing.T) {
 		// Transaction is already started by GetCapabilities, no need to call BeginTransaction
 
 		// Set effective owner - this must be done before creating jobs
-		// For FS authentication, we must use the authenticated username (typically the Unix username)
+		// For FS authentication, we must use the authenticated username
 		// We can't set arbitrary owners unless we're a superuser
-		owner := "bbockelm@f4hp7ql65f-2.local" // The authenticated user from FS auth
+		owner := qmgmt.authenticatedUser
+		if owner == "" {
+			harness.printScheddLog()
+			_ = qmgmt.AbortTransaction(ctx)
+			t.Fatal("No authenticated user from QMGMT connection")
+		}
 		if err := qmgmt.SetEffectiveOwner(ctx, owner); err != nil {
 			harness.printScheddLog()
 			_ = qmgmt.AbortTransaction(ctx)
