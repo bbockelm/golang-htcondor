@@ -22,7 +22,7 @@ make examples      # Build all examples
 
 Pre-commit hooks automatically run before each commit to catch issues early:
 - `gofmt` - Format Go code
-- `goimports` - Organize imports  
+- `goimports` - Organize imports
 - `go mod tidy` - Keep go.mod clean
 - `golangci-lint` - Run linter checks
 - File hygiene checks (trailing whitespace, etc.)
@@ -39,7 +39,7 @@ The project now has automated CI that runs on every push and pull request:
 - Generates coverage reports
 - Uploads coverage to Codecov (on Go 1.23)
 
-### Lint Job  
+### Lint Job
 - Runs golangci-lint with comprehensive checks
 - Uses Go 1.23
 - Configuration in `.golangci.yml`
