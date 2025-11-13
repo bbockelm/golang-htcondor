@@ -700,3 +700,30 @@ func convertClassAdValue(val interface{}) interface{} {
 		return v
 	}
 }
+
+// handleMetrics handles GET /metrics endpoint for Prometheus scraping
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.prometheusExporter == nil {
+		writeError(w, http.StatusNotImplemented, "Metrics not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	metricsText, err := s.prometheusExporter.Export(ctx)
+	if err != nil {
+		log.Printf("Error exporting metrics: %v", err)
+		writeError(w, http.StatusInternalServerError, "Failed to export metrics")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(metricsText)); err != nil {
+		log.Printf("Error writing metrics response: %v", err)
+	}
+}

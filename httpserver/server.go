@@ -9,29 +9,35 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/metricsd"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	httpServer     *http.Server
-	schedd         *htcondor.Schedd
-	userHeader     string
-	signingKeyPath string
+	httpServer         *http.Server
+	schedd             *htcondor.Schedd
+	userHeader         string
+	signingKeyPath     string
+	metricsRegistry    *metricsd.Registry
+	prometheusExporter *metricsd.PrometheusExporter
 }
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr     string        // Address to listen on (e.g., ":8080")
-	ScheddName     string        // Schedd name
-	ScheddAddr     string        // Schedd address
-	ScheddPort     int           // Schedd port
-	UserHeader     string        // HTTP header to extract username from (optional)
-	SigningKeyPath string        // Path to token signing key (optional, for token generation)
-	TLSCertFile    string        // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile     string        // Path to TLS key file (optional, enables HTTPS)
-	ReadTimeout    time.Duration // HTTP read timeout (default: 30s)
-	WriteTimeout   time.Duration // HTTP write timeout (default: 30s)
-	IdleTimeout    time.Duration // HTTP idle timeout (default: 120s)
+	ListenAddr      string              // Address to listen on (e.g., ":8080")
+	ScheddName      string              // Schedd name
+	ScheddAddr      string              // Schedd address
+	ScheddPort      int                 // Schedd port
+	UserHeader      string              // HTTP header to extract username from (optional)
+	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
+	TLSCertFile     string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile      string              // Path to TLS key file (optional, enables HTTPS)
+	ReadTimeout     time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout    time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout     time.Duration       // HTTP idle timeout (default: 120s)
+	Collector       *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
 }
 
 // NewServer creates a new HTTP API server
@@ -42,6 +48,35 @@ func NewServer(cfg Config) (*Server, error) {
 		schedd:         schedd,
 		userHeader:     cfg.UserHeader,
 		signingKeyPath: cfg.SigningKeyPath,
+	}
+
+	// Setup metrics if collector is provided
+	enableMetrics := cfg.EnableMetrics
+	if cfg.Collector != nil && !cfg.EnableMetrics {
+		enableMetrics = true // Enable by default if collector is provided
+	}
+
+	if enableMetrics && cfg.Collector != nil {
+		registry := metricsd.NewRegistry()
+
+		// Set cache TTL
+		cacheTTL := cfg.MetricsCacheTTL
+		if cacheTTL == 0 {
+			cacheTTL = 10 * time.Second
+		}
+		registry.SetCacheTTL(cacheTTL)
+
+		// Register collectors
+		poolCollector := metricsd.NewPoolCollector(cfg.Collector)
+		registry.Register(poolCollector)
+
+		processCollector := metricsd.NewProcessCollector()
+		registry.Register(processCollector)
+
+		s.metricsRegistry = registry
+		s.prometheusExporter = metricsd.NewPrometheusExporter(registry)
+
+		log.Printf("Metrics endpoint enabled at /metrics")
 	}
 
 	mux := http.NewServeMux()

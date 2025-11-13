@@ -195,6 +195,24 @@ GET /openapi.json
 
 Returns the full OpenAPI 3.0 specification.
 
+#### Prometheus Metrics
+```bash
+GET /metrics
+```
+
+Returns Prometheus-formatted metrics about the HTCondor pool and the server process. Available when a collector is configured.
+
+**Example metrics:**
+- `htcondor_pool_machines_total` - Total machines in the pool
+- `htcondor_pool_cpus_total` - Total CPU cores
+- `htcondor_pool_cpus_used` - Used CPU cores
+- `htcondor_pool_memory_mb_total` - Total memory in MB
+- `htcondor_pool_jobs_total` - Total jobs
+- `process_resident_memory_bytes` - Server memory usage
+- `process_goroutines` - Active goroutines
+
+See [../metricsd/README.md](../metricsd/README.md) for complete metrics documentation.
+
 ## Authentication
 
 The server uses HTCondor TOKEN authentication. The bearer token from the HTTP Authorization header is passed to the HTCondor schedd for authentication.
@@ -248,6 +266,22 @@ SCHEDD_NAME = local
 SCHEDD_HOST = 127.0.0.1
 SCHEDD_PORT = 9618
 ```
+
+#### Collector Configuration (Optional - for Metrics)
+
+```bash
+# Collector configuration (optional, enables /metrics endpoint)
+COLLECTOR_HOST = 127.0.0.1
+COLLECTOR_PORT = 9618
+
+# Metrics cache TTL (optional, default: 10s)
+METRICS_CACHE_TTL = 10s
+```
+
+When collector configuration is provided, the HTTP server automatically:
+1. Registers pool and process metrics collectors
+2. Exposes metrics at `/metrics` in Prometheus format
+3. Caches metrics according to configured TTL
 
 ### Configuration Examples
 

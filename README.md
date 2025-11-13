@@ -105,6 +105,7 @@ go build
 - `GET /api/v1/jobs/{id}` - Get job details
 - `PUT /api/v1/jobs/{id}/input` - Upload input files (tarball)
 - `GET /api/v1/jobs/{id}/output` - Download output files (tarball)
+- `GET /metrics` - Prometheus metrics endpoint
 - `GET /openapi.json` - OpenAPI 3.0 specification
 
 **Example Usage:**
@@ -122,9 +123,41 @@ curl http://localhost:8080/api/v1/jobs?constraint=Owner==\"user\" \
 # Get job details
 curl http://localhost:8080/api/v1/jobs/1.0 \
   -H "Authorization: Bearer $TOKEN"
+
+# Get Prometheus metrics
+curl http://localhost:8080/metrics
 ```
 
 See [httpserver/README.md](httpserver/README.md) for full documentation and [HTTP_API_TODO.md](HTTP_API_TODO.md) for implementation status.
+
+### Metrics Collection (metricsd)
+
+The library includes a metrics collection module inspired by `condor_gangliad` for exporting metrics to Prometheus:
+
+```go
+import (
+    "github.com/bbockelm/golang-htcondor/metricsd"
+)
+
+// Create metrics registry
+registry := metricsd.NewRegistry()
+
+// Register collectors
+poolCollector := metricsd.NewPoolCollector(collector)
+registry.Register(poolCollector)
+
+// Export to Prometheus format
+exporter := metricsd.NewPrometheusExporter(registry)
+metricsText, err := exporter.Export(ctx)
+```
+
+**Built-in Metrics:**
+- Pool-wide statistics (machines, CPUs, memory, jobs)
+- Process-level metrics (memory, goroutines)
+- Machine state distribution
+- Resource utilization
+
+The HTTP API server automatically exposes metrics at `/metrics` when a collector is configured. See [metricsd/README.md](metricsd/README.md) for details.
 
 ## Development
 

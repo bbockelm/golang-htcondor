@@ -12,4 +12,9 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// Job management endpoints
 	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/api/v1/jobs/", s.handleJobByID) // Pattern with trailing slash catches /api/v1/jobs/{id}
+
+	// Metrics endpoint (if enabled)
+	if s.prometheusExporter != nil {
+		mux.HandleFunc("/metrics", s.handleMetrics)
+	}
 }
