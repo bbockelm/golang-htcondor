@@ -1135,8 +1135,95 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 			return fmt.Errorf("error reading tar: %w", err)
 		}
 
-		// Skip directories
+		// Handle directories - send mkdir command
 		if header.Typeflag == tar.TypeDir {
+			var dirName string
+
+			if singleJobMode {
+				// In single job mode, directories are at root level
+				dirName = strings.TrimSuffix(header.Name, "/")
+			} else {
+				// In multi-job mode, parse cluster.proc/dirname
+				parts := strings.SplitN(header.Name, "/", 2)
+				if len(parts) != 2 {
+					// Directory not in cluster.proc/dirname format, skip
+					continue
+				}
+
+				// Parse cluster.proc
+				procParts := strings.SplitN(parts[0], ".", 2)
+				if len(procParts) != 2 {
+					// Not in cluster.proc format, skip
+					continue
+				}
+
+				cluster, err := strconv.ParseInt(procParts[0], 10, 32)
+				if err != nil {
+					// Invalid cluster ID, skip
+					continue
+				}
+
+				proc, err := strconv.ParseInt(procParts[1], 10, 32)
+				if err != nil {
+					// Invalid proc ID, skip
+					continue
+				}
+
+				parsedJobID := procID{cluster: int32(cluster), proc: int32(proc)}
+				dirName = strings.TrimSuffix(parts[1], "/")
+
+				// Check if this job is in our list
+				if _, ok := jobInfoMap[parsedJobID]; !ok {
+					// Job not in our list, skip
+					continue
+				}
+
+				// Check if we're switching to a new job
+				if currentJobID == nil || *currentJobID != parsedJobID {
+					// Send CommandFinished for the previous job if there was one
+					if currentJobID != nil && currentJobInfo != nil {
+						if err := s.sendCommandFinished(ctx, cedarStream); err != nil {
+							return fmt.Errorf("failed to send CommandFinished for job %d.%d: %w", currentJobID.cluster, currentJobID.proc, err)
+						}
+						processedJobs[*currentJobID] = true
+					}
+
+					// Switch to new job
+					currentJobID = &parsedJobID
+					currentJobInfo = jobInfoMap[parsedJobID]
+
+					// Reset file index and GoAhead state for new job
+					fileIndex = 0
+					peerGoesAheadAlways = false
+
+					// Send protocol headers for this job
+					if err := s.sendTransferProtocolHeaders(ctx, cedarStream, 1*1024*1024); err != nil {
+						return fmt.Errorf("failed to send protocol headers for job %d.%d: %w", parsedJobID.cluster, parsedJobID.proc, err)
+					}
+				}
+			}
+
+			// Send CommandMkdir
+			if dirName != "" && dirName != "." {
+				log.Printf("Sending mkdir command for: %s", dirName)
+				msg := message.NewMessageForStream(cedarStream)
+				if err := msg.PutInt32(ctx, int32(CommandMkdir)); err != nil {
+					return fmt.Errorf("failed to send CommandMkdir: %w", err)
+				}
+				if err := msg.FinishMessage(ctx); err != nil {
+					return fmt.Errorf("failed to finish CommandMkdir message: %w", err)
+				}
+
+				// Send directory name
+				msg = message.NewMessageForStream(cedarStream)
+				if err := msg.PutString(ctx, dirName); err != nil {
+					return fmt.Errorf("failed to send directory name: %w", err)
+				}
+				if err := msg.FinishMessage(ctx); err != nil {
+					return fmt.Errorf("failed to finish directory name message: %w", err)
+				}
+			}
+
 			continue
 		}
 
