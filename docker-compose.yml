@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  golang-htcondor:
+    build: .
+    image: golang-htcondor:latest
+    container_name: golang-htcondor-dev
+    volumes:
+      - ./cmd/htcondor-api/tmp:/tmp
+    ports:
+      - "8080:8080"
+      - "9618:9618"

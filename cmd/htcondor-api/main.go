@@ -19,12 +19,22 @@ import (
 
 var (
 	demoMode   = flag.Bool("demo", false, "Run in demo mode with mini condor")
-	listenAddr = flag.String("listen", ":8080", "Address to listen on")
+	listenAddr = flag.String("listen", ":8080", "Address to listen on (use 0.0.0.0:8080 to listen on all interfaces)")
 	userHeader = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
 )
 
 func main() {
 	flag.Parse()
+
+	// Force listenAddr to 0.0.0.0:8080 if not explicitly set
+	if *listenAddr == ":8080" {
+		*listenAddr = "0.0.0.0:8080"
+	}
+
+	// Set a default user header if not provided
+	if *userHeader == "" {
+		*userHeader = "X-Remote-User"
+	}
 
 	if *demoMode {
 		if err := runDemoMode(); err != nil {
@@ -56,7 +66,7 @@ func runNormalMode() error {
 		return fmt.Errorf("SCHEDD_HOST not configured")
 	}
 
-	scheddPort := 9618 // Default schedd port
+	scheddPort := 9619 // Default schedd port
 	if portStr, ok := cfg.Get("SCHEDD_PORT"); ok {
 		if _, err := fmt.Sscanf(portStr, "%d", &scheddPort); err != nil {
 			log.Printf("Warning: failed to parse SCHEDD_PORT '%s', using default %d: %v", portStr, scheddPort, err)
@@ -164,18 +174,31 @@ func runDemoMode() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
+
+	// Use absolute path for all config and directory creation
+	tempDirAbs, err := filepath.Abs(tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	// Ensure required subdirectories exist
+	for _, sub := range []string{"log", "spool", "execute"} {
+		if err := os.MkdirAll(filepath.Join(tempDirAbs, sub), 0777); err != nil {
+			return fmt.Errorf("failed to create %s: %w", sub, err)
+		}
+	}
 	defer func() {
-		log.Printf("Cleaning up temporary directory: %s", tempDir)
-		if err := os.RemoveAll(tempDir); err != nil {
+		log.Printf("Cleaning up temporary directory: %s", tempDirAbs)
+		if err := os.RemoveAll(tempDirAbs); err != nil {
 			log.Printf("Warning: failed to remove temp directory: %v", err)
 		}
 	}()
 
-	log.Printf("Using temporary directory: %s", tempDir)
+	log.Printf("Using temporary directory: %s", tempDirAbs)
 
 	// Write mini condor configuration
-	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
+	configFile := filepath.Join(tempDirAbs, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDirAbs); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
@@ -194,7 +217,7 @@ func runDemoMode() error {
 
 	// Wait for condor to be ready
 	log.Println("Waiting for HTCondor to be ready...")
-	if err := waitForCondor(tempDir); err != nil {
+	if err := waitForCondor(tempDirAbs); err != nil {
 		return fmt.Errorf("condor failed to start: %w", err)
 	}
 
@@ -204,7 +227,7 @@ func runDemoMode() error {
 	var signingKeyPath string
 	if *userHeader != "" {
 		log.Printf("User header mode enabled: %s", *userHeader)
-		signingKeyPath = filepath.Join(tempDir, "signing.key")
+		signingKeyPath = filepath.Join(tempDirAbs, "signing.key")
 
 		// Generate a signing key
 		key, err := httpserver.GenerateSigningKey()
@@ -225,7 +248,7 @@ func runDemoMode() error {
 		ListenAddr:     *listenAddr,
 		ScheddName:     "local",
 		ScheddAddr:     "127.0.0.1",
-		ScheddPort:     9618,
+		ScheddPort:     9619,
 		UserHeader:     *userHeader,
 		SigningKeyPath: signingKeyPath,
 	})
@@ -257,8 +280,11 @@ func runDemoMode() error {
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
 func writeMiniCondorConfig(configFile, localDir string) error {
+	uid := os.Getuid()
+	gid := os.Getgid()
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for Demo Mode
 LOCAL_DIR = %s
+CONDOR_IDS = %d.%d
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
 EXECUTE = $(LOCAL_DIR)/execute
@@ -275,11 +301,14 @@ SUSPEND = FALSE
 PREEMPT = FALSE
 KILL = FALSE
 
+# hardcode no shared port
+USE_SHARED_PORT = FALSE
+
 # Network settings
 CONDOR_HOST = 127.0.0.1
 COLLECTOR_HOST = $(CONDOR_HOST):9618
 SCHEDD_HOST = $(CONDOR_HOST)
-SCHEDD_PORT = 9618
+SCHEDD_ARGS = -p 9619
 
 # Security settings - allow local access
 ALLOW_WRITE = 127.0.0.1, $(IP_ADDRESS)
@@ -306,7 +335,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir)
+`, localDir, uid, gid)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
