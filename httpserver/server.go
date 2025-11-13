@@ -21,12 +21,17 @@ type Server struct {
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr     string // Address to listen on (e.g., ":8080")
-	ScheddName     string // Schedd name
-	ScheddAddr     string // Schedd address
-	ScheddPort     int    // Schedd port
-	UserHeader     string // HTTP header to extract username from (optional)
-	SigningKeyPath string // Path to token signing key (optional, for token generation)
+	ListenAddr     string        // Address to listen on (e.g., ":8080")
+	ScheddName     string        // Schedd name
+	ScheddAddr     string        // Schedd address
+	ScheddPort     int           // Schedd port
+	UserHeader     string        // HTTP header to extract username from (optional)
+	SigningKeyPath string        // Path to token signing key (optional, for token generation)
+	TLSCertFile    string        // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile     string        // Path to TLS key file (optional, enables HTTPS)
+	ReadTimeout    time.Duration // HTTP read timeout (default: 30s)
+	WriteTimeout   time.Duration // HTTP write timeout (default: 30s)
+	IdleTimeout    time.Duration // HTTP idle timeout (default: 120s)
 }
 
 // NewServer creates a new HTTP API server
@@ -42,12 +47,26 @@ func NewServer(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
 
+	// Set default timeouts if not specified
+	readTimeout := cfg.ReadTimeout
+	if readTimeout == 0 {
+		readTimeout = 30 * time.Second
+	}
+	writeTimeout := cfg.WriteTimeout
+	if writeTimeout == 0 {
+		writeTimeout = 30 * time.Second
+	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = 120 * time.Second
+	}
+
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
 
 	return s, nil
@@ -57,6 +76,12 @@ func NewServer(cfg Config) (*Server, error) {
 func (s *Server) Start() error {
 	log.Printf("Starting HTCondor API server on %s", s.httpServer.Addr)
 	return s.httpServer.ListenAndServe()
+}
+
+// StartTLS starts the HTTPS server with TLS
+func (s *Server) StartTLS(certFile, keyFile string) error {
+	log.Printf("Starting HTCondor API server on %s (TLS enabled)", s.httpServer.Addr)
+	return s.httpServer.ListenAndServeTLS(certFile, keyFile)
 }
 
 // Shutdown gracefully shuts down the HTTP server

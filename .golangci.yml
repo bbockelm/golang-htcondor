@@ -26,7 +26,20 @@ linters:
     - bodyclose     # Checks HTTP response body is closed
     - noctx         # Finds sending http request without context.Context
 
+linters-settings:
+  govet:
+    # Disable buildtag check - we use //go:build directives which are sufficient in Go 1.18+
+    check-shadowing: false
+    enable-all: true
+    disable:
+      - buildtag
+
 issues:
+  exclude-rules:
+    # Exclude buildtag warnings - //go:build is sufficient in Go 1.18+
+    - linters:
+        - govet
+      text: "\\+build line is no longer needed"
 
   max-issues-per-linter: 0
   max-same-issues: 0

@@ -15,6 +15,12 @@ test: ## Run all tests
 	@echo "Running tests..."
 	go test -v ./...
 
+.PHONY: test-integration
+test-integration: ## Run integration tests (requires HTCondor)
+	@echo "Running integration tests..."
+	@echo "Note: This requires HTCondor to be installed"
+	go test -v -tags=integration -timeout=5m ./httpserver/
+
 .PHONY: test-race
 test-race: ## Run tests with race detector
 	@echo "Running tests with race detector..."

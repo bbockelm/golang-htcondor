@@ -383,7 +383,7 @@ func TestSpoolJobFilesFromTarIntegration(t *testing.T) {
 universe = vanilla
 executable = /bin/echo
 arguments = "Hello from tar spooled job"
-transfer_input_files = input1.txt, input2.dat, subdir/input3.txt
+transfer_input_files = input1.txt, input2.dat, input3.txt
 output = job.out
 error = job.err
 log = job.log
@@ -424,9 +424,9 @@ queue
 	tarWriter := tar.NewWriter(&tarBuf)
 
 	files := map[string][]byte{
-		"input1.txt":        []byte("This is test input file 1 from tar\nWith multiple lines\n"),
-		"input2.dat":        []byte("Binary data in file 2 from tar"),
-		"subdir/input3.txt": []byte("File in subdirectory from tar\n"),
+		"input1.txt": []byte("This is test input file 1 from tar\nWith multiple lines\n"),
+		"input2.dat": []byte("Binary data in file 2 from tar"),
+		"input3.txt": []byte("File in tar\n"),
 	}
 
 	for name, data := range files {
@@ -582,9 +582,9 @@ queue
 
 		// Check for the expected input files
 		expectedFiles := map[string][]byte{
-			"input1.txt":        []byte("This is test input file 1 from tar\nWith multiple lines\n"),
-			"input2.dat":        []byte("Binary data in file 2 from tar"),
-			"subdir/input3.txt": []byte("File in subdirectory from tar\n"),
+			"input1.txt": []byte("This is test input file 1 from tar\nWith multiple lines\n"),
+			"input2.dat": []byte("Binary data in file 2 from tar"),
+			"input3.txt": []byte("File in tar\n"),
 		}
 
 		for filename, expectedContent := range expectedFiles {

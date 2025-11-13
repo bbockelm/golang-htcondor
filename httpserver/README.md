@@ -214,17 +214,107 @@ curl -H "Authorization: Bearer $(cat token.txt)" \
 
 ## Configuration
 
-### Normal Mode
+### HTCondor Configuration Parameters
 
-The server reads HTCondor configuration from standard locations:
-- `$CONDOR_CONFIG` environment variable
-- `/etc/condor/condor_config`
-- `~/.condor/user_config`
+The HTTP API server reads configuration from HTCondor's configuration system. Configuration can be placed in `/etc/condor/config.d/` or any HTCondor configuration file.
 
-Required configuration:
-- `SCHEDD_HOST`: Schedd hostname or IP
-- `SCHEDD_PORT`: Schedd port (default: 9618)
-- `SCHEDD_NAME`: Schedd name (optional)
+#### HTTP Server Parameters
+
+```bash
+# Listen address (default: :8080)
+HTTP_API_LISTEN_ADDR = :8443
+
+# TLS/HTTPS configuration (optional - both required for TLS)
+HTTP_API_TLS_CERT = /etc/condor/certs/server.crt
+HTTP_API_TLS_KEY = /etc/condor/certs/server.key
+
+# HTTP timeout configuration (optional, duration strings)
+HTTP_API_READ_TIMEOUT = 30s      # Default: 30s
+HTTP_API_WRITE_TIMEOUT = 30s     # Default: 30s
+HTTP_API_IDLE_TIMEOUT = 2m       # Default: 120s
+
+# User header for authentication (optional)
+HTTP_API_USER_HEADER = X-Forwarded-User
+
+# JWT signing key path (optional, demo mode only)
+HTTP_API_SIGNING_KEY = /etc/condor/keys/jwt_signing.key
+```
+
+#### Schedd Configuration
+
+```bash
+# Schedd configuration (required for normal mode)
+SCHEDD_NAME = local
+SCHEDD_HOST = 127.0.0.1
+SCHEDD_PORT = 9618
+```
+
+### Configuration Examples
+
+#### Basic HTTP Server
+
+Create `/etc/condor/config.d/99-http-api.config`:
+
+```bash
+HTTP_API_LISTEN_ADDR = :8080
+```
+
+Start the server:
+
+```bash
+./htcondor-api --mode=normal
+```
+
+#### HTTPS Server with TLS
+
+Create `/etc/condor/config.d/99-http-api.config`:
+
+```bash
+HTTP_API_LISTEN_ADDR = :8443
+HTTP_API_TLS_CERT = /etc/condor/certs/server.crt
+HTTP_API_TLS_KEY = /etc/condor/certs/server.key
+HTTP_API_READ_TIMEOUT = 45s
+HTTP_API_WRITE_TIMEOUT = 45s
+HTTP_API_IDLE_TIMEOUT = 5m
+```
+
+Generate self-signed certificates (for testing):
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt \
+  -days 365 -nodes -subj "/CN=localhost"
+```
+
+Start the server:
+
+```bash
+./htcondor-api --mode=normal
+```
+
+The server will listen on port 8443 with HTTPS.
+
+#### Behind Reverse Proxy
+
+If running behind a reverse proxy that sets authentication headers:
+
+```bash
+HTTP_API_LISTEN_ADDR = 127.0.0.1:8080
+HTTP_API_USER_HEADER = X-Forwarded-User
+HTTP_API_READ_TIMEOUT = 60s
+HTTP_API_WRITE_TIMEOUT = 60s
+```
+
+### Command Line Options
+
+Command-line flags override HTCondor configuration:
+
+```bash
+# Override listen address
+./htcondor-api --mode=normal --listen=:9090
+
+# Override user header
+./htcondor-api --mode=normal --user-header=X-Auth-User
+```
 
 ### Demo Mode
 
@@ -233,6 +323,16 @@ Demo mode uses a minimal configuration stored in a temporary directory. The conf
 - TOKEN authentication enabled
 - File transfer enabled
 - Jobs kept in queue for 24 hours after completion
+
+```bash
+# Start in demo mode
+./htcondor-api --demo
+
+# Demo mode with custom listen address
+./htcondor-api --demo --listen=:9090
+```
+
+For complete configuration examples, see `examples/http_api_config/`.
 
 ## Examples
 
@@ -271,16 +371,29 @@ curl http://localhost:8080/openapi.json
 
 See `HTTP_API_TODO.md` for a list of planned features and implementation notes.
 
-## Limitations
+## Current Status
 
-Current limitations (see `HTTP_API_TODO.md` for full details):
+The HTTP API server implements the following features (see `HTTP_API_TODO.md` for complete details):
 
-1. **Authentication**: Token is extracted but not yet integrated into schedd auth
-2. **Job Removal**: DELETE endpoint not implemented (requires `schedd.Act()`)
-3. **Job Editing**: PATCH endpoint not implemented (requires QMGMT edit API)
-4. **Job History**: No support for querying completed jobs
-5. **Pagination**: No pagination for large job lists
-6. **Bulk Operations**: No support for operating on multiple jobs
+✅ **Completed:**
+- Bearer token authentication integrated with HTCondor schedd
+- Job submission via HTTP POST
+- Job queries with constraint and projection support
+- Individual job removal (DELETE /api/v1/jobs/{id})
+- Individual job editing (PATCH /api/v1/jobs/{id})
+- Bulk job operations (DELETE/PATCH /api/v1/jobs with constraints)
+- File transfer (upload input, download output)
+- Configuration via HTCondor config system
+- TLS/HTTPS support
+- Configurable HTTP timeouts
+
+⏳ **Pending:**
+- Job history support (querying completed jobs)
+- Job status monitoring (SSE/WebSocket for real-time updates)
+- Enhanced demo mode (auto-generated tokens, test jobs)
+- Metrics and monitoring (Prometheus endpoint)
+
+See `HTTP_API_TODO.md` for detailed implementation notes and examples.
 
 ## License
 

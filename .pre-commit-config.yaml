@@ -25,7 +25,7 @@ repos:
       - id: golangci-lint
         name: Run golangci-lint
         description: Fast linters runner for Go
-        args: ['--timeout=5m']
+        args: ['--timeout=5m', '--fix=false']
 
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks

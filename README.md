@@ -137,8 +137,30 @@ go build ./...
 ### Testing
 
 ```bash
+# Run unit tests
 go test ./...
+
+# Run with race detector
+go test -race ./...
+
+# Run integration tests (requires HTCondor installed)
+go test -tags=integration -v ./httpserver/
+
+# Or use make
+make test
+make test-integration
 ```
+
+The integration test verifies the complete HTTP API workflow:
+1. Starts a mini HTCondor instance
+2. Launches the HTTP API server
+3. Submits a job via HTTP
+4. Uploads input files as tarball
+5. Polls job status until completion
+6. Downloads output tarball
+7. Verifies results
+
+See [httpserver/INTEGRATION_TEST.md](httpserver/INTEGRATION_TEST.md) for details.
 
 ## API Reference
 

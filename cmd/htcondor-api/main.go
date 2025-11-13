@@ -63,12 +63,66 @@ func runNormalMode() error {
 		}
 	}
 
+	// Get HTTP API configuration
+	listenAddrFromConfig := *listenAddr
+	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
+		listenAddrFromConfig = addr
+	}
+
+	// Get TLS configuration
+	tlsCertFile, _ := cfg.Get("HTTP_API_TLS_CERT")
+	tlsKeyFile, _ := cfg.Get("HTTP_API_TLS_KEY")
+
+	// Get timeout configuration
+	readTimeout := 30 * time.Second
+	if timeoutStr, ok := cfg.Get("HTTP_API_READ_TIMEOUT"); ok {
+		if duration, err := time.ParseDuration(timeoutStr); err == nil {
+			readTimeout = duration
+		} else {
+			log.Printf("Warning: failed to parse HTTP_API_READ_TIMEOUT '%s', using default: %v", timeoutStr, err)
+		}
+	}
+
+	writeTimeout := 30 * time.Second
+	if timeoutStr, ok := cfg.Get("HTTP_API_WRITE_TIMEOUT"); ok {
+		if duration, err := time.ParseDuration(timeoutStr); err == nil {
+			writeTimeout = duration
+		} else {
+			log.Printf("Warning: failed to parse HTTP_API_WRITE_TIMEOUT '%s', using default: %v", timeoutStr, err)
+		}
+	}
+
+	idleTimeout := 120 * time.Second
+	if timeoutStr, ok := cfg.Get("HTTP_API_IDLE_TIMEOUT"); ok {
+		if duration, err := time.ParseDuration(timeoutStr); err == nil {
+			idleTimeout = duration
+		} else {
+			log.Printf("Warning: failed to parse HTTP_API_IDLE_TIMEOUT '%s', using default: %v", timeoutStr, err)
+		}
+	}
+
+	// Get optional user header configuration
+	userHeaderFromConfig := *userHeader
+	if header, ok := cfg.Get("HTTP_API_USER_HEADER"); ok && header != "" {
+		userHeaderFromConfig = header
+	}
+
+	// Get optional signing key path
+	signingKeyPath, _ := cfg.Get("HTTP_API_SIGNING_KEY")
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr: *listenAddr,
-		ScheddName: scheddName,
-		ScheddAddr: scheddHost,
-		ScheddPort: scheddPort,
+		ListenAddr:     listenAddrFromConfig,
+		ScheddName:     scheddName,
+		ScheddAddr:     scheddHost,
+		ScheddPort:     scheddPort,
+		UserHeader:     userHeaderFromConfig,
+		SigningKeyPath: signingKeyPath,
+		TLSCertFile:    tlsCertFile,
+		TLSKeyFile:     tlsKeyFile,
+		ReadTimeout:    readTimeout,
+		WriteTimeout:   writeTimeout,
+		IdleTimeout:    idleTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -81,7 +135,12 @@ func runNormalMode() error {
 	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- server.Start()
+		// Check if TLS is enabled
+		if tlsCertFile != "" && tlsKeyFile != "" {
+			errChan <- server.StartTLS(tlsCertFile, tlsKeyFile)
+		} else {
+			errChan <- server.Start()
+		}
 	}()
 
 	// Wait for shutdown signal or error
