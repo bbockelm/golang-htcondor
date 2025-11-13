@@ -230,7 +230,7 @@ func (ftc *FileTransferClient) DownloadFile(ctx context.Context, remotePath stri
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
 	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to connect to schedd: %w", err)
+		return fmt.Errorf("failed to connect to schedd at %s:%d: %w", ftc.daemonAddr, ftc.daemonPort, err)
 	}
 	defer func() {
 		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
