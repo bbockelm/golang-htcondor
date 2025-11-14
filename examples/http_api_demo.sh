@@ -5,14 +5,19 @@ set -e
 
 API_URL="http://localhost:8080"
 TOKEN="${CONDOR_TOKEN:-your-token-here}"
+USER="${CONDOR_USER:-testuser}"
 
 echo "=== HTCondor HTTP API Example ==="
 echo ""
 
-# Check if token is set
+# Check authentication method
 if [ "$TOKEN" = "your-token-here" ]; then
-    echo "Warning: Using placeholder token. Set CONDOR_TOKEN environment variable."
-    echo "Generate a token with: condor_token_create -identity user@example.com"
+    echo "Using user header authentication (X-Remote-User: $USER)"
+    AUTH_HEADER="X-Remote-User: $USER"
+    echo ""
+else
+    echo "Using bearer token authentication"
+    AUTH_HEADER="Authorization: Bearer $TOKEN"
     echo ""
 fi
 
@@ -28,10 +33,13 @@ error = test.err
 log = test.log
 queue'
 
+# Properly escape the submit file for JSON
+SUBMIT_FILE_JSON=$(echo "$SUBMIT_FILE" | jq -Rs .)
+
 RESPONSE=$(curl -s -X POST "${API_URL}/api/v1/jobs" \
-    -H "Authorization: Bearer ${TOKEN}" \
+    -H "$AUTH_HEADER" \
     -H "Content-Type: application/json" \
-    -d "{\"submit_file\": \"${SUBMIT_FILE}\"}")
+    -d "{\"submit_file\": ${SUBMIT_FILE_JSON}}")
 
 echo "Response: ${RESPONSE}"
 CLUSTER_ID=$(echo "${RESPONSE}" | jq -r '.cluster_id' 2>/dev/null || echo "")
@@ -43,17 +51,17 @@ if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
 
     echo "3. Getting job details..."
     curl -s "${API_URL}/api/v1/jobs/${JOB_ID}" \
-        -H "Authorization: Bearer ${TOKEN}" | jq '.' || echo "Could not get job details"
+        -H "$AUTH_HEADER" | jq '.' || echo "Could not get job details"
     echo ""
 
     echo "4. Listing all jobs..."
     curl -s "${API_URL}/api/v1/jobs?projection=ClusterId,ProcId,JobStatus,Owner" \
-        -H "Authorization: Bearer ${TOKEN}" | jq '.jobs[] | {ClusterId, ProcId, JobStatus, Owner}' || echo "Could not list jobs"
+        -H "$AUTH_HEADER" | jq '.jobs[] | {ClusterId, ProcId, JobStatus, Owner}' || echo "Could not list jobs"
     echo ""
 
     echo "5. Listing jobs with constraint..."
     curl -s "${API_URL}/api/v1/jobs?constraint=ClusterId==${CLUSTER_ID}" \
-        -H "Authorization: Bearer ${TOKEN}" | jq '.jobs | length' | xargs echo "Found jobs:" || echo "Could not query jobs"
+        -H "$AUTH_HEADER" | jq '.jobs | length' | xargs echo "Found jobs:" || echo "Could not query jobs"
     echo ""
 else
     echo "Job submission failed or token authentication not configured."

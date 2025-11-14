@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,28 +16,17 @@ import (
 	"time"
 )
 
-// getScheddAddress queries the collector for the schedd address and port
-func getScheddAddress(t *testing.T, harness *condorTestHarness) (string, int) {
+// getScheddAddress queries the collector for the schedd address
+func getScheddAddress(t *testing.T, harness *condorTestHarness) string {
 	t.Helper()
 
 	// Parse collector address
 	collectorAddr := harness.GetCollectorAddr()
 	addr := parseCollectorSinfulString(collectorAddr)
 
-	collectorHost, collectorPortStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("Failed to parse collector address %s: %v", addr, err)
-	}
+	t.Logf("Querying collector at %s for schedd location", addr)
 
-	// Query collector for schedd location
-	var collectorPort int
-	if _, err := fmt.Sscanf(collectorPortStr, "%d", &collectorPort); err != nil {
-		t.Fatalf("Failed to parse collector port: %v", err)
-	}
-
-	t.Logf("Querying collector at %s:%d for schedd location", collectorHost, collectorPort)
-
-	collector := NewCollector(collectorHost, collectorPort)
+	collector := NewCollector(addr)
 	ctx := context.Background()
 	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
 	if err != nil {
@@ -64,17 +52,8 @@ func getScheddAddress(t *testing.T, harness *condorTestHarness) (string, int) {
 
 	// Parse schedd sinful string
 	scheddAddr := parseCollectorSinfulString(myAddress)
-	scheddHost, scheddPortStr, err := net.SplitHostPort(scheddAddr)
-	if err != nil {
-		t.Fatalf("Failed to parse schedd address %s: %v", scheddAddr, err)
-	}
 
-	var scheddPort int
-	if _, err := fmt.Sscanf(scheddPortStr, "%d", &scheddPort); err != nil {
-		t.Fatalf("Failed to parse schedd port: %v", err)
-	}
-
-	return scheddHost, scheddPort
+	return scheddAddr
 }
 
 // minInt returns the minimum of two integers
@@ -108,14 +87,14 @@ func TestSpoolJobFilesIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddHost, scheddPort := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s:%d", scheddHost, scheddPort)
+	scheddAddr := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddHost, scheddPort)
+	schedd := NewSchedd(harness.scheddName, scheddAddr)
 
 	// Create a submit file for remote submission with input files
 	submitFile := `
@@ -369,14 +348,14 @@ func TestSpoolJobFilesFromTarIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddHost, scheddPort := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s:%d", scheddHost, scheddPort)
+	scheddAddr := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddHost, scheddPort)
+	schedd := NewSchedd(harness.scheddName, scheddAddr)
 
 	// Create a submit file for remote submission with input files
 	submitFile := `
@@ -626,14 +605,14 @@ func TestReceiveJobSandboxIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddHost, scheddPort := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s:%d", scheddHost, scheddPort)
+	scheddAddr := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddHost, scheddPort)
+	schedd := NewSchedd(harness.scheddName, scheddAddr)
 
 	// Create a trivial job that produces output
 	// Create a submit file

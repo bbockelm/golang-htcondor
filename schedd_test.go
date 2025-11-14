@@ -6,23 +6,20 @@ import (
 )
 
 func TestNewSchedd(t *testing.T) {
-	schedd := NewSchedd("test_schedd", "schedd.example.com", 9618)
+	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	if schedd == nil {
 		t.Fatal("NewSchedd returned nil")
 	}
 	if schedd.name != "test_schedd" {
 		t.Errorf("Expected name 'test_schedd', got '%s'", schedd.name)
 	}
-	if schedd.address != "schedd.example.com" {
-		t.Errorf("Expected address 'schedd.example.com', got '%s'", schedd.address)
-	}
-	if schedd.port != 9618 {
-		t.Errorf("Expected port 9618, got %d", schedd.port)
+	if schedd.address != "schedd.example.com:9618" {
+		t.Errorf("Expected address 'schedd.example.com:9618', got '%s'", schedd.address)
 	}
 }
 
 func TestScheddQuery(t *testing.T) {
-	schedd := NewSchedd("test_schedd", "schedd.example.com", 9618)
+	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	ctx := context.Background()
 
 	_, err := schedd.Query(ctx, "Owner == \"user\"", []string{"ClusterId", "ProcId"})
@@ -33,7 +30,7 @@ func TestScheddQuery(t *testing.T) {
 }
 
 func TestScheddSubmit(t *testing.T) {
-	schedd := NewSchedd("test_schedd", "schedd.example.com", 9618)
+	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	ctx := context.Background()
 
 	submitFile := `
@@ -50,7 +47,7 @@ queue
 }
 
 func TestScheddRemoveJobs(t *testing.T) {
-	schedd := NewSchedd("test_schedd", "schedd.example.com", 9618)
+	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	ctx := context.Background()
 
 	// Test with invalid constraint (should fail to connect)
@@ -62,7 +59,7 @@ func TestScheddRemoveJobs(t *testing.T) {
 }
 
 func TestScheddEdit(t *testing.T) {
-	schedd := NewSchedd("test_schedd", "schedd.example.com", 9618)
+	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	ctx := context.Background()
 
 	err := schedd.Edit(ctx, "ClusterId == 1", "JobPrio", "10")

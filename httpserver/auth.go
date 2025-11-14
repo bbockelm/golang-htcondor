@@ -3,15 +3,10 @@ package httpserver
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
-	"os"
-	"time"
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // authContextKey is the type for the authentication context key
@@ -72,53 +67,4 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 	//
 	// TODO: Extend htcondor.Schedd to accept SecurityConfig or token in Query/Submit methods
 	return schedd, nil
-}
-
-// GenerateToken generates a simple HTCondor-compatible JWT token for the given username
-// This is a simplified implementation for demo mode. In production, use condor_token_create.
-func GenerateToken(username, signingKeyPath string) (string, error) {
-	// Read signing key
-	//nolint:gosec // signingKeyPath is admin-configured, not user input
-	keyData, err := os.ReadFile(signingKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read signing key: %w", err)
-	}
-
-	// For HTCondor tokens, we need to use HS256 with a symmetric key
-	signingKey := keyData
-
-	// Create token claims
-	now := time.Now()
-	claims := jwt.MapClaims{
-		"sub": username,                       // Subject (username)
-		"iat": now.Unix(),                     // Issued at
-		"exp": now.Add(24 * time.Hour).Unix(), // Expires in 24 hours
-		"iss": "htcondor-api-demo",            // Issuer
-	}
-
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// Sign token
-	tokenString, err := token.SignedString(signingKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
-	}
-
-	return tokenString, nil
-}
-
-// GenerateSigningKey generates a random signing key for token generation
-func GenerateSigningKey() ([]byte, error) {
-	key := make([]byte, 32) // 256-bit key
-	_, err := rand.Read(key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate signing key: %w", err)
-	}
-	return key, nil
-}
-
-// EncodeSigningKey encodes a signing key as base64
-func EncodeSigningKey(key []byte) string {
-	return base64.StdEncoding.EncodeToString(key)
 }

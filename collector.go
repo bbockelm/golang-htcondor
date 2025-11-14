@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -16,14 +15,12 @@ import (
 // Collector represents an HTCondor collector daemon
 type Collector struct {
 	address string
-	port    int
 }
 
 // NewCollector creates a new Collector instance
-func NewCollector(address string, port int) *Collector {
+func NewCollector(address string) *Collector {
 	return &Collector{
 		address: address,
-		port:    port,
 	}
 }
 
@@ -32,8 +29,7 @@ func NewCollector(address string, port int) *Collector {
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 func (c *Collector) QueryAds(ctx context.Context, adType string, constraint string) ([]*classad.ClassAd, error) {
 	// Establish connection using cedar client
-	addr := net.JoinHostPort(c.address, fmt.Sprintf("%d", c.port))
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, c.address, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to collector: %w", err)
 	}
@@ -203,7 +199,6 @@ func (c *Collector) LocateDaemon(_ context.Context, _ string, _ string) (*Daemon
 // DaemonLocation represents the location information for a daemon
 type DaemonLocation struct {
 	Name    string
-	Address net.IP
-	Port    int
+	Address string
 	Pool    string
 }

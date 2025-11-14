@@ -59,7 +59,7 @@ func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
 
 	// For now, we expect this to fail with connection error since we don't have a schedd
 	// But it should fail AFTER validating the job ads and parsing the tar
-	schedd := NewSchedd("test-schedd", "localhost", 9618)
+	schedd := NewSchedd("test-schedd", "localhost:9618")
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -139,7 +139,7 @@ func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
 	jobAds := []*classad.ClassAd{jobAd1, jobAd2}
 
 	// Test with mock schedd
-	schedd := NewSchedd("test-schedd", "localhost", 9618)
+	schedd := NewSchedd("test-schedd", "localhost:9618")
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -209,7 +209,7 @@ func TestSpoolJobFilesFromTar_MissingAttributes(t *testing.T) {
 			jobAd := tt.setupJobAd()
 			jobAds := []*classad.ClassAd{jobAd}
 
-			schedd := NewSchedd("test-schedd", "localhost", 9618)
+			schedd := NewSchedd("test-schedd", "localhost:9618")
 			ctx := context.Background()
 
 			err := schedd.SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBuf.Bytes()))
@@ -231,7 +231,7 @@ func TestSpoolJobFilesFromTar_EmptyJobAds(t *testing.T) {
 	tarWriter := tar.NewWriter(&tarBuf)
 	_ = tarWriter.Close()
 
-	schedd := NewSchedd("test-schedd", "localhost", 9618)
+	schedd := NewSchedd("test-schedd", "localhost:9618")
 	ctx := context.Background()
 
 	err := schedd.SpoolJobFilesFromTar(ctx, []*classad.ClassAd{}, bytes.NewReader(tarBuf.Bytes()))
@@ -285,7 +285,7 @@ func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
 
 	jobAds := []*classad.ClassAd{jobAd}
 
-	schedd := NewSchedd("test-schedd", "localhost", 9618)
+	schedd := NewSchedd("test-schedd", "localhost:9618")
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -343,7 +343,7 @@ func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
 
 	jobAds := []*classad.ClassAd{jobAd}
 
-	schedd := NewSchedd("test-schedd", "localhost", 9618)
+	schedd := NewSchedd("test-schedd", "localhost:9618")
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 

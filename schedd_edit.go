@@ -94,8 +94,8 @@ func (s *Schedd) EditJob(ctx context.Context, clusterID, procID int, attributes 
 		}
 	}
 
-	// Open QMGMT connection (use private fields with lowercase names)
-	qmgmt, err := NewQmgmtConnection(ctx, s.address, s.port)
+	// Open QMGMT connection
+	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to open QMGMT connection: %w", err)
 	}
@@ -173,8 +173,8 @@ func (s *Schedd) EditJobs(ctx context.Context, constraint string, attributes map
 		return 0, nil
 	}
 
-	// Open QMGMT connection (use private fields with lowercase names)
-	qmgmt, err := NewQmgmtConnection(ctx, s.address, s.port)
+	// Open QMGMT connection
+	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open QMGMT connection: %w", err)
 	}

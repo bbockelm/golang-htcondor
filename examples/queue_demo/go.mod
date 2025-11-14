@@ -13,6 +13,6 @@ require (
 
 require (
 	github.com/PelicanPlatform/classad v0.0.4 // indirect
-	github.com/bbockelm/cedar v0.0.4 // indirect
+	github.com/bbockelm/cedar v0.0.8 // indirect
 	golang.org/x/sys v0.37.0 // indirect
 )

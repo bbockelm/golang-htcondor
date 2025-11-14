@@ -4,8 +4,7 @@ go 1.24.0
 
 require (
 	github.com/PelicanPlatform/classad v0.0.4
-	github.com/bbockelm/cedar v0.0.7
-	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/bbockelm/cedar v0.0.8
 	golang.org/x/sys v0.37.0
 )
 

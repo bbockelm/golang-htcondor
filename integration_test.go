@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -384,20 +383,8 @@ func TestCollectorQueryIntegration(t *testing.T) {
 	}
 	addr = strings.TrimSuffix(addr, ">")
 
-	// Parse collector address to get host and port
-	collectorHost, collectorPort, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("Failed to parse collector address %q: %v", addr, err)
-	}
-
-	// Convert port string to int
-	port := 0
-	if _, err := fmt.Sscanf(collectorPort, "%d", &port); err != nil {
-		t.Fatalf("Failed to parse collector port: %v", err)
-	}
-
 	// Create a Collector client
-	collector := NewCollector(collectorHost, port)
+	collector := NewCollector(addr)
 
 	// Test 1: Query for collector daemon ad
 	t.Run("QueryCollectorAd", func(t *testing.T) {

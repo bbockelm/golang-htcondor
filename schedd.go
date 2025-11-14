@@ -32,15 +32,14 @@ func GetSecurityConfigFromContext(ctx context.Context) (*security.SecurityConfig
 type Schedd struct {
 	name    string
 	address string
-	port    int
 }
 
 // NewSchedd creates a new Schedd instance
-func NewSchedd(name string, address string, port int) *Schedd {
+// address can be a hostname:port or a sinful string like "<IP:PORT?addrs=...>"
+func NewSchedd(name string, address string) *Schedd {
 	return &Schedd{
 		name:    name,
 		address: address,
-		port:    port,
 	}
 }
 
@@ -54,8 +53,7 @@ func (s *Schedd) Query(ctx context.Context, constraint string, projection []stri
 // queryWithAuth performs the actual query with optional authentication
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
 	// Establish connection using cedar client
-	addr := fmt.Sprintf("%s:%d", s.address, s.port)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
 	}
@@ -191,7 +189,7 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 	}
 
 	// Create QMGMT connection
-	qmgmt, err := NewQmgmtConnection(ctx, s.address, s.port)
+	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to schedd: %w", err)
 	}
@@ -280,7 +278,7 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 	}
 
 	// Connect to schedd's queue management interface
-	qmgmt, err := NewQmgmtConnection(ctx, s.address, s.port)
+	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to connect to schedd: %w", err)
 	}

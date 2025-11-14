@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"net"
 	"os/exec"
 	"strings"
 	"testing"
@@ -11,25 +10,15 @@ import (
 )
 
 // discoverSchedd discovers the schedd address from the test harness
-func discoverSchedd(t *testing.T, harness *condorTestHarness) (host string, port int) {
+func discoverSchedd(t *testing.T, harness *condorTestHarness) string {
 	t.Helper()
 
 	// Parse collector address
 	collectorAddr := harness.GetCollectorAddr()
 	addr := parseCollectorSinfulString(collectorAddr)
 
-	collectorHost, collectorPortStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("Failed to parse collector address %s: %v", addr, err)
-	}
-
-	var collectorPort int
-	if _, err := fmt.Sscanf(collectorPortStr, "%d", &collectorPort); err != nil {
-		t.Fatalf("Failed to parse collector port: %v", err)
-	}
-
 	// Query collector for schedd location
-	collector := NewCollector(collectorHost, collectorPort)
+	collector := NewCollector(addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -56,17 +45,8 @@ func discoverSchedd(t *testing.T, harness *condorTestHarness) (host string, port
 
 	// Parse schedd sinful string
 	scheddAddr := parseCollectorSinfulString(myAddress)
-	scheddHost, scheddPortStr, err := net.SplitHostPort(scheddAddr)
-	if err != nil {
-		t.Fatalf("Failed to parse schedd address %s: %v", scheddAddr, err)
-	}
 
-	var scheddPort int
-	if _, err := fmt.Sscanf(scheddPortStr, "%d", &scheddPort); err != nil {
-		t.Fatalf("Failed to parse schedd port: %v", err)
-	}
-
-	return scheddHost, scheddPort
+	return scheddAddr
 }
 
 // TestScheddSubmitHighLevel tests the high-level Schedd.Submit API
@@ -89,10 +69,10 @@ func TestScheddSubmitHighLevel(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// Simple submit file content
 	submitFile := `
@@ -137,10 +117,10 @@ func TestScheddSubmitMultiProc(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// Submit file with multiple procs
 	submitFile := `
@@ -185,10 +165,10 @@ func TestScheddSubmitWithVariables(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// Submit file with queue variables (use 'in' for inline lists)
 	submitFile := `
@@ -233,10 +213,10 @@ func TestScheddQueryIntegration(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// First, submit a test job so we have something to query
 	// Use /bin/sleep to keep job in queue longer for testing

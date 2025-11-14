@@ -19,8 +19,8 @@ func main() {
 
 	// Create a collector instance
 	// For testing, use a known public collector like OSG's
-	collector := htcondor.NewCollector("cm-1.ospool.osg-htc.org", 9618)
-	fmt.Printf("Created collector: %s:%d\n", "cm-1.ospool.osg-htc.org", 9618)
+	collector := htcondor.NewCollector("cm-1.ospool.osg-htc.org:9618")
+	fmt.Printf("Created collector: %s\n", "cm-1.ospool.osg-htc.org:9618")
 
 	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -51,8 +51,8 @@ func main() {
 	// Example 2: Create a schedd instance
 	fmt.Println("\n\nExample 2: Creating Schedd client")
 	fmt.Println("----------------------------------")
-	_ = htcondor.NewSchedd("test_schedd", "schedd.example.com", 9618)
-	fmt.Printf("Created schedd: %s at %s:%d\n", "test_schedd", "schedd.example.com", 9618)
+	_ = htcondor.NewSchedd("test_schedd", "schedd.example.com:9618")
+	fmt.Printf("Created schedd: %s at %s\n", "test_schedd", "schedd.example.com:9618")
 	fmt.Println("Note: Schedd query implementation is still in progress")
 
 	fmt.Println("\n✓ Examples complete!")

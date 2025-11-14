@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -56,8 +55,7 @@ const (
 //  9. CommitTransaction (10007)
 //  10. CloseSocket (10028)
 type QmgmtConnection struct {
-	scheddHost         string
-	scheddPort         int
+	address            string
 	htcondorClient     *client.HTCondorClient
 	stream             *stream.Stream
 	authenticatedUser  string // User from authentication negotiation
@@ -69,13 +67,12 @@ type QmgmtConnection struct {
 
 // NewQmgmtConnection establishes a queue management connection to the schedd
 // Uses FS authentication from cedar package
-func NewQmgmtConnection(ctx context.Context, scheddHost string, scheddPort int) (*QmgmtConnection, error) {
+// address can be a hostname:port or a sinful string like "<IP:PORT?addrs=...>"
+func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, error) {
 	// Establish connection using cedar client
-	addr := net.JoinHostPort(scheddHost, fmt.Sprintf("%d", scheddPort))
-
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 10*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, address, 10*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", addr, err)
+		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", address, err)
 	}
 
 	// Get CEDAR stream from client
@@ -155,8 +152,7 @@ func NewQmgmtConnection(ctx context.Context, scheddHost string, scheddPort int) 
 	_ = capabilities
 
 	q := &QmgmtConnection{
-		scheddHost:        scheddHost,
-		scheddPort:        scheddPort,
+		address:           address,
 		htcondorClient:    htcondorClient,
 		stream:            cedarStream,
 		authenticatedUser: negotiation.User, // Store authenticated user

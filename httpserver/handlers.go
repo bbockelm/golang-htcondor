@@ -26,7 +26,7 @@ type JobSubmitResponse struct {
 
 // JobListResponse represents a job listing response
 type JobListResponse struct {
-	Jobs []map[string]interface{} `json:"jobs"`
+	Jobs []*classad.ClassAd `json:"jobs"`
 }
 
 // handleJobs handles /api/v1/jobs endpoint (GET for list, POST for submit, DELETE/PATCH for bulk operations)
@@ -81,13 +81,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert ClassAds to JSON-friendly format
-	jobs := make([]map[string]interface{}, len(jobAds))
-	for i, ad := range jobAds {
-		jobs[i] = classAdToMap(ad)
-	}
-
-	writeJSON(w, http.StatusOK, JobListResponse{Jobs: jobs})
+	// Return ClassAds directly - they have MarshalJSON method
+	writeJSON(w, http.StatusOK, JobListResponse{Jobs: jobAds})
 }
 
 // handleSubmitJob handles POST /api/v1/jobs
@@ -209,8 +204,8 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 		return
 	}
 
-	// Return the job ClassAd as JSON
-	writeJSON(w, http.StatusOK, classAdToMap(jobAds[0]))
+	// Return the job ClassAd as JSON - uses MarshalJSON method
+	writeJSON(w, http.StatusOK, jobAds[0])
 }
 
 // handleDeleteJob handles DELETE /api/v1/jobs/{id}
@@ -669,36 +664,6 @@ func parseJobID(jobID string) (cluster, proc int, err error) {
 	}
 
 	return cluster, proc, nil
-}
-
-// classAdToMap converts a ClassAd to a map for JSON serialization
-func classAdToMap(ad *classad.ClassAd) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	// Iterate through all attributes in the ClassAd using GetAttributes()
-	for _, attr := range ad.GetAttributes() {
-		// Use EvaluateAttr to get the evaluated value directly
-		val := ad.EvaluateAttr(attr)
-		result[attr] = convertClassAdValue(val)
-	}
-
-	return result
-}
-
-// convertClassAdValue converts a ClassAd value to a JSON-friendly type
-func convertClassAdValue(val interface{}) interface{} {
-	switch v := val.(type) {
-	case *classad.ClassAd:
-		return classAdToMap(v)
-	case []interface{}:
-		result := make([]interface{}, len(v))
-		for i, item := range v {
-			result[i] = convertClassAdValue(item)
-		}
-		return result
-	default:
-		return v
-	}
 }
 
 // handleMetrics handles GET /metrics endpoint for Prometheus scraping

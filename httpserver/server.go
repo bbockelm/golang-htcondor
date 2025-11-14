@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 )
@@ -18,6 +23,8 @@ type Server struct {
 	schedd             *htcondor.Schedd
 	userHeader         string
 	signingKeyPath     string
+	trustDomain        string
+	uidDomain          string
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 }
@@ -26,10 +33,11 @@ type Server struct {
 type Config struct {
 	ListenAddr      string              // Address to listen on (e.g., ":8080")
 	ScheddName      string              // Schedd name
-	ScheddAddr      string              // Schedd address
-	ScheddPort      int                 // Schedd port
+	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
 	UserHeader      string              // HTTP header to extract username from (optional)
 	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
+	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
 	TLSCertFile     string              // Path to TLS certificate file (optional, enables HTTPS)
 	TLSKeyFile      string              // Path to TLS key file (optional, enables HTTPS)
 	ReadTimeout     time.Duration       // HTTP read timeout (default: 30s)
@@ -42,10 +50,29 @@ type Config struct {
 
 // NewServer creates a new HTTP API server
 func NewServer(cfg Config) (*Server, error) {
-	schedd := htcondor.NewSchedd(cfg.ScheddName, cfg.ScheddAddr, cfg.ScheddPort)
+	// Discover schedd address if not provided
+	scheddAddr := cfg.ScheddAddr
+	if scheddAddr == "" {
+		if cfg.Collector == nil {
+			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
+		}
+
+		log.Printf("ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+		var err error
+		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover schedd: %w", err)
+		}
+		log.Printf("Discovered schedd at: %s", scheddAddr)
+	}
+
+	// Create schedd with the address as-is (can be host:port or sinful string)
+	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
 	s := &Server{
 		schedd:         schedd,
+		trustDomain:    cfg.TrustDomain,
+		uidDomain:      cfg.UIDDomain,
 		userHeader:     cfg.UserHeader,
 		signingKeyPath: cfg.SigningKeyPath,
 	}
@@ -190,7 +217,19 @@ func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 
 		// Generate token for this user
 		log.Printf("Generating token for user: %s (from header %s)", username, s.userHeader)
-		token, err := GenerateToken(username, s.signingKeyPath)
+		iat := time.Now().Unix()
+		exp := time.Now().Add(1 * time.Minute).Unix()
+		issuer := s.trustDomain
+		if issuer == "" {
+			return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
+		}
+		if !strings.Contains(username, "@") {
+			if s.uidDomain == "" {
+				return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
+			}
+			username = username + "@" + s.uidDomain
+		}
+		token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), filepath.Base(s.signingKeyPath), username, issuer, iat, exp, nil)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate token for user %s: %w", username, err)
 		}
@@ -222,4 +261,92 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
 	return ctx, nil
+}
+
+// discoverSchedd discovers the schedd address from the collector
+func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 1 * time.Second
+
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		// Query collector for schedd ads
+		constraint := ""
+		if scheddName != "" {
+			constraint = fmt.Sprintf("Name == \"%s\"", scheddName)
+		}
+
+		ads, err := collector.QueryAds(ctx, "ScheddAd", constraint)
+		cancel()
+
+		if err == nil && len(ads) > 0 {
+			var selectedAd *classad.ClassAd
+
+			// If scheddName is empty, try to match hostname or use first schedd
+			if scheddName == "" {
+				hostname, err := os.Hostname()
+				if err == nil {
+					// Try to find a schedd whose name matches the hostname
+					for _, ad := range ads {
+						if nameExpr, ok := ad.Lookup("Name"); ok {
+							name := nameExpr.String()
+							name = strings.Trim(name, "\"")
+							if name == hostname {
+								selectedAd = ad
+								log.Printf("Found schedd matching hostname: %s", hostname)
+								break
+							}
+						}
+					}
+				}
+
+				// If no match found, use the first schedd
+				if selectedAd == nil {
+					selectedAd = ads[0]
+					if nameExpr, ok := selectedAd.Lookup("Name"); ok {
+						name := nameExpr.String()
+						name = strings.Trim(name, "\"")
+						log.Printf("Using first schedd found: %s", name)
+					}
+				}
+			} else {
+				// Use the first ad (which should match the constraint)
+				selectedAd = ads[0]
+			}
+
+			// Extract MyAddress from the selected schedd ad
+			myAddressExpr, ok := selectedAd.Lookup("MyAddress")
+			if !ok {
+				return "", fmt.Errorf("schedd ad missing MyAddress attribute")
+			}
+
+			// ClassAd String() returns a quoted string; trim surrounding
+			// quotes and whitespace. Also remove surrounding angle brackets so
+			// the cedar client receives a clean sinful-like address.
+			myAddress := strings.TrimSpace(myAddressExpr.String())
+			myAddress = strings.Trim(myAddress, "\"")
+			myAddress = strings.TrimPrefix(myAddress, "<")
+			myAddress = strings.TrimSuffix(myAddress, ">")
+
+			// Reconstruct as a sinful string without outer angle brackets
+			// (client.ConnectToAddress accepts either form; normalizing
+			// avoids shared-port parsing issues that include trailing '>').
+			sinful := fmt.Sprintf("<%s>", myAddress)
+
+			log.Printf("Schedd MyAddress from collector: %s", sinful)
+
+			return sinful, nil
+		}
+
+		// Wait before retrying
+		if time.Now().Add(pollInterval).Before(deadline) {
+			time.Sleep(pollInterval)
+		}
+	}
+
+	if scheddName != "" {
+		return "", fmt.Errorf("timeout after %v: schedd '%s' not found in collector", timeout, scheddName)
+	}
+	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
 }

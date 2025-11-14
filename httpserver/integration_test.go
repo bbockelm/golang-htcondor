@@ -60,8 +60,12 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	}
 	t.Log("HTCondor is ready!")
 
-	// Generate signing key for demo authentication
-	signingKeyPath := filepath.Join(tempDir, "signing.key")
+	// Generate signing key for demo authentication in passwords.d directory
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
 	key, err := httpserver.GenerateSigningKey()
 	if err != nil {
 		t.Fatalf("Failed to generate signing key: %v", err)

@@ -8,21 +8,18 @@ import (
 )
 
 func TestNewCollector(t *testing.T) {
-	collector := NewCollector("collector.example.com", 9618)
+	collector := NewCollector("collector.example.com:9618")
 	if collector == nil {
 		t.Fatal("NewCollector returned nil")
 	}
-	if collector.address != "collector.example.com" {
-		t.Errorf("Expected address 'collector.example.com', got '%s'", collector.address)
-	}
-	if collector.port != 9618 {
-		t.Errorf("Expected port 9618, got %d", collector.port)
+	if collector.address != "collector.example.com:9618" {
+		t.Errorf("Expected address 'collector.example.com:9618', got '%s'", collector.address)
 	}
 }
 
 func TestCollectorQueryAds(t *testing.T) {
 	t.Skip("Skipping integration test - requires live collector")
-	collector := NewCollector("collector.example.com", 9618)
+	collector := NewCollector("collector.example.com:9618")
 	ctx := context.Background()
 
 	// This would require a live collector to test
@@ -33,7 +30,7 @@ func TestCollectorQueryAds(t *testing.T) {
 }
 
 func TestCollectorAdvertise(t *testing.T) {
-	collector := NewCollector("collector.example.com", 9618)
+	collector := NewCollector("collector.example.com:9618")
 	ctx := context.Background()
 
 	ad := classad.New()
@@ -45,7 +42,7 @@ func TestCollectorAdvertise(t *testing.T) {
 }
 
 func TestCollectorLocateDaemon(t *testing.T) {
-	collector := NewCollector("collector.example.com", 9618)
+	collector := NewCollector("collector.example.com:9618")
 	ctx := context.Background()
 
 	_, err := collector.LocateDaemon(ctx, "Schedd", "test_schedd")

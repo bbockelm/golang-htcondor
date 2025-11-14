@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver"
 )
@@ -47,14 +48,6 @@ func runNormalMode() error {
 
 	// Get schedd configuration
 	scheddName, _ := cfg.Get("SCHEDD_NAME")
-	if scheddName == "" {
-		scheddName = "local"
-	}
-
-	scheddHost, ok := cfg.Get("SCHEDD_HOST")
-	if !ok {
-		return fmt.Errorf("SCHEDD_HOST not configured")
-	}
 
 	scheddPort := 9618 // Default schedd port
 	if portStr, ok := cfg.Get("SCHEDD_PORT"); ok {
@@ -106,23 +99,47 @@ func runNormalMode() error {
 	if header, ok := cfg.Get("HTTP_API_USER_HEADER"); ok && header != "" {
 		userHeaderFromConfig = header
 	}
+	uidDomain := ""
+	trustDomain := ""
+	if userHeaderFromConfig != "" {
+		log.Printf("Using user header: %s", userHeaderFromConfig)
+		if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
+			uidDomain = domain
+			log.Printf("Using UID_DOMAIN: %s", uidDomain)
+		}
+		if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
+			trustDomain = domain
+			log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
+		}
+	}
 
-	// Get optional signing key path
-	signingKeyPath, _ := cfg.Get("HTTP_API_SIGNING_KEY")
+	// Get optional signing key path - default to SEC_TOKEN_POOL_SIGNING_KEY_FILE
+	signingKeyPath, ok := cfg.Get("HTTP_API_SIGNING_KEY")
+	if !ok || signingKeyPath == "" {
+		signingKeyPath, _ = cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE")
+	}
+
+	// Create collector from COLLECTOR_HOST
+	var collector *htcondor.Collector
+	if collectorHost, ok := cfg.Get("COLLECTOR_HOST"); ok && collectorHost != "" {
+		collector = htcondor.NewCollector(collectorHost)
+		log.Printf("Created collector for: %s", collectorHost)
+	}
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     listenAddrFromConfig,
 		ScheddName:     scheddName,
-		ScheddAddr:     scheddHost,
-		ScheddPort:     scheddPort,
 		UserHeader:     userHeaderFromConfig,
 		SigningKeyPath: signingKeyPath,
 		TLSCertFile:    tlsCertFile,
 		TLSKeyFile:     tlsKeyFile,
+		TrustDomain:    trustDomain,
+		UIDDomain:      uidDomain,
 		ReadTimeout:    readTimeout,
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,
+		Collector:      collector,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -173,10 +190,43 @@ func runDemoMode() error {
 
 	log.Printf("Using temporary directory: %s", tempDir)
 
+	// Create required directories for HTCondor
+	logDir := filepath.Join(tempDir, "log")
+	if err := os.MkdirAll(logDir, 0750); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
+	spoolDir := filepath.Join(tempDir, "spool")
+	if err := os.MkdirAll(spoolDir, 0750); err != nil {
+		return fmt.Errorf("failed to create spool directory: %w", err)
+	}
+	executeDir := filepath.Join(tempDir, "execute")
+	if err := os.MkdirAll(executeDir, 0750); err != nil {
+		return fmt.Errorf("failed to create execute directory: %w", err)
+	}
+
+	// Find condor_master to determine release directory
+	condorMasterPath, err := exec.LookPath("condor_master")
+	if err != nil {
+		return fmt.Errorf("condor_master not found in PATH: %w", err)
+	}
+
+	// Extract release directory from condor_master path
+	// If condor_master is at /usr/sbin/condor_master, release dir is /usr
+	releaseDir := filepath.Dir(filepath.Dir(condorMasterPath))
+	log.Printf("Detected HTCondor release directory: %s", releaseDir)
+
 	// Write mini condor configuration
+	// Note: HTCondor will auto-generate signing keys when condor_master starts
 	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
+	if err := writeMiniCondorConfig(configFile, tempDir, releaseDir); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if err := os.Setenv("CONDOR_CONFIG", configFile); err != nil {
+		return fmt.Errorf("failed to set CONDOR_CONFIG: %w", err)
+	}
+	cfg, err := config.New()
+	if err != nil {
+		return fmt.Errorf("failed to load HTCondor configuration: %w", err)
 	}
 
 	// Start condor_master
@@ -200,34 +250,41 @@ func runDemoMode() error {
 
 	log.Println("HTCondor is ready!")
 
-	// Generate signing key if user-header is set
+	// Determine signing key path for token generation
+	// HTCondor auto-generates $(LOCAL_DIR)/passwords.d/POOL when needed
 	var signingKeyPath string
 	if *userHeader != "" {
+		signingKeyPath = filepath.Join(tempDir, "passwords.d", "POOL")
 		log.Printf("User header mode enabled: %s", *userHeader)
-		signingKeyPath = filepath.Join(tempDir, "signing.key")
-
-		// Generate a signing key
-		key, err := httpserver.GenerateSigningKey()
-		if err != nil {
-			return fmt.Errorf("failed to generate signing key: %w", err)
-		}
-
-		// Write the key to file
-		if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
-			return fmt.Errorf("failed to write signing key: %w", err)
-		}
-
-		log.Printf("Generated signing key at: %s", signingKeyPath)
+		log.Printf("Will use HTCondor-generated signing key at: %s", signingKeyPath)
 	}
+
+	uidDomain := ""
+	trustDomain := ""
+	if *userHeader != "" {
+		log.Printf("Using user header: %s", *userHeader)
+		if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
+			uidDomain = domain
+			log.Printf("Using UID_DOMAIN: %s", uidDomain)
+		}
+		if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
+			trustDomain = domain
+			log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
+		}
+	}
+
+	// Create collector for demo mode (points to local collector at 127.0.0.1:9618)
+	collector := htcondor.NewCollector("127.0.0.1:9618")
+	log.Printf("Created collector for demo mode: 127.0.0.1:9618")
 
 	// Create and start HTTP server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     *listenAddr,
-		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1",
-		ScheddPort:     9618,
 		UserHeader:     *userHeader,
 		SigningKeyPath: signingKeyPath,
+		TrustDomain:    trustDomain,
+		UIDDomain:      uidDomain,
+		Collector:      collector,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -256,15 +313,17 @@ func runDemoMode() error {
 }
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
-func writeMiniCondorConfig(configFile, localDir string) error {
+func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for Demo Mode
 LOCAL_DIR = %s
+RELEASE_DIR = %s
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
 EXECUTE = $(LOCAL_DIR)/execute
-BIN = $(LOCAL_DIR)/bin
-LIB = $(LOCAL_DIR)/lib
-RELEASE_DIR = /usr
+BIN = $(RELEASE_DIR)/bin
+SBIN = $(RELEASE_DIR)/sbin
+LIB = $(RELEASE_DIR)/lib
+LIBEXEC = $(RELEASE_DIR)/libexec
 
 # Run all daemons locally
 DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD
@@ -278,8 +337,6 @@ KILL = FALSE
 # Network settings
 CONDOR_HOST = 127.0.0.1
 COLLECTOR_HOST = $(CONDOR_HOST):9618
-SCHEDD_HOST = $(CONDOR_HOST)
-SCHEDD_PORT = 9618
 
 # Security settings - allow local access
 ALLOW_WRITE = 127.0.0.1, $(IP_ADDRESS)
@@ -306,7 +363,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir)
+`, localDir, releaseDir)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)

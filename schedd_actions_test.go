@@ -72,7 +72,7 @@ func TestParseJobActionResults(t *testing.T) {
 
 // TestRemoveJobsValidation verifies parameter validation
 func TestRemoveJobsValidation(t *testing.T) {
-	schedd := NewSchedd("test", "localhost", 9618)
+	schedd := NewSchedd("test", "localhost:9618")
 	ctx := context.Background()
 
 	// Test empty constraint
@@ -90,7 +90,7 @@ func TestRemoveJobsValidation(t *testing.T) {
 
 // TestActOnJobsValidation verifies actOnJobs parameter validation
 func TestActOnJobsValidation(t *testing.T) {
-	schedd := NewSchedd("test", "localhost", 9618)
+	schedd := NewSchedd("test", "localhost:9618")
 	ctx := context.Background()
 
 	// Test both constraint and IDs specified (should fail)

@@ -136,8 +136,7 @@ func (s *Schedd) actOnJobs(
 	}
 
 	// Connect to schedd using cedar client
-	addr := fmt.Sprintf("%s:%d", s.address, s.port)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
 	}

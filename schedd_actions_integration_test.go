@@ -28,10 +28,10 @@ func TestScheddRemoveJobsIntegration(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// Submit a test job
 	submitFile := `
@@ -120,10 +120,10 @@ func TestScheddRemoveJobsByIDIntegration(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	// Submit multiple test jobs
 	submitFile := `
@@ -207,10 +207,10 @@ func TestScheddRemoveNonExistentJob(t *testing.T) {
 	}
 
 	// Discover schedd address
-	host, port := discoverSchedd(t, harness)
+	addr := discoverSchedd(t, harness)
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", host, port)
+	schedd := NewSchedd("local", addr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

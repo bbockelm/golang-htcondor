@@ -2,8 +2,6 @@ package htcondor
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"os/exec"
 	"strings"
 	"testing"
@@ -33,20 +31,9 @@ func TestScheddSubmitIntegration(t *testing.T) {
 	collectorAddr := harness.GetCollectorAddr()
 	addr := parseCollectorSinfulString(collectorAddr)
 
-	collectorHost, collectorPortStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("Failed to parse collector address %s: %v", addr, err)
-	}
+	t.Logf("Querying collector at %s for schedd location", addr)
 
-	// Query collector for schedd location
-	var collectorPort int
-	if _, err := fmt.Sscanf(collectorPortStr, "%d", &collectorPort); err != nil {
-		t.Fatalf("Failed to parse collector port: %v", err)
-	}
-
-	t.Logf("Querying collector at %s:%d for schedd location", collectorHost, collectorPort)
-
-	collector := NewCollector(collectorHost, collectorPort)
+	collector := NewCollector(addr)
 	ctx := context.Background()
 	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
 	if err != nil {
@@ -74,17 +61,8 @@ func TestScheddSubmitIntegration(t *testing.T) {
 
 	// Parse schedd sinful string
 	scheddAddr := parseCollectorSinfulString(myAddress)
-	scheddHost, scheddPortStr, err := net.SplitHostPort(scheddAddr)
-	if err != nil {
-		t.Fatalf("Failed to parse schedd address %s: %v", scheddAddr, err)
-	}
 
-	var scheddPort int
-	if _, err := fmt.Sscanf(scheddPortStr, "%d", &scheddPort); err != nil {
-		t.Fatalf("Failed to parse schedd port: %v", err)
-	}
-
-	t.Logf("Schedd discovered at: %s:%d", scheddHost, scheddPort)
+	t.Logf("Schedd discovered at: %s", scheddAddr)
 
 	// Test 1: Create a simple job ClassAd
 	t.Run("SubmitSimpleJob", func(t *testing.T) {
@@ -103,7 +81,7 @@ func TestScheddSubmitIntegration(t *testing.T) {
 
 		// Connect to schedd's queue management interface
 		// Note: NewQmgmtConnection calls GetCapabilities which implicitly starts a transaction
-		qmgmt, err := NewQmgmtConnection(ctx, scheddHost, scheddPort)
+		qmgmt, err := NewQmgmtConnection(ctx, scheddAddr)
 		if err != nil {
 			harness.printScheddLog()
 			t.Fatalf("Failed to connect to schedd: %v", err)

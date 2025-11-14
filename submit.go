@@ -713,9 +713,8 @@ func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
 
 // setOwnership sets owner and accounting attributes
 func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
-	// Owner - would typically come from authentication
-	// For now, use a placeholder
-	_ = ad.Set("Owner", "unknown")
+	// Owner - do not set a placeholder as this causes a failure
+	// instead of being ignored.
 
 	// Accounting group
 	if group, ok := sf.cfg.Get("accounting_group"); ok {
