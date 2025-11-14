@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 )
 
@@ -25,6 +25,7 @@ type Server struct {
 	signingKeyPath     string
 	trustDomain        string
 	uidDomain          string
+	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 }
@@ -46,10 +47,24 @@ type Config struct {
 	Collector       *htcondor.Collector // Collector for metrics (optional)
 	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
 	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
+	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
 }
 
 // NewServer creates a new HTTP API server
 func NewServer(cfg Config) (*Server, error) {
+	// Initialize logger if not provided
+	logger := cfg.Logger
+	if logger == nil {
+		var err error
+		logger, err = logging.New(&logging.Config{
+			OutputPath:   "stderr",
+			MinVerbosity: logging.VerbosityInfo,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create logger: %w", err)
+		}
+	}
+
 	// Discover schedd address if not provided
 	scheddAddr := cfg.ScheddAddr
 	if scheddAddr == "" {
@@ -57,13 +72,13 @@ func NewServer(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
 		}
 
-		log.Printf("ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
 		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second)
+		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover schedd: %w", err)
 		}
-		log.Printf("Discovered schedd at: %s", scheddAddr)
+		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
 	}
 
 	// Create schedd with the address as-is (can be host:port or sinful string)
@@ -75,6 +90,7 @@ func NewServer(cfg Config) (*Server, error) {
 		uidDomain:      cfg.UIDDomain,
 		userHeader:     cfg.UserHeader,
 		signingKeyPath: cfg.SigningKeyPath,
+		logger:         logger,
 	}
 
 	// Setup metrics if collector is provided
@@ -103,11 +119,14 @@ func NewServer(cfg Config) (*Server, error) {
 		s.metricsRegistry = registry
 		s.prometheusExporter = metricsd.NewPrometheusExporter(registry)
 
-		log.Printf("Metrics endpoint enabled at /metrics")
+		s.logger.Info(logging.DestinationMetrics, "Metrics endpoint enabled", "path", "/metrics")
 	}
 
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
+
+	// Wrap with access logging middleware
+	handler := s.accessLogMiddleware(mux)
 
 	// Set default timeouts if not specified
 	readTimeout := cfg.ReadTimeout
@@ -136,20 +155,108 @@ func NewServer(cfg Config) (*Server, error) {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	log.Printf("Starting HTCondor API server on %s", s.httpServer.Addr)
+	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
 	return s.httpServer.ListenAndServe()
 }
 
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
-	log.Printf("Starting HTCondor API server on %s (TLS enabled)", s.httpServer.Addr)
+	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
 	return s.httpServer.ListenAndServeTLS(certFile, keyFile)
 }
 
 // Shutdown gracefully shuts down the HTTP server
 func (s *Server) Shutdown(ctx context.Context) error {
-	log.Println("Shutting down HTTP server...")
+	s.logger.Info(logging.DestinationHTTP, "Shutting down HTTP server")
 	return s.httpServer.Shutdown(ctx)
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code and bytes written
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	bytesWritten int
+}
+
+func (rw *responseWriter) WriteHeader(statusCode int) {
+	rw.statusCode = statusCode
+	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if rw.statusCode == 0 {
+		rw.statusCode = http.StatusOK
+	}
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytesWritten += n
+	return n, err
+}
+
+// accessLogMiddleware logs HTTP requests in access log style
+func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Wrap the response writer to capture status code
+		rw := &responseWriter{
+			ResponseWriter: w,
+			statusCode:     0,
+			bytesWritten:   0,
+		}
+
+		// Get client IP (handle X-Forwarded-For and X-Real-IP)
+		clientIP := r.RemoteAddr
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			clientIP = strings.Split(xff, ",")[0]
+		} else if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+			clientIP = xrip
+		}
+		// Strip port from RemoteAddr if present
+		if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+			clientIP = clientIP[:idx]
+		}
+
+		// Extract identity from context (will be set by auth middleware if present)
+		identity := "-"
+		if s.userHeader != "" {
+			if username := r.Header.Get(s.userHeader); username != "" {
+				identity = username
+			}
+		}
+		// Try to extract from bearer token if no user header
+		if identity == "-" {
+			if token, err := extractBearerToken(r); err == nil && token != "" {
+				// For now, just indicate that token auth was used
+				// Could parse JWT to extract subject if needed
+				identity = "token"
+			}
+		}
+
+		// Process the request
+		next.ServeHTTP(rw, r)
+
+		// Calculate duration
+		duration := time.Since(start)
+
+		// Log in access log format
+		statusCode := rw.statusCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+
+		s.logger.Info(
+			logging.DestinationHTTP,
+			"HTTP request",
+			"client_ip", clientIP,
+			"identity", identity,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", statusCode,
+			"duration_ms", duration.Milliseconds(),
+			"bytes", rw.bytesWritten,
+			"user_agent", r.UserAgent(),
+		)
+	})
 }
 
 // ErrorResponse represents an error response
@@ -160,7 +267,7 @@ type ErrorResponse struct {
 }
 
 // writeError writes an error response
-func writeError(w http.ResponseWriter, statusCode int, message string) {
+func (s *Server) writeError(w http.ResponseWriter, statusCode int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(ErrorResponse{
@@ -168,17 +275,17 @@ func writeError(w http.ResponseWriter, statusCode int, message string) {
 		Message: message,
 		Code:    statusCode,
 	}); err != nil {
-		log.Printf("Failed to encode error response: %v", err)
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode error response", "error", err, "status_code", statusCode)
 	}
 }
 
 // writeJSON writes a JSON response
-func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+func (s *Server) writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if data != nil {
 		if err := json.NewEncoder(w).Encode(data); err != nil {
-			log.Printf("Error encoding JSON response: %v", err)
+			s.logger.Error(logging.DestinationHTTP, "Error encoding JSON response", "error", err, "status_code", statusCode)
 		}
 	}
 }
@@ -216,7 +323,7 @@ func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 		}
 
 		// Generate token for this user
-		log.Printf("Generating token for user: %s (from header %s)", username, s.userHeader)
+		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username, "header", s.userHeader)
 		iat := time.Now().Unix()
 		exp := time.Now().Add(1 * time.Minute).Unix()
 		issuer := s.trustDomain
@@ -264,7 +371,7 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 }
 
 // discoverSchedd discovers the schedd address from the collector
-func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout time.Duration) (string, error) {
+func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout time.Duration, logger *logging.Logger) (string, error) {
 	deadline := time.Now().Add(timeout)
 	pollInterval := 1 * time.Second
 
@@ -294,7 +401,7 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 							name = strings.Trim(name, "\"")
 							if name == hostname {
 								selectedAd = ad
-								log.Printf("Found schedd matching hostname: %s", hostname)
+								logger.Info(logging.DestinationSchedd, "Found schedd matching hostname", "hostname", hostname)
 								break
 							}
 						}
@@ -307,7 +414,7 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 					if nameExpr, ok := selectedAd.Lookup("Name"); ok {
 						name := nameExpr.String()
 						name = strings.Trim(name, "\"")
-						log.Printf("Using first schedd found: %s", name)
+						logger.Info(logging.DestinationSchedd, "Using first schedd found", "name", name)
 					}
 				}
 			} else {
@@ -334,7 +441,7 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 			// avoids shared-port parsing issues that include trailing '>').
 			sinful := fmt.Sprintf("<%s>", myAddress)
 
-			log.Printf("Schedd MyAddress from collector: %s", sinful)
+			logger.Info(logging.DestinationSchedd, "Schedd MyAddress from collector", "address", sinful)
 
 			return sinful, nil
 		}

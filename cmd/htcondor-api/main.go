@@ -16,6 +16,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver"
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 var (
@@ -112,11 +113,17 @@ func runNormalMode() error {
 		signingKeyPath, _ = cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE")
 	}
 
+	// Create logger from configuration
+	logger, err := logging.FromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
 	// Create collector from COLLECTOR_HOST
 	var collector *htcondor.Collector
 	if collectorHost, ok := cfg.Get("COLLECTOR_HOST"); ok && collectorHost != "" {
 		collector = htcondor.NewCollector(collectorHost)
-		log.Printf("Created collector for: %s", collectorHost)
+		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHost)
 	}
 
 	// Create and start server
@@ -133,6 +140,7 @@ func runNormalMode() error {
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,
 		Collector:      collector,
+		Logger:         logger,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -156,7 +164,7 @@ func runNormalMode() error {
 	// Wait for shutdown signal or error
 	select {
 	case sig := <-sigChan:
-		log.Printf("Received signal: %v, shutting down...", sig)
+		logger.Info(logging.DestinationGeneral, "Received shutdown signal", "signal", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return server.Shutdown(ctx)
@@ -167,7 +175,16 @@ func runNormalMode() error {
 
 // runDemoMode runs the server with a mini condor setup
 func runDemoMode() error {
-	log.Println("Starting in demo mode...")
+	// Create logger for demo mode (stdout for access logs)
+	logger, err := logging.New(&logging.Config{
+		OutputPath:   "stdout",
+		MinVerbosity: logging.VerbosityInfo,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	logger.Info(logging.DestinationGeneral, "Starting in demo mode")
 
 	// Create temporary directory for mini condor
 	tempDir, err := os.MkdirTemp("", "htcondor-demo-*")
@@ -180,13 +197,13 @@ func runDemoMode() error {
 	}
 
 	defer func() {
-		log.Printf("Cleaning up temporary directory: %s", tempDir)
+		logger.Info(logging.DestinationGeneral, "Cleaning up temporary directory", "path", tempDir)
 		if err := os.RemoveAll(tempDir); err != nil {
-			log.Printf("Warning: failed to remove temp directory: %v", err)
+			logger.Error(logging.DestinationGeneral, "Failed to remove temp directory", "error", err)
 		}
 	}()
 
-	log.Printf("Using temporary directory: %s", tempDir)
+	logger.Info(logging.DestinationGeneral, "Using temporary directory", "path", tempDir)
 
 	// Create required directories for HTCondor
 	logDir := filepath.Join(tempDir, "log")
@@ -273,7 +290,7 @@ func runDemoMode() error {
 
 	// Create collector for demo mode (points to local collector at 127.0.0.1:9618)
 	collector := htcondor.NewCollector("127.0.0.1:9618")
-	log.Printf("Created collector for demo mode: 127.0.0.1:9618")
+	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", "127.0.0.1:9618")
 
 	// Create and start HTTP server
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -283,6 +300,7 @@ func runDemoMode() error {
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
 		Collector:      collector,
+		Logger:         logger,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

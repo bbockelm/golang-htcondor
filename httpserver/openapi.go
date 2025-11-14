@@ -2,8 +2,9 @@ package httpserver
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
+
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // OpenAPI schema for the HTCondor RESTful API
@@ -495,7 +496,7 @@ const openAPISchema = `{
 // handleOpenAPISchema serves the OpenAPI schema
 func (s *Server) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -505,13 +506,13 @@ func (s *Server) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 	// Parse and re-encode to ensure valid JSON and pretty printing
 	var schema interface{}
 	if err := json.Unmarshal([]byte(openAPISchema), &schema); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to parse OpenAPI schema")
+		s.writeError(w, http.StatusInternalServerError, "Failed to parse OpenAPI schema")
 		return
 	}
 
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(schema); err != nil {
-		log.Printf("Failed to encode OpenAPI schema: %v", err)
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode OpenAPI schema", "error", err)
 	}
 }
