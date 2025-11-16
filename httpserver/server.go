@@ -15,6 +15,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"golang.org/x/oauth2"
 )
 
 // Server represents the HTTP API server
@@ -28,27 +29,37 @@ type Server struct {
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
-	tokenCache         *TokenCache // Cache of validated tokens and their session caches
+	tokenCache         *TokenCache     // Cache of validated tokens and their session caches
+	oauth2Provider     *OAuth2Provider // OAuth2 provider for MCP endpoints
+	oauth2Config       *oauth2.Config  // OAuth2 client config for SSO
 }
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr      string              // Address to listen on (e.g., ":8080")
-	ScheddName      string              // Schedd name
-	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader      string              // HTTP header to extract username from (optional)
-	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
-	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	TLSCertFile     string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile      string              // Path to TLS key file (optional, enables HTTPS)
-	ReadTimeout     time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout    time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout     time.Duration       // HTTP idle timeout (default: 120s)
-	Collector       *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
-	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
+	ListenAddr         string              // Address to listen on (e.g., ":8080")
+	ScheddName         string              // Schedd name
+	ScheddAddr         string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader         string              // HTTP header to extract username from (optional)
+	SigningKeyPath     string              // Path to token signing key (optional, for token generation)
+	TrustDomain        string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain          string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	TLSCertFile        string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile         string              // Path to TLS key file (optional, enables HTTPS)
+	ReadTimeout        time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout       time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout        time.Duration       // HTTP idle timeout (default: 120s)
+	Collector          *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics      bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL    time.Duration       // Metrics cache TTL (default: 10s)
+	Logger             *logging.Logger     // Logger instance (optional, creates default if nil)
+	EnableMCP          bool                // Enable MCP endpoints with OAuth2 (default: false)
+	OAuth2DBPath       string              // Path to OAuth2 SQLite database (default: "oauth2.db")
+	OAuth2Issuer       string              // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID     string              // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret string              // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL      string              // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL     string              // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL  string              // OAuth2 redirect URL for SSO (optional)
 }
 
 // NewServer creates a new HTTP API server
@@ -93,6 +104,41 @@ func NewServer(cfg Config) (*Server, error) {
 		signingKeyPath: cfg.SigningKeyPath,
 		logger:         logger,
 		tokenCache:     NewTokenCache(), // Initialize token cache
+	}
+
+	// Setup OAuth2 provider if MCP is enabled
+	if cfg.EnableMCP {
+		oauth2DBPath := cfg.OAuth2DBPath
+		if oauth2DBPath == "" {
+			oauth2DBPath = "oauth2.db"
+		}
+
+		oauth2Issuer := cfg.OAuth2Issuer
+		if oauth2Issuer == "" {
+			oauth2Issuer = "http://" + cfg.ListenAddr
+		}
+
+		oauth2Provider, err := NewOAuth2Provider(oauth2DBPath, oauth2Issuer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)
+		}
+		s.oauth2Provider = oauth2Provider
+		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+
+		// Setup OAuth2 client config for SSO if configured
+		if cfg.OAuth2ClientID != "" && cfg.OAuth2AuthURL != "" && cfg.OAuth2TokenURL != "" {
+			s.oauth2Config = &oauth2.Config{
+				ClientID:     cfg.OAuth2ClientID,
+				ClientSecret: cfg.OAuth2ClientSecret,
+				RedirectURL:  cfg.OAuth2RedirectURL,
+				Endpoint: oauth2.Endpoint{
+					AuthURL:  cfg.OAuth2AuthURL,
+					TokenURL: cfg.OAuth2TokenURL,
+				},
+				Scopes: []string{"openid", "profile", "email"},
+			}
+			logger.Info(logging.DestinationHTTP, "OAuth2 SSO client configured", "auth_url", cfg.OAuth2AuthURL)
+		}
 	}
 
 	// Setup metrics if collector is provided
@@ -170,7 +216,20 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 // Shutdown gracefully shuts down the HTTP server
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info(logging.DestinationHTTP, "Shutting down HTTP server")
+
+	// Close OAuth2 provider if enabled
+	if s.oauth2Provider != nil {
+		if err := s.oauth2Provider.Close(); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to close OAuth2 provider", "error", err)
+		}
+	}
+
 	return s.httpServer.Shutdown(ctx)
+}
+
+// GetOAuth2Provider returns the OAuth2 provider (for testing)
+func (s *Server) GetOAuth2Provider() *OAuth2Provider {
+	return s.oauth2Provider
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written

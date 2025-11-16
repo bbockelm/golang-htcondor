@@ -31,3 +31,11 @@ Thumbs.db
 # Example binaries
 examples/*/basic
 examples/*/example
+
+# Command binaries
+htcondor-api
+htcondor-mcp
+
+# Test databases
+oauth2.db
+oauth2.db-*

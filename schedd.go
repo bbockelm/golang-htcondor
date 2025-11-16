@@ -45,6 +45,16 @@ func NewSchedd(name string, address string) *Schedd {
 	}
 }
 
+// Name returns the schedd's name
+func (s *Schedd) Name() string {
+	return s.name
+}
+
+// Address returns the schedd's address
+func (s *Schedd) Address() string {
+	return s.address
+}
+
 // Query queries the schedd for job advertisements
 // constraint is a ClassAd constraint expression (use "true" to get all jobs)
 // projection is a list of attributes to return (use nil to get all attributes)
