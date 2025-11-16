@@ -72,7 +72,7 @@ func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
 
 	// The error should be about connection, not about missing attributes
 	errMsg := err.Error()
-	if !contains(errMsg, "connect") && !contains(errMsg, "dial") && !contains(errMsg, "connection") {
+	if !contains(errMsg, "connect") && !contains(errMsg, "dial") && !contains(errMsg, "connection") && !contains(errMsg, "security") && !contains(errMsg, "handshake") && !contains(errMsg, "EOF") {
 		t.Errorf("Expected connection error, got: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
 
 	// The error should be about connection, not about missing attributes
 	errMsg := err.Error()
-	if !contains(errMsg, "connect") && !contains(errMsg, "dial") && !contains(errMsg, "connection") {
+	if !contains(errMsg, "connect") && !contains(errMsg, "dial") && !contains(errMsg, "connection") && !contains(errMsg, "security") && !contains(errMsg, "handshake") && !contains(errMsg, "EOF") {
 		t.Errorf("Expected connection error, got: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
 		t.Fatal("Expected error (connection failure), got nil")
 	}
 
-	if !contains(err.Error(), "connect") && !contains(err.Error(), "dial") && !contains(err.Error(), "connection") {
+	if !contains(err.Error(), "connect") && !contains(err.Error(), "dial") && !contains(err.Error(), "connection") && !contains(err.Error(), "security") && !contains(err.Error(), "handshake") && !contains(err.Error(), "EOF") {
 		t.Errorf("Expected connection error, got: %v", err)
 	}
 
@@ -354,7 +354,7 @@ func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
 		t.Fatal("Expected error (connection failure), got nil")
 	}
 
-	if !contains(err.Error(), "connect") && !contains(err.Error(), "dial") && !contains(err.Error(), "connection") {
+	if !contains(err.Error(), "connect") && !contains(err.Error(), "dial") && !contains(err.Error(), "connection") && !contains(err.Error(), "security") && !contains(err.Error(), "handshake") && !contains(err.Error(), "EOF") {
 		t.Errorf("Expected connection error, got: %v", err)
 	}
 

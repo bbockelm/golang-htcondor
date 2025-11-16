@@ -217,9 +217,8 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 	return config
 }
 
-// runNormalMode runs the server using existing HTCondor configuration
-func runNormalMode() error {
-	// Load HTCondor configuration
+// loadConfigWithDefaults loads HTCondor configuration with fallbacks
+func loadConfigWithDefaults() *config.Config {
 	cfg, err := config.New()
 	if err != nil {
 		// If config loading fails, create an empty config with minimal defaults
@@ -230,26 +229,33 @@ func runNormalMode() error {
 
 	// Fix TILDE and LOCAL_DIR defaults if needed
 	fixConfigDefaults(cfg)
+	return cfg
+}
 
-	// Get schedd configuration from CLI flags or config
-	scheddNameValue := *scheddName
+// getScheddConfig extracts schedd configuration from CLI flags and config
+func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue string) {
+	scheddNameValue = *scheddName
 	if scheddNameValue == "" {
 		scheddNameValue, _ = cfg.Get("SCHEDD_NAME")
 	}
-	scheddAddrValue := *scheddAddr
+	scheddAddrValue = *scheddAddr
+	return scheddNameValue, scheddAddrValue
+}
 
-	// Get HTTP API configuration
-	listenAddrFromConfig := *listenAddr
+// getHTTPConfig extracts HTTP API configuration from config
+func getHTTPConfig(cfg *config.Config) (listenAddrResult, tlsCertFile, tlsKeyFile string) {
+	listenAddrResult = *listenAddr
 	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
-		listenAddrFromConfig = addr
+		listenAddrResult = addr
 	}
+	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
+	tlsKeyFile, _ = cfg.Get("HTTP_API_TLS_KEY")
+	return listenAddrResult, tlsCertFile, tlsKeyFile
+}
 
-	// Get TLS configuration
-	tlsCertFile, _ := cfg.Get("HTTP_API_TLS_CERT")
-	tlsKeyFile, _ := cfg.Get("HTTP_API_TLS_KEY")
-
-	// Get timeout configuration
-	readTimeout := 30 * time.Second
+// getTimeoutConfig parses timeout configuration with defaults
+func getTimeoutConfig(cfg *config.Config) (readTimeout, writeTimeout, idleTimeout time.Duration) {
+	readTimeout = 30 * time.Second
 	if timeoutStr, ok := cfg.Get("HTTP_API_READ_TIMEOUT"); ok {
 		if duration, err := time.ParseDuration(timeoutStr); err == nil {
 			readTimeout = duration
@@ -258,7 +264,7 @@ func runNormalMode() error {
 		}
 	}
 
-	writeTimeout := 30 * time.Second
+	writeTimeout = 30 * time.Second
 	if timeoutStr, ok := cfg.Get("HTTP_API_WRITE_TIMEOUT"); ok {
 		if duration, err := time.ParseDuration(timeoutStr); err == nil {
 			writeTimeout = duration
@@ -267,7 +273,7 @@ func runNormalMode() error {
 		}
 	}
 
-	idleTimeout := 120 * time.Second
+	idleTimeout = 120 * time.Second
 	if timeoutStr, ok := cfg.Get("HTTP_API_IDLE_TIMEOUT"); ok {
 		if duration, err := time.ParseDuration(timeoutStr); err == nil {
 			idleTimeout = duration
@@ -276,13 +282,15 @@ func runNormalMode() error {
 		}
 	}
 
-	// Get optional user header configuration
-	userHeaderFromConfig := *userHeader
+	return readTimeout, writeTimeout, idleTimeout
+}
+
+// getUserHeaderConfig extracts user header and domain configuration
+func getUserHeaderConfig(cfg *config.Config) (userHeaderFromConfig, uidDomain, trustDomain string) {
+	userHeaderFromConfig = *userHeader
 	if header, ok := cfg.Get("HTTP_API_USER_HEADER"); ok && header != "" {
 		userHeaderFromConfig = header
 	}
-	uidDomain := ""
-	trustDomain := ""
 	if userHeaderFromConfig != "" {
 		log.Printf("Using user header: %s", userHeaderFromConfig)
 		if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
@@ -294,6 +302,41 @@ func runNormalMode() error {
 			log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
 		}
 	}
+	return userHeaderFromConfig, uidDomain, trustDomain
+}
+
+// setupCollector creates collector from CLI flag or config
+func setupCollector(cfg *config.Config, logger *logging.Logger) *htcondor.Collector {
+	collectorHostValue := *collectorHost
+	if collectorHostValue == "" {
+		if ch, ok := cfg.Get("COLLECTOR_HOST"); ok && ch != "" {
+			collectorHostValue = ch
+		}
+	}
+	if collectorHostValue != "" {
+		collector := htcondor.NewCollector(collectorHostValue)
+		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHostValue)
+		return collector
+	}
+	return nil
+}
+
+// runNormalMode runs the server using existing HTCondor configuration
+func runNormalMode() error {
+	// Load configuration
+	cfg := loadConfigWithDefaults()
+
+	// Get schedd configuration
+	scheddNameValue, scheddAddrValue := getScheddConfig(cfg)
+
+	// Get HTTP API configuration
+	listenAddrFromConfig, tlsCertFile, tlsKeyFile := getHTTPConfig(cfg)
+
+	// Get timeout configuration
+	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
+
+	// Get user header configuration
+	userHeaderFromConfig, uidDomain, trustDomain := getUserHeaderConfig(cfg)
 
 	// Get optional signing key path - default to SEC_TOKEN_POOL_SIGNING_KEY_FILE
 	signingKeyPath, ok := cfg.Get("HTTP_API_SIGNING_KEY")
@@ -307,18 +350,8 @@ func runNormalMode() error {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create collector from CLI flag or config
-	var collector *htcondor.Collector
-	collectorHostValue := *collectorHost
-	if collectorHostValue == "" {
-		if ch, ok := cfg.Get("COLLECTOR_HOST"); ok && ch != "" {
-			collectorHostValue = ch
-		}
-	}
-	if collectorHostValue != "" {
-		collector = htcondor.NewCollector(collectorHostValue)
-		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHostValue)
-	}
+	// Create collector
+	collector := setupCollector(cfg, logger)
 
 	// Discover schedd if not specified
 	if scheddAddrValue == "" && scheddNameValue == "" {
@@ -542,11 +575,8 @@ func runDemoMode() error {
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
 func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
-	uid := os.Getuid()
-	gid := os.Getgid()
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for Demo Mode
 LOCAL_DIR = %s
-CONDOR_IDS = %d.%d
 RELEASE_DIR = %s
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
@@ -594,7 +624,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, uid, gid, releaseDir)
+`, localDir, releaseDir)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
