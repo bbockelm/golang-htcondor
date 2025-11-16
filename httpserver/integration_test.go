@@ -576,7 +576,7 @@ queue`
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/%s/hold", baseURL, jobID), bytes.NewReader(holdBody))
 	req.Header.Set("X-Test-User", testUser)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to hold job: %v", err)
@@ -607,7 +607,7 @@ queue`
 	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/%s/release", baseURL, jobID), bytes.NewReader(releaseBody))
 	req.Header.Set("X-Test-User", testUser)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to release job: %v", err)
@@ -666,7 +666,7 @@ queue 3`
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/hold", baseURL), bytes.NewReader(holdBody))
 	req.Header.Set("X-Test-User", testUser)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to bulk hold jobs: %v", err)
@@ -692,7 +692,7 @@ queue 3`
 	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/release", baseURL), bytes.NewReader(releaseBody))
 	req.Header.Set("X-Test-User", testUser)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to bulk release jobs: %v", err)
@@ -889,7 +889,7 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 func getJob(t *testing.T, client *http.Client, baseURL, user, jobID string) map[string]interface{} {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, jobID), nil)
 	req.Header.Set("X-Test-User", user)
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to get job: %v", err)

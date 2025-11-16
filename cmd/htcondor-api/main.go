@@ -20,10 +20,10 @@ import (
 )
 
 var (
-	demoMode       = flag.Bool("demo", false, "Run in demo mode with mini condor")
-	listenAddr     = flag.String("listen", ":8080", "Address to listen on")
-	userHeader     = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
-	collectorHost  = flag.String("collector", "", "Collector host (e.g., 'collector.example.com:9618'). Falls back to COLLECTOR_HOST config if not specified.")
+	demoMode      = flag.Bool("demo", false, "Run in demo mode with mini condor")
+	listenAddr    = flag.String("listen", ":8080", "Address to listen on")
+	userHeader    = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
+	collectorHost = flag.String("collector", "", "Collector host (e.g., 'collector.example.com:9618'). Falls back to COLLECTOR_HOST config if not specified.")
 )
 
 func main() {
