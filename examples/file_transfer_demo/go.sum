@@ -1,7 +1,7 @@
 github.com/PelicanPlatform/classad v0.0.4 h1:CKRLqSe+6tTvYELE/P1uYYugse8aAMKAnb+IC5HDqIU=
 github.com/PelicanPlatform/classad v0.0.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/bbockelm/cedar v0.0.8 h1:bFofATy6UMHfvyS3htGWy4SckQk1KBrveyoaQamJBAE=
-github.com/bbockelm/cedar v0.0.8/go.mod h1:ti0zaigF2l7et8Otrm9DSmDux9fPlCxIWblfWxFwI8c=
+github.com/bbockelm/cedar v0.0.10 h1:9nx2HU+YCEZr9jhnh7BAEo18v0OPSUfisg0EP8UyX/g=
+github.com/bbockelm/cedar v0.0.10/go.mod h1:ti0zaigF2l7et8Otrm9DSmDux9fPlCxIWblfWxFwI8c=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 golang.org/x/crypto v0.43.0 h1:dduJYIi3A3KOfdGOHX8AVZ/jGiyPa3IbBozJ5kNuE04=
