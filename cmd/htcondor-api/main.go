@@ -330,8 +330,11 @@ func runDemoMode() error {
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
 func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
+	uid := os.Getuid()
+	gid := os.Getgid()
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for Demo Mode
 LOCAL_DIR = %s
+CONDOR_IDS = %d.%d
 RELEASE_DIR = %s
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
@@ -379,7 +382,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, releaseDir)
+`, localDir, uid, gid, releaseDir)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)

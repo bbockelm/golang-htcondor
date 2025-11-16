@@ -1,3 +1,7 @@
+Dockerfile
+docker-compose.yml
+cmd/tmp/*
+
 # Git files
 .git
 .gitignore

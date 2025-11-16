@@ -57,7 +57,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	// Establish connection using cedar client
 	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
+		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
 	defer func() {
 		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
@@ -180,7 +180,7 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 	// Create QMGMT connection
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
-		return "", fmt.Errorf("failed to connect to schedd: %w", err)
+		return "", fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
 	defer func() {
 		if cerr := qmgmt.Close(); cerr != nil && err == nil {
@@ -269,7 +269,7 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 	// Connect to schedd's queue management interface
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to connect to schedd: %w", err)
+		return 0, nil, fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
 	defer func() {
 		if cerr := qmgmt.Close(); cerr != nil && err == nil {

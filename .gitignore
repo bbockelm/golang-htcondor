@@ -31,3 +31,6 @@ Thumbs.db
 # Example binaries
 examples/*/basic
 examples/*/example
+
+# Temporary files and tokens
+cmd/htcondor-api/tmp/
