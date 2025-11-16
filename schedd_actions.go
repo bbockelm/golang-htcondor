@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -136,7 +135,7 @@ func (s *Schedd) actOnJobs(
 	}
 
 	// Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
 	}

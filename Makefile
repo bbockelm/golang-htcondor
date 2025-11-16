@@ -96,3 +96,43 @@ ci: tidy fmt lint test ## Run all CI checks locally
 .PHONY: all
 all: tidy fmt lint test build examples ## Run all checks and build everything
 	@echo "Build complete!"
+
+# Docker targets
+DOCKER_IMAGE ?= golang-htcondor:dev
+DOCKER_PLATFORM ?= linux/arm64,linux/amd64
+
+.PHONY: docker-build
+docker-build: ## Build Docker image
+	@echo "Building Docker image..."
+	docker build -t $(DOCKER_IMAGE) .
+
+.PHONY: docker-build-multiarch
+docker-build-multiarch: ## Build multi-architecture Docker image
+	@echo "Building multi-architecture Docker image..."
+	docker buildx build --platform $(DOCKER_PLATFORM) -t $(DOCKER_IMAGE) .
+
+.PHONY: docker-test
+docker-test: ## Run tests inside Docker container
+	@echo "Running tests inside Docker container..."
+	docker build -t $(DOCKER_IMAGE) .
+	docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) go test -v ./...
+
+.PHONY: docker-test-integration
+docker-test-integration: ## Run integration tests inside Docker container with HTCondor
+	@echo "Running integration tests inside Docker container..."
+	docker build -t $(DOCKER_IMAGE) .
+	docker run --rm --privileged -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) /bin/bash -c "\
+		sudo condor_master && \
+		sleep 5 && \
+		go test -v -tags=integration -timeout=5m ./httpserver/"
+
+.PHONY: docker-shell
+docker-shell: ## Start interactive shell in Docker container
+	@echo "Starting Docker shell..."
+	docker build -t $(DOCKER_IMAGE) .
+	docker run --rm -it -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) /bin/bash
+
+.PHONY: docker-clean
+docker-clean: ## Remove Docker image
+	@echo "Removing Docker image..."
+	docker rmi $(DOCKER_IMAGE) || true

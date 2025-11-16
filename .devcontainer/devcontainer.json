@@ -1,0 +1,33 @@
+{
+	"name": "HTCondor Go Development",
+	"build": {
+		"dockerfile": "../Dockerfile",
+		"context": ".."
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"ms-vscode.makefile-tools",
+				"eamodio.gitlens"
+			],
+			"settings": {
+				"go.toolsManagement.checkForUpdates": "local",
+				"go.useLanguageServer": true,
+				"go.gopath": "/go",
+				"go.goroot": "/usr/local/go",
+				"terminal.integrated.defaultProfile.linux": "bash"
+			}
+		}
+	},
+	"forwardPorts": [9618],
+	"portsAttributes": {
+		"9618": {
+			"label": "HTCondor Collector",
+			"onAutoForward": "notify"
+		}
+	},
+	"postCreateCommand": "go mod download",
+	"remoteUser": "vscode",
+	"features": {}
+}

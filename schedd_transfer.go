@@ -67,7 +67,7 @@ func (s *Schedd) ReceiveJobSandbox(ctx context.Context, constraint string, w io.
 // doReceiveJobSandbox implements the actual transfer logic
 func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w io.Writer) error {
 	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
@@ -554,7 +554,7 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 	}
 
 	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
@@ -1007,7 +1007,7 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 	}
 
 	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
 	}
