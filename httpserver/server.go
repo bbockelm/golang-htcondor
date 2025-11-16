@@ -492,12 +492,12 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 			username = r.Header.Get(s.userHeader)
 		}
 	}
-	
+
 	// If username not from header, try to extract from JWT token
 	if username == "" {
 		username, _ = parseJWTUsername(token)
 	}
-	
+
 	// Set username in context for rate limiting (empty string will be treated as "unauthenticated")
 	if username != "" {
 		ctx = htcondor.WithAuthenticatedUser(ctx, username)

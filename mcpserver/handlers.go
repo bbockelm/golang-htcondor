@@ -231,7 +231,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			Token:          token,
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
-		
+
 		// Extract username from token for rate limiting
 		username, _ := parseJWTUsername(token)
 		if username != "" {

@@ -983,7 +983,7 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	t.Log("Test 1: Making rapid queries to trigger rate limit...")
 	successCount := 0
 	rateLimitCount := 0
-	
+
 	// Make 20 rapid queries (rate limit is 2 per second with burst of 4)
 	for i := 0; i < 20; i++ {
 		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
@@ -993,22 +993,22 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
-		
+
 		if resp.StatusCode == http.StatusOK {
 			successCount++
 		} else if resp.StatusCode == http.StatusTooManyRequests {
 			rateLimitCount++
 			t.Logf("Request %d: Rate limited (429 status)", i+1)
 		}
-		
+
 		resp.Body.Close()
-		
+
 		// Small delay to avoid overwhelming the server
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	t.Logf("Results: %d successful, %d rate limited", successCount, rateLimitCount)
-	
+
 	// We should have hit the rate limit at least once
 	if rateLimitCount == 0 {
 		t.Error("Expected to hit rate limit, but no 429 responses received")
@@ -1035,7 +1035,7 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Test 3: Test per-user isolation
 	t.Log("Test 3: Testing per-user rate limit isolation...")
 	user2 := "testuser2"
-	
+
 	// Exhaust user1's rate limit
 	for i := 0; i < 10; i++ {
 		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
