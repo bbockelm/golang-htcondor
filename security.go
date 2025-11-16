@@ -8,12 +8,18 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
 
 // globalDefaultConfig holds a pointer to the default HTCondor configuration.
 // Access is thread-safe via atomic operations.
 // This is loaded lazily on first use or via explicit ReloadDefaultConfig() call.
 var globalDefaultConfig atomic.Pointer[config.Config]
+
+// globalRateLimitManager holds a pointer to the global rate limiter manager.
+// Access is thread-safe via atomic operations.
+// This is loaded lazily based on the global configuration.
+var globalRateLimitManager atomic.Pointer[ratelimit.Manager]
 
 // loadDefaultConfig attempts to load the default HTCondor configuration.
 // Returns nil if loading fails (e.g., config files not found).
@@ -45,6 +51,29 @@ func getDefaultConfig() *config.Config {
 func ReloadDefaultConfig() {
 	cfg := loadDefaultConfig()
 	globalDefaultConfig.Store(cfg)
+	
+	// Also reload rate limiter from new config
+	if cfg != nil {
+		manager := ratelimit.ConfigFromHTCondor(cfg)
+		globalRateLimitManager.Store(manager)
+	} else {
+		globalRateLimitManager.Store(nil)
+	}
+}
+
+// getRateLimitManager returns the global rate limiter manager, loading it lazily if needed.
+// Returns nil if no configuration is available (which means unlimited).
+func getRateLimitManager() *ratelimit.Manager {
+	manager := globalRateLimitManager.Load()
+	if manager == nil {
+		// Try to load from config
+		cfg := getDefaultConfig()
+		if cfg != nil {
+			manager = ratelimit.ConfigFromHTCondor(cfg)
+			globalRateLimitManager.Store(manager)
+		}
+	}
+	return manager
 }
 
 // GetSecurityConfig creates a SecurityConfig from HTCondor configuration.
