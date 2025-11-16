@@ -34,12 +34,12 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	if !ok {
 		scheddName = "schedd"
 	}
-	
+
 	schedd := NewSchedd(scheddName, scheddAddr)
 
 	// Create a config with rate limits
 	cfg := config.NewEmpty()
-	cfg.Set("SCHEDD_QUERY_RATE_LIMIT", "2")           // 2 queries per second globally
+	cfg.Set("SCHEDD_QUERY_RATE_LIMIT", "2")          // 2 queries per second globally
 	cfg.Set("SCHEDD_QUERY_PER_USER_RATE_LIMIT", "1") // 1 query per second per user
 
 	// Create rate limiter manager
@@ -167,7 +167,7 @@ func TestCollectorQueryRateLimit(t *testing.T) {
 
 	// Create a config with rate limits
 	cfg := config.NewEmpty()
-	cfg.Set("COLLECTOR_QUERY_RATE_LIMIT", "3")           // 3 queries per second globally
+	cfg.Set("COLLECTOR_QUERY_RATE_LIMIT", "3")          // 3 queries per second globally
 	cfg.Set("COLLECTOR_QUERY_PER_USER_RATE_LIMIT", "2") // 2 queries per second per user
 
 	// Create rate limiter manager
@@ -236,8 +236,8 @@ func TestRateLimitConfiguration(t *testing.T) {
 		expectedCollectorPerUser float64
 	}{
 		{
-			name:   "no limits configured",
-			config: map[string]string{},
+			name:                     "no limits configured",
+			config:                   map[string]string{},
 			expectedScheddGlobal:     0,
 			expectedScheddPerUser:    0,
 			expectedCollectorGlobal:  0,

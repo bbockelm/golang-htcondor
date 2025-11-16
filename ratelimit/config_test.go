@@ -8,76 +8,76 @@ import (
 
 func TestConfigFromHTCondor(t *testing.T) {
 	tests := []struct {
-		name                   string
-		configValues           map[string]string
-		expectedScheddGlobal   float64
-		expectedScheddPerUser  float64
-		expectedCollectorGlobal float64
+		name                     string
+		configValues             map[string]string
+		expectedScheddGlobal     float64
+		expectedScheddPerUser    float64
+		expectedCollectorGlobal  float64
 		expectedCollectorPerUser float64
 	}{
 		{
-			name:                   "empty config",
-			configValues:           map[string]string{},
-			expectedScheddGlobal:   0,
-			expectedScheddPerUser:  0,
-			expectedCollectorGlobal: 0,
+			name:                     "empty config",
+			configValues:             map[string]string{},
+			expectedScheddGlobal:     0,
+			expectedScheddPerUser:    0,
+			expectedCollectorGlobal:  0,
 			expectedCollectorPerUser: 0,
 		},
 		{
 			name: "all limits set",
 			configValues: map[string]string{
-				"SCHEDD_QUERY_RATE_LIMIT":           "10",
-				"SCHEDD_QUERY_PER_USER_RATE_LIMIT":  "5",
-				"COLLECTOR_QUERY_RATE_LIMIT":        "20",
+				"SCHEDD_QUERY_RATE_LIMIT":             "10",
+				"SCHEDD_QUERY_PER_USER_RATE_LIMIT":    "5",
+				"COLLECTOR_QUERY_RATE_LIMIT":          "20",
 				"COLLECTOR_QUERY_PER_USER_RATE_LIMIT": "10",
 			},
-			expectedScheddGlobal:   10,
-			expectedScheddPerUser:  5,
-			expectedCollectorGlobal: 20,
+			expectedScheddGlobal:     10,
+			expectedScheddPerUser:    5,
+			expectedCollectorGlobal:  20,
 			expectedCollectorPerUser: 10,
 		},
 		{
 			name: "partial config",
 			configValues: map[string]string{
-				"SCHEDD_QUERY_RATE_LIMIT":           "15",
+				"SCHEDD_QUERY_RATE_LIMIT":             "15",
 				"COLLECTOR_QUERY_PER_USER_RATE_LIMIT": "8",
 			},
-			expectedScheddGlobal:   15,
-			expectedScheddPerUser:  0,
-			expectedCollectorGlobal: 0,
+			expectedScheddGlobal:     15,
+			expectedScheddPerUser:    0,
+			expectedCollectorGlobal:  0,
 			expectedCollectorPerUser: 8,
 		},
 		{
 			name: "negative values treated as unlimited",
 			configValues: map[string]string{
-				"SCHEDD_QUERY_RATE_LIMIT":           "-1",
-				"SCHEDD_QUERY_PER_USER_RATE_LIMIT":  "-5",
+				"SCHEDD_QUERY_RATE_LIMIT":          "-1",
+				"SCHEDD_QUERY_PER_USER_RATE_LIMIT": "-5",
 			},
-			expectedScheddGlobal:   0,
-			expectedScheddPerUser:  0,
-			expectedCollectorGlobal: 0,
+			expectedScheddGlobal:     0,
+			expectedScheddPerUser:    0,
+			expectedCollectorGlobal:  0,
 			expectedCollectorPerUser: 0,
 		},
 		{
 			name: "invalid values use defaults",
 			configValues: map[string]string{
-				"SCHEDD_QUERY_RATE_LIMIT":           "invalid",
-				"SCHEDD_QUERY_PER_USER_RATE_LIMIT":  "not_a_number",
+				"SCHEDD_QUERY_RATE_LIMIT":          "invalid",
+				"SCHEDD_QUERY_PER_USER_RATE_LIMIT": "not_a_number",
 			},
-			expectedScheddGlobal:   0,
-			expectedScheddPerUser:  0,
-			expectedCollectorGlobal: 0,
+			expectedScheddGlobal:     0,
+			expectedScheddPerUser:    0,
+			expectedCollectorGlobal:  0,
 			expectedCollectorPerUser: 0,
 		},
 		{
 			name: "decimal values",
 			configValues: map[string]string{
-				"SCHEDD_QUERY_RATE_LIMIT":           "10.5",
-				"SCHEDD_QUERY_PER_USER_RATE_LIMIT":  "2.5",
+				"SCHEDD_QUERY_RATE_LIMIT":          "10.5",
+				"SCHEDD_QUERY_PER_USER_RATE_LIMIT": "2.5",
 			},
-			expectedScheddGlobal:   10.5,
-			expectedScheddPerUser:  2.5,
-			expectedCollectorGlobal: 0,
+			expectedScheddGlobal:     10.5,
+			expectedScheddPerUser:    2.5,
+			expectedCollectorGlobal:  0,
 			expectedCollectorPerUser: 0,
 		},
 	}
@@ -117,12 +117,12 @@ func TestConfigFromHTCondor(t *testing.T) {
 func TestConfigFromHTCondorNilConfig(t *testing.T) {
 	// Should not panic with nil config
 	manager := ConfigFromHTCondor(nil)
-	
+
 	scheddStats := manager.GetScheddStats()
 	if scheddStats.GlobalRate != 0 {
 		t.Errorf("expected 0 global rate with nil config, got %f", scheddStats.GlobalRate)
 	}
-	
+
 	collectorStats := manager.GetCollectorStats()
 	if collectorStats.GlobalRate != 0 {
 		t.Errorf("expected 0 global rate with nil config, got %f", collectorStats.GlobalRate)

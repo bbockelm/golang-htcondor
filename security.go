@@ -51,7 +51,7 @@ func getDefaultConfig() *config.Config {
 func ReloadDefaultConfig() {
 	cfg := loadDefaultConfig()
 	globalDefaultConfig.Store(cfg)
-	
+
 	// Also reload rate limiter from new config
 	if cfg != nil {
 		manager := ratelimit.ConfigFromHTCondor(cfg)
