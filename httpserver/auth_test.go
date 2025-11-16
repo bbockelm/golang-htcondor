@@ -13,7 +13,7 @@ import (
 )
 
 // Helper function to create a test JWT token
-func createTestJWTToken(subject, issuer string, validForSeconds int) string {
+func createTestJWTToken(validForSeconds int) string {
 	// Create JWT header with kid (key ID)
 	header := map[string]interface{}{
 		"alg": "HS256",
@@ -26,8 +26,8 @@ func createTestJWTToken(subject, issuer string, validForSeconds int) string {
 	// Create JWT payload with current timestamps
 	now := time.Now().Unix()
 	payload := map[string]interface{}{
-		"sub": subject,
-		"iss": issuer,
+		"sub": "alice@test.domain",
+		"iss": "test.domain",
 		"iat": now,
 		"exp": now + int64(validForSeconds),
 	}
@@ -85,7 +85,7 @@ func createExpiredTestJWTToken(subject, issuer string) string {
 
 func TestParseJWTExpiration(t *testing.T) {
 	t.Run("ValidToken", func(t *testing.T) {
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 		exp, err := parseJWTExpiration(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
@@ -140,7 +140,7 @@ func TestParseJWTExpiration(t *testing.T) {
 func TestTokenCache(t *testing.T) {
 	t.Run("AddValidToken", func(t *testing.T) {
 		cache := NewTokenCache()
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 
 		entry, err := cache.Add(token)
 		if err != nil {
@@ -172,7 +172,7 @@ func TestTokenCache(t *testing.T) {
 
 	t.Run("GetExistingToken", func(t *testing.T) {
 		cache := NewTokenCache()
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 
 		_, err := cache.Add(token)
 		if err != nil {
@@ -199,7 +199,7 @@ func TestTokenCache(t *testing.T) {
 
 	t.Run("RemoveToken", func(t *testing.T) {
 		cache := NewTokenCache()
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 
 		_, err := cache.Add(token)
 		if err != nil {
@@ -220,7 +220,7 @@ func TestTokenCache(t *testing.T) {
 
 	t.Run("AddDuplicateToken", func(t *testing.T) {
 		cache := NewTokenCache()
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 
 		entry1, err := cache.Add(token)
 		if err != nil {
@@ -246,7 +246,7 @@ func TestTokenCache(t *testing.T) {
 	t.Run("AutomaticExpiration", func(t *testing.T) {
 		cache := NewTokenCache()
 		// Create token that expires in 1 second
-		token := createTestJWTToken("alice@test.domain", "test.domain", 1)
+		token := createTestJWTToken(1)
 
 		_, err := cache.Add(token)
 		if err != nil {
@@ -269,7 +269,7 @@ func TestTokenCache(t *testing.T) {
 
 func TestConfigureSecurityForTokenWithCache(t *testing.T) {
 	t.Run("WithSessionCache", func(t *testing.T) {
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 		cache := NewTokenCache()
 		entry, _ := cache.Add(token)
 
@@ -288,7 +288,7 @@ func TestConfigureSecurityForTokenWithCache(t *testing.T) {
 	})
 
 	t.Run("WithoutSessionCache", func(t *testing.T) {
-		token := createTestJWTToken("alice@test.domain", "test.domain", 3600)
+		token := createTestJWTToken(3600)
 
 		config, err := ConfigureSecurityForTokenWithCache(token, nil)
 		if err != nil {
