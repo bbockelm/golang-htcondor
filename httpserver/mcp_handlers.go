@@ -1,0 +1,529 @@
+package httpserver
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/bbockelm/cedar/security"
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/mcpserver"
+	"github.com/ory/fosite"
+	"github.com/ory/fosite/handler/openid"
+)
+
+// handleMCPMessage handles MCP JSON-RPC messages over HTTP
+func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
+	// Validate OAuth2 token
+	token, err := s.validateOAuth2Token(r)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "OAuth2 validation failed", "error", err)
+		s.writeError(w, http.StatusUnauthorized, "Invalid or missing OAuth2 token")
+		return
+	}
+
+	// Extract username from token
+	username := token.GetSession().GetSubject()
+	if username == "" {
+		s.writeError(w, http.StatusUnauthorized, "Token missing subject")
+		return
+	}
+
+	// Read MCP message from request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+		s.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		return
+	}
+
+	// Parse MCP message
+	var mcpRequest mcpserver.MCPMessage
+	if err := json.Unmarshal(body, &mcpRequest); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+		s.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+		return
+	}
+
+	s.logger.Debug(logging.DestinationHTTP, "Received MCP message", "method", mcpRequest.Method, "username", username)
+
+	// Check if the requested MCP method is allowed based on OAuth2 scopes
+	if !s.isMethodAllowedByScopes(token, &mcpRequest) {
+		s.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
+		s.writeError(w, http.StatusForbidden, "Insufficient permissions for requested operation")
+		return
+	}
+
+	// Create context with security config for HTCondor operations
+	ctx := r.Context()
+
+	// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
+	// If we have a signing key, generate an HTCondor token for this user
+	if s.signingKeyPath != "" && s.trustDomain != "" {
+		htcToken, err := s.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
+			s.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+			return
+		}
+
+		// Create security config with the token
+		secConfig := &security.SecurityConfig{
+			AuthMethods:    []security.AuthMethod{security.AuthToken},
+			Authentication: security.SecurityRequired,
+			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+			Encryption:     security.SecurityOptional,
+			Integrity:      security.SecurityOptional,
+			Token:          htcToken,
+		}
+		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	}
+
+	// Create a temporary MCP server to handle this request
+	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		ScheddName:     s.schedd.Name(),
+		ScheddAddr:     s.schedd.Address(),
+		SigningKeyPath: s.signingKeyPath,
+		TrustDomain:    s.trustDomain,
+		UIDDomain:      s.uidDomain,
+		Logger:         s.logger,
+	})
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Create pipes for stdin/stdout simulation
+	var responseBuffer bytes.Buffer
+
+	// Write the request to a buffer that the MCP server can read
+	requestBuffer := bytes.NewBuffer(body)
+
+	// Temporarily replace the server's stdin/stdout
+	originalStdin := mcpServer.SetStdin(requestBuffer)
+	originalStdout := mcpServer.SetStdout(&responseBuffer)
+	defer func() {
+		mcpServer.SetStdin(originalStdin)
+		mcpServer.SetStdout(originalStdout)
+	}()
+
+	// Handle the message directly using the MCP server's handler
+	response := mcpServer.HandleMessage(ctx, &mcpRequest)
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// validateOAuth2Token validates an OAuth2 token from the Authorization header
+func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, error) {
+	if s.oauth2Provider == nil {
+		return nil, fmt.Errorf("OAuth2 not configured")
+	}
+
+	// Extract token from Authorization header
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return nil, fmt.Errorf("missing Authorization header")
+	}
+
+	parts := strings.SplitN(auth, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return nil, fmt.Errorf("invalid Authorization header format")
+	}
+
+	tokenString := parts[1]
+
+	// Validate the token using fosite
+	ctx := r.Context()
+	session := &openid.DefaultSession{}
+
+	tokenType, accessRequest, err := s.oauth2Provider.GetProvider().IntrospectToken(
+		ctx,
+		tokenString,
+		fosite.AccessToken,
+		session,
+	)
+	_ = tokenType // Not used but returned by IntrospectToken
+
+	if err != nil {
+		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+
+	return accessRequest, nil
+}
+
+// handleOAuth2Authorize handles OAuth2 authorization requests
+func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse authorization request
+	ar, err := s.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, r)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
+		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		return
+	}
+
+	// Extract username from user header if configured
+	username := ""
+	if s.userHeader != "" {
+		username = r.Header.Get(s.userHeader)
+	}
+
+	// If no user header, check for username in query parameters (for SSO flow)
+	if username == "" {
+		username = r.URL.Query().Get("username")
+	}
+
+	if username == "" {
+		s.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	// Create session for this user
+	session := DefaultOpenIDConnectSession(username)
+
+	// Generate response
+	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response", "error", err)
+		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		return
+	}
+
+	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+}
+
+// handleOAuth2Token handles OAuth2 token requests
+func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Create the session object
+	session := &openid.DefaultSession{}
+
+	// Create access request
+	accessRequest, err := s.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create access request", "error", err)
+		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+
+	// Create access response
+	response, err := s.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create access response", "error", err)
+		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+
+	s.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
+}
+
+// handleOAuth2Introspect handles OAuth2 token introspection requests
+func (s *Server) handleOAuth2Introspect(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+	session := &openid.DefaultSession{}
+
+	ir, err := s.oauth2Provider.GetProvider().NewIntrospectionRequest(ctx, r, session)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create introspection request", "error", err)
+		s.oauth2Provider.GetProvider().WriteIntrospectionError(ctx, w, err)
+		return
+	}
+
+	s.oauth2Provider.GetProvider().WriteIntrospectionResponse(ctx, w, ir)
+}
+
+// handleOAuth2Revoke handles OAuth2 token revocation requests
+func (s *Server) handleOAuth2Revoke(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	err := s.oauth2Provider.GetProvider().NewRevocationRequest(ctx, r)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to revoke token", "error", err)
+		s.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, err)
+		return
+	}
+
+	s.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, nil)
+}
+
+// handleOAuth2Register handles dynamic client registration (RFC 7591)
+func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse registration request
+	var regReq struct {
+		RedirectURIs  []string `json:"redirect_uris"`
+		GrantTypes    []string `json:"grant_types"`
+		ResponseTypes []string `json:"response_types"`
+		Scopes        []string `json:"scope"`
+		ClientName    string   `json:"client_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&regReq); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid registration request")
+		return
+	}
+
+	// Validate redirect URIs
+	if len(regReq.RedirectURIs) == 0 {
+		s.writeError(w, http.StatusBadRequest, "At least one redirect_uri is required")
+		return
+	}
+
+	// Generate client ID and secret
+	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
+	clientSecret := generateRandomString(32)
+
+	// Default values
+	if len(regReq.GrantTypes) == 0 {
+		regReq.GrantTypes = []string{"authorization_code", "refresh_token"}
+	}
+	if len(regReq.ResponseTypes) == 0 {
+		regReq.ResponseTypes = []string{"code"}
+	}
+	if len(regReq.Scopes) == 0 {
+		regReq.Scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+
+	// Create the client
+	client := &fosite.DefaultClient{
+		ID:            clientID,
+		Secret:        []byte(clientSecret),
+		RedirectURIs:  regReq.RedirectURIs,
+		GrantTypes:    regReq.GrantTypes,
+		ResponseTypes: regReq.ResponseTypes,
+		Scopes:        regReq.Scopes,
+		Public:        false,
+	}
+
+	if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create client", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to register client")
+		return
+	}
+
+	// Return registration response
+	resp := map[string]interface{}{
+		"client_id":      clientID,
+		"client_secret":  clientSecret,
+		"redirect_uris":  regReq.RedirectURIs,
+		"grant_types":    regReq.GrantTypes,
+		"response_types": regReq.ResponseTypes,
+		"scope":          strings.Join(regReq.Scopes, " "),
+		"client_name":    regReq.ClientName,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// generateRandomString generates a random string of specified length
+func generateRandomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		time.Sleep(time.Nanosecond) // Ensure different values
+	}
+	return string(b)
+}
+
+// handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
+// Implements RFC 8414: OAuth 2.0 Authorization Server Metadata
+func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusNotFound, "OAuth2 not configured")
+		return
+	}
+
+	// Get the issuer URL from the OAuth2 provider config
+	issuer := s.oauth2Provider.config.AccessTokenIssuer
+
+	metadata := map[string]interface{}{
+		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/mcp/oauth2/authorize",
+		"token_endpoint":                        issuer + "/mcp/oauth2/token",
+		"introspection_endpoint":                issuer + "/mcp/oauth2/introspect",
+		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
+		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"code_challenge_methods_supported":      []string{"plain", "S256"},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(metadata); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode metadata", "error", err)
+	}
+}
+
+// isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
+func (s *Server) isMethodAllowedByScopes(token fosite.AccessRequester, mcpRequest *mcpserver.MCPMessage) bool {
+	scopes := token.GetGrantedScopes()
+
+	// Check if user has mcp:write or mcp:read scopes
+	hasRead := false
+	hasWrite := false
+	for _, scope := range scopes {
+		if scope == "mcp:read" {
+			hasRead = true
+		}
+		if scope == "mcp:write" {
+			hasWrite = true
+		}
+	}
+
+	// Determine if the method requires write access
+	requiresWrite := s.methodRequiresWrite(mcpRequest)
+
+	// Allow if user has write access, or has read access and method doesn't require write
+	if hasWrite {
+		return true
+	}
+	if hasRead && !requiresWrite {
+		return true
+	}
+
+	return false
+}
+
+// methodRequiresWrite determines if an MCP method requires write access
+func (s *Server) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
+	// Read-only methods
+	readOnlyMethods := map[string]bool{
+		"initialize":      true,
+		"tools/list":      true,
+		"resources/list":  true,
+		"resources/read":  true,
+	}
+
+	// Check if method itself is read-only
+	if readOnlyMethods[mcpRequest.Method] {
+		return false
+	}
+
+	// For tools/call, check the tool name
+	if mcpRequest.Method == "tools/call" {
+		var params struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(mcpRequest.Params, &params); err == nil {
+			// Read-only tools
+			readOnlyTools := map[string]bool{
+				"query_jobs": true,
+				"get_job":    true,
+			}
+			if readOnlyTools[params.Name] {
+				return false
+			}
+		}
+	}
+
+	// All other methods/tools require write access
+	return true
+}
+
+// generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
+func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
+	if s.signingKeyPath == "" {
+		return "", fmt.Errorf("signing key path not configured")
+	}
+
+	if s.trustDomain == "" {
+		return "", fmt.Errorf("trust domain not configured")
+	}
+
+	// Ensure username has domain suffix
+	if !strings.Contains(username, "@") {
+		if s.uidDomain == "" {
+			return "", fmt.Errorf("UID domain not configured")
+		}
+		username = username + "@" + s.uidDomain
+	}
+
+	iat := time.Now().Unix()
+	exp := time.Now().Add(1 * time.Hour).Unix()
+
+	// Build authz list based on scopes
+	var authz []string
+	hasWrite := false
+	for _, scope := range scopes {
+		if scope == "mcp:write" {
+			hasWrite = true
+			break
+		}
+	}
+
+	if hasWrite {
+		// Full access
+		authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+	} else {
+		// Read-only access
+		authz = []string{"READ"}
+	}
+
+	token, err := security.GenerateJWT(
+		s.signingKeyPath, // directory
+		"POOL",           // key name
+		username,
+		s.trustDomain,
+		iat,
+		exp,
+		authz,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate JWT: %w", err)
+	}
+
+	return token, nil
+}

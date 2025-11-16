@@ -39,6 +39,51 @@ func main() {
 	}
 }
 
+// mcpConfig holds MCP-related configuration
+type mcpConfig struct {
+	enabled      bool
+	oauth2DBPath string
+	oauth2Issuer string
+}
+
+// loadMCPConfig loads MCP configuration from HTCondor config
+func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
+	config := mcpConfig{}
+
+	// Check if MCP should be enabled from config
+	if mcpEnable, ok := cfg.Get("HTTP_API_ENABLE_MCP"); ok && mcpEnable == "true" {
+		config.enabled = true
+		log.Println("MCP endpoints enabled via configuration")
+	}
+
+	// Get OAuth2 DB path from config, default to /var/lib/condor/oauth2.db
+	if config.enabled {
+		if dbPath, ok := cfg.Get("HTTP_API_OAUTH2_DB_PATH"); ok && dbPath != "" {
+			config.oauth2DBPath = dbPath
+		} else if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
+			config.oauth2DBPath = filepath.Join(localDir, "oauth2.db")
+		} else {
+			config.oauth2DBPath = "/var/lib/condor/oauth2.db"
+		}
+		log.Printf("OAuth2 database path: %s", config.oauth2DBPath)
+
+		// Get OAuth2 issuer from config or construct from FULL_HOSTNAME
+		if issuer, ok := cfg.Get("HTTP_API_OAUTH2_ISSUER"); ok && issuer != "" {
+			config.oauth2Issuer = issuer
+		} else {
+			// Default to https:// and use FULL_HOSTNAME if available
+			hostname := listenAddrFromConfig
+			if fullHostname, ok := cfg.Get("FULL_HOSTNAME"); ok && fullHostname != "" {
+				hostname = fullHostname
+			}
+			config.oauth2Issuer = "https://" + hostname
+		}
+		log.Printf("OAuth2 issuer: %s", config.oauth2Issuer)
+	}
+
+	return config
+}
+
 // runNormalMode runs the server using existing HTCondor configuration
 func runNormalMode() error {
 	// Load HTCondor configuration
@@ -126,6 +171,9 @@ func runNormalMode() error {
 		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHost)
 	}
 
+	// Load MCP configuration
+	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig)
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     listenAddrFromConfig,
@@ -141,6 +189,9 @@ func runNormalMode() error {
 		IdleTimeout:    idleTimeout,
 		Collector:      collector,
 		Logger:         logger,
+		EnableMCP:      mcpCfg.enabled,
+		OAuth2DBPath:   mcpCfg.oauth2DBPath,
+		OAuth2Issuer:   mcpCfg.oauth2Issuer,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -292,7 +343,10 @@ func runDemoMode() error {
 	collector := htcondor.NewCollector("127.0.0.1:9618")
 	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", "127.0.0.1:9618")
 
-	// Create and start HTTP server
+	// OAuth2 database path for MCP
+	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
+
+	// Create and start HTTP server with MCP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     *listenAddr,
 		UserHeader:     *userHeader,
@@ -301,6 +355,9 @@ func runDemoMode() error {
 		UIDDomain:      uidDomain,
 		Collector:      collector,
 		Logger:         logger,
+		EnableMCP:      true,                          // Enable MCP in demo mode
+		OAuth2DBPath:   oauth2DBPath,                  // OAuth2 database path
+		OAuth2Issuer:   "http://" + *listenAddr,       // OAuth2 issuer URL
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
