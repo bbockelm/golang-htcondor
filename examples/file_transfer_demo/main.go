@@ -99,7 +99,7 @@ func uploadFileDemo(ctx context.Context, host string, port int, filePath string)
 	// Step 2: Connect to schedd using cedar client
 	fmt.Printf("\n🔌 Connecting to schedd...\n")
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd: %w", err)
 	}

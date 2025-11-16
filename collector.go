@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -29,7 +28,7 @@ func NewCollector(address string) *Collector {
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 func (c *Collector) QueryAds(ctx context.Context, adType string, constraint string) ([]*classad.ClassAd, error) {
 	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, c.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, c.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to collector: %w", err)
 	}

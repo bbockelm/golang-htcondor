@@ -325,7 +325,6 @@ func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 		}
 
 		// Generate token for this user
-		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username, "header", s.userHeader)
 		iat := time.Now().Unix()
 		exp := time.Now().Add(1 * time.Minute).Unix()
 		issuer := s.trustDomain
@@ -338,7 +337,9 @@ func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 			}
 			username = username + "@" + s.uidDomain
 		}
-		token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), filepath.Base(s.signingKeyPath), username, issuer, iat, exp, nil)
+		kid := filepath.Base(s.signingKeyPath)
+		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username, "header", s.userHeader, "issuer", issuer, "key", kid)
+		token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate token for user %s: %w", username, err)
 		}

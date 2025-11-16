@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -70,7 +69,7 @@ type QmgmtConnection struct {
 // address can be a hostname:port or a sinful string like "<IP:PORT?addrs=...>"
 func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, error) {
 	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, address, 10*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", address, err)
 	}

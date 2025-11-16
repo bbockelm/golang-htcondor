@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -124,7 +123,7 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 
 	// 2. Connect to schedd using cedar client
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd: %w", err)
 	}
@@ -228,7 +227,7 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 func (ftc *FileTransferClient) DownloadFile(ctx context.Context, remotePath string, localPath string) error {
 	// 1. Connect to schedd using cedar client
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to schedd: %w", err)
 	}
