@@ -441,10 +441,10 @@ func (s *Server) isMethodAllowedByScopes(token fosite.AccessRequester, mcpReques
 func (s *Server) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 	// Read-only methods
 	readOnlyMethods := map[string]bool{
-		"initialize":      true,
-		"tools/list":      true,
-		"resources/list":  true,
-		"resources/read":  true,
+		"initialize":     true,
+		"tools/list":     true,
+		"resources/list": true,
+		"resources/read": true,
 	}
 
 	// Check if method itself is read-only

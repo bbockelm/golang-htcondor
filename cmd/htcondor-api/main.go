@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,7 +24,9 @@ var (
 	demoMode      = flag.Bool("demo", false, "Run in demo mode with mini condor")
 	listenAddr    = flag.String("listen", ":8080", "Address to listen on")
 	userHeader    = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
-	collectorHost = flag.String("collector", "", "Collector host (e.g., 'collector.example.com:9618'). Falls back to COLLECTOR_HOST config if not specified.")
+	collectorHost = flag.String("collector", "", "Collector host:port (overrides COLLECTOR_HOST from config)")
+	scheddName    = flag.String("schedd", "", "Schedd name (overrides SCHEDD_NAME from config)")
+	scheddAddr    = flag.String("schedd-addr", "", "Schedd address (if specified, schedd name is ignored)")
 )
 
 func main() {
@@ -45,6 +48,135 @@ type mcpConfig struct {
 	enabled      bool
 	oauth2DBPath string
 	oauth2Issuer string
+}
+
+// fixConfigDefaults handles edge cases in HTCondor configuration defaults
+func fixConfigDefaults(cfg *config.Config) {
+	// If TILDE is empty or unset, LOCAL_DIR should default to /usr
+	tilde, hasTilde := cfg.Get("TILDE")
+	if !hasTilde || tilde == "" {
+		// Check if LOCAL_DIR is already set
+		if localDir, hasLocalDir := cfg.Get("LOCAL_DIR"); !hasLocalDir || localDir == "" || localDir == "$(TILDE)" {
+			cfg.Set("LOCAL_DIR", "/usr")
+			log.Println("TILDE is empty, setting LOCAL_DIR to /usr")
+		}
+	}
+}
+
+// createLogger creates a logger with reasonable defaults for unprivileged operation
+func createLogger(cfg *config.Config) (*logging.Logger, error) {
+	// Check if we can write to the LOG path specified in config
+	logPath, hasLogPath := cfg.Get("LOG")
+
+	// If no LOG path is configured, or if we're running unprivileged and can't write to it,
+	// default to stdout
+	if !hasLogPath || logPath == "" {
+		log.Println("No LOG path configured, using stdout")
+		return logging.New(&logging.Config{
+			OutputPath:   "stdout",
+			MinVerbosity: logging.VerbosityInfo,
+		})
+	}
+
+	// Try to create logger from config
+	logger, err := logging.FromConfig(cfg)
+	if err != nil {
+		// If it fails (e.g., permission denied), fall back to stdout
+		log.Printf("Warning: failed to create logger with configured path '%s': %v", logPath, err)
+		log.Println("Falling back to stdout logging")
+		return logging.New(&logging.Config{
+			OutputPath:   "stdout",
+			MinVerbosity: logging.VerbosityInfo,
+		})
+	}
+
+	return logger, nil
+}
+
+// discoverSchedd attempts to discover a schedd address
+// Priority order:
+// 1. Check local schedd address file (SCHEDD_ADDRESS_FILE)
+// 2. Query collector for schedds and use the first one
+func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *logging.Logger) (addr, name string) {
+	// Try to find local schedd address file
+	if spoolDir, ok := cfg.Get("SPOOL"); ok && spoolDir != "" {
+		scheddAddrFile := filepath.Join(spoolDir, ".schedd_address")
+		// #nosec G304 -- Reading HTCondor schedd address file from configured SPOOL directory
+		if data, err := os.ReadFile(scheddAddrFile); err == nil {
+			addr = string(data)
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				logger.Info(logging.DestinationSchedd, "Found local schedd address file", "path", scheddAddrFile, "address", addr)
+				// Try to extract name from address or use hostname
+				if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
+					name = hostname
+				}
+				return addr, name
+			}
+		}
+	}
+
+	// Try SCHEDD_ADDRESS_FILE directly if SPOOL isn't set
+	if addrFile, ok := cfg.Get("SCHEDD_ADDRESS_FILE"); ok && addrFile != "" {
+		// #nosec G304 -- Reading HTCondor schedd address file from SCHEDD_ADDRESS_FILE configuration
+		if data, err := os.ReadFile(addrFile); err == nil {
+			addr = string(data)
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				logger.Info(logging.DestinationSchedd, "Found schedd address file", "path", addrFile, "address", addr)
+				if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
+					name = hostname
+				}
+				return addr, name
+			}
+		}
+	}
+
+	// If we have a collector, query for schedds
+	if collector != nil {
+		logger.Info(logging.DestinationSchedd, "Querying collector for schedds")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		schedds, err := collector.QueryAds(ctx, "ScheddAd", "")
+		if err != nil {
+			logger.Error(logging.DestinationSchedd, "Failed to query collector for schedds", "error", err)
+			return "", ""
+		}
+
+		if len(schedds) > 0 {
+			// Use the first schedd
+			scheddAd := schedds[0]
+
+			// Extract MyAddress
+			if myAddr, ok := scheddAd.Lookup("MyAddress"); ok {
+				addrStr := myAddr.String()
+				// Remove quotes if present
+				addrStr = strings.Trim(addrStr, "\"")
+				if addrStr != "" {
+					addr = addrStr
+				}
+			}
+
+			// Extract Name
+			if nameExpr, ok := scheddAd.Lookup("Name"); ok {
+				nameStr := nameExpr.String()
+				// Remove quotes if present
+				nameStr = strings.Trim(nameStr, "\"")
+				if nameStr != "" {
+					name = nameStr
+				}
+			}
+
+			if addr != "" {
+				logger.Info(logging.DestinationSchedd, "Found schedd from collector", "name", name, "address", addr)
+				return addr, name
+			}
+		}
+	}
+
+	logger.Warn(logging.DestinationSchedd, "Could not discover schedd - no local address file and no collector available")
+	return "", ""
 }
 
 // loadMCPConfig loads MCP configuration from HTCondor config
@@ -90,11 +222,21 @@ func runNormalMode() error {
 	// Load HTCondor configuration
 	cfg, err := config.New()
 	if err != nil {
-		return fmt.Errorf("failed to load HTCondor configuration: %w", err)
+		// If config loading fails, create an empty config with minimal defaults
+		log.Printf("Warning: failed to load HTCondor configuration: %v", err)
+		log.Println("Proceeding with minimal configuration...")
+		cfg = config.NewEmpty()
 	}
 
-	// Get schedd configuration
-	scheddName, _ := cfg.Get("SCHEDD_NAME")
+	// Fix TILDE and LOCAL_DIR defaults if needed
+	fixConfigDefaults(cfg)
+
+	// Get schedd configuration from CLI flags or config
+	scheddNameValue := *scheddName
+	if scheddNameValue == "" {
+		scheddNameValue, _ = cfg.Get("SCHEDD_NAME")
+	}
+	scheddAddrValue := *scheddAddr
 
 	// Get HTTP API configuration
 	listenAddrFromConfig := *listenAddr
@@ -159,22 +301,28 @@ func runNormalMode() error {
 		signingKeyPath, _ = cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE")
 	}
 
-	// Create logger from configuration
-	logger, err := logging.FromConfig(cfg)
+	// Create logger with reasonable defaults for unprivileged operation
+	logger, err := createLogger(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create collector from command-line flag or COLLECTOR_HOST config
+	// Create collector from CLI flag or config
 	var collector *htcondor.Collector
-	collectorHostStr := *collectorHost
-	if collectorHostStr == "" {
-		// Fall back to config
-		collectorHostStr, _ = cfg.Get("COLLECTOR_HOST")
+	collectorHostValue := *collectorHost
+	if collectorHostValue == "" {
+		if ch, ok := cfg.Get("COLLECTOR_HOST"); ok && ch != "" {
+			collectorHostValue = ch
+		}
 	}
-	if collectorHostStr != "" {
-		collector = htcondor.NewCollector(collectorHostStr)
-		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHostStr)
+	if collectorHostValue != "" {
+		collector = htcondor.NewCollector(collectorHostValue)
+		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHostValue)
+	}
+
+	// Discover schedd if not specified
+	if scheddAddrValue == "" && scheddNameValue == "" {
+		scheddAddrValue, scheddNameValue = discoverSchedd(cfg, collector, logger)
 	}
 
 	// Load MCP configuration
@@ -183,7 +331,8 @@ func runNormalMode() error {
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     listenAddrFromConfig,
-		ScheddName:     scheddName,
+		ScheddName:     scheddNameValue,
+		ScheddAddr:     scheddAddrValue,
 		UserHeader:     userHeaderFromConfig,
 		SigningKeyPath: signingKeyPath,
 		TLSCertFile:    tlsCertFile,
@@ -361,9 +510,9 @@ func runDemoMode() error {
 		UIDDomain:      uidDomain,
 		Collector:      collector,
 		Logger:         logger,
-		EnableMCP:      true,                          // Enable MCP in demo mode
-		OAuth2DBPath:   oauth2DBPath,                  // OAuth2 database path
-		OAuth2Issuer:   "http://" + *listenAddr,       // OAuth2 issuer URL
+		EnableMCP:      true,                    // Enable MCP in demo mode
+		OAuth2DBPath:   oauth2DBPath,            // OAuth2 database path
+		OAuth2Issuer:   "http://" + *listenAddr, // OAuth2 issuer URL
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

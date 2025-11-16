@@ -14,6 +14,11 @@ jobs:
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            tag: amd64
+          - platform: linux/arm64
+            tag: arm64
 
     steps:
     - name: Checkout code
@@ -33,18 +38,16 @@ jobs:
         context: .
         platforms: ${{ matrix.platform }}
         load: true
-        tags: golang-htcondor:test-${{ matrix.platform }}
+        tags: golang-htcondor:test-${{ matrix.tag }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
     - name: Run tests in Docker
       run: |
-        # Extract platform name for docker run
-        PLATFORM=$(echo "${{ matrix.platform }}" | sed 's/linux\///')
         docker run --rm --platform ${{ matrix.platform }} \
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
-          golang-htcondor:test-${{ matrix.platform }} \
+          golang-htcondor:test-${{ matrix.tag }} \
           go test -v ./...
 
     - name: Run build in Docker
@@ -52,7 +55,7 @@ jobs:
         docker run --rm --platform ${{ matrix.platform }} \
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
-          golang-htcondor:test-${{ matrix.platform }} \
+          golang-htcondor:test-${{ matrix.tag }} \
           go build -v ./...
 
   docker-integration-test:

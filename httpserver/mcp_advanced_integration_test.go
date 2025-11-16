@@ -15,12 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/httpserver"
-	"github.com/bbockelm/golang-htcondor/mcpserver"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 	"github.com/ory/fosite/handler/openid"
@@ -238,16 +236,16 @@ func setupTestServer(t *testing.T) (string, *httpserver.Server, string, int, str
 
 	// Wait for server to start and extract the port
 	time.Sleep(500 * time.Millisecond)
-	
+
 	// Get the actual listening port from the server
 	// Since we can't easily extract the port from the server, we'll use a listener approach
 	// For now, let's use a fixed range of ports starting from a high number
 	port := findAvailablePort(t)
-	
+
 	// Recreate server with actual port
 	serverAddr = fmt.Sprintf("127.0.0.1:%d", port)
 	baseURL := fmt.Sprintf("http://%s", serverAddr)
-	
+
 	server, err = httpserver.NewServer(httpserver.Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",

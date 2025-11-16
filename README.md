@@ -95,9 +95,32 @@ cd cmd/htcondor-api
 go build
 ./htcondor-api --demo
 
-# Or use with existing HTCondor
+# Or use with existing HTCondor (auto-discovers schedd)
 ./htcondor-api
+
+# Specify collector and let it discover the schedd
+./htcondor-api -collector collector.example.com:9618
+
+# Specify a specific schedd
+./htcondor-api -schedd myschedd -collector collector.example.com:9618
+
+# Or specify schedd address directly
+./htcondor-api -schedd-addr "<192.168.1.100:9618?addrs=192.168.1.100-9618>"
 ```
+
+**CLI Options:**
+- `-listen` - Address to listen on (default: `:8080`)
+- `-collector` - Collector host:port (overrides `COLLECTOR_HOST` from config)
+- `-schedd` - Schedd name (overrides `SCHEDD_NAME` from config)
+- `-schedd-addr` - Schedd address (if specified, schedd name is ignored)
+- `-demo` - Run in demo mode with mini HTCondor
+- `-user-header` - HTTP header to read username from (demo mode only)
+
+The server works out-of-the-box with minimal configuration:
+- **Auto-discovery**: If schedd is not specified, it searches for a local schedd address file or queries the collector
+- **Fallback logging**: If configured log paths are inaccessible, falls back to stdout
+- **Minimal config**: Can start with an empty HTCondor config or no directories configured
+- **TILDE handling**: If `TILDE` is empty, `LOCAL_DIR` defaults to `/usr`
 
 **API Endpoints:**
 - `POST /api/v1/jobs` - Submit jobs

@@ -113,9 +113,9 @@ func (s *OAuth2Storage) Close() error {
 
 // validTableNames is a whitelist of allowed table names
 var validTableNames = map[string]bool{
-	"oauth2_access_tokens":        true,
-	"oauth2_refresh_tokens":       true,
-	"oauth2_authorization_codes":  true,
+	"oauth2_access_tokens":       true,
+	"oauth2_refresh_tokens":      true,
+	"oauth2_authorization_codes": true,
 }
 
 // buildInsertQuery builds an INSERT query for a valid table name
@@ -124,7 +124,7 @@ func buildInsertQuery(table string) (string, error) {
 		return "", fmt.Errorf("invalid table name: %s", table)
 	}
 	// Safe: table name is from whitelist
-	return `INSERT INTO ` + table + ` (signature, request_id, requested_at, client_id, scopes, granted_scopes, 
+	return `INSERT INTO ` + table + ` (signature, request_id, requested_at, client_id, scopes, granted_scopes,
 		form_data, session_data, subject, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, nil
 }
@@ -135,7 +135,7 @@ func buildSelectQuery(table string) (string, error) {
 		return "", fmt.Errorf("invalid table name: %s", table)
 	}
 	// Safe: table name is from whitelist
-	return `SELECT request_id, requested_at, client_id, scopes, granted_scopes, 
+	return `SELECT request_id, requested_at, client_id, scopes, granted_scopes,
 		form_data, session_data, subject, active
 		FROM ` + table + ` WHERE signature = ?`, nil
 }
@@ -419,4 +419,3 @@ func (s *OAuth2Storage) LoadRSAKey(ctx context.Context) (string, error) {
 	}
 	return privateKeyPEM, nil
 }
-
