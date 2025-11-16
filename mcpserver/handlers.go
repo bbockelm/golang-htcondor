@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -221,6 +222,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 
 	// Create context with security config if token provided
 	token, _ := request.Arguments["token"].(string)
+	var username string
 	if token != "" {
 		secConfig := &security.SecurityConfig{
 			AuthMethods:    []security.AuthMethod{security.AuthToken},
@@ -232,34 +234,52 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
-		// Extract username from token for rate limiting
-		username, _ := parseJWTUsername(token)
+		// Check if token is already validated
+		username = s.getValidatedUsername(token)
 		if username != "" {
+			// Use cached validated username for rate limiting
 			ctx = htcondor.WithAuthenticatedUser(ctx, username)
 		}
+		// If not validated, treat as unauthenticated for rate limiting
+		// Token will be validated on first successful operation
 	}
 
 	// Route to appropriate handler
+	var result interface{}
+	var err error
 	switch request.Name {
 	case "submit_job":
-		return s.toolSubmitJob(ctx, request.Arguments)
+		result, err = s.toolSubmitJob(ctx, request.Arguments)
 	case "query_jobs":
-		return s.toolQueryJobs(ctx, request.Arguments)
+		result, err = s.toolQueryJobs(ctx, request.Arguments)
 	case "get_job":
-		return s.toolGetJob(ctx, request.Arguments)
+		result, err = s.toolGetJob(ctx, request.Arguments)
 	case "remove_job":
-		return s.toolRemoveJob(ctx, request.Arguments)
+		result, err = s.toolRemoveJob(ctx, request.Arguments)
 	case "remove_jobs":
-		return s.toolRemoveJobs(ctx, request.Arguments)
+		result, err = s.toolRemoveJobs(ctx, request.Arguments)
 	case "edit_job":
-		return s.toolEditJob(ctx, request.Arguments)
+		result, err = s.toolEditJob(ctx, request.Arguments)
 	case "hold_job":
-		return s.toolHoldJob(ctx, request.Arguments)
+		result, err = s.toolHoldJob(ctx, request.Arguments)
 	case "release_job":
-		return s.toolReleaseJob(ctx, request.Arguments)
+		result, err = s.toolReleaseJob(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
+
+	// If operation succeeded and token was provided but not yet validated, mark it as validated
+	if err == nil && token != "" && username == "" {
+		// Parse username from token and mark as validated
+		if extractedUsername, parseErr := parseJWTUsername(token); parseErr == nil {
+			// Parse expiration from token
+			if expiration, expErr := parseJWTExpiration(token); expErr == nil {
+				s.markTokenValidated(token, extractedUsername, expiration)
+			}
+		}
+	}
+
+	return result, err
 }
 
 // toolSubmitJob handles job submission
@@ -689,4 +709,63 @@ func parseJWTUsername(token string) (string, error) {
 	}
 
 	return username, nil
+}
+
+// parseJWTExpiration extracts the expiration time from a JWT token
+// Returns the expiration time or an error if parsing fails
+func parseJWTExpiration(token string) (time.Time, error) {
+	// JWT format: header.payload.signature
+	parts := []byte(token)
+	dotCount := 0
+	payloadStart := 0
+	payloadEnd := 0
+
+	for i, b := range parts {
+		if b == '.' {
+			dotCount++
+			if dotCount == 1 {
+				payloadStart = i + 1
+			} else if dotCount == 2 {
+				payloadEnd = i
+				break
+			}
+		}
+	}
+
+	if dotCount < 2 {
+		return time.Time{}, fmt.Errorf("invalid JWT format")
+	}
+
+	// Decode the payload (base64url)
+	payloadB64 := string(parts[payloadStart:payloadEnd])
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+
+	// Parse JSON to extract exp claim
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("failed to parse JWT payload: %w", err)
+	}
+
+	// Extract expiration time
+	exp, ok := claims["exp"]
+	if !ok {
+		return time.Time{}, fmt.Errorf("JWT missing exp claim")
+	}
+
+	var expTime int64
+	switch v := exp.(type) {
+	case float64:
+		expTime = int64(v)
+	case int64:
+		expTime = v
+	case int:
+		expTime = int64(v)
+	default:
+		return time.Time{}, fmt.Errorf("JWT exp claim is not a valid timestamp")
+	}
+
+	return time.Unix(expTime, 0), nil
 }

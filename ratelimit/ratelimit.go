@@ -133,7 +133,7 @@ func (l *Limiter) Wait(ctx context.Context, username string) error {
 	// Wait for global limit
 	if l.globalLimiter != nil {
 		if err := l.globalLimiter.Wait(ctx); err != nil {
-			return fmt.Errorf("global rate limit wait cancelled: %w", err)
+			return &RateLimitError{Message: fmt.Sprintf("global rate limit wait cancelled: %v", err)}
 		}
 	}
 
@@ -142,7 +142,7 @@ func (l *Limiter) Wait(ctx context.Context, username string) error {
 		userLimiter := l.getUserLimiter(username)
 		if userLimiter != nil {
 			if err := userLimiter.Wait(ctx); err != nil {
-				return fmt.Errorf("rate limit wait cancelled for user %s: %w", username, err)
+				return &RateLimitError{Message: fmt.Sprintf("rate limit wait cancelled for user %s: %v", username, err)}
 			}
 		}
 	}

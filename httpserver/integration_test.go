@@ -982,7 +982,7 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Start HTTP server with random port
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", httpServerPort)
 	baseURL := fmt.Sprintf("http://%s", serverAddr)
-	
+
 	// Create server (Note: schedd address will be discovered from collector)
 	collectorAddr := fmt.Sprintf("127.0.0.1:%d", collectorPort)
 	collector := htcondor.NewCollector(collectorAddr)
@@ -997,13 +997,13 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	
+
 	// Start server in background
 	serverErrChan := make(chan error, 1)
 	go func() {
 		serverErrChan <- server.Start()
 	}()
-	
+
 	// Ensure server is stopped at the end
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
