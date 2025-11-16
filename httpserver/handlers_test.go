@@ -1,6 +1,9 @@
 package httpserver
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -49,4 +52,69 @@ func TestCollectorAdsResponse(t *testing.T) {
 	if response.Ads != nil {
 		t.Error("Expected nil ads in empty response")
 	}
+}
+
+// testHealthEndpoint is a helper function to test health check endpoints
+func testHealthEndpoint(t *testing.T, handlerFunc func(http.ResponseWriter, *http.Request), path string, expectedStatus string) {
+	t.Helper()
+
+	tests := []struct {
+		name           string
+		method         string
+		wantStatusCode int
+		wantStatus     string
+	}{
+		{
+			name:           "GET " + path + " returns " + expectedStatus,
+			method:         http.MethodGet,
+			wantStatusCode: http.StatusOK,
+			wantStatus:     expectedStatus,
+		},
+		{
+			name:           "POST " + path + " returns Method Not Allowed",
+			method:         http.MethodPost,
+			wantStatusCode: http.StatusMethodNotAllowed,
+			wantStatus:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, path, nil)
+			w := httptest.NewRecorder()
+
+			handlerFunc(w, req)
+
+			resp := w.Result()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("Failed to close response body: %v", err)
+				}
+			}()
+
+			if resp.StatusCode != tt.wantStatusCode {
+				t.Errorf("handler status = %v, want %v", resp.StatusCode, tt.wantStatusCode)
+			}
+
+			if tt.wantStatus != "" {
+				var response map[string]string
+				if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				if response["status"] != tt.wantStatus {
+					t.Errorf("handler response status = %v, want %v", response["status"], tt.wantStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestHealthzEndpoint verifies the /healthz endpoint returns OK
+func TestHealthzEndpoint(t *testing.T) {
+	testHealthEndpoint(t, (&Server{}).handleHealthz, "/healthz", "ok")
+}
+
+// TestReadyzEndpoint verifies the /readyz endpoint returns ready status
+func TestReadyzEndpoint(t *testing.T) {
+	testHealthEndpoint(t, (&Server{}).handleReadyz, "/readyz", "ready")
 }

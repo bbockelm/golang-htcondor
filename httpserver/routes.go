@@ -54,4 +54,8 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	if s.prometheusExporter != nil {
 		mux.HandleFunc("/metrics", s.handleMetrics)
 	}
+
+	// Health and readiness endpoints for Kubernetes
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
 }

@@ -810,6 +810,34 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleHealthz handles GET /healthz endpoint for health checks
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Health check always returns OK if the server is running
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+	})
+}
+
+// handleReadyz handles GET /readyz endpoint for readiness checks
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Readiness check returns OK if the server is ready to accept traffic
+	// Currently just checks if the server is running, but could be extended
+	// to check schedd connectivity or other dependencies
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ready",
+	})
+}
+
 // parseJobActionRequest parses job ID and optional reason for single job actions
 func (s *Server) parseJobActionRequest(r *http.Request, jobID, defaultAction string) (cluster, proc int, reason string, err error) {
 	// Parse job ID
