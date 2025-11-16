@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,9 +138,9 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	clientID, clientSecret := createOAuth2Client(t, server, testUser)
 	t.Logf("OAuth2 client created: %s", clientID)
 
-	// Step 2: Get OAuth2 access token
-	t.Log("Step 2: Getting OAuth2 access token...")
-	accessToken := getOAuth2Token(t, client, baseURL, clientID, clientSecret, testUser)
+	// Step 2: Get OAuth2 access token using authorization code flow
+	t.Log("Step 2: Getting OAuth2 access token via authorization code flow...")
+	accessToken := getOAuth2TokenAuthCode(t, client, baseURL, clientID, clientSecret, testUser)
 	t.Logf("Access token obtained: %s...", accessToken[:20])
 
 	// Step 3: Test MCP initialize
@@ -173,10 +174,10 @@ func createOAuth2Client(t *testing.T, server *httpserver.Server, username string
 	client := &fosite.DefaultClient{
 		ID:            clientID,
 		Secret:        []byte(clientSecret),
-		RedirectURIs:  []string{"http://localhost/callback"},
-		GrantTypes:    []string{"client_credentials"},
-		ResponseTypes: []string{"token"},
-		Scopes:        []string{"htcondor:jobs"},
+		RedirectURIs:  []string{"http://localhost:18081/callback"},
+		GrantTypes:    []string{"authorization_code", "refresh_token"},
+		ResponseTypes: []string{"code"},
+		Scopes:        []string{"openid", "mcp:read", "mcp:write"},
 		Public:        false,
 	}
 
@@ -187,6 +188,102 @@ func createOAuth2Client(t *testing.T, server *httpserver.Server, username string
 	return clientID, clientSecret
 }
 
+// getOAuth2TokenAuthCode obtains an OAuth2 access token using authorization code flow
+func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clientID, clientSecret, username string) string {
+	// Step 1: Create authorization request
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18081/callback&scope=openid+mcp:read+mcp:write&state=teststate&username=%s",
+		baseURL, clientID, username)
+
+	req, err := http.NewRequest("GET", authURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to create auth request: %v", err)
+	}
+	req.Header.Set("X-Test-User", username)
+
+	// Don't follow redirects automatically
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer func() { httpClient.CheckRedirect = nil }()
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to send auth request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Authorization request failed: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	// Extract authorization code from redirect
+	location := resp.Header.Get("Location")
+	if location == "" {
+		t.Fatal("No redirect location in authorization response")
+	}
+
+	// Parse the authorization code from the redirect URL
+	code := extractCodeFromURL(t, location)
+	if code == "" {
+		t.Fatal("No authorization code in redirect URL")
+	}
+
+	t.Logf("Received authorization code: %s...", code[:10])
+
+	// Step 2: Exchange authorization code for access token
+	tokenReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18081/callback&client_id=%s&client_secret=%s",
+			code, clientID, clientSecret),
+	))
+	if err != nil {
+		t.Fatalf("Failed to create token request: %v", err)
+	}
+
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	tokenResp, err := httpClient.Do(tokenReq)
+	if err != nil {
+		t.Fatalf("Failed to send token request: %v", err)
+	}
+	defer tokenResp.Body.Close()
+
+	if tokenResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(tokenResp.Body)
+		t.Fatalf("Token request failed: status %d, body: %s", tokenResp.StatusCode, string(body))
+	}
+
+	var tokenRespData struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+		RefreshToken string `json:"refresh_token"`
+	}
+
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenRespData); err != nil {
+		t.Fatalf("Failed to decode token response: %v", err)
+	}
+
+	if tokenRespData.AccessToken == "" {
+		t.Fatal("Empty access token received")
+	}
+
+	return tokenRespData.AccessToken
+}
+
+// extractCodeFromURL extracts the authorization code from a redirect URL
+func extractCodeFromURL(t *testing.T, urlStr string) string {
+	if idx := strings.Index(urlStr, "code="); idx != -1 {
+		code := urlStr[idx+5:]
+		if end := strings.Index(code, "&"); end != -1 {
+			code = code[:end]
+		}
+		return code
+	}
+	return ""
+}
+
+// Deprecated: kept for backward compatibility
 // getOAuth2Token obtains an OAuth2 access token using client credentials flow
 func getOAuth2Token(t *testing.T, client *http.Client, baseURL, clientID, clientSecret, username string) string {
 	// Build token request
@@ -377,7 +474,36 @@ func testMCPQueryJobs(t *testing.T, client *http.Client, baseURL, accessToken st
 		t.Fatal("query_jobs returned no jobs")
 	}
 
-	t.Logf("Query found %d job(s)", int(count))
+	// Validate that the results contain the submitted job
+	content, ok := result["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatal("query_jobs result missing content array")
+	}
+
+	// Parse the text content to find job information
+	foundClusterID := false
+	for _, item := range content {
+		contentItem, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		text, ok := contentItem["text"].(string)
+		if !ok {
+			continue
+		}
+		// Check if the text contains our cluster ID
+		if strings.Contains(text, fmt.Sprintf("ClusterId\": %d", clusterID)) ||
+			strings.Contains(text, fmt.Sprintf("\"ClusterId\":%d", clusterID)) {
+			foundClusterID = true
+			break
+		}
+	}
+
+	if !foundClusterID {
+		t.Fatalf("query_jobs did not return the expected cluster ID %d", clusterID)
+	}
+
+	t.Logf("Query found %d job(s), including expected cluster ID %d", int(count), clusterID)
 }
 
 // sendMCPRequest sends an MCP request and returns the response
