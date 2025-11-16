@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -45,22 +47,68 @@ func main() {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled      bool
-	oauth2DBPath string
-	oauth2Issuer string
+	enabled            bool
+	oauth2DBPath       string
+	oauth2Issuer       string
+	oauth2ClientID     string
+	oauth2ClientSecret string
+	oauth2AuthURL      string
+	oauth2TokenURL     string
+	oauth2RedirectURL  string
 }
 
 // fixConfigDefaults handles edge cases in HTCondor configuration defaults
-func fixConfigDefaults(cfg *config.Config) {
+func fixConfigDefaults(cfg *config.Config, debug bool) {
 	// If TILDE is empty or unset, LOCAL_DIR should default to /usr
 	tilde, hasTilde := cfg.Get("TILDE")
 	if !hasTilde || tilde == "" {
 		// Check if LOCAL_DIR is already set
 		if localDir, hasLocalDir := cfg.Get("LOCAL_DIR"); !hasLocalDir || localDir == "" || localDir == "$(TILDE)" {
+			if debug {
+				log.Println("DEBUG: condor user does not exist, setting LOCAL_DIR to /usr and LOG to /var/log/condor")
+			}
 			cfg.Set("LOCAL_DIR", "/usr")
-			log.Println("TILDE is empty, setting LOCAL_DIR to /usr")
+			cfg.Set("LOG", "/var/log/condor")
 		}
 	}
+}
+
+// checkLogPathWritable checks if the log path directory exists and is writable
+func checkLogPathWritable(logPath string) error {
+	// Check if directory exists
+	info, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Try to create the directory
+			if err := os.MkdirAll(logPath, 0750); err != nil {
+				return fmt.Errorf("directory does not exist and cannot be created: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("cannot stat directory: %w", err)
+	}
+
+	// Check if it's a directory
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory")
+	}
+
+	// Check if writable by trying to create a temp file
+	tempFile := filepath.Join(logPath, ".write_test")
+	// #nosec G304 -- Writing test file to verify log directory is writable
+	f, err := os.OpenFile(tempFile, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		// Best effort cleanup
+		_ = os.Remove(tempFile)
+		return fmt.Errorf("failed to close test file: %w", err)
+	}
+	if err := os.Remove(tempFile); err != nil {
+		return fmt.Errorf("failed to remove test file: %w", err)
+	}
+	return nil
 }
 
 // createLogger creates a logger with reasonable defaults for unprivileged operation
@@ -68,10 +116,19 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 	// Check if we can write to the LOG path specified in config
 	logPath, hasLogPath := cfg.Get("LOG")
 
-	// If no LOG path is configured, or if we're running unprivileged and can't write to it,
-	// default to stdout
+	// If no LOG path is configured, default to stdout
 	if !hasLogPath || logPath == "" {
-		log.Println("No LOG path configured, using stdout")
+		log.Println("Using stdout logging")
+		return logging.New(&logging.Config{
+			OutputPath:   "stdout",
+			MinVerbosity: logging.VerbosityInfo,
+		})
+	}
+
+	// Check if LOG directory exists and is writable
+	if err := checkLogPathWritable(logPath); err != nil {
+		log.Printf("LOG directory '%s' is not writable: %v", logPath, err)
+		log.Println("Using stdout logging")
 		return logging.New(&logging.Config{
 			OutputPath:   "stdout",
 			MinVerbosity: logging.VerbosityInfo,
@@ -82,8 +139,8 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 	logger, err := logging.FromConfig(cfg)
 	if err != nil {
 		// If it fails (e.g., permission denied), fall back to stdout
-		log.Printf("Warning: failed to create logger with configured path '%s': %v", logPath, err)
-		log.Println("Falling back to stdout logging")
+		log.Printf("Failed to create logger with configured path '%s': %v", logPath, err)
+		log.Println("Using stdout logging")
 		return logging.New(&logging.Config{
 			OutputPath:   "stdout",
 			MinVerbosity: logging.VerbosityInfo,
@@ -96,8 +153,8 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 // discoverSchedd attempts to discover a schedd address
 // Priority order:
 // 1. Check local schedd address file (SCHEDD_ADDRESS_FILE)
-// 2. Query collector for schedds and use the first one
-func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *logging.Logger) (addr, name string) {
+// 2. Query collector for schedds and use the first one (or filter by requestedName if provided)
+func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *logging.Logger, requestedName string) (addr, name string) {
 	// Try to find local schedd address file
 	if spoolDir, ok := cfg.Get("SPOOL"); ok && spoolDir != "" {
 		scheddAddrFile := filepath.Join(spoolDir, ".schedd_address")
@@ -134,13 +191,28 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 
 	// If we have a collector, query for schedds
 	if collector != nil {
-		logger.Info(logging.DestinationSchedd, "Querying collector for schedds")
+		if requestedName != "" {
+			logger.Info(logging.DestinationSchedd, "Querying collector for schedd", "name", requestedName)
+		} else {
+			logger.Info(logging.DestinationSchedd, "Querying collector for schedds")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		schedds, err := collector.QueryAds(ctx, "ScheddAd", "")
+		// Build constraint to filter by name if requested
+		constraint := ""
+		if requestedName != "" {
+			constraint = fmt.Sprintf("Name == \"%s\"", requestedName)
+		}
+
+		schedds, err := collector.QueryAds(ctx, "ScheddAd", constraint)
 		if err != nil {
 			logger.Error(logging.DestinationSchedd, "Failed to query collector for schedds", "error", err)
+			return "", ""
+		}
+
+		if len(schedds) == 0 && requestedName != "" {
+			logger.Error(logging.DestinationSchedd, "Schedd not found in collector", "name", requestedName)
 			return "", ""
 		}
 
@@ -179,6 +251,42 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 	return "", ""
 }
 
+// discoverOIDCEndpoints performs OIDC discovery to find authorization and token endpoints
+func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL string, err error) {
+	// Construct the well-known OIDC configuration URL
+	configURL := strings.TrimSuffix(issuerURL, "/") + "/.well-known/openid-configuration"
+
+	// Fetch the OIDC configuration
+	req, err := http.NewRequestWithContext(context.Background(), "GET", configURL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create OIDC configuration request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req) // #nosec G107 -- URL is from configuration, admin-controlled
+	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch OIDC configuration: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("OIDC configuration endpoint returned status %d", resp.StatusCode)
+	}
+
+	// Parse the configuration
+	var config struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
+		return "", "", fmt.Errorf("failed to parse OIDC configuration: %w", err)
+	}
+
+	if config.AuthorizationEndpoint == "" || config.TokenEndpoint == "" {
+		return "", "", fmt.Errorf("OIDC configuration missing required endpoints")
+	}
+
+	return config.AuthorizationEndpoint, config.TokenEndpoint, nil
+}
+
 // loadMCPConfig loads MCP configuration from HTCondor config
 func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 	config := mcpConfig{}
@@ -209,9 +317,63 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 			if fullHostname, ok := cfg.Get("FULL_HOSTNAME"); ok && fullHostname != "" {
 				hostname = fullHostname
 			}
+			// Append port if non-standard (not 443 for https)
+			if strings.HasPrefix(listenAddrFromConfig, ":") {
+				// Extract port from listen address
+				port := strings.TrimPrefix(listenAddrFromConfig, ":")
+				if port != "443" && port != "" {
+					hostname = hostname + ":" + port
+				}
+			}
 			config.oauth2Issuer = "https://" + hostname
 		}
 		log.Printf("OAuth2 issuer: %s", config.oauth2Issuer)
+
+		// Get OAuth2 client ID
+		if clientID, ok := cfg.Get("HTTP_API_OAUTH2_CLIENT_ID"); ok && clientID != "" {
+			config.oauth2ClientID = clientID
+		}
+
+		// Get OAuth2 client secret from file
+		if secretFile, ok := cfg.Get("HTTP_API_OAUTH2_CLIENT_SECRET_FILE"); ok && secretFile != "" {
+			// #nosec G304 -- Reading OAuth2 client secret from configured file path
+			if secretData, err := os.ReadFile(secretFile); err == nil {
+				config.oauth2ClientSecret = strings.TrimSpace(string(secretData))
+				log.Printf("OAuth2 client secret loaded from file: %s", secretFile)
+			} else {
+				log.Printf("Warning: failed to read OAuth2 client secret file '%s': %v", secretFile, err)
+			}
+		}
+
+		// Check for OIDC discovery or explicit URLs
+		if idpURL, ok := cfg.Get("HTTP_API_OAUTH2_IDP"); ok && idpURL != "" {
+			// Use OIDC discovery to find auth and token URLs
+			log.Printf("Attempting OIDC discovery from: %s", idpURL)
+			if authURL, tokenURL, err := discoverOIDCEndpoints(idpURL); err == nil {
+				config.oauth2AuthURL = authURL
+				config.oauth2TokenURL = tokenURL
+				log.Printf("OIDC discovery successful - Auth URL: %s, Token URL: %s", authURL, tokenURL)
+			} else {
+				log.Printf("Warning: OIDC discovery failed: %v", err)
+			}
+		} else {
+			// Get explicit auth and token URLs
+			if authURL, ok := cfg.Get("HTTP_API_OAUTH2_AUTH_URL"); ok && authURL != "" {
+				config.oauth2AuthURL = authURL
+			}
+			if tokenURL, ok := cfg.Get("HTTP_API_OAUTH2_TOKEN_URL"); ok && tokenURL != "" {
+				config.oauth2TokenURL = tokenURL
+			}
+		}
+
+		// Get redirect URL or derive from issuer
+		if redirectURL, ok := cfg.Get("HTTP_API_OAUTH2_REDIRECT_URL"); ok && redirectURL != "" {
+			config.oauth2RedirectURL = redirectURL
+		} else if config.oauth2Issuer != "" {
+			// Default: derive from issuer by appending /oauth2/callback
+			config.oauth2RedirectURL = config.oauth2Issuer + "/oauth2/callback"
+			log.Printf("OAuth2 redirect URL derived from issuer: %s", config.oauth2RedirectURL)
+		}
 	}
 
 	return config
@@ -228,7 +390,9 @@ func loadConfigWithDefaults() *config.Config {
 	}
 
 	// Fix TILDE and LOCAL_DIR defaults if needed
-	fixConfigDefaults(cfg)
+	// Enable debug messages in development (can be controlled by env var if needed)
+	debug := os.Getenv("HTCONDOR_API_DEBUG") != ""
+	fixConfigDefaults(cfg, debug)
 	return cfg
 }
 
@@ -314,6 +478,11 @@ func setupCollector(cfg *config.Config, logger *logging.Logger) *htcondor.Collec
 		}
 	}
 	if collectorHostValue != "" {
+		// Add default port if not specified
+		if !strings.Contains(collectorHostValue, ":") {
+			collectorHostValue += ":9618"
+			logger.Info(logging.DestinationCollector, "Added default port to collector host", "host", collectorHostValue)
+		}
 		collector := htcondor.NewCollector(collectorHostValue)
 		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHostValue)
 		return collector
@@ -353,9 +522,18 @@ func runNormalMode() error {
 	// Create collector
 	collector := setupCollector(cfg, logger)
 
-	// Discover schedd if not specified
-	if scheddAddrValue == "" && scheddNameValue == "" {
-		scheddAddrValue, scheddNameValue = discoverSchedd(cfg, collector, logger)
+	// Discover schedd if address not specified
+	// If a schedd name is provided, we'll search for that specific schedd
+	if scheddAddrValue == "" {
+		if scheddNameValue != "" {
+			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
+		}
+		var discoveredName string
+		scheddAddrValue, discoveredName = discoverSchedd(cfg, collector, logger, scheddNameValue)
+		// If we discovered a name and didn't have one before, use it
+		if scheddNameValue == "" && discoveredName != "" {
+			scheddNameValue = discoveredName
+		}
 	}
 
 	// Load MCP configuration
@@ -363,23 +541,28 @@ func runNormalMode() error {
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:     listenAddrFromConfig,
-		ScheddName:     scheddNameValue,
-		ScheddAddr:     scheddAddrValue,
-		UserHeader:     userHeaderFromConfig,
-		SigningKeyPath: signingKeyPath,
-		TLSCertFile:    tlsCertFile,
-		TLSKeyFile:     tlsKeyFile,
-		TrustDomain:    trustDomain,
-		UIDDomain:      uidDomain,
-		ReadTimeout:    readTimeout,
-		WriteTimeout:   writeTimeout,
-		IdleTimeout:    idleTimeout,
-		Collector:      collector,
-		Logger:         logger,
-		EnableMCP:      mcpCfg.enabled,
-		OAuth2DBPath:   mcpCfg.oauth2DBPath,
-		OAuth2Issuer:   mcpCfg.oauth2Issuer,
+		ListenAddr:         listenAddrFromConfig,
+		ScheddName:         scheddNameValue,
+		ScheddAddr:         scheddAddrValue,
+		UserHeader:         userHeaderFromConfig,
+		SigningKeyPath:     signingKeyPath,
+		TLSCertFile:        tlsCertFile,
+		TLSKeyFile:         tlsKeyFile,
+		TrustDomain:        trustDomain,
+		UIDDomain:          uidDomain,
+		ReadTimeout:        readTimeout,
+		WriteTimeout:       writeTimeout,
+		IdleTimeout:        idleTimeout,
+		Collector:          collector,
+		Logger:             logger,
+		EnableMCP:          mcpCfg.enabled,
+		OAuth2DBPath:       mcpCfg.oauth2DBPath,
+		OAuth2Issuer:       mcpCfg.oauth2Issuer,
+		OAuth2ClientID:     mcpCfg.oauth2ClientID,
+		OAuth2ClientSecret: mcpCfg.oauth2ClientSecret,
+		OAuth2AuthURL:      mcpCfg.oauth2AuthURL,
+		OAuth2TokenURL:     mcpCfg.oauth2TokenURL,
+		OAuth2RedirectURL:  mcpCfg.oauth2RedirectURL,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

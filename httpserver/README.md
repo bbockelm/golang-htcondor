@@ -258,6 +258,132 @@ HTTP_API_USER_HEADER = X-Forwarded-User
 HTTP_API_SIGNING_KEY = /etc/condor/keys/jwt_signing.key
 ```
 
+#### MCP OAuth2 Configuration
+
+Model Context Protocol (MCP) endpoints require OAuth2 authentication. Enable MCP support with:
+
+```bash
+# Enable MCP endpoints (default: false)
+HTTP_API_ENABLE_MCP = true
+
+# OAuth2 database path for storing clients and tokens
+# Default: $(LOCAL_DIR)/oauth2.db or /var/lib/condor/oauth2.db
+HTTP_API_OAUTH2_DB_PATH = /var/lib/condor/oauth2.db
+
+# OAuth2 issuer URL (default: https://$(FULL_HOSTNAME) with non-standard port appended)
+# If not explicitly set, the server will append the listen port if it's non-standard (not 443)
+HTTP_API_OAUTH2_ISSUER = https://htcondor.example.com
+
+# OIDC/SSO Configuration (optional, for external identity provider)
+
+# Option 1: Use OIDC Discovery (recommended)
+# The server will automatically discover auth and token endpoints from the provider
+HTTP_API_OAUTH2_IDP = https://idp.example.com
+
+# Option 2: Specify endpoints explicitly
+# HTTP_API_OAUTH2_AUTH_URL = https://idp.example.com/auth/realms/master/protocol/openid-connect/auth
+# HTTP_API_OAUTH2_TOKEN_URL = https://idp.example.com/auth/realms/master/protocol/openid-connect/token
+
+# OAuth2 client credentials for SSO provider (e.g., Keycloak, Okta, Google)
+HTTP_API_OAUTH2_CLIENT_ID = htcondor-api-client
+
+# Client secret is read from a file (not directly in config for security)
+# HTCondor configuration is considered public, so secrets must be in separate files
+HTTP_API_OAUTH2_CLIENT_SECRET_FILE = /etc/condor/secrets/oauth2_client_secret
+
+# Redirect URL for OAuth2 callback (default: derived from issuer + /oauth2/callback)
+# Only set this if you need a different callback URL
+# HTTP_API_OAUTH2_REDIRECT_URL = https://htcondor.example.com/oauth2/callback
+```
+
+**OIDC Discovery:**
+
+When `HTTP_API_OAUTH2_IDP` is set, the server will fetch the OIDC configuration from:
+```
+<IDP_URL>/.well-known/openid-configuration
+```
+
+This automatically discovers the authorization and token endpoints, making configuration easier and more maintainable. If discovery fails or you prefer explicit configuration, use `HTTP_API_OAUTH2_AUTH_URL` and `HTTP_API_OAUTH2_TOKEN_URL` instead.
+
+**Client Secret File:**
+
+Create a file with your OAuth2 client secret:
+```bash
+echo "your-secret-here" > /etc/condor/secrets/oauth2_client_secret
+chmod 600 /etc/condor/secrets/oauth2_client_secret
+chown condor:condor /etc/condor/secrets/oauth2_client_secret
+```
+
+**User Header Authentication:**
+
+If `HTTP_API_USER_HEADER` is configured (e.g., from a reverse proxy), the user identity is taken from that header instead of the OAuth2 token subject. This allows integration with existing authentication systems:
+
+```bash
+# User identity from reverse proxy header
+HTTP_API_USER_HEADER = X-Remote-User
+
+# When both are configured:
+# - User identity comes from the header (e.g., X-Remote-User: alice)
+# - OAuth2 is still used for authorization and scoping
+# - HTCondor tokens are generated for the header-provided username
+```
+
+This is useful when running behind Apache with authentication modules, nginx with auth_request, or similar setups where user authentication is handled upstream.
+
+**OIDC/SSO Integration:**
+
+When OIDC/SSO parameters are configured, the HTTP API server can:
+1. Redirect users to your identity provider for authentication
+2. Handle OAuth2 authorization code flow
+3. Exchange authorization codes for access tokens
+4. Generate HTCondor tokens based on authenticated identity (or user header if configured)
+5. Enable MCP clients to authenticate through your existing SSO infrastructure
+
+**Example OIDC Providers:**
+
+All major OIDC providers support automatic discovery. Set `HTTP_API_OAUTH2_IDP` to the issuer URL, and the server will automatically discover the endpoints:
+
+- **Keycloak**: Popular open-source identity and access management solution
+  - IDP URL: `https://keycloak.example.com/auth/realms/{realm}`
+  - Or explicit - Auth URL: `https://keycloak.example.com/auth/realms/{realm}/protocol/openid-connect/auth`
+  - Token URL: `https://keycloak.example.com/auth/realms/{realm}/protocol/openid-connect/token`
+
+- **Okta**: Enterprise identity service
+  - IDP URL: `https://{domain}.okta.com/oauth2/default`
+  - Or explicit - Auth URL: `https://{domain}.okta.com/oauth2/default/v1/authorize`
+  - Token URL: `https://{domain}.okta.com/oauth2/default/v1/token`
+
+- **Google**: Google OAuth2
+  - IDP URL: `https://accounts.google.com`
+  - Or explicit - Auth URL: `https://accounts.google.com/o/oauth2/v2/auth`
+  - Token URL: `https://oauth2.googleapis.com/token`
+
+- **GitHub**: GitHub OAuth2 (does not support OIDC discovery, use explicit URLs)
+  - Auth URL: `https://github.com/login/oauth/authorize`
+  - Token URL: `https://github.com/login/oauth/access_token`
+
+- **Azure AD**: Microsoft Azure Active Directory
+  - IDP URL: `https://login.microsoftonline.com/{tenant}/v2.0`
+  - Or explicit - Auth URL: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`
+  - Token URL: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+
+**Setting up OIDC Provider (Example with Keycloak):**
+
+1. Create a new client in your OIDC provider with:
+   - Client ID: `htcondor-api-client`
+   - Client Protocol: `openid-connect`
+   - Access Type: `confidential`
+   - Valid Redirect URIs: `https://htcondor.example.com/oauth2/callback`
+   - Web Origins: `https://htcondor.example.com`
+
+2. Configure scopes: `openid`, `profile`, `email`
+
+3. Note the client secret from the credentials tab
+
+4. Add the configuration to HTCondor config file
+
+For complete MCP documentation including OAuth2 flows, see the MCP integration test in `httpserver/mcp_integration_test.go`.
+
 #### Schedd Configuration
 
 ```bash
@@ -326,6 +452,100 @@ Start the server:
 ```
 
 The server will listen on port 8443 with HTTPS.
+
+#### MCP with OAuth2 and OIDC/SSO Integration
+
+Create `/etc/condor/config.d/99-http-api-mcp.config`:
+
+```bash
+# Enable MCP endpoints
+HTTP_API_ENABLE_MCP = true
+
+# HTTPS configuration (required for production OAuth2)
+HTTP_API_LISTEN_ADDR = :8443
+HTTP_API_TLS_CERT = /etc/condor/certs/server.crt
+HTTP_API_TLS_KEY = /etc/condor/certs/server.key
+
+# OAuth2 provider configuration
+HTTP_API_OAUTH2_DB_PATH = /var/lib/condor/oauth2.db
+# Issuer is automatically constructed as https://$(FULL_HOSTNAME):8443
+# since port 8443 is non-standard, or set explicitly:
+# HTTP_API_OAUTH2_ISSUER = https://htcondor.example.com:8443
+
+# OIDC/SSO provider integration using discovery (recommended)
+HTTP_API_OAUTH2_IDP = https://keycloak.example.com/auth/realms/htcondor
+HTTP_API_OAUTH2_CLIENT_ID = htcondor-mcp-client
+HTTP_API_OAUTH2_CLIENT_SECRET_FILE = /etc/condor/secrets/oauth2_client_secret
+
+# Redirect URL is automatically derived as $(HTTP_API_OAUTH2_ISSUER)/oauth2/callback
+# Override only if needed:
+# HTTP_API_OAUTH2_REDIRECT_URL = https://htcondor.example.com:8443/oauth2/callback
+
+# HTCondor token generation for authenticated users
+HTTP_API_SIGNING_KEY = /etc/condor/keys/POOL
+TRUST_DOMAIN = htcondor.example.com
+UID_DOMAIN = example.com
+
+# Optional: Use user header from reverse proxy for identity
+# HTTP_API_USER_HEADER = X-Remote-User
+```
+
+Create the OAuth2 client secret file:
+```bash
+mkdir -p /etc/condor/secrets
+echo "your-keycloak-client-secret" > /etc/condor/secrets/oauth2_client_secret
+chmod 600 /etc/condor/secrets/oauth2_client_secret
+chown condor:condor /etc/condor/secrets/oauth2_client_secret
+```
+
+**OAuth2 Endpoints Available:**
+
+- `GET /oauth2/authorize` - OAuth2 authorization endpoint (redirects to OIDC provider)
+- `POST /oauth2/token` - OAuth2 token endpoint (exchanges auth code for access token)
+- `POST /oauth2/introspect` - OAuth2 token introspection endpoint
+- `POST /mcp` - MCP JSON-RPC endpoint (requires OAuth2 bearer token)
+
+**OAuth2 Flow for MCP Clients:**
+
+1. Client initiates OAuth2 authorization code flow at `/oauth2/authorize`
+2. User is redirected to OIDC provider (e.g., Keycloak) for authentication
+3. After successful authentication, user is redirected back with authorization code
+4. Client exchanges authorization code for access token at `/oauth2/token`
+5. Client uses access token to make MCP requests to `/mcp` endpoint
+
+**Example MCP Request with OAuth2:**
+
+```bash
+# Step 1: Get authorization code (typically done in browser)
+# User visits: https://htcondor.example.com/oauth2/authorize?client_id=htcondor-mcp-client&response_type=code&redirect_uri=https://htcondor.example.com/oauth2/callback&scope=openid
+
+# Step 2: Exchange code for token
+curl -X POST https://htcondor.example.com/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=https://htcondor.example.com/oauth2/callback&client_id=htcondor-mcp-client&client_secret=your-secret-here"
+
+# Response:
+# {
+#   "access_token": "eyJhbGc...",
+#   "token_type": "Bearer",
+#   "expires_in": 3600
+# }
+
+# Step 3: Use access token for MCP requests
+curl -X POST https://htcondor.example.com/mcp \
+  -H "Authorization: Bearer eyJhbGc..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "job.submit",
+    "params": {
+      "submit_file": "executable=/bin/echo\narguments=Hello from MCP\nqueue"
+    },
+    "id": 1
+  }'
+```
+
+For detailed MCP protocol documentation, see `mcpserver/README.md`.
 
 #### Behind Reverse Proxy
 

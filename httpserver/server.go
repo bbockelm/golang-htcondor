@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 // Server represents the HTTP API server
 type Server struct {
 	httpServer         *http.Server
+	listener           net.Listener // Explicit listener to get actual address
 	schedd             *htcondor.Schedd
 	collector          *htcondor.Collector
 	userHeader         string
@@ -206,13 +208,33 @@ func NewServer(cfg Config) (*Server, error) {
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
-	return s.httpServer.ListenAndServe()
+
+	// Create listener explicitly to get actual address
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
+	}
+	s.listener = ln
+
+	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	return s.httpServer.Serve(ln)
 }
 
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
-	return s.httpServer.ListenAndServeTLS(certFile, keyFile)
+
+	// Create listener explicitly to get actual address
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
+	}
+	s.listener = ln
+
+	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	return s.httpServer.ServeTLS(ln, certFile, keyFile)
 }
 
 // Shutdown gracefully shuts down the HTTP server
@@ -232,6 +254,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // GetOAuth2Provider returns the OAuth2 provider (for testing)
 func (s *Server) GetOAuth2Provider() *OAuth2Provider {
 	return s.oauth2Provider
+}
+
+// GetAddr returns the actual listening address of the server.
+// Returns empty string if the server hasn't started yet.
+func (s *Server) GetAddr() string {
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written

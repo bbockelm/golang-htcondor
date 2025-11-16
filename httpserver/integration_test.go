@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,31 +35,15 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	t.Logf("Using temporary directory: %s", tempDir)
-
-	// Write mini condor configuration
-	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
-		t.Fatalf("Failed to write config: %v", err)
-	}
-
-	// Start condor_master
-	t.Log("Starting condor_master...")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	condorMaster, err := startCondorMaster(ctx, configFile)
+	// Create secure socket directory in /tmp to avoid path length issues
+	socketDir, err := os.MkdirTemp("/tmp", "htc_sock_*")
 	if err != nil {
-		t.Fatalf("Failed to start condor_master: %v", err)
+		t.Fatalf("Failed to create socket directory: %v", err)
 	}
-	defer stopCondorMaster(condorMaster, t)
+	defer os.RemoveAll(socketDir)
 
-	// Wait for condor to be ready
-	t.Log("Waiting for HTCondor to be ready...")
-	if err := waitForCondor(tempDir, 30*time.Second); err != nil {
-		t.Fatalf("Condor failed to start: %v", err)
-	}
-	t.Log("HTCondor is ready!")
+	t.Logf("Using temporary directory: %s", tempDir)
+	t.Logf("Using socket directory: %s", socketDir)
 
 	// Generate signing key for demo authentication in passwords.d directory
 	passwordsDir := filepath.Join(tempDir, "passwords.d")
@@ -75,19 +60,52 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to write signing key: %v", err)
 	}
 
-	// Use a fixed port for testing
-	serverPort := 18080
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	trustDomain := "test.htcondor.org"
+
+	// Write mini condor configuration
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Start condor_master
+	t.Log("Starting condor_master...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	condorMaster, err := startCondorMaster(ctx, configFile, tempDir)
+	if err != nil {
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+	defer stopCondorMaster(condorMaster, t)
+
+	// Wait for condor to be ready
+	t.Log("Waiting for HTCondor to be ready...")
+	if err := waitForCondor(tempDir, 60*time.Second, t); err != nil {
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+	t.Log("HTCondor is ready!")
+
+	// Find the actual schedd address
+	scheddAddr, err := getScheddAddress(tempDir, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to get schedd address: %v", err)
+	}
+	t.Logf("Using schedd address: %s", scheddAddr)
+
+	// Use dynamic port for HTTP server
+	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector("127.0.0.1:9618")
+	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1:9618",
+		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
 		SigningKeyPath: signingKeyPath,
+		TrustDomain:    trustDomain,
+		UIDDomain:      "test.htcondor.org",
 		Collector:      collector,
 	})
 	if err != nil {
@@ -100,8 +118,19 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		serverErrChan <- server.Start()
 	}()
 
-	// Wait for server to be ready
-	t.Logf("Waiting for server to start on %s", baseURL)
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get actual server address using GetAddr() method
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Wait for server to be fully ready
 	if err := waitForServer(baseURL, 10*time.Second); err != nil {
 		t.Fatalf("Server failed to start: %v", err)
 	}
@@ -125,9 +154,10 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	// Step 1: Submit a job via HTTP
 	t.Log("Step 1: Submitting job via HTTP...")
 	submitFile := `executable = /bin/bash
-arguments = -c "echo 'Hello from HTCondor!' > output.txt && echo 'Test successful' >> output.txt"
-transfer_input_files = input.txt
+arguments = script.sh
+transfer_input_files = input.txt, script.sh
 transfer_output_files = output.txt
+transfer_executable = NO
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue`
@@ -139,13 +169,14 @@ queue`
 	t.Log("Step 2: Creating and uploading input tarball...")
 	inputTar := createInputTarball(t, map[string]string{
 		"input.txt": "This is test input data\n",
+		"script.sh": "#!/bin/bash\necho 'Hello from HTCondor!' > output.txt\n echo 'Test successful' >> output.txt\n",
 	})
 	uploadInputTarball(t, client, baseURL, testUser, jobID, inputTar)
 	t.Log("Input tarball uploaded successfully")
 
 	// Step 3: Poll job status until complete
 	t.Log("Step 3: Polling job status until complete...")
-	waitForJobCompletion(t, client, baseURL, testUser, jobID, 60*time.Second)
+	waitForJobCompletion(t, client, baseURL, testUser, jobID, tempDir, 60*time.Second)
 	t.Log("Job completed successfully!")
 
 	// Step 4: Download output tarball
@@ -227,12 +258,43 @@ func createInputTarball(t *testing.T, files map[string]string) []byte {
 			Mode: 0644,
 			Size: int64(len(content)),
 		}
+		if name == "script.sh" {
+			hdr.Mode = 0755
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("Failed to write tar header: %v", err)
 		}
 		if _, err := tw.Write([]byte(content)); err != nil {
 			t.Fatalf("Failed to write tar content: %v", err)
 		}
+	}
+
+	return buf.Bytes()
+}
+
+// createSimpleInputTarball creates a tarball with a simple dummy input file
+func createSimpleInputTarball(t *testing.T) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	// Add a simple input file
+	content := []byte("dummy input file for testing\n")
+	hdr := &tar.Header{
+		Name: "input.txt",
+		Mode: 0644,
+		Size: int64(len(content)),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("Failed to write tar header: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("Failed to write tar content: %v", err)
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
 	}
 
 	return buf.Bytes()
@@ -262,7 +324,7 @@ func uploadInputTarball(t *testing.T, client *http.Client, baseURL, user, jobID 
 }
 
 // waitForJobCompletion polls the job status until it completes or times out
-func waitForJobCompletion(t *testing.T, client *http.Client, baseURL, user, jobID string, timeout time.Duration) {
+func waitForJobCompletion(t *testing.T, client *http.Client, baseURL, user, jobID, localDir string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -311,12 +373,18 @@ func waitForJobCompletion(t *testing.T, client *http.Client, baseURL, user, jobI
 			if hr, ok := jobAd["HoldReason"].(string); ok {
 				holdReason = hr
 			}
-			t.Fatalf("Job was held. Reason: %s", holdReason)
+			// Ignore spooling holds - these are normal and will be released automatically
+			if holdReason != "Spooling input data files" {
+				t.Fatalf("Job was held. Reason: %s", holdReason)
+			}
+			t.Logf("Job is in spooling hold (normal), waiting for release...")
 		}
 
 		time.Sleep(pollInterval)
 	}
 
+	t.Logf("Timeout waiting for job completion after %v", timeout)
+	printHTCondorLogs(localDir, t)
 	t.Fatalf("Timeout waiting for job completion after %v", timeout)
 }
 
@@ -386,42 +454,129 @@ func getFileNames(files map[string]string) []string {
 }
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration
-func writeMiniCondorConfig(configFile, localDir string) error {
+func writeMiniCondorConfig(configFile, localDir, socketDir, passwordsDir, trustDomain string, t *testing.T) error {
+	// Determine LIBEXEC directory by looking for condor_shared_port
+	var libexecDir string
+	sharedPortPath, err := exec.LookPath("condor_shared_port")
+	if err == nil {
+		// Found condor_shared_port, use its parent directory
+		libexecDir = filepath.Dir(sharedPortPath)
+		t.Logf("Found condor_shared_port at %s, using LIBEXEC=%s", sharedPortPath, libexecDir)
+	} else {
+		// Not found in PATH, try deriving from condor_master location
+		masterPath, _ := exec.LookPath("condor_master")
+		if masterPath != "" {
+			sbinDir := filepath.Dir(masterPath)
+			derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
+
+			// Check if the derived path exists
+			if _, err := os.Stat(filepath.Join(derivedLibexec, "condor_shared_port")); err == nil {
+				libexecDir = derivedLibexec
+				t.Logf("Using derived LIBEXEC=%s (from condor_master location)", libexecDir)
+			} else {
+				// Try standard location /usr/libexec/condor
+				stdLibexec := "/usr/libexec/condor"
+				if _, err := os.Stat(filepath.Join(stdLibexec, "condor_shared_port")); err == nil {
+					libexecDir = stdLibexec
+					t.Logf("Using standard LIBEXEC=%s", libexecDir)
+				}
+			}
+		}
+	}
+
+	// Compute SBIN path from condor_master location
+	var sbinDir string
+	if masterPath, err := exec.LookPath("condor_master"); err == nil {
+		sbinDir = filepath.Dir(masterPath)
+	}
+
+	// Build LIBEXEC line if we found a valid directory
+	libexecLine := ""
+	if libexecDir != "" {
+		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
+	}
+
+	// Build SBIN line if we found it
+	sbinLine := ""
+	if sbinDir != "" {
+		sbinLine = fmt.Sprintf("SBIN = %s\n", sbinDir)
+	}
+
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for HTTP API Integration Test
+CONDOR_HOST = 127.0.0.1
+
+# Use local directory structure
 LOCAL_DIR = %s
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
 EXECUTE = $(LOCAL_DIR)/execute
-BIN = $(LOCAL_DIR)/bin
-LIB = $(LOCAL_DIR)/lib
-RELEASE_DIR = /usr
 
-# Run all daemons locally
-DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD
+# Set paths for HTCondor binaries
+%s%s
+# Collector configuration
+COLLECTOR_HOST = 127.0.0.1:0
+
+# Network settings
+BIND_ALL_INTERFACES = False
+NETWORK_INTERFACE = 127.0.0.1
+
+# Enable shared port with proper configuration
+USE_SHARED_PORT = True
+SHARED_PORT_DEBUG = D_FULLDEBUG
+DAEMON_SOCKET_DIR = %s
+
+# Security settings - enable all authentication methods
+SEC_DEFAULT_AUTHENTICATION = OPTIONAL
+SEC_DEFAULT_AUTHENTICATION_METHODS = FS,TOKEN
+SEC_DEFAULT_ENCRYPTION = OPTIONAL
+SEC_DEFAULT_INTEGRITY = OPTIONAL
+SEC_CLIENT_AUTHENTICATION_METHODS = FS,TOKEN
+
+# Token configuration
+SEC_TOKEN_DIRECTORY = %s
+TRUST_DOMAIN = %s
+
+# Allow all access for testing
+ALLOW_READ = *
+ALLOW_WRITE = *
+ALLOW_NEGOTIATOR = *
+ALLOW_ADMINISTRATOR = *
+ALLOW_OWNER = *
+ALLOW_CLIENT = *
+
+# Schedd configuration
+DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, SCHEDD, NEGOTIATOR, STARTD
+SCHEDD_NAME = test_schedd
+SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
+MAX_SCHEDD_LOG = 10000000
+SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY
+
+# Collector configuration
+COLLECTOR_ADDRESS_FILE = $(LOG)/.collector_address
+MAX_COLLECTOR_LOG = 10000000
+COLLECTOR_DEBUG = D_FULLDEBUG D_SECURITY
+
+# Shared port logging
+SHARED_PORT_DEBUG = D_FULLDEBUG D_SECURITY D_NETWORK:2 D_COMMAND
+MAX_SHARED_PORT_LOG = 10000000
+
+# Master logging
+MAX_MASTER_LOG = 10000000
+MASTER_DEBUG = D_FULLDEBUG D_SECURITY
+
+# Startd logging
+MAX_STARTD_LOG = 10000000
+STARTD_DEBUG = D_FULLDEBUG D_SECURITY
+
+# Negotiator logging
+MAX_NEGOTIATOR_LOG = 10000000
+NEGOTIATOR_DEBUG = D_FULLDEBUG
 
 # Use only local system resources
 START = TRUE
 SUSPEND = FALSE
 PREEMPT = FALSE
 KILL = FALSE
-
-# Network settings
-CONDOR_HOST = 127.0.0.1
-COLLECTOR_HOST = $(CONDOR_HOST):9618
-SCHEDD_HOST = $(CONDOR_HOST)
-SCHEDD_PORT = 9618
-
-# Security settings - allow local access
-ALLOW_WRITE = 127.0.0.1, $(IP_ADDRESS)
-ALLOW_READ = *
-ALLOW_NEGOTIATOR = 127.0.0.1, $(IP_ADDRESS)
-ALLOW_ADMINISTRATOR = 127.0.0.1, $(IP_ADDRESS)
-
-# Use TOKEN authentication
-SEC_DEFAULT_AUTHENTICATION = REQUIRED
-SEC_DEFAULT_AUTHENTICATION_METHODS = TOKEN, FS
-SEC_READ_AUTHENTICATION = OPTIONAL
-SEC_CLIENT_AUTHENTICATION = OPTIONAL
 
 # Enable file transfer
 ENABLE_FILE_TRANSFER = TRUE
@@ -434,34 +589,51 @@ SYSTEM_PERIODIC_REMOVE = (JobStatus == 4) && ((time() - CompletionDate) > 3600)
 NUM_CPUS = 2
 MEMORY = 2048
 
-# Logging
-MAX_DEFAULT_LOG = 10000000
-MAX_NUM_DEFAULT_LOG = 3
-
 # Run jobs quickly in test mode
-SCHEDD_INTERVAL = 5
-NEGOTIATOR_INTERVAL = 5
+SCHEDD_INTERVAL = 2
+NEGOTIATOR_INTERVAL = 3
 STARTER_UPDATE_INTERVAL = 5
-`, localDir)
+
+# Disable unwanted features for testing
+ENABLE_SOAP = False
+ENABLE_WEB_SERVER = False
+`, localDir, sbinLine, libexecLine, socketDir, passwordsDir, trustDomain)
 
 	return os.WriteFile(configFile, []byte(config), 0644)
 }
 
 // startCondorMaster starts the condor_master process
-func startCondorMaster(ctx context.Context, configFile string) (*exec.Cmd, error) {
+func startCondorMaster(ctx context.Context, configFile, localDir string) (*exec.Cmd, error) {
 	condorMasterPath, err := exec.LookPath("condor_master")
 	if err != nil {
 		return nil, fmt.Errorf("condor_master not found in PATH: %w", err)
 	}
 
+	// Create log directory
+	logDir := filepath.Join(localDir, "log")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	// Create spool and execute directories
+	spoolDir := filepath.Join(localDir, "spool")
+	if err := os.MkdirAll(spoolDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create spool directory: %w", err)
+	}
+
+	executeDir := filepath.Join(localDir, "execute")
+	if err := os.MkdirAll(executeDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create execute directory: %w", err)
+	}
+
 	cmd := exec.CommandContext(ctx, condorMasterPath, "-f")
 	cmd.Env = append(os.Environ(),
 		"CONDOR_CONFIG="+configFile,
-		"_CONDOR_MASTER_LOG=$(LOCAL_DIR)/log/MasterLog",
+		"_CONDOR_LOCAL_DIR="+localDir,
 	)
-	// Redirect output to avoid cluttering test output
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Redirect output for debugging
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start condor_master: %w", err)
@@ -501,28 +673,161 @@ func stopCondorMaster(cmd *exec.Cmd, t *testing.T) {
 	}
 }
 
-// waitForCondor waits for HTCondor to be ready
-func waitForCondor(localDir string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+// waitForCondor waits for HTCondor to be ready by checking address files
+func waitForCondor(localDir string, timeout time.Duration, t *testing.T) error {
+	collectorAddressFile := filepath.Join(localDir, "log", ".collector_address")
+	scheddAddressFile := filepath.Join(localDir, "log", ".schedd_address")
 
-	for time.Now().Before(deadline) {
-		// Check if schedd log exists
-		scheddLog := filepath.Join(localDir, "log", "SchedLog")
-		if _, err := os.Stat(scheddLog); err == nil {
-			// Try to run condor_q
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			cmd := exec.CommandContext(ctx, "condor_q", "-version")
-			err := cmd.Run()
-			cancel()
-			if err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	collectorReady := false
+	scheddReady := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			// List files in log directory for debugging
+			if entries, err := os.ReadDir(filepath.Join(localDir, "log")); err == nil {
+				t.Logf("Files in log directory:")
+				for _, entry := range entries {
+					t.Logf("  %s", entry.Name())
+				}
+			}
+			printHTCondorLogs(localDir, t)
+
+			if !collectorReady {
+				return fmt.Errorf("timeout waiting for collector to start")
+			}
+			if !scheddReady {
+				return fmt.Errorf("timeout waiting for schedd to start")
+			}
+			return fmt.Errorf("timeout waiting for HTCondor daemons to start")
+
+		case <-ticker.C:
+			// Check collector if not ready
+			if !collectorReady {
+				if data, err := os.ReadFile(collectorAddressFile); err == nil {
+					content := strings.TrimSpace(string(data))
+					if content != "" && !strings.Contains(content, "(null)") {
+						collectorReady = true
+						t.Logf("✅ Collector started at: %s", content)
+					} else if strings.Contains(content, "(null)") {
+						printHTCondorLogs(localDir, t)
+						return fmt.Errorf("collector address file contains '(null)' - daemon failed to start")
+					}
+				}
+			}
+
+			// Check schedd if not ready
+			if !scheddReady {
+				if data, err := os.ReadFile(scheddAddressFile); err == nil {
+					content := strings.TrimSpace(string(data))
+					if content != "" && !strings.Contains(content, "(null)") {
+						scheddReady = true
+						t.Logf("✅ Schedd started (address file present)")
+					} else if strings.Contains(content, "(null)") {
+						printHTCondorLogs(localDir, t)
+						return fmt.Errorf("schedd address file contains '(null)' - daemon failed to start")
+					}
+				}
+			}
+
+			// If both are ready, we're done
+			if collectorReady && scheddReady {
+				t.Logf("✅ All HTCondor daemons ready")
+				// Give a bit more time for daemons to fully initialize
+				time.Sleep(1 * time.Second)
 				return nil
 			}
 		}
+	}
+}
 
-		time.Sleep(1 * time.Second)
+// printHTCondorLogs prints all HTCondor logs for debugging
+func printHTCondorLogs(localDir string, t *testing.T) {
+	t.Logf("=== Printing HTCondor Logs (recent entries) ===")
+	logDir := filepath.Join(localDir, "log")
+	t.Logf("Log directory: %s", logDir)
+
+	// List all files in log directory
+	if files, err := os.ReadDir(logDir); err == nil {
+		t.Logf("Files in log directory:")
+		for _, file := range files {
+			t.Logf("  - %s", file.Name())
+		}
+	} else {
+		t.Logf("Failed to list log directory: %v", err)
 	}
 
-	return fmt.Errorf("timeout waiting for HTCondor to be ready")
+	// For SchedLog, show last 100 lines as it's most relevant
+	schedLogPath := filepath.Join(logDir, "SchedLog")
+	if data, err := os.ReadFile(schedLogPath); err == nil {
+		t.Logf("=== SchedLog (last 100 lines) ===")
+		lines := strings.Split(string(data), "\n")
+		startLine := len(lines) - 100
+		if startLine < 0 {
+			startLine = 0
+		}
+		for _, line := range lines[startLine:] {
+			if line != "" {
+				t.Logf("%s", line)
+			}
+		}
+		t.Logf("=== End SchedLog ===")
+	} else {
+		t.Logf("Failed to read SchedLog: %v", err)
+	}
+
+	// For other logs, just show last 50 lines
+	otherLogs := []string{"MasterLog", "CollectorLog", "StartLog", "StarterLog.slot1_1", "ShadowLog", "NegotiatorLog"}
+	for _, logFile := range otherLogs {
+		logPath := filepath.Join(logDir, logFile)
+		if data, err := os.ReadFile(logPath); err == nil {
+			t.Logf("=== %s (last 50 lines) ===", logFile)
+			lines := strings.Split(string(data), "\n")
+			startLine := len(lines) - 50
+			if startLine < 0 {
+				startLine = 0
+			}
+			for _, line := range lines[startLine:] {
+				if line != "" {
+					t.Logf("%s", line)
+				}
+			}
+			t.Logf("=== End %s ===", logFile)
+		} else {
+			t.Logf("Failed to read %s: %v", logFile, err)
+		}
+	}
+	t.Logf("=== End of HTCondor Logs ===")
+}
+
+// getScheddAddress finds the actual schedd address from HTCondor address file
+func getScheddAddress(localDir string, timeout time.Duration) (string, error) {
+	scheddAddressFile := filepath.Join(localDir, "log", ".schedd_address")
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(scheddAddressFile); err == nil {
+			// Parse address from file (first non-comment line)
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "$") {
+					// Return the sinful string which includes shared port info
+					return line, nil
+				}
+			}
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return "", fmt.Errorf("timeout finding schedd address")
 }
 
 // waitForServer waits for the HTTP server to be ready
@@ -566,8 +871,36 @@ queue`
 	_, jobID := submitJob(t, client, baseURL, testUser, submitFile)
 	t.Logf("Job submitted: %s", jobID)
 
-	// Wait for job to start running (or at least leave HELD state if it was held)
+	// Spool input files so the job can be released from hold
+	t.Log("Spooling input files...")
+	inputTar := createSimpleInputTarball(t)
+	uploadInputTarball(t, client, baseURL, testUser, jobID, inputTar)
+	t.Log("Input files spooled successfully")
+
+	// Wait for job to be processed and released from initial hold
 	time.Sleep(2 * time.Second)
+
+	// Query and print the full job ad for debugging
+	t.Log("Querying job ad for debugging...")
+	jobAd := getJob(t, client, baseURL, testUser, jobID)
+	t.Logf("=== Full Job Ad for %s ===", jobID)
+	// Print job ad in a more readable format
+	jobAdJSON, _ := json.MarshalIndent(jobAd, "", "  ")
+	t.Logf("%s", string(jobAdJSON))
+	t.Logf("=== End Job Ad ===")
+
+	// Check key attributes
+	if jobStatus, ok := jobAd["JobStatus"].(float64); ok {
+		t.Logf("JobStatus: %v", jobStatus)
+	}
+	if procID, ok := jobAd["ProcId"]; ok {
+		t.Logf("ProcId: %v", procID)
+	} else {
+		t.Logf("ProcId: NOT PRESENT")
+	}
+	if clusterID, ok := jobAd["ClusterId"]; ok {
+		t.Logf("ClusterId: %v", clusterID)
+	}
 
 	// Test: Hold the job
 	t.Log("Testing job hold...")
@@ -579,12 +912,14 @@ queue`
 
 	resp, err := client.Do(req)
 	if err != nil {
+		printHTCondorLogs(tempDir, t)
 		t.Fatalf("Failed to hold job: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		printHTCondorLogs(tempDir, t)
 		t.Fatalf("Hold job failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -610,12 +945,14 @@ queue`
 
 	resp, err = client.Do(req)
 	if err != nil {
+		printHTCondorLogs(tempDir, t)
 		t.Fatalf("Failed to release job: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		printHTCondorLogs(tempDir, t)
 		t.Fatalf("Release job failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -653,7 +990,16 @@ queue 3`
 	clusterID, _ := submitJob(t, client, baseURL, testUser, submitFile)
 	t.Logf("Jobs submitted in cluster: %d", clusterID)
 
-	// Wait for jobs to enter queue
+	// Spool input files for all jobs in the cluster to release them from initial hold
+	t.Log("Spooling input files for all jobs...")
+	inputTar := createSimpleInputTarball(t)
+	for procID := 0; procID < 3; procID++ {
+		jobID := fmt.Sprintf("%d.%d", clusterID, procID)
+		uploadInputTarball(t, client, baseURL, testUser, jobID, inputTar)
+	}
+	t.Log("Input files spooled for all jobs")
+
+	// Wait for jobs to be processed and released from initial hold
 	time.Sleep(2 * time.Second)
 
 	// Test: Bulk hold by constraint
@@ -804,54 +1150,89 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 		t.Fatalf("Failed to create temp directory: %v", err)
 	}
 
-	// Write mini condor configuration
-	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
-		t.Fatalf("Failed to write config: %v", err)
-	}
-
-	// Start condor_master
-	ctx, cancel := context.WithCancel(context.Background())
-	condorMaster, err := startCondorMaster(ctx, configFile)
+	// Create secure socket directory
+	socketDir, err := os.MkdirTemp("/tmp", "htc_sock_*")
 	if err != nil {
-		cancel()
 		os.RemoveAll(tempDir)
-		t.Fatalf("Failed to start condor_master: %v", err)
-	}
-
-	// Wait for condor to be ready
-	if err := waitForCondor(tempDir, 30*time.Second); err != nil {
-		stopCondorMaster(condorMaster, t)
-		cancel()
-		os.RemoveAll(tempDir)
-		t.Fatalf("Condor failed to start: %v", err)
+		t.Fatalf("Failed to create socket directory: %v", err)
 	}
 
 	// Generate signing key
 	passwordsDir := filepath.Join(tempDir, "passwords.d")
-	os.MkdirAll(passwordsDir, 0700)
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
 	// Generate a simple signing key for testing
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
 	}
-	os.WriteFile(signingKeyPath, key, 0600)
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to write signing key: %v", err)
+	}
 
-	// Create HTTP server with collector
-	serverPort := 18080
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
-	baseURL = fmt.Sprintf("http://%s", serverAddr)
+	trustDomain := "test.htcondor.org"
+
+	// Write mini condor configuration
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Start condor_master
+	ctx, cancel := context.WithCancel(context.Background())
+	condorMaster, err := startCondorMaster(ctx, configFile, tempDir)
+	if err != nil {
+		cancel()
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+
+	// Wait for condor to be ready
+	if err := waitForCondor(tempDir, 60*time.Second, t); err != nil {
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+
+	// Find the actual schedd address (with dynamic port)
+	scheddAddr, err := getScheddAddress(tempDir, 10*time.Second)
+	if err != nil {
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(socketDir)
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to get schedd address: %v", err)
+	}
+	t.Logf("Using schedd address: %s", scheddAddr)
+
+	// Extract collector address from schedd address (same host, may need to query collector)
+	collectorAddr := scheddAddr // For shared port, collector uses same port
+
+	// Use dynamic port (0) for HTTP server
+	serverAddr := "127.0.0.1:0"
 
 	// Create collector pointing to local mini condor
-	collector := htcondor.NewCollector("127.0.0.1:9618")
+	collector := htcondor.NewCollector(collectorAddr)
 
 	server, err = NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1:9618",
+		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
 		SigningKeyPath: signingKeyPath,
+		TrustDomain:    "test.htcondor.org",
+		UIDDomain:      "test.htcondor.org",
 		Collector:      collector,
 	})
 	if err != nil {
@@ -862,9 +1243,28 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 	}
 
 	// Start server in background
-	go server.Start()
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- server.Start()
+	}()
 
-	// Wait for server to be ready
+	// Wait a bit for server to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Get the actual listening address from the server
+	addr := server.GetAddr()
+	if addr == "" {
+		server.Shutdown(context.Background())
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to get server address (server may not have started)")
+	}
+
+	baseURL = fmt.Sprintf("http://%s", addr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Wait for server to be fully ready
 	if err := waitForServer(baseURL, 10*time.Second); err != nil {
 		server.Shutdown(context.Background())
 		stopCondorMaster(condorMaster, t)
@@ -879,6 +1279,7 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 		server.Shutdown(shutdownCtx)
 		stopCondorMaster(condorMaster, t)
 		cancel()
+		os.RemoveAll(socketDir)
 		os.RemoveAll(tempDir)
 	}
 

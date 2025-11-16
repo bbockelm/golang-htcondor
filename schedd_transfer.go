@@ -158,6 +158,9 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 		}
 
 		dirPrefix := fmt.Sprintf("%d.%d", clusterID, procID)
+		if jobCount == 1 {
+			dirPrefix = ""
+		}
 
 		// Get list of transfer output files (if specified)
 		var transferOutputFiles map[string]bool

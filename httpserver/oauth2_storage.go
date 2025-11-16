@@ -97,6 +97,12 @@ func (s *OAuth2Storage) createTables() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS oauth2_hmac_secrets (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		secret BLOB NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE TABLE IF NOT EXISTS oauth2_oidc_sessions (
 		signature TEXT PRIMARY KEY,
 		request_id TEXT NOT NULL,
@@ -108,6 +114,7 @@ func (s *OAuth2Storage) createTables() error {
 		session_data TEXT NOT NULL,
 		subject TEXT NOT NULL,
 		active INTEGER NOT NULL DEFAULT 1,
+		expires_at TIMESTAMP NOT NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -138,6 +145,7 @@ var validTableNames = map[string]bool{
 	"oauth2_access_tokens":       true,
 	"oauth2_refresh_tokens":      true,
 	"oauth2_authorization_codes": true,
+	"oauth2_oidc_sessions":       true,
 }
 
 // buildInsertQuery builds an INSERT query for a valid table name
@@ -440,6 +448,25 @@ func (s *OAuth2Storage) LoadRSAKey(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return privateKeyPEM, nil
+}
+
+// SaveHMACSecret stores the HMAC secret
+func (s *OAuth2Storage) SaveHMACSecret(ctx context.Context, secret []byte) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO oauth2_hmac_secrets (id, secret) VALUES (1, ?)`, secret)
+	return err
+}
+
+// LoadHMACSecret loads the HMAC secret
+func (s *OAuth2Storage) LoadHMACSecret(ctx context.Context) ([]byte, error) {
+	var secret []byte
+	err := s.db.QueryRowContext(ctx, `SELECT secret FROM oauth2_hmac_secrets WHERE id = 1`).Scan(&secret)
+	if err == sql.ErrNoRows {
+		return nil, nil // No secret stored yet
+	}
+	if err != nil {
+		return nil, err
+	}
+	return secret, nil
 }
 
 // ClientAssertionJWTValid implements fosite.ClientAssertionJWTValid interface

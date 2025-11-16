@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/httpserver"
 	"github.com/bbockelm/golang-htcondor/mcpserver"
 	"github.com/ory/fosite"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // TestMCPHTTPIntegration tests the MCP protocol via HTTP with OAuth2 authentication
@@ -36,11 +37,44 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Create secure socket directory
+	socketDir, err := os.MkdirTemp("/tmp", "htc_sock_*")
+	if err != nil {
+		t.Fatalf("Failed to create socket directory: %v", err)
+	}
+	defer os.RemoveAll(socketDir)
+
 	t.Logf("Using temporary directory: %s", tempDir)
+	t.Logf("Using socket directory: %s", socketDir)
+
+	// Print HTCondor logs on test failure
+	defer func() {
+		if t.Failed() {
+			printHTCondorLogs(tempDir, t)
+		}
+	}()
+
+	// Generate signing key for HTCondor authentication in passwords.d directory
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	// The signing key should be in passwords.d/POOL
+	// GenerateJWT expects the directory path and key name separately
+	poolKeyPath := filepath.Join(passwordsDir, "POOL")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(poolKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to write signing key: %v", err)
+	}
+
+	trustDomain := "test.htcondor.org"
 
 	// Write mini condor configuration
 	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
+	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
@@ -53,7 +87,7 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	condorMaster, err := startCondorMaster(ctx, configFile)
+	condorMaster, err := startCondorMaster(ctx, configFile, tempDir)
 	if err != nil {
 		t.Fatalf("Failed to start condor_master: %v", err)
 	}
@@ -61,24 +95,17 @@ func TestMCPHTTPIntegration(t *testing.T) {
 
 	// Wait for condor to be ready
 	t.Log("Waiting for HTCondor to be ready...")
-	if err := waitForCondor(tempDir, 30*time.Second); err != nil {
+	if err := waitForCondor(tempDir, 60*time.Second, t); err != nil {
 		t.Fatalf("Condor failed to start: %v", err)
 	}
 	t.Log("HTCondor is ready!")
 
-	// Generate signing key for HTCondor authentication in passwords.d directory
-	passwordsDir := filepath.Join(tempDir, "passwords.d")
-	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
-		t.Fatalf("Failed to create passwords.d directory: %v", err)
-	}
-	signingKeyPath := filepath.Join(passwordsDir, "POOL")
-	key, err := httpserver.GenerateSigningKey()
+	// Find the actual schedd address
+	scheddAddr, err := getScheddAddress(tempDir, 10*time.Second)
 	if err != nil {
-		t.Fatalf("Failed to generate signing key: %v", err)
+		t.Fatalf("Failed to get schedd address: %v", err)
 	}
-	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
-		t.Fatalf("Failed to write signing key: %v", err)
-	}
+	t.Logf("Using schedd address: %s", scheddAddr)
 
 	// Use a fixed port for testing
 	serverPort := 18081
@@ -89,14 +116,14 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
 	// Create HTTP server with MCP enabled
-	server, err := httpserver.NewServer(httpserver.Config{
+	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1:9618",
+		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.local",
-		UIDDomain:      "test.local",
+		SigningKeyPath: passwordsDir, // Pass the directory, GenerateJWT will look for POOL inside
+		TrustDomain:    trustDomain,
+		UIDDomain:      trustDomain,
 		EnableMCP:      true,
 		OAuth2DBPath:   oauth2DBPath,
 		OAuth2Issuer:   baseURL,
@@ -164,16 +191,22 @@ func TestMCPHTTPIntegration(t *testing.T) {
 }
 
 // createOAuth2Client creates a new OAuth2 client in the storage
-func createOAuth2Client(t *testing.T, server *httpserver.Server, username string) (string, string) {
+func createOAuth2Client(t *testing.T, server *Server, username string) (string, string) {
 	// Access the OAuth2 storage directly
 	storage := server.GetOAuth2Provider().GetStorage()
 
 	clientID := "test-client"
 	clientSecret := "test-secret"
 
+	// Hash the client secret with bcrypt (fosite expects hashed secrets)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("Failed to hash client secret: %v", err)
+	}
+
 	client := &fosite.DefaultClient{
 		ID:            clientID,
-		Secret:        []byte(clientSecret),
+		Secret:        hashedSecret,
 		RedirectURIs:  []string{"http://localhost:18081/callback"},
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
@@ -212,7 +245,10 @@ func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clie
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusFound {
+	t.Logf("Authorization response: status=%d", resp.StatusCode)
+
+	// Accept both 302 (Found) and 303 (See Other) as valid OAuth2 redirects
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("Authorization request failed: status %d, body: %s", resp.StatusCode, string(body))
 	}
@@ -221,6 +257,16 @@ func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clie
 	location := resp.Header.Get("Location")
 	if location == "" {
 		t.Fatal("No redirect location in authorization response")
+	}
+
+	t.Logf("Redirect location: %s", location)
+
+	// Check if the redirect contains an error
+	if redirectURL, parseErr := url.Parse(location); parseErr == nil {
+		if errorCode := redirectURL.Query().Get("error"); errorCode != "" {
+			errorDesc := redirectURL.Query().Get("error_description")
+			t.Fatalf("OAuth2 error in redirect: %s - %s", errorCode, errorDesc)
+		}
 	}
 
 	// Parse the authorization code from the redirect URL
