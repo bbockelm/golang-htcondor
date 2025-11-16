@@ -489,6 +489,576 @@ const openAPISchema = `{
           }
         }
       }
+    },
+    "/jobs/{jobId}/hold": {
+      "post": {
+        "summary": "Hold a job",
+        "description": "Hold a specific job by its ID",
+        "operationId": "holdJob",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional reason for holding the job"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Job held successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "type": "object",
+                      "properties": {
+                        "total": {"type": "integer"},
+                        "success": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID or job cannot be held",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{jobId}/release": {
+      "post": {
+        "summary": "Release a held job",
+        "description": "Release a specific held job by its ID",
+        "operationId": "releaseJob",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional reason for releasing the job"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Job released successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "type": "object",
+                      "properties": {
+                        "total": {"type": "integer"},
+                        "success": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID or job cannot be released",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/hold": {
+      "post": {
+        "summary": "Hold jobs by constraint",
+        "description": "Hold multiple jobs matching a ClassAd constraint",
+        "operationId": "bulkHoldJobs",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["constraint"],
+                "properties": {
+                  "constraint": {
+                    "type": "string",
+                    "description": "ClassAd constraint expression"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional reason for holding the jobs"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bulk hold operation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "constraint": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "type": "object",
+                      "properties": {
+                        "total": {"type": "integer"},
+                        "success": {"type": "integer"},
+                        "not_found": {"type": "integer"},
+                        "permission_denied": {"type": "integer"},
+                        "bad_status": {"type": "integer"},
+                        "already_done": {"type": "integer"},
+                        "error": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No jobs matched the constraint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/release": {
+      "post": {
+        "summary": "Release jobs by constraint",
+        "description": "Release multiple held jobs matching a ClassAd constraint",
+        "operationId": "bulkReleaseJobs",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["constraint"],
+                "properties": {
+                  "constraint": {
+                    "type": "string",
+                    "description": "ClassAd constraint expression"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional reason for releasing the jobs"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bulk release operation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "constraint": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "type": "object",
+                      "properties": {
+                        "total": {"type": "integer"},
+                        "success": {"type": "integer"},
+                        "not_found": {"type": "integer"},
+                        "permission_denied": {"type": "integer"},
+                        "bad_status": {"type": "integer"},
+                        "already_done": {"type": "integer"},
+                        "error": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No jobs matched the constraint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/collector/ads": {
+      "get": {
+        "summary": "Query collector for all ads",
+        "description": "Query the HTCondor collector for daemon advertisements",
+        "operationId": "listCollectorAds",
+        "parameters": [
+          {
+            "name": "constraint",
+            "in": "query",
+            "description": "ClassAd constraint expression (default: 'true' for all ads)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "true"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of collector ads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ads": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "ClassAd as a JSON object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Collector not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/collector/ads/{adType}": {
+      "get": {
+        "summary": "Query collector for ads of specific type",
+        "description": "Query the HTCondor collector for daemon advertisements of a specific type",
+        "operationId": "listCollectorAdsByType",
+        "parameters": [
+          {
+            "name": "adType",
+            "in": "path",
+            "required": true,
+            "description": "Ad type (e.g., 'startd', 'schedd', 'master', 'all')",
+            "schema": {
+              "type": "string",
+              "enum": ["all", "startd", "schedd", "master", "submitter", "negotiator", "collector", "machines", "schedds", "masters", "submitters", "negotiators", "collectors"]
+            }
+          },
+          {
+            "name": "constraint",
+            "in": "query",
+            "description": "ClassAd constraint expression (default: 'true' for all ads of this type)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "true"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of collector ads of specified type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ads": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "ClassAd as a JSON object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Collector not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/collector/ads/{adType}/{name}": {
+      "get": {
+        "summary": "Get specific collector ad by name",
+        "description": "Retrieve a specific daemon advertisement from the collector by ad type and name",
+        "operationId": "getCollectorAdByName",
+        "parameters": [
+          {
+            "name": "adType",
+            "in": "path",
+            "required": true,
+            "description": "Ad type (e.g., 'startd', 'schedd', 'master')",
+            "schema": {
+              "type": "string",
+              "enum": ["startd", "schedd", "master", "submitter", "negotiator", "collector", "machines", "schedds", "masters", "submitters", "negotiators", "collectors"]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Name of the daemon",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Daemon ClassAd",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "ClassAd as a JSON object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Ad not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Collector not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }`

@@ -144,7 +144,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 
 	jobID := parts[0]
 
-	// Check if this is a sandbox operation
+	// Check if this is a sandbox operation or job action
 	if len(parts) == 2 {
 		switch parts[1] {
 		case "input":
@@ -152,6 +152,12 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			return
 		case "output":
 			s.handleJobOutput(w, r, jobID)
+			return
+		case "hold":
+			s.handleJobHold(w, r, jobID)
+			return
+		case "release":
+			s.handleJobRelease(w, r, jobID)
 			return
 		}
 	}
@@ -546,6 +552,132 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
+func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
+	// Create authenticated context
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Constraint string `json:"constraint"`
+		Reason     string `json:"reason,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if req.Constraint == "" {
+		s.writeError(w, http.StatusBadRequest, "Constraint is required for bulk hold")
+		return
+	}
+
+	// Default reason if not provided
+	if req.Reason == "" {
+		req.Reason = "Held via HTTP API bulk operation"
+	}
+
+	// Hold jobs by constraint
+	results, err := s.schedd.HoldJobs(ctx, req.Constraint, req.Reason)
+	if err != nil {
+		// Check if it's an authentication error
+		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Bulk job hold failed: %v", err))
+		return
+	}
+
+	// Check results
+	if results.TotalJobs == 0 {
+		s.writeError(w, http.StatusNotFound, "No jobs matched the constraint")
+		return
+	}
+
+	// Return success with statistics
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":    "Bulk job hold completed",
+		"constraint": req.Constraint,
+		"results": map[string]int{
+			"total":             results.TotalJobs,
+			"success":           results.Success,
+			"not_found":         results.NotFound,
+			"permission_denied": results.PermissionDenied,
+			"bad_status":        results.BadStatus,
+			"already_done":      results.AlreadyDone,
+			"error":             results.Error,
+		},
+	})
+}
+
+// handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
+func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
+	// Create authenticated context
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Constraint string `json:"constraint"`
+		Reason     string `json:"reason,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if req.Constraint == "" {
+		s.writeError(w, http.StatusBadRequest, "Constraint is required for bulk release")
+		return
+	}
+
+	// Default reason if not provided
+	if req.Reason == "" {
+		req.Reason = "Released via HTTP API bulk operation"
+	}
+
+	// Release jobs by constraint
+	results, err := s.schedd.ReleaseJobs(ctx, req.Constraint, req.Reason)
+	if err != nil {
+		// Check if it's an authentication error
+		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Bulk job release failed: %v", err))
+		return
+	}
+
+	// Check results
+	if results.TotalJobs == 0 {
+		s.writeError(w, http.StatusNotFound, "No jobs matched the constraint")
+		return
+	}
+
+	// Return success with statistics
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":    "Bulk job release completed",
+		"constraint": req.Constraint,
+		"results": map[string]int{
+			"total":             results.TotalJobs,
+			"success":           results.Success,
+			"not_found":         results.NotFound,
+			"permission_denied": results.PermissionDenied,
+			"bad_status":        results.BadStatus,
+			"already_done":      results.AlreadyDone,
+			"error":             results.Error,
+		},
+	})
+}
+
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
 func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodPut {
@@ -691,4 +823,422 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte(metricsText)); err != nil {
 		s.logger.Error(logging.DestinationMetrics, "Error writing metrics response", "error", err)
 	}
+}
+
+// handleJobHold handles POST /api/v1/jobs/{id}/hold
+func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Parse job ID
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+		return
+	}
+
+	// Parse optional reason from request body
+	var req struct {
+		Reason string `json:"reason,omitempty"`
+	}
+	if r.Body != nil && r.Body != http.NoBody {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			// If body can't be decoded, just use empty reason
+			req.Reason = ""
+		}
+	}
+
+	// Default reason if not provided
+	if req.Reason == "" {
+		req.Reason = "Held via HTTP API"
+	}
+
+	// Build constraint for specific job
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+
+	// Hold the job
+	results, err := s.schedd.HoldJobs(ctx, constraint, req.Reason)
+	if err != nil {
+		// Check if it's an authentication error
+		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job hold failed: %v", err))
+		return
+	}
+
+	// Check if job was found
+	if results.NotFound > 0 {
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
+	if results.Success == 0 {
+		// Job exists but couldn't be held
+		msg := "Failed to hold job"
+		switch {
+		case results.PermissionDenied > 0:
+			msg = "Permission denied to hold job"
+		case results.BadStatus > 0:
+			msg = "Job in wrong status for hold"
+		case results.AlreadyDone > 0:
+			msg = "Job is already held"
+		case results.Error > 0:
+			msg = "Error holding job"
+		}
+		s.writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	// Success
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "Job held successfully",
+		"job_id":  jobID,
+		"results": map[string]int{
+			"total":   results.TotalJobs,
+			"success": results.Success,
+		},
+	})
+}
+
+// handleJobRelease handles POST /api/v1/jobs/{id}/release
+func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Parse job ID
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+		return
+	}
+
+	// Parse optional reason from request body
+	var req struct {
+		Reason string `json:"reason,omitempty"`
+	}
+	if r.Body != nil && r.Body != http.NoBody {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			// If body can't be decoded, just use empty reason
+			req.Reason = ""
+		}
+	}
+
+	// Default reason if not provided
+	if req.Reason == "" {
+		req.Reason = "Released via HTTP API"
+	}
+
+	// Build constraint for specific job
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+
+	// Release the job
+	results, err := s.schedd.ReleaseJobs(ctx, constraint, req.Reason)
+	if err != nil {
+		// Check if it's an authentication error
+		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job release failed: %v", err))
+		return
+	}
+
+	// Check if job was found
+	if results.NotFound > 0 {
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
+	if results.Success == 0 {
+		// Job exists but couldn't be released
+		msg := "Failed to release job"
+		switch {
+		case results.PermissionDenied > 0:
+			msg = "Permission denied to release job"
+		case results.BadStatus > 0:
+			msg = "Job in wrong status for release"
+		case results.AlreadyDone > 0:
+			msg = "Job is already released/not held"
+		case results.Error > 0:
+			msg = "Error releasing job"
+		}
+		s.writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	// Success
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "Job released successfully",
+		"job_id":  jobID,
+		"results": map[string]int{
+			"total":   results.TotalJobs,
+			"success": results.Success,
+		},
+	})
+}
+
+// CollectorAdsResponse represents collector ads listing response
+type CollectorAdsResponse struct {
+	Ads []*classad.ClassAd `json:"ads"`
+}
+
+// handleCollectorAds handles /api/v1/collector/ads endpoint
+func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.collector == nil {
+		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Get query parameters
+	constraint := r.URL.Query().Get("constraint")
+	if constraint == "" {
+		constraint = "true" // Default: all ads
+	}
+
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
+	// Query collector for all ads (using "Machine" which queries STARTD ads)
+	// In a more complete implementation, we'd query all ad types
+	ads, err := s.collector.QueryAdsWithProjection(ctx, "StartdAd", constraint, projection)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+}
+
+// handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
+func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request, adType string) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.collector == nil {
+		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Get query parameters
+	constraint := r.URL.Query().Get("constraint")
+	if constraint == "" {
+		constraint = "true" // Default: all ads of this type
+	}
+
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
+	// Map common ad type names
+	var queryAdType string
+	switch strings.ToLower(adType) {
+	case "all":
+		// For "all", we'll query startd ads as a default
+		// A more complete implementation would query all types and merge
+		queryAdType = "StartdAd"
+	case "startd", "machine", "machines":
+		queryAdType = "StartdAd"
+	case "schedd", "schedds":
+		queryAdType = "ScheddAd"
+	case "master", "masters":
+		queryAdType = "MasterAd"
+	case "submitter", "submitters":
+		queryAdType = "SubmitterAd"
+	case "negotiator", "negotiators":
+		queryAdType = "NegotiatorAd"
+	case "collector", "collectors":
+		queryAdType = "CollectorAd"
+	default:
+		// Try to use the ad type as-is
+		queryAdType = adType
+	}
+
+	// Query collector
+	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+}
+
+// handleCollectorAdByName handles /api/v1/collector/ads/{adType}/{name} endpoint
+func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request, adType, name string) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.collector == nil {
+		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Map ad type
+	var queryAdType string
+	var nameAttr string
+	switch strings.ToLower(adType) {
+	case "startd", "machine", "machines":
+		queryAdType = "StartdAd"
+		nameAttr = "Name"
+	case "schedd", "schedds":
+		queryAdType = "ScheddAd"
+		nameAttr = "Name"
+	case "master", "masters":
+		queryAdType = "MasterAd"
+		nameAttr = "Name"
+	case "submitter", "submitters":
+		queryAdType = "SubmitterAd"
+		nameAttr = "Name"
+	case "negotiator", "negotiators":
+		queryAdType = "NegotiatorAd"
+		nameAttr = "Name"
+	case "collector", "collectors":
+		queryAdType = "CollectorAd"
+		nameAttr = "Name"
+	default:
+		queryAdType = adType
+		nameAttr = "Name"
+	}
+
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
+	// Build constraint for specific ad by name
+	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
+
+	// Query collector
+	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+		return
+	}
+
+	if len(ads) == 0 {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Ad not found: %s/%s", adType, name))
+		return
+	}
+
+	// Return the first matching ad
+	s.writeJSON(w, http.StatusOK, ads[0])
+}
+
+// handleCollectorPath handles /api/v1/collector/* paths with routing
+func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
+	// Strip /api/v1/collector/ prefix
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/collector/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		s.writeError(w, http.StatusNotFound, "Collector endpoint not found")
+		return
+	}
+
+	// Route based on path structure
+	if parts[0] == "ads" {
+		if len(parts) == 1 {
+			// GET /api/v1/collector/ads
+			s.handleCollectorAds(w, r)
+		} else if len(parts) == 2 {
+			// GET /api/v1/collector/ads/{adType}
+			s.handleCollectorAdsByType(w, r, parts[1])
+		} else if len(parts) == 3 {
+			// GET /api/v1/collector/ads/{adType}/{name}
+			s.handleCollectorAdByName(w, r, parts[1], parts[2])
+		} else {
+			s.writeError(w, http.StatusNotFound, "Invalid collector path")
+		}
+	} else {
+		s.writeError(w, http.StatusNotFound, "Collector endpoint not found")
+	}
+}
+
+// handleJobsPath handles /api/v1/jobs/* paths with routing for bulk operations
+func (s *Server) handleJobsPath(w http.ResponseWriter, r *http.Request) {
+	// Strip /api/v1/jobs/ prefix
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		s.writeError(w, http.StatusNotFound, "Jobs endpoint not found")
+		return
+	}
+
+	// Check for bulk hold/release operations
+	if parts[0] == "hold" && len(parts) == 1 {
+		// POST /api/v1/jobs/hold
+		if r.Method == http.MethodPost {
+			s.handleBulkHoldJobs(w, r)
+		} else {
+			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		}
+		return
+	}
+
+	if parts[0] == "release" && len(parts) == 1 {
+		// POST /api/v1/jobs/release
+		if r.Method == http.MethodPost {
+			s.handleBulkReleaseJobs(w, r)
+		} else {
+			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		}
+		return
+	}
+
+	// Otherwise, treat as job ID path
+	s.handleJobByID(w, r)
 }

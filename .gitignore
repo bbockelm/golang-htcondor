@@ -5,6 +5,9 @@
 *.so
 *.dylib
 
+# Main binary
+htcondor-api
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -34,3 +37,11 @@ examples/*/example
 
 # Temporary files and tokens
 cmd/htcondor-api/tmp/
+
+# Command binaries
+htcondor-api
+htcondor-mcp
+
+# Test databases
+oauth2.db
+oauth2.db-*

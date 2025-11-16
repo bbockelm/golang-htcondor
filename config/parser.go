@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-//line parser.y:2
-
 // Statement represents a parsed configuration statement
+//
+//line parser.y:2
 type Statement interface {
 	statement()
 }

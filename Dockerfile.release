@@ -1,0 +1,45 @@
+# Multi-stage build for minimal release container with htcondor-api server
+# Stage 1: Build the htcondor-api binary
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+# Install ca-certificates for go mod download
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /build
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the htcondor-api binary
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -v -ldflags="-w -s" -o htcondor-api ./cmd/htcondor-api
+
+# Stage 2: Create minimal runtime image
+FROM alpine:3.21
+
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates tzdata
+
+# Create a non-root user to run the application
+RUN addgroup -g 1000 htcondor && \
+    adduser -D -u 1000 -G htcondor htcondor
+
+# Copy the binary from builder
+COPY --from=builder /build/htcondor-api /usr/local/bin/htcondor-api
+
+# Switch to non-root user
+USER htcondor
+
+# Expose default HTTP port
+EXPOSE 8080
+
+# Run the htcondor-api server
+ENTRYPOINT ["/usr/local/bin/htcondor-api"]
+CMD ["-listen", ":8080"]

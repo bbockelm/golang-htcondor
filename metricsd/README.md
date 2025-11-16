@@ -261,9 +261,33 @@ The `metricsd` package is inspired by HTCondor's `condor_gangliad` daemon, which
 
 ## Testing
 
+### Unit Tests
+
 ```bash
 go test ./metricsd
 ```
+
+### Integration Tests
+
+The package includes integration tests that verify the metrics collection against a real HTCondor instance. These tests:
+
+- Set up a mini HTCondor instance with collector, schedd, negotiator, and startd
+- Test the PoolCollector against real HTCondor daemon ads
+- Verify Prometheus export format
+- Test metrics caching functionality
+- Validate combined collectors (pool + process)
+
+To run integration tests (requires HTCondor to be installed):
+
+```bash
+# Using make
+make test-integration
+
+# Or directly with go test
+go test -tags=integration -v -timeout=5m ./metricsd/
+```
+
+The integration tests will automatically skip if HTCondor is not installed on the system.
 
 ## Future Enhancements
 

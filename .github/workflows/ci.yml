@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.25']
+        go-version: ['1.24', '1.25']
 
     steps:
     - name: Checkout code
@@ -27,8 +27,8 @@ jobs:
     - name: Install HTCondor
       run: |
         # Add HTCondor APT repository
-        wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key | sudo apt-key add -
-        echo "deb [arch=amd64] http://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/htcondor.list
+        wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key | sudo gpg --dearmor -o /usr/share/keyrings/htcondor-archive-keyring.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/htcondor-archive-keyring.gpg] http://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/htcondor.list
 
         # Update and install HTCondor
         sudo apt-get update
@@ -47,7 +47,7 @@ jobs:
       run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
 
     - name: Upload coverage to Codecov
-      if: matrix.go-version == '1.23'
+      if: matrix.go-version == '1.25'
       uses: codecov/codecov-action@v4
       with:
         files: ./coverage.out
@@ -65,13 +65,12 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25'
+        go-version: '1.24'
         cache: true
 
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v7
       with:
-        version: v2.6.1
         args: --timeout=5m
 
   build:
@@ -85,7 +84,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25'
+        go-version: '1.24'
         cache: true
 
     - name: Build

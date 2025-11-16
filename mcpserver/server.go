@@ -248,6 +248,25 @@ func (s *Server) handleMessage(ctx context.Context, msg *MCPMessage) *MCPMessage
 	return response
 }
 
+// HandleMessage is the public interface for handling MCP messages (used by HTTP handler)
+func (s *Server) HandleMessage(ctx context.Context, msg *MCPMessage) *MCPMessage {
+	return s.handleMessage(ctx, msg)
+}
+
+// SetStdin sets the input stream for the MCP server and returns the previous stream
+func (s *Server) SetStdin(stdin io.Reader) io.Reader {
+	old := s.stdin
+	s.stdin = stdin
+	return old
+}
+
+// SetStdout sets the output stream for the MCP server and returns the previous stream
+func (s *Server) SetStdout(stdout io.Writer) io.Writer {
+	old := s.stdout
+	s.stdout = stdout
+	return old
+}
+
 // handleInitialize handles the initialize request
 func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interface{} {
 	return map[string]interface{}{

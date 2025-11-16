@@ -128,6 +128,29 @@ curl http://localhost:8080/api/v1/jobs/1.0 \
 curl http://localhost:8080/metrics
 ```
 
+**Container Images:**
+
+Pre-built container images are available from GitHub Container Registry:
+
+```bash
+# Pull the latest stable release
+docker pull ghcr.io/bbockelm/golang-htcondor:latest
+
+# Pull a specific version
+docker pull ghcr.io/bbockelm/golang-htcondor:v1.0.0
+
+# Pull the development version (built from main branch)
+docker pull ghcr.io/bbockelm/golang-htcondor:devel
+
+# Run the container
+docker run -p 8080:8080 ghcr.io/bbockelm/golang-htcondor:latest
+
+# Run with demo mode
+docker run -p 8080:8080 ghcr.io/bbockelm/golang-htcondor:latest -demo
+```
+
+The container images are multi-architecture (amd64/arm64) and include only the `htcondor-api` binary with minimal dependencies (~15MB total).
+
 See [httpserver/README.md](httpserver/README.md) for full documentation and [HTTP_API_TODO.md](HTTP_API_TODO.md) for implementation status.
 
 ### Metrics Collection (metricsd)

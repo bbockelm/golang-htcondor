@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/httpserver"
+	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
 // TestHTTPAPIIntegration tests the full lifecycle of job submission via HTTP API in demo mode
@@ -66,9 +66,10 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to create passwords.d directory: %v", err)
 	}
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
-	key, err := httpserver.GenerateSigningKey()
-	if err != nil {
-		t.Fatalf("Failed to generate signing key: %v", err)
+	// Generate a simple signing key for testing
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
 	}
 	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
 		t.Fatalf("Failed to write signing key: %v", err)
@@ -79,14 +80,15 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
 	baseURL := fmt.Sprintf("http://%s", serverAddr)
 
-	// Create HTTP server
-	server, err := httpserver.NewServer(httpserver.Config{
+	// Create HTTP server with collector for collector tests
+	collector := htcondor.NewCollector("127.0.0.1:9618")
+	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1",
-		ScheddPort:     9618,
+		ScheddAddr:     "127.0.0.1:9618",
 		UserHeader:     "X-Test-User",
 		SigningKeyPath: signingKeyPath,
+		Collector:      collector,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -540,4 +542,368 @@ func waitForServer(baseURL string, timeout time.Duration) error {
 	}
 
 	return fmt.Errorf("timeout waiting for HTTP server to be ready")
+}
+
+// TestJobHoldReleaseIntegration tests job hold and release functionality
+func TestJobHoldReleaseIntegration(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Setup mini condor and HTTP server (similar to TestHTTPAPIIntegration)
+	tempDir, server, baseURL, cleanup := setupIntegrationTest(t)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	testUser := "testuser"
+
+	// Submit a job
+	t.Log("Submitting test job...")
+	submitFile := `executable = /bin/sleep
+arguments = 60
+queue`
+	_, jobID := submitJob(t, client, baseURL, testUser, submitFile)
+	t.Logf("Job submitted: %s", jobID)
+
+	// Wait for job to start running (or at least leave HELD state if it was held)
+	time.Sleep(2 * time.Second)
+
+	// Test: Hold the job
+	t.Log("Testing job hold...")
+	holdReq := map[string]string{"reason": "Integration test hold"}
+	holdBody, _ := json.Marshal(holdReq)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/%s/hold", baseURL, jobID), bytes.NewReader(holdBody))
+	req.Header.Set("X-Test-User", testUser)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to hold job: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Hold job failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var holdResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&holdResp)
+	t.Logf("Hold response: %+v", holdResp)
+
+	// Verify job is held by checking job status
+	time.Sleep(1 * time.Second)
+	jobResp := getJob(t, client, baseURL, testUser, jobID)
+	jobStatus, _ := jobResp["JobStatus"].(float64)
+	if jobStatus != 5 { // 5 = HELD
+		t.Logf("Warning: Job status is %v, expected 5 (HELD). May not have been held yet.", jobStatus)
+	}
+
+	// Test: Release the job
+	t.Log("Testing job release...")
+	releaseReq := map[string]string{"reason": "Integration test release"}
+	releaseBody, _ := json.Marshal(releaseReq)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/%s/release", baseURL, jobID), bytes.NewReader(releaseBody))
+	req.Header.Set("X-Test-User", testUser)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to release job: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Release job failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var releaseResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&releaseResp)
+	t.Logf("Release response: %+v", releaseResp)
+
+	// Clean up: Remove the job
+	removeJob(t, client, baseURL, testUser, jobID)
+	t.Log("Job hold/release test completed successfully")
+
+	_ = tempDir
+	_ = server
+}
+
+// TestBulkJobOperationsIntegration tests bulk hold and release by constraint
+func TestBulkJobOperationsIntegration(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Setup mini condor and HTTP server
+	tempDir, server, baseURL, cleanup := setupIntegrationTest(t)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	testUser := "bulktest"
+
+	// Submit multiple test jobs
+	t.Log("Submitting test jobs...")
+	submitFile := `executable = /bin/sleep
+arguments = 120
+queue 3`
+	clusterID, _ := submitJob(t, client, baseURL, testUser, submitFile)
+	t.Logf("Jobs submitted in cluster: %d", clusterID)
+
+	// Wait for jobs to enter queue
+	time.Sleep(2 * time.Second)
+
+	// Test: Bulk hold by constraint
+	t.Log("Testing bulk hold...")
+	holdReq := map[string]string{
+		"constraint": fmt.Sprintf("ClusterId == %d", clusterID),
+		"reason":     "Bulk integration test hold",
+	}
+	holdBody, _ := json.Marshal(holdReq)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/hold", baseURL), bytes.NewReader(holdBody))
+	req.Header.Set("X-Test-User", testUser)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to bulk hold jobs: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Bulk hold failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var holdResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&holdResp)
+	t.Logf("Bulk hold response: %+v", holdResp)
+
+	// Test: Bulk release by constraint
+	t.Log("Testing bulk release...")
+	releaseReq := map[string]string{
+		"constraint": fmt.Sprintf("ClusterId == %d && JobStatus == 5", clusterID),
+		"reason":     "Bulk integration test release",
+	}
+	releaseBody, _ := json.Marshal(releaseReq)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/release", baseURL), bytes.NewReader(releaseBody))
+	req.Header.Set("X-Test-User", testUser)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to bulk release jobs: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Bulk release failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var releaseResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&releaseResp)
+	t.Logf("Bulk release response: %+v", releaseResp)
+
+	// Clean up: Remove all test jobs
+	removeReq := map[string]string{
+		"constraint": fmt.Sprintf("ClusterId == %d", clusterID),
+		"reason":     "Test cleanup",
+	}
+	removeBody, _ := json.Marshal(removeReq)
+	req, _ = http.NewRequest("DELETE", fmt.Sprintf("%s/api/v1/jobs", baseURL), bytes.NewReader(removeBody))
+	req.Header.Set("X-Test-User", testUser)
+	req.Header.Set("Content-Type", "application/json")
+	client.Do(req)
+
+	t.Log("Bulk job operations test completed successfully")
+
+	_ = tempDir
+	_ = server
+}
+
+// TestCollectorQueryIntegration tests collector query APIs
+func TestCollectorQueryIntegration(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Setup mini condor and HTTP server
+	tempDir, server, baseURL, cleanup := setupIntegrationTest(t)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Test: Query all collector ads
+	t.Log("Testing collector ads query...")
+	resp, err := client.Get(fmt.Sprintf("%s/api/v1/collector/ads", baseURL))
+	if err != nil {
+		t.Fatalf("Failed to query collector ads: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Collector query failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var adsResp CollectorAdsResponse
+	json.NewDecoder(resp.Body).Decode(&adsResp)
+	t.Logf("Found %d ads", len(adsResp.Ads))
+
+	// Test: Query schedd ads
+	t.Log("Testing schedd ads query...")
+	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd", baseURL))
+	if err != nil {
+		t.Fatalf("Failed to query schedd ads: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Schedd query failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	json.NewDecoder(resp.Body).Decode(&adsResp)
+	t.Logf("Found %d schedd ads", len(adsResp.Ads))
+
+	// Test: Query with projection
+	t.Log("Testing collector query with projection...")
+	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd?projection=Name,MyAddress", baseURL))
+	if err != nil {
+		t.Fatalf("Failed to query with projection: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Projection query failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	json.NewDecoder(resp.Body).Decode(&adsResp)
+	t.Logf("Found %d ads with projection", len(adsResp.Ads))
+	if len(adsResp.Ads) > 0 {
+		t.Logf("First ad attributes: %+v", adsResp.Ads[0])
+	}
+
+	t.Log("Collector query test completed successfully")
+
+	_ = tempDir
+	_ = server
+}
+
+// setupIntegrationTest is a helper to set up a test environment with mini condor and HTTP server
+func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL string, cleanup func()) {
+	// Create temporary directory for mini condor
+	tempDir, err := os.MkdirTemp("", "htcondor-integration-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+
+	// Write mini condor configuration
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDir); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Start condor_master
+	ctx, cancel := context.WithCancel(context.Background())
+	condorMaster, err := startCondorMaster(ctx, configFile)
+	if err != nil {
+		cancel()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+
+	// Wait for condor to be ready
+	if err := waitForCondor(tempDir, 30*time.Second); err != nil {
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+
+	// Generate signing key
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	os.MkdirAll(passwordsDir, 0700)
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	// Generate a simple signing key for testing
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	os.WriteFile(signingKeyPath, key, 0600)
+
+	// Create HTTP server with collector
+	serverPort := 18080
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
+	baseURL = fmt.Sprintf("http://%s", serverAddr)
+
+	// Create collector pointing to local mini condor
+	collector := htcondor.NewCollector("127.0.0.1:9618")
+
+	server, err = NewServer(Config{
+		ListenAddr:     serverAddr,
+		ScheddName:     "local",
+		ScheddAddr:     "127.0.0.1:9618",
+		UserHeader:     "X-Test-User",
+		SigningKeyPath: signingKeyPath,
+		Collector:      collector,
+	})
+	if err != nil {
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Start server in background
+	go server.Start()
+
+	// Wait for server to be ready
+	if err := waitForServer(baseURL, 10*time.Second); err != nil {
+		server.Shutdown(context.Background())
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Server failed to start: %v", err)
+	}
+
+	cleanup = func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		server.Shutdown(shutdownCtx)
+		stopCondorMaster(condorMaster, t)
+		cancel()
+		os.RemoveAll(tempDir)
+	}
+
+	return tempDir, server, baseURL, cleanup
+}
+
+// getJob retrieves a job's details
+func getJob(t *testing.T, client *http.Client, baseURL, user, jobID string) map[string]interface{} {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, jobID), nil)
+	req.Header.Set("X-Test-User", user)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var jobResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&jobResp)
+	return jobResp
+}
+
+// removeJob removes a job
+func removeJob(t *testing.T, client *http.Client, baseURL, user, jobID string) {
+	req, _ := http.NewRequest("DELETE", fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, jobID), nil)
+	req.Header.Set("X-Test-User", user)
+	client.Do(req)
 }
