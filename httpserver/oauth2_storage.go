@@ -19,7 +19,7 @@ type OAuth2Storage struct {
 
 // NewOAuth2Storage creates a new OAuth2 storage backed by SQLite
 func NewOAuth2Storage(dbPath string) (*OAuth2Storage, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -97,9 +97,31 @@ func (s *OAuth2Storage) createTables() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS oauth2_oidc_sessions (
+		signature TEXT PRIMARY KEY,
+		request_id TEXT NOT NULL,
+		requested_at TIMESTAMP NOT NULL,
+		client_id TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		granted_scopes TEXT NOT NULL,
+		form_data TEXT NOT NULL,
+		session_data TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS oauth2_jwt_assertions (
+		jti TEXT PRIMARY KEY,
+		expires_at TIMESTAMP NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON oauth2_access_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth2_refresh_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_authorization_codes_client ON oauth2_authorization_codes(client_id);
+	CREATE INDEX IF NOT EXISTS idx_oidc_sessions_client ON oauth2_oidc_sessions(client_id);
+	CREATE INDEX IF NOT EXISTS idx_jwt_assertions_expires ON oauth2_jwt_assertions(expires_at);
 	`
 
 	_, err := s.db.ExecContext(context.Background(), schema)
@@ -418,4 +440,57 @@ func (s *OAuth2Storage) LoadRSAKey(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return privateKeyPEM, nil
+}
+
+// ClientAssertionJWTValid implements fosite.ClientAssertionJWTValid interface
+// This checks if a JWT ID (JTI) has already been used to prevent replay attacks
+func (s *OAuth2Storage) ClientAssertionJWTValid(ctx context.Context, jti string) error {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth2_jwt_assertions WHERE jti = ? AND expires_at > ?`, jti, time.Now()).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check JWT assertion: %w", err)
+	}
+	if count > 0 {
+		return fosite.ErrJTIKnown
+	}
+	return nil
+}
+
+// SetClientAssertionJWT implements fosite.SetClientAssertionJWT interface
+// This stores the JTI (JWT ID) with expiration to prevent replay attacks
+func (s *OAuth2Storage) SetClientAssertionJWT(ctx context.Context, jti string, exp time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO oauth2_jwt_assertions (jti, expires_at) VALUES (?, ?)`, jti, exp)
+	if err != nil {
+		return fmt.Errorf("failed to store JWT assertion: %w", err)
+	}
+
+	// Clean up expired JWT assertions to prevent database bloat
+	// This is done opportunistically on each insert
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM oauth2_jwt_assertions WHERE expires_at < ?`, time.Now())
+
+	return nil
+}
+
+// RevokeRefreshTokenMaybeGracePeriod implements fosite.TokenRevocationStorage interface
+// This handles refresh token revocation. The signature parameter allows for grace period implementation
+// but for simplicity we immediately revoke the token by request ID
+func (s *OAuth2Storage) RevokeRefreshTokenMaybeGracePeriod(ctx context.Context, requestID string, _ string) error {
+	// Immediately revoke the refresh token
+	// For grace period support, you could store the signature and delay actual revocation
+	return s.RevokeRefreshToken(ctx, requestID)
+}
+
+// CreateOpenIDConnectSession implements openid.OpenIDConnectRequestStorage interface
+func (s *OAuth2Storage) CreateOpenIDConnectSession(ctx context.Context, signature string, requester fosite.Requester) error {
+	return s.createTokenSession(ctx, "oauth2_oidc_sessions", signature, requester)
+}
+
+// GetOpenIDConnectSession implements openid.OpenIDConnectRequestStorage interface
+func (s *OAuth2Storage) GetOpenIDConnectSession(ctx context.Context, signature string, requester fosite.Requester) (fosite.Requester, error) {
+	return s.getTokenSession(ctx, "oauth2_oidc_sessions", signature, requester.GetSession())
+}
+
+// DeleteOpenIDConnectSession implements openid.OpenIDConnectRequestStorage interface
+func (s *OAuth2Storage) DeleteOpenIDConnectSession(ctx context.Context, signature string) error {
+	return s.deleteTokenSession(ctx, "oauth2_oidc_sessions", signature)
 }

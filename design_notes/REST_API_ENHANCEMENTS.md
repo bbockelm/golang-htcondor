@@ -18,7 +18,7 @@ This document summarizes the REST API enhancements made to the golang-htcondor H
 
 **POST /api/v1/jobs/{jobId}/release**
 - Releases a held job by its ID
-- Accepts optional reason in request body  
+- Accepts optional reason in request body
 - Returns success/failure with detailed results
 - Integrated with existing HTCondor `ReleaseJobs` functionality
 

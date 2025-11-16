@@ -76,18 +76,22 @@ func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
 	}
 
-	// Create JWK strategy for signing
-	jwtStrategy := &jwt.DefaultSigner{
-		GetPrivateKey: func(_ context.Context) (interface{}, error) {
-			return privateKey, nil
-		},
+	// Create key getter function for OpenID strategy
+	keyGetter := func(_ context.Context) (interface{}, error) {
+		return privateKey, nil
 	}
 
-	// Create OAuth2 provider - removed OAuth2ClientCredentialsGrantFactory
+	// Create strategy with proper key
+	strategy := &compose.CommonStrategy{
+		CoreStrategy:               compose.NewOAuth2HMACStrategy(config),
+		OpenIDConnectTokenStrategy: compose.NewOpenIDConnectStrategy(keyGetter, config),
+	}
+
+	// Create OAuth2 provider with proper strategy
 	oauth2Provider := compose.Compose(
 		config,
 		storage,
-		jwtStrategy,
+		strategy,
 		compose.OAuth2AuthorizeExplicitFactory,
 		compose.OAuth2RefreshTokenGrantFactory,
 		compose.OpenIDConnectExplicitFactory,
