@@ -3,14 +3,13 @@ package httpserver
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // authContextKey is the type for the authentication context key
@@ -102,115 +101,52 @@ func NewTokenCache() *TokenCache {
 	}
 }
 
-// parseJWTExpiration extracts the expiration time from a JWT token
+// parseJWTExpiration extracts the expiration time from a JWT token using the JWT library
 // Returns the expiration time or an error if parsing fails
 func parseJWTExpiration(token string) (time.Time, error) {
-	// JWT format: header.payload.signature
-	parts := []byte(token)
-	dotCount := 0
-	payloadStart := 0
-	payloadEnd := 0
-
-	for i, b := range parts {
-		if b == '.' {
-			dotCount++
-			if dotCount == 1 {
-				payloadStart = i + 1
-			} else if dotCount == 2 {
-				payloadEnd = i
-				break
-			}
-		}
-	}
-
-	if dotCount < 2 {
-		return time.Time{}, fmt.Errorf("invalid JWT format")
-	}
-
-	// Decode the payload (base64url)
-	payloadB64 := string(parts[payloadStart:payloadEnd])
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	// Parse the token without verification (we just need to read claims)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsedToken, _, err := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+		return time.Time{}, fmt.Errorf("failed to parse JWT: %w", err)
 	}
 
-	// Parse JSON to extract exp claim
-	var claims map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse JWT payload: %w", err)
-	}
-
-	// Extract expiration time
-	exp, ok := claims["exp"]
+	// Extract standard claims
+	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
 	if !ok {
+		return time.Time{}, fmt.Errorf("failed to extract JWT claims")
+	}
+
+	// Check if expiration is set
+	if claims.ExpiresAt == nil {
 		return time.Time{}, fmt.Errorf("JWT missing exp claim")
 	}
 
-	var expTime int64
-	switch v := exp.(type) {
-	case float64:
-		expTime = int64(v)
-	case int64:
-		expTime = v
-	case int:
-		expTime = int64(v)
-	default:
-		return time.Time{}, fmt.Errorf("JWT exp claim is not a valid timestamp")
-	}
-
-	return time.Unix(expTime, 0), nil
+	return claims.ExpiresAt.Time, nil
 }
 
-// parseJWTUsername extracts the username (sub claim) from a JWT token
+// parseJWTUsername extracts the username (sub claim) from a JWT token using the JWT library
 // Returns the username or an error if parsing fails
 func parseJWTUsername(token string) (string, error) {
-	// JWT format: header.payload.signature
-	parts := []byte(token)
-	dotCount := 0
-	payloadStart := 0
-	payloadEnd := 0
-
-	for i, b := range parts {
-		if b == '.' {
-			dotCount++
-			if dotCount == 1 {
-				payloadStart = i + 1
-			} else if dotCount == 2 {
-				payloadEnd = i
-				break
-			}
-		}
-	}
-
-	if dotCount < 2 {
-		return "", fmt.Errorf("invalid JWT format")
-	}
-
-	// Decode the payload (base64url)
-	payloadB64 := string(parts[payloadStart:payloadEnd])
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	// Parse the token without verification (we just need to read claims)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsedToken, _, err := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
 	if err != nil {
-		return "", fmt.Errorf("failed to decode JWT payload: %w", err)
+		return "", fmt.Errorf("failed to parse JWT: %w", err)
 	}
 
-	// Parse JSON to extract sub claim
-	var claims map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return "", fmt.Errorf("failed to parse JWT payload: %w", err)
-	}
-
-	// Extract username from sub claim
-	sub, ok := claims["sub"]
+	// Extract standard claims
+	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
 	if !ok {
+		return "", fmt.Errorf("failed to extract JWT claims")
+	}
+
+	// Check if subject is set
+	if claims.Subject == "" {
 		return "", fmt.Errorf("JWT missing sub claim")
 	}
 
-	username, ok := sub.(string)
-	if !ok {
-		return "", fmt.Errorf("JWT sub claim is not a string")
-	}
-
-	return username, nil
+	return claims.Subject, nil
 }
 
 // Add adds a validated token to the cache with a session cache

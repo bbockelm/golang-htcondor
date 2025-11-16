@@ -935,15 +935,13 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 
 	t.Logf("Using temporary directory: %s", tempDir)
 
-	// Allocate random ports for collector and schedd
-	collectorPort := findAvailablePort(t)
-	scheddPort := findAvailablePort(t)
+	// Allocate random port for HTTP server (HTCondor will use port 0 for auto-assignment)
 	httpServerPort := findAvailablePort(t)
-	t.Logf("Using collector port: %d, schedd port: %d, HTTP server port: %d", collectorPort, scheddPort, httpServerPort)
+	t.Logf("Using HTTP server port: %d (HTCondor will auto-assign collector and schedd ports)", httpServerPort)
 
-	// Write mini condor configuration with rate limiting
+	// Write mini condor configuration with rate limiting (using port 0 for auto-assignment)
 	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfigWithRateLimit(configFile, tempDir, collectorPort, scheddPort); err != nil {
+	if err := writeMiniCondorConfigWithRateLimit(configFile, tempDir, 0, 0); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
@@ -983,9 +981,9 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", httpServerPort)
 	baseURL := fmt.Sprintf("http://%s", serverAddr)
 
-	// Create server (Note: schedd address will be discovered from collector)
-	collectorAddr := fmt.Sprintf("127.0.0.1:%d", collectorPort)
-	collector := htcondor.NewCollector(collectorAddr)
+	// Create collector using local address (collector will auto-discover from condor config)
+	// Since HTCondor is using port 0, the actual port will be assigned by HTCondor
+	collector := htcondor.NewCollector("") // Empty string means use local condor config
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",

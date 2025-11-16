@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -30,9 +31,17 @@ type Server struct {
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
-	tokenCache         *TokenCache     // Cache of validated tokens and their session caches
-	oauth2Provider     *OAuth2Provider // OAuth2 provider for MCP endpoints
-	oauth2Config       *oauth2.Config  // OAuth2 client config for SSO
+	tokenCache         *TokenCache          // Cache of validated tokens and their session caches
+	oauth2Provider     *OAuth2Provider      // OAuth2 provider for MCP endpoints
+	oauth2Config       *oauth2.Config       // OAuth2 client config for SSO
+	validatedTokens    map[string]TokenInfo // Cache of validated tokens for rate limiting
+	tokenMutex         sync.RWMutex
+}
+
+// TokenInfo stores information about a validated token
+type TokenInfo struct {
+	Username   string
+	Expiration time.Time
 }
 
 // Config holds server configuration
@@ -98,14 +107,15 @@ func NewServer(cfg Config) (*Server, error) {
 	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
 	s := &Server{
-		schedd:         schedd,
-		collector:      cfg.Collector,
-		trustDomain:    cfg.TrustDomain,
-		uidDomain:      cfg.UIDDomain,
-		userHeader:     cfg.UserHeader,
-		signingKeyPath: cfg.SigningKeyPath,
-		logger:         logger,
-		tokenCache:     NewTokenCache(), // Initialize token cache
+		schedd:          schedd,
+		collector:       cfg.Collector,
+		trustDomain:     cfg.TrustDomain,
+		uidDomain:       cfg.UIDDomain,
+		userHeader:      cfg.UserHeader,
+		signingKeyPath:  cfg.SigningKeyPath,
+		logger:          logger,
+		tokenCache:      NewTokenCache(),            // Initialize token cache
+		validatedTokens: make(map[string]TokenInfo), // Initialize validated tokens map
 	}
 
 	// Setup OAuth2 provider if MCP is enabled
@@ -206,6 +216,12 @@ func NewServer(cfg Config) (*Server, error) {
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
+
+	// Start token cleanup goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.startTokenCleanup(ctx)
+
 	return s.httpServer.ListenAndServe()
 }
 
@@ -232,6 +248,64 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // GetOAuth2Provider returns the OAuth2 provider (for testing)
 func (s *Server) GetOAuth2Provider() *OAuth2Provider {
 	return s.oauth2Provider
+}
+
+// markTokenValidated adds a token to the validated cache after successful authentication
+func (s *Server) markTokenValidated(token, username string, expiration time.Time) {
+	s.tokenMutex.Lock()
+	defer s.tokenMutex.Unlock()
+	s.validatedTokens[token] = TokenInfo{
+		Username:   username,
+		Expiration: expiration,
+	}
+}
+
+// getValidatedUsername returns the username if the token is in the validated cache and not expired
+// Returns empty string if token is not validated or expired
+func (s *Server) getValidatedUsername(token string) string {
+	s.tokenMutex.RLock()
+	defer s.tokenMutex.RUnlock()
+
+	info, exists := s.validatedTokens[token]
+	if !exists {
+		return ""
+	}
+
+	// Check if token is expired
+	if time.Now().After(info.Expiration) {
+		return ""
+	}
+
+	return info.Username
+}
+
+// startTokenCleanup starts a goroutine that periodically removes expired tokens from cache
+func (s *Server) startTokenCleanup(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.cleanupExpiredTokens()
+			}
+		}
+	}()
+}
+
+// cleanupExpiredTokens removes expired tokens from the cache
+func (s *Server) cleanupExpiredTokens() {
+	s.tokenMutex.Lock()
+	defer s.tokenMutex.Unlock()
+
+	now := time.Now()
+	for token, info := range s.validatedTokens {
+		if now.After(info.Expiration) {
+			delete(s.validatedTokens, token)
+		}
+	}
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written
@@ -482,23 +556,39 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
-	// Extract username for rate limiting
+	// Extract username for rate limiting - only use from tokens that have been cached (validated)
 	var username string
 	if s.userHeader != "" {
 		// Check if using user header mode
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
-			// User header mode - get username from header
+			// User header mode - username is always trusted from header
 			username = r.Header.Get(s.userHeader)
+		} else {
+			// Real bearer token - only use username if token is already in cache (validated)
+			if entry, exists := s.tokenCache.Get(token); exists {
+				// Token has been successfully used before, extract username
+				if parsedUsername, err := parseJWTUsername(token); err == nil {
+					username = parsedUsername
+					// Also mark in validated tokens cache
+					s.markTokenValidated(token, parsedUsername, entry.Expiration)
+				}
+			}
+		}
+	} else {
+		// Not using user header mode - only use username if token is in cache
+		if entry, exists := s.tokenCache.Get(token); exists {
+			// Token has been successfully used before, extract username
+			if parsedUsername, err := parseJWTUsername(token); err == nil {
+				username = parsedUsername
+				// Also mark in validated tokens cache
+				s.markTokenValidated(token, parsedUsername, entry.Expiration)
+			}
 		}
 	}
 
-	// If username not from header, try to extract from JWT token
-	if username == "" {
-		username, _ = parseJWTUsername(token)
-	}
-
-	// Set username in context for rate limiting (empty string will be treated as "unauthenticated")
+	// Set username in context for rate limiting only if from validated token
+	// Otherwise treated as "unauthenticated"
 	if username != "" {
 		ctx = htcondor.WithAuthenticatedUser(ctx, username)
 	}
