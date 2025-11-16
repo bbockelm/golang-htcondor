@@ -56,7 +56,7 @@ jobs:
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
           golang-htcondor:test-${{ matrix.tag }} \
-          go build -v ./...
+          /bin/sh -c "git config --global --add safe.directory /workspace && go build -v ./...
 
   docker-integration-test:
     name: Integration Test in Docker
@@ -86,18 +86,8 @@ jobs:
           -w /workspace \
           golang-htcondor:integration-test \
           /bin/bash -c "
-            # Start HTCondor
-            sudo condor_master
-
-            # Wait for HTCondor to start
-            echo 'Waiting for HTCondor to start...'
-            sleep 10
-
-            # Check HTCondor status
-            condor_status || echo 'HTCondor status check failed, continuing anyway...'
-
             # Run integration tests
-            go test -v -tags=integration -timeout=10m ./httpserver/ || true
+            go test -v -tags=integration -timeout=10m ./httpserver/
           "
 
   docker-verify-env:

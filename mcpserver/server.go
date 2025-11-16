@@ -40,6 +40,7 @@ type TokenInfo struct {
 type Config struct {
 	ScheddName      string              // Schedd name
 	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	Schedd          *htcondor.Schedd    // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
 	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
 	TrustDomain     string              // Trust domain for token issuer (optional)
 	UIDDomain       string              // UID domain for generated token username (optional)
@@ -66,24 +67,32 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 
-	// Discover schedd address if not provided
-	scheddAddr := cfg.ScheddAddr
-	if scheddAddr == "" {
-		if cfg.Collector == nil {
-			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
+	// Use provided schedd or create new one
+	var schedd *htcondor.Schedd
+	if cfg.Schedd != nil {
+		// Reuse provided schedd instance
+		logger.Debug(logging.DestinationSchedd, "Using provided schedd instance")
+		schedd = cfg.Schedd
+	} else {
+		// Discover schedd address if not provided
+		scheddAddr := cfg.ScheddAddr
+		if scheddAddr == "" {
+			if cfg.Collector == nil {
+				return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
+			}
+
+			logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+			var err error
+			scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to discover schedd: %w", err)
+			}
+			logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
 		}
 
-		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
-		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover schedd: %w", err)
-		}
-		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
+		// Create schedd with the address as-is (can be host:port or sinful string)
+		schedd = htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 	}
-
-	// Create schedd with the address as-is (can be host:port or sinful string)
-	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
 	// Default I/O streams
 	stdin := cfg.Stdin

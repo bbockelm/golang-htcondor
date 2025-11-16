@@ -76,18 +76,39 @@ func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
 	}
 
-	// Create JWK strategy for signing
-	jwtStrategy := &jwt.DefaultSigner{
-		GetPrivateKey: func(_ context.Context) (interface{}, error) {
-			return privateKey, nil
-		},
+	// Generate or load HMAC secret (32 bytes for HMAC-SHA512/256)
+	hmacSecret, err := storage.LoadHMACSecret(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load HMAC secret: %w", err)
+	}
+	if len(hmacSecret) == 0 {
+		// Generate new HMAC secret
+		hmacSecret = make([]byte, 32)
+		if _, err := rand.Read(hmacSecret); err != nil {
+			return nil, fmt.Errorf("failed to generate HMAC secret: %w", err)
+		}
+		if err := storage.SaveHMACSecret(ctx, hmacSecret); err != nil {
+			return nil, fmt.Errorf("failed to save HMAC secret: %w", err)
+		}
+	}
+	config.GlobalSecret = hmacSecret
+
+	// Create key getter function for OpenID strategy
+	keyGetter := func(_ context.Context) (interface{}, error) {
+		return privateKey, nil
 	}
 
-	// Create OAuth2 provider - removed OAuth2ClientCredentialsGrantFactory
+	// Create strategy with proper key
+	strategy := &compose.CommonStrategy{
+		CoreStrategy:               compose.NewOAuth2HMACStrategy(config),
+		OpenIDConnectTokenStrategy: compose.NewOpenIDConnectStrategy(keyGetter, config),
+	}
+
+	// Create OAuth2 provider with proper strategy
 	oauth2Provider := compose.Compose(
 		config,
 		storage,
-		jwtStrategy,
+		strategy,
 		compose.OAuth2AuthorizeExplicitFactory,
 		compose.OAuth2RefreshTokenGrantFactory,
 		compose.OpenIDConnectExplicitFactory,

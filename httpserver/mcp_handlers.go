@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/mcpserver"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/handler/openid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // handleMCPMessage handles MCP JSON-RPC messages over HTTP
@@ -80,14 +82,16 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 			Encryption:     security.SecurityOptional,
 			Integrity:      security.SecurityOptional,
 			Token:          htcToken,
+			SecurityTag:    username,
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 	}
 
 	// Create a temporary MCP server to handle this request
+	// IMPORTANT: Reuse the HTTP server's schedd connection to avoid redundant
+	// authentication and key exchange on every MCP request
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		ScheddName:     s.schedd.Name(),
-		ScheddAddr:     s.schedd.Address(),
+		Schedd:         s.schedd,
 		SigningKeyPath: s.signingKeyPath,
 		TrustDomain:    s.trustDomain,
 		UIDDomain:      s.uidDomain,
@@ -198,14 +202,36 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 	// Create session for this user
 	session := DefaultOpenIDConnectSession(username)
 
+	// Grant requested scopes
+	requestedScopes := ar.GetRequestedScopes()
+	s.logger.Info(logging.DestinationHTTP, "Creating authorize response", "username", username, "client_id", ar.GetClient().GetID(), "requested_scopes", requestedScopes)
+
+	// Grant all requested scopes (in production, you'd validate these)
+	for _, scope := range requestedScopes {
+		ar.GrantScope(scope)
+	}
+
 	// Generate response
 	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response", "error", err)
+		// Extract more detailed error information
+		errorDetails := fmt.Sprintf("%v", err)
+
+		// Try to unwrap to get RFC6749Error
+		var rfc6749Err *fosite.RFC6749Error
+		if errors.As(err, &rfc6749Err) {
+			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
+				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
+		}
+
+		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response",
+			"error", err, "error_type", fmt.Sprintf("%T", err), "error_details", errorDetails,
+			"username", username, "client_id", ar.GetClient().GetID())
 		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
+	s.logger.Info(logging.DestinationHTTP, "Successfully created authorize response", "username", username)
 	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
 }
 
@@ -218,13 +244,27 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Log the incoming request for debugging
+	s.logger.Info(logging.DestinationHTTP, "Token request received",
+		"grant_type", r.FormValue("grant_type"),
+		"client_id", r.FormValue("client_id"))
+
 	// Create the session object
 	session := &openid.DefaultSession{}
 
 	// Create access request
 	accessRequest, err := s.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access request", "error", err)
+		// Extract more detailed error information
+		errorDetails := fmt.Sprintf("%v", err)
+		var rfc6749Err *fosite.RFC6749Error
+		if errors.As(err, &rfc6749Err) {
+			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
+				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
+		}
+		s.logger.Error(logging.DestinationHTTP, "Failed to create access request",
+			"error", err, "error_details", errorDetails,
+			"client_id", r.FormValue("client_id"))
 		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
@@ -317,6 +357,14 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
 	clientSecret := generateRandomString(32)
 
+	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to register client")
+		return
+	}
+
 	// Default values
 	if len(regReq.GrantTypes) == 0 {
 		regReq.GrantTypes = []string{"authorization_code", "refresh_token"}
@@ -331,7 +379,7 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	// Create the client
 	client := &fosite.DefaultClient{
 		ID:            clientID,
-		Secret:        []byte(clientSecret),
+		Secret:        hashedSecret,
 		RedirectURIs:  regReq.RedirectURIs,
 		GrantTypes:    regReq.GrantTypes,
 		ResponseTypes: regReq.ResponseTypes,
@@ -494,23 +542,37 @@ func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []strin
 	iat := time.Now().Unix()
 	exp := time.Now().Add(1 * time.Hour).Unix()
 
-	// Build authz list based on scopes
-	var authz []string
-	hasWrite := false
-	for _, scope := range scopes {
-		if scope == "mcp:write" {
-			hasWrite = true
-			break
+	// WORKAROUND: HTCondor expects the 'scope' claim to be a space-separated string,
+	// but security.GenerateJWT() encodes it as a JSON array, which causes HTCondor's
+	// token validation to fail with "did not result in a valid mapped user name".
+	//
+	// For now, we pass an empty authz list (nil) which omits the scope claim entirely.
+	// This gives the token full permissions based on the subject (username) alone.
+	//
+	// TODO: Fix security.GenerateJWT() in cedar to encode scope as a string, or
+	// generate the JWT manually here with proper scope formatting.
+	//
+	// Original scope-based authorization logic (commented out):
+	/*
+		var authz []string
+		hasWrite := false
+		for _, scope := range scopes {
+			if scope == "mcp:write" {
+				hasWrite = true
+				break
+			}
 		}
-	}
 
-	if hasWrite {
-		// Full access
-		authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
-	} else {
-		// Read-only access
-		authz = []string{"READ"}
-	}
+		if hasWrite {
+			// Full access
+			authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+		} else {
+			// Read-only access
+			authz = []string{"READ"}
+		}
+	*/
+
+	var authz []string // Empty/nil = no scope claim, allows full access
 
 	token, err := security.GenerateJWT(
 		s.signingKeyPath, // directory

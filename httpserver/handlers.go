@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -150,7 +151,27 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 
 	jobID := parts[0]
 
-	// Check if this is a sandbox operation or job action
+	// Check for bulk operations at /api/v1/jobs/hold or /api/v1/jobs/release
+	if len(parts) == 1 {
+		switch jobID {
+		case "hold":
+			if r.Method == http.MethodPost {
+				s.handleBulkHoldJobs(w, r)
+			} else {
+				s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			}
+			return
+		case "release":
+			if r.Method == http.MethodPost {
+				s.handleBulkReleaseJobs(w, r)
+			} else {
+				s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			}
+			return
+		}
+	}
+
+	// Check if this is a sandbox operation or job action on a specific job
 	if len(parts) == 2 {
 		switch parts[1] {
 		case "input":
@@ -562,47 +583,30 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
-func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
-	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
-	if err != nil {
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-		return
-	}
-
-	// Parse request body
+// parseBulkActionRequest parses constraint and reason from request body for bulk operations
+func (s *Server) parseBulkActionRequest(r *http.Request, actionName string) (constraint, reason string, err error) {
 	var req struct {
 		Constraint string `json:"constraint"`
 		Reason     string `json:"reason,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
-		return
+		return "", "", fmt.Errorf("invalid request body: %w", err)
 	}
 
 	if req.Constraint == "" {
-		s.writeError(w, http.StatusBadRequest, "Constraint is required for bulk hold")
-		return
+		return "", "", fmt.Errorf("constraint is required for bulk %s", actionName)
 	}
 
 	// Default reason if not provided
 	if req.Reason == "" {
-		req.Reason = "Held via HTTP API bulk operation"
+		req.Reason = fmt.Sprintf("%s via HTTP API bulk operation", actionName)
 	}
 
-	// Hold jobs by constraint
-	results, err := s.schedd.HoldJobs(ctx, req.Constraint, req.Reason)
-	if err != nil {
-		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Bulk job hold failed: %v", err))
-		return
-	}
+	return req.Constraint, req.Reason, nil
+}
 
+// handleBulkActionResults checks results and writes appropriate response for bulk operations
+func (s *Server) handleBulkActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, constraint, actionName string) {
 	// Check results
 	if results.TotalJobs == 0 {
 		s.writeError(w, http.StatusNotFound, "No jobs matched the constraint")
@@ -611,8 +615,8 @@ func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Return success with statistics
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message":    "Bulk job hold completed",
-		"constraint": req.Constraint,
+		"message":    fmt.Sprintf("Bulk job %s completed", actionName),
+		"constraint": constraint,
 		"results": map[string]int{
 			"total":             results.TotalJobs,
 			"success":           results.Success,
@@ -625,8 +629,11 @@ func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
-func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
+// JobActionFunc is a function that performs a job action (hold, release, etc.)
+type JobActionFunc func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error)
+
+// handleBulkJobAction is a generic handler for bulk job actions (hold, release, etc.)
+func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, actionName, actionVerb string, actionFunc JobActionFunc) {
 	// Create authenticated context
 	ctx, err := s.createAuthenticatedContext(r)
 	if err != nil {
@@ -635,57 +642,35 @@ func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse request body
-	var req struct {
-		Constraint string `json:"constraint"`
-		Reason     string `json:"reason,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+	constraint, reason, err := s.parseBulkActionRequest(r, actionName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if req.Constraint == "" {
-		s.writeError(w, http.StatusBadRequest, "Constraint is required for bulk release")
-		return
-	}
-
-	// Default reason if not provided
-	if req.Reason == "" {
-		req.Reason = "Released via HTTP API bulk operation"
-	}
-
-	// Release jobs by constraint
-	results, err := s.schedd.ReleaseJobs(ctx, req.Constraint, req.Reason)
+	// Perform action
+	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
 		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Bulk job release failed: %v", err))
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Bulk job %s failed: %v", actionVerb, err))
 		return
 	}
 
-	// Check results
-	if results.TotalJobs == 0 {
-		s.writeError(w, http.StatusNotFound, "No jobs matched the constraint")
-		return
-	}
+	s.handleBulkActionResults(w, results, constraint, actionVerb)
+}
 
-	// Return success with statistics
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message":    "Bulk job release completed",
-		"constraint": req.Constraint,
-		"results": map[string]int{
-			"total":             results.TotalJobs,
-			"success":           results.Success,
-			"not_found":         results.NotFound,
-			"permission_denied": results.PermissionDenied,
-			"bad_status":        results.BadStatus,
-			"already_done":      results.AlreadyDone,
-			"error":             results.Error,
-		},
-	})
+// handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
+func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
+	s.handleBulkJobAction(w, r, "Held", "hold", s.schedd.HoldJobs)
+}
+
+// handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
+func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
+	s.handleBulkJobAction(w, r, "Released", "release", s.schedd.ReleaseJobs)
 }
 
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
@@ -839,25 +824,40 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleJobHold handles POST /api/v1/jobs/{id}/hold
-func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
-	if r.Method != http.MethodPost {
+// handleHealthz handles GET /healthz endpoint for health checks
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
-	if err != nil {
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	// Health check always returns OK if the server is running
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+	})
+}
+
+// handleReadyz handles GET /readyz endpoint for readiness checks
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
+	// Readiness check returns OK if the server is ready to accept traffic
+	// Currently just checks if the server is running, but could be extended
+	// to check schedd connectivity or other dependencies
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ready",
+	})
+}
+
+// parseJobActionRequest parses job ID and optional reason for single job actions
+func (s *Server) parseJobActionRequest(r *http.Request, jobID, defaultAction string) (cluster, proc int, reason string, err error) {
 	// Parse job ID
-	cluster, proc, err := parseJobID(jobID)
+	cluster, proc, err = parseJobID(jobID)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
-		return
+		return 0, 0, "", fmt.Errorf("invalid job ID: %w", err)
 	}
 
 	// Parse optional reason from request body
@@ -865,7 +865,7 @@ func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID str
 		Reason string `json:"reason,omitempty"`
 	}
 	if r.Body != nil && r.Body != http.NoBody {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil {
 			// If body can't be decoded, just use empty reason
 			req.Reason = ""
 		}
@@ -873,24 +873,14 @@ func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID str
 
 	// Default reason if not provided
 	if req.Reason == "" {
-		req.Reason = "Held via HTTP API"
+		req.Reason = fmt.Sprintf("%s via HTTP API", defaultAction)
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	return cluster, proc, req.Reason, nil
+}
 
-	// Hold the job
-	results, err := s.schedd.HoldJobs(ctx, constraint, req.Reason)
-	if err != nil {
-		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job hold failed: %v", err))
-		return
-	}
-
+// handleJobActionResults checks results and writes response for single job actions
+func (s *Server) handleJobActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, jobID, actionName string) {
 	// Check if job was found
 	if results.NotFound > 0 {
 		s.writeError(w, http.StatusNotFound, "Job not found")
@@ -898,17 +888,24 @@ func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID str
 	}
 
 	if results.Success == 0 {
-		// Job exists but couldn't be held
-		msg := "Failed to hold job"
+		// Job exists but couldn't be acted upon
+		msg := fmt.Sprintf("Failed to %s job", actionName)
 		switch {
 		case results.PermissionDenied > 0:
-			msg = "Permission denied to hold job"
+			msg = fmt.Sprintf("Permission denied to %s job", actionName)
 		case results.BadStatus > 0:
-			msg = "Job in wrong status for hold"
+			msg = fmt.Sprintf("Job in wrong status for %s", actionName)
 		case results.AlreadyDone > 0:
-			msg = "Job is already held"
+			switch actionName {
+			case "hold":
+				msg = "Job is already held"
+			case "release":
+				msg = "Job is already released/not held"
+			default:
+				msg = fmt.Sprintf("Job action %s already done", actionName)
+			}
 		case results.Error > 0:
-			msg = "Error holding job"
+			msg = fmt.Sprintf("Error %s job", actionName+"ing")
 		}
 		s.writeError(w, http.StatusBadRequest, msg)
 		return
@@ -916,7 +913,7 @@ func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID str
 
 	// Success
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message": "Job held successfully",
+		"message": fmt.Sprintf("Job %s successfully", actionName+"ed"),
 		"job_id":  jobID,
 		"results": map[string]int{
 			"total":   results.TotalJobs,
@@ -925,8 +922,8 @@ func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID str
 	})
 }
 
-// handleJobRelease handles POST /api/v1/jobs/{id}/release
-func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
+// handleSingleJobAction is a generic handler for single job actions (hold, release, etc.)
+func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, jobID, actionName, actionVerb string, actionFunc JobActionFunc) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -939,76 +936,39 @@ func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Parse job ID
-	cluster, proc, err := parseJobID(jobID)
+	// Parse job ID and reason
+	cluster, proc, reason, err := s.parseJobActionRequest(r, jobID, actionName)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-
-	// Parse optional reason from request body
-	var req struct {
-		Reason string `json:"reason,omitempty"`
-	}
-	if r.Body != nil && r.Body != http.NoBody {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			// If body can't be decoded, just use empty reason
-			req.Reason = ""
-		}
-	}
-
-	// Default reason if not provided
-	if req.Reason == "" {
-		req.Reason = "Released via HTTP API"
 	}
 
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Release the job
-	results, err := s.schedd.ReleaseJobs(ctx, constraint, req.Reason)
+	// Perform action
+	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
 		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job release failed: %v", err))
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job %s failed: %v", actionVerb, err))
 		return
 	}
 
-	// Check if job was found
-	if results.NotFound > 0 {
-		s.writeError(w, http.StatusNotFound, "Job not found")
-		return
-	}
+	s.handleJobActionResults(w, results, jobID, actionVerb)
+}
 
-	if results.Success == 0 {
-		// Job exists but couldn't be released
-		msg := "Failed to release job"
-		switch {
-		case results.PermissionDenied > 0:
-			msg = "Permission denied to release job"
-		case results.BadStatus > 0:
-			msg = "Job in wrong status for release"
-		case results.AlreadyDone > 0:
-			msg = "Job is already released/not held"
-		case results.Error > 0:
-			msg = "Error releasing job"
-		}
-		s.writeError(w, http.StatusBadRequest, msg)
-		return
-	}
+// handleJobHold handles POST /api/v1/jobs/{id}/hold
+func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
+	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.schedd.HoldJobs)
+}
 
-	// Success
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message": "Job released successfully",
-		"job_id":  jobID,
-		"results": map[string]int{
-			"total":   results.TotalJobs,
-			"success": results.Success,
-		},
-	})
+// handleJobRelease handles POST /api/v1/jobs/{id}/release
+func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
+	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.schedd.ReleaseJobs)
 }
 
 // CollectorAdsResponse represents collector ads listing response
@@ -1215,56 +1175,19 @@ func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route based on path structure
-	if parts[0] == "ads" {
-		if len(parts) == 1 {
-			// GET /api/v1/collector/ads
-			s.handleCollectorAds(w, r)
-		} else if len(parts) == 2 {
-			// GET /api/v1/collector/ads/{adType}
-			s.handleCollectorAdsByType(w, r, parts[1])
-		} else if len(parts) == 3 {
-			// GET /api/v1/collector/ads/{adType}/{name}
-			s.handleCollectorAdByName(w, r, parts[1], parts[2])
-		} else {
-			s.writeError(w, http.StatusNotFound, "Invalid collector path")
-		}
-	} else {
+	switch {
+	case parts[0] == "ads" && len(parts) == 1:
+		// GET /api/v1/collector/ads
+		s.handleCollectorAds(w, r)
+	case parts[0] == "ads" && len(parts) == 2:
+		// GET /api/v1/collector/ads/{adType}
+		s.handleCollectorAdsByType(w, r, parts[1])
+	case parts[0] == "ads" && len(parts) == 3:
+		// GET /api/v1/collector/ads/{adType}/{name}
+		s.handleCollectorAdByName(w, r, parts[1], parts[2])
+	case parts[0] == "ads":
+		s.writeError(w, http.StatusNotFound, "Invalid collector path")
+	default:
 		s.writeError(w, http.StatusNotFound, "Collector endpoint not found")
 	}
-}
-
-// handleJobsPath handles /api/v1/jobs/* paths with routing for bulk operations
-func (s *Server) handleJobsPath(w http.ResponseWriter, r *http.Request) {
-	// Strip /api/v1/jobs/ prefix
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
-	parts := strings.Split(path, "/")
-
-	if len(parts) == 0 || parts[0] == "" {
-		s.writeError(w, http.StatusNotFound, "Jobs endpoint not found")
-		return
-	}
-
-	// Check for bulk hold/release operations
-	if parts[0] == "hold" && len(parts) == 1 {
-		// POST /api/v1/jobs/hold
-		if r.Method == http.MethodPost {
-			s.handleBulkHoldJobs(w, r)
-		} else {
-			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		}
-		return
-	}
-
-	if parts[0] == "release" && len(parts) == 1 {
-		// POST /api/v1/jobs/release
-		if r.Method == http.MethodPost {
-			s.handleBulkReleaseJobs(w, r)
-		} else {
-			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		}
-		return
-	}
-
-	// Otherwise, treat as job ID path
-	s.handleJobByID(w, r)
 }
