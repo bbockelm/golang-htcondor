@@ -278,7 +278,31 @@ See [DEPENDENCIES.md](DEPENDENCIES.md) for information about required dependenci
 
 ## Development
 
-### Setup Development Environment
+### Docker Development Environment
+
+The project includes a complete Docker environment with HTCondor for testing on any platform, including Mac with Apple Silicon (arm64).
+
+```bash
+# Run tests inside Docker (builds image automatically)
+make docker-test
+
+# Run integration tests with HTCondor inside Docker
+make docker-test-integration
+
+# Start an interactive shell in Docker
+make docker-shell
+
+# Build Docker image manually
+make docker-build
+```
+
+The Docker environment uses Rocky Linux 9 (RHEL-like) because HTCondor is available for arm64 on RHEL-based distributions. This allows development and testing on Mac laptops.
+
+**GitHub Codespaces Support**: Open this repository in Codespaces for an instant cloud-based development environment with HTCondor pre-installed.
+
+See [DOCKER.md](DOCKER.md) for complete Docker setup documentation.
+
+### Local Setup Development Environment
 
 ```bash
 # Clone the repository
@@ -303,11 +327,18 @@ golangci-lint run
 ### CI/CD
 
 This project uses GitHub Actions for continuous integration:
-- **Tests**: Run on Go 1.21, 1.22, and 1.23
+
+**Standard CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+- **Tests**: Run on Go 1.25
 - **Linting**: golangci-lint with comprehensive checks
 - **Build**: Verifies all packages and examples build successfully
 
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the full CI configuration.
+**Docker CI** ([`.github/workflows/docker-test.yml`](.github/workflows/docker-test.yml)):
+- **Multi-architecture testing**: Tests on both linux/amd64 and linux/arm64
+- **Integration tests**: Runs with full HTCondor environment in Docker
+- **Environment verification**: Validates Docker setup and tools
+
+The Docker CI ensures the code works correctly in containerized environments including Codespaces.
 
 ## Contributing
 

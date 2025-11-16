@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -56,7 +55,7 @@ func (s *Schedd) Query(ctx context.Context, constraint string, projection []stri
 // queryWithAuth performs the actual query with optional authentication
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
 	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address, 30*time.Second)
+	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
 	}

@@ -1,0 +1,50 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Go build artifacts
+*.o
+*.a
+*.so
+*.exe
+*.test
+*.out
+/main
+/htcondor-api
+/metrics_demo
+/query_demo
+
+# Directories
+/vendor/
+.vscode/
+.idea/
+
+# Test and coverage files
+*.prof
+coverage.txt
+coverage.html
+
+# Documentation build artifacts
+*.pdf
+*.html
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# Log files
+*.log
+
+# HTCondor runtime files
+condor_config.local
+/log/
+/spool/
+/execute/
