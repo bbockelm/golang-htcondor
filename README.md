@@ -227,7 +227,7 @@ Features:
 - **Token bucket algorithm**: Allows short bursts while maintaining average rate
 - **Zero-config**: Defaults to unlimited if not configured
 
-See [RATE_LIMITING.md](RATE_LIMITING.md) for complete documentation.
+See [RATE_LIMITING.md](design_notes/RATE_LIMITING.md) for complete documentation.
 
 ## Development
 

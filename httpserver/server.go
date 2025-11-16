@@ -482,6 +482,27 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
+	// Extract username for rate limiting
+	var username string
+	if s.userHeader != "" {
+		// Check if using user header mode
+		_, bearerErr := extractBearerToken(r)
+		if bearerErr != nil {
+			// User header mode - get username from header
+			username = r.Header.Get(s.userHeader)
+		}
+	}
+	
+	// If username not from header, try to extract from JWT token
+	if username == "" {
+		username, _ = parseJWTUsername(token)
+	}
+	
+	// Set username in context for rate limiting (empty string will be treated as "unauthenticated")
+	if username != "" {
+		ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	}
+
 	return ctx, nil
 }
 

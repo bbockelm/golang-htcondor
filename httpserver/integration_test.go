@@ -907,3 +907,226 @@ func removeJob(t *testing.T, client *http.Client, baseURL, user, jobID string) {
 	req.Header.Set("X-Test-User", user)
 	client.Do(req)
 }
+
+// TestHTTPAPIRateLimiting tests that rate limiting works correctly with HTTP API
+func TestHTTPAPIRateLimiting(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Create temporary directory for mini condor
+	tempDir, err := os.MkdirTemp("", "htcondor-ratelimit-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Logf("Using temporary directory: %s", tempDir)
+
+	// Write mini condor configuration with rate limiting
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfigWithRateLimit(configFile, tempDir); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Start condor_master
+	t.Log("Starting condor_master...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	condorMaster, err := startCondorMaster(ctx, configFile)
+	if err != nil {
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+	defer stopCondorMaster(condorMaster, t)
+
+	// Wait for condor to be ready
+	t.Log("Waiting for HTCondor to be ready...")
+	if err := waitForCondor(tempDir, 30*time.Second); err != nil {
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+	t.Log("HTCondor is ready!")
+
+	// Generate signing key for demo authentication
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to write signing key: %v", err)
+	}
+
+	// Start HTTP server
+	serverPort := 18081
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
+	server, err := startHTTPServerForTesting(tempDir, serverAddr, signingKeyPath, "test.domain")
+	if err != nil {
+		t.Fatalf("Failed to start HTTP server: %v", err)
+	}
+	defer server.Stop()
+
+	// Wait for server to be ready
+	time.Sleep(500 * time.Millisecond)
+
+	// Test rate limiting
+	client := &http.Client{Timeout: 10 * time.Second}
+	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	user := "testuser"
+
+	// Test 1: Make rapid queries to exceed rate limit
+	t.Log("Test 1: Making rapid queries to trigger rate limit...")
+	successCount := 0
+	rateLimitCount := 0
+	
+	// Make 20 rapid queries (rate limit is 2 per second with burst of 4)
+	for i := 0; i < 20; i++ {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
+		req.Header.Set("X-Test-User", user)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		
+		if resp.StatusCode == http.StatusOK {
+			successCount++
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			rateLimitCount++
+			t.Logf("Request %d: Rate limited (429 status)", i+1)
+		}
+		
+		resp.Body.Close()
+		
+		// Small delay to avoid overwhelming the server
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Logf("Results: %d successful, %d rate limited", successCount, rateLimitCount)
+	
+	// We should have hit the rate limit at least once
+	if rateLimitCount == 0 {
+		t.Error("Expected to hit rate limit, but no 429 responses received")
+	}
+
+	// Test 2: Wait for rate limit to clear
+	t.Log("Test 2: Waiting for rate limit to clear...")
+	time.Sleep(2 * time.Second) // Wait for tokens to replenish
+
+	// Should succeed now
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
+	req.Header.Set("X-Test-User", user)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected 200 OK after rate limit cleared, got %d", resp.StatusCode)
+	}
+	t.Log("Test 2: Query succeeded after rate limit cleared")
+
+	// Test 3: Test per-user isolation
+	t.Log("Test 3: Testing per-user rate limit isolation...")
+	user2 := "testuser2"
+	
+	// Exhaust user1's rate limit
+	for i := 0; i < 10; i++ {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
+		req.Header.Set("X-Test-User", user)
+		resp, _ := client.Do(req)
+		resp.Body.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// User2 should still be able to query
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs", baseURL), nil)
+	req.Header.Set("X-Test-User", user2)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		t.Error("User2 should not be rate limited when user1 exceeds limit")
+	} else {
+		t.Log("Test 3: Per-user isolation working correctly")
+	}
+}
+
+// writeMiniCondorConfigWithRateLimit writes a mini condor configuration with rate limiting enabled
+func writeMiniCondorConfigWithRateLimit(configFile, baseDir string) error {
+	masterPath, err := exec.LookPath("condor_master")
+	if err != nil {
+		return err
+	}
+	sbinDir := filepath.Dir(masterPath)
+
+	config := fmt.Sprintf(`
+# Mini HTCondor configuration for rate limiting tests
+DAEMON_LIST = MASTER, SCHEDD, COLLECTOR, STARTD, NEGOTIATOR
+
+# Basic paths
+LOCAL_DIR = %s
+LOG = %s/log
+SPOOL = %s/spool
+EXECUTE = %s/execute
+LOCK = %s/lock
+RUN = %s/run
+
+# Daemon paths
+MASTER = %s/condor_master
+SCHEDD = %s/condor_schedd
+COLLECTOR = %s/condor_collector
+STARTD = %s/condor_startd
+NEGOTIATOR = %s/condor_negotiator
+
+# Network settings
+COLLECTOR_HOST = 127.0.0.1:9619
+COLLECTOR_ARGS = -p 9619
+SCHEDD_ARGS = -p 9617
+
+# Rate limiting configuration (very low limits for testing)
+SCHEDD_QUERY_RATE_LIMIT = 2
+SCHEDD_QUERY_PER_USER_RATE_LIMIT = 1
+COLLECTOR_QUERY_RATE_LIMIT = 4
+COLLECTOR_QUERY_PER_USER_RATE_LIMIT = 2
+
+# Minimal machine resources for testing
+NUM_CPUS = 1
+MEMORY = 1024
+
+# Security
+ALLOW_ADMINISTRATOR = *
+ALLOW_WRITE = *
+ALLOW_READ = *
+SEC_DEFAULT_AUTHENTICATION = OPTIONAL
+SEC_DEFAULT_AUTHENTICATION_METHODS = FS, IDTOKENS
+
+# Logging
+MAX_COLLECTOR_LOG = 10000000
+MAX_SCHEDD_LOG = 10000000
+MAX_STARTD_LOG = 10000000
+MAX_MASTER_LOG = 10000000
+MAX_NEGOTIATOR_LOG = 10000000
+
+# Fast polling for testing
+POLLING_INTERVAL = 5
+NEGOTIATOR_INTERVAL = 10
+UPDATE_INTERVAL = 5
+
+# Disable unwanted features
+ENABLE_SOAP = False
+ENABLE_WEB_SERVER = False
+`, baseDir, baseDir, baseDir, baseDir, baseDir, baseDir,
+		sbinDir, sbinDir, sbinDir, sbinDir, sbinDir)
+
+	return os.WriteFile(configFile, []byte(config), 0600)
+}

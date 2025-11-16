@@ -161,6 +161,58 @@ func parseJWTExpiration(token string) (time.Time, error) {
 	return time.Unix(expTime, 0), nil
 }
 
+// parseJWTUsername extracts the username (sub claim) from a JWT token
+// Returns the username or an error if parsing fails
+func parseJWTUsername(token string) (string, error) {
+	// JWT format: header.payload.signature
+	parts := []byte(token)
+	dotCount := 0
+	payloadStart := 0
+	payloadEnd := 0
+
+	for i, b := range parts {
+		if b == '.' {
+			dotCount++
+			if dotCount == 1 {
+				payloadStart = i + 1
+			} else if dotCount == 2 {
+				payloadEnd = i
+				break
+			}
+		}
+	}
+
+	if dotCount < 2 {
+		return "", fmt.Errorf("invalid JWT format")
+	}
+
+	// Decode the payload (base64url)
+	payloadB64 := string(parts[payloadStart:payloadEnd])
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+
+	// Parse JSON to extract sub claim
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return "", fmt.Errorf("failed to parse JWT payload: %w", err)
+	}
+
+	// Extract username from sub claim
+	sub, ok := claims["sub"]
+	if !ok {
+		return "", fmt.Errorf("JWT missing sub claim")
+	}
+
+	username, ok := sub.(string)
+	if !ok {
+		return "", fmt.Errorf("JWT sub claim is not a string")
+	}
+
+	return username, nil
+}
+
 // Add adds a validated token to the cache with a session cache
 // If the token is already in the cache, returns the existing entry
 // Automatically schedules cleanup when the token expires
