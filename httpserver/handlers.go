@@ -1022,9 +1022,19 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all ads
 	}
 
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
 	// Query collector for all ads (using "Machine" which queries STARTD ads)
 	// In a more complete implementation, we'd query all ad types
-	ads, err := s.collector.QueryAds(ctx, "StartdAd", constraint)
+	ads, err := s.collector.QueryAdsWithProjection(ctx, "StartdAd", constraint, projection)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
@@ -1053,6 +1063,16 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		constraint = "true" // Default: all ads of this type
 	}
 
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
 	// Map common ad type names
 	var queryAdType string
 	switch strings.ToLower(adType) {
@@ -1078,7 +1098,7 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 	}
 
 	// Query collector
-	ads, err := s.collector.QueryAds(ctx, queryAdType, constraint)
+	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
@@ -1128,11 +1148,21 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 		nameAttr = "Name"
 	}
 
+	// Get projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		projection = strings.Split(projectionStr, ",")
+		for i := range projection {
+			projection[i] = strings.TrimSpace(projection[i])
+		}
+	}
+
 	// Build constraint for specific ad by name
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
 
 	// Query collector
-	ads, err := s.collector.QueryAds(ctx, queryAdType, constraint)
+	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return

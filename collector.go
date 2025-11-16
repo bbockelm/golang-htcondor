@@ -28,6 +28,14 @@ func NewCollector(address string) *Collector {
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 func (c *Collector) QueryAds(ctx context.Context, adType string, constraint string) ([]*classad.ClassAd, error) {
+	return c.QueryAdsWithProjection(ctx, adType, constraint, nil)
+}
+
+// QueryAdsWithProjection queries the collector for daemon advertisements with optional projection
+// adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
+// constraint is a ClassAd constraint expression string (pass empty string for no constraint)
+// projection is an optional list of attribute names to return (pass nil for all attributes)
+func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, constraint string, projection []string) ([]*classad.ClassAd, error) {
 	// Establish connection using cedar client
 	htcondorClient, err := client.ConnectToAddress(ctx, c.address, 30*time.Second)
 	if err != nil {
@@ -70,7 +78,7 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 			return nil, fmt.Errorf("failed to parse constraint expression: %w", err)
 		}
 	}
-	queryAd := createQueryAd(adType, constraintExpr)
+	queryAd := createQueryAd(adType, constraintExpr, projection)
 
 	// Create message and send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -141,7 +149,7 @@ func getCommandForAdType(adType string) (commands.CommandType, error) {
 }
 
 // createQueryAd creates a ClassAd for querying ads
-func createQueryAd(adType string, constraint *classad.Expr) *classad.ClassAd {
+func createQueryAd(adType string, constraint *classad.Expr, projection []string) *classad.ClassAd {
 	ad := classad.New()
 
 	// Set MyType and TargetType as required by HTCondor query protocol
@@ -156,6 +164,18 @@ func createQueryAd(adType string, constraint *classad.Expr) *classad.ClassAd {
 		_ = ad.Set("Requirements", true)
 	} else {
 		_ = ad.Set("Requirements", constraint)
+	}
+
+	// Set ProjectionAttributes if projection is specified
+	if len(projection) > 0 {
+		projectionStr := ""
+		for i, attr := range projection {
+			if i > 0 {
+				projectionStr += ","
+			}
+			projectionStr += attr
+		}
+		_ = ad.Set("ProjectionAttributes", projectionStr)
 	}
 
 	return ad

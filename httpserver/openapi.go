@@ -847,6 +847,15 @@ const openAPISchema = `{
               "type": "string",
               "default": "true"
             }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -917,6 +926,15 @@ const openAPISchema = `{
               "type": "string",
               "default": "true"
             }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -983,6 +1001,15 @@ const openAPISchema = `{
             "in": "path",
             "required": true,
             "description": "Name of the daemon",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "required": false,
             "schema": {
               "type": "string"
             }
