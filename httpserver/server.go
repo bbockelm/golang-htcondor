@@ -21,59 +21,61 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	httpServer         *http.Server
-	listener           net.Listener // Explicit listener to get actual address
-	schedd             *htcondor.Schedd
-	collector          *htcondor.Collector
-	userHeader         string
-	signingKeyPath     string
-	trustDomain        string
-	uidDomain          string
-	logger             *logging.Logger
-	metricsRegistry    *metricsd.Registry
-	prometheusExporter *metricsd.PrometheusExporter
-	tokenCache         *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	oauth2Provider     *OAuth2Provider   // OAuth2 provider for MCP endpoints
-	oauth2Config       *oauth2.Config    // OAuth2 client config for SSO
-	oauth2StateStore   *OAuth2StateStore // State storage for OAuth2 SSO flow
-	oauth2UserInfoURL  string            // User info endpoint for SSO
-	oauth2GroupsClaim  string            // Claim name for group information (default: "groups")
-	mcpAccessGroup     string            // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup       string            // Group required for read access (empty = all users have read)
-	mcpWriteGroup      string            // Group required for write access (empty = all users have write)
+	httpServer          *http.Server
+	listener            net.Listener // Explicit listener to get actual address
+	schedd              *htcondor.Schedd
+	collector           *htcondor.Collector
+	userHeader          string
+	signingKeyPath      string
+	trustDomain         string
+	uidDomain           string
+	logger              *logging.Logger
+	metricsRegistry     *metricsd.Registry
+	prometheusExporter  *metricsd.PrometheusExporter
+	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
+	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
+	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
+	oauth2UserInfoURL   string            // User info endpoint for SSO
+	oauth2UsernameClaim string            // Claim name for username (default: "sub")
+	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
+	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
+	mcpReadGroup        string            // Group required for read access (empty = all users have read)
+	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
 }
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr         string              // Address to listen on (e.g., ":8080")
-	ScheddName         string              // Schedd name
-	ScheddAddr         string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader         string              // HTTP header to extract username from (optional)
-	SigningKeyPath     string              // Path to token signing key (optional, for token generation)
-	TrustDomain        string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain          string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	TLSCertFile        string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile         string              // Path to TLS key file (optional, enables HTTPS)
-	ReadTimeout        time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout       time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout        time.Duration       // HTTP idle timeout (default: 120s)
-	Collector          *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics      bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL    time.Duration       // Metrics cache TTL (default: 10s)
-	Logger             *logging.Logger     // Logger instance (optional, creates default if nil)
-	EnableMCP          bool                // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath       string              // Path to OAuth2 SQLite database (default: "oauth2.db")
-	OAuth2Issuer       string              // OAuth2 issuer URL (default: listen address)
-	OAuth2ClientID     string              // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret string              // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL      string              // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL     string              // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL  string              // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL  string              // OAuth2 user info endpoint for SSO (optional)
-	OAuth2GroupsClaim  string              // Claim name for groups in user info (default: "groups")
-	MCPAccessGroup     string              // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup       string              // Group required for read operations (empty = all have read)
-	MCPWriteGroup      string              // Group required for write operations (empty = all have write)
+	ListenAddr          string              // Address to listen on (e.g., ":8080")
+	ScheddName          string              // Schedd name
+	ScheddAddr          string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader          string              // HTTP header to extract username from (optional)
+	SigningKeyPath      string              // Path to token signing key (optional, for token generation)
+	TrustDomain         string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
+	ReadTimeout         time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout        time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout         time.Duration       // HTTP idle timeout (default: 120s)
+	Collector           *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics       bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
+	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
+	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
+	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: "oauth2.db")
+	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL       string              // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL      string              // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL   string              // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL   string              // OAuth2 user info endpoint for SSO (optional)
+	OAuth2UsernameClaim string              // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim   string              // Claim name for groups in user info (default: "groups")
+	MCPAccessGroup      string              // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup        string              // Group required for read operations (empty = all have read)
+	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
 }
 
 // NewServer creates a new HTTP API server
@@ -139,6 +141,12 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 		s.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+
+		// Set username claim name (default: "sub")
+		s.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
+		if s.oauth2UsernameClaim == "" {
+			s.oauth2UsernameClaim = "sub"
+		}
 
 		// Initialize OAuth2 state store
 		s.oauth2StateStore = NewOAuth2StateStore()
@@ -299,6 +307,15 @@ func (s *Server) GetAddr() string {
 		return ""
 	}
 	return s.listener.Addr().String()
+}
+
+// UpdateOAuth2RedirectURL updates the OAuth2 redirect URL for SSO integration.
+// This is useful when the server is started with a dynamic port (e.g., "127.0.0.1:0")
+// and you need to update the redirect URL after the server has started.
+func (s *Server) UpdateOAuth2RedirectURL(redirectURL string) {
+	if s.oauth2Config != nil {
+		s.oauth2Config.RedirectURL = redirectURL
+	}
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written

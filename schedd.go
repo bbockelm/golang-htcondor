@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -84,10 +85,14 @@ func (s *Schedd) Query(ctx context.Context, constraint string, projection []stri
 // queryWithAuth performs the actual query with optional authentication
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
+	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
+	// If rate limit is exceeded, we want to return 429 immediately, not block
 	username := GetAuthenticatedUserFromContext(ctx)
 	rateLimitManager := getRateLimitManager()
 	if rateLimitManager != nil {
-		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
+		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
+		defer cancelRateLimit()
+		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}

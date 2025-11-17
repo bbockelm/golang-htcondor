@@ -19,6 +19,39 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// extractUsernameFromToken extracts the username from an OAuth2 token using the configured claim
+func (s *Server) extractUsernameFromToken(token fosite.AccessRequester) string {
+	// If user header is configured, that takes precedence (already set in context)
+	if s.userHeader != "" {
+		// This should have been handled earlier, but return subject as fallback
+		return token.GetSession().GetSubject()
+	}
+
+	// Use configured claim name (default: "sub")
+	claimName := s.oauth2UsernameClaim
+	if claimName == "" {
+		claimName = "sub"
+	}
+
+	// If using default "sub" claim, use GetSubject() method
+	if claimName == "sub" {
+		return token.GetSession().GetSubject()
+	}
+
+	// For other claims, get from session's extra claims
+	session := token.GetSession()
+	if oidcSession, ok := session.(*openid.DefaultSession); ok {
+		if claims := oidcSession.IDTokenClaims(); claims != nil {
+			if username, ok := claims.Extra[claimName].(string); ok && username != "" {
+				return username
+			}
+		}
+	}
+
+	// Fallback to subject if custom claim not found
+	return token.GetSession().GetSubject()
+}
+
 // handleMCPMessage handles MCP JSON-RPC messages over HTTP
 func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Validate OAuth2 token
@@ -29,10 +62,10 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract username from token
-	username := token.GetSession().GetSubject()
+	// Extract username from token using configured claim
+	username := s.extractUsernameFromToken(token)
 	if username == "" {
-		s.writeError(w, http.StatusUnauthorized, "Token missing subject")
+		s.writeError(w, http.StatusUnauthorized, "Token missing username claim")
 		return
 	}
 

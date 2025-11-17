@@ -459,7 +459,10 @@ func TestMCPGroupMembership(t *testing.T) {
 			}
 
 			ssoAuthURL := resp.Header.Get("Location")
-			resp2, _ := client.Get(ssoAuthURL)
+			resp2, err := client.Get(ssoAuthURL)
+			if err != nil || resp2 == nil {
+				t.Fatalf("Failed to follow SSO redirect: %v", err)
+			}
 			defer resp2.Body.Close()
 
 			loginURL := resp2.Header.Get("Location")
@@ -471,7 +474,10 @@ func TestMCPGroupMembership(t *testing.T) {
 			formData := url.Values{}
 			formData.Set("username", tc.username)
 			formData.Set("password", tc.password)
-			loginResp, _ := client.PostForm(loginURL, formData)
+			loginResp, err := client.PostForm(loginURL, formData)
+			if err != nil || loginResp == nil {
+				t.Fatalf("Failed to submit login: %v", err)
+			}
 			defer loginResp.Body.Close()
 
 			authorizeURL := loginResp.Header.Get("Location")
@@ -479,13 +485,19 @@ func TestMCPGroupMembership(t *testing.T) {
 				authorizeURL = ssoBaseURL + authorizeURL
 			}
 
-			authResp, _ := client.Get(authorizeURL)
+			authResp, err := client.Get(authorizeURL)
+			if err != nil || authResp == nil {
+				t.Fatalf("Failed to follow authorize redirect: %v", err)
+			}
 			defer authResp.Body.Close()
 
 			mcpCallbackURL := authResp.Header.Get("Location")
 
 			// Follow redirect to MCP callback - this is where access control happens
-			callbackResp, _ := client.Get(mcpCallbackURL)
+			callbackResp, err := client.Get(mcpCallbackURL)
+			if err != nil || callbackResp == nil {
+				t.Fatalf("Failed to follow MCP callback: %v", err)
+			}
 			defer callbackResp.Body.Close()
 
 			clientCallbackURL := callbackResp.Header.Get("Location")
@@ -514,7 +526,10 @@ func TestMCPGroupMembership(t *testing.T) {
 			))
 			tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-			tokenResp, _ := client.Do(tokenReq)
+			tokenResp, err := client.Do(tokenReq)
+			if err != nil || tokenResp == nil {
+				t.Fatalf("Failed to send token request: %v", err)
+			}
 			defer tokenResp.Body.Close()
 
 			if tokenResp.StatusCode != http.StatusOK {
@@ -659,6 +674,9 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 	}
 	baseURL := fmt.Sprintf("http://%s", actualAddr)
 
+	// Update OAuth2 redirect URL now that we know the actual server address
+	server.UpdateOAuth2RedirectURL(baseURL + "/mcp/oauth2/callback")
+
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -785,6 +803,9 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		t.Fatal("Server failed to start - no listening address available")
 	}
 	baseURL := fmt.Sprintf("http://%s", actualAddr)
+
+	// Update OAuth2 redirect URL now that we know the actual server address
+	server.UpdateOAuth2RedirectURL(baseURL + "/mcp/oauth2/callback")
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
