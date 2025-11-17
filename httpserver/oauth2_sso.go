@@ -139,8 +139,10 @@ func (s *Server) fetchUserInfo(ctx context.Context, accessToken string) (*UserIn
 		Claims: claims,
 	}
 
+	s.logger.Debug(logging.DestinationHTTP, "Fetched user info from IDP", "claims", claims)
+
 	// Extract standard claims
-	if sub, ok := claims["sub"].(string); ok {
+	if sub, ok := claims[s.oauth2UsernameClaim].(string); ok {
 		userInfo.Subject = sub
 	}
 	if email, ok := claims["email"].(string); ok {
