@@ -35,6 +35,15 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 // projection is an optional list of attribute names to return (pass nil for all attributes)
 func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, constraint string, projection []string) ([]*classad.ClassAd, error) {
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+			return nil, fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
 	// Establish connection using cedar client
 	htcondorClient, err := client.ConnectToAddress(ctx, c.address)
 	if err != nil {
@@ -63,9 +72,15 @@ func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, c
 
 	// Perform security handshake
 	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+	negotiation, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("security handshake failed: %w", err)
+	}
+
+	// If username not already set in context, use the authenticated user from handshake
+	if username == "" && negotiation.User != "" {
+		// Update context with authenticated user for potential future use
+		ctx = WithAuthenticatedUser(ctx, negotiation.User)
 	}
 
 	// Create query ClassAd

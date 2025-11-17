@@ -86,7 +86,7 @@ func createExpiredTestJWTToken(subject, issuer string) string {
 func TestParseJWTExpiration(t *testing.T) {
 	t.Run("ValidToken", func(t *testing.T) {
 		token := createTestJWTToken(3600)
-		exp, err := parseJWTExpiration(token)
+		_, exp, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestParseJWTExpiration(t *testing.T) {
 
 	t.Run("ExpiredToken", func(t *testing.T) {
 		token := createExpiredTestJWTToken("alice@test.domain", "test.domain")
-		exp, err := parseJWTExpiration(token)
+		_, exp, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
@@ -113,7 +113,7 @@ func TestParseJWTExpiration(t *testing.T) {
 	})
 
 	t.Run("InvalidFormat", func(t *testing.T) {
-		_, err := parseJWTExpiration("invalid.token")
+		_, _, err := parseJWTClaims("invalid.token")
 		if err == nil {
 			t.Error("Expected error for invalid token format")
 		}
@@ -130,7 +130,7 @@ func TestParseJWTExpiration(t *testing.T) {
 		payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
 		token := headerB64 + "." + payloadB64 + ".signature"
-		_, err := parseJWTExpiration(token)
+		_, _, err := parseJWTClaims(token)
 		if err == nil {
 			t.Error("Expected error for missing exp claim")
 		}

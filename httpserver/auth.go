@@ -3,14 +3,13 @@ package httpserver
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // authContextKey is the type for the authentication context key
@@ -83,6 +82,7 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 // TokenCacheEntry represents a cached token with its expiration and associated session cache
 type TokenCacheEntry struct {
 	Token         string
+	Username      string // Username extracted from JWT (for rate limiting)
 	Expiration    time.Time
 	SessionCache  *security.SessionCache
 	expiryTimer   *time.Timer
@@ -102,63 +102,33 @@ func NewTokenCache() *TokenCache {
 	}
 }
 
-// parseJWTExpiration extracts the expiration time from a JWT token
-// Returns the expiration time or an error if parsing fails
-func parseJWTExpiration(token string) (time.Time, error) {
-	// JWT format: header.payload.signature
-	parts := []byte(token)
-	dotCount := 0
-	payloadStart := 0
-	payloadEnd := 0
-
-	for i, b := range parts {
-		if b == '.' {
-			dotCount++
-			if dotCount == 1 {
-				payloadStart = i + 1
-			} else if dotCount == 2 {
-				payloadEnd = i
-				break
-			}
-		}
+// parseJWTClaims extracts username and expiration from a JWT token using the JWT library
+// Returns the username, expiration time, or an error if parsing fails
+func parseJWTClaims(token string) (username string, expiration time.Time, err error) {
+	// Parse the token without verification (we just need to read claims)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsedToken, _, parseErr := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
+	if parseErr != nil {
+		return "", time.Time{}, fmt.Errorf("failed to parse JWT: %w", parseErr)
 	}
 
-	if dotCount < 2 {
-		return time.Time{}, fmt.Errorf("invalid JWT format")
-	}
-
-	// Decode the payload (base64url)
-	payloadB64 := string(parts[payloadStart:payloadEnd])
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
-	}
-
-	// Parse JSON to extract exp claim
-	var claims map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse JWT payload: %w", err)
-	}
-
-	// Extract expiration time
-	exp, ok := claims["exp"]
+	// Extract standard claims
+	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
 	if !ok {
-		return time.Time{}, fmt.Errorf("JWT missing exp claim")
+		return "", time.Time{}, fmt.Errorf("failed to extract JWT claims")
 	}
 
-	var expTime int64
-	switch v := exp.(type) {
-	case float64:
-		expTime = int64(v)
-	case int64:
-		expTime = v
-	case int:
-		expTime = int64(v)
-	default:
-		return time.Time{}, fmt.Errorf("JWT exp claim is not a valid timestamp")
+	// Check if subject is set
+	if claims.Subject == "" {
+		return "", time.Time{}, fmt.Errorf("JWT missing sub claim")
 	}
 
-	return time.Unix(expTime, 0), nil
+	// Check if expiration is set
+	if claims.ExpiresAt == nil {
+		return "", time.Time{}, fmt.Errorf("JWT missing exp claim")
+	}
+
+	return claims.Subject, claims.ExpiresAt.Time, nil
 }
 
 // Add adds a validated token to the cache with a session cache
@@ -179,10 +149,10 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 		}
 	}
 
-	// Parse token to get expiration
-	expiration, err := parseJWTExpiration(token)
+	// Parse token to get username and expiration
+	username, expiration, err := parseJWTClaims(token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse token expiration: %w", err)
+		return nil, fmt.Errorf("failed to parse token claims: %w", err)
 	}
 
 	// Check if already expired
@@ -198,6 +168,7 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 
 	entry := &TokenCacheEntry{
 		Token:         token,
+		Username:      username,
 		Expiration:    expiration,
 		SessionCache:  sessionCache,
 		cancelCleanup: cancel,

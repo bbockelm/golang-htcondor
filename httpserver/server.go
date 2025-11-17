@@ -32,7 +32,7 @@ type Server struct {
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
-	tokenCache         *TokenCache       // Cache of validated tokens and their session caches
+	tokenCache         *TokenCache       // Cache of validated tokens and their session caches (includes username)
 	oauth2Provider     *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config       *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore   *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -118,7 +118,7 @@ func NewServer(cfg Config) (*Server, error) {
 		userHeader:     cfg.UserHeader,
 		signingKeyPath: cfg.SigningKeyPath,
 		logger:         logger,
-		tokenCache:     NewTokenCache(), // Initialize token cache
+		tokenCache:     NewTokenCache(), // Initialize token cache (includes username for rate limiting)
 	}
 
 	// Setup OAuth2 provider if MCP is enabled
@@ -548,6 +548,35 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+	// Extract username for rate limiting - only use from tokens that have been cached (validated)
+	var username string
+	if s.userHeader != "" {
+		// Check if using user header mode
+		_, bearerErr := extractBearerToken(r)
+		if bearerErr != nil {
+			// User header mode - username is always trusted from header
+			username = r.Header.Get(s.userHeader)
+		} else {
+			// Real bearer token - only use username if token is already in cache (validated)
+			if entry, exists := s.tokenCache.Get(token); exists {
+				// Token has been successfully used before, use cached username
+				username = entry.Username
+			}
+		}
+	} else {
+		// Not using user header mode - only use username if token is in cache
+		if entry, exists := s.tokenCache.Get(token); exists {
+			// Token has been successfully used before, use cached username
+			username = entry.Username
+		}
+	}
+
+	// Set username in context for rate limiting only if from validated token
+	// Otherwise treated as "unauthenticated"
+	if username != "" {
+		ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	}
 
 	return ctx, nil
 }

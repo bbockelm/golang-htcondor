@@ -15,6 +15,9 @@ import (
 // securityConfigContextKey is the type for the security configuration context key
 type securityConfigContextKey struct{}
 
+// authenticatedUserContextKey is the type for the authenticated user context key
+type authenticatedUserContextKey struct{}
+
 // WithSecurityConfig creates a context that includes security configuration
 // This allows passing authentication information (like tokens) from HTTP handlers to Schedd methods
 func WithSecurityConfig(ctx context.Context, secConfig *security.SecurityConfig) context.Context {
@@ -28,6 +31,22 @@ func GetSecurityConfigFromContext(ctx context.Context) (security.SecurityConfig,
 		return security.SecurityConfig{}, false
 	}
 	return *secConfig, true
+}
+
+// WithAuthenticatedUser creates a context that includes the authenticated username
+// This is used for rate limiting purposes
+func WithAuthenticatedUser(ctx context.Context, username string) context.Context {
+	return context.WithValue(ctx, authenticatedUserContextKey{}, username)
+}
+
+// GetAuthenticatedUserFromContext retrieves the authenticated username from the context
+// Returns empty string if not found, which will be treated as "unauthenticated"
+func GetAuthenticatedUserFromContext(ctx context.Context) string {
+	username, ok := ctx.Value(authenticatedUserContextKey{}).(string)
+	if !ok {
+		return ""
+	}
+	return username
 }
 
 // Schedd represents an HTCondor schedd daemon
@@ -64,6 +83,15 @@ func (s *Schedd) Query(ctx context.Context, constraint string, projection []stri
 
 // queryWithAuth performs the actual query with optional authentication
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
+			return nil, fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
 	// Establish connection using cedar client
 	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
 	if err != nil {
@@ -91,9 +119,16 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	}
 
 	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+	negotiation, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("security handshake failed: %w", err)
+	}
+
+	// If username not already set in context, use the authenticated user from handshake
+	if username == "" && negotiation.User != "" {
+		// Update context with authenticated user for potential future use
+		// Note: This doesn't affect rate limiting for this call since we already checked it
+		ctx = WithAuthenticatedUser(ctx, negotiation.User)
 	}
 
 	// Create query request ClassAd

@@ -4,12 +4,14 @@ go 1.24.0
 
 require (
 	github.com/PelicanPlatform/classad v0.0.4
-	github.com/bbockelm/cedar v0.0.12
+	github.com/bbockelm/cedar v0.0.13
 	github.com/glebarez/sqlite v1.11.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/ory/fosite v0.47.0
 	golang.org/x/crypto v0.43.0
 	golang.org/x/oauth2 v0.33.0
 	golang.org/x/sys v0.37.0
+	golang.org/x/time v0.14.0
 )
 
 require (
@@ -28,7 +30,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gobuffalo/pop/v6 v6.1.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang/mock v1.6.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/uuid v1.3.1 // indirect

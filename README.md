@@ -11,6 +11,7 @@ This library provides a Go interface to HTCondor services, allowing you to:
 - Query the schedd for job information
 - Submit and manage jobs
 - Transfer files using HTCondor's file transfer protocol
+- Rate limiting for query protection (configurable via HTCondor config)
 
 ## Dependencies
 
@@ -204,6 +205,29 @@ metricsText, err := exporter.Export(ctx)
 - Resource utilization
 
 The HTTP API server automatically exposes metrics at `/metrics` when a collector is configured. See [metricsd/README.md](metricsd/README.md) for details.
+
+## Rate Limiting
+
+The library includes built-in rate limiting for schedd and collector queries to protect daemons from being overwhelmed. Rate limits are configured via HTCondor configuration parameters:
+
+```
+# Schedd query rate limits
+SCHEDD_QUERY_RATE_LIMIT = 10              # 10 queries/sec globally
+SCHEDD_QUERY_PER_USER_RATE_LIMIT = 5     # 5 queries/sec per user
+
+# Collector query rate limits
+COLLECTOR_QUERY_RATE_LIMIT = 20           # 20 queries/sec globally
+COLLECTOR_QUERY_PER_USER_RATE_LIMIT = 10 # 10 queries/sec per user
+```
+
+Features:
+- **Global rate limits**: Protect overall system capacity
+- **Per-user rate limits**: Prevent individual users from monopolizing resources
+- **Automatic user detection**: Extracts username from authentication or uses "unauthenticated"
+- **Token bucket algorithm**: Allows short bursts while maintaining average rate
+- **Zero-config**: Defaults to unlimited if not configured
+
+See [RATE_LIMITING.md](design_notes/RATE_LIMITING.md) for complete documentation.
 
 ## Development
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -25,6 +26,14 @@ type Server struct {
 	prometheusExporter *metricsd.PrometheusExporter
 	stdin              io.Reader
 	stdout             io.Writer
+	validatedTokens    map[string]TokenInfo // Cache of validated tokens
+	tokenMutex         sync.RWMutex
+}
+
+// TokenInfo stores information about a validated token
+type TokenInfo struct {
+	Username   string
+	Expiration time.Time
 }
 
 // Config holds server configuration
@@ -96,14 +105,15 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		schedd:         schedd,
-		collector:      cfg.Collector,
-		trustDomain:    cfg.TrustDomain,
-		uidDomain:      cfg.UIDDomain,
-		signingKeyPath: cfg.SigningKeyPath,
-		logger:         logger,
-		stdin:          stdin,
-		stdout:         stdout,
+		schedd:          schedd,
+		collector:       cfg.Collector,
+		trustDomain:     cfg.TrustDomain,
+		uidDomain:       cfg.UIDDomain,
+		signingKeyPath:  cfg.SigningKeyPath,
+		logger:          logger,
+		stdin:           stdin,
+		stdout:          stdout,
+		validatedTokens: make(map[string]TokenInfo),
 	}
 
 	// Setup metrics if collector is provided
@@ -176,6 +186,9 @@ type MCPError struct {
 // Run starts the MCP server and processes messages
 func (s *Server) Run(ctx context.Context) error {
 	s.logger.Info(logging.DestinationGeneral, "Starting MCP server")
+
+	// Start token cleanup goroutine
+	s.startTokenCleanup(ctx)
 
 	decoder := json.NewDecoder(s.stdin)
 	encoder := json.NewEncoder(s.stdout)
@@ -274,6 +287,64 @@ func (s *Server) SetStdout(stdout io.Writer) io.Writer {
 	old := s.stdout
 	s.stdout = stdout
 	return old
+}
+
+// markTokenValidated adds a token to the validated cache after successful authentication
+func (s *Server) markTokenValidated(token, username string, expiration time.Time) {
+	s.tokenMutex.Lock()
+	defer s.tokenMutex.Unlock()
+	s.validatedTokens[token] = TokenInfo{
+		Username:   username,
+		Expiration: expiration,
+	}
+}
+
+// getValidatedUsername returns the username if the token is in the validated cache and not expired
+// Returns empty string if token is not validated or expired
+func (s *Server) getValidatedUsername(token string) string {
+	s.tokenMutex.RLock()
+	defer s.tokenMutex.RUnlock()
+
+	info, exists := s.validatedTokens[token]
+	if !exists {
+		return ""
+	}
+
+	// Check if token is expired
+	if time.Now().After(info.Expiration) {
+		return ""
+	}
+
+	return info.Username
+}
+
+// startTokenCleanup starts a goroutine that periodically removes expired tokens from cache
+func (s *Server) startTokenCleanup(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.cleanupExpiredTokens()
+			}
+		}
+	}()
+}
+
+// cleanupExpiredTokens removes expired tokens from the cache
+func (s *Server) cleanupExpiredTokens() {
+	s.tokenMutex.Lock()
+	defer s.tokenMutex.Unlock()
+
+	now := time.Now()
+	for token, info := range s.validatedTokens {
+		if now.After(info.Expiration) {
+			delete(s.validatedTokens, token)
+		}
+	}
 }
 
 // handleInitialize handles the initialize request

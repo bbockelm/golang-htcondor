@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // Tool represents an MCP tool definition
@@ -220,6 +222,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 
 	// Create context with security config if token provided
 	token, _ := request.Arguments["token"].(string)
+	var username string
 	if token != "" {
 		secConfig := &security.SecurityConfig{
 			AuthMethods:    []security.AuthMethod{security.AuthToken},
@@ -230,29 +233,50 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			Token:          token,
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+		// Check if token is already validated
+		username = s.getValidatedUsername(token)
+		if username != "" {
+			// Use cached validated username for rate limiting
+			ctx = htcondor.WithAuthenticatedUser(ctx, username)
+		}
+		// If not validated, treat as unauthenticated for rate limiting
+		// Token will be validated on first successful operation
 	}
 
 	// Route to appropriate handler
+	var result interface{}
+	var err error
 	switch request.Name {
 	case "submit_job":
-		return s.toolSubmitJob(ctx, request.Arguments)
+		result, err = s.toolSubmitJob(ctx, request.Arguments)
 	case "query_jobs":
-		return s.toolQueryJobs(ctx, request.Arguments)
+		result, err = s.toolQueryJobs(ctx, request.Arguments)
 	case "get_job":
-		return s.toolGetJob(ctx, request.Arguments)
+		result, err = s.toolGetJob(ctx, request.Arguments)
 	case "remove_job":
-		return s.toolRemoveJob(ctx, request.Arguments)
+		result, err = s.toolRemoveJob(ctx, request.Arguments)
 	case "remove_jobs":
-		return s.toolRemoveJobs(ctx, request.Arguments)
+		result, err = s.toolRemoveJobs(ctx, request.Arguments)
 	case "edit_job":
-		return s.toolEditJob(ctx, request.Arguments)
+		result, err = s.toolEditJob(ctx, request.Arguments)
 	case "hold_job":
-		return s.toolHoldJob(ctx, request.Arguments)
+		result, err = s.toolHoldJob(ctx, request.Arguments)
 	case "release_job":
-		return s.toolReleaseJob(ctx, request.Arguments)
+		result, err = s.toolReleaseJob(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
+
+	// If operation succeeded and token was provided but not yet validated, mark it as validated
+	if err == nil && token != "" && username == "" {
+		// Parse username and expiration from token in a single call
+		if extractedUsername, expiration, parseErr := parseJWTClaims(token); parseErr == nil {
+			s.markTokenValidated(token, extractedUsername, expiration)
+		}
+	}
+
+	return result, err
 }
 
 // toolSubmitJob handles job submission
@@ -630,4 +654,33 @@ func parseJobID(jobID string) (cluster int, proc int, err error) {
 	}
 
 	return cluster, proc, nil
+}
+
+// parseJWTClaims extracts username and expiration from a JWT token using the JWT library
+// Returns the username, expiration time, or an error if parsing fails
+func parseJWTClaims(token string) (username string, expiration time.Time, err error) {
+	// Parse the token without verification (we just need to read claims)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsedToken, _, parseErr := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
+	if parseErr != nil {
+		return "", time.Time{}, fmt.Errorf("failed to parse JWT: %w", parseErr)
+	}
+
+	// Extract standard claims
+	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
+	if !ok {
+		return "", time.Time{}, fmt.Errorf("failed to extract JWT claims")
+	}
+
+	// Check if subject is set
+	if claims.Subject == "" {
+		return "", time.Time{}, fmt.Errorf("JWT missing sub claim")
+	}
+
+	// Check if expiration is set
+	if claims.ExpiresAt == nil {
+		return "", time.Time{}, fmt.Errorf("JWT missing exp claim")
+	}
+
+	return claims.Subject, claims.ExpiresAt.Time, nil
 }

@@ -34,6 +34,10 @@ Thumbs.db
 # Example binaries
 examples/*/basic
 examples/*/example
+examples/basic/basic
+examples/file_transfer_demo/file_transfer_demo
+examples/param_defaults_demo/param_defaults_demo
+examples/queue_demo/queue_demo
 
 # Temporary files and tokens
 cmd/htcondor-api/tmp/
