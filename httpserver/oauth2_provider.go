@@ -17,9 +17,10 @@ import (
 
 // OAuth2Provider manages OAuth2 operations
 type OAuth2Provider struct {
-	oauth2  fosite.OAuth2Provider
-	storage *OAuth2Storage
-	config  *fosite.Config
+	oauth2   fosite.OAuth2Provider
+	storage  *OAuth2Storage
+	config   *fosite.Config
+	strategy *compose.CommonStrategy
 }
 
 // NewOAuth2Provider creates a new OAuth2 provider with SQLite storage
@@ -117,9 +118,10 @@ func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
 	)
 
 	return &OAuth2Provider{
-		oauth2:  oauth2Provider,
-		storage: storage,
-		config:  config,
+		oauth2:   oauth2Provider,
+		storage:  storage,
+		config:   config,
+		strategy: strategy,
 	}, nil
 }
 
@@ -136,6 +138,11 @@ func (p *OAuth2Provider) GetProvider() fosite.OAuth2Provider {
 // GetStorage returns the OAuth2 storage
 func (p *OAuth2Provider) GetStorage() *OAuth2Storage {
 	return p.storage
+}
+
+// GetStrategy returns the OAuth2 strategy
+func (p *OAuth2Provider) GetStrategy() *compose.CommonStrategy {
+	return p.strategy
 }
 
 // DefaultOpenIDConnectSession creates a default OpenID Connect session

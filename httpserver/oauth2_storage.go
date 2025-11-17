@@ -124,11 +124,30 @@ func (s *OAuth2Storage) createTables() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS oauth2_device_codes (
+		device_code TEXT PRIMARY KEY,
+		user_code TEXT NOT NULL UNIQUE,
+		request_id TEXT NOT NULL,
+		requested_at TIMESTAMP NOT NULL,
+		client_id TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		granted_scopes TEXT NOT NULL,
+		form_data TEXT NOT NULL,
+		session_data TEXT,
+		subject TEXT,
+		status TEXT NOT NULL DEFAULT 'pending',
+		expires_at TIMESTAMP NOT NULL,
+		last_polled_at TIMESTAMP,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON oauth2_access_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth2_refresh_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_authorization_codes_client ON oauth2_authorization_codes(client_id);
 	CREATE INDEX IF NOT EXISTS idx_oidc_sessions_client ON oauth2_oidc_sessions(client_id);
 	CREATE INDEX IF NOT EXISTS idx_jwt_assertions_expires ON oauth2_jwt_assertions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_device_codes_user_code ON oauth2_device_codes(user_code);
+	CREATE INDEX IF NOT EXISTS idx_device_codes_expires ON oauth2_device_codes(expires_at);
 	`
 
 	_, err := s.db.ExecContext(context.Background(), schema)
@@ -520,4 +539,236 @@ func (s *OAuth2Storage) GetOpenIDConnectSession(ctx context.Context, signature s
 // DeleteOpenIDConnectSession implements openid.OpenIDConnectRequestStorage interface
 func (s *OAuth2Storage) DeleteOpenIDConnectSession(ctx context.Context, signature string) error {
 	return s.deleteTokenSession(ctx, "oauth2_oidc_sessions", signature)
+}
+
+// Device Code Flow Storage Methods
+
+// CreateDeviceCodeSession creates a new device code session
+func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode string, userCode string, request fosite.Requester, expiresAt time.Time) error {
+	scopes, err := json.Marshal(request.GetRequestedScopes())
+	if err != nil {
+		return err
+	}
+	grantedScopes, err := json.Marshal(request.GetGrantedScopes())
+	if err != nil {
+		return err
+	}
+	formData, err := json.Marshal(request.GetRequestForm())
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id, 
+			scopes, granted_scopes, form_data, expires_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+	`, deviceCode, userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
+		string(scopes), string(grantedScopes), string(formData), expiresAt)
+
+	return err
+}
+
+// GetDeviceCodeSession retrieves a device code session by device code
+func (s *OAuth2Storage) GetDeviceCodeSession(ctx context.Context, deviceCode string, session fosite.Session) (fosite.Requester, error) {
+	var (
+		userCode      string
+		requestID     string
+		requestedAt   time.Time
+		clientID      string
+		scopes        string
+		grantedScopes string
+		formData      string
+		sessionData   sql.NullString
+		subject       sql.NullString
+		status        string
+		expiresAt     time.Time
+	)
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT user_code, request_id, requested_at, client_id, scopes, granted_scopes,
+			form_data, session_data, subject, status, expires_at
+		FROM oauth2_device_codes WHERE device_code = ?
+	`, deviceCode).Scan(&userCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
+		&formData, &sessionData, &subject, &status, &expiresAt)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fosite.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if expired
+	if time.Now().After(expiresAt) {
+		return nil, ErrExpiredToken
+	}
+
+	// Check status
+	if status == "denied" {
+		return nil, fosite.ErrAccessDenied
+	}
+	if status == "pending" {
+		return nil, ErrAuthorizationPending
+	}
+
+	client, err := s.GetClient(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+
+	request := fosite.NewRequest()
+	request.ID = requestID
+	request.RequestedAt = requestedAt
+	request.Client = client
+
+	var scopesList []string
+	if err := json.Unmarshal([]byte(scopes), &scopesList); err != nil {
+		return nil, err
+	}
+	request.RequestedScope = scopesList
+
+	var grantedScopesList []string
+	if err := json.Unmarshal([]byte(grantedScopes), &grantedScopesList); err != nil {
+		return nil, err
+	}
+	request.GrantedScope = grantedScopesList
+
+	// Unmarshal session data if available
+	if sessionData.Valid && sessionData.String != "" {
+		if err := json.Unmarshal([]byte(sessionData.String), session); err != nil {
+			return nil, err
+		}
+		request.Session = session
+	}
+
+	return request, nil
+}
+
+// GetDeviceCodeSessionByUserCode retrieves a device code session by user code
+func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, userCode string) (string, fosite.Requester, error) {
+	var (
+		deviceCode    string
+		requestID     string
+		requestedAt   time.Time
+		clientID      string
+		scopes        string
+		grantedScopes string
+		formData      string
+		status        string
+		expiresAt     time.Time
+	)
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT device_code, request_id, requested_at, client_id, scopes, granted_scopes,
+			form_data, status, expires_at
+		FROM oauth2_device_codes WHERE user_code = ?
+	`, userCode).Scan(&deviceCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
+		&formData, &status, &expiresAt)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, fosite.ErrNotFound
+	}
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Check if expired
+	if time.Now().After(expiresAt) {
+		return "", nil, ErrExpiredToken
+	}
+
+	client, err := s.GetClient(ctx, clientID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	request := fosite.NewRequest()
+	request.ID = requestID
+	request.RequestedAt = requestedAt
+	request.Client = client
+
+	var scopesList []string
+	if err := json.Unmarshal([]byte(scopes), &scopesList); err != nil {
+		return "", nil, err
+	}
+	request.RequestedScope = scopesList
+
+	var grantedScopesList []string
+	if err := json.Unmarshal([]byte(grantedScopes), &grantedScopesList); err != nil {
+		return "", nil, err
+	}
+	request.GrantedScope = grantedScopesList
+
+	return deviceCode, request, nil
+}
+
+// ApproveDeviceCodeSession approves a device code (user authorized the device)
+func (s *OAuth2Storage) ApproveDeviceCodeSession(ctx context.Context, userCode string, subject string, session fosite.Session) error {
+	sessionData, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE oauth2_device_codes 
+		SET status = 'approved', subject = ?, session_data = ?
+		WHERE user_code = ? AND status = 'pending'
+	`, subject, string(sessionData), userCode)
+
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fosite.ErrNotFound
+	}
+
+	return nil
+}
+
+// DenyDeviceCodeSession denies a device code (user rejected the device)
+func (s *OAuth2Storage) DenyDeviceCodeSession(ctx context.Context, userCode string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE oauth2_device_codes 
+		SET status = 'denied'
+		WHERE user_code = ? AND status = 'pending'
+	`, userCode)
+
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fosite.ErrNotFound
+	}
+
+	return nil
+}
+
+// UpdateDeviceCodePolling updates the last polled timestamp for rate limiting
+func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE oauth2_device_codes 
+		SET last_polled_at = ?
+		WHERE device_code = ?
+	`, time.Now(), deviceCode)
+	return err
+}
+
+// InvalidateDeviceCodeSession invalidates a device code after it's been used
+func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceCode string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE oauth2_device_codes 
+		SET status = 'used'
+		WHERE device_code = ?
+	`, deviceCode)
+	return err
 }
