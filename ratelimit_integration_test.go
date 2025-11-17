@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,9 +18,18 @@ func TestScheddQueryRateLimit(t *testing.T) {
 
 	h := setupCondorHarness(t)
 
+	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
+	// Extract the host:port from within the angle brackets
+	collectorAddr := h.GetCollectorAddr()
+	collectorAddr = strings.TrimPrefix(collectorAddr, "<")
+	if idx := strings.Index(collectorAddr, "?"); idx > 0 {
+		collectorAddr = collectorAddr[:idx] // Remove query parameters
+	}
+	collectorAddr = strings.TrimSuffix(collectorAddr, ">")
+
 	// Get schedd - we need to query the collector to find it
 	ctx := context.Background()
-	collector := NewCollector(h.GetCollectorAddr())
+	collector := NewCollector(collectorAddr)
 	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
 	if err != nil || len(scheddAds) == 0 {
 		t.Skipf("No schedd found, skipping rate limit test: %v", err)
@@ -162,8 +172,17 @@ func TestCollectorQueryRateLimit(t *testing.T) {
 
 	h := setupCondorHarness(t)
 
+	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
+	// Extract the host:port from within the angle brackets
+	addr := h.GetCollectorAddr()
+	addr = strings.TrimPrefix(addr, "<")
+	if idx := strings.Index(addr, "?"); idx > 0 {
+		addr = addr[:idx] // Remove query parameters
+	}
+	addr = strings.TrimSuffix(addr, ">")
+
 	// Get collector instance
-	collector := NewCollector(h.GetCollectorAddr())
+	collector := NewCollector(addr)
 
 	// Create a config with rate limits
 	cfg := config.NewEmpty()

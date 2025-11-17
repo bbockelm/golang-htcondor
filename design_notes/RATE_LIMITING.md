@@ -100,17 +100,17 @@ import (
 func main() {
     // Rate limits are automatically loaded from HTCondor config
     // No explicit initialization needed
-    
+
     schedd := htcondor.NewSchedd("schedd_name", "schedd.example.com:9618")
-    
+
     ctx := context.Background()
-    
+
     // Query will be rate-limited according to configuration
     jobs, err := schedd.Query(ctx, "true", []string{"ClusterId", "ProcId"})
     if err != nil {
         log.Fatalf("Query failed: %v", err)
     }
-    
+
     fmt.Printf("Found %d jobs\n", len(jobs))
 }
 ```
@@ -128,9 +128,9 @@ import (
 func queryAsUser(username string) error {
     // Create context with authenticated user
     ctx := htcondor.WithAuthenticatedUser(context.Background(), username)
-    
+
     schedd := htcondor.NewSchedd("schedd_name", "schedd.example.com:9618")
-    
+
     // This query will be rate-limited for the specified user
     _, err := schedd.Query(ctx, "true", nil)
     return err
@@ -152,17 +152,17 @@ func setupCustomRateLimiter() {
     cfg := config.NewEmpty()
     cfg.Set("SCHEDD_QUERY_RATE_LIMIT", "15")
     cfg.Set("SCHEDD_QUERY_PER_USER_RATE_LIMIT", "8")
-    
+
     // Create rate limiter from config
     manager := ratelimit.ConfigFromHTCondor(cfg)
-    
+
     // Check if a user is allowed to query
     username := "alice"
     if err := manager.AllowSchedd(username); err != nil {
         // Rate limit exceeded
         return
     }
-    
+
     // Or wait for rate limit to clear
     ctx := context.Background()
     if err := manager.WaitSchedd(ctx, username); err != nil {
@@ -210,14 +210,14 @@ import "github.com/bbockelm/golang-htcondor/ratelimit"
 func getRateLimitStats() {
     // Assuming you have access to the manager
     var manager *ratelimit.Manager
-    
+
     scheddStats := manager.GetScheddStats()
     fmt.Printf("Schedd rate limiter:\n")
     fmt.Printf("  Global rate: %.2f qps\n", scheddStats.GlobalRate)
     fmt.Printf("  Per-user rate: %.2f qps\n", scheddStats.PerUserRate)
     fmt.Printf("  Active users: %d\n", scheddStats.UserCount)
     fmt.Printf("  Available tokens: %.2f\n", scheddStats.GlobalTokens)
-    
+
     collectorStats := manager.GetCollectorStats()
     fmt.Printf("Collector rate limiter:\n")
     fmt.Printf("  Global rate: %.2f qps\n", collectorStats.GlobalRate)
