@@ -33,12 +33,22 @@ go get github.com/bbockelm/golang-htcondor
 
 ```go
 import "github.com/bbockelm/golang-htcondor"
+import "context"
+import "log"
+
+ctx := context.Background()
 
 // Create a collector instance
-collector := htcondor.NewCollector("collector.example.com", 9618)
+collector := htcondor.NewCollector("collector.example.com:9618")
 
 // Query for schedd ads
 ads, err := collector.QueryAds(ctx, "ScheddAd", "")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Query for schedd ads of a specific schedd
+ads, err := collector.QueryAds(ctx, "ScheddAd", `Machine=="schedd_name"`)
 if err != nil {
     log.Fatal(err)
 }
