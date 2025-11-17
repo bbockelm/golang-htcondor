@@ -510,6 +510,7 @@ func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"issuer":                                issuer,
 		"authorization_endpoint":                issuer + "/mcp/oauth2/authorize",
 		"token_endpoint":                        issuer + "/mcp/oauth2/token",
+		"registration_endpoint":                 issuer + "/mcp/oauth2/register",
 		"introspection_endpoint":                issuer + "/mcp/oauth2/introspect",
 		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
 		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
