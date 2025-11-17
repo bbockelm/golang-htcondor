@@ -10,6 +10,23 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
 
+// parseSinfulString extracts the host:port from an HTCondor sinful string
+// Example: "<127.0.0.1:9618?addrs=127.0.0.1-9618&alias=...>" -> "127.0.0.1:9618"
+//
+// TODO: This is a workaround for a bug in the cedar library where it doesn't properly
+// parse sinful strings before attempting to dial. The cedar library should handle this
+// parsing internally. Once cedar is fixed, this function can be removed and we can pass
+// the raw sinful strings directly to NewSchedd() and NewCollector().
+// See: https://github.com/bbockelm/cedar/issues/TBD
+func parseSinfulString(sinful string) string {
+	sinful = strings.TrimPrefix(sinful, "<")
+	if idx := strings.Index(sinful, "?"); idx > 0 {
+		sinful = sinful[:idx] // Remove query parameters
+	}
+	sinful = strings.TrimSuffix(sinful, ">")
+	return sinful
+}
+
 // TestScheddQueryRateLimit tests that rate limiting works for schedd queries
 func TestScheddQueryRateLimit(t *testing.T) {
 	if testing.Short() {
@@ -30,12 +47,7 @@ func TestScheddQueryRateLimit(t *testing.T) {
 
 	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
 	// Extract the host:port from within the angle brackets
-	collectorAddr := h.GetCollectorAddr()
-	collectorAddr = strings.TrimPrefix(collectorAddr, "<")
-	if idx := strings.Index(collectorAddr, "?"); idx > 0 {
-		collectorAddr = collectorAddr[:idx] // Remove query parameters
-	}
-	collectorAddr = strings.TrimSuffix(collectorAddr, ">")
+	collectorAddr := parseSinfulString(h.GetCollectorAddr())
 
 	// Get schedd - we need to query the collector to find it
 	ctx := context.Background()
@@ -50,6 +62,9 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	if !ok {
 		t.Fatal("Schedd ad missing MyAddress")
 	}
+	// Parse schedd address - same sinful string format as collector
+	scheddAddr = parseSinfulString(scheddAddr)
+
 	scheddName, ok := scheddAds[0].EvaluateAttrString("Name")
 	if !ok {
 		scheddName = "schedd"
@@ -184,12 +199,7 @@ func TestCollectorQueryRateLimit(t *testing.T) {
 
 	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
 	// Extract the host:port from within the angle brackets
-	addr := h.GetCollectorAddr()
-	addr = strings.TrimPrefix(addr, "<")
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx] // Remove query parameters
-	}
-	addr = strings.TrimSuffix(addr, ">")
+	addr := parseSinfulString(h.GetCollectorAddr())
 
 	// Get collector instance
 	collector := NewCollector(addr)
