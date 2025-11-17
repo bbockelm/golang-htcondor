@@ -691,7 +691,7 @@ func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []strin
 	)
 	token, err := security.GenerateJWT(
 		filepath.Dir(s.signingKeyPath),
-		filepath.Dir(s.signingKeyPath),
+		filepath.Base(s.signingKeyPath),
 		username,
 		s.trustDomain,
 		iat,
