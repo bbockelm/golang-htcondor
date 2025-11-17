@@ -139,7 +139,7 @@ func (s *Server) fetchUserInfo(ctx context.Context, accessToken string) (*UserIn
 		Claims: claims,
 	}
 
-	s.logger.Debug(logging.DestinationHTTP, "Fetched user info from IDP", "claims", claims)
+	s.logger.Info(logging.DestinationHTTP, "Fetched user info from IDP", "claims", claims)
 
 	// Extract standard claims
 	if sub, ok := claims[s.oauth2UsernameClaim].(string); ok {
