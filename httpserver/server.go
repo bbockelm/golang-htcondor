@@ -32,9 +32,15 @@ type Server struct {
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
-	tokenCache         *TokenCache     // Cache of validated tokens and their session caches (includes username)
-	oauth2Provider     *OAuth2Provider // OAuth2 provider for MCP endpoints
-	oauth2Config       *oauth2.Config  // OAuth2 client config for SSO
+	tokenCache         *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	oauth2Provider     *OAuth2Provider   // OAuth2 provider for MCP endpoints
+	oauth2Config       *oauth2.Config    // OAuth2 client config for SSO
+	oauth2StateStore   *OAuth2StateStore // State storage for OAuth2 SSO flow
+	oauth2UserInfoURL  string            // User info endpoint for SSO
+	oauth2GroupsClaim  string            // Claim name for group information (default: "groups")
+	mcpAccessGroup     string            // Group required for any MCP access (empty = all authenticated users)
+	mcpReadGroup       string            // Group required for read access (empty = all users have read)
+	mcpWriteGroup      string            // Group required for write access (empty = all users have write)
 }
 
 // Config holds server configuration
@@ -63,6 +69,11 @@ type Config struct {
 	OAuth2AuthURL      string              // OAuth2 authorization URL for SSO (optional)
 	OAuth2TokenURL     string              // OAuth2 token URL for SSO (optional)
 	OAuth2RedirectURL  string              // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL  string              // OAuth2 user info endpoint for SSO (optional)
+	OAuth2GroupsClaim  string              // Claim name for groups in user info (default: "groups")
+	MCPAccessGroup     string              // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup       string              // Group required for read operations (empty = all have read)
+	MCPWriteGroup      string              // Group required for write operations (empty = all have write)
 }
 
 // NewServer creates a new HTTP API server
@@ -129,6 +140,9 @@ func NewServer(cfg Config) (*Server, error) {
 		s.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
 
+		// Initialize OAuth2 state store
+		s.oauth2StateStore = NewOAuth2StateStore()
+
 		// Setup OAuth2 client config for SSO if configured
 		if cfg.OAuth2ClientID != "" && cfg.OAuth2AuthURL != "" && cfg.OAuth2TokenURL != "" {
 			s.oauth2Config = &oauth2.Config{
@@ -141,7 +155,29 @@ func NewServer(cfg Config) (*Server, error) {
 				},
 				Scopes: []string{"openid", "profile", "email"},
 			}
+			s.oauth2UserInfoURL = cfg.OAuth2UserInfoURL
 			logger.Info(logging.DestinationHTTP, "OAuth2 SSO client configured", "auth_url", cfg.OAuth2AuthURL)
+		}
+
+		// Set groups claim name (default: "groups")
+		s.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
+		if s.oauth2GroupsClaim == "" {
+			s.oauth2GroupsClaim = "groups"
+		}
+
+		// Set group-based access control
+		s.mcpAccessGroup = cfg.MCPAccessGroup
+		s.mcpReadGroup = cfg.MCPReadGroup
+		s.mcpWriteGroup = cfg.MCPWriteGroup
+
+		if s.mcpAccessGroup != "" {
+			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_group", s.mcpAccessGroup)
+		}
+		if s.mcpReadGroup != "" {
+			logger.Info(logging.DestinationHTTP, "MCP read access control enabled", "read_group", s.mcpReadGroup)
+		}
+		if s.mcpWriteGroup != "" {
+			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", s.mcpWriteGroup)
 		}
 	}
 

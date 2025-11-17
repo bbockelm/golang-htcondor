@@ -55,6 +55,11 @@ type mcpConfig struct {
 	oauth2AuthURL      string
 	oauth2TokenURL     string
 	oauth2RedirectURL  string
+	oauth2UserInfoURL  string
+	oauth2GroupsClaim  string
+	mcpAccessGroup     string
+	mcpReadGroup       string
+	mcpWriteGroup      string
 }
 
 // fixConfigDefaults handles edge cases in HTCondor configuration defaults
@@ -370,9 +375,37 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 		if redirectURL, ok := cfg.Get("HTTP_API_OAUTH2_REDIRECT_URL"); ok && redirectURL != "" {
 			config.oauth2RedirectURL = redirectURL
 		} else if config.oauth2Issuer != "" {
-			// Default: derive from issuer by appending /oauth2/callback
-			config.oauth2RedirectURL = config.oauth2Issuer + "/oauth2/callback"
+			// Default: derive from issuer by appending /mcp/oauth2/callback
+			config.oauth2RedirectURL = config.oauth2Issuer + "/mcp/oauth2/callback"
 			log.Printf("OAuth2 redirect URL derived from issuer: %s", config.oauth2RedirectURL)
+		}
+
+		// Get user info URL
+		if userInfoURL, ok := cfg.Get("HTTP_API_OAUTH2_USERINFO_URL"); ok && userInfoURL != "" {
+			config.oauth2UserInfoURL = userInfoURL
+			log.Printf("OAuth2 user info URL: %s", userInfoURL)
+		}
+
+		// Get groups claim name (default: "groups")
+		if groupsClaim, ok := cfg.Get("HTTP_API_OAUTH2_GROUPS_CLAIM"); ok && groupsClaim != "" {
+			config.oauth2GroupsClaim = groupsClaim
+		} else {
+			config.oauth2GroupsClaim = "groups"
+		}
+		log.Printf("OAuth2 groups claim name: %s", config.oauth2GroupsClaim)
+
+		// Get group-based access control settings
+		if accessGroup, ok := cfg.Get("HTTP_API_MCP_ACCESS_GROUP"); ok && accessGroup != "" {
+			config.mcpAccessGroup = accessGroup
+			log.Printf("MCP access group: %s", accessGroup)
+		}
+		if readGroup, ok := cfg.Get("HTTP_API_MCP_READ_GROUP"); ok && readGroup != "" {
+			config.mcpReadGroup = readGroup
+			log.Printf("MCP read group: %s", readGroup)
+		}
+		if writeGroup, ok := cfg.Get("HTTP_API_MCP_WRITE_GROUP"); ok && writeGroup != "" {
+			config.mcpWriteGroup = writeGroup
+			log.Printf("MCP write group: %s", writeGroup)
 		}
 	}
 
@@ -563,6 +596,11 @@ func runNormalMode() error {
 		OAuth2AuthURL:      mcpCfg.oauth2AuthURL,
 		OAuth2TokenURL:     mcpCfg.oauth2TokenURL,
 		OAuth2RedirectURL:  mcpCfg.oauth2RedirectURL,
+		OAuth2UserInfoURL:  mcpCfg.oauth2UserInfoURL,
+		OAuth2GroupsClaim:  mcpCfg.oauth2GroupsClaim,
+		MCPAccessGroup:     mcpCfg.mcpAccessGroup,
+		MCPReadGroup:       mcpCfg.mcpReadGroup,
+		MCPWriteGroup:      mcpCfg.mcpWriteGroup,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

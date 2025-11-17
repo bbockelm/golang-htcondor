@@ -294,6 +294,29 @@ HTTP_API_OAUTH2_CLIENT_SECRET_FILE = /etc/condor/secrets/oauth2_client_secret
 # Redirect URL for OAuth2 callback (default: derived from issuer + /oauth2/callback)
 # Only set this if you need a different callback URL
 # HTTP_API_OAUTH2_REDIRECT_URL = https://htcondor.example.com/oauth2/callback
+
+# User info endpoint URL (required for SSO integration with group-based access control)
+# This endpoint should return user information including group membership
+HTTP_API_OAUTH2_USERINFO_URL = https://idp.example.com/userinfo
+
+# Claim name for groups in the userinfo response (default: "groups")
+# The groups can be returned as either a JSON array or space-delimited string
+HTTP_API_OAUTH2_GROUPS_CLAIM = groups
+
+# Group-Based Access Control (optional)
+# Control access to MCP endpoints and scope granting based on group membership
+
+# Required group for any MCP access (if not set, all authenticated users can access)
+# Users without this group will receive an "access_denied" error
+HTTP_API_MCP_ACCESS_GROUP = mcp-users
+
+# Required group for mcp:read scope (if not set, no users get read access by default)
+# Users in this group will receive the mcp:read scope
+HTTP_API_MCP_READ_GROUP = mcp-read
+
+# Required group for mcp:write scope (if not set, no users get write access by default)
+# Users in this group will receive both mcp:read and mcp:write scopes
+HTTP_API_MCP_WRITE_GROUP = mcp-write
 ```
 
 **OIDC Discovery:**
@@ -304,6 +327,50 @@ When `HTTP_API_OAUTH2_IDP` is set, the server will fetch the OIDC configuration 
 ```
 
 This automatically discovers the authorization and token endpoints, making configuration easier and more maintainable. If discovery fails or you prefer explicit configuration, use `HTTP_API_OAUTH2_AUTH_URL` and `HTTP_API_OAUTH2_TOKEN_URL` instead.
+
+**Group-Based Access Control:**
+
+The HTTP API server supports fine-grained access control based on group membership from your identity provider:
+
+1. **Access Control** (`HTTP_API_MCP_ACCESS_GROUP`): Controls who can access MCP endpoints at all
+   - If set, users must be in this group to access any MCP functionality
+   - If not set, all authenticated users can access MCP endpoints
+   - Users without the required group receive an `access_denied` error
+
+2. **Read Scope** (`HTTP_API_MCP_READ_GROUP`): Controls who gets the `mcp:read` scope
+   - Users in this group receive the `mcp:read` scope in their access token
+   - Allows read-only operations via MCP
+
+3. **Write Scope** (`HTTP_API_MCP_WRITE_GROUP`): Controls who gets the `mcp:write` scope
+   - Users in this group receive both `mcp:read` and `mcp:write` scopes
+   - Allows full read-write operations via MCP
+
+**Group Format:**
+
+Groups can be returned from the userinfo endpoint in two formats:
+- JSON array: `{"groups": ["users", "mcp-users", "mcp-read"]}`
+- Space-delimited string: `{"groups": "users mcp-users mcp-read"}`
+
+Group matching is case-insensitive. The claim name can be customized with `HTTP_API_OAUTH2_GROUPS_CLAIM` (default: `groups`).
+
+**Example Access Control Configuration:**
+
+```bash
+# Require users to be in "mcp-users" group to access MCP at all
+HTTP_API_MCP_ACCESS_GROUP = mcp-users
+
+# Users in "mcp-read" group get read-only access
+HTTP_API_MCP_READ_GROUP = mcp-read
+
+# Users in "mcp-admin" group get full read-write access
+HTTP_API_MCP_WRITE_GROUP = mcp-admin
+```
+
+With this configuration:
+- User with groups `["users"]`: Access denied
+- User with groups `["mcp-users"]`: Access granted, but no scopes (limited functionality)
+- User with groups `["mcp-users", "mcp-read"]`: Access granted with `mcp:read` scope
+- User with groups `["mcp-users", "mcp-admin"]`: Access granted with `mcp:read` and `mcp:write` scopes
 
 **Client Secret File:**
 
