@@ -57,7 +57,7 @@ func extractGroups(groupsClaim interface{}) []string {
 // hasGroup checks if the user has the specified group (case-insensitive)
 func hasGroup(userGroups []string, requiredGroup string) bool {
 	if requiredGroup == "" {
-		return false // No group specified
+		return true // No group specified
 	}
 	requiredLower := strings.ToLower(requiredGroup)
 	for _, group := range userGroups {
