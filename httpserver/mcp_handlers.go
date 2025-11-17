@@ -183,21 +183,61 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract username from user header if configured
+	// Determine authentication method:
+	// 1. If userHeader is configured, use that (for demo/testing mode)
+	// 2. If OAuth2 SSO is configured and no userHeader, initiate SSO flow
+	// 3. If neither, check query parameter (backward compatibility for tests)
+
 	username := ""
+
+	// Method 1: User header (demo mode)
 	if s.userHeader != "" {
 		username = r.Header.Get(s.userHeader)
+		if username != "" {
+			s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", s.userHeader)
+		}
 	}
 
-	// If no user header, check for username in query parameters (for SSO flow)
+	// Method 2: OAuth2 SSO flow
+	if username == "" && s.oauth2Config != nil {
+		// Generate state parameter
+		state, err := s.oauth2StateStore.GenerateState()
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+			return
+		}
+
+		// Store authorize request for later retrieval
+		s.oauth2StateStore.Store(state, ar)
+
+		// Build authorization URL
+		authURL := s.oauth2Config.AuthCodeURL(state)
+
+		s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
+			"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
+
+		// Redirect to IDP
+		http.Redirect(w, r, authURL, http.StatusFound)
+		return
+	}
+
+	// Method 3: Query parameter (backward compatibility for testing)
 	if username == "" {
 		username = r.URL.Query().Get("username")
 	}
 
+	// If still no username, authentication is required
 	if username == "" {
+		s.logger.Error(logging.DestinationHTTP, "No authentication method available")
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
+
+	// User authenticated via header or query parameter - continue with authorization
+	s.logger.Info(logging.DestinationHTTP, "User authenticated, creating authorize response",
+		"username", username, "client_id", ar.GetClient().GetID())
 
 	// Create session for this user
 	session := DefaultOpenIDConnectSession(username)
