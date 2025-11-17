@@ -32,10 +32,20 @@ go get github.com/bbockelm/golang-htcondor
 ### Collector
 
 ```go
-import "github.com/bbockelm/golang-htcondor"
+import (
+    "context"
+    "log"
+    "time"
+    
+    "github.com/bbockelm/golang-htcondor"
+)
 
 // Create a collector instance
-collector := htcondor.NewCollector("collector.example.com", 9618)
+collector := htcondor.NewCollector("collector.example.com:9618")
+
+// Create a context with timeout
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
 
 // Query for schedd ads
 ads, err := collector.QueryAds(ctx, "ScheddAd", "")
@@ -53,8 +63,21 @@ if err != nil {
 ### Schedd
 
 ```go
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+    
+    "github.com/bbockelm/golang-htcondor"
+)
+
 // Create a schedd instance
-schedd := htcondor.NewSchedd("schedd_name", "schedd.example.com", 9618)
+schedd := htcondor.NewSchedd("schedd_name", "schedd.example.com:9618")
+
+// Create a context with timeout
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
 
 // Submit a job using submit file content
 submitFile := `
