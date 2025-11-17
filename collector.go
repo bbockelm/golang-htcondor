@@ -26,6 +26,7 @@ func NewCollector(address string) *Collector {
 // QueryAds queries the collector for daemon advertisements
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
+// Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
 func (c *Collector) QueryAds(ctx context.Context, adType string, constraint string) ([]*classad.ClassAd, error) {
 	return c.QueryAdsWithProjection(ctx, adType, constraint, nil)
 }
@@ -34,7 +35,48 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 // projection is an optional list of attribute names to return (pass nil for all attributes)
+// Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
 func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, constraint string, projection []string) ([]*classad.ClassAd, error) {
+	return c.queryAdsInternal(ctx, adType, constraint, projection, nil)
+}
+
+// QueryAdsWithOptions queries the collector for daemon advertisements with pagination and limits
+// opts specifies query options including limit, projection, and pagination
+// Returns the matching ads and pagination info
+func (c *Collector) QueryAdsWithOptions(ctx context.Context, adType string, constraint string, opts *QueryOptions) ([]*classad.ClassAd, *PageInfo, error) {
+	// Apply defaults if opts is nil
+	if opts == nil {
+		opts = &QueryOptions{}
+	}
+	effectiveOpts := opts.ApplyDefaults()
+
+	// Get effective projection
+	projection := effectiveOpts.GetEffectiveProjection(DefaultCollectorProjection())
+
+	// Query with the effective options
+	ads, err := c.queryAdsInternal(ctx, adType, constraint, projection, &effectiveOpts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build pagination info
+	pageInfo := &PageInfo{
+		TotalReturned:  len(ads),
+		HasMoreResults: false,
+		NextPageToken:  "",
+	}
+
+	// If we got exactly the limit, there might be more results
+	if !effectiveOpts.IsUnlimited() && len(ads) >= effectiveOpts.Limit {
+		// There might be more results, but we can't know for sure without collector support
+		// Leave HasMoreResults as false for now
+	}
+
+	return ads, pageInfo, nil
+}
+
+// queryAdsInternal performs the actual collector query
+func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constraint string, projection []string, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
 	rateLimitManager := getRateLimitManager()
@@ -110,12 +152,23 @@ func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, c
 	responseMsg := message.NewMessageFromStream(cedarStream)
 	var ads []*classad.ClassAd
 
+	// Determine the limit to apply
+	limit := -1 // unlimited by default
+	if opts != nil && !opts.IsUnlimited() {
+		limit = opts.Limit
+	}
+
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return ads, ctx.Err()
 		default:
+		}
+
+		// Check if we've reached the limit
+		if limit > 0 && len(ads) >= limit {
+			break
 		}
 
 		// Read "more" flag

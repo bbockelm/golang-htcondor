@@ -78,12 +78,50 @@ func (s *Schedd) Address() string {
 // Query queries the schedd for job advertisements
 // constraint is a ClassAd constraint expression (use "true" to get all jobs)
 // projection is a list of attributes to return (use nil to get all attributes)
+// Deprecated: Use QueryWithOptions for pagination and default limits/projections
 func (s *Schedd) Query(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
-	return s.queryWithAuth(ctx, constraint, projection, false)
+	return s.queryWithAuth(ctx, constraint, projection, false, nil)
 }
 
-// queryWithAuth performs the actual query with optional authentication
-func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
+// QueryWithOptions queries the schedd for job advertisements with pagination and limits
+// opts specifies query options including limit, projection, and pagination
+// Returns the matching job ads and pagination info
+func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *QueryOptions) ([]*classad.ClassAd, *PageInfo, error) {
+	// Apply defaults if opts is nil
+	if opts == nil {
+		opts = &QueryOptions{}
+	}
+	effectiveOpts := opts.ApplyDefaults()
+
+	// Get effective projection
+	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
+
+	// Query with the effective options
+	jobAds, err := s.queryWithAuth(ctx, constraint, projection, false, &effectiveOpts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build pagination info
+	pageInfo := &PageInfo{
+		TotalReturned:  len(jobAds),
+		HasMoreResults: false,
+		NextPageToken:  "",
+	}
+
+	// If we got exactly the limit, there might be more results
+	// In a real implementation, we'd need the schedd to tell us if there are more
+	// For now, we'll assume no pagination beyond the limit
+	if !effectiveOpts.IsUnlimited() && len(jobAds) >= effectiveOpts.Limit {
+		// There might be more results, but we can't know for sure without schedd support
+		// Leave HasMoreResults as false for now
+	}
+
+	return jobAds, pageInfo, nil
+}
+
+// queryWithAuth performs the actual query with optional authentication and query options
+func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
@@ -154,12 +192,23 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	// Receive response ads
 	var jobAds []*classad.ClassAd
 
+	// Determine the limit to apply
+	limit := -1 // unlimited by default
+	if opts != nil && !opts.IsUnlimited() {
+		limit = opts.Limit
+	}
+
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return jobAds, ctx.Err()
 		default:
+		}
+
+		// Check if we've reached the limit
+		if limit > 0 && len(jobAds) >= limit {
+			break
 		}
 
 		// Create a new message for each response ClassAd

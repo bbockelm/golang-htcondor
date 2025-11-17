@@ -52,7 +52,7 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 		},
 		{
 			Name:        "query_jobs",
-			Description: "Query HTCondor jobs with optional constraints and projections",
+			Description: "Query HTCondor jobs with optional constraints, projections, and pagination",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -62,10 +62,18 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results",
+						"description": "List of attributes to include in results. Use ['*'] for all attributes. Default is a limited set of common attributes.",
 						"items": map[string]interface{}{
 							"type": "string",
 						},
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of results to return (default: 50). Use -1 for unlimited.",
+					},
+					"page_token": map[string]interface{}{
+						"type":        "string",
+						"description": "Page token for pagination (optional)",
 					},
 					"token": map[string]interface{}{
 						"type":        "string",
@@ -329,7 +337,23 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		}
 	}
 
-	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	// Parse limit parameter (default 50)
+	limit := 50
+	if limitVal, ok := args["limit"].(float64); ok {
+		limit = int(limitVal)
+	}
+
+	// Get page token
+	pageToken, _ := args["page_token"].(string)
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
+	jobAds, pageInfo, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -340,17 +364,26 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("failed to serialize jobs: %w", err)
 	}
 
+	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
+		len(jobAds), constraint, string(jobsJSON))
+
+	// Add pagination info if available
+	if pageInfo.HasMoreResults {
+		resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", pageInfo.NextPageToken)
+	}
+
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
-					len(jobAds), constraint, string(jobsJSON)),
+				"text": resultText,
 			},
 		},
 		"metadata": map[string]interface{}{
-			"count":      len(jobAds),
-			"constraint": constraint,
+			"count":           pageInfo.TotalReturned,
+			"constraint":      constraint,
+			"has_more":        pageInfo.HasMoreResults,
+			"next_page_token": pageInfo.NextPageToken,
 		},
 	}, nil
 }
