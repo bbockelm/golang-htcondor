@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -112,9 +113,7 @@ func TestMCPWithSSO(t *testing.T) {
 	}
 
 	// Setup mock SSO server first (so we know its URL)
-	ssoPort := findAvailablePort(t)
-	ssoServer, ssoStorage := setupMockSSOServer(t, ssoPort, "")
-	ssoBaseURL := fmt.Sprintf("http://127.0.0.1:%d", ssoPort)
+	ssoServer, ssoStorage, ssoBaseURL := setupMockSSOServer(t, "")
 	t.Cleanup(func() { shutdownMockSSOServer(t, ssoServer) })
 
 	// Setup main MCP server with SSO integration enabled
@@ -403,9 +402,7 @@ func TestMCPGroupMembership(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup mock SSO server
-			ssoPort := findAvailablePort(t)
-			ssoServer, ssoStorage := setupMockSSOServer(t, ssoPort, "")
-			ssoBaseURL := fmt.Sprintf("http://127.0.0.1:%d", ssoPort)
+			ssoServer, ssoStorage, ssoBaseURL := setupMockSSOServer(t, "")
 			t.Cleanup(func() { shutdownMockSSOServer(t, ssoServer) })
 
 			// Configure user info for this test case
@@ -613,9 +610,8 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 	}
 
 	// Find an available port for MCP server
-	availablePort := findAvailablePort(t)
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", availablePort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	serverAddr := "127.0.0.1:0"
+	placeholderBaseURL := "http://127.0.0.1:0"
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
 	// Setup user info endpoint
@@ -631,12 +627,12 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 		UIDDomain:          "test.local",
 		EnableMCP:          true,
 		OAuth2DBPath:       oauth2DBPath,
-		OAuth2Issuer:       baseURL,
+		OAuth2Issuer:       placeholderBaseURL,
 		OAuth2ClientID:     "mcp-client",
 		OAuth2ClientSecret: "mcp-secret",
 		OAuth2AuthURL:      ssoBaseURL + "/authorize",
 		OAuth2TokenURL:     ssoBaseURL + "/token",
-		OAuth2RedirectURL:  baseURL + "/mcp/oauth2/callback",
+		OAuth2RedirectURL:  placeholderBaseURL + "/mcp/oauth2/callback",
 		OAuth2UserInfoURL:  userInfoURL,
 		OAuth2GroupsClaim:  "groups",
 		MCPAccessGroup:     accessGroup,
@@ -656,11 +652,12 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 	// Wait for server to start
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify server is listening
+	// Verify server is listening and get actual address
 	actualAddr := server.GetAddr()
 	if actualAddr == "" {
 		t.Fatal("Server failed to start - no listening address available")
 	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -737,16 +734,17 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		t.Fatalf("Condor failed to start: %v", err)
 	}
 
-	// Find an available port for MCP server
-	availablePort := findAvailablePort(t)
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", availablePort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	// Use dynamic port allocation for MCP server
+	serverAddr := "127.0.0.1:0"
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
 	// Setup user info endpoint in mock SSO
 	userInfoURL := ssoBaseURL + "/userinfo"
 
 	// Create server with SSO integration
+	// Note: OAuth2Issuer and OAuth2RedirectURL will use placeholder baseURL
+	// The actual baseURL is computed after server starts
+	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
@@ -756,12 +754,12 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		UIDDomain:          "test.local",
 		EnableMCP:          true,
 		OAuth2DBPath:       oauth2DBPath,
-		OAuth2Issuer:       baseURL,
+		OAuth2Issuer:       placeholderBaseURL,
 		OAuth2ClientID:     "mcp-client",
 		OAuth2ClientSecret: "mcp-secret",
 		OAuth2AuthURL:      ssoBaseURL + "/authorize",
 		OAuth2TokenURL:     ssoBaseURL + "/token",
-		OAuth2RedirectURL:  baseURL + "/mcp/oauth2/callback",
+		OAuth2RedirectURL:  placeholderBaseURL + "/mcp/oauth2/callback",
 		OAuth2UserInfoURL:  userInfoURL,
 		OAuth2GroupsClaim:  "groups",
 		// Grant read and write scopes to users in "mcp-users" group
@@ -781,11 +779,12 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 	// Wait for server to start
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify server is listening
+	// Verify server is listening and get actual address
 	actualAddr := server.GetAddr()
 	if actualAddr == "" {
 		t.Fatal("Server failed to start - no listening address available")
 	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -864,14 +863,13 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 		t.Fatalf("Condor failed to start: %v", err)
 	}
 
-	// Find an available port before creating the server
-	// This is necessary because OAuth2Issuer must be set correctly when the provider is created
-	availablePort := findAvailablePort(t)
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", availablePort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	// Use dynamic port allocation
+	serverAddr := "127.0.0.1:0"
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Create server with the pre-determined port and correct OAuth2Issuer
+	// Create server with dynamic port
+	// OAuth2Issuer will use placeholder, actual baseURL computed after server starts
+	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
@@ -882,7 +880,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 		UIDDomain:      "test.local",
 		EnableMCP:      true,
 		OAuth2DBPath:   oauth2DBPath,
-		OAuth2Issuer:   baseURL, // Correct issuer with actual port
+		OAuth2Issuer:   placeholderBaseURL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -897,11 +895,12 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 	// Wait for server to start
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify server is listening on the expected address
+	// Verify server is listening and get actual address
 	actualAddr := server.GetAddr()
 	if actualAddr == "" {
 		t.Fatal("Server failed to start - no listening address available")
 	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -922,7 +921,6 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 	return tempDir, server, baseURL
 }
 
-// findAvailablePort finds an available port for testing
 func shutdownTestServer(t *testing.T, server *Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -991,7 +989,7 @@ func getOAuth2TokenAuthCodeForClient(t *testing.T, httpClient *http.Client, base
 
 // Mock SSO Server
 
-func setupMockSSOServer(t *testing.T, port int, tempDir string) (*http.Server, *mockSSOStorage) {
+func setupMockSSOServer(t *testing.T, tempDir string) (*http.Server, *mockSSOStorage, string) {
 	// Create a simple mock SSO server using fosite
 	storage := &mockSSOStorage{
 		users: map[string]string{
@@ -1006,10 +1004,18 @@ func setupMockSSOServer(t *testing.T, port int, tempDir string) (*http.Server, *
 		userInfos:            make(map[string]map[string]interface{}),
 	}
 
+	// Use dynamic port allocation
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create listener: %v", err)
+	}
+	actualAddr := listener.Addr().String()
+	ssoBaseURL := fmt.Sprintf("http://%s", actualAddr)
+
 	config := &fosite.Config{
 		AccessTokenLifespan:   time.Hour,
 		AuthorizeCodeLifespan: time.Minute * 10,
-		TokenURL:              fmt.Sprintf("http://127.0.0.1:%d/token", port),
+		TokenURL:              ssoBaseURL + "/token",
 		ScopeStrategy:         fosite.HierarchicScopeStrategy,
 		GlobalSecret:          []byte("mock-sso-secret-key-exactly-32!!"), // Exactly 32 bytes for HMAC-SHA512/256
 	}
@@ -1165,14 +1171,13 @@ func setupMockSSOServer(t *testing.T, port int, tempDir string) (*http.Server, *
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
 		Handler: mux,
 	}
 
-	go server.ListenAndServe()
+	go server.Serve(listener)
 	time.Sleep(500 * time.Millisecond)
 
-	return server, storage
+	return server, storage, ssoBaseURL
 }
 
 func shutdownMockSSOServer(t *testing.T, server *http.Server) {

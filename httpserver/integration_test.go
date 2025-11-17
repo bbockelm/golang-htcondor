@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1310,16 +1309,6 @@ func removeJob(t *testing.T, client *http.Client, baseURL, user, jobID string) {
 	client.Do(req)
 }
 
-// findAvailablePort finds an available port for testing
-func findAvailablePort(t *testing.T) int {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to find available port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
-
 // TestHTTPAPIRateLimiting tests that rate limiting works correctly with HTTP API
 func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Skip if condor_master is not available
@@ -1335,10 +1324,6 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	t.Logf("Using temporary directory: %s", tempDir)
-
-	// Allocate random port for HTTP server (HTCondor will use port 0 for auto-assignment)
-	httpServerPort := findAvailablePort(t)
-	t.Logf("Using HTTP server port: %d (HTCondor will auto-assign collector and schedd ports)", httpServerPort)
 
 	// Write mini condor configuration with rate limiting (using port 0 for auto-assignment)
 	configFile := filepath.Join(tempDir, "condor_config")
@@ -1378,9 +1363,8 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 		t.Fatalf("Failed to write signing key: %v", err)
 	}
 
-	// Start HTTP server with random port
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", httpServerPort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	// Start HTTP server with dynamic port allocation
+	serverAddr := "127.0.0.1:0"
 
 	// Create collector using local address (collector will auto-discover from condor config)
 	// Since HTCondor is using port 0, the actual port will be assigned by HTCondor
@@ -1412,12 +1396,20 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 		}
 	}()
 
+	// Wait for server to start and get actual address
+	time.Sleep(500 * time.Millisecond)
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("Server started on %s", baseURL)
+
 	// Wait for server to be ready
-	t.Logf("Waiting for server to start on %s", baseURL)
 	if err := waitForServer(baseURL, 10*time.Second); err != nil {
 		t.Fatalf("Server failed to start: %v", err)
 	}
-	t.Logf("Server is ready on %s", baseURL)
+	t.Logf("Server is ready")
 
 	// Test rate limiting
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -1513,6 +1505,34 @@ func writeMiniCondorConfigWithRateLimit(configFile, baseDir string, collectorPor
 	}
 	sbinDir := filepath.Dir(masterPath)
 
+	// Determine LIBEXEC directory by looking for condor_shared_port
+	var libexecDir string
+	sharedPortPath, err := exec.LookPath("condor_shared_port")
+	if err == nil {
+		// Found condor_shared_port, use its parent directory
+		libexecDir = filepath.Dir(sharedPortPath)
+	} else {
+		// Not found in PATH, try deriving from condor_master location
+		derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
+
+		// Check if the derived path exists
+		if _, err := os.Stat(filepath.Join(derivedLibexec, "condor_shared_port")); err == nil {
+			libexecDir = derivedLibexec
+		} else {
+			// Try standard location /usr/libexec/condor
+			stdLibexec := "/usr/libexec/condor"
+			if _, err := os.Stat(filepath.Join(stdLibexec, "condor_shared_port")); err == nil {
+				libexecDir = stdLibexec
+			}
+		}
+	}
+
+	// Build LIBEXEC line if we found a valid directory
+	libexecLine := ""
+	if libexecDir != "" {
+		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
+	}
+
 	config := fmt.Sprintf(`
 # Mini HTCondor configuration for rate limiting tests
 DAEMON_LIST = MASTER, SCHEDD, COLLECTOR, STARTD, NEGOTIATOR
@@ -1531,6 +1551,7 @@ SCHEDD = %s/condor_schedd
 COLLECTOR = %s/condor_collector
 STARTD = %s/condor_startd
 NEGOTIATOR = %s/condor_negotiator
+%s
 
 # Network settings
 COLLECTOR_HOST = 127.0.0.1:%d
@@ -1589,6 +1610,7 @@ ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
 `, baseDir, baseDir, baseDir, baseDir, baseDir, baseDir,
 		sbinDir, sbinDir, sbinDir, sbinDir, sbinDir,
+		libexecLine,
 		collectorPort, collectorPort, scheddPort)
 
 	return os.WriteFile(configFile, []byte(config), 0600)
