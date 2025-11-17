@@ -561,17 +561,15 @@ func getUserHeaderConfig(cfg *config.Config) (userHeaderFromConfig, uidDomain, t
 	userHeaderFromConfig = *userHeader
 	if header, ok := cfg.Get("HTTP_API_USER_HEADER"); ok && header != "" {
 		userHeaderFromConfig = header
-	}
-	if userHeaderFromConfig != "" {
 		log.Printf("Using user header: %s", userHeaderFromConfig)
-		if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
-			uidDomain = domain
-			log.Printf("Using UID_DOMAIN: %s", uidDomain)
-		}
-		if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
-			trustDomain = domain
-			log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
-		}
+	}
+	if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
+		uidDomain = domain
+		log.Printf("Using UID_DOMAIN: %s", uidDomain)
+	}
+	if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
+		trustDomain = domain
+		log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
 	}
 	return userHeaderFromConfig, uidDomain, trustDomain
 }
