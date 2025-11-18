@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -24,6 +25,9 @@ type Server struct {
 	httpServer          *http.Server
 	listener            net.Listener // Explicit listener to get actual address
 	schedd              *htcondor.Schedd
+	scheddMu            sync.RWMutex // Protects schedd instance for thread-safe updates
+	scheddName          string       // Schedd name for discovery
+	scheddDiscovered    bool         // Whether schedd address was discovered from collector
 	collector           *htcondor.Collector
 	userHeader          string
 	signingKeyPath      string
@@ -42,6 +46,8 @@ type Server struct {
 	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
+	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
+	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
 }
 
 // Config holds server configuration
@@ -96,6 +102,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Discover schedd address if not provided
 	scheddAddr := cfg.ScheddAddr
+	scheddDiscovered := false
 	if scheddAddr == "" {
 		if cfg.Collector == nil {
 			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
@@ -108,20 +115,24 @@ func NewServer(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("failed to discover schedd: %w", err)
 		}
 		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
+		scheddDiscovered = true
 	}
 
 	// Create schedd with the address as-is (can be host:port or sinful string)
 	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
 	s := &Server{
-		schedd:         schedd,
-		collector:      cfg.Collector,
-		trustDomain:    cfg.TrustDomain,
-		uidDomain:      cfg.UIDDomain,
-		userHeader:     cfg.UserHeader,
-		signingKeyPath: cfg.SigningKeyPath,
-		logger:         logger,
-		tokenCache:     NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		schedd:           schedd,
+		scheddName:       cfg.ScheddName,
+		scheddDiscovered: scheddDiscovered,
+		collector:        cfg.Collector,
+		trustDomain:      cfg.TrustDomain,
+		uidDomain:        cfg.UIDDomain,
+		userHeader:       cfg.UserHeader,
+		signingKeyPath:   cfg.SigningKeyPath,
+		logger:           logger,
+		tokenCache:       NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		stopChan:         make(chan struct{}),
 	}
 
 	// Setup OAuth2 provider if MCP is enabled
@@ -268,6 +279,11 @@ func (s *Server) Start() error {
 	}
 	s.listener = ln
 
+	// Start schedd address updater if address was discovered from collector
+	if s.scheddDiscovered && s.collector != nil {
+		s.startScheddAddressUpdater()
+	}
+
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
 	return s.httpServer.Serve(ln)
 }
@@ -284,6 +300,11 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	}
 	s.listener = ln
 
+	// Start schedd address updater if address was discovered from collector
+	if s.scheddDiscovered && s.collector != nil {
+		s.startScheddAddressUpdater()
+	}
+
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
 	return s.httpServer.ServeTLS(ln, certFile, keyFile)
 }
@@ -291,6 +312,24 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 // Shutdown gracefully shuts down the HTTP server
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info(logging.DestinationHTTP, "Shutting down HTTP server")
+
+	// Signal background goroutines to stop
+	close(s.stopChan)
+
+	// Wait for background goroutines to finish (with timeout)
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	// Wait for goroutines to finish or context to be done
+	select {
+	case <-done:
+		s.logger.Debug(logging.DestinationHTTP, "Background goroutines stopped")
+	case <-ctx.Done():
+		s.logger.Warn(logging.DestinationHTTP, "Shutdown timeout waiting for background goroutines")
+	}
 
 	// Close OAuth2 provider if enabled
 	if s.oauth2Provider != nil {
@@ -300,6 +339,64 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	return s.httpServer.Shutdown(ctx)
+}
+
+// getSchedd returns the current schedd instance (thread-safe)
+func (s *Server) getSchedd() *htcondor.Schedd {
+	s.scheddMu.RLock()
+	defer s.scheddMu.RUnlock()
+	return s.schedd
+}
+
+// updateSchedd updates the schedd instance with a new address (thread-safe)
+func (s *Server) updateSchedd(newAddress string) {
+	s.scheddMu.Lock()
+	defer s.scheddMu.Unlock()
+
+	// Only update if the address has changed
+	if s.schedd.Address() != newAddress {
+		s.logger.Info(logging.DestinationSchedd, "Updating schedd address",
+			"old_address", s.schedd.Address(),
+			"new_address", newAddress)
+		s.schedd = htcondor.NewSchedd(s.scheddName, newAddress)
+	}
+}
+
+// startScheddAddressUpdater starts a background goroutine that periodically
+// checks for schedd address updates from the collector
+func (s *Server) startScheddAddressUpdater() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		s.logger.Info(logging.DestinationSchedd, "Started schedd address updater",
+			"interval", "60s",
+			"schedd_name", s.scheddName)
+
+		for {
+			select {
+			case <-ticker.C:
+				// Query collector for updated schedd address
+				newAddr, err := discoverSchedd(s.collector, s.scheddName, 5*time.Second, s.logger)
+				if err != nil {
+					s.logger.Warn(logging.DestinationSchedd, "Failed to discover schedd address",
+						"error", err,
+						"schedd_name", s.scheddName)
+					continue
+				}
+
+				// Update schedd if address changed
+				s.updateSchedd(newAddr)
+
+			case <-s.stopChan:
+				s.logger.Info(logging.DestinationSchedd, "Stopping schedd address updater")
+				return
+			}
+		}
+	}()
 }
 
 // GetOAuth2Provider returns the OAuth2 provider (for testing)

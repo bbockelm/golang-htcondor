@@ -92,7 +92,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query schedd
-	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	jobAds, err := s.getSchedd().Query(ctx, constraint, projection)
 	if err != nil {
 		// Check if it's a rate limit error
 		if ratelimit.IsRateLimitError(err) {
@@ -134,7 +134,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit job using SubmitRemote
-	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, req.SubmitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, req.SubmitFile)
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -242,7 +242,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
 	// Query for the specific job
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	jobAds, err := s.getSchedd().Query(ctx, constraint, nil)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -285,7 +285,7 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
 	// Remove the job using the schedd RemoveJobs method
-	results, err := s.schedd.RemoveJobs(ctx, constraint, "Removed via HTTP API")
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -399,7 +399,7 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 		Force:               false,
 	}
 
-	if err := s.schedd.EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
 			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Cannot edit job: %v", err))
@@ -461,7 +461,7 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove jobs by constraint
-	results, err := s.schedd.RemoveJobs(ctx, req.Constraint, req.Reason)
+	results, err := s.getSchedd().RemoveJobs(ctx, req.Constraint, req.Reason)
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -573,7 +573,7 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Edit jobs matching constraint
-	count, err := s.schedd.EditJobs(ctx, req.Constraint, attributes, opts)
+	count, err := s.getSchedd().EditJobs(ctx, req.Constraint, attributes, opts)
 	if err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
@@ -685,12 +685,12 @@ func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, act
 
 // handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
 func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
-	s.handleBulkJobAction(w, r, "Held", "hold", s.schedd.HoldJobs)
+	s.handleBulkJobAction(w, r, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
 func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
-	s.handleBulkJobAction(w, r, "Released", "release", s.schedd.ReleaseJobs)
+	s.handleBulkJobAction(w, r, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
@@ -716,7 +716,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 
 	// First, query for the job to get its proc ad
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	jobAds, err := s.getSchedd().Query(ctx, constraint, nil)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -740,7 +740,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	limitedReader := io.LimitReader(r.Body, 1024*1024*1024) // 1GB limit
 
 	// Spool job files from tar
-	err = s.schedd.SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
+	err = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
 	if err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
@@ -786,7 +786,7 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID s
 	w.WriteHeader(http.StatusOK)
 
 	// Start receiving job sandbox
-	errChan := s.schedd.ReceiveJobSandbox(ctx, constraint, w)
+	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
 
 	// Wait for transfer to complete
 	if err := <-errChan; err != nil {
@@ -983,12 +983,12 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 
 // handleJobHold handles POST /api/v1/jobs/{id}/hold
 func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.schedd.HoldJobs)
+	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleJobRelease handles POST /api/v1/jobs/{id}/release
 func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.schedd.ReleaseJobs)
+	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
 // CollectorAdsResponse represents collector ads listing response
