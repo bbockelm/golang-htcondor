@@ -231,7 +231,7 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 			constraint = fmt.Sprintf("Name == \"%s\"", requestedName)
 		}
 
-		schedds, err := collector.QueryAds(ctx, "ScheddAd", constraint)
+		schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
 		if err != nil {
 			logger.Error(logging.DestinationSchedd, "Failed to query collector for schedds", "error", err)
 			return "", ""

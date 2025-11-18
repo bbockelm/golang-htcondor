@@ -773,7 +773,7 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 			constraint = fmt.Sprintf("Name == \"%s\"", scheddName)
 		}
 
-		ads, err := collector.QueryAds(ctx, "ScheddAd", constraint)
+		ads, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
 		cancel()
 
 		if err == nil && len(ads) > 0 {

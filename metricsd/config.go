@@ -306,7 +306,7 @@ func (c *CollectorMetricsCollector) Collect(ctx context.Context) ([]Metric, erro
 		}
 
 		// Query collector for this type
-		ads, err := c.collector.QueryAds(ctx, adType, "")
+		ads, _, err := c.collector.QueryAdsWithOptions(ctx, adType, "", nil)
 		if err != nil {
 			// Continue with other types
 			continue

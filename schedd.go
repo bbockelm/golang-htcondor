@@ -78,12 +78,78 @@ func (s *Schedd) Address() string {
 // Query queries the schedd for job advertisements
 // constraint is a ClassAd constraint expression (use "true" to get all jobs)
 // projection is a list of attributes to return (use nil to get all attributes)
+//
+// Deprecated: Use QueryWithOptions for pagination and default limits/projections
 func (s *Schedd) Query(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
-	return s.queryWithAuth(ctx, constraint, projection, false)
+	return s.queryWithAuth(ctx, constraint, projection, false, nil)
 }
 
-// queryWithAuth performs the actual query with optional authentication
-func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool) ([]*classad.ClassAd, error) {
+// QueryWithOptions queries the schedd for job advertisements with pagination and limits
+// opts specifies query options including limit, projection, and pagination
+// Returns the matching job ads and pagination info
+func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *QueryOptions) ([]*classad.ClassAd, *PageInfo, error) {
+	// Apply defaults if opts is nil
+	if opts == nil {
+		opts = &QueryOptions{}
+	}
+	effectiveOpts := opts.ApplyDefaults()
+
+	// If a page token is provided, modify the constraint to skip earlier jobs
+	effectiveConstraint := constraint
+	if effectiveOpts.PageToken != "" {
+		clusterID, procID, err := DecodePageToken(effectiveOpts.PageToken)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid page token: %w", err)
+		}
+
+		// Add constraint to select jobs after the page token
+		// Jobs come in ClusterId.ProcId order, so we want:
+		// (ClusterId > pageClusterId) OR (ClusterId == pageClusterId AND ProcId > pageProcId)
+		pageConstraint := fmt.Sprintf("(ClusterId > %d || (ClusterId == %d && ProcId > %d))",
+			clusterID, clusterID, procID)
+
+		if constraint == "" || constraint == "true" {
+			effectiveConstraint = pageConstraint
+		} else {
+			effectiveConstraint = fmt.Sprintf("(%s) && (%s)", constraint, pageConstraint)
+		}
+	}
+
+	// Get effective projection
+	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
+
+	// Query with the effective options
+	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, projection, false, &effectiveOpts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build pagination info
+	pageInfo := &PageInfo{
+		TotalReturned:  len(jobAds),
+		HasMoreResults: false,
+		NextPageToken:  "",
+	}
+
+	// If we got the limit or more results, there might be more available
+	if !effectiveOpts.IsUnlimited() && len(jobAds) >= effectiveOpts.Limit {
+		// Generate page token from the last job's ClusterId and ProcId
+		if len(jobAds) > 0 {
+			lastJob := jobAds[len(jobAds)-1]
+			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
+				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
+					pageInfo.NextPageToken = EncodePageToken(clusterID, procID)
+					pageInfo.HasMoreResults = true
+				}
+			}
+		}
+	}
+
+	return jobAds, pageInfo, nil
+}
+
+// queryWithAuth performs the actual query with optional authentication and query options
+func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
@@ -154,12 +220,23 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	// Receive response ads
 	var jobAds []*classad.ClassAd
 
+	// Determine the limit to apply
+	limit := -1 // unlimited by default
+	if opts != nil && !opts.IsUnlimited() {
+		limit = opts.Limit
+	}
+
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return jobAds, ctx.Err()
 		default:
+		}
+
+		// Check if we've reached the limit
+		if limit > 0 && len(jobAds) >= limit {
+			break
 		}
 
 		// Create a new message for each response ClassAd
