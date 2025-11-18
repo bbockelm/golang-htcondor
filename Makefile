@@ -19,7 +19,7 @@ test: ## Run all tests
 test-integration: ## Run integration tests (requires HTCondor)
 	@echo "Running integration tests..."
 	@echo "Note: This requires HTCondor to be installed"
-	go test -v -tags=integration -timeout=5m ./metricsd/
+	go test -v -tags=integration -timeout=5m ./...
 
 .PHONY: test-race
 test-race: ## Run tests with race detector

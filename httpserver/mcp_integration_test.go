@@ -121,7 +121,7 @@ func TestMCPHTTPIntegration(t *testing.T) {
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
-		SigningKeyPath: passwordsDir, // Pass the directory, GenerateJWT will look for POOL inside
+		SigningKeyPath: poolKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      trustDomain,
 		EnableMCP:      true,
@@ -210,7 +210,7 @@ func createOAuth2Client(t *testing.T, server *Server, username string) (string, 
 		RedirectURIs:  []string{"http://localhost:18081/callback"},
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
-		Scopes:        []string{"openid", "mcp:read", "mcp:write"},
+		Scopes:        []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
 		Public:        false,
 	}
 
