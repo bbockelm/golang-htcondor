@@ -261,7 +261,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
 	// Query for the specific job
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -735,7 +735,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 
 	// First, query for the job to get its proc ad
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1260,7 +1260,7 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
 
 	// Query collector
-	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, &htcondor.QueryOptions{Projection: projection})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))

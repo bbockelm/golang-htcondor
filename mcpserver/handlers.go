@@ -401,7 +401,7 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	}
 
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -635,7 +635,7 @@ func (s *Server) resourceScheddStatus(ctx context.Context) (interface{}, error) 
 
 	// Try to get schedd ad from collector using QueryAds
 	constraint := "true" // Get all schedds or filter later
-	ads, err := s.collector.QueryAds(ctx, "ScheddAd", constraint)
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query collector: %w", err)
 	}
