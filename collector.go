@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -73,6 +74,170 @@ func (c *Collector) QueryAdsWithOptions(ctx context.Context, adType string, cons
 	// Future enhancement: collector could support pagination hints
 
 	return ads, pageInfo, nil
+}
+
+// StreamOptions configures streaming query behavior
+type StreamOptions struct {
+	// BufferSize is the number of ads to buffer in the channel (default: 100)
+	BufferSize int
+	// WriteTimeout is the maximum cumulative time spent blocking on channel writes (default: 5s)
+	WriteTimeout time.Duration
+}
+
+// ApplyStreamDefaults returns StreamOptions with defaults applied
+func (o *StreamOptions) ApplyStreamDefaults() StreamOptions {
+	opts := StreamOptions{
+		BufferSize:   100,
+		WriteTimeout: 5 * time.Second,
+	}
+	if o != nil {
+		if o.BufferSize > 0 {
+			opts.BufferSize = o.BufferSize
+		}
+		if o.WriteTimeout > 0 {
+			opts.WriteTimeout = o.WriteTimeout
+		}
+	}
+	return opts
+}
+
+// AdResult represents a single ad or error from a streaming query
+type AdResult struct {
+	Ad  *classad.ClassAd
+	Err error
+}
+
+// QueryAdsStream queries the collector and streams results through a channel
+// The channel is returned immediately once the first ad is ready or an error occurs
+// The channel will be closed when all ads have been sent or an error occurs
+// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
+func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constraint string, projection []string, streamOpts *StreamOptions) <-chan AdResult {
+	ch := make(chan AdResult, streamOpts.ApplyStreamDefaults().BufferSize)
+	
+	go func() {
+		defer close(ch)
+		
+		// Apply rate limiting if configured
+		username := GetAuthenticatedUserFromContext(ctx)
+		rateLimitManager := getRateLimitManager()
+		if rateLimitManager != nil {
+			if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+				ch <- AdResult{Err: fmt.Errorf("rate limit exceeded: %w", err)}
+				return
+			}
+		}
+
+		// Establish connection
+		htcondorClient, err := client.ConnectToAddress(ctx, c.address)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to connect to collector: %w", err)}
+			return
+		}
+		defer htcondorClient.Close()
+
+		// Get CEDAR stream
+		cedarStream := htcondorClient.GetStream()
+
+		// Determine command
+		cmd, err := getCommandForAdType(adType)
+		if err != nil {
+			ch <- AdResult{Err: err}
+			return
+		}
+
+		// Get security config
+		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
+			return
+		}
+
+		// Perform security handshake
+		auth := security.NewAuthenticator(secConfig, cedarStream)
+		negotiation, err := auth.ClientHandshake(ctx)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("security handshake failed: %w", err)}
+			return
+		}
+
+		// Update context with authenticated user if needed
+		if username == "" && negotiation.User != "" {
+			ctx = WithAuthenticatedUser(ctx, negotiation.User)
+		}
+
+		// Create query ClassAd
+		var constraintExpr *classad.Expr
+		if constraint != "" {
+			constraintExpr, err = classad.ParseExpr(constraint)
+			if err != nil {
+				ch <- AdResult{Err: fmt.Errorf("failed to parse constraint expression: %w", err)}
+				return
+			}
+		}
+		queryAd := createQueryAd(adType, constraintExpr, projection)
+
+		// Send query
+		queryMsg := message.NewMessageForStream(cedarStream)
+		if err := queryMsg.PutClassAd(ctx, queryAd); err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to add query ClassAd to message: %w", err)}
+			return
+		}
+		if err := queryMsg.FlushFrame(ctx, true); err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to send query message: %w", err)}
+			return
+		}
+
+		// Stream response ads
+		opts := streamOpts.ApplyStreamDefaults()
+		totalBlockTime := time.Duration(0)
+		
+		for {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				ch <- AdResult{Err: ctx.Err()}
+				return
+			default:
+			}
+
+			// Read "more" flag
+			responseMsg := message.NewMessageFromStream(cedarStream)
+			more, err := responseMsg.GetInt32(ctx)
+			if err != nil {
+				ch <- AdResult{Err: fmt.Errorf("failed to read 'more' flag: %w", err)}
+				return
+			}
+
+			if more == 0 {
+				// End of results
+				return
+			}
+
+			// Read ClassAd
+			ad, err := responseMsg.GetClassAd(ctx)
+			if err != nil {
+				ch <- AdResult{Err: fmt.Errorf("failed to read ClassAd: %w", err)}
+				return
+			}
+
+			// Send ad to channel with timeout tracking
+			startWrite := time.Now()
+			select {
+			case ch <- AdResult{Ad: ad}:
+				blockTime := time.Since(startWrite)
+				totalBlockTime += blockTime
+				if totalBlockTime > opts.WriteTimeout {
+					ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, opts.WriteTimeout)}
+					return
+				}
+			case <-ctx.Done():
+				ch <- AdResult{Err: ctx.Err()}
+				return
+			}
+		}
+	}()
+	
+	return ch
 }
 
 // queryAdsInternal performs the actual collector query

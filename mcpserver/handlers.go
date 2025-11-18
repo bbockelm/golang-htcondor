@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/golang-jwt/jwt/v5"
@@ -337,25 +338,25 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		}
 	}
 
-	// Parse limit parameter (default 50)
-	limit := 50
-	if limitVal, ok := args["limit"].(float64); ok {
-		limit = int(limitVal)
+	// Get effective projection if none specified
+	if len(projection) == 0 {
+		projection = htcondor.DefaultJobProjection()
 	}
 
-	// Get page token
-	pageToken, _ := args["page_token"].(string)
-
-	// Build query options
-	opts := &htcondor.QueryOptions{
-		Limit:      limit,
-		Projection: projection,
-		PageToken:  pageToken,
+	// Use streaming query
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   100,
+		WriteTimeout: 5 * time.Second,
 	}
+	resultCh := s.schedd.QueryStream(ctx, constraint, projection, streamOpts)
 
-	jobAds, pageInfo, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
-	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+	// Collect results from stream
+	var jobAds []*classad.ClassAd
+	for result := range resultCh {
+		if result.Err != nil {
+			return nil, fmt.Errorf("query failed: %w", result.Err)
+		}
+		jobAds = append(jobAds, result.Ad)
 	}
 
 	// Convert ClassAds to JSON
@@ -367,11 +368,6 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
 		len(jobAds), constraint, string(jobsJSON))
 
-	// Add pagination info if available
-	if pageInfo.HasMoreResults {
-		resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", pageInfo.NextPageToken)
-	}
-
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
@@ -380,10 +376,8 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 			},
 		},
 		"metadata": map[string]interface{}{
-			"count":           pageInfo.TotalReturned,
-			"constraint":      constraint,
-			"has_more":        pageInfo.HasMoreResults,
-			"next_page_token": pageInfo.NextPageToken,
+			"count":      len(jobAds),
+			"constraint": constraint,
 		},
 	}, nil
 }

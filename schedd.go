@@ -148,6 +148,139 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 	return jobAds, pageInfo, nil
 }
 
+// JobAdResult represents a single job ad or error from a streaming query
+type JobAdResult struct {
+	Ad  *classad.ClassAd
+	Err error
+}
+
+// QueryStream queries the schedd and streams job ads through a channel
+// The channel is returned immediately once the first ad is ready or an error occurs
+// The channel will be closed when all ads have been sent or an error occurs
+// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
+func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection []string, streamOpts *StreamOptions) <-chan JobAdResult {
+	ch := make(chan JobAdResult, streamOpts.ApplyStreamDefaults().BufferSize)
+	
+	go func() {
+		defer close(ch)
+		
+		// Apply rate limiting if configured
+		username := GetAuthenticatedUserFromContext(ctx)
+		rateLimitManager := getRateLimitManager()
+		if rateLimitManager != nil {
+			rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
+			defer cancelRateLimit()
+			if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+				ch <- JobAdResult{Err: fmt.Errorf("rate limit exceeded: %w", err)}
+				return
+			}
+		}
+
+		// Establish connection
+		htcondorClient, err := client.ConnectToAddress(ctx, s.address)
+		if err != nil {
+			ch <- JobAdResult{Err: fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)}
+			return
+		}
+		defer htcondorClient.Close()
+
+		// Get CEDAR stream
+		cedarStream := htcondorClient.GetStream()
+
+		// Determine command
+		cmd := commands.QUERY_JOB_ADS
+
+		// Get security config
+		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+		if err != nil {
+			ch <- JobAdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
+			return
+		}
+
+		// Perform security handshake
+		auth := security.NewAuthenticator(secConfig, cedarStream)
+		negotiation, err := auth.ClientHandshake(ctx)
+		if err != nil {
+			ch <- JobAdResult{Err: fmt.Errorf("security handshake failed: %w", err)}
+			return
+		}
+
+		// Update context with authenticated user if needed
+		if username == "" && negotiation.User != "" {
+			ctx = WithAuthenticatedUser(ctx, negotiation.User)
+		}
+
+		// Create query request ClassAd
+		requestAd := createJobQueryAd(constraint, projection)
+
+		// Send query
+		queryMsg := message.NewMessageForStream(cedarStream)
+		if err := queryMsg.PutClassAd(ctx, requestAd); err != nil {
+			ch <- JobAdResult{Err: fmt.Errorf("failed to serialize query ClassAd: %w", err)}
+			return
+		}
+		if err := queryMsg.FinishMessage(ctx); err != nil {
+			ch <- JobAdResult{Err: fmt.Errorf("failed to send query: %w", err)}
+			return
+		}
+
+		// Stream response ads
+		opts := streamOpts.ApplyStreamDefaults()
+		totalBlockTime := time.Duration(0)
+		
+		for {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				ch <- JobAdResult{Err: ctx.Err()}
+				return
+			default:
+			}
+
+			// Create a new message for each response ClassAd
+			responseMsg := message.NewMessageFromStream(cedarStream)
+
+			// Read ClassAd
+			ad, err := responseMsg.GetClassAd(ctx)
+			if err != nil {
+				ch <- JobAdResult{Err: fmt.Errorf("failed to read ClassAd: %w", err)}
+				return
+			}
+
+			// Check if this is the final ad (Owner == 0)
+			if ownerVal, ok := ad.EvaluateAttrInt("Owner"); ok && ownerVal == 0 {
+				// This is the final ad - check for errors
+				if errCode, ok := ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
+					errMsg := "unknown error"
+					if errStr, ok := ad.EvaluateAttrString("ErrorString"); ok {
+						errMsg = errStr
+					}
+					ch <- JobAdResult{Err: fmt.Errorf("schedd query error %d: %s", errCode, errMsg)}
+				}
+				// Success - final ad received
+				return
+			}
+
+			// Send job ad to channel with timeout tracking
+			startWrite := time.Now()
+			select {
+			case ch <- JobAdResult{Ad: ad}:
+				blockTime := time.Since(startWrite)
+				totalBlockTime += blockTime
+				if totalBlockTime > opts.WriteTimeout {
+					ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, opts.WriteTimeout)}
+					return
+				}
+			case <-ctx.Done():
+				ch <- JobAdResult{Err: ctx.Err()}
+				return
+			}
+		}
+	}()
+	
+	return ch
+}
+
 // queryWithAuth performs the actual query with optional authentication and query options
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
