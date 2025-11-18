@@ -347,28 +347,42 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if condor:/* scopes are requested
-	requestedScopes := accessRequest.GetRequestedScopes()
-	if hasCondorScopes(requestedScopes) {
-		// Generate HTCondor IDTOKEN for condor:/* scopes
-		s.handleCondorTokenRequest(ctx, w, r, accessRequest)
-		return
-	}
-
-	// Create access response (standard OAuth2 flow)
+	// Create access response (for all flows - this generates tokens including refresh token)
+	s.logger.Info(logging.DestinationHTTP, "Creating access response",
+		"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+		"requested_scopes", accessRequest.GetRequestedScopes())
 	response, err := s.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access response", "error", err)
+		// Log more details about the error - unwrap to see the root cause
+		rootErr := err
+		for errors.Unwrap(rootErr) != nil {
+			rootErr = errors.Unwrap(rootErr)
+		}
+		s.logger.Error(logging.DestinationHTTP, "Failed to create access response",
+			"error", err,
+			"root_error", rootErr,
+			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+			"client_id", accessRequest.GetClient().GetID())
 		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
+	s.logger.Info(logging.DestinationHTTP, "Successfully created access response")
 
+	// Check if condor:/* scopes are requested
+	requestedScopes := accessRequest.GetRequestedScopes()
+	if hasCondorScopes(requestedScopes) {
+		// Generate HTCondor IDTOKEN and replace the access token
+		s.replaceWithCondorToken(ctx, w, r, accessRequest, response)
+		return
+	}
+
+	// Standard OAuth2 flow - write the response as-is
 	s.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
 }
 
-// handleCondorTokenRequest handles OAuth2 token requests with condor:/* scopes
-// Returns an HTCondor IDTOKEN as the access token
-func (s *Server) handleCondorTokenRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, accessRequest fosite.AccessRequester) {
+// replaceWithCondorToken replaces the OAuth2 access token with an HTCondor IDTOKEN
+// while preserving the refresh token and other fields
+func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, accessRequest fosite.AccessRequester, response fosite.AccessResponder) {
 	// Check if we can generate HTCondor tokens
 	if s.signingKeyPath == "" || s.trustDomain == "" {
 		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
@@ -418,15 +432,12 @@ func (s *Server) handleCondorTokenRequest(ctx context.Context, w http.ResponseWr
 		"username", username,
 		"scopes", requestedScopes)
 
-	// Return the IDTOKEN as the access token
-	// Note: We return the IDTOKEN directly as the access_token
-	// The token_type is "Bearer" which is standard for JWTs
-	tokenResponse := map[string]interface{}{
-		"access_token": idtoken,
-		"token_type":   "Bearer",
-		"expires_in":   3600, // 1 hour
-		"scope":        strings.Join(requestedScopes, " "),
-	}
+	// Get the response as a map and replace the access token with HTCondor IDTOKEN
+	// The response already has the refresh token and other OAuth2 fields
+	tokenResponse := response.ToMap()
+	s.logger.Info(logging.DestinationHTTP, "Token response map created", "has_refresh_token", tokenResponse["refresh_token"] != nil)
+	tokenResponse["access_token"] = idtoken
+	tokenResponse["token_type"] = "Bearer"
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
