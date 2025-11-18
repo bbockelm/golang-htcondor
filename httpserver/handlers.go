@@ -15,6 +15,26 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
 
+// isAuthenticationError checks if an error is a genuine authentication/authorization error
+// vs a connection error that happens to mention "security" or "authentication"
+func isAuthenticationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	// Check for explicit authentication/authorization failures
+	if strings.Contains(errMsg, "DENIED") ||
+		strings.Contains(errMsg, "unauthorized") ||
+		strings.Contains(errMsg, "forbidden") {
+		return true
+	}
+	// Check for authentication errors that are not connection errors
+	if strings.Contains(errMsg, "authentication") && !strings.Contains(errMsg, "connection") {
+		return true
+	}
+	return false
+}
+
 // JobSubmitRequest represents a job submission request
 type JobSubmitRequest struct {
 	SubmitFile string `json:"submit_file"` // Submit file content
@@ -80,7 +100,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -117,7 +137,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, req.SubmitFile)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -228,7 +248,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 			return
 		}
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -268,7 +288,7 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 	results, err := s.schedd.RemoveJobs(ctx, constraint, "Removed via HTTP API")
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -444,7 +464,7 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	results, err := s.schedd.RemoveJobs(ctx, req.Constraint, req.Reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -652,7 +672,7 @@ func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, act
 	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -702,7 +722,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 			return
 		}
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -722,7 +742,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	// Spool job files from tar
 	err = s.schedd.SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
 	if err != nil {
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -950,7 +970,7 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
