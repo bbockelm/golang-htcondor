@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,7 +324,8 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	// Log the incoming request for debugging
 	s.logger.Info(logging.DestinationHTTP, "Token request received",
 		"grant_type", r.FormValue("grant_type"),
-		"client_id", r.FormValue("client_id"))
+		"client_id", r.FormValue("client_id"),
+		"scope", r.FormValue("scope"))
 
 	// Create the session object
 	session := &openid.DefaultSession{}
@@ -345,15 +347,106 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create access response
+	// Create access response (for all flows - this generates tokens including refresh token)
+	s.logger.Info(logging.DestinationHTTP, "Creating access response",
+		"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+		"requested_scopes", accessRequest.GetRequestedScopes())
 	response, err := s.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access response", "error", err)
+		// Log more details about the error - unwrap to see the root cause
+		rootErr := err
+		for errors.Unwrap(rootErr) != nil {
+			rootErr = errors.Unwrap(rootErr)
+		}
+		s.logger.Error(logging.DestinationHTTP, "Failed to create access response",
+			"error", err,
+			"root_error", rootErr,
+			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+			"client_id", accessRequest.GetClient().GetID())
+		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+	s.logger.Info(logging.DestinationHTTP, "Successfully created access response")
+
+	// Check if condor:/* scopes are requested
+	requestedScopes := accessRequest.GetRequestedScopes()
+	if hasCondorScopes(requestedScopes) {
+		// Generate HTCondor IDTOKEN and replace the access token
+		s.replaceWithCondorToken(ctx, w, r, accessRequest, response)
+		return
+	}
+
+	// Standard OAuth2 flow - write the response as-is
+	s.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
+}
+
+// replaceWithCondorToken replaces the OAuth2 access token with an HTCondor IDTOKEN
+// while preserving the refresh token and other fields
+func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, accessRequest fosite.AccessRequester, response fosite.AccessResponder) {
+	// Check if we can generate HTCondor tokens
+	if s.signingKeyPath == "" || s.trustDomain == "" {
+		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
+		err := &fosite.RFC6749Error{
+			ErrorField:       "server_error",
+			DescriptionField: "Server not configured to issue HTCondor tokens",
+			HintField:        "Contact administrator to configure signing key and trust domain",
+			CodeField:        http.StatusInternalServerError,
+		}
 		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
 
-	s.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
+	// Get the username from the session
+	username := accessRequest.GetSession().GetSubject()
+	if username == "" {
+		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
+		err := &fosite.RFC6749Error{
+			ErrorField:       "invalid_request",
+			DescriptionField: "Cannot determine user identity",
+			CodeField:        http.StatusBadRequest,
+		}
+		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+
+	// Get requested scopes
+	requestedScopes := accessRequest.GetRequestedScopes()
+
+	// Generate HTCondor IDTOKEN
+	idtoken, err := s.generateHTCondorTokenWithScopes(username, requestedScopes)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
+			"error", err,
+			"username", username,
+			"scopes", requestedScopes)
+		fositeErr := &fosite.RFC6749Error{
+			ErrorField:       "server_error",
+			DescriptionField: "Failed to generate HTCondor IDTOKEN",
+			CodeField:        http.StatusInternalServerError,
+		}
+		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, fositeErr)
+		return
+	}
+
+	s.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for condor scopes",
+		"username", username,
+		"scopes", requestedScopes)
+
+	// Get the response as a map and replace the access token with HTCondor IDTOKEN
+	// The response already has the refresh token and other OAuth2 fields
+	tokenResponse := response.ToMap()
+	s.logger.Info(logging.DestinationHTTP, "Token response map created", "has_refresh_token", tokenResponse["refresh_token"] != nil)
+	tokenResponse["access_token"] = idtoken
+	tokenResponse["token_type"] = "Bearer"
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(tokenResponse); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode token response", "error", err)
+	}
 }
 
 // handleOAuth2Introspect handles OAuth2 token introspection requests
@@ -461,6 +554,10 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		"mcp:write": true,
 	}
 	for _, scope := range regReq.Scopes {
+		// Allow condor:/* scopes
+		if strings.HasPrefix(scope, "condor:/") {
+			continue
+		}
 		if !supportedScopes[scope] {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
 			return
@@ -535,7 +632,7 @@ func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
 	}
@@ -564,7 +661,7 @@ func (s *Server) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ 
 		"authorization_servers":                 []string{issuer},
 		"bearer_methods_supported":              []string{"header"},
 		"resource_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
 		"resource_documentation":                issuer + "/mcp",
 	}
 
@@ -641,6 +738,51 @@ func (s *Server) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 	return true
 }
 
+// hasCondorScopes checks if any condor:/* scopes are present in the list
+func hasCondorScopes(scopes []string) bool {
+	for _, scope := range scopes {
+		if strings.HasPrefix(scope, "condor:/") {
+			return true
+		}
+	}
+	return false
+}
+
+// mapCondorScopesToAuthz maps condor:/* scopes to HTCondor authorization levels
+// Returns the authorization limits for the token
+// Maps 1-to-1 from condor:/FOO to FOO
+func mapCondorScopesToAuthz(scopes []string) []string {
+	authzMap := make(map[string]bool)
+
+	for _, scope := range scopes {
+		if !strings.HasPrefix(scope, "condor:/") {
+			continue
+		}
+
+		// Extract the authorization level from condor:/LEVEL
+		authLevel := strings.TrimPrefix(scope, "condor:/")
+		authLevel = strings.ToUpper(authLevel)
+
+		// Map scope 1-to-1 to HTCondor authorization levels
+		// Supported: READ, WRITE, ADVERTISE_STARTD, ADVERTISE_SCHEDD, ADVERTISE_MASTER
+		switch authLevel {
+		case "READ", "WRITE", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER":
+			authzMap[authLevel] = true
+		default:
+			// Unknown authorization level, ignore
+			continue
+		}
+	}
+
+	// Convert map to slice
+	var authz []string
+	for auth := range authzMap {
+		authz = append(authz, auth)
+	}
+
+	return authz
+}
+
 // generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
 func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
 	if s.signingKeyPath == "" {
@@ -662,22 +804,28 @@ func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []strin
 	iat := time.Now().Unix()
 	exp := time.Now().Add(1 * time.Hour).Unix()
 
-	// Map MCP scopes to HTCondor authorization levels
+	// Check if condor:/* scopes are present
 	var authz []string
-	hasWrite := false
-	for _, scope := range scopes {
-		if scope == "mcp:write" {
-			hasWrite = true
-			break
-		}
-	}
-
-	if hasWrite {
-		// Full access for write scope
-		authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+	if hasCondorScopes(scopes) {
+		// Map condor:/* scopes to HTCondor authorization levels
+		authz = mapCondorScopesToAuthz(scopes)
 	} else {
-		// Read-only access for read scope
-		authz = []string{"READ"}
+		// Map MCP scopes to HTCondor authorization levels (legacy behavior)
+		hasWrite := false
+		for _, scope := range scopes {
+			if scope == "mcp:write" {
+				hasWrite = true
+				break
+			}
+		}
+
+		if hasWrite {
+			// Full access for write scope
+			authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+		} else {
+			// Read-only access for read scope
+			authz = []string{"READ"}
+		}
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",

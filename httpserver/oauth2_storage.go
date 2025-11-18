@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
+	"github.com/ory/fosite/handler/openid"
 )
 
 // OAuth2Storage implements fosite storage interfaces using SQLite
@@ -73,6 +74,7 @@ func (s *OAuth2Storage) createTables() error {
 		session_data TEXT NOT NULL,
 		subject TEXT NOT NULL,
 		active INTEGER NOT NULL DEFAULT 1,
+		expires_at TIMESTAMP,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -402,10 +404,16 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 	}
 	request.GrantedScope = grantedScopesList
 
-	if err := json.Unmarshal([]byte(sessionData), session); err != nil {
-		return nil, err
+	// Only unmarshal session data if we have a valid session to unmarshal into
+	if session != nil && sessionData != "" {
+		if err := json.Unmarshal([]byte(sessionData), session); err != nil {
+			return nil, err
+		}
+		request.Session = session
+	} else {
+		// Create a default session if none provided
+		request.Session = &openid.DefaultSession{}
 	}
-	request.Session = session
 
 	return request, nil
 }
