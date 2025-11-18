@@ -260,8 +260,14 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Query for the specific job
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
+	// Query for the specific job with extended projection including hold reason
+	// We need hold reason info for clients that check job status details
+	projection := append(htcondor.DefaultJobProjection(),
+		"HoldReason", "HoldReasonCode", "HoldReasonSubCode",
+		"RemoteHost", "RemoteSlotID", "StartdAddr")
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -733,9 +739,13 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
-	// First, query for the job to get its proc ad
+	// First, query for the job to get its proc ad with transfer attributes
+	// We need transfer-related attributes for spooling to work
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
+	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
