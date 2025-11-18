@@ -4,7 +4,6 @@
 package httpserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"

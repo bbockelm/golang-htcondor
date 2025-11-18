@@ -3,7 +3,6 @@ package httpserver
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,7 +135,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 
 		// Manually expire it by updating the database
 		_, err = storage.db.ExecContext(ctx, `
-			UPDATE oauth2_device_codes 
+			UPDATE oauth2_device_codes
 			SET expires_at = ?
 			WHERE device_code = ?
 		`, time.Now().Add(-1*time.Minute), resp.DeviceCode)
@@ -241,10 +240,4 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when reusing device code, but got none")
 	}
-}
-
-func TestMain(m *testing.M) {
-	// Run tests
-	code := m.Run()
-	os.Exit(code)
 }

@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,15 +18,15 @@ import (
 
 // TokenInfo stores OAuth2 token information for a trust domain
 type TokenInfo struct {
-	TrustDomain   string    `json:"trust_domain"`
-	ClientID      string    `json:"client_id"`
-	ClientSecret  string    `json:"client_secret"`
-	AccessToken   string    `json:"access_token"`
-	RefreshToken  string    `json:"refresh_token"`
-	TokenType     string    `json:"token_type"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	Scopes        []string  `json:"scopes"`
-	IssuerURL     string    `json:"issuer_url"`
+	TrustDomain  string    `json:"trust_domain"`
+	ClientID     string    `json:"client_id"`
+	ClientSecret string    `json:"client_secret"`
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	TokenType    string    `json:"token_type"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Scopes       []string  `json:"scopes"`
+	IssuerURL    string    `json:"issuer_url"`
 }
 
 // TokenInfoStore manages multiple token infos keyed by trust domain
@@ -35,10 +36,10 @@ type TokenInfoStore struct {
 
 // TokenFetchConfig holds configuration for fetching tokens
 type TokenFetchConfig struct {
-	IssuerURL   string
-	TrustDomain string
-	Scopes      []string
-	ClientID    string
+	IssuerURL    string
+	TrustDomain  string
+	Scopes       []string
+	ClientID     string
 	ClientSecret string
 }
 
@@ -181,11 +182,23 @@ func registerClient(config *TokenFetchConfig) (string, string, error) {
 		return "", "", err
 	}
 
-	resp, err := http.Post(registerURL, "application/json", bytes.NewBuffer(bodyBytes))
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "POST", registerURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close response body: %v\n", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -213,11 +226,23 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 	data.Set("client_id", config.ClientID)
 	data.Set("scope", strings.Join(config.Scopes, " "))
 
-	resp, err := http.PostForm(deviceAuthURL, data)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "POST", deviceAuthURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close response body: %v\n", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -268,13 +293,21 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 			tokenData.Set("device_code", deviceResp.DeviceCode)
 			tokenData.Set("client_id", config.ClientID)
 
-			tokenResp, err := http.PostForm(tokenURL, tokenData)
+			tokenReq, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(tokenData.Encode()))
+			if err != nil {
+				return nil, err
+			}
+			tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+			tokenResp, err := client.Do(tokenReq)
 			if err != nil {
 				return nil, err
 			}
 
 			body, _ := io.ReadAll(tokenResp.Body)
-			tokenResp.Body.Close()
+			if err := tokenResp.Body.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to close response body: %v\n", err)
+			}
 
 			if tokenResp.StatusCode == http.StatusOK {
 				var tokenResult struct {
@@ -324,7 +357,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 }
 
 // refreshToken refreshes an access token using a refresh token
-func refreshToken(tokenInfo *TokenInfo, config *TokenFetchConfig) (*TokenInfo, error) {
+func refreshToken(tokenInfo *TokenInfo, _ *TokenFetchConfig) (*TokenInfo, error) {
 	tokenURL := tokenInfo.IssuerURL + "/mcp/oauth2/token"
 
 	data := url.Values{}
@@ -333,11 +366,23 @@ func refreshToken(tokenInfo *TokenInfo, config *TokenFetchConfig) (*TokenInfo, e
 	data.Set("client_id", tokenInfo.ClientID)
 	data.Set("client_secret", tokenInfo.ClientSecret)
 
-	resp, err := http.PostForm(tokenURL, data)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close response body: %v\n", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -403,6 +448,7 @@ func getAccessTokenPath(trustDomain string) string {
 
 // loadTokenInfoStore loads token info from disk
 func loadTokenInfoStore(path string) (*TokenInfoStore, error) {
+	//nolint:gosec // Path is from user config directory
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
