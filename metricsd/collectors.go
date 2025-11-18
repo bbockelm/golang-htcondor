@@ -27,7 +27,7 @@ func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 	now := time.Now()
 
 	// Query for startd (machine) ads
-	startdAds, err := c.collector.QueryAds(ctx, "Startd", "")
+	startdAds, _, err := c.collector.QueryAdsWithOptions(ctx, "Startd", "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query startd ads: %w", err)
 	}
@@ -138,7 +138,7 @@ func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 	})
 
 	// Query for schedd ads
-	scheddAds, err := c.collector.QueryAds(ctx, "Schedd", "")
+	scheddAds, _, err := c.collector.QueryAdsWithOptions(ctx, "Schedd", "", nil)
 	if err == nil {
 		metrics = append(metrics, Metric{
 			Name:      "htcondor_pool_schedds_total",

@@ -169,7 +169,7 @@ queue`
 	t.Log("Step 2: Creating and uploading input tarball...")
 	inputTar := createInputTarball(t, map[string]string{
 		"input.txt": "This is test input data\n",
-		"script.sh": "#!/bin/bash\necho 'Hello from HTCondor!' > output.txt\n echo 'Test successful' >> output.txt\n",
+		"script.sh": "#!/bin/bash\necho 'Hello from HTCondor!' > output.txt\necho 'Test successful' >> output.txt\n",
 	})
 	uploadInputTarball(t, client, baseURL, testUser, jobID, inputTar)
 	t.Log("Input tarball uploaded successfully")

@@ -82,17 +82,47 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all jobs
 	}
 
-	projectionStr := r.URL.Query().Get("projection")
-	var projection []string
-	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
 		}
 	}
 
-	// Query schedd
-	jobAds, err := s.getSchedd().Query(ctx, constraint, projection)
+	// Parse projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
+		}
+	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
+	// Query schedd with options
+	jobAds, pageInfo, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		// Check if it's a rate limit error
 		if ratelimit.IsRateLimitError(err) {
@@ -108,8 +138,17 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return ClassAds directly - they have MarshalJSON method
-	s.writeJSON(w, http.StatusOK, JobListResponse{Jobs: jobAds})
+	// Return ClassAds with pagination info
+	response := map[string]interface{}{
+		"jobs":           jobAds,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleSubmitJob handles POST /api/v1/jobs
@@ -241,8 +280,14 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Query for the specific job
-	jobAds, err := s.getSchedd().Query(ctx, constraint, nil)
+	// Query for the specific job with extended projection including hold reason
+	// We need hold reason info for clients that check job status details
+	projection := append(htcondor.DefaultJobProjection(),
+		"HoldReason", "HoldReasonCode", "HoldReasonSubCode",
+		"RemoteHost", "RemoteSlotID", "StartdAddr")
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -714,9 +759,13 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
-	// First, query for the job to get its proc ad
+	// First, query for the job to get its proc ad with transfer attributes
+	// We need transfer-related attributes for spooling to work
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, err := s.getSchedd().Query(ctx, constraint, nil)
+	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1016,19 +1065,47 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all ads
 	}
 
-	// Get projection parameter
-	projectionStr := r.URL.Query().Get("projection")
-	var projection []string
-	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
 		}
 	}
 
+	// Parse projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
+		}
+	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
 	// Query collector for all ads (using "Machine" which queries STARTD ads)
-	// In a more complete implementation, we'd query all ad types
-	ads, err := s.collector.QueryAdsWithProjection(ctx, "StartdAd", constraint, projection)
+	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, "StartdAd", constraint, opts)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1038,7 +1115,17 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+	// Return ads with pagination info
+	response := map[string]interface{}{
+		"ads":            ads,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
@@ -1061,15 +1148,37 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		constraint = "true" // Default: all ads of this type
 	}
 
-	// Get projection parameter
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
+		}
+	}
+
+	// Parse projection parameter
 	projectionStr := r.URL.Query().Get("projection")
 	var projection []string
 	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
 		}
 	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
 
 	// Map common ad type names
 	var queryAdType string
@@ -1095,8 +1204,15 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		queryAdType = adType
 	}
 
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
 	// Query collector
-	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, opts)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1106,7 +1222,17 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+	// Return ads with pagination info
+	response := map[string]interface{}{
+		"ads":            ads,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleCollectorAdByName handles /api/v1/collector/ads/{adType}/{name} endpoint
@@ -1164,7 +1290,7 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
 
 	// Query collector
-	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, &htcondor.QueryOptions{Projection: projection})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))

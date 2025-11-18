@@ -89,6 +89,18 @@ const openAPISchema = `{
               "description": "Job ClassAd as a JSON object"
             },
             "description": "Array of job ClassAds"
+          },
+          "total_returned": {
+            "type": "integer",
+            "description": "Number of jobs returned in this response"
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether there are more results available"
+          },
+          "next_page_token": {
+            "type": "string",
+            "description": "Token to use for fetching the next page (only present if has_more is true)"
           }
         }
       }
@@ -98,7 +110,7 @@ const openAPISchema = `{
     "/jobs": {
       "get": {
         "summary": "List jobs",
-        "description": "Query the schedd for jobs matching the constraint",
+        "description": "Query the schedd for jobs matching the constraint. Returns up to 50 jobs by default.",
         "operationId": "listJobs",
         "parameters": [
           {
@@ -114,7 +126,27 @@ const openAPISchema = `{
           {
             "name": "projection",
             "in": "query",
-            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "description": "Comma-separated list of attributes to return. Use '*' for all attributes. Default returns: ClusterId, ProcId, Owner, JobStatus, Cmd, Args",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "ClusterId,ProcId,Owner,JobStatus"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results to return (default: 50). Use '*' for unlimited results.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "100"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Pagination token from a previous response to fetch the next page of results",
             "required": false,
             "schema": {
               "type": "string"
@@ -835,7 +867,7 @@ const openAPISchema = `{
     "/collector/ads": {
       "get": {
         "summary": "Query collector for all ads",
-        "description": "Query the HTCondor collector for daemon advertisements",
+        "description": "Query the HTCondor collector for daemon advertisements. Returns up to 50 ads by default.",
         "operationId": "listCollectorAds",
         "parameters": [
           {
@@ -851,7 +883,27 @@ const openAPISchema = `{
           {
             "name": "projection",
             "in": "query",
-            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "description": "Comma-separated list of attributes to return. Use '*' for all attributes. Default returns: Name, Machine, MyType, State, Activity, MyAddress",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Name,Machine,State"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results to return (default: 50). Use '*' for unlimited results.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "100"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Pagination token from a previous response to fetch the next page of results",
             "required": false,
             "schema": {
               "type": "string"
@@ -872,6 +924,18 @@ const openAPISchema = `{
                         "type": "object",
                         "description": "ClassAd as a JSON object"
                       }
+                    },
+                    "total_returned": {
+                      "type": "integer",
+                      "description": "Number of ads returned in this response"
+                    },
+                    "has_more": {
+                      "type": "boolean",
+                      "description": "Whether there are more results available"
+                    },
+                    "next_page_token": {
+                      "type": "string",
+                      "description": "Token to use for fetching the next page (only present if has_more is true)"
                     }
                   }
                 }
@@ -904,7 +968,7 @@ const openAPISchema = `{
     "/collector/ads/{adType}": {
       "get": {
         "summary": "Query collector for ads of specific type",
-        "description": "Query the HTCondor collector for daemon advertisements of a specific type",
+        "description": "Query the HTCondor collector for daemon advertisements of a specific type. Returns up to 50 ads by default.",
         "operationId": "listCollectorAdsByType",
         "parameters": [
           {
@@ -930,7 +994,27 @@ const openAPISchema = `{
           {
             "name": "projection",
             "in": "query",
-            "description": "Comma-separated list of attributes to return (default: all attributes)",
+            "description": "Comma-separated list of attributes to return. Use '*' for all attributes. Default returns: Name, Machine, MyType, State, Activity, MyAddress",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Name,Machine,State"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results to return (default: 50). Use '*' for unlimited results.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "100"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Pagination token from a previous response to fetch the next page of results",
             "required": false,
             "schema": {
               "type": "string"
@@ -951,6 +1035,18 @@ const openAPISchema = `{
                         "type": "object",
                         "description": "ClassAd as a JSON object"
                       }
+                    },
+                    "total_returned": {
+                      "type": "integer",
+                      "description": "Number of ads returned in this response"
+                    },
+                    "has_more": {
+                      "type": "boolean",
+                      "description": "Whether there are more results available"
+                    },
+                    "next_page_token": {
+                      "type": "string",
+                      "description": "Token to use for fetching the next page (only present if has_more is true)"
                     }
                   }
                 }
