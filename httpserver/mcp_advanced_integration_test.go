@@ -767,7 +767,7 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
-		SigningKeyPath:     passwordsDir,
+		SigningKeyPath:     poolKeyPath,
 		TrustDomain:        "test.local",
 		UIDDomain:          "test.local",
 		EnableMCP:          true,
@@ -896,7 +896,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 		ScheddName:     "local",
 		ScheddAddr:     "127.0.0.1:9618",
 		UserHeader:     "X-Test-User",
-		SigningKeyPath: passwordsDir, // Pass the directory, GenerateJWT will look for POOL inside
+		SigningKeyPath: poolKeyPath,
 		TrustDomain:    "test.local",
 		UIDDomain:      "test.local",
 		EnableMCP:      true,

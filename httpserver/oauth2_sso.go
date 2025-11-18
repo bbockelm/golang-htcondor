@@ -89,13 +89,13 @@ func (s *Server) getScopesForGroups(userGroups []string, requestedScopes []strin
 			// Already added
 			continue
 		case "mcp:read":
-			// Grant only if user is in the required read group
-			if hasGroup(userGroups, s.mcpReadGroup) {
+			// Grant only if read group is configured AND user is in it
+			if s.mcpReadGroup != "" && hasGroup(userGroups, s.mcpReadGroup) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			// Grant only if user is in the required write group
-			if hasGroup(userGroups, s.mcpWriteGroup) {
+			// Grant only if write group is configured AND user is in it
+			if s.mcpWriteGroup != "" && hasGroup(userGroups, s.mcpWriteGroup) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		default:
