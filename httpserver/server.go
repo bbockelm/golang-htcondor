@@ -422,8 +422,9 @@ type ErrorResponse struct {
 
 // writeError writes an error response
 func (s *Server) writeError(w http.ResponseWriter, statusCode int, message string) {
-	// Add WWW-Authenticate header for 401 Unauthorized responses when OAuth2 is enabled
-	if statusCode == http.StatusUnauthorized && s.oauth2Provider != nil {
+	// Add WWW-Authenticate header for 401 Unauthorized responses per RFC 6750
+	// This is required for Bearer token authentication regardless of OAuth2 provider
+	if statusCode == http.StatusUnauthorized {
 		s.addWWWAuthenticateHeader(w, "", "")
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -456,22 +457,34 @@ func (s *Server) writeOAuthError(w http.ResponseWriter, statusCode int, errorCod
 // addWWWAuthenticateHeader adds RFC 6750 compliant WWW-Authenticate header
 // See: https://datatracker.ietf.org/doc/html/rfc6750#section-3
 func (s *Server) addWWWAuthenticateHeader(w http.ResponseWriter, errorCode, errorDescription string) {
-	if s.oauth2Provider == nil {
-		return
-	}
+	var headerValue string
 
-	// Get the issuer from OAuth2 provider config
-	realm := s.oauth2Provider.config.AccessTokenIssuer
+	if s.oauth2Provider != nil {
+		// Get the issuer from OAuth2 provider config
+		realm := s.oauth2Provider.config.AccessTokenIssuer
 
-	// Build WWW-Authenticate header value
-	headerValue := fmt.Sprintf(`Bearer realm="%s"`, realm)
+		// Build WWW-Authenticate header value with realm
+		headerValue = fmt.Sprintf(`Bearer realm="%s"`, realm)
 
-	if errorCode != "" {
-		headerValue += fmt.Sprintf(`, error="%s"`, errorCode)
-	}
+		if errorCode != "" {
+			headerValue += fmt.Sprintf(`, error="%s"`, errorCode)
+		}
 
-	if errorDescription != "" {
-		headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
+		if errorDescription != "" {
+			headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
+		}
+	} else {
+		// Even without OAuth2 provider, we should include WWW-Authenticate header
+		// for proper OAuth2/Bearer token authentication per RFC 6750
+		headerValue = "Bearer"
+
+		if errorCode != "" {
+			headerValue += fmt.Sprintf(` error="%s"`, errorCode)
+		}
+
+		if errorDescription != "" {
+			headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
+		}
 	}
 
 	w.Header().Set("WWW-Authenticate", headerValue)
