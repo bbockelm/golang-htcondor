@@ -1,10 +1,14 @@
-// Package mcpserver implements the Model Context Protocol server for HTCondor.
 package mcpserver
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -210,6 +214,42 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 				"required": []string{"job_id"},
 			},
 		},
+		{
+			Name:        "get_job_stdout",
+			Description: "Get stdout (output) from a completed or running HTCondor job",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
+		{
+			Name:        "get_job_stderr",
+			Description: "Get stderr (error output) from a completed or running HTCondor job",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
 	}
 
 	return map[string]interface{}{
@@ -272,6 +312,10 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolHoldJob(ctx, request.Arguments)
 	case "release_job":
 		result, err = s.toolReleaseJob(ctx, request.Arguments)
+	case "get_job_stdout":
+		result, err = s.toolGetJobStdout(ctx, request.Arguments)
+	case "get_job_stderr":
+		result, err = s.toolGetJobStderr(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
@@ -716,4 +760,108 @@ func parseJWTClaims(token string) (username string, expiration time.Time, err er
 	}
 
 	return claims.Subject, claims.ExpiresAt.Time, nil
+}
+
+// toolGetJobStdout handles retrieving stdout from a job
+func (s *Server) toolGetJobStdout(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.toolGetJobOutput(ctx, args, "stdout", "Out")
+}
+
+// toolGetJobStderr handles retrieving stderr from a job
+func (s *Server) toolGetJobStderr(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.toolGetJobOutput(ctx, args, "stderr", "Err")
+}
+
+// toolGetJobOutput is a helper function to retrieve stdout or stderr from a job
+func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface{}, outputType, attributeName string) (interface{}, error) {
+	jobID, ok := args["job_id"].(string)
+	if !ok || jobID == "" {
+		return nil, fmt.Errorf("job_id is required")
+	}
+
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid job_id: %w", err)
+	}
+
+	// Query the job to get the output filename
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
+
+	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query job: %w", err)
+	}
+
+	if len(jobAds) == 0 {
+		return nil, fmt.Errorf("job not found: %s", jobID)
+	}
+
+	jobAd := jobAds[0]
+
+	// Get the output filename from the job ad
+	outputFileExpr, ok := jobAd.Lookup(attributeName)
+	if !ok {
+		return nil, fmt.Errorf("job does not have %s attribute configured", outputType)
+	}
+
+	outputFile, err := outputFileExpr.Eval(nil).StringValue()
+	if err != nil || outputFile == "" {
+		return nil, fmt.Errorf("job %s attribute is empty or invalid", outputType)
+	}
+
+	// Download the job sandbox
+	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var sandboxBuf bytes.Buffer
+	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+
+	if err := <-errChan; err != nil {
+		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
+	}
+
+	// Extract the output file from the tar archive
+	tarReader := tar.NewReader(&sandboxBuf)
+	var outputContent string
+
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tar archive: %w", err)
+		}
+
+		// Check if this is the output file we're looking for
+		baseName := filepath.Base(header.Name)
+		if baseName == outputFile {
+			content, err := io.ReadAll(tarReader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read %s content: %w", outputType, err)
+			}
+			outputContent = string(content)
+			break
+		}
+	}
+
+	if outputContent == "" {
+		return nil, fmt.Errorf("%s file not found in job sandbox (expected: %s)", outputType, outputFile)
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType, outputContent),
+			},
+		},
+		"metadata": map[string]interface{}{
+			"job_id":      jobID,
+			"output_type": outputType,
+			"filename":    outputFile,
+			"size":        len(outputContent),
+		},
+	}, nil
 }
