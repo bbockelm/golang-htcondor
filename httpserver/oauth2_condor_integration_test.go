@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,52 +193,119 @@ func TestCondorScopesIntegration(t *testing.T) {
 	})
 }
 
-// getOAuth2TokenWithCondorScopes obtains an OAuth2 access token with specified condor scopes
-func getOAuth2TokenWithCondorScopes(t *testing.T, client *http.Client, baseURL, clientID, clientSecret, username string, scopes []string) string {
-	scopeStr := strings.Join(scopes, " ")
-	
-	// Build token request with client_credentials grant
-	req, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
-		fmt.Sprintf("grant_type=client_credentials&client_id=%s&client_secret=%s&scope=%s",
-			clientID, clientSecret, scopeStr),
+// getOAuth2TokenWithCondorScopes obtains an OAuth2 access token with specified condor scopes using authorization code flow
+func getOAuth2TokenWithCondorScopes(t *testing.T, httpClient *http.Client, baseURL, clientID, clientSecret, username string, scopes []string) string {
+	scopeStr := strings.Join(scopes, "+")
+
+	// Step 1: Create authorization request
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18082/callback&scope=%s&state=teststate&username=%s",
+		baseURL, clientID, scopeStr, username)
+
+	req, err := http.NewRequest("GET", authURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to create auth request: %v", err)
+	}
+	req.Header.Set("X-Test-User", username)
+
+	// Don't follow redirects automatically
+	originalCheckRedirect := httpClient.CheckRedirect
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer func() { httpClient.CheckRedirect = originalCheckRedirect }()
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to send auth request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	t.Logf("Authorization response: status=%d", resp.StatusCode)
+
+	// Accept both 302 (Found) and 303 (See Other) as valid OAuth2 redirects
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Authorization request failed: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	// Extract authorization code from redirect
+	location := resp.Header.Get("Location")
+	if location == "" {
+		t.Fatal("No redirect location in authorization response")
+	}
+
+	t.Logf("Redirect location: %s", location)
+
+	// Check if the redirect contains an error
+	if redirectURL, parseErr := url.Parse(location); parseErr == nil {
+		if errorCode := redirectURL.Query().Get("error"); errorCode != "" {
+			errorDesc := redirectURL.Query().Get("error_description")
+			t.Fatalf("OAuth2 error in redirect: %s - %s", errorCode, errorDesc)
+		}
+	}
+
+	// Parse the authorization code from the redirect URL
+	code := extractCodeFromURL(t, location)
+	if code == "" {
+		t.Fatal("No authorization code in redirect URL")
+	}
+
+	t.Logf("Received authorization code: %s...", code[:min(10, len(code))])
+
+	// Step 2: Exchange authorization code for access token
+	tokenReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18082/callback&client_id=%s&client_secret=%s",
+			code, clientID, clientSecret),
 	))
 	if err != nil {
 		t.Fatalf("Failed to create token request: %v", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Test-User", username)
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := client.Do(req)
+	tokenResp, err := httpClient.Do(tokenReq)
 	if err != nil {
-		t.Fatalf("Failed to request token: %v", err)
+		t.Fatalf("Failed to send token request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer tokenResp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Token request failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int    `json:"expires_in"`
-		Scope       string `json:"scope"`
+	body, _ := io.ReadAll(tokenResp.Body)
+	if tokenResp.StatusCode != http.StatusOK {
+		t.Fatalf("Token request failed: status %d, body: %s", tokenResp.StatusCode, string(body))
 	}
 
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
+	var tokenRespData struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+		Scope        string `json:"scope"`
+		RefreshToken string `json:"refresh_token"`
+	}
+
+	if err := json.Unmarshal(body, &tokenRespData); err != nil {
 		t.Fatalf("Failed to decode token response: %v, body: %s", err, string(body))
 	}
 
-	if tokenResp.AccessToken == "" {
+	if tokenRespData.AccessToken == "" {
 		t.Fatal("Empty access token received")
 	}
 
 	t.Logf("Token response: token_type=%s, expires_in=%d, scope=%s",
-		tokenResp.TokenType, tokenResp.ExpiresIn, tokenResp.Scope)
+		tokenRespData.TokenType, tokenRespData.ExpiresIn, tokenRespData.Scope)
 
-	return tokenResp.AccessToken
+	return tokenRespData.AccessToken
+}
+
+// extractCodeFromURL extracts the authorization code from a redirect URL
+func extractCodeFromURL(t *testing.T, urlStr string) string {
+	if idx := strings.Index(urlStr, "code="); idx != -1 {
+		code := urlStr[idx+5:]
+		if end := strings.Index(code, "&"); end != -1 {
+			code = code[:end]
+		}
+		return code
+	}
+	return ""
 }
 
 // Helper to register a client with condor scopes support
@@ -255,7 +323,7 @@ func registerOAuth2ClientWithCondorScopes(t *testing.T, storage *OAuth2Storage) 
 		ID:            clientID,
 		Secret:        hashedSecret,
 		RedirectURIs:  []string{"http://localhost:18082/callback"},
-		GrantTypes:    []string{"authorization_code", "refresh_token", "client_credentials"},
+		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
 		Scopes:        []string{"openid", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD"},
 		Public:        false,
@@ -266,11 +334,4 @@ func registerOAuth2ClientWithCondorScopes(t *testing.T, storage *OAuth2Storage) 
 	}
 
 	return clientID, clientSecret
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

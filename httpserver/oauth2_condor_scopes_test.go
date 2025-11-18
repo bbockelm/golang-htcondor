@@ -71,29 +71,9 @@ func TestMapCondorScopesToAuthz(t *testing.T) {
 			expected: []string{"READ"},
 		},
 		{
-			name:     "WRITE scope includes READ",
+			name:     "WRITE scope",
 			scopes:   []string{"condor:/WRITE"},
-			expected: []string{"WRITE", "READ"},
-		},
-		{
-			name:     "ADMINISTRATOR scope includes READ and WRITE",
-			scopes:   []string{"condor:/ADMINISTRATOR"},
-			expected: []string{"ADMINISTRATOR", "WRITE", "READ"},
-		},
-		{
-			name:     "OWNER scope includes READ and WRITE",
-			scopes:   []string{"condor:/OWNER"},
-			expected: []string{"OWNER", "WRITE", "READ"},
-		},
-		{
-			name:     "DAEMON scope includes READ",
-			scopes:   []string{"condor:/DAEMON"},
-			expected: []string{"DAEMON", "READ"},
-		},
-		{
-			name:     "NEGOTIATOR scope includes READ",
-			scopes:   []string{"condor:/NEGOTIATOR"},
-			expected: []string{"NEGOTIATOR", "READ"},
+			expected: []string{"WRITE"},
 		},
 		{
 			name:     "ADVERTISE scopes",
@@ -101,12 +81,7 @@ func TestMapCondorScopesToAuthz(t *testing.T) {
 			expected: []string{"ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"},
 		},
 		{
-			name:     "CONFIG scope",
-			scopes:   []string{"condor:/CONFIG"},
-			expected: []string{"CONFIG"},
-		},
-		{
-			name:     "multiple scopes deduplicated",
+			name:     "multiple scopes",
 			scopes:   []string{"condor:/READ", "condor:/WRITE"},
 			expected: []string{"READ", "WRITE"},
 		},
@@ -118,6 +93,11 @@ func TestMapCondorScopesToAuthz(t *testing.T) {
 		{
 			name:     "unknown scope ignored",
 			scopes:   []string{"condor:/UNKNOWN", "condor:/READ"},
+			expected: []string{"READ"},
+		},
+		{
+			name:     "unsupported scopes ignored",
+			scopes:   []string{"condor:/ADMINISTRATOR", "condor:/DAEMON", "condor:/READ"},
 			expected: []string{"READ"},
 		},
 		{
@@ -167,53 +147,6 @@ func TestMapCondorScopesToAuthz(t *testing.T) {
 					len(result), len(tt.expected), result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestMapCondorScopesToAuthzImplications(t *testing.T) {
-	// Test that WRITE implies READ
-	result := mapCondorScopesToAuthz([]string{"condor:/WRITE"})
-	hasRead := false
-	hasWrite := false
-	for _, auth := range result {
-		if auth == "READ" {
-			hasRead = true
-		}
-		if auth == "WRITE" {
-			hasWrite = true
-		}
-	}
-	if !hasRead {
-		t.Error("WRITE scope should include READ authorization")
-	}
-	if !hasWrite {
-		t.Error("WRITE scope should include WRITE authorization")
-	}
-
-	// Test that ADMINISTRATOR implies READ and WRITE
-	result = mapCondorScopesToAuthz([]string{"condor:/ADMINISTRATOR"})
-	hasRead = false
-	hasWrite = false
-	hasAdmin := false
-	for _, auth := range result {
-		if auth == "READ" {
-			hasRead = true
-		}
-		if auth == "WRITE" {
-			hasWrite = true
-		}
-		if auth == "ADMINISTRATOR" {
-			hasAdmin = true
-		}
-	}
-	if !hasRead {
-		t.Error("ADMINISTRATOR scope should include READ authorization")
-	}
-	if !hasWrite {
-		t.Error("ADMINISTRATOR scope should include WRITE authorization")
-	}
-	if !hasAdmin {
-		t.Error("ADMINISTRATOR scope should include ADMINISTRATOR authorization")
 	}
 }
 
