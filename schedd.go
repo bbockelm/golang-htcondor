@@ -93,11 +93,32 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 	}
 	effectiveOpts := opts.ApplyDefaults()
 
+	// If a page token is provided, modify the constraint to skip earlier jobs
+	effectiveConstraint := constraint
+	if effectiveOpts.PageToken != "" {
+		clusterID, procID, err := DecodePageToken(effectiveOpts.PageToken)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid page token: %w", err)
+		}
+
+		// Add constraint to select jobs after the page token
+		// Jobs come in ClusterId.ProcId order, so we want:
+		// (ClusterId > pageClusterId) OR (ClusterId == pageClusterId AND ProcId > pageProcId)
+		pageConstraint := fmt.Sprintf("(ClusterId > %d || (ClusterId == %d && ProcId > %d))",
+			clusterID, clusterID, procID)
+
+		if constraint == "" || constraint == "true" {
+			effectiveConstraint = pageConstraint
+		} else {
+			effectiveConstraint = fmt.Sprintf("(%s) && (%s)", constraint, pageConstraint)
+		}
+	}
+
 	// Get effective projection
 	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
 
 	// Query with the effective options
-	jobAds, err := s.queryWithAuth(ctx, constraint, projection, false, &effectiveOpts)
+	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, projection, false, &effectiveOpts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,12 +130,18 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 		NextPageToken:  "",
 	}
 
-	// If we got exactly the limit, there might be more results
-	// In a real implementation, we'd need the schedd to tell us if there are more
-	// For now, we'll assume no pagination beyond the limit
+	// If we got the limit or more results, there might be more available
 	if !effectiveOpts.IsUnlimited() && len(jobAds) >= effectiveOpts.Limit {
-		// There might be more results, but we can't know for sure without schedd support
-		// Leave HasMoreResults as false for now
+		// Generate page token from the last job's ClusterId and ProcId
+		if len(jobAds) > 0 {
+			lastJob := jobAds[len(jobAds)-1]
+			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
+				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
+					pageInfo.NextPageToken = EncodePageToken(clusterID, procID)
+					pageInfo.HasMoreResults = true
+				}
+			}
+		}
 	}
 
 	return jobAds, pageInfo, nil

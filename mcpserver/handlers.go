@@ -73,7 +73,7 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 					},
 					"page_token": map[string]interface{}{
 						"type":        "string",
-						"description": "Page token for pagination (optional)",
+						"description": "Page token for pagination. When a query returns 'has_more': true, use the 'next_page_token' value from the response to fetch the next page of results. The token encodes the position (ClusterId.ProcId) of the last job in the current page, and subsequent queries will return jobs that come after this position. Leave empty for the first page.",
 					},
 					"token": map[string]interface{}{
 						"type":        "string",

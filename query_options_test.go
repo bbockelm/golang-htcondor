@@ -1,6 +1,7 @@
 package htcondor
 
 import (
+	"encoding/base64"
 	"testing"
 )
 
@@ -187,5 +188,90 @@ func TestDefaultCollectorProjection(t *testing.T) {
 		if !found {
 			t.Errorf("DefaultCollectorProjection() missing expected attribute: %s", attr)
 		}
+	}
+}
+
+func TestEncodeDecodePageToken(t *testing.T) {
+	tests := []struct {
+		name      string
+		clusterID int64
+		procID    int64
+	}{
+		{
+			name:      "simple job ID",
+			clusterID: 123,
+			procID:    0,
+		},
+		{
+			name:      "job with proc",
+			clusterID: 456,
+			procID:    7,
+		},
+		{
+			name:      "large cluster ID",
+			clusterID: 999999,
+			procID:    42,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := EncodePageToken(tt.clusterID, tt.procID)
+			if token == "" {
+				t.Error("EncodePageToken() returned empty string")
+			}
+
+			gotCluster, gotProc, err := DecodePageToken(token)
+			if err != nil {
+				t.Errorf("DecodePageToken() error = %v", err)
+			}
+			if gotCluster != tt.clusterID {
+				t.Errorf("DecodePageToken() clusterID = %v, want %v", gotCluster, tt.clusterID)
+			}
+			if gotProc != tt.procID {
+				t.Errorf("DecodePageToken() procID = %v, want %v", gotProc, tt.procID)
+			}
+		})
+	}
+}
+
+func TestDecodePageTokenErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{
+			name:  "empty token",
+			token: "",
+		},
+		{
+			name:  "invalid base64",
+			token: "not-valid-base64!@#",
+		},
+		{
+			name:  "invalid job ID format - no dot",
+			token: base64.StdEncoding.EncodeToString([]byte("123")),
+		},
+		{
+			name:  "invalid job ID format - multiple dots",
+			token: base64.StdEncoding.EncodeToString([]byte("123.4.5")),
+		},
+		{
+			name:  "invalid cluster ID",
+			token: base64.StdEncoding.EncodeToString([]byte("abc.123")),
+		},
+		{
+			name:  "invalid proc ID",
+			token: base64.StdEncoding.EncodeToString([]byte("123.xyz")),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := DecodePageToken(tt.token)
+			if err == nil {
+				t.Error("DecodePageToken() expected error, got nil")
+			}
+		})
 	}
 }

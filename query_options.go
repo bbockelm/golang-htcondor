@@ -1,5 +1,12 @@
 package htcondor
 
+import (
+	"encoding/base64"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
 // QueryOptions contains options for querying jobs and collector ads
 type QueryOptions struct {
 	// Limit specifies the maximum number of results to return.
@@ -94,4 +101,41 @@ type PageInfo struct {
 
 	// TotalReturned is the number of results in the current response
 	TotalReturned int
+}
+
+// EncodePageToken encodes a cluster.proc identifier as a base64 page token
+func EncodePageToken(clusterID, procID int64) string {
+	jobID := fmt.Sprintf("%d.%d", clusterID, procID)
+	return base64.StdEncoding.EncodeToString([]byte(jobID))
+}
+
+// DecodePageToken decodes a base64 page token to cluster and proc IDs
+// Returns cluster ID, proc ID, and error if decoding fails
+func DecodePageToken(token string) (int64, int64, error) {
+	if token == "" {
+		return 0, 0, fmt.Errorf("empty page token")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid page token: %w", err)
+	}
+
+	jobID := string(decoded)
+	parts := strings.Split(jobID, ".")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid job ID format in page token: %s", jobID)
+	}
+
+	clusterID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid cluster ID in page token: %w", err)
+	}
+
+	procID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid proc ID in page token: %w", err)
+	}
+
+	return clusterID, procID, nil
 }

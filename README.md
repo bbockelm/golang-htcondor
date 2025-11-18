@@ -12,7 +12,7 @@ This library provides a Go interface to HTCondor services, allowing you to:
 - Submit and manage jobs
 - Transfer files using HTCondor's file transfer protocol
 - Rate limiting for query protection (configurable via HTCondor config)
-- **Query optimization with defaults, limits, and pagination** (see [QUERY_OPTIMIZATION.md](QUERY_OPTIMIZATION.md))
+- **Query optimization with defaults, limits, and pagination** (see [QUERY_OPTIMIZATION.md](design_notes/QUERY_OPTIMIZATION.md))
 
 ## Dependencies
 
@@ -92,7 +92,7 @@ if err != nil {
 }
 ```
 
-See [QUERY_OPTIMIZATION.md](QUERY_OPTIMIZATION.md) for more details on query limits, default projections, and pagination.
+See [QUERY_OPTIMIZATION.md](design_notes/QUERY_OPTIMIZATION.md) for more details on query limits, default projections, and pagination.
 
 The `Submit` method supports all HTCondor submit file features:
 - Simple `queue` statements
