@@ -26,6 +26,7 @@ func NewCollector(address string) *Collector {
 // QueryAds queries the collector for daemon advertisements
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
+//
 // Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
 func (c *Collector) QueryAds(ctx context.Context, adType string, constraint string) ([]*classad.ClassAd, error) {
 	return c.QueryAdsWithProjection(ctx, adType, constraint, nil)
@@ -35,6 +36,7 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 // projection is an optional list of attribute names to return (pass nil for all attributes)
+//
 // Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
 func (c *Collector) QueryAdsWithProjection(ctx context.Context, adType string, constraint string, projection []string) ([]*classad.ClassAd, error) {
 	return c.queryAdsInternal(ctx, adType, constraint, projection, nil)
@@ -67,10 +69,8 @@ func (c *Collector) QueryAdsWithOptions(ctx context.Context, adType string, cons
 	}
 
 	// If we got exactly the limit, there might be more results
-	if !effectiveOpts.IsUnlimited() && len(ads) >= effectiveOpts.Limit {
-		// There might be more results, but we can't know for sure without collector support
-		// Leave HasMoreResults as false for now
-	}
+	// However, we can't know for sure without collector support, so leave HasMoreResults as false
+	// Future enhancement: collector could support pagination hints
 
 	return ads, pageInfo, nil
 }

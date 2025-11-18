@@ -78,6 +78,7 @@ func (s *Schedd) Address() string {
 // Query queries the schedd for job advertisements
 // constraint is a ClassAd constraint expression (use "true" to get all jobs)
 // projection is a list of attributes to return (use nil to get all attributes)
+//
 // Deprecated: Use QueryWithOptions for pagination and default limits/projections
 func (s *Schedd) Query(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
 	return s.queryWithAuth(ctx, constraint, projection, false, nil)
