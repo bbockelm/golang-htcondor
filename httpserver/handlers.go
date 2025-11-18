@@ -15,6 +15,26 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
 
+// isAuthenticationError checks if an error is a genuine authentication/authorization error
+// vs a connection error that happens to mention "security" or "authentication"
+func isAuthenticationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	// Check for explicit authentication/authorization failures
+	if strings.Contains(errMsg, "DENIED") ||
+		strings.Contains(errMsg, "unauthorized") ||
+		strings.Contains(errMsg, "forbidden") {
+		return true
+	}
+	// Check for authentication errors that are not connection errors
+	if strings.Contains(errMsg, "authentication") && !strings.Contains(errMsg, "connection") {
+		return true
+	}
+	return false
+}
+
 // JobSubmitRequest represents a job submission request
 type JobSubmitRequest struct {
 	SubmitFile string `json:"submit_file"` // Submit file content
@@ -62,17 +82,47 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all jobs
 	}
 
-	projectionStr := r.URL.Query().Get("projection")
-	var projection []string
-	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
 		}
 	}
 
-	// Query schedd
-	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	// Parse projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
+		}
+	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
+	// Query schedd with options
+	jobAds, pageInfo, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		// Check if it's a rate limit error
 		if ratelimit.IsRateLimitError(err) {
@@ -80,7 +130,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -88,8 +138,17 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return ClassAds directly - they have MarshalJSON method
-	s.writeJSON(w, http.StatusOK, JobListResponse{Jobs: jobAds})
+	// Return ClassAds with pagination info
+	response := map[string]interface{}{
+		"jobs":           jobAds,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleSubmitJob handles POST /api/v1/jobs
@@ -114,10 +173,10 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit job using SubmitRemote
-	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, req.SubmitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, req.SubmitFile)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -221,14 +280,20 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Query for the specific job
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	// Query for the specific job with extended projection including hold reason
+	// We need hold reason info for clients that check job status details
+	projection := append(htcondor.DefaultJobProjection(),
+		"HoldReason", "HoldReasonCode", "HoldReasonSubCode",
+		"RemoteHost", "RemoteSlotID", "StartdAddr")
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 			return
 		}
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -265,10 +330,10 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
 	// Remove the job using the schedd RemoveJobs method
-	results, err := s.schedd.RemoveJobs(ctx, constraint, "Removed via HTTP API")
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -379,7 +444,7 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 		Force:               false,
 	}
 
-	if err := s.schedd.EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
 			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Cannot edit job: %v", err))
@@ -441,10 +506,10 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove jobs by constraint
-	results, err := s.schedd.RemoveJobs(ctx, req.Constraint, req.Reason)
+	results, err := s.getSchedd().RemoveJobs(ctx, req.Constraint, req.Reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -553,7 +618,7 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Edit jobs matching constraint
-	count, err := s.schedd.EditJobs(ctx, req.Constraint, attributes, opts)
+	count, err := s.getSchedd().EditJobs(ctx, req.Constraint, attributes, opts)
 	if err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
@@ -652,7 +717,7 @@ func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, act
 	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -665,12 +730,12 @@ func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, act
 
 // handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
 func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
-	s.handleBulkJobAction(w, r, "Held", "hold", s.schedd.HoldJobs)
+	s.handleBulkJobAction(w, r, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
 func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
-	s.handleBulkJobAction(w, r, "Released", "release", s.schedd.ReleaseJobs)
+	s.handleBulkJobAction(w, r, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
@@ -694,15 +759,19 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
-	// First, query for the job to get its proc ad
+	// First, query for the job to get its proc ad with transfer attributes
+	// We need transfer-related attributes for spooling to work
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, err := s.schedd.Query(ctx, constraint, nil)
+	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 			return
 		}
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -720,9 +789,9 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	limitedReader := io.LimitReader(r.Body, 1024*1024*1024) // 1GB limit
 
 	// Spool job files from tar
-	err = s.schedd.SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
+	err = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
 	if err != nil {
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -766,7 +835,7 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID s
 	w.WriteHeader(http.StatusOK)
 
 	// Start receiving job sandbox
-	errChan := s.schedd.ReceiveJobSandbox(ctx, constraint, w)
+	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
 
 	// Wait for transfer to complete
 	if err := <-errChan; err != nil {
@@ -950,7 +1019,7 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
 		// Check if it's an authentication error
-		if strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "security") {
+		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
@@ -963,12 +1032,12 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 
 // handleJobHold handles POST /api/v1/jobs/{id}/hold
 func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.schedd.HoldJobs)
+	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleJobRelease handles POST /api/v1/jobs/{id}/release
 func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.schedd.ReleaseJobs)
+	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
 // CollectorAdsResponse represents collector ads listing response
@@ -996,19 +1065,47 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all ads
 	}
 
-	// Get projection parameter
-	projectionStr := r.URL.Query().Get("projection")
-	var projection []string
-	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
 		}
 	}
 
+	// Parse projection parameter
+	projectionStr := r.URL.Query().Get("projection")
+	var projection []string
+	if projectionStr != "" {
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
+		}
+	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
 	// Query collector for all ads (using "Machine" which queries STARTD ads)
-	// In a more complete implementation, we'd query all ad types
-	ads, err := s.collector.QueryAdsWithProjection(ctx, "StartdAd", constraint, projection)
+	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, "StartdAd", constraint, opts)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1018,7 +1115,17 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+	// Return ads with pagination info
+	response := map[string]interface{}{
+		"ads":            ads,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
@@ -1041,15 +1148,37 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		constraint = "true" // Default: all ads of this type
 	}
 
-	// Get projection parameter
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
+		}
+	}
+
+	// Parse projection parameter
 	projectionStr := r.URL.Query().Get("projection")
 	var projection []string
 	if projectionStr != "" {
-		projection = strings.Split(projectionStr, ",")
-		for i := range projection {
-			projection[i] = strings.TrimSpace(projection[i])
+		if projectionStr == "*" {
+			projection = []string{"*"} // all attributes
+		} else {
+			projection = strings.Split(projectionStr, ",")
+			for i := range projection {
+				projection[i] = strings.TrimSpace(projection[i])
+			}
 		}
 	}
+
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
 
 	// Map common ad type names
 	var queryAdType string
@@ -1075,8 +1204,15 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		queryAdType = adType
 	}
 
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
+	}
+
 	// Query collector
-	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, opts)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1086,7 +1222,17 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, CollectorAdsResponse{Ads: ads})
+	// Return ads with pagination info
+	response := map[string]interface{}{
+		"ads":            ads,
+		"total_returned": pageInfo.TotalReturned,
+		"has_more":       pageInfo.HasMoreResults,
+	}
+	if pageInfo.NextPageToken != "" {
+		response["next_page_token"] = pageInfo.NextPageToken
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleCollectorAdByName handles /api/v1/collector/ads/{adType}/{name} endpoint
@@ -1144,7 +1290,7 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
 
 	// Query collector
-	ads, err := s.collector.QueryAdsWithProjection(ctx, queryAdType, constraint, projection)
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, &htcondor.QueryOptions{Projection: projection})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))

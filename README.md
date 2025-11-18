@@ -12,6 +12,7 @@ This library provides a Go interface to HTCondor services, allowing you to:
 - Submit and manage jobs
 - Transfer files using HTCondor's file transfer protocol
 - Rate limiting for query protection (configurable via HTCondor config)
+- **Query optimization with defaults, limits, and pagination** (see [QUERY_OPTIMIZATION.md](design_notes/QUERY_OPTIMIZATION.md))
 
 ## Dependencies
 
@@ -36,7 +37,7 @@ import (
     "context"
     "log"
     "time"
-    
+
     "github.com/bbockelm/golang-htcondor"
 )
 
@@ -68,7 +69,7 @@ import (
     "fmt"
     "log"
     "time"
-    
+
     "github.com/bbockelm/golang-htcondor"
 )
 
@@ -96,12 +97,25 @@ if err != nil {
 }
 fmt.Printf("Submitted job cluster %s\n", clusterID)
 
-// Query jobs
+// Query jobs with new QueryWithOptions API (recommended)
+opts := &htcondor.QueryOptions{
+    Limit: 50,  // limit to 50 results
+    Projection: []string{"ClusterId", "ProcId", "JobStatus"},
+}
+jobs, pageInfo, err := schedd.QueryWithOptions(ctx, "Owner == \"user\"", opts)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Found %d jobs\n", pageInfo.TotalReturned)
+
+// Query jobs with old API (still supported, no limits applied)
 jobs, err := schedd.Query(ctx, "Owner == \"user\"", []string{"ClusterId", "ProcId", "JobStatus"})
 if err != nil {
     log.Fatal(err)
 }
 ```
+
+See [QUERY_OPTIMIZATION.md](design_notes/QUERY_OPTIMIZATION.md) for more details on query limits, default projections, and pagination.
 
 The `Submit` method supports all HTCondor submit file features:
 - Simple `queue` statements
