@@ -145,6 +145,13 @@ func (p *OAuth2Provider) GetStrategy() *compose.CommonStrategy {
 	return p.strategy
 }
 
+// UpdateIssuer updates the issuer URL in the OAuth2 config
+// This is useful when using port 0 and getting the actual port after server start
+func (p *OAuth2Provider) UpdateIssuer(issuer string) {
+	p.config.AccessTokenIssuer = issuer
+	p.config.TokenURL = issuer + "/mcp/oauth2/token"
+}
+
 // DefaultOpenIDConnectSession creates a default OpenID Connect session
 func DefaultOpenIDConnectSession(username string) *openid.DefaultSession {
 	return &openid.DefaultSession{

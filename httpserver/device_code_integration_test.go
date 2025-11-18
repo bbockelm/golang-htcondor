@@ -103,15 +103,13 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 	}
 	t.Logf("Using schedd address: %s", scheddAddr)
 
-	// Use a fixed port for testing
-	serverPort := 18082
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	// Request port 0 to get a random available port
+	serverAddr := "127.0.0.1:0"
 
 	// OAuth2 database path
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Create HTTP server with MCP enabled
+	// Create HTTP server with MCP enabled (we'll update the URL after getting the actual port)
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
@@ -122,7 +120,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 		UIDDomain:      trustDomain,
 		EnableMCP:      true,
 		OAuth2DBPath:   oauth2DBPath,
-		OAuth2Issuer:   baseURL,
+		OAuth2Issuer:   "http://127.0.0.1:0", // Will use actual address from GetAddr()
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -134,8 +132,23 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 		serverErrChan <- server.Start()
 	}()
 
+	// Wait for server to start and get actual address
+	time.Sleep(500 * time.Millisecond)
+
+	// Get actual server address using GetAddr() method
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Update OAuth2 issuer with actual address
+	server.GetOAuth2Provider().UpdateIssuer(baseURL)
+
 	// Wait for server to be ready
-	t.Logf("Waiting for server to start on %s", baseURL)
+	t.Logf("Waiting for server to be fully ready")
 	if err := waitForServer(baseURL, 10*time.Second); err != nil {
 		t.Fatalf("Server failed to start: %v", err)
 	}
