@@ -116,16 +116,82 @@ func New(config *Config) (*Logger, error) {
 	}, nil
 }
 
+// parseVerbosity converts a verbosity string to a Verbosity level.
+// Supports both simple levels (ERROR, WARN, INFO, DEBUG) and HTCondor-style
+// debug levels (D_ALWAYS, D_ERROR, D_STATUS, D_FULLDEBUG, etc.).
+func parseVerbosity(level string) Verbosity {
+	level = strings.ToUpper(strings.TrimSpace(level))
+
+	// Handle simple verbosity levels
+	switch level {
+	case "ERROR":
+		return VerbosityError
+	case "WARN", "WARNING":
+		return VerbosityWarn
+	case "INFO":
+		return VerbosityInfo
+	case "DEBUG":
+		return VerbosityDebug
+	}
+
+	// Handle HTCondor-style debug levels
+	// HTCondor debug levels can be space-separated (e.g., "D_FULLDEBUG D_SECURITY")
+	// We'll use the most verbose (highest) level specified
+	hasMatch := false
+	verbosity := VerbosityError // Start with least verbose
+	parts := strings.Fields(level)
+
+	for _, part := range parts {
+		switch part {
+		case "D_ALWAYS":
+			// D_ALWAYS is for critical messages, map to Error
+			hasMatch = true
+			if verbosity < VerbosityError {
+				verbosity = VerbosityError
+			}
+		case "D_ERROR":
+			// D_ERROR maps to Error level
+			hasMatch = true
+			if verbosity < VerbosityError {
+				verbosity = VerbosityError
+			}
+		case "D_STATUS", "D_GENERAL":
+			// D_STATUS maps to Info level
+			hasMatch = true
+			if verbosity < VerbosityInfo {
+				verbosity = VerbosityInfo
+			}
+		case "D_FULLDEBUG", "D_SECURITY", "D_COMMAND", "D_PROTOCOL", "D_NETWORK":
+			// D_FULLDEBUG and other specific debug categories map to Debug level
+			hasMatch = true
+			if verbosity < VerbosityDebug {
+				verbosity = VerbosityDebug
+			}
+		}
+	}
+
+	// If we didn't match any D_ flags, return default
+	if !hasMatch {
+		return VerbosityInfo
+	}
+
+	return verbosity
+}
+
 // FromConfig creates a new Logger from HTCondor configuration.
 // It reads the following configuration parameters:
 //   - LOG: Output path (stdout, stderr, or file path). Defaults to stderr.
-//   - LOG_VERBOSITY: Minimum verbosity level (ERROR, WARN, INFO, DEBUG). Defaults to INFO.
+//   - LOG_VERBOSITY: Minimum verbosity level. Defaults to INFO.
+//     Supports both simple levels (ERROR, WARN, INFO, DEBUG) and HTCondor-style
+//     debug levels (D_ALWAYS, D_ERROR, D_STATUS, D_FULLDEBUG, etc.).
 //   - LOG_DESTINATIONS: Comma-separated list of enabled destinations (GENERAL, HTTP, SCHEDD, COLLECTOR, METRICS, SECURITY). Defaults to all enabled.
 //
 // Example configuration:
 //
 //	LOG = /var/log/htcondor/api.log
 //	LOG_VERBOSITY = DEBUG
+//	# or using HTCondor-style debug levels:
+//	LOG_VERBOSITY = D_FULLDEBUG D_SECURITY
 //	LOG_DESTINATIONS = HTTP, SCHEDD, SECURITY
 func FromConfig(cfg *config.Config) (*Logger, error) {
 	if cfg == nil {
@@ -141,16 +207,7 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 	// Parse verbosity
 	verbosity := VerbosityInfo
 	if logVerbosity, ok := cfg.Get("LOG_VERBOSITY"); ok {
-		switch strings.ToUpper(strings.TrimSpace(logVerbosity)) {
-		case "ERROR":
-			verbosity = VerbosityError
-		case "WARN", "WARNING":
-			verbosity = VerbosityWarn
-		case "INFO":
-			verbosity = VerbosityInfo
-		case "DEBUG":
-			verbosity = VerbosityDebug
-		}
+		verbosity = parseVerbosity(logVerbosity)
 	}
 
 	// Parse enabled destinations
