@@ -1,4 +1,4 @@
-// Example demonstrating schedd address update functionality
+// Package main demonstrates schedd address update functionality.
 //
 // This example shows how the HTTP server automatically updates the schedd
 // address when it's discovered from the collector. The address is checked
@@ -10,7 +10,6 @@
 // When the schedd address is discovered from the collector (Config.ScheddAddr
 // is empty), the updater IS started and will periodically query the collector
 // for address updates.
-
 package main
 
 import (

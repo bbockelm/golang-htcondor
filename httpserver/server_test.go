@@ -92,7 +92,7 @@ func TestScheddThreadSafety(t *testing.T) {
 	// Start goroutines updating the schedd
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
-		go func(id int) {
+		go func(_ int) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				addr := "127.0.0.1:" + string(rune('9'+'0'+j%10))
