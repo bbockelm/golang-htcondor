@@ -113,10 +113,10 @@ type AdResult struct {
 // If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
 func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constraint string, projection []string, streamOpts *StreamOptions) <-chan AdResult {
 	ch := make(chan AdResult, streamOpts.ApplyStreamDefaults().BufferSize)
-	
+
 	go func() {
 		defer close(ch)
-		
+
 		// Apply rate limiting if configured
 		username := GetAuthenticatedUserFromContext(ctx)
 		rateLimitManager := getRateLimitManager()
@@ -190,7 +190,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 		// Stream response ads
 		opts := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
-		
+
 		for {
 			// Check for context cancellation
 			select {
@@ -236,7 +236,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 			}
 		}
 	}()
-	
+
 	return ch
 }
 

@@ -172,7 +172,6 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 // handleSubmitJob handles POST /api/v1/jobs
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context

@@ -160,10 +160,10 @@ type JobAdResult struct {
 // If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
 func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection []string, streamOpts *StreamOptions) <-chan JobAdResult {
 	ch := make(chan JobAdResult, streamOpts.ApplyStreamDefaults().BufferSize)
-	
+
 	go func() {
 		defer close(ch)
-		
+
 		// Apply rate limiting if configured
 		username := GetAuthenticatedUserFromContext(ctx)
 		rateLimitManager := getRateLimitManager()
@@ -227,7 +227,7 @@ func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection 
 		// Stream response ads
 		opts := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
-		
+
 		for {
 			// Check for context cancellation
 			select {
@@ -277,7 +277,7 @@ func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection 
 			}
 		}
 	}()
-	
+
 	return ch
 }
 
