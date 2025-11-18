@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,7 +51,7 @@ func runTokenFetch(args []string) error {
 
 	issuerURL := args[0]
 	trustDomain := ""
-	scopes := []string{"openid", "mcp:read", "mcp:write"}
+	scopes := []string{"openid", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE"}
 
 	// Simple flag parsing
 	for i := 1; i < len(args); i++ {
@@ -91,6 +92,15 @@ func runTokenFetch(args []string) error {
 	}
 	if store == nil {
 		store = &TokenInfoStore{Tokens: make(map[string]*TokenInfo)}
+	}
+
+	// Check if we have an existing valid token in tokens.d
+	existingToken, err := checkExistingToken(trustDomain)
+	if err == nil && existingToken != "" {
+		fmt.Println("Found existing valid token in tokens.d")
+		fmt.Printf("Token is valid for at least 5 more minutes\n")
+		fmt.Printf("Token location: %s\n", getAccessTokenPath(trustDomain))
+		return nil
 	}
 
 	// Check if we have a valid token for this trust domain
@@ -228,9 +238,10 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 	}
 
 	// Display instructions to user
+	verificationURL := fmt.Sprintf("%s?user_code=%s", deviceResp.VerificationURI, deviceResp.UserCode)
 	fmt.Println("\n==================================================")
-	fmt.Printf("Please visit: %s\n", deviceResp.VerificationURI)
-	fmt.Printf("And enter code: %s\n", deviceResp.UserCode)
+	fmt.Printf("Please visit: %s\n", verificationURL)
+	fmt.Printf("(Code: %s)\n", deviceResp.UserCode)
 	fmt.Println("==================================================")
 	fmt.Println()
 
@@ -430,4 +441,55 @@ func saveAccessToken(tokenInfo *TokenInfo) error {
 
 	tokenPath := getAccessTokenPath(tokenInfo.TrustDomain)
 	return os.WriteFile(tokenPath, []byte(tokenInfo.AccessToken), 0600)
+}
+
+// checkExistingToken checks if there's a valid token in tokens.d that won't expire for at least 5 minutes
+func checkExistingToken(trustDomain string) (string, error) {
+	tokenPath := getAccessTokenPath(trustDomain)
+	
+	// Check if token file exists
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return "", err
+	}
+	
+	token := string(tokenData)
+	if token == "" {
+		return "", fmt.Errorf("empty token")
+	}
+	
+	// Parse JWT to check expiration
+	// JWT format: header.payload.signature
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid token format")
+	}
+	
+	// Decode payload (base64url)
+	payloadData, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		// Try with standard base64
+		payloadData, err = base64.RawStdEncoding.DecodeString(parts[1])
+		if err != nil {
+			return "", fmt.Errorf("failed to decode token payload: %w", err)
+		}
+	}
+	
+	// Parse JSON payload
+	var payload struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payloadData, &payload); err != nil {
+		return "", fmt.Errorf("failed to parse token payload: %w", err)
+	}
+	
+	// Check if token expires in more than 5 minutes
+	expiresAt := time.Unix(payload.Exp, 0)
+	fiveMinutesFromNow := time.Now().Add(5 * time.Minute)
+	
+	if expiresAt.After(fiveMinutesFromNow) {
+		return token, nil
+	}
+	
+	return "", fmt.Errorf("token expires within 5 minutes")
 }
