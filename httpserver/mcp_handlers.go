@@ -391,11 +391,11 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 	request, err := deviceHandler.HandleDeviceAccessRequest(ctx, deviceCode, session)
 	if err != nil {
 		// Map errors to OAuth error responses
-		if err == ErrAuthorizationPending {
+		if errors.Is(err, ErrAuthorizationPending) {
 			s.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
 			return
 		}
-		if err == fosite.ErrAccessDenied {
+		if errors.Is(err, fosite.ErrAccessDenied) {
 			s.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
 			return
 		}
@@ -404,16 +404,16 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate tokens using fosite
+		// Generate tokens using fosite
 	strategy := s.oauth2Provider.GetStrategy()
-	accessToken, _, err := strategy.CoreStrategy.GenerateAccessToken(ctx, request)
+	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to generate access token", "error", err)
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
 		return
 	}
 
-	refreshToken, _, err := strategy.CoreStrategy.GenerateRefreshToken(ctx, request)
+	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
@@ -421,14 +421,14 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 	}
 
 	// Store tokens
-	signature := strategy.CoreStrategy.AccessTokenSignature(ctx, accessToken)
+	signature := strategy.AccessTokenSignature(ctx, accessToken)
 	if err := s.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, signature, request); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to store access token", "error", err)
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
 
-	refreshSignature := strategy.CoreStrategy.RefreshTokenSignature(ctx, refreshToken)
+	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
 	if err := s.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
@@ -771,7 +771,7 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 </html>`, userCode)
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(html))
+		_, _ = w.Write([]byte(html))
 		return
 	}
 
@@ -809,7 +809,8 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		if action == "approve" {
+		switch action {
+		case "approve":
 			// Create session for user
 			session := DefaultOpenIDConnectSession(username)
 
@@ -841,8 +842,8 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 </html>`
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(html))
-		} else if action == "deny" {
+			_, _ = w.Write([]byte(html))
+		case "deny":
 			// Deny the device code
 			if err := s.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
 				s.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
@@ -871,8 +872,8 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 </html>`
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(html))
-		} else {
+			_, _ = w.Write([]byte(html))
+		default:
 			s.writeHTMLError(w, "Invalid action")
 		}
 		return
@@ -900,7 +901,7 @@ func (s *Server) writeHTMLError(w http.ResponseWriter, message string) {
 </html>`, message)
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusBadRequest)
-	w.Write([]byte(html))
+	_, _ = w.Write([]byte(html))
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -106,16 +107,16 @@ func (h *DeviceCodeHandler) HandleDeviceAccessRequest(ctx context.Context, devic
 	request, err := h.storage.GetDeviceCodeSession(ctx, deviceCode, session)
 	if err != nil {
 		// Map storage errors to appropriate OAuth errors
-		if err == fosite.ErrNotFound {
+		if errors.Is(err, fosite.ErrNotFound) {
 			return nil, fosite.ErrInvalidGrant.WithDebug("Device code not found")
 		}
-		if err == ErrAuthorizationPending {
+		if errors.Is(err, ErrAuthorizationPending) {
 			return nil, err // Return as-is for proper error response
 		}
-		if err == fosite.ErrAccessDenied {
+		if errors.Is(err, fosite.ErrAccessDenied) {
 			return nil, err // Return as-is for proper error response
 		}
-		if err == ErrExpiredToken {
+		if errors.Is(err, ErrExpiredToken) {
 			return nil, fosite.ErrInvalidGrant.WithDebug("Device code expired")
 		}
 		return nil, err
@@ -125,10 +126,8 @@ func (h *DeviceCodeHandler) HandleDeviceAccessRequest(ctx context.Context, devic
 	_ = h.storage.UpdateDeviceCodePolling(ctx, deviceCode)
 
 	// Invalidate the device code after successful use
-	if err := h.storage.InvalidateDeviceCodeSession(ctx, deviceCode); err != nil {
-		// Log but don't fail the request
-		// In production, you'd want proper logging here
-	}
+	_ = h.storage.InvalidateDeviceCodeSession(ctx, deviceCode)
+	// Note: Errors during invalidation are intentionally ignored as the token was already granted
 
 	return request, nil
 }
@@ -153,9 +152,9 @@ func (h *DeviceCodeHandler) generateUserCode() (string, error) {
 // generateNumericCode generates a numeric user code (e.g., "12345678")
 func (h *DeviceCodeHandler) generateNumericCode() (string, error) {
 	// Generate a random number
-	max := new(big.Int)
-	max.Exp(big.NewInt(10), big.NewInt(int64(h.userCodeLen)), nil)
-	n, err := rand.Int(rand.Reader, max)
+	maxVal := new(big.Int)
+	maxVal.Exp(big.NewInt(10), big.NewInt(int64(h.userCodeLen)), nil)
+	n, err := rand.Int(rand.Reader, maxVal)
 	if err != nil {
 		return "", err
 	}

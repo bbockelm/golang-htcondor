@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +23,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
-	defer storage.Close()
+	defer func() { _ = storage.Close() }()
 
 	// Create test client
 	clientID := "test-device-client"
@@ -78,7 +79,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 		// Test polling before authorization (should return pending)
 		session := &fosite.DefaultSession{}
 		_, err = handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, session)
-		if err != ErrAuthorizationPending {
+		if !errors.Is(err, ErrAuthorizationPending) {
 			t.Errorf("Expected ErrAuthorizationPending, got: %v", err)
 		}
 
@@ -150,10 +151,10 @@ func TestDeviceCodeHandler(t *testing.T) {
 			t.Error("Expected error for expired device code, got nil")
 		}
 		// The error is wrapped with ErrInvalidGrant in the handler
-		if err != fosite.ErrInvalidGrant && err != ErrExpiredToken {
+		if !errors.Is(err, fosite.ErrInvalidGrant) && !errors.Is(err, ErrExpiredToken) {
 			// Check if it's a wrapped error
-			fositeErr, ok := err.(*fosite.RFC6749Error)
-			if !ok || fositeErr.ErrorField != "invalid_grant" {
+			var fositeErr *fosite.RFC6749Error
+			if !errors.As(err, &fositeErr) || fositeErr.ErrorField != "invalid_grant" {
 				t.Errorf("Expected invalid_grant error for expired token, got: %v (type: %T)", err, err)
 			}
 		}
@@ -175,7 +176,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 		// Try to use denied code
 		session := &fosite.DefaultSession{}
 		_, err = handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, session)
-		if err != fosite.ErrAccessDenied {
+		if !errors.Is(err, fosite.ErrAccessDenied) {
 			t.Errorf("Expected ErrAccessDenied, got: %v", err)
 		}
 	})
@@ -192,7 +193,7 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
-	defer storage.Close()
+	defer func() { _ = storage.Close() }()
 
 	// Create test client
 	clientSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
@@ -207,6 +208,7 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	if err := storage.CreateClient(ctx, client); err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
+	defer func() { _ = storage.Close() }()
 
 	// Create config and handler
 	config := &fosite.Config{
