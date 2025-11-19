@@ -83,6 +83,21 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all jobs
 	}
 
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
+		}
+	}
+
 	// Parse projection parameter
 	projectionStr := r.URL.Query().Get("projection")
 	var projection []string
@@ -97,6 +112,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get page token
+	pageToken := r.URL.Query().Get("page_token")
+
 	// Get effective projection if none specified
 	if len(projection) == 0 {
 		projection = htcondor.DefaultJobProjection()
@@ -104,12 +122,30 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		projection = nil // nil means all attributes
 	}
 
+	// Apply page token to constraint if provided
+	effectiveConstraint := constraint
+	if pageToken != "" {
+		clusterID, procID, err := htcondor.DecodePageToken(pageToken)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid page token: %v", err))
+			return
+		}
+		// Add constraint to select jobs after the page token
+		pageConstraint := fmt.Sprintf("(ClusterId > %d || (ClusterId == %d && ProcId > %d))",
+			clusterID, clusterID, procID)
+		if constraint == "" || constraint == "true" {
+			effectiveConstraint = pageConstraint
+		} else {
+			effectiveConstraint = fmt.Sprintf("(%s) && (%s)", constraint, pageConstraint)
+		}
+	}
+
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
 	}
-	resultCh := s.getSchedd().QueryStream(ctx, constraint, projection, streamOpts)
+	resultCh := s.getSchedd().QueryStream(ctx, effectiveConstraint, projection, streamOpts)
 
 	// Set up streaming JSON response
 	w.Header().Set("Content-Type", "application/json")
@@ -123,16 +159,46 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream job ads as they arrive
 	jobCount := 0
+	var lastClusterID, lastProcID int64
+	hasError := false
 	for result := range resultCh {
 		if result.Err != nil {
+			// Check if it's a rate limit error
+			if ratelimit.IsRateLimitError(result.Err) {
+				s.logger.Error(logging.DestinationHTTP, "Rate limit exceeded", "error", result.Err)
+				errJSON, _ := json.Marshal(map[string]string{"error": "Rate limit exceeded"})
+				if jobCount > 0 {
+					w.Write([]byte(","))
+				}
+				w.Write(errJSON)
+				hasError = true
+				break
+			}
+			// Check if it's an authentication error
+			if isAuthenticationError(result.Err) {
+				s.logger.Error(logging.DestinationHTTP, "Authentication failed", "error", result.Err)
+				errJSON, _ := json.Marshal(map[string]string{"error": "Authentication failed"})
+				if jobCount > 0 {
+					w.Write([]byte(","))
+				}
+				w.Write(errJSON)
+				hasError = true
+				break
+			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			// Write error in the response
 			errJSON, _ := json.Marshal(map[string]string{"error": result.Err.Error()})
 			if jobCount > 0 {
 				w.Write([]byte(","))
 			}
 			w.Write(errJSON)
+			hasError = true
+			break
+		}
+
+		// Check limit
+		if limit > 0 && jobCount >= limit {
+			// We've reached the limit, stop consuming but we need to track if there are more
 			break
 		}
 
@@ -157,6 +223,14 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Track last job for pagination
+		if clusterID, ok := result.Ad.EvaluateAttrInt("ClusterId"); ok {
+			lastClusterID = int64(clusterID)
+		}
+		if procID, ok := result.Ad.EvaluateAttrInt("ProcId"); ok {
+			lastProcID = int64(procID)
+		}
+
 		jobCount++
 
 		// Flush after each ad for true streaming
@@ -166,7 +240,19 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Close JSON array and add metadata
-	metadata := fmt.Sprintf(`],"total_returned":%d}`, jobCount)
+	metadata := fmt.Sprintf(`],"total_returned":%d`, jobCount)
+
+	// Add pagination info if we hit the limit and no error occurred
+	if !hasError && limit > 0 && jobCount >= limit {
+		// Generate next page token
+		nextPageToken := htcondor.EncodePageToken(lastClusterID, lastProcID)
+		metadata += fmt.Sprintf(`,"has_more":true,"next_page_token":%q`, nextPageToken)
+	} else {
+		metadata += `,"has_more":false`
+	}
+
+	metadata += "}"
+
 	if _, err := w.Write([]byte(metadata)); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 	}
