@@ -491,25 +491,59 @@ func saveAccessToken(tokenInfo *TokenInfo) error {
 
 // checkExistingToken checks if there's a valid token in tokens.d that won't expire for at least 5 minutes
 func checkExistingToken(trustDomain string) (string, error) {
-	tokenPath := getAccessTokenPath(trustDomain)
-
-	// Check if token file exists
-	//nolint:gosec // G304: Token path is derived from user-provided trust domain, controlled by application logic
-	tokenData, err := os.ReadFile(tokenPath)
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		homeDir = "/tmp"
+	}
+	tokensDir := filepath.Join(homeDir, ".condor", "tokens.d")
+
+	// Check if tokens.d directory exists
+	entries, err := os.ReadDir(tokensDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read tokens.d directory: %w", err)
 	}
 
-	token := string(tokenData)
-	if token == "" {
-		return "", fmt.Errorf("empty token")
+	// Scan all files in tokens.d directory
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		tokenPath := filepath.Join(tokensDir, entry.Name())
+		//nolint:gosec // G304: Token path is constructed from user's .condor directory
+		tokenData, err := os.ReadFile(tokenPath)
+		if err != nil {
+			continue // Skip files we can't read
+		}
+
+		// Parse file line by line
+		lines := strings.Split(string(tokenData), "\n")
+		for _, line := range lines {
+			// Trim whitespace
+			line = strings.TrimSpace(line)
+
+			// Skip empty lines and comments
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+
+			// Try to parse and validate this token
+			if isValidToken(line) {
+				return line, nil
+			}
+		}
 	}
 
+	return "", fmt.Errorf("no valid token found in tokens.d")
+}
+
+// isValidToken checks if a token is valid JWT and won't expire for at least 5 minutes
+func isValidToken(token string) bool {
 	// Parse JWT to check expiration
 	// JWT format: header.payload.signature
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", fmt.Errorf("invalid token format")
+		return false
 	}
 
 	// Decode payload (base64url)
@@ -518,7 +552,7 @@ func checkExistingToken(trustDomain string) (string, error) {
 		// Try with standard base64
 		payloadData, err = base64.RawStdEncoding.DecodeString(parts[1])
 		if err != nil {
-			return "", fmt.Errorf("failed to decode token payload: %w", err)
+			return false
 		}
 	}
 
@@ -527,16 +561,12 @@ func checkExistingToken(trustDomain string) (string, error) {
 		Exp int64 `json:"exp"`
 	}
 	if err := json.Unmarshal(payloadData, &payload); err != nil {
-		return "", fmt.Errorf("failed to parse token payload: %w", err)
+		return false
 	}
 
 	// Check if token expires in more than 5 minutes
 	expiresAt := time.Unix(payload.Exp, 0)
 	fiveMinutesFromNow := time.Now().Add(5 * time.Minute)
 
-	if expiresAt.After(fiveMinutesFromNow) {
-		return token, nil
-	}
-
-	return "", fmt.Errorf("token expires within 5 minutes")
+	return expiresAt.After(fiveMinutesFromNow)
 }
