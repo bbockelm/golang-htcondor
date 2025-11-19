@@ -142,6 +142,12 @@ func (s *OAuth2Storage) Close() error {
 	return s.db.Close()
 }
 
+// GetDB returns the underlying database connection
+// This allows sharing the database connection with other components like SessionStore
+func (s *OAuth2Storage) GetDB() *sql.DB {
+	return s.db
+}
+
 // validTableNames is a whitelist of allowed table names
 var validTableNames = map[string]bool{
 	"oauth2_access_tokens":       true,

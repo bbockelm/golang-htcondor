@@ -1,11 +1,12 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -17,22 +18,50 @@ type SessionData struct {
 	Token     string    // HTCondor token for this session (optional)
 }
 
-// SessionStore manages HTTP sessions
+// SessionStore manages HTTP sessions with SQLite persistence
 type SessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*SessionData // key is session ID
-	ttl      time.Duration           // Session time-to-live
+	db  *sql.DB       // Database connection (shared with OAuth2Storage)
+	ttl time.Duration // Session time-to-live
 }
 
-// NewSessionStore creates a new session store
-func NewSessionStore(ttl time.Duration) *SessionStore {
+// NewSessionStore creates a new session store with database persistence
+// The db parameter should be the same database connection used by OAuth2Storage
+func NewSessionStore(db *sql.DB, ttl time.Duration) (*SessionStore, error) {
 	if ttl == 0 {
 		ttl = 24 * time.Hour // Default: 24 hours
 	}
-	return &SessionStore{
-		sessions: make(map[string]*SessionData),
-		ttl:      ttl,
+	
+	store := &SessionStore{
+		db:  db,
+		ttl: ttl,
 	}
+	
+	// Create sessions table if it doesn't exist
+	if err := store.createTable(); err != nil {
+		return nil, fmt.Errorf("failed to create sessions table: %w", err)
+	}
+	
+	return store, nil
+}
+
+// createTable creates the sessions table in the database
+func (s *SessionStore) createTable() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS http_sessions (
+		session_id TEXT PRIMARY KEY,
+		username TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		expires_at TIMESTAMP NOT NULL,
+		token TEXT,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON http_sessions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_sessions_username ON http_sessions(username);
+	`
+	
+	_, err := s.db.ExecContext(context.Background(), schema)
+	return err
 }
 
 // generateSessionID generates a cryptographically secure random session ID
@@ -58,9 +87,15 @@ func (s *SessionStore) Create(username string) (string, *SessionData, error) {
 		ExpiresAt: now.Add(s.ttl),
 	}
 
-	s.mu.Lock()
-	s.sessions[sessionID] = session
-	s.mu.Unlock()
+	// Store session in database
+	ctx := context.Background()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, token)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, session.Token)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
+	}
 
 	return sessionID, session, nil
 }
@@ -68,48 +103,52 @@ func (s *SessionStore) Create(username string) (string, *SessionData, error) {
 // Get retrieves a session by ID
 // Returns nil if session doesn't exist or has expired
 func (s *SessionStore) Get(sessionID string) *SessionData {
-	s.mu.RLock()
-	session, exists := s.sessions[sessionID]
-	s.mu.RUnlock()
-
-	if !exists {
+	ctx := context.Background()
+	
+	var session SessionData
+	var token sql.NullString
+	
+	err := s.db.QueryRowContext(ctx,
+		`SELECT username, created_at, expires_at, token 
+		 FROM http_sessions 
+		 WHERE session_id = ? AND expires_at > ?`,
+		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token)
+	
+	if err != nil {
+		// Session not found or expired
 		return nil
 	}
-
-	// Check if expired
-	if time.Now().After(session.ExpiresAt) {
-		s.Delete(sessionID)
-		return nil
+	
+	if token.Valid {
+		session.Token = token.String
 	}
-
-	return session
+	
+	return &session
 }
 
 // Delete removes a session
 func (s *SessionStore) Delete(sessionID string) {
-	s.mu.Lock()
-	delete(s.sessions, sessionID)
-	s.mu.Unlock()
+	ctx := context.Background()
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM http_sessions WHERE session_id = ?`, sessionID)
 }
 
 // Cleanup removes expired sessions
 func (s *SessionStore) Cleanup() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	for id, session := range s.sessions {
-		if now.After(session.ExpiresAt) {
-			delete(s.sessions, id)
-		}
-	}
+	ctx := context.Background()
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM http_sessions WHERE expires_at <= ?`, time.Now())
 }
 
 // Size returns the number of active sessions
 func (s *SessionStore) Size() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.sessions)
+	ctx := context.Background()
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM http_sessions WHERE expires_at > ?`,
+		time.Now()).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
 }
 
 // sessionCookieName is the name of the HTTP session cookie

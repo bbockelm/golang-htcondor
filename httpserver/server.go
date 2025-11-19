@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
 	"golang.org/x/oauth2"
 )
 
@@ -138,8 +140,7 @@ func NewServer(cfg Config) (*Server, error) {
 		userHeader:       cfg.UserHeader,
 		signingKeyPath:   cfg.SigningKeyPath,
 		logger:           logger,
-		tokenCache:       NewTokenCache(),         // Initialize token cache (includes username for rate limiting)
-		sessionStore:     NewSessionStore(sessionTTL), // Initialize HTTP session store
+		tokenCache:       NewTokenCache(), // Initialize token cache (includes username for rate limiting)
 		stopChan:         make(chan struct{}),
 	}
 
@@ -213,6 +214,38 @@ func NewServer(cfg Config) (*Server, error) {
 		if s.mcpWriteGroup != "" {
 			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", s.mcpWriteGroup)
 		}
+
+		// Initialize session store with shared database connection
+		sessionStore, err := NewSessionStore(s.oauth2Provider.GetStorage().GetDB(), sessionTTL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create session store: %w", err)
+		}
+		s.sessionStore = sessionStore
+		logger.Info(logging.DestinationHTTP, "Session store enabled with database persistence", "ttl", sessionTTL)
+	} else {
+		// OAuth2 not enabled, create standalone database for sessions
+		// Use a separate database file for sessions
+		sessionDBPath := cfg.OAuth2DBPath
+		if sessionDBPath == "" {
+			sessionDBPath = "sessions.db"
+		} else {
+			// Use same path but different file name if OAuth2 DB is configured
+			sessionDBPath = sessionDBPath + ".sessions"
+		}
+
+		// Open database for sessions
+		sessionDB, err := sql.Open("sqlite", sessionDBPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open session database: %w", err)
+		}
+
+		sessionStore, err := NewSessionStore(sessionDB, sessionTTL)
+		if err != nil {
+			_ = sessionDB.Close()
+			return nil, fmt.Errorf("failed to create session store: %w", err)
+		}
+		s.sessionStore = sessionStore
+		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
 	}
 
 	// Setup metrics if collector is provided

@@ -1,14 +1,35 @@
 package httpserver
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	_ "github.com/glebarez/sqlite"
 )
 
+// createTestSessionStore creates a session store with an in-memory database for testing
+func createTestSessionStore(t *testing.T, ttl time.Duration) *SessionStore {
+	t.Helper()
+	
+	// Use in-memory database for tests
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open test database: %v", err)
+	}
+	
+	store, err := NewSessionStore(db, ttl)
+	if err != nil {
+		t.Fatalf("Failed to create session store: %v", err)
+	}
+	
+	return store
+}
+
 func TestSessionStore(t *testing.T) {
-	store := NewSessionStore(1 * time.Hour)
+	store := createTestSessionStore(t, 1*time.Hour)
 
 	// Test Create
 	sessionID, session, err := store.Create("testuser")
@@ -51,7 +72,7 @@ func TestSessionStore(t *testing.T) {
 }
 
 func TestSessionStoreExpiration(t *testing.T) {
-	store := NewSessionStore(100 * time.Millisecond)
+	store := createTestSessionStore(t, 100*time.Millisecond)
 
 	sessionID, _, err := store.Create("testuser")
 	if err != nil {
@@ -73,7 +94,7 @@ func TestSessionStoreExpiration(t *testing.T) {
 }
 
 func TestSessionStoreCleanup(t *testing.T) {
-	store := NewSessionStore(100 * time.Millisecond)
+	store := createTestSessionStore(t, 100*time.Millisecond)
 
 	// Create multiple sessions
 	for i := 0; i < 5; i++ {
@@ -114,12 +135,14 @@ func TestGenerateSessionID(t *testing.T) {
 }
 
 func TestSessionCookie(t *testing.T) {
-	// Create a test server
+	// Create a test server with a temporary database
+	tempDir := t.TempDir()
 	cfg := Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test",
-		ScheddAddr: "127.0.0.1:9618",
-		SessionTTL: 1 * time.Hour,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test",
+		ScheddAddr:   "127.0.0.1:9618",
+		SessionTTL:   1 * time.Hour,
+		OAuth2DBPath: tempDir + "/test.db", // Use temp dir for database
 	}
 
 	server, err := NewServer(cfg)
@@ -173,12 +196,14 @@ func TestSessionCookie(t *testing.T) {
 }
 
 func TestGetSessionFromRequest(t *testing.T) {
-	// Create a test server
+	// Create a test server with a temporary database
+	tempDir := t.TempDir()
 	cfg := Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test",
-		ScheddAddr: "127.0.0.1:9618",
-		SessionTTL: 1 * time.Hour,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test",
+		ScheddAddr:   "127.0.0.1:9618",
+		SessionTTL:   1 * time.Hour,
+		OAuth2DBPath: tempDir + "/test.db", // Use temp dir for database
 	}
 
 	server, err := NewServer(cfg)
@@ -228,12 +253,14 @@ func TestGetSessionFromRequest(t *testing.T) {
 }
 
 func TestClearSessionCookie(t *testing.T) {
-	// Create a test server
+	// Create a test server with a temporary database
+	tempDir := t.TempDir()
 	cfg := Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test",
-		ScheddAddr: "127.0.0.1:9618",
-		SessionTTL: 1 * time.Hour,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test",
+		ScheddAddr:   "127.0.0.1:9618",
+		SessionTTL:   1 * time.Hour,
+		OAuth2DBPath: tempDir + "/test.db", // Use temp dir for database
 	}
 
 	server, err := NewServer(cfg)
