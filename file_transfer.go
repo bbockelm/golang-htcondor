@@ -121,22 +121,8 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 	item.FileSize = stat.Size()
 	item.FileMode = uint32(stat.Mode().Perm())
 
-	// 2. Connect to schedd using cedar client
+	// 2. Prepare security config
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to schedd: %w", err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// 3. Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// 4. Security handshake
 	secConfig := &security.SecurityConfig{
 		Command:        commands.FILETRANS_UPLOAD,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
@@ -144,11 +130,21 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,
 	}
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+
+	// 3. Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
 	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
+		return fmt.Errorf("failed to connect and authenticate to schedd: %w", err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// 4. Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// 5. Send FILETRANS_UPLOAD command
 	// TODO: Need StartCommand API - for now, manually send command code
@@ -225,22 +221,8 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 //
 // TODO: Still missing Daemon.StartCommand() - currently must manually send command code.
 func (ftc *FileTransferClient) DownloadFile(ctx context.Context, remotePath string, localPath string) error {
-	// 1. Connect to schedd using cedar client
+	// 1. Prepare security config
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	htcondorClient, err := client.ConnectToAddress(ctx, addr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to schedd at %s:%d: %w", ftc.daemonAddr, ftc.daemonPort, err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// 2. Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// 3. Security handshake
 	secConfig := &security.SecurityConfig{
 		Command:        commands.FILETRANS_DOWNLOAD,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
@@ -248,11 +230,21 @@ func (ftc *FileTransferClient) DownloadFile(ctx context.Context, remotePath stri
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,
 	}
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+
+	// 2. Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
 	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
+		return fmt.Errorf("failed to connect and authenticate to schedd at %s:%d: %w", ftc.daemonAddr, ftc.daemonPort, err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// 3. Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// 4. Send FILETRANS_DOWNLOAD command
 	// TODO: Need StartCommand API - for now, manually send command code
