@@ -301,30 +301,28 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 			timer.Reset(checkInterval)
 
 			startWrite := time.Now()
-			select {
-			case ch <- JobAdResult{Ad: ad}:
-				blockTime := time.Since(startWrite)
-				totalBlockTime += blockTime
-			case <-timer.C:
-				// Timer expired - check if we've exceeded total timeout
-				blockTime := time.Since(startWrite)
-				totalBlockTime += blockTime
-				if totalBlockTime >= streamOptsApplied.WriteTimeout {
-					ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
-					return
-				}
-				// Otherwise, retry the write
+			for {
 				select {
 				case ch <- JobAdResult{Ad: ad}:
-					// Success on retry
+					blockTime := time.Since(startWrite)
+					totalBlockTime += blockTime
+					goto nextAd
+				case <-timer.C:
+					// Timer expired - check if we've exceeded total timeout
+					blockTime := time.Since(startWrite)
+					totalBlockTime += blockTime
+					if totalBlockTime >= streamOptsApplied.WriteTimeout {
+						ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+						return
+					}
+					// Continue retrying in the loop
+					timer.Reset(checkInterval)
 				case <-ctx.Done():
 					ch <- JobAdResult{Err: ctx.Err()}
 					return
 				}
-			case <-ctx.Done():
-				ch <- JobAdResult{Err: ctx.Err()}
-				return
 			}
+		nextAd:
 		}
 	}()
 
@@ -469,9 +467,9 @@ func createJobQueryAdWithLimit(constraint string, projection []string, limit int
 		_ = ad.Set("Projection", projectionStr)
 	}
 
-	// Set limit if specified (positive value)
+	// Set LimitResults for server-side limit enforcement
 	if limit > 0 {
-		_ = ad.Set("Limit", int64(limit))
+		_ = ad.Set("LimitResults", int64(limit))
 	}
 
 	return ad

@@ -1181,6 +1181,21 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		constraint = "true" // Default: all ads
 	}
 
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
+		}
+	}
+
 	// Parse projection parameter
 	projectionStr := r.URL.Query().Get("projection")
 	var projection []string
@@ -1207,7 +1222,7 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, streamOpts)
+	resultCh, err := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, limit, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -1239,6 +1254,11 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
 			errorMsg = result.Err.Error()
+			break
+		}
+
+		// Check limit
+		if limit > 0 && adCount >= limit {
 			break
 		}
 
@@ -1280,6 +1300,10 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
 	}
 
+	// Collector doesn't support pagination yet - hardcode has_more as false
+	// TODO: When collector supports pagination, implement proper page token handling
+	metadata += `,"has_more":false,"next_page_token":""`
+
 	metadata += "}"
 
 	if _, err := w.Write([]byte(metadata)); err != nil {
@@ -1288,6 +1312,8 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
+//
+//nolint:gocyclo // Complex function for handling collector ad streaming with multiple ad types and error cases
 func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request, adType string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1305,6 +1331,21 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 	constraint := r.URL.Query().Get("constraint")
 	if constraint == "" {
 		constraint = "true" // Default: all ads of this type
+	}
+
+	// Parse limit parameter
+	limit := 50 // default limit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limitStr == "*" {
+			limit = -1 // unlimited
+		} else {
+			parsedLimit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid limit parameter: %v", err))
+				return
+			}
+			limit = parsedLimit
+		}
 	}
 
 	// Parse projection parameter
@@ -1357,7 +1398,7 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, streamOpts)
+	resultCh, err := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, limit, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -1389,6 +1430,11 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err, "adType", adType)
 			errorMsg = result.Err.Error()
+			break
+		}
+
+		// Check limit
+		if limit > 0 && adCount >= limit {
 			break
 		}
 
@@ -1429,6 +1475,10 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		errJSON, _ := json.Marshal(errorMsg)
 		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
 	}
+
+	// Collector doesn't support pagination yet - hardcode has_more as false
+	// TODO: When collector supports pagination, implement proper page token handling
+	metadata += `,"has_more":false,"next_page_token":""`
 
 	metadata += "}"
 
