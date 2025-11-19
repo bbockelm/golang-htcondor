@@ -45,13 +45,14 @@ func main() {
 				}
 				return
 			}
-			log.Fatalf("Unknown token subcommand. Usage: htcondor-api token fetch <issuer-url> [--trust-domain DOMAIN] [--scopes SCOPES]")
+			log.Fatalf("Unknown token subcommand. Usage: htcondor-api token fetch <issuer-url>")
 		default:
-			log.Fatalf("Unknown subcommand: %s", args[0])
+			log.Fatalf("Unknown command: %s", args[0])
 		}
+		return
 	}
 
-	// No subcommand - run server
+	// Default behavior: run as server
 	if *demoMode {
 		if err := runDemoMode(); err != nil {
 			log.Fatalf("Demo mode failed: %v", err)

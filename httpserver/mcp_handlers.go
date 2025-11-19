@@ -321,11 +321,26 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Parse form data
+	if err := r.ParseForm(); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to parse form", "error", err)
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
+		return
+	}
+
+	grantType := r.FormValue("grant_type")
+
 	// Log the incoming request for debugging
 	s.logger.Info(logging.DestinationHTTP, "Token request received",
-		"grant_type", r.FormValue("grant_type"),
+		"grant_type", grantType,
 		"client_id", r.FormValue("client_id"),
 		"scope", r.FormValue("scope"))
+
+	// Handle device_code grant type separately
+	if grantType == "urn:ietf:params:oauth:grant-type:device_code" {
+		s.handleDeviceCodeTokenRequest(w, r)
+		return
+	}
 
 	// Create the session object
 	session := &openid.DefaultSession{}
@@ -446,6 +461,88 @@ func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWrit
 
 	if err := json.NewEncoder(w).Encode(tokenResponse); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode token response", "error", err)
+	}
+}
+
+// handleDeviceCodeTokenRequest handles token requests with device_code grant type
+func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	deviceCode := r.FormValue("device_code")
+	if deviceCode == "" {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code is required")
+		return
+	}
+
+	// Create device code handler
+	deviceHandler := NewDeviceCodeHandler(s.oauth2Provider.GetStorage(), s.oauth2Provider.config)
+
+	// Create session
+	session := &openid.DefaultSession{}
+
+	// Handle device code access request
+	request, err := deviceHandler.HandleDeviceAccessRequest(ctx, deviceCode, session)
+	if err != nil {
+		// Map errors to OAuth error responses
+		if errors.Is(err, ErrAuthorizationPending) {
+			s.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
+			return
+		}
+		if errors.Is(err, fosite.ErrAccessDenied) {
+			s.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
+			return
+		}
+		s.logger.Error(logging.DestinationHTTP, "Device code token request failed", "error", err)
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid device code")
+		return
+	}
+
+	// Generate tokens using fosite
+	strategy := s.oauth2Provider.GetStrategy()
+	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate access token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	// Store tokens
+	signature := strategy.AccessTokenSignature(ctx, accessToken)
+	if err := s.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, signature, request); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to store access token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
+	if err := s.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	// Build response
+	response := map[string]interface{}{
+		"access_token":  accessToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(s.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"refresh_token": refreshToken,
+		"scope":         strings.Join(request.GetGrantedScopes(), " "),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
@@ -628,8 +725,9 @@ func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"registration_endpoint":                 issuer + "/mcp/oauth2/register",
 		"introspection_endpoint":                issuer + "/mcp/oauth2/introspect",
 		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
+		"device_authorization_endpoint":         issuer + "/mcp/oauth2/device/authorize",
 		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
@@ -670,6 +768,237 @@ func (s *Server) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ 
 	if err := json.NewEncoder(w).Encode(metadata); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode protected resource metadata", "error", err)
 	}
+}
+
+// handleOAuth2DeviceAuthorize handles device authorization requests (RFC 8628)
+func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse client credentials from request
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
+
+	// Get client
+	client, err := s.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
+		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
+		return
+	}
+
+	// Parse requested scopes
+	scopeStr := r.FormValue("scope")
+	var scopes []string
+	if scopeStr != "" {
+		scopes = strings.Split(scopeStr, " ")
+	} else {
+		// Default scopes
+		scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+
+	// Create device code handler
+	deviceHandler := NewDeviceCodeHandler(s.oauth2Provider.GetStorage(), s.oauth2Provider.config)
+
+	// Handle device authorization
+	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Device authorization failed", "error", err)
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Device authorization failed")
+		return
+	}
+
+	// Return device authorization response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// handleOAuth2DeviceVerify handles the user code verification page
+func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	if r.Method == http.MethodGet {
+		// Display verification form
+		userCode := r.URL.Query().Get("user_code")
+		html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Device Authorization</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
+        h1 { color: #333; }
+        form { margin-top: 20px; }
+        input[type="text"] { font-size: 18px; padding: 10px; width: 100%%; margin: 10px 0; text-transform: uppercase; }
+        button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; cursor: pointer; font-size: 16px; width: 100%%; margin: 5px 0; }
+        button.deny { background-color: #f44336; }
+        button:hover { opacity: 0.8; }
+        .error { color: red; margin: 10px 0; }
+        .success { color: green; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>Device Authorization</h1>
+    <p>Enter the code displayed on your device:</p>
+    <form method="POST" action="/mcp/oauth2/device/verify">
+        <input type="text" name="user_code" placeholder="Enter code" value="%s" required pattern="[A-Z0-9-]+" />
+        <button type="submit" name="action" value="approve">Approve</button>
+        <button type="submit" name="action" value="deny" class="deny">Deny</button>
+    </form>
+</body>
+</html>`, userCode)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(html))
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Handle approval/denial
+		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
+		action := r.FormValue("action")
+
+		if userCode == "" {
+			s.writeHTMLError(w, "User code is required")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := s.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			s.writeHTMLError(w, "Invalid or expired user code")
+			return
+		}
+
+		// Determine authentication method (similar to authorize endpoint)
+		username := ""
+		if s.userHeader != "" {
+			username = r.Header.Get(s.userHeader)
+		}
+
+		if username == "" {
+			// For simplicity in testing, use a query parameter
+			username = r.URL.Query().Get("username")
+		}
+
+		if username == "" {
+			s.writeHTMLError(w, "Authentication required")
+			return
+		}
+
+		switch action {
+		case "approve":
+			// Create session for user
+			session := DefaultOpenIDConnectSession(username)
+
+			// Approve the device code
+			if err := s.oauth2Provider.GetStorage().ApproveDeviceCodeSession(ctx, userCode, username, session); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
+				s.writeHTMLError(w, "Failed to approve device")
+				return
+			}
+
+			s.logger.Info(logging.DestinationHTTP, "Device code approved", "user_code", userCode, "username", username, "client_id", request.GetClient().GetID())
+
+			// Return success page
+			html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorization Complete</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; text-align: center; }
+        h1 { color: #4CAF50; }
+        p { font-size: 18px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>✓ Authorization Complete</h1>
+    <p>You have successfully authorized the device.</p>
+    <p>You can close this window now.</p>
+</body>
+</html>`
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(html))
+		case "deny":
+			// Deny the device code
+			if err := s.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
+				s.writeHTMLError(w, "Failed to deny device")
+				return
+			}
+
+			s.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
+
+			// Return denial page
+			html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorization Denied</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; text-align: center; }
+        h1 { color: #f44336; }
+        p { font-size: 18px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>✗ Authorization Denied</h1>
+    <p>You have denied authorization for this device.</p>
+    <p>You can close this window now.</p>
+</body>
+</html>`
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(html))
+		default:
+			s.writeHTMLError(w, "Invalid action")
+		}
+		return
+	}
+
+	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+// writeHTMLError writes an HTML error page
+func (s *Server) writeHTMLError(w http.ResponseWriter, message string) {
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Error</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
+        .error { color: red; font-size: 18px; }
+    </style>
+</head>
+<body>
+    <h1>Error</h1>
+    <p class="error">%s</p>
+    <a href="/mcp/oauth2/device/verify">Try again</a>
+</body>
+</html>`, message)
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(html))
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
