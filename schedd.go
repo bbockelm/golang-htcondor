@@ -163,20 +163,6 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 		}
 	}
 
-	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
 	// Determine command
 	cmd := commands.QUERY_JOB_ADS
 	if useAuth {
@@ -189,18 +175,23 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
 
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
+	// Establish connection and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("security handshake failed: %w", err)
+		return nil, fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
 
-	// If username not already set in context, use the authenticated user from handshake
-	if username == "" && negotiation.User != "" {
-		// Update context with authenticated user for potential future use
-		// Note: This doesn't affect rate limiting for this call since we already checked it
-		ctx = WithAuthenticatedUser(ctx, negotiation.User)
-	}
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
+
+	// Note: ConnectAndAuthenticate doesn't expose negotiation details, so we can't get
+	// the authenticated user here. Username should be provided in the context if needed.
 
 	// Create query request ClassAd
 	requestAd := createJobQueryAd(constraint, projection)
