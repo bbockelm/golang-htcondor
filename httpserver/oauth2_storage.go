@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
+	"github.com/ory/fosite/handler/openid"
 )
 
 // OAuth2Storage implements fosite storage interfaces using SQLite
@@ -73,6 +74,7 @@ func (s *OAuth2Storage) createTables() error {
 		session_data TEXT NOT NULL,
 		subject TEXT NOT NULL,
 		active INTEGER NOT NULL DEFAULT 1,
+		expires_at TIMESTAMP,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -421,10 +423,16 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 	}
 	request.GrantedScope = grantedScopesList
 
-	if err := json.Unmarshal([]byte(sessionData), session); err != nil {
-		return nil, err
+	// Only unmarshal session data if we have a valid session to unmarshal into
+	if session != nil && sessionData != "" {
+		if err := json.Unmarshal([]byte(sessionData), session); err != nil {
+			return nil, err
+		}
+		request.Session = session
+	} else {
+		// Create a default session if none provided
+		request.Session = &openid.DefaultSession{}
 	}
-	request.Session = session
 
 	return request, nil
 }
@@ -559,7 +567,7 @@ func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode 
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id, 
+		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id,
 			scopes, granted_scopes, form_data, expires_at, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
 	`, deviceCode, userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
@@ -713,7 +721,7 @@ func (s *OAuth2Storage) ApproveDeviceCodeSession(ctx context.Context, userCode s
 	}
 
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE oauth2_device_codes 
+		UPDATE oauth2_device_codes
 		SET status = 'approved', subject = ?, session_data = ?
 		WHERE user_code = ? AND status = 'pending'
 	`, subject, string(sessionData), userCode)
@@ -736,7 +744,7 @@ func (s *OAuth2Storage) ApproveDeviceCodeSession(ctx context.Context, userCode s
 // DenyDeviceCodeSession denies a device code (user rejected the device)
 func (s *OAuth2Storage) DenyDeviceCodeSession(ctx context.Context, userCode string) error {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE oauth2_device_codes 
+		UPDATE oauth2_device_codes
 		SET status = 'denied'
 		WHERE user_code = ? AND status = 'pending'
 	`, userCode)
@@ -759,7 +767,7 @@ func (s *OAuth2Storage) DenyDeviceCodeSession(ctx context.Context, userCode stri
 // UpdateDeviceCodePolling updates the last polled timestamp for rate limiting
 func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE oauth2_device_codes 
+		UPDATE oauth2_device_codes
 		SET last_polled_at = ?
 		WHERE device_code = ?
 	`, time.Now(), deviceCode)
@@ -769,7 +777,7 @@ func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode 
 // InvalidateDeviceCodeSession invalidates a device code after it's been used
 func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceCode string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE oauth2_device_codes 
+		UPDATE oauth2_device_codes
 		SET status = 'used'
 		WHERE device_code = ?
 	`, deviceCode)

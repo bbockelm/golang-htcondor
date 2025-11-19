@@ -46,19 +46,53 @@ Initiates the OAuth2 authorization flow. Supports authorization code grant type.
 POST /mcp/oauth2/token
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=client_credentials&client_id=CLIENT_ID&client_secret=CLIENT_SECRET
+grant_type=authorization_code&code=AUTHORIZATION_CODE&redirect_uri=REDIRECT_URI&client_id=CLIENT_ID&client_secret=CLIENT_SECRET
 ```
 
-Obtains an access token using client credentials flow.
+Obtains an access token using authorization code flow.
+
+**Supported Scopes:**
+- `openid`, `profile`, `email` - Standard OpenID Connect scopes
+- `mcp:read`, `mcp:write` - MCP-specific scopes for job management
+- `condor:/READ`, `condor:/WRITE`, `condor:/ADVERTISE_STARTD`, `condor:/ADVERTISE_SCHEDD`, `condor:/ADVERTISE_MASTER` - HTCondor authorization scopes
+
+**HTCondor IDTOKEN Support:**
+
+When requesting one or more `condor:/*` scopes, the OAuth2 token endpoint returns an HTCondor IDTOKEN (JWT) as the access token. This IDTOKEN can be used directly with HTCondor daemons for authentication and authorization.
+
+The condor scopes map 1-to-1 to HTCondor authorization levels. Each `condor:/FOO` scope grants the `FOO` authorization level in the resulting IDTOKEN.
+
+Example workflow for obtaining an IDTOKEN:
+
+1. Initiate authorization code flow with condor scopes:
+```bash
+# Browser redirects to:
+http://localhost:8080/mcp/oauth2/authorize?response_type=code&client_id=CLIENT_ID&redirect_uri=REDIRECT_URI&scope=condor:/READ+condor:/WRITE&state=STATE
+```
+
+2. Exchange authorization code for IDTOKEN:
+```bash
+curl -X POST http://localhost:8080/mcp/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=authorization_code" \
+  -d "code=AUTHORIZATION_CODE" \
+  -d "redirect_uri=REDIRECT_URI" \
+  -d "client_id=CLIENT_ID" \
+  -d "client_secret=CLIENT_SECRET"
+```
 
 **Response:**
 ```json
 {
-  "access_token": "...",
+  "access_token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IlBPT0wiLCJ0eXAiOiJKV1QifQ...",
   "token_type": "Bearer",
-  "expires_in": 3600
+  "expires_in": 3600,
+  "scope": "condor:/READ condor:/WRITE",
+  "refresh_token": "..."
 }
 ```
+
+When `condor:/*` scopes are requested, the `access_token` is an HTCondor IDTOKEN (JWT) that can be used directly with HTCondor daemons. For other scopes, the `access_token` is a standard OAuth2 token.
 
 #### Token Introspection Endpoint
 

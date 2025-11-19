@@ -3,8 +3,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -492,25 +492,26 @@ func saveAccessToken(tokenInfo *TokenInfo) error {
 // checkExistingToken checks if there's a valid token in tokens.d that won't expire for at least 5 minutes
 func checkExistingToken(trustDomain string) (string, error) {
 	tokenPath := getAccessTokenPath(trustDomain)
-	
+
 	// Check if token file exists
+	//nolint:gosec // G304: Token path is derived from user-provided trust domain, controlled by application logic
 	tokenData, err := os.ReadFile(tokenPath)
 	if err != nil {
 		return "", err
 	}
-	
+
 	token := string(tokenData)
 	if token == "" {
 		return "", fmt.Errorf("empty token")
 	}
-	
+
 	// Parse JWT to check expiration
 	// JWT format: header.payload.signature
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return "", fmt.Errorf("invalid token format")
 	}
-	
+
 	// Decode payload (base64url)
 	payloadData, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -520,7 +521,7 @@ func checkExistingToken(trustDomain string) (string, error) {
 			return "", fmt.Errorf("failed to decode token payload: %w", err)
 		}
 	}
-	
+
 	// Parse JSON payload
 	var payload struct {
 		Exp int64 `json:"exp"`
@@ -528,14 +529,14 @@ func checkExistingToken(trustDomain string) (string, error) {
 	if err := json.Unmarshal(payloadData, &payload); err != nil {
 		return "", fmt.Errorf("failed to parse token payload: %w", err)
 	}
-	
+
 	// Check if token expires in more than 5 minutes
 	expiresAt := time.Unix(payload.Exp, 0)
 	fiveMinutesFromNow := time.Now().Add(5 * time.Minute)
-	
+
 	if expiresAt.After(fiveMinutesFromNow) {
 		return token, nil
 	}
-	
+
 	return "", fmt.Errorf("token expires within 5 minutes")
 }
