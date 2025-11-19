@@ -73,6 +73,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListJobs handles GET /api/v1/jobs
+//
+//nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, err := s.createAuthenticatedContext(r)
@@ -119,41 +121,132 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Get page token
 	pageToken := r.URL.Query().Get("page_token")
 
-	// Build query options
+	// Build query options with limit
 	opts := &htcondor.QueryOptions{
 		Limit:      limit,
 		Projection: projection,
 		PageToken:  pageToken,
 	}
 
-	// Query schedd with options
-	jobAds, pageInfo, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	// Start streaming query
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
+	}
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 	if err != nil {
-		// Check if it's a rate limit error
-		if ratelimit.IsRateLimitError(err) {
-			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
-			return
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
 		}
-		// Check if it's an authentication error
-		if isAuthenticationError(err) {
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
 
-	// Return ClassAds with pagination info
-	response := map[string]interface{}{
-		"jobs":           jobAds,
-		"total_returned": pageInfo.TotalReturned,
-		"has_more":       pageInfo.HasMoreResults,
-	}
-	if pageInfo.NextPageToken != "" {
-		response["next_page_token"] = pageInfo.NextPageToken
+	// Set up streaming JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	// Start JSON array
+	if _, err := w.Write([]byte(`{"jobs":[`)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response header", "error", err)
+		return
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
+	// Stream job ads as they arrive
+	jobCount := 0
+	var lastClusterID, lastProcID int64
+	var errorMsg string
+	for result := range resultCh {
+		if result.Err != nil {
+			// Check if it's a rate limit error
+			if ratelimit.IsRateLimitError(result.Err) {
+				s.logger.Error(logging.DestinationHTTP, "Rate limit exceeded", "error", result.Err)
+				errorMsg = "Rate limit exceeded"
+				break
+			}
+			// Check if it's an authentication error
+			if isAuthenticationError(result.Err) {
+				s.logger.Error(logging.DestinationHTTP, "Authentication failed", "error", result.Err)
+				errorMsg = "Authentication failed"
+				break
+			}
+			// Error occurred - log it and close the response
+			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
+			errorMsg = result.Err.Error()
+			break
+		}
+
+		// Check limit
+		if limit > 0 && jobCount >= limit {
+			// We've reached the limit, stop consuming but we need to track if there are more
+			break
+		}
+
+		// Marshal the ad
+		adJSON, err := json.Marshal(result.Ad)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to marshal job ad", "error", err)
+			continue
+		}
+
+		// Add comma if not first item
+		if jobCount > 0 {
+			if _, err := w.Write([]byte(",")); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to write comma", "error", err)
+				return
+			}
+		}
+
+		// Write the ad
+		if _, err := w.Write(adJSON); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to write job ad", "error", err)
+			return
+		}
+
+		// Track last job for pagination
+		if clusterID, ok := result.Ad.EvaluateAttrInt("ClusterId"); ok {
+			lastClusterID = clusterID
+		}
+		if procID, ok := result.Ad.EvaluateAttrInt("ProcId"); ok {
+			lastProcID = procID
+		}
+
+		jobCount++
+
+		// Flush after each ad for true streaming
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+
+	// Close JSON array and add metadata
+	metadata := fmt.Sprintf(`],"total_returned":%d`, jobCount)
+
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	// Add pagination info if we hit the limit and no error occurred
+	if errorMsg == "" && limit > 0 && jobCount >= limit {
+		// Generate next page token
+		nextPageToken := htcondor.EncodePageToken(lastClusterID, lastProcID)
+		metadata += fmt.Sprintf(`,"has_more":true,"next_page_token":%q`, nextPageToken)
+	} else {
+		metadata += `,"has_more":false`
+	}
+
+	metadata += "}"
+
+	if _, err := w.Write([]byte(metadata)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
+	}
 }
 
 // handleSubmitJob handles POST /api/v1/jobs
@@ -1117,41 +1210,110 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get page token
-	pageToken := r.URL.Query().Get("page_token")
-
-	// Build query options
-	opts := &htcondor.QueryOptions{
-		Limit:      limit,
-		Projection: projection,
-		PageToken:  pageToken,
+	// Get effective projection if none specified
+	if len(projection) == 0 {
+		projection = htcondor.DefaultCollectorProjection()
+	} else if len(projection) == 1 && projection[0] == "*" {
+		projection = nil // nil means all attributes
 	}
 
-	// Query collector for all ads (using "Machine" which queries STARTD ads)
-	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, "StartdAd", constraint, opts)
+	// Start streaming query
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
+	}
+	resultCh, err := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, limit, streamOpts)
 	if err != nil {
-		if ratelimit.IsRateLimitError(err) {
-			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
-			return
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
 
-	// Return ads with pagination info
-	response := map[string]interface{}{
-		"ads":            ads,
-		"total_returned": pageInfo.TotalReturned,
-		"has_more":       pageInfo.HasMoreResults,
-	}
-	if pageInfo.NextPageToken != "" {
-		response["next_page_token"] = pageInfo.NextPageToken
+	// Set up streaming JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	// Start JSON array
+	if _, err := w.Write([]byte(`{"ads":[`)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response header", "error", err)
+		return
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
+	// Stream ads as they arrive
+	adCount := 0
+	var errorMsg string
+	for result := range resultCh {
+		if result.Err != nil {
+			// Error occurred - log it and close the response
+			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
+			errorMsg = result.Err.Error()
+			break
+		}
+
+		// Check limit
+		if limit > 0 && adCount >= limit {
+			break
+		}
+
+		// Marshal the ad
+		adJSON, err := json.Marshal(result.Ad)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to marshal ad", "error", err)
+			continue
+		}
+
+		// Add comma if not first item
+		if adCount > 0 {
+			if _, err := w.Write([]byte(",")); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to write comma", "error", err)
+				return
+			}
+		}
+
+		// Write the ad
+		if _, err := w.Write(adJSON); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to write ad", "error", err)
+			return
+		}
+
+		adCount++
+
+		// Flush after each ad for true streaming
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+
+	// Close JSON array and add metadata
+	metadata := fmt.Sprintf(`],"total_returned":%d`, adCount)
+
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	// Collector doesn't support pagination yet - hardcode has_more as false
+	// TODO: When collector supports pagination, implement proper page token handling
+	metadata += `,"has_more":false,"next_page_token":""`
+
+	metadata += "}"
+
+	if _, err := w.Write([]byte(metadata)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
+	}
 }
 
 // handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
+//
+//nolint:gocyclo // Complex function for handling collector ad streaming with multiple ad types and error cases
 func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request, adType string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1200,8 +1362,12 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Get page token
-	pageToken := r.URL.Query().Get("page_token")
+	// Get effective projection if none specified
+	if len(projection) == 0 {
+		projection = htcondor.DefaultCollectorProjection()
+	} else if len(projection) == 1 && projection[0] == "*" {
+		projection = nil // nil means all attributes
+	}
 
 	// Map common ad type names
 	var queryAdType string
@@ -1227,35 +1393,98 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		queryAdType = adType
 	}
 
-	// Build query options
-	opts := &htcondor.QueryOptions{
-		Limit:      limit,
-		Projection: projection,
-		PageToken:  pageToken,
+	// Start streaming query
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
 	}
-
-	// Query collector
-	ads, pageInfo, err := s.collector.QueryAdsWithOptions(ctx, queryAdType, constraint, opts)
+	resultCh, err := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, limit, streamOpts)
 	if err != nil {
-		if ratelimit.IsRateLimitError(err) {
-			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
-			return
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
 
-	// Return ads with pagination info
-	response := map[string]interface{}{
-		"ads":            ads,
-		"total_returned": pageInfo.TotalReturned,
-		"has_more":       pageInfo.HasMoreResults,
-	}
-	if pageInfo.NextPageToken != "" {
-		response["next_page_token"] = pageInfo.NextPageToken
+	// Set up streaming JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	// Start JSON array
+	if _, err := w.Write([]byte(`{"ads":[`)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response header", "error", err)
+		return
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
+	// Stream ads as they arrive
+	adCount := 0
+	var errorMsg string
+	for result := range resultCh {
+		if result.Err != nil {
+			// Error occurred - log it and close the response
+			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err, "adType", adType)
+			errorMsg = result.Err.Error()
+			break
+		}
+
+		// Check limit
+		if limit > 0 && adCount >= limit {
+			break
+		}
+
+		// Marshal the ad
+		adJSON, err := json.Marshal(result.Ad)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to marshal ad", "error", err)
+			continue
+		}
+
+		// Add comma if not first item
+		if adCount > 0 {
+			if _, err := w.Write([]byte(",")); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to write comma", "error", err)
+				return
+			}
+		}
+
+		// Write the ad
+		if _, err := w.Write(adJSON); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to write ad", "error", err)
+			return
+		}
+
+		adCount++
+
+		// Flush after each ad for true streaming
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+
+	// Close JSON array and add metadata
+	metadata := fmt.Sprintf(`],"total_returned":%d`, adCount)
+
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	// Collector doesn't support pagination yet - hardcode has_more as false
+	// TODO: When collector supports pagination, implement proper page token handling
+	metadata += `,"has_more":false,"next_page_token":""`
+
+	metadata += "}"
+
+	if _, err := w.Write([]byte(metadata)); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
+	}
 }
 
 // handleCollectorAdByName handles /api/v1/collector/ads/{adType}/{name} endpoint

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/golang-jwt/jwt/v5"
@@ -398,9 +399,24 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		PageToken:  pageToken,
 	}
 
-	jobAds, pageInfo, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	// Use streaming query
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   100,
+		WriteTimeout: 5 * time.Second,
+	}
+	resultCh, err := s.schedd.QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		// Pre-request error
+		return nil, fmt.Errorf("failed to start query: %w", err)
+	}
+
+	// Collect results from stream
+	var jobAds []*classad.ClassAd
+	for result := range resultCh {
+		if result.Err != nil {
+			return nil, fmt.Errorf("query failed: %w", result.Err)
+		}
+		jobAds = append(jobAds, result.Ad)
 	}
 
 	// Convert ClassAds to JSON
@@ -412,9 +428,26 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
 		len(jobAds), constraint, string(jobsJSON))
 
-	// Add pagination info if available
-	if pageInfo.HasMoreResults {
-		resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", pageInfo.NextPageToken)
+	// Build metadata
+	metadata := map[string]interface{}{
+		"count":      len(jobAds),
+		"constraint": constraint,
+		"has_more":   false,
+	}
+
+	// Check if we might have more results (got exactly the limit)
+	if limit > 0 && len(jobAds) >= limit {
+		// Generate page token from last job
+		if len(jobAds) > 0 {
+			lastJob := jobAds[len(jobAds)-1]
+			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
+				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
+					metadata["has_more"] = true
+					metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
+					resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
+				}
+			}
+		}
 	}
 
 	return map[string]interface{}{
@@ -424,12 +457,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 				"text": resultText,
 			},
 		},
-		"metadata": map[string]interface{}{
-			"count":           pageInfo.TotalReturned,
-			"constraint":      constraint,
-			"has_more":        pageInfo.HasMoreResults,
-			"next_page_token": pageInfo.NextPageToken,
-		},
+		"metadata": metadata,
 	}, nil
 }
 
