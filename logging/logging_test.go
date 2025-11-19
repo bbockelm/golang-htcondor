@@ -78,10 +78,10 @@ func TestParseDestination(t *testing.T) {
 
 func TestFromConfigWithDaemon(t *testing.T) {
 	tests := []struct {
-		name              string
-		daemonName        string
-		configText        string
-		expectedLevels    map[Destination]Verbosity
+		name               string
+		daemonName         string
+		configText         string
+		expectedLevels     map[Destination]Verbosity
 		expectedOutputPath string
 	}{
 		{

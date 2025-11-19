@@ -207,19 +207,19 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 		// Split by comma or whitespace
 		debugConfig = strings.ReplaceAll(debugConfig, ",", " ")
 		pairs := strings.Fields(debugConfig)
-		
+
 		for _, pair := range pairs {
 			// Split by colon
 			parts := strings.SplitN(pair, ":", 2)
 			if len(parts) != 2 {
 				continue // Skip malformed pairs
 			}
-			
+
 			dest, ok := parseDestination(parts[0])
 			if !ok {
 				continue // Skip unknown destinations
 			}
-			
+
 			level := parseLevel(parts[1])
 			destinationLevels[dest] = level
 		}
@@ -260,7 +260,7 @@ func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
 			configuredLevel = level
 		}
 	}
-	
+
 	// Only log if message level is at or below configured level
 	return msgLevel <= configuredLevel
 }

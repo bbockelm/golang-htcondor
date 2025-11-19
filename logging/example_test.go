@@ -61,7 +61,7 @@ func ExampleLogger_withFiltering() {
 
 	// This will be logged (Security is at Debug level)
 	logger.Debug(logging.DestinationSecurity, "Authentication successful", "user", "alice")
-	
+
 	// This will be logged (Warn is allowed for all destinations by default)
 	logger.Warn(logging.DestinationSchedd, "Connection slow", "latency_ms", 500)
 }
