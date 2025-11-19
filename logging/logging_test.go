@@ -7,146 +7,154 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 )
 
-func TestParseVerbosity(t *testing.T) {
+func TestParseLevel(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected Verbosity
 	}{
-		// Simple verbosity levels
+		// String levels (case insensitive)
 		{"error lowercase", "error", VerbosityError},
 		{"ERROR uppercase", "ERROR", VerbosityError},
 		{"warn lowercase", "warn", VerbosityWarn},
 		{"WARN uppercase", "WARN", VerbosityWarn},
-		{"WARNING", "WARNING", VerbosityWarn},
+		{"WARNING", "warning", VerbosityWarn},
 		{"info lowercase", "info", VerbosityInfo},
 		{"INFO uppercase", "INFO", VerbosityInfo},
 		{"debug lowercase", "debug", VerbosityDebug},
 		{"DEBUG uppercase", "DEBUG", VerbosityDebug},
-		{"whitespace", "  INFO  ", VerbosityInfo},
+		{"whitespace", "  info  ", VerbosityInfo},
 
-		// HTCondor debug levels - single flags
-		{"D_ALWAYS", "D_ALWAYS", VerbosityError},
-		{"D_ERROR", "D_ERROR", VerbosityError},
-		{"D_STATUS", "D_STATUS", VerbosityInfo},
-		{"D_GENERAL", "D_GENERAL", VerbosityInfo},
-		{"D_FULLDEBUG", "D_FULLDEBUG", VerbosityDebug},
-		{"D_SECURITY", "D_SECURITY", VerbosityDebug},
-		{"D_COMMAND", "D_COMMAND", VerbosityDebug},
-		{"D_PROTOCOL", "D_PROTOCOL", VerbosityDebug},
-		{"D_NETWORK", "D_NETWORK", VerbosityDebug},
-
-		// HTCondor debug levels - multiple flags (should use most verbose)
-		{"D_FULLDEBUG D_SECURITY", "D_FULLDEBUG D_SECURITY", VerbosityDebug},
-		{"D_STATUS D_FULLDEBUG", "D_STATUS D_FULLDEBUG", VerbosityDebug},
-		{"D_ALWAYS D_STATUS", "D_ALWAYS D_STATUS", VerbosityInfo},
-		{"D_ERROR D_ALWAYS", "D_ERROR D_ALWAYS", VerbosityError},
+		// Integer levels
+		{"0 (off/error)", "0", VerbosityError},
+		{"1 (info)", "1", VerbosityInfo},
+		{"2 (debug)", "2", VerbosityDebug},
 
 		// Unknown/default
-		{"unknown", "UNKNOWN_LEVEL", VerbosityInfo},
-		{"empty", "", VerbosityInfo},
+		{"unknown", "unknown_level", VerbosityWarn},
+		{"empty", "", VerbosityWarn},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseVerbosity(tt.input)
+			result := parseLevel(tt.input)
 			if result != tt.expected {
-				t.Errorf("parseVerbosity(%q) = %v, expected %v", tt.input, result, tt.expected)
+				t.Errorf("parseLevel(%q) = %v, expected %v", tt.input, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestFromConfig_Verbosity(t *testing.T) {
+func TestParseDestination(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expectedDst Destination
+		expectedOk  bool
+	}{
+		{"general", "general", DestinationGeneral, true},
+		{"http", "http", DestinationHTTP, true},
+		{"HTTP uppercase", "HTTP", DestinationHTTP, true},
+		{"schedd", "schedd", DestinationSchedd, true},
+		{"collector", "collector", DestinationCollector, true},
+		{"metrics", "metrics", DestinationMetrics, true},
+		{"security", "security", DestinationSecurity, true},
+		{"cedar", "cedar", DestinationCedar, true},
+		{"CEDAR uppercase", "CEDAR", DestinationCedar, true},
+		{"unknown", "unknown", DestinationGeneral, false},
+		{"empty", "", DestinationGeneral, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dst, ok := parseDestination(tt.input)
+			if dst != tt.expectedDst || ok != tt.expectedOk {
+				t.Errorf("parseDestination(%q) = (%v, %v), expected (%v, %v)",
+					tt.input, dst, ok, tt.expectedDst, tt.expectedOk)
+			}
+		})
+	}
+}
+
+func TestFromConfigWithDaemon(t *testing.T) {
 	tests := []struct {
 		name              string
+		daemonName        string
 		configText        string
-		expectedVerbosity Verbosity
+		expectedLevels    map[Destination]Verbosity
+		expectedOutputPath string
 	}{
 		{
-			name:              "default verbosity",
-			configText:        "LOG = stdout\n",
-			expectedVerbosity: VerbosityInfo,
-		},
-		{
-			name: "ERROR level",
+			name:       "HTTP_API_DEBUG with cedar:debug",
+			daemonName: "HTTP_API",
 			configText: `
 LOG = stdout
-LOG_VERBOSITY = ERROR
+HTTP_API_DEBUG = cedar:debug
 `,
-			expectedVerbosity: VerbosityError,
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityDebug,
+			},
+			expectedOutputPath: "stdout",
 		},
 		{
-			name: "WARN level",
+			name:       "HTTP_API_DEBUG with multiple destinations",
+			daemonName: "HTTP_API",
 			configText: `
-LOG = stdout
-LOG_VERBOSITY = WARN
+LOG = stderr
+HTTP_API_DEBUG = cedar:debug, http:info, schedd:warn
 `,
-			expectedVerbosity: VerbosityWarn,
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar:  VerbosityDebug,
+				DestinationHTTP:   VerbosityInfo,
+				DestinationSchedd: VerbosityWarn,
+			},
+			expectedOutputPath: "stderr",
 		},
 		{
-			name: "INFO level",
+			name:       "SCHEDD_DEBUG with numeric levels",
+			daemonName: "SCHEDD",
 			configText: `
 LOG = stdout
-LOG_VERBOSITY = INFO
+SCHEDD_DEBUG = cedar:2 schedd:1
 `,
-			expectedVerbosity: VerbosityInfo,
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar:  VerbosityDebug,
+				DestinationSchedd: VerbosityInfo,
+			},
+			expectedOutputPath: "stdout",
 		},
 		{
-			name: "DEBUG level",
+			name:       "Mixed case destinations and levels",
+			daemonName: "HTTP_API",
 			configText: `
 LOG = stdout
-LOG_VERBOSITY = DEBUG
+HTTP_API_DEBUG = CEDAR:DEBUG HTTP:INFO
 `,
-			expectedVerbosity: VerbosityDebug,
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityDebug,
+				DestinationHTTP:  VerbosityInfo,
+			},
+			expectedOutputPath: "stdout",
 		},
 		{
-			name: "D_ALWAYS",
-			configText: `
-LOG = stdout
-LOG_VERBOSITY = D_ALWAYS
-`,
-			expectedVerbosity: VerbosityError,
+			name:               "No debug config (defaults to warn)",
+			daemonName:         "HTTP_API",
+			configText:         "LOG = stdout\n",
+			expectedLevels:     map[Destination]Verbosity{},
+			expectedOutputPath: "stdout",
 		},
 		{
-			name: "D_ERROR",
+			name:       "Malformed pairs are skipped",
+			daemonName: "HTTP_API",
 			configText: `
 LOG = stdout
-LOG_VERBOSITY = D_ERROR
+HTTP_API_DEBUG = cedar:debug, invalid, http:info
 `,
-			expectedVerbosity: VerbosityError,
-		},
-		{
-			name: "D_STATUS",
-			configText: `
-LOG = stdout
-LOG_VERBOSITY = D_STATUS
-`,
-			expectedVerbosity: VerbosityInfo,
-		},
-		{
-			name: "D_FULLDEBUG",
-			configText: `
-LOG = stdout
-LOG_VERBOSITY = D_FULLDEBUG
-`,
-			expectedVerbosity: VerbosityDebug,
-		},
-		{
-			name: "D_FULLDEBUG D_SECURITY (multiple flags)",
-			configText: `
-LOG = stdout
-LOG_VERBOSITY = D_FULLDEBUG D_SECURITY
-`,
-			expectedVerbosity: VerbosityDebug,
-		},
-		{
-			name: "D_STATUS D_SECURITY (mixed levels)",
-			configText: `
-LOG = stdout
-LOG_VERBOSITY = D_STATUS D_SECURITY
-`,
-			expectedVerbosity: VerbosityDebug,
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityDebug,
+				DestinationHTTP:  VerbosityInfo,
+			},
+			expectedOutputPath: "stdout",
 		},
 	}
 
@@ -157,13 +165,26 @@ LOG_VERBOSITY = D_STATUS D_SECURITY
 				t.Fatalf("Failed to create config: %v", err)
 			}
 
-			logger, err := FromConfig(cfg)
+			logger, err := FromConfigWithDaemon(tt.daemonName, cfg)
 			if err != nil {
-				t.Fatalf("FromConfig() error = %v", err)
+				t.Fatalf("FromConfigWithDaemon() error = %v", err)
 			}
 
-			if logger.config.MinVerbosity != tt.expectedVerbosity {
-				t.Errorf("FromConfig() verbosity = %v, expected %v", logger.config.MinVerbosity, tt.expectedVerbosity)
+			// Check output path
+			if logger.config.OutputPath != tt.expectedOutputPath {
+				t.Errorf("OutputPath = %v, expected %v", logger.config.OutputPath, tt.expectedOutputPath)
+			}
+
+			// Check destination levels
+			if len(logger.config.DestinationLevels) != len(tt.expectedLevels) {
+				t.Errorf("DestinationLevels count = %d, expected %d",
+					len(logger.config.DestinationLevels), len(tt.expectedLevels))
+			}
+			for dest, expectedLevel := range tt.expectedLevels {
+				if logger.config.DestinationLevels[dest] != expectedLevel {
+					t.Errorf("DestinationLevels[%v] = %v, expected %v",
+						dest, logger.config.DestinationLevels[dest], expectedLevel)
+				}
 			}
 		})
 	}
@@ -206,69 +227,94 @@ func TestFromConfig_OutputPath(t *testing.T) {
 	}
 }
 
-func TestFromConfig_Destinations(t *testing.T) {
+func TestShouldLog(t *testing.T) {
 	tests := []struct {
-		name                 string
-		configText           string
-		expectedDestinations map[Destination]bool
+		name           string
+		destLevels     map[Destination]Verbosity
+		dest           Destination
+		msgLevel       Verbosity
+		expectedResult bool
 	}{
 		{
-			name:                 "default (all enabled)",
-			configText:           "LOG = stdout\n",
-			expectedDestinations: nil, // nil means all enabled
+			name: "debug message allowed when dest is debug",
+			destLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityDebug,
+			},
+			dest:           DestinationCedar,
+			msgLevel:       VerbosityDebug,
+			expectedResult: true,
 		},
 		{
-			name: "specific destinations",
-			configText: `
-LOG = stdout
-LOG_DESTINATIONS = HTTP, SCHEDD, SECURITY
-`,
-			expectedDestinations: map[Destination]bool{
-				DestinationHTTP:     true,
-				DestinationSchedd:   true,
-				DestinationSecurity: true,
+			name: "debug message blocked when dest is info",
+			destLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityInfo,
 			},
+			dest:           DestinationCedar,
+			msgLevel:       VerbosityDebug,
+			expectedResult: false,
 		},
 		{
-			name: "single destination",
-			configText: `
-LOG = stdout
-LOG_DESTINATIONS = HTTP
-`,
-			expectedDestinations: map[Destination]bool{
-				DestinationHTTP: true,
+			name: "info message allowed when dest is info",
+			destLevels: map[Destination]Verbosity{
+				DestinationHTTP: VerbosityInfo,
 			},
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityInfo,
+			expectedResult: true,
+		},
+		{
+			name: "warn message allowed when dest is info",
+			destLevels: map[Destination]Verbosity{
+				DestinationHTTP: VerbosityInfo,
+			},
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityWarn,
+			expectedResult: true,
+		},
+		{
+			name: "error message always allowed",
+			destLevels: map[Destination]Verbosity{
+				DestinationHTTP: VerbosityError,
+			},
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityError,
+			expectedResult: true,
+		},
+		{
+			name:           "default to warn when dest not configured",
+			destLevels:     map[Destination]Verbosity{},
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityWarn,
+			expectedResult: true,
+		},
+		{
+			name:           "default blocks debug when dest not configured",
+			destLevels:     map[Destination]Verbosity{},
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityDebug,
+			expectedResult: false,
+		},
+		{
+			name:           "nil destLevels defaults to warn",
+			destLevels:     nil,
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityWarn,
+			expectedResult: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := config.NewFromReader(strings.NewReader(tt.configText))
-			if err != nil {
-				t.Fatalf("Failed to create config: %v", err)
+			logger := &Logger{
+				config: &Config{
+					DestinationLevels: tt.destLevels,
+				},
 			}
 
-			logger, err := FromConfig(cfg)
-			if err != nil {
-				t.Fatalf("FromConfig() error = %v", err)
-			}
-
-			// Check if the maps match
-			if tt.expectedDestinations == nil {
-				if len(logger.config.EnabledDestinations) != 0 {
-					t.Errorf("FromConfig() destinations = %v, expected nil/empty", logger.config.EnabledDestinations)
-				}
-			} else {
-				if len(logger.config.EnabledDestinations) != len(tt.expectedDestinations) {
-					t.Errorf("FromConfig() destinations count = %d, expected %d",
-						len(logger.config.EnabledDestinations), len(tt.expectedDestinations))
-				}
-				for dest, expected := range tt.expectedDestinations {
-					if logger.config.EnabledDestinations[dest] != expected {
-						t.Errorf("FromConfig() destination %v = %v, expected %v",
-							dest, logger.config.EnabledDestinations[dest], expected)
-					}
-				}
+			result := logger.shouldLog(tt.dest, tt.msgLevel)
+			if result != tt.expectedResult {
+				t.Errorf("shouldLog(%v, %v) = %v, expected %v",
+					tt.dest, tt.msgLevel, result, tt.expectedResult)
 			}
 		})
 	}
@@ -282,7 +328,14 @@ func TestFromConfig_Nil(t *testing.T) {
 	if logger == nil {
 		t.Fatal("FromConfig(nil) returned nil logger")
 	}
-	if logger.config.MinVerbosity != VerbosityInfo {
-		t.Errorf("FromConfig(nil) verbosity = %v, expected VerbosityInfo", logger.config.MinVerbosity)
+}
+
+func TestFromConfigWithDaemon_Nil(t *testing.T) {
+	logger, err := FromConfigWithDaemon("HTTP_API", nil)
+	if err != nil {
+		t.Fatalf("FromConfigWithDaemon(nil) error = %v", err)
+	}
+	if logger == nil {
+		t.Fatal("FromConfigWithDaemon(nil) returned nil logger")
 	}
 }

@@ -17,8 +17,8 @@ import (
 func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 	// Create a logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError, // Keep it quiet during tests
+		OutputPath: "stderr",
+		// Keep it quiet during tests - no debug levels configured means default warn
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -250,8 +250,7 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 func TestCollectorRoutesNoAuth(t *testing.T) {
 	// Create a logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError,
+		OutputPath: "stderr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
