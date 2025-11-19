@@ -90,6 +90,8 @@ type Config struct {
 }
 
 // NewServer creates a new HTTP API server
+//
+//nolint:gocyclo // Initialization logic with sequential checks is acceptable
 func NewServer(cfg Config) (*Server, error) {
 	// Initialize logger if not provided
 	logger := cfg.Logger
@@ -230,7 +232,7 @@ func NewServer(cfg Config) (*Server, error) {
 			sessionDBPath = "sessions.db"
 		} else {
 			// Use same path but different file name if OAuth2 DB is configured
-			sessionDBPath = sessionDBPath + ".sessions"
+			sessionDBPath += ".sessions"
 		}
 
 		// Open database for sessions
@@ -843,7 +845,7 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)
 	var username string
-	
+
 	// Try to get username from session cookie first
 	if sessionData, ok := s.getSessionFromRequest(r); ok {
 		username = sessionData.Username

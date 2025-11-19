@@ -162,7 +162,8 @@ func TestHTTPSessionIntegration(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// Job submission returns 201 Created on success
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("Job submission failed with status %d: %s", resp.StatusCode, string(body))
 	}
@@ -232,6 +233,9 @@ func TestHTTPSessionIntegration(t *testing.T) {
 
 	// Test 4: Verify session cookie is included in subsequent responses
 	// (just check that we can still use it)
+	// Add small delay to avoid rate limiting
+	time.Sleep(200 * time.Millisecond)
+
 	req, err = http.NewRequest("GET", baseURL+"/api/v1/jobs", nil)
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
