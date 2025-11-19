@@ -43,17 +43,16 @@ const (
 	DestinationCollector                    // Collector interaction logs
 	DestinationMetrics                      // Metrics collection logs
 	DestinationSecurity                     // Security/auth logs
+	DestinationCedar                        // Cedar protocol logs
 )
 
 // Config holds logging configuration
 type Config struct {
 	// OutputPath is where logs are written ("stdout", "stderr", or file path)
 	OutputPath string
-	// MinVerbosity is the minimum verbosity level to log
-	MinVerbosity Verbosity
-	// EnabledDestinations specifies which destinations are enabled
-	// If nil or empty, all destinations are enabled
-	EnabledDestinations map[Destination]bool
+	// DestinationLevels specifies verbosity level for each destination
+	// If a destination is not in the map, it defaults to VerbosityWarn
+	DestinationLevels map[Destination]Verbosity
 }
 
 // Logger wraps slog.Logger with destination and verbosity filtering
@@ -66,8 +65,8 @@ type Logger struct {
 func New(config *Config) (*Logger, error) {
 	if config == nil {
 		config = &Config{
-			OutputPath:   "stderr",
-			MinVerbosity: VerbosityInfo,
+			OutputPath:        "stderr",
+			DestinationLevels: nil, // Will default to VerbosityWarn for all
 		}
 	}
 
@@ -87,9 +86,18 @@ func New(config *Config) (*Logger, error) {
 		writer = f
 	}
 
+	// Find the most verbose level across all destinations to set slog level
+	// This ensures slog doesn't filter out messages we might want for specific destinations
+	minVerbosity := VerbosityWarn // Default
+	for _, level := range config.DestinationLevels {
+		if level > minVerbosity {
+			minVerbosity = level
+		}
+	}
+
 	// Convert our verbosity to slog level
 	var slogLevel slog.Level
-	switch config.MinVerbosity {
+	switch minVerbosity {
 	case VerbosityError:
 		slogLevel = slog.LevelError
 	case VerbosityWarn:
@@ -99,7 +107,7 @@ func New(config *Config) (*Logger, error) {
 	case VerbosityDebug:
 		slogLevel = slog.LevelDebug
 	default:
-		slogLevel = slog.LevelInfo
+		slogLevel = slog.LevelWarn
 	}
 
 	// Create slog handler with options
@@ -116,18 +124,72 @@ func New(config *Config) (*Logger, error) {
 	}, nil
 }
 
-// FromConfig creates a new Logger from HTCondor configuration.
+// parseLevel converts a level string to a Verbosity level.
+// Supports: "error", "warn", "info", "debug" (case insensitive)
+// Also supports integers: 0=off (error), 1=info, 2=debug
+func parseLevel(level string) Verbosity {
+	level = strings.ToLower(strings.TrimSpace(level))
+
+	// Handle string levels
+	switch level {
+	case "error":
+		return VerbosityError
+	case "warn", "warning":
+		return VerbosityWarn
+	case "info":
+		return VerbosityInfo
+	case "debug":
+		return VerbosityDebug
+	case "0": // off
+		return VerbosityError
+	case "1": // info
+		return VerbosityInfo
+	case "2": // debug
+		return VerbosityDebug
+	}
+
+	// Default to warn
+	return VerbosityWarn
+}
+
+// parseDestination converts a destination string to a Destination constant.
+func parseDestination(dest string) (Destination, bool) {
+	dest = strings.ToLower(strings.TrimSpace(dest))
+	switch dest {
+	case "general":
+		return DestinationGeneral, true
+	case "http":
+		return DestinationHTTP, true
+	case "schedd":
+		return DestinationSchedd, true
+	case "collector":
+		return DestinationCollector, true
+	case "metrics":
+		return DestinationMetrics, true
+	case "security":
+		return DestinationSecurity, true
+	case "cedar":
+		return DestinationCedar, true
+	default:
+		return DestinationGeneral, false
+	}
+}
+
+// FromConfigWithDaemon creates a new Logger from HTCondor configuration for a specific daemon.
 // It reads the following configuration parameters:
 //   - LOG: Output path (stdout, stderr, or file path). Defaults to stderr.
-//   - LOG_VERBOSITY: Minimum verbosity level (ERROR, WARN, INFO, DEBUG). Defaults to INFO.
-//   - LOG_DESTINATIONS: Comma-separated list of enabled destinations (GENERAL, HTTP, SCHEDD, COLLECTOR, METRICS, SECURITY). Defaults to all enabled.
+//   - <DAEMON>_DEBUG: Space or comma-separated list of destination:level pairs.
+//     Example: "cedar:debug, http:info" or "cedar:2 http:1"
+//     Levels: error, warn, info, debug (or integers: 0=off, 1=info, 2=debug)
+//     Default level for all destinations is warn if not specified.
 //
 // Example configuration:
 //
 //	LOG = /var/log/htcondor/api.log
-//	LOG_VERBOSITY = DEBUG
-//	LOG_DESTINATIONS = HTTP, SCHEDD, SECURITY
-func FromConfig(cfg *config.Config) (*Logger, error) {
+//	HTTP_API_DEBUG = cedar:debug, http:info, schedd:warn
+//	# or using integers:
+//	HTTP_API_DEBUG = cedar:2 http:1
+func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error) {
 	if cfg == nil {
 		return New(nil)
 	}
@@ -138,59 +200,69 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 		outputPath = logPath
 	}
 
-	// Parse verbosity
-	verbosity := VerbosityInfo
-	if logVerbosity, ok := cfg.Get("LOG_VERBOSITY"); ok {
-		switch strings.ToUpper(strings.TrimSpace(logVerbosity)) {
-		case "ERROR":
-			verbosity = VerbosityError
-		case "WARN", "WARNING":
-			verbosity = VerbosityWarn
-		case "INFO":
-			verbosity = VerbosityInfo
-		case "DEBUG":
-			verbosity = VerbosityDebug
-		}
-	}
+	// Parse destination levels from <DAEMON>_DEBUG
+	destinationLevels := make(map[Destination]Verbosity)
+	debugParam := strings.ToUpper(daemonName) + "_DEBUG"
+	if debugConfig, ok := cfg.Get(debugParam); ok && debugConfig != "" {
+		// Split by comma or whitespace
+		debugConfig = strings.ReplaceAll(debugConfig, ",", " ")
+		pairs := strings.Fields(debugConfig)
 
-	// Parse enabled destinations
-	var enabledDestinations map[Destination]bool
-	if logDestinations, ok := cfg.Get("LOG_DESTINATIONS"); ok && logDestinations != "" {
-		enabledDestinations = make(map[Destination]bool)
-		parts := strings.Split(logDestinations, ",")
-		for _, part := range parts {
-			part = strings.ToUpper(strings.TrimSpace(part))
-			switch part {
-			case "GENERAL":
-				enabledDestinations[DestinationGeneral] = true
-			case "HTTP":
-				enabledDestinations[DestinationHTTP] = true
-			case "SCHEDD":
-				enabledDestinations[DestinationSchedd] = true
-			case "COLLECTOR":
-				enabledDestinations[DestinationCollector] = true
-			case "METRICS":
-				enabledDestinations[DestinationMetrics] = true
-			case "SECURITY":
-				enabledDestinations[DestinationSecurity] = true
+		for _, pair := range pairs {
+			// Split by colon
+			parts := strings.SplitN(pair, ":", 2)
+			if len(parts) != 2 {
+				continue // Skip malformed pairs
 			}
+
+			dest, ok := parseDestination(parts[0])
+			if !ok {
+				continue // Skip unknown destinations
+			}
+
+			level := parseLevel(parts[1])
+			destinationLevels[dest] = level
 		}
 	}
 
 	return New(&Config{
-		OutputPath:          outputPath,
-		MinVerbosity:        verbosity,
-		EnabledDestinations: enabledDestinations,
+		OutputPath:        outputPath,
+		DestinationLevels: destinationLevels,
 	})
 }
 
-// shouldLog checks if a log should be written based on destination filtering
-func (l *Logger) shouldLog(dest Destination) bool {
-	// If no destinations are configured, allow all
-	if len(l.config.EnabledDestinations) == 0 {
-		return true
+// FromConfig creates a new Logger from HTCondor configuration with default settings.
+// For daemon-specific logging, use FromConfigWithDaemon instead.
+// It only reads the LOG parameter for output path.
+func FromConfig(cfg *config.Config) (*Logger, error) {
+	if cfg == nil {
+		return New(nil)
 	}
-	return l.config.EnabledDestinations[dest]
+
+	// Parse output path only
+	outputPath := "stderr"
+	if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
+		outputPath = logPath
+	}
+
+	return New(&Config{
+		OutputPath:        outputPath,
+		DestinationLevels: nil, // All destinations default to warn
+	})
+}
+
+// shouldLog checks if a log should be written based on destination-specific verbosity level
+func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
+	// Get the configured level for this destination (default to warn)
+	configuredLevel := VerbosityWarn
+	if l.config.DestinationLevels != nil {
+		if level, ok := l.config.DestinationLevels[dest]; ok {
+			configuredLevel = level
+		}
+	}
+
+	// Only log if message level is at or below configured level
+	return msgLevel <= configuredLevel
 }
 
 // destinationString returns a string representation of the destination
@@ -208,6 +280,8 @@ func destinationString(dest Destination) string {
 		return "metrics"
 	case DestinationSecurity:
 		return "security"
+	case DestinationCedar:
+		return "cedar"
 	default:
 		return "unknown"
 	}
@@ -215,7 +289,7 @@ func destinationString(dest Destination) string {
 
 // Error logs an error message
 func (l *Logger) Error(dest Destination, msg string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
 	l.logger.Error(msg, append([]any{"destination", destinationString(dest)}, args...)...)
@@ -223,7 +297,7 @@ func (l *Logger) Error(dest Destination, msg string, args ...any) {
 
 // Warn logs a warning message
 func (l *Logger) Warn(dest Destination, msg string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
 	l.logger.Warn(msg, append([]any{"destination", destinationString(dest)}, args...)...)
@@ -231,7 +305,7 @@ func (l *Logger) Warn(dest Destination, msg string, args ...any) {
 
 // Info logs an info message
 func (l *Logger) Info(dest Destination, msg string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
 	l.logger.Info(msg, append([]any{"destination", destinationString(dest)}, args...)...)
@@ -239,7 +313,7 @@ func (l *Logger) Info(dest Destination, msg string, args ...any) {
 
 // Debug logs a debug message
 func (l *Logger) Debug(dest Destination, msg string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
 	l.logger.Debug(msg, append([]any{"destination", destinationString(dest)}, args...)...)
@@ -247,7 +321,7 @@ func (l *Logger) Debug(dest Destination, msg string, args ...any) {
 
 // Errorf logs an error message with Printf-style formatting
 func (l *Logger) Errorf(dest Destination, format string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
 	l.logger.Error(formatMessage(format, args...), "destination", destinationString(dest))
@@ -255,7 +329,7 @@ func (l *Logger) Errorf(dest Destination, format string, args ...any) {
 
 // Warnf logs a warning message with Printf-style formatting
 func (l *Logger) Warnf(dest Destination, format string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
 	l.logger.Warn(formatMessage(format, args...), "destination", destinationString(dest))
@@ -263,7 +337,7 @@ func (l *Logger) Warnf(dest Destination, format string, args ...any) {
 
 // Infof logs an info message with Printf-style formatting
 func (l *Logger) Infof(dest Destination, format string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
 	l.logger.Info(formatMessage(format, args...), "destination", destinationString(dest))
@@ -271,7 +345,7 @@ func (l *Logger) Infof(dest Destination, format string, args ...any) {
 
 // Debugf logs a debug message with Printf-style formatting
 func (l *Logger) Debugf(dest Destination, format string, args ...any) {
-	if !l.shouldLog(dest) {
+	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
 	l.logger.Debug(formatMessage(format, args...), "destination", destinationString(dest))

@@ -21,8 +21,7 @@ func TestMCPServerInitialize(t *testing.T) {
 
 	// Create logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError,
+		OutputPath: "stderr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -73,8 +72,7 @@ func TestMCPServerListTools(t *testing.T) {
 
 	// Create logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError,
+		OutputPath: "stderr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)

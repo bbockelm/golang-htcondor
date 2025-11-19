@@ -14,8 +14,7 @@ import (
 func TestScheddAddressUpdate(t *testing.T) {
 	// Create a logger for the test
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError, // Use Error level to reduce test output
+		OutputPath: "stderr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -60,8 +59,7 @@ func TestScheddAddressUpdate(t *testing.T) {
 func TestScheddThreadSafety(t *testing.T) {
 	// Create a logger for the test
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError,
+		OutputPath: "stderr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)

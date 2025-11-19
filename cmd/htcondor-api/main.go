@@ -127,8 +127,7 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 	if !hasLogPath || logPath == "" {
 		log.Println("Using stdout logging")
 		return logging.New(&logging.Config{
-			OutputPath:   "stdout",
-			MinVerbosity: logging.VerbosityInfo,
+			OutputPath: "stdout",
 		})
 	}
 
@@ -137,8 +136,7 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 		log.Printf("LOG directory '%s' is not writable: %v", logPath, err)
 		log.Println("Using stdout logging")
 		return logging.New(&logging.Config{
-			OutputPath:   "stdout",
-			MinVerbosity: logging.VerbosityInfo,
+			OutputPath: "stdout",
 		})
 	}
 
@@ -149,8 +147,7 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 		log.Printf("Failed to create logger with configured path '%s': %v", logPath, err)
 		log.Println("Using stdout logging")
 		return logging.New(&logging.Config{
-			OutputPath:   "stdout",
-			MinVerbosity: logging.VerbosityInfo,
+			OutputPath: "stdout",
 		})
 	}
 
@@ -711,8 +708,7 @@ func runNormalMode() error {
 func runDemoMode() error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
