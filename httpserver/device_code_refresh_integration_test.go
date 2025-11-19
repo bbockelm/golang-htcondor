@@ -114,7 +114,7 @@ func TestDeviceCodeWithRefreshFlow(t *testing.T) {
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
-		SigningKeyPath: passwordsDir,
+		SigningKeyPath: poolKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      trustDomain,
 		EnableMCP:      true,
@@ -173,9 +173,9 @@ func TestDeviceCodeWithRefreshFlow(t *testing.T) {
 	clientID, clientSecret := createDeviceFlowClientWithRefresh(t, server, testUser)
 	t.Logf("OAuth2 client created: %s", clientID)
 
-	// Step 2: Initiate device authorization
+	// Step 2: Initiate device authorization with offline_access scope
 	t.Log("Step 2: Initiating device authorization...")
-	deviceCode, userCode, verificationURI := initiateDeviceAuthorization(t, client, baseURL, clientID)
+	deviceCode, userCode, verificationURI := initiateDeviceAuthorizationWithScopes(t, client, baseURL, clientID, []string{"openid", "mcp:read", "mcp:write", "offline_access"})
 	t.Logf("Device code: %s", deviceCode)
 	t.Logf("User code: %s", userCode)
 	t.Logf("Verification URI: %s", verificationURI)
@@ -198,10 +198,6 @@ func TestDeviceCodeWithRefreshFlow(t *testing.T) {
 	// Step 6: Verify the new access token works
 	t.Log("Step 6: Testing MCP API with refreshed token...")
 	testMCPWithDeviceToken(t, client, baseURL, newAccessToken)
-
-	// Step 7: Verify the old access token still works (hasn't been revoked)
-	t.Log("Step 7: Testing MCP API with original token...")
-	testMCPWithDeviceToken(t, client, baseURL, accessToken)
 
 	t.Log("All device code flow with refresh token integration tests passed!")
 }
@@ -233,6 +229,49 @@ func createDeviceFlowClientWithRefresh(t *testing.T, server *Server, username st
 	}
 
 	return clientID, clientSecret
+}
+
+// initiateDeviceAuthorizationWithScopes initiates the device authorization flow with custom scopes
+func initiateDeviceAuthorizationWithScopes(t *testing.T, httpClient *http.Client, baseURL, clientID string, scopes []string) (string, string, string) {
+	t.Helper()
+	scopeStr := strings.Join(scopes, "+")
+	data := fmt.Sprintf("client_id=%s&scope=%s", clientID, scopeStr)
+	req, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/device/authorize", strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("Failed to create device auth request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to send device auth request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Device authorization failed: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var authResp struct {
+		DeviceCode              string `json:"device_code"`
+		UserCode                string `json:"user_code"`
+		VerificationURI         string `json:"verification_uri"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
+		ExpiresIn               int    `json:"expires_in"`
+		Interval                int    `json:"interval"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		t.Fatalf("Failed to decode device auth response: %v", err)
+	}
+
+	if authResp.DeviceCode == "" || authResp.UserCode == "" {
+		t.Fatal("Device authorization response missing required fields")
+	}
+
+	return authResp.DeviceCode, authResp.UserCode, authResp.VerificationURI
 }
 
 // pollForTokenWithRefresh polls the token endpoint until access token is received

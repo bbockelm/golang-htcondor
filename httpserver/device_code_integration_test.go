@@ -115,7 +115,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
 		UserHeader:     "X-Test-User",
-		SigningKeyPath: passwordsDir,
+		SigningKeyPath: poolKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      trustDomain,
 		EnableMCP:      true,
@@ -216,7 +216,7 @@ func createDeviceFlowClient(t *testing.T, server *Server, username string) (stri
 	client := &fosite.DefaultClient{
 		ID:            clientID,
 		Secret:        hashedSecret,
-		RedirectURIs:  []string{},                                           // Device flow doesn't use redirect URIs
+		RedirectURIs:  []string{},                                               // Device flow doesn't use redirect URIs
 		GrantTypes:    []string{"urn:ietf:params:oauth:grant-type:device_code"}, // Device code grant type
 		ResponseTypes: []string{},
 		Scopes:        []string{"openid", "mcp:read", "mcp:write"},
