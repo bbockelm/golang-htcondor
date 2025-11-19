@@ -255,13 +255,14 @@ func TestStdioFilesFromTarIntegration(t *testing.T) {
 	// Create schedd client
 	schedd := NewSchedd(harness.scheddName, scheddAddr)
 
-	// Create a job that reads from stdin
+	// Create a job that reads from stdin using a shell script file
+	// This avoids argument parsing issues in the submit file
 	submitFile := `
 universe = vanilla
 executable = /bin/sh
-arguments = -c "cat > output.txt && echo 'stderr message' >&2"
+arguments = process.sh
 transfer_executable = false
-transfer_input_files = stdin.txt
+transfer_input_files = stdin.txt,process.sh
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 transfer_output_files = output.txt
@@ -285,10 +286,11 @@ queue
 
 	t.Logf("Job submitted successfully: cluster=%d, num_procs=%d", clusterID, len(procAds))
 
-	// Create a tar archive with stdin file
+	// Create a tar archive with stdin file and shell script
 	var tarBuf bytes.Buffer
 	tarWriter := tar.NewWriter(&tarBuf)
 
+	// Add stdin.txt
 	stdinContent := []byte("Content from stdin via tar\nSecond line via tar\n")
 	header := &tar.Header{
 		Name:    "stdin.txt",
@@ -297,10 +299,30 @@ queue
 		ModTime: time.Now(),
 	}
 	if err := tarWriter.WriteHeader(header); err != nil {
-		t.Fatalf("Failed to write tar header: %v", err)
+		t.Fatalf("Failed to write tar header for stdin.txt: %v", err)
 	}
 	if _, err := tarWriter.Write(stdinContent); err != nil {
-		t.Fatalf("Failed to write tar data: %v", err)
+		t.Fatalf("Failed to write tar data for stdin.txt: %v", err)
+	}
+
+	// Add process.sh shell script
+	scriptContent := []byte(`#!/bin/sh
+# Read from stdin and write to output.txt
+cat > output.txt
+# Write to stderr
+echo 'stderr message' >&2
+`)
+	scriptHeader := &tar.Header{
+		Name:    "process.sh",
+		Size:    int64(len(scriptContent)),
+		Mode:    0755, // Executable
+		ModTime: time.Now(),
+	}
+	if err := tarWriter.WriteHeader(scriptHeader); err != nil {
+		t.Fatalf("Failed to write tar header for process.sh: %v", err)
+	}
+	if _, err := tarWriter.Write(scriptContent); err != nil {
+		t.Fatalf("Failed to write tar data for process.sh: %v", err)
 	}
 
 	if err := tarWriter.Close(); err != nil {
@@ -342,7 +364,7 @@ queue
 	var lastStatus int64 = -1
 
 	for time.Since(startTime) < maxWait {
-		queryResult, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %d", clusterID), []string{"JobStatus"})
+		queryResult, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %d", clusterID), []string{"JobStatus", "HoldReason", "HoldReasonCode"})
 		if err != nil {
 			t.Logf("Warning: Failed to query job status: %v", err)
 		} else if len(queryResult) > 0 {
@@ -351,6 +373,22 @@ queue
 				statusVal := statusExpr.Eval(nil)
 				if statusInt, err := statusVal.IntValue(); err == nil {
 					t.Logf("Job status: %d", statusInt)
+
+					// If job is held, log the hold reason
+					if statusInt == 5 {
+						if holdReasonExpr, ok := jobAd.Lookup("HoldReason"); ok {
+							holdReasonVal := holdReasonExpr.Eval(nil)
+							if holdReason, err := holdReasonVal.StringValue(); err == nil {
+								t.Logf("Job is HELD. Reason: %s", holdReason)
+							}
+						}
+						if holdCodeExpr, ok := jobAd.Lookup("HoldReasonCode"); ok {
+							holdCodeVal := holdCodeExpr.Eval(nil)
+							if holdCode, err := holdCodeVal.IntValue(); err == nil {
+								t.Logf("Hold reason code: %d", holdCode)
+							}
+						}
+					}
 
 					if lastStatus != -1 && statusInt != lastStatus {
 						maxWait += 10 * time.Second
