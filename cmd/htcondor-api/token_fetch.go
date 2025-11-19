@@ -490,7 +490,7 @@ func saveAccessToken(tokenInfo *TokenInfo) error {
 }
 
 // checkExistingToken checks if there's a valid token in tokens.d that won't expire for at least 5 minutes
-func checkExistingToken(trustDomain string) (string, error) {
+func checkExistingToken(_ string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/tmp"
