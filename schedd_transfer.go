@@ -66,10 +66,17 @@ func (s *Schedd) ReceiveJobSandbox(ctx context.Context, constraint string, w io.
 
 // doReceiveJobSandbox implements the actual transfer logic
 func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w io.Writer) error {
-	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
+	// Get SecurityConfig from context, HTCondor config, or defaults
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
-		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
+		return fmt.Errorf("failed to create security config: %w", err)
+	}
+
+	// Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
+	if err != nil {
+		return fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
 	}
 	defer func() {
 		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
@@ -79,18 +86,6 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 
 	// Get CEDAR stream from client
 	cedarStream := htcondorClient.GetStream()
-
-	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
-	if err != nil {
-		return fmt.Errorf("failed to create security config: %w", err)
-	}
-
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
-	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
-	}
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)
@@ -556,21 +551,7 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 		}
 	}
 
-	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
-	if err != nil {
-		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// 2. Perform DC_AUTHENTICATE handshake with SPOOL_JOB_FILES_WITH_PERMS
+	// Prepare security config
 	secConfig := &security.SecurityConfig{
 		Command:        commands.SPOOL_JOB_FILES_WITH_PERMS,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
@@ -580,11 +561,20 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 		Integrity:      security.SecurityOptional,
 	}
 
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+	// Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
+		return fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)
@@ -1009,21 +999,7 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 		}
 	}
 
-	// 1. Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
-	if err != nil {
-		return fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// 2. Perform DC_AUTHENTICATE handshake with SPOOL_JOB_FILES_WITH_PERMS
+	// Prepare security config
 	secConfig := &security.SecurityConfig{
 		Command:        commands.SPOOL_JOB_FILES_WITH_PERMS,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
@@ -1033,11 +1009,20 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 		Integrity:      security.SecurityOptional,
 	}
 
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
+	// Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
+		return fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)

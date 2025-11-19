@@ -9,7 +9,6 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/security"
 )
 
 // Collector represents an HTCondor collector daemon
@@ -271,20 +270,6 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 		}
 	}
 
-	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, c.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to collector: %w", err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
 	// Determine the command based on ad type
 	cmd, err := getCommandForAdType(adType)
 	if err != nil {
@@ -297,18 +282,23 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
 
-	// Perform security handshake
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
+	// Establish connection and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("security handshake failed: %w", err)
+		return nil, fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
 
-	// If username not already set in context, use the authenticated user from handshake
-	if username == "" && negotiation.User != "" {
-		// Update context with authenticated user for potential future use
-		ctx = WithAuthenticatedUser(ctx, negotiation.User)
-	}
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
+
+	// Note: ConnectAndAuthenticate doesn't expose negotiation details, so we can't get
+	// the authenticated user here. Username should be provided in the context if needed.
 
 	// Create query ClassAd
 	var constraintExpr *classad.Expr

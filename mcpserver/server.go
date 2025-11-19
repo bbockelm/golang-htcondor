@@ -59,8 +59,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if logger == nil {
 		var err error
 		logger, err = logging.New(&logging.Config{
-			OutputPath:   "stderr",
-			MinVerbosity: logging.VerbosityInfo,
+			OutputPath: "stderr",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create logger: %w", err)

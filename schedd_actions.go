@@ -9,7 +9,6 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/security"
 )
 
 // JobAction represents an action to perform on jobs
@@ -134,10 +133,17 @@ func (s *Schedd) actOnJobs(
 		return nil, fmt.Errorf("must specify either constraint or ids")
 	}
 
-	// Connect to schedd using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
+	// Get SecurityConfig from context, HTCondor config, or defaults
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.ACT_ON_JOBS, "CLIENT", s.address)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd: %w", err)
+		return nil, fmt.Errorf("failed to create security config: %w", err)
+	}
+
+	// Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect and authenticate to schedd: %w", err)
 	}
 	defer func() {
 		_ = htcondorClient.Close()
@@ -145,19 +151,6 @@ func (s *Schedd) actOnJobs(
 
 	// Get CEDAR stream from client
 	cedarStream := htcondorClient.GetStream()
-
-	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.ACT_ON_JOBS, "CLIENT", s.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create security config: %w", err)
-	}
-
-	// Perform security handshake
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	_, err = auth.ClientHandshake(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("security handshake failed: %w", err)
-	}
 
 	// Build command ClassAd
 	cmdAd := classad.New()

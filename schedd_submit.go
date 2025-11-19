@@ -68,6 +68,14 @@ type QmgmtConnection struct {
 // Uses FS authentication from cedar package
 // address can be a hostname:port or a sinful string like "<IP:PORT?addrs=...>"
 func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, error) {
+	// Get SecurityConfig from context, HTCondor config, or defaults
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, QMGMT_WRITE_CMD, "CLIENT", address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create security config: %w", err)
+	}
+
+	// Note: We use manual authentication here instead of ConnectAndAuthenticate because we need
+	// access to the negotiation result to get the authenticated user and verify auth method.
 	// Establish connection using cedar client
 	htcondorClient, err := client.ConnectToAddress(ctx, address)
 	if err != nil {
@@ -76,12 +84,6 @@ func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, 
 
 	// Get CEDAR stream from client
 	cedarStream := htcondorClient.GetStream()
-
-	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, QMGMT_WRITE_CMD, "CLIENT", address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create security config: %w", err)
-	}
 
 	// Perform DC_AUTHENTICATE handshake
 	auth := security.NewAuthenticator(secConfig, cedarStream)
