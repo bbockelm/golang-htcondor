@@ -158,7 +158,15 @@ type JobAdResult struct {
 // The channel is returned immediately once the first ad is ready or an error occurs
 // The channel will be closed when all ads have been sent or an error occurs
 // If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
+//
+// Deprecated: Use QueryStreamWithOptions for pagination and limit support
 func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection []string, streamOpts *StreamOptions) <-chan JobAdResult {
+	return s.QueryStreamWithOptions(ctx, constraint, &QueryOptions{Projection: projection}, streamOpts)
+}
+
+// QueryStreamWithOptions queries the schedd with QueryOptions and streams job ads through a channel
+// This method supports server-side limits for better performance
+func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, opts *QueryOptions, streamOpts *StreamOptions) <-chan JobAdResult {
 	ch := make(chan JobAdResult, streamOpts.ApplyStreamDefaults().BufferSize)
 
 	go func() {
@@ -210,8 +218,25 @@ func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection 
 			ctx = WithAuthenticatedUser(ctx, negotiation.User)
 		}
 
-		// Create query request ClassAd
-		requestAd := createJobQueryAd(constraint, projection)
+		// Apply defaults to opts if needed
+		effectiveOpts := &QueryOptions{}
+		if opts != nil {
+			effectiveOpts = opts
+		}
+		effectiveOptsValue := effectiveOpts.ApplyDefaults()
+		effectiveOpts = &effectiveOptsValue
+
+		// Get effective projection
+		projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
+
+		// Get limit for query ad
+		limit := -1
+		if !effectiveOpts.IsUnlimited() {
+			limit = effectiveOpts.Limit
+		}
+
+		// Create query request ClassAd with limit
+		requestAd := createJobQueryAdWithLimit(constraint, projection, limit)
 
 		// Send query
 		queryMsg := message.NewMessageForStream(cedarStream)
@@ -225,18 +250,15 @@ func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection 
 		}
 
 		// Stream response ads
-		opts := streamOpts.ApplyStreamDefaults()
+		streamOptsApplied := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
 
-		for {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				ch <- JobAdResult{Err: ctx.Err()}
-				return
-			default:
-			}
+		// Create timer that wakes up periodically to check timeout
+		checkInterval := 100 * time.Millisecond
+		timer := time.NewTimer(checkInterval)
+		defer timer.Stop()
 
+		for {
 			// Create a new message for each response ClassAd
 			responseMsg := message.NewMessageFromStream(cedarStream)
 
@@ -261,14 +283,37 @@ func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection 
 				return
 			}
 
-			// Send job ad to channel with timeout tracking
+			// Send job ad to channel with timeout tracking using a timer
+			// Calculate how much time we have left
+			timeLeft := streamOptsApplied.WriteTimeout - totalBlockTime
+			if timeLeft < checkInterval {
+				checkInterval = timeLeft
+			}
+			if checkInterval <= 0 {
+				ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+				return
+			}
+			timer.Reset(checkInterval)
+
 			startWrite := time.Now()
 			select {
 			case ch <- JobAdResult{Ad: ad}:
 				blockTime := time.Since(startWrite)
 				totalBlockTime += blockTime
-				if totalBlockTime > opts.WriteTimeout {
-					ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, opts.WriteTimeout)}
+			case <-timer.C:
+				// Timer expired - check if we've exceeded total timeout
+				blockTime := time.Since(startWrite)
+				totalBlockTime += blockTime
+				if totalBlockTime >= streamOptsApplied.WriteTimeout {
+					ch <- JobAdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+					return
+				}
+				// Otherwise, retry the write
+				select {
+				case ch <- JobAdResult{Ad: ad}:
+					// Success on retry
+				case <-ctx.Done():
+					ch <- JobAdResult{Err: ctx.Err()}
 					return
 				}
 			case <-ctx.Done():
@@ -335,8 +380,12 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 		ctx = WithAuthenticatedUser(ctx, negotiation.User)
 	}
 
-	// Create query request ClassAd
-	requestAd := createJobQueryAd(constraint, projection)
+	// Create query request ClassAd with limit
+	queryLimit := -1
+	if opts != nil && !opts.IsUnlimited() {
+		queryLimit = opts.Limit
+	}
+	requestAd := createJobQueryAdWithLimit(constraint, projection, queryLimit)
 
 	// Send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -404,6 +453,10 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 
 // createJobQueryAd creates a request ClassAd for querying jobs
 func createJobQueryAd(constraint string, projection []string) *classad.ClassAd {
+	return createJobQueryAdWithLimit(constraint, projection, -1)
+}
+
+func createJobQueryAdWithLimit(constraint string, projection []string, limit int) *classad.ClassAd {
 	ad := classad.New()
 
 	// Set constraint (use "true" if empty)
@@ -422,6 +475,11 @@ func createJobQueryAd(constraint string, projection []string) *classad.ClassAd {
 	if len(projection) > 0 {
 		projectionStr := strings.Join(projection, " ")
 		_ = ad.Set("Projection", projectionStr)
+	}
+
+	// Set limit if specified (positive value)
+	if limit > 0 {
+		_ = ad.Set("Limit", int64(limit))
 	}
 
 	return ad

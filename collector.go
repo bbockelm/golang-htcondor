@@ -188,18 +188,15 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 		}
 
 		// Stream response ads
-		opts := streamOpts.ApplyStreamDefaults()
+		streamOptsApplied := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
 
-		for {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				ch <- AdResult{Err: ctx.Err()}
-				return
-			default:
-			}
+		// Create timer that wakes up periodically to check timeout
+		checkInterval := 100 * time.Millisecond
+		timer := time.NewTimer(checkInterval)
+		defer timer.Stop()
 
+		for {
 			// Read "more" flag
 			responseMsg := message.NewMessageFromStream(cedarStream)
 			more, err := responseMsg.GetInt32(ctx)
@@ -220,14 +217,37 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 				return
 			}
 
-			// Send ad to channel with timeout tracking
+			// Send ad to channel with timeout tracking using a timer
+			// Calculate how much time we have left
+			timeLeft := streamOptsApplied.WriteTimeout - totalBlockTime
+			if timeLeft < checkInterval {
+				checkInterval = timeLeft
+			}
+			if checkInterval <= 0 {
+				ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+				return
+			}
+			timer.Reset(checkInterval)
+
 			startWrite := time.Now()
 			select {
 			case ch <- AdResult{Ad: ad}:
 				blockTime := time.Since(startWrite)
 				totalBlockTime += blockTime
-				if totalBlockTime > opts.WriteTimeout {
-					ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, opts.WriteTimeout)}
+			case <-timer.C:
+				// Timer expired - check if we've exceeded total timeout
+				blockTime := time.Since(startWrite)
+				totalBlockTime += blockTime
+				if totalBlockTime >= streamOptsApplied.WriteTimeout {
+					ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+					return
+				}
+				// Otherwise, retry the write
+				select {
+				case ch <- AdResult{Ad: ad}:
+					// Success on retry
+				case <-ctx.Done():
+					ch <- AdResult{Err: ctx.Err()}
 					return
 				}
 			case <-ctx.Done():

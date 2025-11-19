@@ -338,9 +338,20 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		}
 	}
 
-	// Get effective projection if none specified
-	if len(projection) == 0 {
-		projection = htcondor.DefaultJobProjection()
+	// Parse limit parameter (default 50)
+	limit := 50
+	if limitVal, ok := args["limit"].(float64); ok {
+		limit = int(limitVal)
+	}
+
+	// Get page token
+	pageToken, _ := args["page_token"].(string)
+
+	// Build query options
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
 	}
 
 	// Use streaming query
@@ -348,13 +359,28 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
 	}
-	resultCh := s.schedd.QueryStream(ctx, constraint, projection, streamOpts)
+	resultCh := s.schedd.QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 
 	// Collect results from stream
 	var jobAds []*classad.ClassAd
 	for result := range resultCh {
 		if result.Err != nil {
 			return nil, fmt.Errorf("query failed: %w", result.Err)
+		}
+		// Check if this is an error ad (Owner is null)
+		if owner, ok := result.Ad.EvaluateAttrInt("Owner"); !ok || owner == 0 {
+			// This is an error ad - extract error message
+			var errMsg string
+			if errCode, ok := result.Ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
+				if errStr, ok := result.Ad.EvaluateAttrString("ErrorString"); ok {
+					errMsg = errStr
+				} else {
+					errMsg = fmt.Sprintf("error code %d", errCode)
+				}
+			} else {
+				errMsg = "unknown error"
+			}
+			return nil, fmt.Errorf("schedd query error: %s", errMsg)
 		}
 		jobAds = append(jobAds, result.Ad)
 	}
@@ -368,6 +394,28 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
 		len(jobAds), constraint, string(jobsJSON))
 
+	// Build metadata
+	metadata := map[string]interface{}{
+		"count":      len(jobAds),
+		"constraint": constraint,
+		"has_more":   false,
+	}
+
+	// Check if we might have more results (got exactly the limit)
+	if limit > 0 && len(jobAds) >= limit {
+		// Generate page token from last job
+		if len(jobAds) > 0 {
+			lastJob := jobAds[len(jobAds)-1]
+			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
+				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
+					metadata["has_more"] = true
+					metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
+					resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
+				}
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
@@ -375,10 +423,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 				"text": resultText,
 			},
 		},
-		"metadata": map[string]interface{}{
-			"count":      len(jobAds),
-			"constraint": constraint,
-		},
+		"metadata": metadata,
 	}, nil
 }
 

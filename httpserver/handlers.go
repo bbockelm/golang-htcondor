@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -115,37 +114,19 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Get page token
 	pageToken := r.URL.Query().Get("page_token")
 
-	// Get effective projection if none specified
-	if len(projection) == 0 {
-		projection = htcondor.DefaultJobProjection()
-	} else if len(projection) == 1 && projection[0] == "*" {
-		projection = nil // nil means all attributes
-	}
-
-	// Apply page token to constraint if provided
-	effectiveConstraint := constraint
-	if pageToken != "" {
-		clusterID, procID, err := htcondor.DecodePageToken(pageToken)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid page token: %v", err))
-			return
-		}
-		// Add constraint to select jobs after the page token
-		pageConstraint := fmt.Sprintf("(ClusterId > %d || (ClusterId == %d && ProcId > %d))",
-			clusterID, clusterID, procID)
-		if constraint == "" || constraint == "true" {
-			effectiveConstraint = pageConstraint
-		} else {
-			effectiveConstraint = fmt.Sprintf("(%s) && (%s)", constraint, pageConstraint)
-		}
+	// Build query options with limit
+	opts := &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: projection,
+		PageToken:  pageToken,
 	}
 
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
-		BufferSize:   100,
-		WriteTimeout: 5 * time.Second,
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh := s.getSchedd().QueryStream(ctx, effectiveConstraint, projection, streamOpts)
+	resultCh := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 
 	// Set up streaming JSON response
 	w.Header().Set("Content-Type", "application/json")
@@ -188,6 +169,29 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
 			errJSON, _ := json.Marshal(map[string]string{"error": result.Err.Error()})
+			if jobCount > 0 {
+				w.Write([]byte(","))
+			}
+			w.Write(errJSON)
+			hasError = true
+			break
+		}
+
+		// Check if this is an error ad (Owner is null)
+		if owner, ok := result.Ad.EvaluateAttrInt("Owner"); !ok || owner == 0 {
+			// This is an error ad - check for error details
+			s.logger.Error(logging.DestinationHTTP, "Received error ad from schedd")
+			var errMsg string
+			if errCode, ok := result.Ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
+				if errStr, ok := result.Ad.EvaluateAttrString("ErrorString"); ok {
+					errMsg = errStr
+				} else {
+					errMsg = fmt.Sprintf("error code %d", errCode)
+				}
+			} else {
+				errMsg = "unknown error"
+			}
+			errJSON, _ := json.Marshal(map[string]string{"error": errMsg})
 			if jobCount > 0 {
 				w.Write([]byte(","))
 			}
@@ -1195,8 +1199,8 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
-		BufferSize:   100,
-		WriteTimeout: 5 * time.Second,
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
 	}
 	resultCh := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, streamOpts)
 
@@ -1328,8 +1332,8 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
-		BufferSize:   100,
-		WriteTimeout: 5 * time.Second,
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
 	}
 	resultCh := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, streamOpts)
 
