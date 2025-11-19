@@ -107,24 +107,43 @@ type AdResult struct {
 }
 
 // QueryAdsStream queries the collector and streams results through a channel
-// The channel is returned immediately once the first ad is ready or an error occurs
-// The channel will be closed when all ads have been sent or an error occurs
-// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
-func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constraint string, projection []string, streamOpts *StreamOptions) <-chan AdResult {
-	ch := make(chan AdResult, streamOpts.ApplyStreamDefaults().BufferSize)
+// Returns a channel and an error. If the error is non-nil, it indicates a problem
+// before the request was sent (e.g., invalid parameters, connection failure).
+// The channel will be closed when all ads have been sent or an error occurs during streaming.
+// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent through the channel.
+func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constraint string, projection []string, streamOpts *StreamOptions) (<-chan AdResult, error) {
+	// Apply stream defaults
+	streamOptsApplied := streamOpts.ApplyStreamDefaults()
+
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+			return nil, fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
+	// Determine command
+	cmd, err := getCommandForAdType(adType)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse constraint expression if provided
+	var constraintExpr *classad.Expr
+	if constraint != "" {
+		constraintExpr, err = classad.ParseExpr(constraint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint expression: %w", err)
+		}
+	}
+
+	// Create channel for results
+	ch := make(chan AdResult, streamOptsApplied.BufferSize)
 
 	go func() {
 		defer close(ch)
-
-		// Apply rate limiting if configured
-		username := GetAuthenticatedUserFromContext(ctx)
-		rateLimitManager := getRateLimitManager()
-		if rateLimitManager != nil {
-			if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
-				ch <- AdResult{Err: fmt.Errorf("rate limit exceeded: %w", err)}
-				return
-			}
-		}
 
 		// Establish connection
 		htcondorClient, err := client.ConnectToAddress(ctx, c.address)
@@ -132,17 +151,10 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 			ch <- AdResult{Err: fmt.Errorf("failed to connect to collector: %w", err)}
 			return
 		}
-		defer htcondorClient.Close()
+		defer func() { _ = htcondorClient.Close() }()
 
 		// Get CEDAR stream
 		cedarStream := htcondorClient.GetStream()
-
-		// Determine command
-		cmd, err := getCommandForAdType(adType)
-		if err != nil {
-			ch <- AdResult{Err: err}
-			return
-		}
 
 		// Get security config
 		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
@@ -165,14 +177,6 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 		}
 
 		// Create query ClassAd
-		var constraintExpr *classad.Expr
-		if constraint != "" {
-			constraintExpr, err = classad.ParseExpr(constraint)
-			if err != nil {
-				ch <- AdResult{Err: fmt.Errorf("failed to parse constraint expression: %w", err)}
-				return
-			}
-		}
 		queryAd := createQueryAd(adType, constraintExpr, projection)
 
 		// Send query
@@ -256,7 +260,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 		}
 	}()
 
-	return ch
+	return ch, nil
 }
 
 // queryAdsInternal performs the actual collector query

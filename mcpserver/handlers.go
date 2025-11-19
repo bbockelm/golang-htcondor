@@ -404,28 +404,17 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
 	}
-	resultCh := s.schedd.QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.schedd.QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	if err != nil {
+		// Pre-request error
+		return nil, fmt.Errorf("failed to start query: %w", err)
+	}
 
 	// Collect results from stream
 	var jobAds []*classad.ClassAd
 	for result := range resultCh {
 		if result.Err != nil {
 			return nil, fmt.Errorf("query failed: %w", result.Err)
-		}
-		// Check if this is an error ad (Owner is null)
-		if owner, ok := result.Ad.EvaluateAttrInt("Owner"); !ok || owner == 0 {
-			// This is an error ad - extract error message
-			var errMsg string
-			if errCode, ok := result.Ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
-				if errStr, ok := result.Ad.EvaluateAttrString("ErrorString"); ok {
-					errMsg = errStr
-				} else {
-					errMsg = fmt.Sprintf("error code %d", errCode)
-				}
-			} else {
-				errMsg = "unknown error"
-			}
-			return nil, fmt.Errorf("schedd query error: %s", errMsg)
 		}
 		jobAds = append(jobAds, result.Ad)
 	}

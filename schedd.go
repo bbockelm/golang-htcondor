@@ -155,34 +155,57 @@ type JobAdResult struct {
 }
 
 // QueryStream queries the schedd and streams job ads through a channel
-// The channel is returned immediately once the first ad is ready or an error occurs
-// The channel will be closed when all ads have been sent or an error occurs
-// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent
+// Returns a channel and an error. If the error is non-nil, it indicates a problem
+// before the request was sent (e.g., invalid parameters, connection failure).
+// The channel will be closed when all ads have been sent or an error occurs during streaming.
+// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent through the channel.
 //
 // Deprecated: Use QueryStreamWithOptions for pagination and limit support
-func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection []string, streamOpts *StreamOptions) <-chan JobAdResult {
+func (s *Schedd) QueryStream(ctx context.Context, constraint string, projection []string, streamOpts *StreamOptions) (<-chan JobAdResult, error) {
 	return s.QueryStreamWithOptions(ctx, constraint, &QueryOptions{Projection: projection}, streamOpts)
 }
 
 // QueryStreamWithOptions queries the schedd with QueryOptions and streams job ads through a channel
+// Returns a channel and an error. If the error is non-nil, it indicates a problem
+// before the request was sent (e.g., invalid parameters, rate limit exceeded).
 // This method supports server-side limits for better performance
-func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, opts *QueryOptions, streamOpts *StreamOptions) <-chan JobAdResult {
-	ch := make(chan JobAdResult, streamOpts.ApplyStreamDefaults().BufferSize)
+func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, opts *QueryOptions, streamOpts *StreamOptions) (<-chan JobAdResult, error) {
+	// Apply stream defaults
+	streamOptsApplied := streamOpts.ApplyStreamDefaults()
+
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
+		defer cancelRateLimit()
+		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+			return nil, fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
+	// Apply defaults to opts if needed
+	effectiveOpts := &QueryOptions{}
+	if opts != nil {
+		effectiveOpts = opts
+	}
+	effectiveOptsValue := effectiveOpts.ApplyDefaults()
+	effectiveOpts = &effectiveOptsValue
+
+	// Get effective projection
+	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
+
+	// Get limit for query ad
+	limit := -1
+	if !effectiveOpts.IsUnlimited() {
+		limit = effectiveOpts.Limit
+	}
+
+	// Create channel for results
+	ch := make(chan JobAdResult, streamOptsApplied.BufferSize)
 
 	go func() {
 		defer close(ch)
-
-		// Apply rate limiting if configured
-		username := GetAuthenticatedUserFromContext(ctx)
-		rateLimitManager := getRateLimitManager()
-		if rateLimitManager != nil {
-			rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
-			defer cancelRateLimit()
-			if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
-				ch <- JobAdResult{Err: fmt.Errorf("rate limit exceeded: %w", err)}
-				return
-			}
-		}
 
 		// Establish connection
 		htcondorClient, err := client.ConnectToAddress(ctx, s.address)
@@ -190,7 +213,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 			ch <- JobAdResult{Err: fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)}
 			return
 		}
-		defer htcondorClient.Close()
+		defer func() { _ = htcondorClient.Close() }()
 
 		// Get CEDAR stream
 		cedarStream := htcondorClient.GetStream()
@@ -218,23 +241,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 			ctx = WithAuthenticatedUser(ctx, negotiation.User)
 		}
 
-		// Apply defaults to opts if needed
-		effectiveOpts := &QueryOptions{}
-		if opts != nil {
-			effectiveOpts = opts
-		}
-		effectiveOptsValue := effectiveOpts.ApplyDefaults()
-		effectiveOpts = &effectiveOptsValue
-
-		// Get effective projection
-		projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
-
-		// Get limit for query ad
-		limit := -1
-		if !effectiveOpts.IsUnlimited() {
-			limit = effectiveOpts.Limit
-		}
-
 		// Create query request ClassAd with limit
 		requestAd := createJobQueryAdWithLimit(constraint, projection, limit)
 
@@ -250,7 +256,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		}
 
 		// Stream response ads
-		streamOptsApplied := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
 
 		// Create timer that wakes up periodically to check timeout
@@ -323,7 +328,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		}
 	}()
 
-	return ch
+	return ch, nil
 }
 
 // queryWithAuth performs the actual query with optional authentication and query options
@@ -442,11 +447,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	return jobAds, nil
 }
 
-// createJobQueryAd creates a request ClassAd for querying jobs
-func createJobQueryAd(constraint string, projection []string) *classad.ClassAd {
-	return createJobQueryAdWithLimit(constraint, projection, -1)
-}
-
+// createJobQueryAdWithLimit creates a request ClassAd for querying jobs with optional limit
 func createJobQueryAdWithLimit(constraint string, projection []string, limit int) *classad.ClassAd {
 	ad := classad.New()
 

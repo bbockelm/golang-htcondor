@@ -104,7 +104,11 @@ func TestStreamingContextCancellation(t *testing.T) {
 	}
 
 	// Start streaming - should fail quickly due to cancelled context
-	resultCh := collector.QueryAdsStream(ctx, "StartdAd", "true", nil, streamOpts)
+	resultCh, err := collector.QueryAdsStream(ctx, "StartdAd", "true", nil, streamOpts)
+	if err != nil {
+		// Pre-request error is acceptable (e.g., rate limit check with cancelled context)
+		return
+	}
 
 	// Read from channel - should get an error related to context cancellation
 	select {
@@ -133,7 +137,11 @@ func TestStreamingScheddContextCancellation(t *testing.T) {
 	}
 
 	// Start streaming - should fail quickly due to cancelled context
-	resultCh := schedd.QueryStream(ctx, "true", nil, streamOpts)
+	resultCh, err := schedd.QueryStream(ctx, "true", nil, streamOpts)
+	if err != nil {
+		// Pre-request error is acceptable (e.g., rate limit check with cancelled context)
+		return
+	}
 
 	// Read from channel - should get an error related to context cancellation
 	select {
@@ -159,7 +167,11 @@ func TestStreamingChannelClosed(t *testing.T) {
 	}
 
 	// Start streaming
-	resultCh := collector.QueryAdsStream(ctx, "StartdAd", "true", nil, streamOpts)
+	resultCh, err := collector.QueryAdsStream(ctx, "StartdAd", "true", nil, streamOpts)
+	if err != nil {
+		// Pre-request error is expected for invalid address
+		return
+	}
 
 	// Consume all results
 	errorReceived := false
@@ -198,7 +210,11 @@ func TestStreamingScheddChannelClosed(t *testing.T) {
 	}
 
 	// Start streaming
-	resultCh := schedd.QueryStream(ctx, "true", nil, streamOpts)
+	resultCh, err := schedd.QueryStream(ctx, "true", nil, streamOpts)
+	if err != nil {
+		// Pre-request error is expected for invalid address
+		return
+	}
 
 	// Consume all results
 	errorReceived := false

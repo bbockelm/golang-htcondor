@@ -73,6 +73,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListJobs handles GET /api/v1/jobs
+//
+//nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, err := s.createAuthenticatedContext(r)
@@ -131,7 +133,19 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	if err != nil {
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
 
 	// Set up streaming JSON response
 	w.Header().Set("Content-Type", "application/json")
@@ -167,22 +181,6 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// Check if this is an error ad (Owner is null)
-		if owner, ok := result.Ad.EvaluateAttrInt("Owner"); !ok || owner == 0 {
-			// This is an error ad - check for error details
-			s.logger.Error(logging.DestinationHTTP, "Received error ad from schedd")
-			if errCode, ok := result.Ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
-				if errStr, ok := result.Ad.EvaluateAttrString("ErrorString"); ok {
-					errorMsg = errStr
-				} else {
-					errorMsg = fmt.Sprintf("error code %d", errCode)
-				}
-			} else {
-				errorMsg = "unknown error"
-			}
-			break
-		}
-
 		// Check limit
 		if limit > 0 && jobCount >= limit {
 			// We've reached the limit, stop consuming but we need to track if there are more
@@ -212,10 +210,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 		// Track last job for pagination
 		if clusterID, ok := result.Ad.EvaluateAttrInt("ClusterId"); ok {
-			lastClusterID = int64(clusterID)
+			lastClusterID = clusterID
 		}
 		if procID, ok := result.Ad.EvaluateAttrInt("ProcId"); ok {
-			lastProcID = int64(procID)
+			lastProcID = procID
 		}
 
 		jobCount++
@@ -1209,7 +1207,19 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, streamOpts)
+	resultCh, err := s.collector.QueryAdsStream(ctx, "StartdAd", constraint, projection, streamOpts)
+	if err != nil {
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
 
 	// Set up streaming JSON response
 	w.Header().Set("Content-Type", "application/json")
@@ -1347,7 +1357,19 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, streamOpts)
+	resultCh, err := s.collector.QueryAdsStream(ctx, queryAdType, constraint, projection, streamOpts)
+	if err != nil {
+		// Pre-request error - check type and set appropriate status
+		switch {
+		case ratelimit.IsRateLimitError(err):
+			s.writeError(w, http.StatusTooManyRequests, err.Error())
+		case isAuthenticationError(err):
+			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+		default:
+			s.writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
 
 	// Set up streaming JSON response
 	w.Header().Set("Content-Type", "application/json")
