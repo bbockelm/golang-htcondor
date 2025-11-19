@@ -10,24 +10,21 @@ on:
 jobs:
   docker-test:
     name: Test in Docker (Rocky Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             tag: amd64
+            runner: ubuntu-latest
           - platform: linux/arm64
             tag: arm64
+            runner: ubuntu-24.04-arm64
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64,amd64
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
