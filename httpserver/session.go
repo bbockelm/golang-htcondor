@@ -11,10 +11,10 @@ import (
 
 // SessionData represents the data stored in a session
 type SessionData struct {
-	Username   string    // Authenticated username
-	CreatedAt  time.Time // When the session was created
-	ExpiresAt  time.Time // When the session expires
-	Token      string    // HTCondor token for this session (optional)
+	Username  string    // Authenticated username
+	CreatedAt time.Time // When the session was created
+	ExpiresAt time.Time // When the session expires
+	Token     string    // HTCondor token for this session (optional)
 }
 
 // SessionStore manages HTTP sessions
@@ -128,8 +128,8 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, sessionID string, expir
 		Path:     "/",
 		Expires:  expiresAt,
 		MaxAge:   int(time.Until(expiresAt).Seconds()),
-		HttpOnly: true,        // Prevent JavaScript access
-		Secure:   secure,      // HTTPS only in production
+		HttpOnly: true,                 // Prevent JavaScript access
+		Secure:   secure,               // HTTPS only in production
 		SameSite: http.SameSiteLaxMode, // CSRF protection
 	}
 
