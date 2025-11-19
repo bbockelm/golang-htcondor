@@ -34,6 +34,25 @@ var (
 func main() {
 	flag.Parse()
 
+	// Check for subcommands
+	args := flag.Args()
+	if len(args) > 0 {
+		switch args[0] {
+		case "token":
+			if len(args) > 1 && args[1] == "fetch" {
+				if err := runTokenFetch(args[2:]); err != nil {
+					log.Fatalf("Token fetch failed: %v", err)
+				}
+				return
+			}
+			log.Fatalf("Unknown token subcommand. Usage: htcondor-api token fetch <issuer-url>")
+		default:
+			log.Fatalf("Unknown command: %s", args[0])
+		}
+		return
+	}
+
+	// Default behavior: run as server
 	if *demoMode {
 		if err := runDemoMode(); err != nil {
 			log.Fatalf("Demo mode failed: %v", err)
