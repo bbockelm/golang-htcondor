@@ -96,22 +96,9 @@ func uploadFileDemo(ctx context.Context, host string, port int, filePath string)
 
 	fmt.Printf("   SHA256: %s...\n", checksumStr[:16])
 
-	// Step 2: Connect to schedd using cedar client
+	// Step 2: Prepare security config
 	fmt.Printf("\n🔌 Connecting to schedd...\n")
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	htcondorClient, err := client.ConnectToAddress(ctx, addr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to schedd: %w", err)
-	}
-	defer htcondorClient.Close()
-
-	fmt.Printf("   Connected!\n")
-
-	// Step 3: Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// Step 4: Security handshake
-	fmt.Printf("\n🔐 Performing security handshake...\n")
 	secConfig := &security.SecurityConfig{
 		Command:        commands.FILETRANS_UPLOAD,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
@@ -121,16 +108,18 @@ func uploadFileDemo(ctx context.Context, host string, port int, filePath string)
 		Integrity:      security.SecurityOptional,
 	}
 
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
+	// Step 3: Connect to schedd and authenticate using cedar client
+	// This handles session resumption failures automatically
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
 	if err != nil {
-		return fmt.Errorf("security handshake failed: %w", err)
+		return fmt.Errorf("failed to connect and authenticate to schedd: %w", err)
 	}
+	defer htcondorClient.Close()
 
-	fmt.Printf("   Authentication: %s\n", negotiation.NegotiatedAuth)
-	if negotiation.NegotiatedCrypto != "" {
-		fmt.Printf("   Encryption: %s\n", negotiation.NegotiatedCrypto)
-	}
+	fmt.Printf("   Connected and authenticated!\n")
+
+	// Step 4: Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// Step 5: Send FILETRANS_UPLOAD command
 	// TODO: This should use StartCommand API when available

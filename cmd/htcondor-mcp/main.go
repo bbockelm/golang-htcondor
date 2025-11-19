@@ -113,8 +113,7 @@ func runNormalMode() error {
 func runDemoMode() error {
 	// Create logger for demo mode
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)

@@ -11,8 +11,7 @@ import (
 // createTestLogger creates a logger for testing
 func createTestLogger() (*logging.Logger, error) {
 	return logging.New(&logging.Config{
-		OutputPath:   "stderr",
-		MinVerbosity: logging.VerbosityError, // Reduce noise in tests
+		OutputPath: "stderr",
 	})
 }
 

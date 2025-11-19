@@ -1,13 +1,18 @@
 package httpserver
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -238,6 +243,24 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			return
 		case "output":
 			s.handleJobOutput(w, r, jobID)
+			return
+		case "stdout":
+			// GET /api/v1/jobs/{id}/stdout
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobStdout(w, r, cluster, proc)
+			return
+		case "stderr":
+			// GET /api/v1/jobs/{id}/stderr
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobStderr(w, r, cluster, proc)
 			return
 		case "hold":
 			s.handleJobHold(w, r, jobID)
@@ -1307,6 +1330,107 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 
 	// Return the first matching ad
 	s.writeJSON(w, http.StatusOK, ads[0])
+}
+
+// handleJobStdout handles GET /api/v1/jobs/{cluster}.{proc}/stdout
+func (s *Server) handleJobStdout(w http.ResponseWriter, r *http.Request, cluster, proc int) {
+	s.handleJobOutputFile(w, r, cluster, proc, "stdout", "Out")
+}
+
+// handleJobStderr handles GET /api/v1/jobs/{cluster}.{proc}/stderr
+func (s *Server) handleJobStderr(w http.ResponseWriter, r *http.Request, cluster, proc int) {
+	s.handleJobOutputFile(w, r, cluster, proc, "stderr", "Err")
+}
+
+// handleJobOutputFile is a helper function to retrieve stdout or stderr from a job
+func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cluster, proc int, outputType, attributeName string) {
+	ctx := r.Context()
+
+	// Query the job to get the output filename
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
+
+	opts := &htcondor.QueryOptions{
+		Projection: projection,
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to query job", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to query job")
+		return
+	}
+
+	if len(jobAds) == 0 {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Job not found: %d.%d", cluster, proc))
+		return
+	}
+
+	jobAd := jobAds[0]
+
+	// Get the output filename from the job ad
+	outputFileExpr, ok := jobAd.Lookup(attributeName)
+	if !ok {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Job does not have %s configured", outputType))
+		return
+	}
+
+	outputFile, err := outputFileExpr.Eval(nil).StringValue()
+	if err != nil || outputFile == "" {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Job %s attribute is empty or invalid", outputType))
+		return
+	}
+
+	// Download the job sandbox
+	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var sandboxBuf bytes.Buffer
+	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+
+	if err := <-errChan; err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to download job sandbox", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to download job sandbox")
+		return
+	}
+
+	// Extract the output file from the tar archive
+	tarReader := tar.NewReader(&sandboxBuf)
+	var outputContent string
+
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to read tar archive", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to read tar archive")
+			return
+		}
+
+		// Check if this is the output file we're looking for
+		baseName := filepath.Base(header.Name)
+		if baseName == outputFile {
+			content, err := io.ReadAll(tarReader)
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to read output content", "error", err)
+				s.writeError(w, http.StatusInternalServerError, "Failed to read output content")
+				return
+			}
+			outputContent = string(content)
+			break
+		}
+	}
+
+	if outputContent == "" {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("%s file not found in job sandbox", outputType))
+		return
+	}
+
+	// Return the output as plain text
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(outputContent))
 }
 
 // handleCollectorPath handles /api/v1/collector/* paths with routing
