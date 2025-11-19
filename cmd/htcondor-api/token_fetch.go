@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // TokenInfo stores OAuth2 token information for a trust domain
@@ -64,7 +66,9 @@ func runTokenFetch(args []string) error {
 			}
 		case "--scopes":
 			if i+1 < len(args) {
-				scopes = strings.Split(args[i+1], ",")
+				userScopes := strings.Split(args[i+1], ",")
+				// Transform user scopes to condor:/ format
+				scopes = transformScopes(userScopes)
 				i++
 			}
 		}
@@ -86,7 +90,10 @@ func runTokenFetch(args []string) error {
 	}
 
 	// Load existing token info
-	tokenInfoPath := getTokenInfoPath()
+	tokenInfoPath, err := getTokenInfoPath()
+	if err != nil {
+		return fmt.Errorf("failed to get token info path: %w", err)
+	}
 	store, err := loadTokenInfoStore(tokenInfoPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to load token info: %w", err)
@@ -100,7 +107,11 @@ func runTokenFetch(args []string) error {
 	if err == nil && existingToken != "" {
 		fmt.Println("Found existing valid token in tokens.d")
 		fmt.Printf("Token is valid for at least 5 more minutes\n")
-		fmt.Printf("Token location: %s\n", getAccessTokenPath(trustDomain))
+		tokenPath, err := getAccessTokenPath(trustDomain)
+		if err != nil {
+			return fmt.Errorf("failed to get token path: %w", err)
+		}
+		fmt.Printf("Token location: %s\n", tokenPath)
 		return nil
 	}
 
@@ -119,7 +130,11 @@ func runTokenFetch(args []string) error {
 			if err := saveAccessToken(newTokenInfo); err != nil {
 				return fmt.Errorf("failed to save access token: %w", err)
 			}
-			fmt.Printf("Access token saved to: %s\n", getAccessTokenPath(trustDomain))
+			tokenPath, err := getAccessTokenPath(trustDomain)
+			if err != nil {
+				return fmt.Errorf("failed to get access token path: %w", err)
+			}
+			fmt.Printf("Access token saved to: %s\n", tokenPath)
 			return nil
 		}
 		fmt.Printf("Refresh failed: %v, falling back to device code flow\n", err)
@@ -160,9 +175,14 @@ func runTokenFetch(args []string) error {
 		return fmt.Errorf("failed to save access token: %w", err)
 	}
 
+	tokenPath, err := getAccessTokenPath(trustDomain)
+	if err != nil {
+		return fmt.Errorf("failed to get access token path: %w", err)
+	}
+
 	fmt.Println("Successfully obtained tokens!")
 	fmt.Printf("Token info saved to: %s\n", tokenInfoPath)
-	fmt.Printf("Access token saved to: %s\n", getAccessTokenPath(trustDomain))
+	fmt.Printf("Access token saved to: %s\n", tokenPath)
 
 	return nil
 }
@@ -424,26 +444,24 @@ func refreshToken(tokenInfo *TokenInfo, _ *TokenFetchConfig) (*TokenInfo, error)
 }
 
 // getTokenInfoPath returns the path to the token info file
-func getTokenInfoPath() string {
-	homeDir, err := os.UserHomeDir()
+func getTokenInfoPath() (string, error) {
+	tokensDir, err := getTokenDirectory()
 	if err != nil {
-		homeDir = "/tmp"
+		return "", err
 	}
-	condorDir := filepath.Join(homeDir, ".condor")
-	return filepath.Join(condorDir, "token_info")
+	return filepath.Join(tokensDir, "token_info"), nil
 }
 
 // getAccessTokenPath returns the path where access token should be saved
-func getAccessTokenPath(trustDomain string) string {
-	homeDir, err := os.UserHomeDir()
+func getAccessTokenPath(trustDomain string) (string, error) {
+	tokensDir, err := getTokenDirectory()
 	if err != nil {
-		homeDir = "/tmp"
+		return "", err
 	}
-	tokensDir := filepath.Join(homeDir, ".condor", "tokens.d")
 	// Sanitize trust domain for filename
 	safeDomain := strings.ReplaceAll(trustDomain, ":", "_")
 	safeDomain = strings.ReplaceAll(safeDomain, "/", "_")
-	return filepath.Join(tokensDir, safeDomain)
+	return filepath.Join(tokensDir, safeDomain), nil
 }
 
 // loadTokenInfoStore loads token info from disk
@@ -480,22 +498,24 @@ func saveTokenInfoStore(store *TokenInfoStore, path string) error {
 
 // saveAccessToken saves the access token to tokens.d directory
 func saveAccessToken(tokenInfo *TokenInfo) error {
-	tokensDir := filepath.Dir(getAccessTokenPath(tokenInfo.TrustDomain))
+	tokenPath, err := getAccessTokenPath(tokenInfo.TrustDomain)
+	if err != nil {
+		return err
+	}
+	tokensDir := filepath.Dir(tokenPath)
 	if err := os.MkdirAll(tokensDir, 0700); err != nil {
 		return err
 	}
 
-	tokenPath := getAccessTokenPath(tokenInfo.TrustDomain)
 	return os.WriteFile(tokenPath, []byte(tokenInfo.AccessToken), 0600)
 }
 
-// checkExistingToken checks if there's a valid token in tokens.d that won't expire for at least 5 minutes
-func checkExistingToken(_ string) (string, error) {
-	homeDir, err := os.UserHomeDir()
+// checkExistingToken checks if there's a valid token in tokens.d for the specific trust domain that won't expire for at least 5 minutes
+func checkExistingToken(trustDomain string) (string, error) {
+	tokensDir, err := getTokenDirectory()
 	if err != nil {
-		homeDir = "/tmp"
+		return "", err
 	}
-	tokensDir := filepath.Join(homeDir, ".condor", "tokens.d")
 
 	// Check if tokens.d directory exists
 	entries, err := os.ReadDir(tokensDir)
@@ -527,19 +547,19 @@ func checkExistingToken(_ string) (string, error) {
 				continue
 			}
 
-			// Try to parse and validate this token
-			if isValidToken(line) {
+			// Try to parse and validate this token for the specific trust domain
+			if isValidTokenForDomain(line, trustDomain) {
 				return line, nil
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no valid token found in tokens.d")
+	return "", fmt.Errorf("no valid token found in tokens.d for trust domain %s", trustDomain)
 }
 
-// isValidToken checks if a token is valid JWT and won't expire for at least 5 minutes
-func isValidToken(token string) bool {
-	// Parse JWT to check expiration
+// isValidTokenForDomain checks if a token is valid JWT for the specific trust domain and won't expire for at least 5 minutes
+func isValidTokenForDomain(token, trustDomain string) bool {
+	// Parse JWT to check expiration and issuer
 	// JWT format: header.payload.signature
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -558,9 +578,16 @@ func isValidToken(token string) bool {
 
 	// Parse JSON payload
 	var payload struct {
-		Exp int64 `json:"exp"`
+		Exp int64  `json:"exp"`
+		Iss string `json:"iss"`
 	}
 	if err := json.Unmarshal(payloadData, &payload); err != nil {
+		return false
+	}
+
+	// Check if token's issuer matches the trust domain
+	// The issuer URL should contain the trust domain as its host
+	if !strings.Contains(payload.Iss, trustDomain) {
 		return false
 	}
 
@@ -569,4 +596,79 @@ func isValidToken(token string) bool {
 	fiveMinutesFromNow := time.Now().Add(5 * time.Minute)
 
 	return expiresAt.After(fiveMinutesFromNow)
+}
+
+// getTokenDirectory returns the token directory path from SEC_TOKEN_DIRECTORY or ~/.condor/tokens.d
+// Never falls back to /tmp - returns error if no valid directory is found
+func getTokenDirectory() (string, error) {
+	// Try SEC_TOKEN_DIRECTORY from HTCondor config
+	cfg, err := config.New()
+	if err == nil {
+		if tokenDir, ok := cfg.Get("SEC_TOKEN_DIRECTORY"); ok {
+			// Verify directory exists or can be created
+			if err := os.MkdirAll(tokenDir, 0700); err != nil {
+				return "", fmt.Errorf("SEC_TOKEN_DIRECTORY %s is not accessible: %w", tokenDir, err)
+			}
+			return tokenDir, nil
+		}
+	}
+
+	// Fall back to ~/.condor/tokens.d
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory and SEC_TOKEN_DIRECTORY not set: %w", err)
+	}
+
+	tokensDir := filepath.Join(homeDir, ".condor", "tokens.d")
+	// Verify directory exists or can be created
+	if err := os.MkdirAll(tokensDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create token directory %s: %w", tokensDir, err)
+	}
+
+	return tokensDir, nil
+}
+
+// transformScopes converts user-requested scopes to condor:/ format
+// For example: "READ" -> "condor:/READ", "WRITE" -> "condor:/WRITE"
+// Scopes already in condor:/ format or other formats (openid, mcp:*) are preserved
+func transformScopes(userScopes []string) []string {
+	// Standard OAuth2 scopes that should not be prefixed
+	standardScopes := map[string]bool{
+		"openid":  true,
+		"profile": true,
+		"email":   true,
+		"address": true,
+		"phone":   true,
+		"offline_access": true,
+	}
+
+	transformed := make([]string, 0, len(userScopes))
+	for _, scope := range userScopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+
+		// Preserve standard OAuth2 scopes
+		if standardScopes[scope] {
+			transformed = append(transformed, scope)
+			continue
+		}
+
+		// If scope already has a prefix (contains :), preserve it
+		if strings.Contains(scope, ":") {
+			transformed = append(transformed, scope)
+			continue
+		}
+
+		// If scope contains /, it might be a path - preserve it
+		if strings.Contains(scope, "/") {
+			transformed = append(transformed, scope)
+			continue
+		}
+
+		// Otherwise, it's a bare HTCondor scope - add condor:/ prefix
+		transformed = append(transformed, "condor:/"+scope)
+	}
+	return transformed
 }
