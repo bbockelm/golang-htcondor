@@ -20,7 +20,7 @@ jobs:
             runner: ubuntu-latest
           - platform: linux/arm64
             tag: arm64
-            runner: ubuntu-24.04-arm64
+            runner: ubuntu-24.04-arm
 
     steps:
     - name: Checkout code
