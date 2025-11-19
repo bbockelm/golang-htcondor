@@ -32,8 +32,7 @@ func TestDynamicClientRegistrationScopes(t *testing.T) {
 
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -175,8 +174,7 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -270,8 +268,7 @@ func TestOAuth2ProtectedResourceMetadata(t *testing.T) {
 
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -367,8 +364,7 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
-		OutputPath:   "stdout",
-		MinVerbosity: logging.VerbosityInfo,
+		OutputPath: "stdout",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
