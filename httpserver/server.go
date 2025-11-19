@@ -37,6 +37,7 @@ type Server struct {
 	metricsRegistry     *metricsd.Registry
 	prometheusExporter  *metricsd.PrometheusExporter
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -83,6 +84,7 @@ type Config struct {
 	MCPAccessGroup      string              // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup        string              // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
+	SessionTTL          time.Duration       // HTTP session TTL (default: 24h)
 }
 
 // NewServer creates a new HTTP API server
@@ -120,6 +122,12 @@ func NewServer(cfg Config) (*Server, error) {
 	// Create schedd with the address as-is (can be host:port or sinful string)
 	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
+	// Set session TTL
+	sessionTTL := cfg.SessionTTL
+	if sessionTTL == 0 {
+		sessionTTL = 24 * time.Hour // Default: 24 hours
+	}
+
 	s := &Server{
 		schedd:           schedd,
 		scheddName:       cfg.ScheddName,
@@ -130,7 +138,8 @@ func NewServer(cfg Config) (*Server, error) {
 		userHeader:       cfg.UserHeader,
 		signingKeyPath:   cfg.SigningKeyPath,
 		logger:           logger,
-		tokenCache:       NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		tokenCache:       NewTokenCache(),         // Initialize token cache (includes username for rate limiting)
+		sessionStore:     NewSessionStore(sessionTTL), // Initialize HTTP session store
 		stopChan:         make(chan struct{}),
 	}
 
@@ -283,6 +292,9 @@ func (s *Server) Start() error {
 		s.startScheddAddressUpdater()
 	}
 
+	// Start session cleanup goroutine
+	s.startSessionCleanup()
+
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
 	return s.httpServer.Serve(ln)
 }
@@ -303,6 +315,9 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
 	}
+
+	// Start session cleanup goroutine
+	s.startSessionCleanup()
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
 	return s.httpServer.ServeTLS(ln, certFile, keyFile)
@@ -398,6 +413,34 @@ func (s *Server) startScheddAddressUpdater() {
 	}()
 }
 
+// startSessionCleanup starts a background goroutine that periodically
+// cleans up expired sessions
+func (s *Server) startSessionCleanup() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		// Clean up expired sessions every hour
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		s.logger.Info(logging.DestinationHTTP, "Started session cleanup goroutine", "interval", "1h")
+
+		for {
+			select {
+			case <-ticker.C:
+				s.sessionStore.Cleanup()
+				s.logger.Debug(logging.DestinationHTTP, "Cleaned up expired sessions",
+					"active_sessions", s.sessionStore.Size())
+
+			case <-s.stopChan:
+				s.logger.Info(logging.DestinationHTTP, "Stopping session cleanup goroutine")
+				return
+			}
+		}
+	}()
+}
+
 // GetOAuth2Provider returns the OAuth2 provider (for testing)
 func (s *Server) GetOAuth2Provider() *OAuth2Provider {
 	return s.oauth2Provider
@@ -468,12 +511,15 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 
 		// Extract identity from context (will be set by auth middleware if present)
 		identity := "-"
-		if s.userHeader != "" {
+		// Try session cookie first
+		if sessionData, ok := s.getSessionFromRequest(r); ok {
+			identity = sessionData.Username
+		} else if s.userHeader != "" {
 			if username := r.Header.Get(s.userHeader); username != "" {
 				identity = username
 			}
 		}
-		// Try to extract from bearer token if no user header
+		// Try to extract from bearer token if no session or user header
 		if identity == "-" {
 			if token, err := extractBearerToken(r); err == nil && token != "" {
 				// For now, just indicate that token auth was used
@@ -613,13 +659,49 @@ func extractBearerToken(r *http.Request) (string, error) {
 }
 
 // extractOrGenerateToken extracts a bearer token from the Authorization header,
-// or if userHeader is set and no auth token is present, generates a token for
-// the username from the specified header
+// checks for a session cookie, or if userHeader is set and no auth token is present,
+// generates a token for the username from the specified header.
+// Priority: Bearer token → Session cookie → User header
 func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 	// Try to extract bearer token first
 	token, err := extractBearerToken(r)
 	if err == nil {
 		return token, nil
+	}
+
+	// Try to get username from session cookie
+	if sessionData, ok := s.getSessionFromRequest(r); ok {
+		username := sessionData.Username
+		// If session has a cached token, use it
+		if sessionData.Token != "" {
+			return sessionData.Token, nil
+		}
+
+		// Generate a token for the session username if signing key is available
+		if s.signingKeyPath != "" {
+			iat := time.Now().Unix()
+			exp := time.Now().Add(1 * time.Minute).Unix()
+			issuer := s.trustDomain
+			if issuer == "" {
+				return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
+			}
+			if !strings.Contains(username, "@") {
+				if s.uidDomain == "" {
+					return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
+				}
+				username = username + "@" + s.uidDomain
+			}
+			kid := filepath.Base(s.signingKeyPath)
+			s.logger.Debug(logging.DestinationSecurity, "Generating token for session user", "username", username, "issuer", issuer, "key", kid)
+			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
+			if err != nil {
+				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)
+			}
+			return token, nil
+		}
+
+		// No signing key configured, cannot generate token from session
+		return "", fmt.Errorf("session cookie found but token generation not configured")
 	}
 
 	// If userHeader is configured and signing key is available, try to generate token
@@ -728,7 +810,11 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)
 	var username string
-	if s.userHeader != "" {
+	
+	// Try to get username from session cookie first
+	if sessionData, ok := s.getSessionFromRequest(r); ok {
+		username = sessionData.Username
+	} else if s.userHeader != "" {
 		// Check if using user header mode
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
