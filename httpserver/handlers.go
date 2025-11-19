@@ -141,39 +141,24 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Stream job ads as they arrive
 	jobCount := 0
 	var lastClusterID, lastProcID int64
-	hasError := false
+	var errorMsg string
 	for result := range resultCh {
 		if result.Err != nil {
 			// Check if it's a rate limit error
 			if ratelimit.IsRateLimitError(result.Err) {
 				s.logger.Error(logging.DestinationHTTP, "Rate limit exceeded", "error", result.Err)
-				errJSON, _ := json.Marshal(map[string]string{"error": "Rate limit exceeded"})
-				if jobCount > 0 {
-					w.Write([]byte(","))
-				}
-				w.Write(errJSON)
-				hasError = true
+				errorMsg = "Rate limit exceeded"
 				break
 			}
 			// Check if it's an authentication error
 			if isAuthenticationError(result.Err) {
 				s.logger.Error(logging.DestinationHTTP, "Authentication failed", "error", result.Err)
-				errJSON, _ := json.Marshal(map[string]string{"error": "Authentication failed"})
-				if jobCount > 0 {
-					w.Write([]byte(","))
-				}
-				w.Write(errJSON)
-				hasError = true
+				errorMsg = "Authentication failed"
 				break
 			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errJSON, _ := json.Marshal(map[string]string{"error": result.Err.Error()})
-			if jobCount > 0 {
-				w.Write([]byte(","))
-			}
-			w.Write(errJSON)
-			hasError = true
+			errorMsg = result.Err.Error()
 			break
 		}
 
@@ -181,22 +166,15 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		if owner, ok := result.Ad.EvaluateAttrInt("Owner"); !ok || owner == 0 {
 			// This is an error ad - check for error details
 			s.logger.Error(logging.DestinationHTTP, "Received error ad from schedd")
-			var errMsg string
 			if errCode, ok := result.Ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
 				if errStr, ok := result.Ad.EvaluateAttrString("ErrorString"); ok {
-					errMsg = errStr
+					errorMsg = errStr
 				} else {
-					errMsg = fmt.Sprintf("error code %d", errCode)
+					errorMsg = fmt.Sprintf("error code %d", errCode)
 				}
 			} else {
-				errMsg = "unknown error"
+				errorMsg = "unknown error"
 			}
-			errJSON, _ := json.Marshal(map[string]string{"error": errMsg})
-			if jobCount > 0 {
-				w.Write([]byte(","))
-			}
-			w.Write(errJSON)
-			hasError = true
 			break
 		}
 
@@ -246,8 +224,14 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Close JSON array and add metadata
 	metadata := fmt.Sprintf(`],"total_returned":%d`, jobCount)
 
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
 	// Add pagination info if we hit the limit and no error occurred
-	if !hasError && limit > 0 && jobCount >= limit {
+	if errorMsg == "" && limit > 0 && jobCount >= limit {
 		// Generate next page token
 		nextPageToken := htcondor.EncodePageToken(lastClusterID, lastProcID)
 		metadata += fmt.Sprintf(`,"has_more":true,"next_page_token":%q`, nextPageToken)
@@ -1216,16 +1200,12 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 
 	// Stream ads as they arrive
 	adCount := 0
+	var errorMsg string
 	for result := range resultCh {
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			// Write error in the response
-			errJSON, _ := json.Marshal(map[string]string{"error": result.Err.Error()})
-			if adCount > 0 {
-				w.Write([]byte(","))
-			}
-			w.Write(errJSON)
+			errorMsg = result.Err.Error()
 			break
 		}
 
@@ -1259,7 +1239,16 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Close JSON array and add metadata
-	metadata := fmt.Sprintf(`],"total_returned":%d}`, adCount)
+	metadata := fmt.Sprintf(`],"total_returned":%d`, adCount)
+
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	metadata += "}"
+
 	if _, err := w.Write([]byte(metadata)); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 	}
@@ -1349,16 +1338,12 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 
 	// Stream ads as they arrive
 	adCount := 0
+	var errorMsg string
 	for result := range resultCh {
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err, "adType", adType)
-			// Write error in the response
-			errJSON, _ := json.Marshal(map[string]string{"error": result.Err.Error()})
-			if adCount > 0 {
-				w.Write([]byte(","))
-			}
-			w.Write(errJSON)
+			errorMsg = result.Err.Error()
 			break
 		}
 
@@ -1392,7 +1377,16 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 	}
 
 	// Close JSON array and add metadata
-	metadata := fmt.Sprintf(`],"total_returned":%d}`, adCount)
+	metadata := fmt.Sprintf(`],"total_returned":%d`, adCount)
+
+	// Add error if one occurred
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	metadata += "}"
+
 	if _, err := w.Write([]byte(metadata)); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 	}
