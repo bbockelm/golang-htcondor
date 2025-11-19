@@ -1350,7 +1350,10 @@ func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, clu
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
 
-	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	opts := &htcondor.QueryOptions{
+		Projection: projection,
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to query job", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to query job")

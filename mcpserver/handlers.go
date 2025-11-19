@@ -1,3 +1,4 @@
+// Package mcpserver implements the Model Context Protocol (MCP) server for HTCondor.
 package mcpserver
 
 import (
@@ -788,7 +789,10 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
 
-	jobAds, err := s.schedd.Query(ctx, constraint, projection)
+	opts := &htcondor.QueryOptions{
+		Projection: projection,
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
