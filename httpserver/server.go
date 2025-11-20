@@ -50,6 +50,8 @@ type Server struct {
 	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
+	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
 	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
 	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
 }
@@ -89,6 +91,8 @@ type Config struct {
 	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
 	SessionTTL          time.Duration       // HTTP session TTL (default: 24h)
 	HTCondorConfig      *config.Config      // HTCondor configuration (optional, used for LOCAL_DIR default)
+	StreamBufferSize    int                 // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout  time.Duration       // Write timeout for streaming queries (default: 5s)
 }
 
 // NewServer creates a new HTTP API server
@@ -134,18 +138,30 @@ func NewServer(cfg Config) (*Server, error) {
 		sessionTTL = 24 * time.Hour // Default: 24 hours
 	}
 
+	// Set streaming defaults
+	streamBufferSize := cfg.StreamBufferSize
+	if streamBufferSize == 0 {
+		streamBufferSize = 100
+	}
+	streamWriteTimeout := cfg.StreamWriteTimeout
+	if streamWriteTimeout == 0 {
+		streamWriteTimeout = 5 * time.Second
+	}
+
 	s := &Server{
-		schedd:           schedd,
-		scheddName:       cfg.ScheddName,
-		scheddDiscovered: scheddDiscovered,
-		collector:        cfg.Collector,
-		trustDomain:      cfg.TrustDomain,
-		uidDomain:        cfg.UIDDomain,
-		userHeader:       cfg.UserHeader,
-		signingKeyPath:   cfg.SigningKeyPath,
-		logger:           logger,
-		tokenCache:       NewTokenCache(), // Initialize token cache (includes username for rate limiting)
-		stopChan:         make(chan struct{}),
+		schedd:             schedd,
+		scheddName:         cfg.ScheddName,
+		scheddDiscovered:   scheddDiscovered,
+		collector:          cfg.Collector,
+		trustDomain:        cfg.TrustDomain,
+		uidDomain:          cfg.UIDDomain,
+		userHeader:         cfg.UserHeader,
+		signingKeyPath:     cfg.SigningKeyPath,
+		logger:             logger,
+		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		streamBufferSize:   streamBufferSize,
+		streamWriteTimeout: streamWriteTimeout,
+		stopChan:           make(chan struct{}),
 	}
 
 	// Setup OAuth2 provider if MCP is enabled

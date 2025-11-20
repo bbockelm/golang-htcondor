@@ -101,6 +101,10 @@ const openAPISchema = `{
           "next_page_token": {
             "type": "string",
             "description": "Token to use for fetching the next page (only present if has_more is true)"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if an error occurred during streaming. When present, the jobs array contains all successfully streamed jobs before the error."
           }
         }
       }
@@ -936,6 +940,10 @@ const openAPISchema = `{
                     "next_page_token": {
                       "type": "string",
                       "description": "Token to use for fetching the next page (only present if has_more is true)"
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Error message if an error occurred during streaming. When present, the ads array contains all successfully streamed ads before the error."
                     }
                   }
                 }
@@ -1047,6 +1055,10 @@ const openAPISchema = `{
                     "next_page_token": {
                       "type": "string",
                       "description": "Token to use for fetching the next page (only present if has_more is true)"
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Error message if an error occurred during streaming. When present, the ads array contains all successfully streamed ads before the error."
                     }
                   }
                 }

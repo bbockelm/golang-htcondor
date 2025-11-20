@@ -3,11 +3,13 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/security"
 )
 
 // Collector represents an HTCondor collector daemon
@@ -74,6 +76,200 @@ func (c *Collector) QueryAdsWithOptions(ctx context.Context, adType string, cons
 	return ads, pageInfo, nil
 }
 
+// StreamOptions configures streaming query behavior
+type StreamOptions struct {
+	// BufferSize is the number of ads to buffer in the channel (default: 100)
+	BufferSize int
+	// WriteTimeout is the maximum cumulative time spent blocking on channel writes (default: 5s)
+	WriteTimeout time.Duration
+}
+
+// ApplyStreamDefaults returns StreamOptions with defaults applied
+func (o *StreamOptions) ApplyStreamDefaults() StreamOptions {
+	opts := StreamOptions{
+		BufferSize:   100,
+		WriteTimeout: 5 * time.Second,
+	}
+	if o != nil {
+		if o.BufferSize > 0 {
+			opts.BufferSize = o.BufferSize
+		}
+		if o.WriteTimeout > 0 {
+			opts.WriteTimeout = o.WriteTimeout
+		}
+	}
+	return opts
+}
+
+// AdResult represents a single ad or error from a streaming query
+type AdResult struct {
+	Ad  *classad.ClassAd
+	Err error
+}
+
+// QueryAdsStream queries the collector and streams results through a channel
+// Returns a channel and an error. If the error is non-nil, it indicates a problem
+// before the request was sent (e.g., invalid parameters, connection failure).
+// The channel will be closed when all ads have been sent or an error occurs during streaming.
+// If cumulative time blocking on channel writes exceeds StreamOptions.WriteTimeout, an error is sent through the channel.
+// The limit parameter controls the maximum number of ads to return (-1 for unlimited).
+func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constraint string, projection []string, limit int, streamOpts *StreamOptions) (<-chan AdResult, error) {
+	// Apply stream defaults
+	streamOptsApplied := streamOpts.ApplyStreamDefaults()
+
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+			return nil, fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
+	// Determine command
+	cmd, err := getCommandForAdType(adType)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse constraint expression if provided
+	var constraintExpr *classad.Expr
+	if constraint != "" {
+		constraintExpr, err = classad.ParseExpr(constraint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint expression: %w", err)
+		}
+	}
+
+	// Create channel for results
+	ch := make(chan AdResult, streamOptsApplied.BufferSize)
+
+	go func() {
+		defer close(ch)
+
+		// Establish connection
+		htcondorClient, err := client.ConnectToAddress(ctx, c.address)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to connect to collector: %w", err)}
+			return
+		}
+		defer func() { _ = htcondorClient.Close() }()
+
+		// Get CEDAR stream
+		cedarStream := htcondorClient.GetStream()
+
+		// Get security config
+		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
+			return
+		}
+
+		// Perform security handshake
+		auth := security.NewAuthenticator(secConfig, cedarStream)
+		negotiation, err := auth.ClientHandshake(ctx)
+		if err != nil {
+			ch <- AdResult{Err: fmt.Errorf("security handshake failed: %w", err)}
+			return
+		}
+
+		// Update context with authenticated user if needed
+		if username == "" && negotiation.User != "" {
+			ctx = WithAuthenticatedUser(ctx, negotiation.User)
+		}
+
+		// Create query ClassAd with limit
+		queryAd := createQueryAd(adType, constraintExpr, projection, limit)
+
+		// Send query
+		queryMsg := message.NewMessageForStream(cedarStream)
+		if err := queryMsg.PutClassAd(ctx, queryAd); err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to add query ClassAd to message: %w", err)}
+			return
+		}
+		if err := queryMsg.FlushFrame(ctx, true); err != nil {
+			ch <- AdResult{Err: fmt.Errorf("failed to send query message: %w", err)}
+			return
+		}
+
+		// Stream response ads
+		streamOptsApplied := streamOpts.ApplyStreamDefaults()
+		totalBlockTime := time.Duration(0)
+		adCount := 0
+
+		// Create timer that wakes up periodically to check timeout
+		checkInterval := 100 * time.Millisecond
+		timer := time.NewTimer(checkInterval)
+		defer timer.Stop()
+
+		for {
+			// Check if we've reached the limit
+			if limit > 0 && adCount >= limit {
+				return
+			}
+
+			// Read "more" flag
+			responseMsg := message.NewMessageFromStream(cedarStream)
+			more, err := responseMsg.GetInt32(ctx)
+			if err != nil {
+				ch <- AdResult{Err: fmt.Errorf("failed to read 'more' flag: %w", err)}
+				return
+			}
+
+			if more == 0 {
+				// End of results
+				return
+			}
+
+			// Read ClassAd
+			ad, err := responseMsg.GetClassAd(ctx)
+			if err != nil {
+				ch <- AdResult{Err: fmt.Errorf("failed to read ClassAd: %w", err)}
+				return
+			}
+
+			// Send ad to channel with timeout tracking using a timer
+			// Calculate how much time we have left
+			timeLeft := streamOptsApplied.WriteTimeout - totalBlockTime
+			if timeLeft < checkInterval {
+				checkInterval = timeLeft
+			}
+			if checkInterval <= 0 {
+				ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+				return
+			}
+			timer.Reset(checkInterval)
+
+			startWrite := time.Now()
+			for {
+				select {
+				case ch <- AdResult{Ad: ad}:
+					blockTime := time.Since(startWrite)
+					totalBlockTime += blockTime
+					adCount++
+					goto nextAd
+				case <-timer.C:
+					// Timer expired - check if we've exceeded total timeout
+					blockTime := time.Since(startWrite)
+					totalBlockTime += blockTime
+					if totalBlockTime >= streamOptsApplied.WriteTimeout {
+						ch <- AdResult{Err: fmt.Errorf("write timeout exceeded: blocked for %v (limit: %v)", totalBlockTime, streamOptsApplied.WriteTimeout)}
+						return
+					}
+					// Continue retrying in the loop
+					timer.Reset(checkInterval)
+				case <-ctx.Done():
+					ch <- AdResult{Err: ctx.Err()}
+					return
+				}
+			}
+		nextAd:
+		}
+	}()
+
+	return ch, nil
+}
+
 // queryAdsInternal performs the actual collector query
 func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constraint string, projection []string, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
@@ -124,7 +320,13 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 			return nil, fmt.Errorf("failed to parse constraint expression: %w", err)
 		}
 	}
-	queryAd := createQueryAd(adType, constraintExpr, projection)
+
+	// Get limit from options
+	limit := -1
+	if opts != nil && !opts.IsUnlimited() {
+		limit = opts.Limit
+	}
+	queryAd := createQueryAd(adType, constraintExpr, projection, limit)
 
 	// Create message and send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -142,8 +344,7 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 	responseMsg := message.NewMessageFromStream(cedarStream)
 	var ads []*classad.ClassAd
 
-	// Determine the limit to apply
-	limit := -1 // unlimited by default
+	// The limit is already enforced server-side via LimitResults, but keep client-side check as safety
 	if opts != nil && !opts.IsUnlimited() {
 		limit = opts.Limit
 	}
@@ -206,7 +407,7 @@ func getCommandForAdType(adType string) (commands.CommandType, error) {
 }
 
 // createQueryAd creates a ClassAd for querying ads
-func createQueryAd(adType string, constraint *classad.Expr, projection []string) *classad.ClassAd {
+func createQueryAd(adType string, constraint *classad.Expr, projection []string, limit int) *classad.ClassAd {
 	ad := classad.New()
 
 	// Set MyType and TargetType as required by HTCondor query protocol
@@ -233,6 +434,11 @@ func createQueryAd(adType string, constraint *classad.Expr, projection []string)
 			projectionStr += attr
 		}
 		_ = ad.Set("ProjectionAttributes", projectionStr)
+	}
+
+	// Set LimitResults for server-side limit enforcement
+	if limit > 0 {
+		_ = ad.Set("LimitResults", int64(limit))
 	}
 
 	return ad
