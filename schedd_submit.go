@@ -240,6 +240,23 @@ func (q *QmgmtConnection) CommitTransaction(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("CommitTransaction failed but could not read error code: %w", err)
 		}
+
+		// Modern schedds (>= 8.3.4) send a ClassAd with error details
+		// Try to read the ClassAd for more detailed error information
+		errorAd, err := responseMsg.GetClassAd(ctx)
+		if err != nil {
+			// If we can't read the ClassAd, just return the basic error
+			q.inTransaction = false
+			return fmt.Errorf("CommitTransaction failed with error code %d", errCode)
+		}
+
+		// Extract error reason from the ClassAd if present
+		if errorReason, ok := errorAd.EvaluateAttrString("ErrorReason"); ok && errorReason != "" {
+			q.inTransaction = false
+			return fmt.Errorf("CommitTransaction failed: %s (error code %d)", errorReason, errCode)
+		}
+
+		// Fallback to basic error if no reason found
 		q.inTransaction = false
 		return fmt.Errorf("CommitTransaction failed with error code %d", errCode)
 	}
