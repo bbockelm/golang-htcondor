@@ -98,10 +98,10 @@ func TestHTTPAPIIntegration(t *testing.T) {
 
 	// Create HTTP server with collector for collector tests
 	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
-	
+
 	// Set OAuth2DBPath to tempDir to avoid permission issues
 	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
-	
+
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
