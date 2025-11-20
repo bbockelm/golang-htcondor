@@ -16,6 +16,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
@@ -72,7 +73,7 @@ type Config struct {
 	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
 	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
 	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: "oauth2.db")
+	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
 	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
 	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
 	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
@@ -87,6 +88,7 @@ type Config struct {
 	MCPReadGroup        string              // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
 	SessionTTL          time.Duration       // HTTP session TTL (default: 24h)
+	HTCondorConfig      *config.Config      // HTCondor configuration (optional, used for LOCAL_DIR default)
 }
 
 // NewServer creates a new HTTP API server
@@ -150,7 +152,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.EnableMCP {
 		oauth2DBPath := cfg.OAuth2DBPath
 		if oauth2DBPath == "" {
-			oauth2DBPath = "oauth2.db"
+			oauth2DBPath = getDefaultDBPath(cfg.HTCondorConfig, "oauth2.db")
 		}
 
 		oauth2Issuer := cfg.OAuth2Issuer
@@ -229,7 +231,7 @@ func NewServer(cfg Config) (*Server, error) {
 		// Use a separate database file for sessions
 		sessionDBPath := cfg.OAuth2DBPath
 		if sessionDBPath == "" {
-			sessionDBPath = "sessions.db"
+			sessionDBPath = getDefaultDBPath(cfg.HTCondorConfig, "sessions.db")
 		} else {
 			// Use same path but different file name if OAuth2 DB is configured
 			sessionDBPath += ".sessions"
@@ -308,6 +310,17 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
+func getDefaultDBPath(cfg *config.Config, filename string) string {
+	if cfg != nil {
+		if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
+			return filepath.Join(localDir, filename)
+		}
+	}
+	// Fallback to standard HTCondor location
+	return filepath.Join("/var/lib/condor", filename)
 }
 
 // Start starts the HTTP server

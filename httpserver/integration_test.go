@@ -98,6 +98,10 @@ func TestHTTPAPIIntegration(t *testing.T) {
 
 	// Create HTTP server with collector for collector tests
 	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	
+	// Set OAuth2DBPath to tempDir to avoid permission issues
+	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
+	
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
@@ -107,6 +111,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		TrustDomain:    trustDomain,
 		UIDDomain:      "test.htcondor.org",
 		Collector:      collector,
+		OAuth2DBPath:   oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -1224,6 +1229,9 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 	// Create collector pointing to local mini condor
 	collector := htcondor.NewCollector(collectorAddr)
 
+	// Set OAuth2DBPath to tempDir to avoid permission issues
+	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
+
 	server, err = NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddName:     "local",
@@ -1233,6 +1241,7 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 		TrustDomain:    "test.htcondor.org",
 		UIDDomain:      "test.htcondor.org",
 		Collector:      collector,
+		OAuth2DBPath:   oauth2DBPath,
 	})
 	if err != nil {
 		stopCondorMaster(condorMaster, t)
@@ -1384,6 +1393,10 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Create collector using local address (collector will auto-discover from condor config)
 	// Since HTCondor is using port 0, the actual port will be assigned by HTCondor
 	collector := htcondor.NewCollector("") // Empty string means use local condor config
+
+	// Set OAuth2DBPath to tempDir to avoid permission issues
+	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
+
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
 		ScheddAddr:     scheddAddr,
@@ -1396,6 +1409,7 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 		ReadTimeout:    2 * time.Second, // Aggressive timeout for testing
 		WriteTimeout:   2 * time.Second,
 		IdleTimeout:    5 * time.Second,
+		OAuth2DBPath:   oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
