@@ -49,3 +49,7 @@ htcondor-mcp
 # Test databases
 oauth2.db
 oauth2.db-*
+*.db
+
+# Reference documentation files
+reference/
