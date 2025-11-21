@@ -118,3 +118,121 @@ func TestHealthzEndpoint(t *testing.T) {
 func TestReadyzEndpoint(t *testing.T) {
 	testHealthEndpoint(t, (&Server{}).handleReadyz, "/readyz", "ready")
 }
+
+// TestLogoutEndpoint verifies the /logout endpoint clears session cookies
+func TestLogoutEndpoint(t *testing.T) {
+	tests := []struct {
+		name           string
+		method         string
+		cookies        []*http.Cookie
+		wantStatusCode int
+		wantStatus     string
+		wantMessage    string
+		checkCookies   bool
+	}{
+		{
+			name:           "POST /logout without cookies returns success",
+			method:         http.MethodPost,
+			cookies:        nil,
+			wantStatusCode: http.StatusOK,
+			wantStatus:     "success",
+			wantMessage:    "Logged out successfully",
+			checkCookies:   false,
+		},
+		{
+			name:   "POST /logout with cookies clears them",
+			method: http.MethodPost,
+			cookies: []*http.Cookie{
+				{Name: "session_id", Value: "test-session-123"},
+				{Name: "auth_token", Value: "test-token-456"},
+			},
+			wantStatusCode: http.StatusOK,
+			wantStatus:     "success",
+			wantMessage:    "Logged out successfully",
+			checkCookies:   true,
+		},
+		{
+			name:           "GET /logout returns Method Not Allowed",
+			method:         http.MethodGet,
+			cookies:        nil,
+			wantStatusCode: http.StatusMethodNotAllowed,
+			wantStatus:     "",
+			wantMessage:    "",
+			checkCookies:   false,
+		},
+		{
+			name:           "PUT /logout returns Method Not Allowed",
+			method:         http.MethodPut,
+			cookies:        nil,
+			wantStatusCode: http.StatusMethodNotAllowed,
+			wantStatus:     "",
+			wantMessage:    "",
+			checkCookies:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/logout", nil)
+
+			// Add cookies to request if provided
+			for _, cookie := range tt.cookies {
+				req.AddCookie(cookie)
+			}
+
+			w := httptest.NewRecorder()
+
+			// Create a minimal server instance for testing
+			server := &Server{}
+			server.handleLogout(w, req)
+
+			resp := w.Result()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("Failed to close response body: %v", err)
+				}
+			}()
+
+			if resp.StatusCode != tt.wantStatusCode {
+				t.Errorf("handler status = %v, want %v", resp.StatusCode, tt.wantStatusCode)
+			}
+
+			if tt.wantStatus != "" {
+				var response map[string]string
+				if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				if response["status"] != tt.wantStatus {
+					t.Errorf("handler response status = %v, want %v", response["status"], tt.wantStatus)
+				}
+				if response["message"] != tt.wantMessage {
+					t.Errorf("handler response message = %v, want %v", response["message"], tt.wantMessage)
+				}
+			}
+
+			// Verify cookies are cleared when checkCookies is true
+			if tt.checkCookies {
+				respCookies := resp.Cookies()
+				if len(respCookies) != len(tt.cookies) {
+					t.Errorf("Expected %d cookies to be cleared, got %d", len(tt.cookies), len(respCookies))
+				}
+
+				// Check that each cookie is set to expire
+				for _, respCookie := range respCookies {
+					if respCookie.MaxAge != -1 {
+						t.Errorf("Cookie %s MaxAge = %v, want -1", respCookie.Name, respCookie.MaxAge)
+					}
+					if respCookie.Value != "" {
+						t.Errorf("Cookie %s Value = %v, want empty string", respCookie.Name, respCookie.Value)
+					}
+					if respCookie.Path != "/" {
+						t.Errorf("Cookie %s Path = %v, want /", respCookie.Name, respCookie.Path)
+					}
+					if !respCookie.HttpOnly {
+						t.Errorf("Cookie %s HttpOnly = %v, want true", respCookie.Name, respCookie.HttpOnly)
+					}
+				}
+			}
+		})
+	}
+}

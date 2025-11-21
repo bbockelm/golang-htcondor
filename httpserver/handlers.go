@@ -1037,6 +1037,34 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogout handles POST /logout endpoint to clear session cookies
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Clear all session-related cookies by setting them with expired time
+	// This follows the standard practice for logout functionality
+	cookies := r.Cookies()
+	for _, cookie := range cookies {
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookie.Name,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   r.TLS != nil,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "success",
+		"message": "Logged out successfully",
+	})
+}
+
 // parseJobActionRequest parses job ID and optional reason for single job actions
 func (s *Server) parseJobActionRequest(r *http.Request, jobID, defaultAction string) (cluster, proc int, reason string, err error) {
 	// Parse job ID
