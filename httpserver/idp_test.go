@@ -234,13 +234,13 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	}
 
 	ar := &fosite.Request{
-		ID:            "test-request-id",
-		RequestedAt:   time.Now(),
-		Client:        client,
+		ID:             "test-request-id",
+		RequestedAt:    time.Now(),
+		Client:         client,
 		RequestedScope: fosite.Arguments{"openid", "profile"},
 		GrantedScope:   fosite.Arguments{"openid", "profile"},
-		Form:          url.Values{},
-		Session:       session,
+		Form:           url.Values{},
+		Session:        session,
 	}
 
 	// Store authorization code

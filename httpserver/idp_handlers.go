@@ -35,7 +35,7 @@ func (s *Server) handleIDPLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 	// Get redirect_uri from query params to pass through
 	redirectURI := r.URL.Query().Get("redirect_uri")
-	
+
 	html := `<!DOCTYPE html>
 <html>
 <head>
