@@ -11,6 +11,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/cedar/stream"
 )
 
 // securityConfigContextKey is the type for the security configuration context key
@@ -207,17 +208,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	go func() {
 		defer close(ch)
 
-		// Establish connection
-		htcondorClient, err := client.ConnectToAddress(ctx, s.address)
-		if err != nil {
-			ch <- JobAdResult{Err: fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)}
-			return
-		}
-		defer func() { _ = htcondorClient.Close() }()
-
-		// Get CEDAR stream
-		cedarStream := htcondorClient.GetStream()
-
 		// Determine command
 		cmd := commands.QUERY_JOB_ADS
 
@@ -228,13 +218,55 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 			return
 		}
 
-		// Perform security handshake
-		auth := security.NewAuthenticator(secConfig, cedarStream)
-		negotiation, err := auth.ClientHandshake(ctx)
-		if err != nil {
-			ch <- JobAdResult{Err: fmt.Errorf("security handshake failed: %w", err)}
+		// Establish connection and authenticate with retry logic for session resumption failures
+		// This follows the same pattern as ConnectAndAuthenticateWithConfig
+		const maxRetries = 2 // Initial attempt + 1 retry on session resumption failure
+
+		var htcondorClient *client.HTCondorClient
+		var cedarStream *stream.Stream
+		var negotiation *security.SecurityNegotiation
+		var lastErr error
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			// Establish connection
+			htcondorClient, err = client.ConnectToAddress(ctx, s.address)
+			if err != nil {
+				lastErr = fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
+				continue
+			}
+
+			// Get CEDAR stream
+			cedarStream = htcondorClient.GetStream()
+
+			// Perform security handshake
+			auth := security.NewAuthenticator(secConfig, cedarStream)
+			negotiation, err = auth.ClientHandshake(ctx)
+
+			// Check if this is a session resumption error
+			if security.IsSessionResumptionError(err) {
+				// Close the connection and retry with a fresh connection
+				_ = htcondorClient.Close()
+				lastErr = fmt.Errorf("session resumption failed, retrying with new connection: %w", err)
+				continue
+			}
+
+			if err != nil {
+				_ = htcondorClient.Close()
+				ch <- JobAdResult{Err: fmt.Errorf("security handshake failed: %w", err)}
+				return
+			}
+
+			// Success! Break out of retry loop
+			break
+		}
+
+		// Check if all retry attempts failed
+		if htcondorClient == nil || negotiation == nil {
+			ch <- JobAdResult{Err: fmt.Errorf("failed to connect and authenticate after %d attempts: %w", maxRetries, lastErr)}
 			return
 		}
+
+		defer func() { _ = htcondorClient.Close() }()
 
 		// Update context with authenticated user if needed
 		if username == "" && negotiation.User != "" {
