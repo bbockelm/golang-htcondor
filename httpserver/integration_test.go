@@ -68,6 +68,11 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
+	// Set CONDOR_CONFIG environment variable and reload configuration
+	// This ensures we don't inherit rate limits from other tests
+	t.Setenv("CONDOR_CONFIG", configFile)
+	htcondor.ReloadDefaultConfig()
+
 	// Start condor_master
 	t.Log("Starting condor_master...")
 	ctx, cancel := context.WithCancel(context.Background())
