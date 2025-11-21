@@ -660,6 +660,36 @@ func runNormalMode() error {
 	// Load MCP configuration
 	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig)
 
+	// Check if IDP should be enabled
+	enableIDP := false
+	if idpEnable, ok := cfg.Get("HTTP_API_ENABLE_IDP"); ok && idpEnable == "true" {
+		enableIDP = true
+		log.Println("Built-in IDP enabled via configuration")
+	}
+
+	// Load IDP configuration
+	idpDBPath := ""
+	idpIssuer := ""
+	if enableIDP {
+		// Load IDP database path
+		if dbPath, ok := cfg.Get("HTTP_API_IDP_DB_PATH"); ok && dbPath != "" {
+			idpDBPath = dbPath
+		} else if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
+			idpDBPath = filepath.Join(localDir, "idp.db")
+		} else {
+			idpDBPath = "/var/lib/condor/idp.db"
+		}
+		log.Printf("IDP database path: %s", idpDBPath)
+
+		// Load IDP issuer
+		if issuer, ok := cfg.Get("HTTP_API_IDP_ISSUER"); ok && issuer != "" {
+			idpIssuer = issuer
+		} else {
+			idpIssuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
+		}
+		log.Printf("IDP issuer: %s", idpIssuer)
+	}
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:          listenAddrFromConfig,
@@ -691,6 +721,9 @@ func runNormalMode() error {
 		MCPAccessGroup:      mcpCfg.mcpAccessGroup,
 		MCPReadGroup:        mcpCfg.mcpReadGroup,
 		MCPWriteGroup:       mcpCfg.mcpWriteGroup,
+		EnableIDP:           enableIDP,
+		IDPDBPath:           idpDBPath,
+		IDPIssuer:           idpIssuer,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -844,7 +877,10 @@ func runDemoMode() error {
 	// OAuth2 database path for MCP
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Create and start HTTP server with MCP enabled
+	// IDP database path
+	idpDBPath := filepath.Join(tempDir, "idp.db")
+
+	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     *listenAddr,
 		UserHeader:     *userHeader,
@@ -857,6 +893,9 @@ func runDemoMode() error {
 		OAuth2DBPath:   oauth2DBPath,                           // OAuth2 database path
 		OAuth2Issuer:   "http://" + *listenAddr,                // OAuth2 issuer URL
 		OAuth2Scopes:   []string{"openid", "profile", "email"}, // Default scopes for demo
+		EnableIDP:      true,                                   // Enable built-in IDP in demo mode
+		IDPDBPath:      idpDBPath,                              // IDP database path
+		IDPIssuer:      "http://" + *listenAddr,                // IDP issuer URL
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
