@@ -72,4 +72,7 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// Health and readiness endpoints for Kubernetes
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
+
+	// Logout endpoint
+	mux.HandleFunc("/logout", s.handleLogout)
 }
