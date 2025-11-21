@@ -1053,10 +1053,25 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear all session-related cookies by setting them with expired time
+	// Delete session from SQL store if it exists
+	if s.sessionStore != nil {
+		sessionID, err := getSessionCookie(r)
+		if err == nil && sessionID != "" {
+			s.sessionStore.Delete(sessionID)
+		}
+	}
+
+	// Clear the htcondor_session cookie specifically
+	s.clearSessionCookie(w)
+
+	// Clear all other cookies by setting them with expired time
 	// This follows the standard practice for logout functionality
 	cookies := r.Cookies()
 	for _, cookie := range cookies {
+		// Skip the session cookie since we already cleared it with clearSessionCookie
+		if cookie.Name == sessionCookieName {
+			continue
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookie.Name,
 			Value:    "",

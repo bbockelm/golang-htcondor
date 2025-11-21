@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestParseJobID tests the parseJobID helper function
@@ -213,8 +214,10 @@ func TestLogoutEndpoint(t *testing.T) {
 			// Verify cookies are cleared when checkCookies is true
 			if tt.checkCookies {
 				respCookies := resp.Cookies()
-				if len(respCookies) != len(tt.cookies) {
-					t.Errorf("Expected %d cookies to be cleared, got %d", len(tt.cookies), len(respCookies))
+				// We should have at least as many cookies as we sent
+				// (may have additional session cookie cleared)
+				if len(respCookies) < len(tt.cookies) {
+					t.Errorf("Expected at least %d cookies to be cleared, got %d", len(tt.cookies), len(respCookies))
 				}
 
 				// Check that each cookie is set to expire
@@ -235,4 +238,82 @@ func TestLogoutEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLogoutEndpointWithSessionStore verifies the /logout endpoint clears session from SQL store
+func TestLogoutEndpointWithSessionStore(t *testing.T) {
+	// Create an in-memory database and session store for testing
+	store := createTestSessionStore(t, 1*time.Hour)
+
+	// Create a test session
+	sessionID, session, err := store.Create("testuser")
+	if err != nil {
+		t.Fatalf("Failed to create test session: %v", err)
+	}
+
+	// Verify session exists in store before logout
+	if retrieved := store.Get(sessionID); retrieved == nil {
+		t.Fatal("Session should exist before logout")
+	}
+
+	// Create a request with the session cookie
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  sessionCookieName,
+		Value: sessionID,
+	})
+
+	w := httptest.NewRecorder()
+
+	// Create a server instance with the session store
+	server := &Server{
+		sessionStore: store,
+	}
+	server.handleLogout(w, req)
+
+	resp := w.Result()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
+
+	// Verify successful response
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handler status = %v, want %v", resp.StatusCode, http.StatusOK)
+	}
+
+	var response map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if response["status"] != "success" {
+		t.Errorf("handler response status = %v, want %v", response["status"], "success")
+	}
+
+	// Verify session was deleted from the SQL store
+	if retrieved := store.Get(sessionID); retrieved != nil {
+		t.Errorf("Session should be deleted from store after logout, but got session for user %s", retrieved.Username)
+	}
+
+	// Verify the session cookie was cleared
+	cookies := resp.Cookies()
+	var sessionCookieCleared bool
+	for _, cookie := range cookies {
+		if cookie.Name == sessionCookieName {
+			sessionCookieCleared = true
+			if cookie.MaxAge != -1 {
+				t.Errorf("Session cookie MaxAge = %v, want -1", cookie.MaxAge)
+			}
+			if cookie.Value != "" {
+				t.Errorf("Session cookie Value = %v, want empty string", cookie.Value)
+			}
+		}
+	}
+	if !sessionCookieCleared {
+		t.Error("Session cookie should be cleared in response")
+	}
+
+	// Verify session data to silence unused variable warning
+	_ = session
 }
