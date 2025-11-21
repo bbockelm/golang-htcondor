@@ -94,6 +94,14 @@ func TestHTTPSessionIntegration(t *testing.T) {
 	// Use dynamic port for HTTP server
 	serverAddr := "127.0.0.1:0"
 
+	// Create a directory for the DB to avoid any interference from Condor
+	dbDir := filepath.Join(tempDir, "db")
+	if err := os.Mkdir(dbDir, 0700); err != nil {
+		t.Fatalf("Failed to create db directory: %v", err)
+	}
+	// Set OAuth2DBPath to tempDir to avoid permission issues
+	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
+
 	// Create HTTP server with session support and signing key for token generation
 	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
 	serverCfg := Config{
@@ -106,6 +114,7 @@ func TestHTTPSessionIntegration(t *testing.T) {
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      trustDomain,
+		OAuth2DBPath:   oauth2DBPath,
 	}
 
 	server, err := NewServer(serverCfg)

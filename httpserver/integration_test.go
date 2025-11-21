@@ -99,8 +99,13 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	// Create HTTP server with collector for collector tests
 	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
 
+	// Create a directory for the DB to avoid any interference from Condor
+	dbDir := filepath.Join(tempDir, "db")
+	if err := os.Mkdir(dbDir, 0700); err != nil {
+		t.Fatalf("Failed to create db directory: %v", err)
+	}
 	// Set OAuth2DBPath to tempDir to avoid permission issues
-	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
+	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
 		ListenAddr:     serverAddr,
