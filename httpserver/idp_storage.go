@@ -397,6 +397,7 @@ func (s *IDPStorage) InvalidateAuthorizeCodeSession(ctx context.Context, signatu
 
 // Helper methods
 
+//nolint:dupl // Similar to OAuth2Storage but uses different query builders
 func (s *IDPStorage) createTokenSession(ctx context.Context, table string, signature string, request fosite.Requester) error {
 	scopes, err := json.Marshal(request.GetRequestedScopes())
 	if err != nil {
@@ -438,6 +439,7 @@ func (s *IDPStorage) createTokenSession(ctx context.Context, table string, signa
 	return err
 }
 
+//nolint:dupl // Similar to OAuth2Storage but uses different query builders
 func (s *IDPStorage) getTokenSession(ctx context.Context, table string, signature string, session fosite.Session) (fosite.Requester, error) {
 	var (
 		requestID     string

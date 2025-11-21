@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -269,7 +270,7 @@ func (s *Server) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIDPMetadata handles OIDC discovery metadata for IDP
-func (s *Server) handleIDPMetadata(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIDPMetadata(w http.ResponseWriter, _ *http.Request) {
 	// Get the issuer URL from the IDP provider config
 	issuer := s.idpProvider.config.AccessTokenIssuer
 
@@ -368,10 +369,10 @@ func (s *Server) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIDPJWKS handles JWKS endpoint for IDP
-func (s *Server) handleIDPJWKS(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIDPJWKS(w http.ResponseWriter, _ *http.Request) {
 	// Extract public key from the RSA private key
 	publicKey := &s.idpProvider.privateKey.PublicKey
-	
+
 	// Convert to JWK format (JSON Web Key)
 	// We use "idp-key-1" as the key ID
 	jwk := map[string]interface{}{
@@ -382,7 +383,7 @@ func (s *Server) handleIDPJWKS(w http.ResponseWriter, r *http.Request) {
 		"n":   base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes()),
 		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(publicKey.E)).Bytes()),
 	}
-	
+
 	jwks := map[string]interface{}{
 		"keys": []interface{}{jwk},
 	}
@@ -460,7 +461,7 @@ func (s *Server) initializeIDPClient(ctx context.Context, redirectURI string) er
 		return nil
 	}
 
-	if err != fosite.ErrNotFound {
+	if !errors.Is(err, fosite.ErrNotFound) {
 		return fmt.Errorf("failed to check for existing client: %w", err)
 	}
 

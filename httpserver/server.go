@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
 	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 )
 
 // Server represents the HTTP API server
@@ -274,6 +275,27 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 		s.sessionStore = sessionStore
 		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
+	}
+
+	// Setup IDP provider if enabled (can work independently of MCP)
+	if cfg.EnableIDP {
+		idpDBPath := cfg.IDPDBPath
+		if idpDBPath == "" {
+			idpDBPath = getDefaultDBPath(cfg.HTCondorConfig, "idp.db")
+		}
+
+		idpIssuer := cfg.IDPIssuer
+		if idpIssuer == "" {
+			idpIssuer = "http://" + cfg.ListenAddr
+		}
+
+		idpProvider, err := NewIDPProvider(idpDBPath, idpIssuer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create IDP provider: %w", err)
+		}
+		s.idpProvider = idpProvider
+		s.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
+		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 	}
 
 	// Setup metrics if collector is provided

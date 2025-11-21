@@ -1142,22 +1142,32 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	}
 
 	// Write certificate to file
+	//nolint:gosec // Path is from config, admin-controlled
 	certFile, err := os.Create(certPath)
 	if err != nil {
 		return fmt.Errorf("failed to create certificate file: %w", err)
 	}
-	defer certFile.Close()
+	defer func() {
+		if err := certFile.Close(); err != nil {
+			log.Printf("Warning: failed to close cert file: %v", err)
+		}
+	}()
 
 	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
 		return fmt.Errorf("failed to encode certificate: %w", err)
 	}
 
 	// Write private key to file
+	//nolint:gosec // Path is from config, admin-controlled
 	keyFile, err := os.Create(keyPath)
 	if err != nil {
 		return fmt.Errorf("failed to create key file: %w", err)
 	}
-	defer keyFile.Close()
+	defer func() {
+		if err := keyFile.Close(); err != nil {
+			log.Printf("Warning: failed to close key file: %v", err)
+		}
+	}()
 
 	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
 	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
