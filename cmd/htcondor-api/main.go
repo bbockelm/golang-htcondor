@@ -691,6 +691,7 @@ func runNormalMode() error {
 		MCPAccessGroup:      mcpCfg.mcpAccessGroup,
 		MCPReadGroup:        mcpCfg.mcpReadGroup,
 		MCPWriteGroup:       mcpCfg.mcpWriteGroup,
+		HTCondorConfig:      cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -857,6 +858,7 @@ func runDemoMode() error {
 		OAuth2DBPath:   oauth2DBPath,                           // OAuth2 database path
 		OAuth2Issuer:   "http://" + *listenAddr,                // OAuth2 issuer URL
 		OAuth2Scopes:   []string{"openid", "profile", "email"}, // Default scopes for demo
+		HTCondorConfig: cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

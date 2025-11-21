@@ -215,9 +215,11 @@ See [../metricsd/README.md](../metricsd/README.md) for complete metrics document
 
 ## Authentication
 
-The server uses HTCondor TOKEN authentication. The bearer token from the HTTP Authorization header is passed to the HTCondor schedd for authentication.
+The server supports multiple authentication methods:
 
-### Getting a Token
+### 1. Bearer Token Authentication
+
+The bearer token from the HTTP Authorization header is passed to the HTCondor schedd for authentication.
 
 ```bash
 # Generate a token (requires HTCondor admin access)
@@ -227,6 +229,45 @@ condor_token_create -identity user@example.com > token.txt
 curl -H "Authorization: Bearer $(cat token.txt)" \
   http://localhost:8080/api/v1/jobs
 ```
+
+### 2. Session Cookie Authentication
+
+After successful OAuth2/SSO authentication, the server sets an HTTP session cookie that can be used for subsequent API requests. This enables browser-based web UIs to authenticate users via SSO and then interact with the REST API without managing bearer tokens.
+
+**Session Cookie Features:**
+- Secure, HttpOnly cookies with SameSite protection
+- Configurable TTL (default: 24 hours)
+- Automatic cleanup of expired sessions
+- Username extracted from session for HTCondor operations
+
+**How it works:**
+1. User authenticates via OAuth2/SSO flow (e.g., `/mcp/oauth2/authorize`)
+2. After successful authentication, server sets `htcondor_session` cookie
+3. Browser automatically includes cookie in subsequent API requests
+4. Server extracts username from cookie and generates HTCondor token
+
+**Example workflow:**
+```bash
+# Step 1: User authenticates via browser (redirected to IDP)
+# Browser visits: http://localhost:8080/mcp/oauth2/authorize?...
+
+# Step 2: After successful auth, session cookie is set automatically
+
+# Step 3: Browser can now make API requests without bearer token
+# The session cookie is included automatically by the browser
+curl -b cookies.txt http://localhost:8080/api/v1/jobs
+```
+
+### 3. User Header Authentication (Demo Mode)
+
+In demo mode with `--user-header` flag, the server can extract username from a custom HTTP header and generate tokens. See demo mode section above.
+
+### Authentication Priority
+
+The server checks for authentication in the following order:
+1. **Bearer token** in Authorization header (highest priority)
+2. **Session cookie** (for browser-based authentication)
+3. **User header** (if configured, for reverse proxy authentication)
 
 **Note**: Token integration is partially implemented. The token is extracted but not yet fully integrated into the schedd authentication layer. See `HTTP_API_TODO.md` for details.
 
@@ -250,6 +291,9 @@ HTTP_API_TLS_KEY = /etc/condor/certs/server.key
 HTTP_API_READ_TIMEOUT = 30s      # Default: 30s
 HTTP_API_WRITE_TIMEOUT = 30s     # Default: 30s
 HTTP_API_IDLE_TIMEOUT = 2m       # Default: 120s
+
+# Session configuration (optional)
+HTTP_API_SESSION_TTL = 24h       # Default: 24h (session cookie lifetime)
 
 # User header for authentication (optional)
 HTTP_API_USER_HEADER = X-Forwarded-User

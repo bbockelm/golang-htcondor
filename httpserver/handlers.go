@@ -33,8 +33,17 @@ func isAuthenticationError(err error) bool {
 		strings.Contains(errMsg, "forbidden") {
 		return true
 	}
+	// Don't treat connection errors as authentication errors, even if they mention "authentication"
+	// Connection errors include: "failed to connect", "EOF", "connection refused", "failed to read", "failed to parse"
+	if strings.Contains(errMsg, "failed to connect") ||
+		strings.Contains(errMsg, "EOF") ||
+		strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "failed to read") ||
+		strings.Contains(errMsg, "failed to parse") {
+		return false
+	}
 	// Check for authentication errors that are not connection errors
-	if strings.Contains(errMsg, "authentication") && !strings.Contains(errMsg, "connection") {
+	if strings.Contains(errMsg, "authentication") {
 		return true
 	}
 	return false
