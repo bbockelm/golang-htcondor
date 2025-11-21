@@ -402,3 +402,68 @@ func TestHandleJobFile(t *testing.T) {
 		})
 	}
 }
+
+// TestDetectContentType verifies that http.DetectContentType works as expected
+func TestDetectContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     []byte
+		wantPattern string // Substring that should be in the content type
+	}{
+		{
+			name:        "text file",
+			content:     []byte("Hello, World!\nThis is a text file.\n"),
+			wantPattern: "text/plain",
+		},
+		{
+			name:        "JSON file",
+			content:     []byte(`{"key": "value", "number": 123}`),
+			wantPattern: "text/plain", // JSON is detected as text/plain by DetectContentType
+		},
+		{
+			name:        "HTML file",
+			content:     []byte(`<!DOCTYPE html><html><body><h1>Test</h1></body></html>`),
+			wantPattern: "text/html",
+		},
+		{
+			name:        "PNG image",
+			content:     []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, // PNG header
+			wantPattern: "image/png",
+		},
+		{
+			name:        "JPEG image",
+			content:     []byte{0xFF, 0xD8, 0xFF}, // JPEG header
+			wantPattern: "image/jpeg",
+		},
+		{
+			name:        "PDF document",
+			content:     []byte("%PDF-1.4\n"),
+			wantPattern: "application/pdf",
+		},
+		{
+			name:        "empty file",
+			content:     []byte{},
+			wantPattern: "text/plain", // Empty files default to text/plain
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contentType := http.DetectContentType(tt.content)
+			// strings package is already imported at the top of the file
+			if !containsString(contentType, tt.wantPattern) {
+				t.Errorf("DetectContentType() = %v, want to contain %v", contentType, tt.wantPattern)
+			}
+		})
+	}
+}
+
+// containsString checks if a string contains a substring
+func containsString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if i+len(substr) <= len(s) && s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
