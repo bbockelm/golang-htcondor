@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -122,6 +123,14 @@ func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 
 // handleIDPLoginSubmit handles login form submission
 func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	// Rate limit login attempts by IP address
+	ip := r.RemoteAddr
+	if !s.idpLoginLimiter.Allow(ip) {
+		s.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "ip", ip)
+		s.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
+		return
+	}
+
 	if err := r.ParseForm(); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Failed to parse form")
 		return
@@ -148,13 +157,12 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Create session for authenticated user
 	// Store username in cookie or session store (using simple cookie for now)
-	// TODO: Set Secure flag to true in production with HTTPS
 	http.SetCookie(w, &http.Cookie{
 		Name:     "idp_session",
 		Value:    username,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Set to true when using HTTPS in production
+		Secure:   true, // Always set to true - server should use HTTPS
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   3600, // 1 hour
 	})
@@ -204,9 +212,18 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Create session for the user
 	session := DefaultIDPSession(username)
 
-	// Grant all requested scopes
+	// Only grant standard OIDC scopes (openid, profile, email, offline_access)
+	// Don't blindly approve all client-requested scopes
+	allowedScopes := map[string]bool{
+		"openid":         true,
+		"profile":        true,
+		"email":          true,
+		"offline_access": true,
+	}
 	for _, scope := range ar.GetRequestedScopes() {
-		ar.GrantScope(scope)
+		if allowedScopes[scope] {
+			ar.GrantScope(scope)
+		}
 	}
 
 	// Create the authorization response
@@ -352,16 +369,22 @@ func (s *Server) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleIDPJWKS handles JWKS endpoint for IDP
 func (s *Server) handleIDPJWKS(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement full JWKS support with public key export
-	// For now, return empty JWKS. This is acceptable for internal use
-	// but clients cannot verify tokens without the public key.
-	// To implement:
-	// 1. Extract RSA public key from the IDP provider's private key
-	// 2. Convert to JWK format with proper kid, use, alg fields
-	// 3. Return as part of the keys array
+	// Extract public key from the RSA private key
+	publicKey := &s.idpProvider.privateKey.PublicKey
+	
+	// Convert to JWK format (JSON Web Key)
+	// We use "idp-key-1" as the key ID
+	jwk := map[string]interface{}{
+		"kty": "RSA",
+		"use": "sig",
+		"alg": "RS256",
+		"kid": "idp-key-1",
+		"n":   base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(publicKey.E)).Bytes()),
+	}
 	
 	jwks := map[string]interface{}{
-		"keys": []interface{}{},
+		"keys": []interface{}{jwk},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -403,8 +426,8 @@ func (s *Server) initializeIDPUsers(ctx context.Context) error {
 			return fmt.Errorf("failed to generate admin password: %w", err)
 		}
 
-		// Create admin user
-		if err := s.idpProvider.storage.CreateUser(ctx, "admin", password); err != nil {
+		// Create admin user with "admin" state
+		if err := s.idpProvider.storage.CreateUser(ctx, "admin", password, "admin"); err != nil {
 			return fmt.Errorf("failed to create admin user: %w", err)
 		}
 
@@ -472,17 +495,6 @@ func (s *Server) initializeIDPClient(ctx context.Context, redirectURI string) er
 	if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
 		return fmt.Errorf("failed to create IDP client: %w", err)
 	}
-
-	// Print credentials to terminal (only in demo mode or if debug logging enabled)
-	fmt.Printf("\n")
-	fmt.Printf("========================================\n")
-	fmt.Printf("IDP Client Credentials\n")
-	fmt.Printf("========================================\n")
-	fmt.Printf("Client ID: %s\n", clientID)
-	fmt.Printf("Client Secret: %s\n", secret)
-	fmt.Printf("Redirect URI: %s\n", redirectURI)
-	fmt.Printf("========================================\n")
-	fmt.Printf("\n")
 
 	s.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID, "redirect_uri", redirectURI)
 

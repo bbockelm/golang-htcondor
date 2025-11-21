@@ -26,15 +26,9 @@ IDP Admin Credentials
 Username: admin
 Password: YG12b45NsPqVfHronFmI
 ========================================
-
-========================================
-IDP Client Credentials
-========================================
-Client ID: htcondor-server
-Client Secret: l1H3b6P1tsYU6tDG2tyh
-Redirect URI: http://127.0.0.1:8080/idp/callback
-========================================
 ```
+
+Note: Client credentials are used internally and are not printed to the terminal.
 
 ## Normal Mode
 
@@ -44,8 +38,8 @@ In normal mode, the IDP is **conditionally enabled** via HTCondor configuration:
 # Enable the built-in IDP
 HTTP_API_ENABLE_IDP = true
 
-# Optional: Specify custom database path (default: $(LOCAL_DIR)/idp.db)
-HTTP_API_IDP_DB_PATH = /var/lib/condor/idp.db
+# Optional: Specify custom database path (default: same as OAuth2 database)
+HTTP_API_IDP_DB_PATH = /var/lib/condor/oauth2.db
 
 # Optional: Specify custom issuer URL (default: derived from listen address)
 HTTP_API_IDP_ISSUER = https://htcondor.example.com
@@ -56,8 +50,7 @@ HTTP_API_IDP_ISSUER = https://htcondor.example.com
 The IDP provides the following endpoints:
 
 ### OIDC Discovery
-- `GET /.well-known/openid-configuration` - OIDC metadata
-- `GET /idp/.well-known/openid-configuration` - OIDC metadata (IDP-prefixed)
+- `GET /idp/.well-known/openid-configuration` - OIDC metadata
 - `GET /idp/.well-known/jwks.json` - JSON Web Key Set
 
 ### Authentication
@@ -130,7 +123,14 @@ Future enhancements may include user management APIs.
 - Store database in a secure location with proper file permissions
 - Consider using a reverse proxy (nginx, Apache) for additional security
 - Rotate client secrets regularly
+- Rate limiting is automatically enabled for login attempts (5 requests/second per IP with burst of 10)
 - Monitor failed login attempts
+
+### Demo Mode
+- Automatically generates self-signed TLS certificate for HTTPS
+- If self-signed cert generation fails, falls back to HTTP (less secure)
+- Credentials are printed to stdout (visible in logs)
+- Database is in a temporary directory (cleared on shutdown)
 
 ## Database Schema
 

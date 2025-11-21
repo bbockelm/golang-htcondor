@@ -42,7 +42,9 @@ func (s *IDPStorage) createTables() error {
 	CREATE TABLE IF NOT EXISTS idp_users (
 		username TEXT PRIMARY KEY,
 		password_hash TEXT NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		state TEXT NOT NULL DEFAULT 'active',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		CHECK (state IN ('pending', 'active', 'admin'))
 	);
 
 	CREATE TABLE IF NOT EXISTS idp_clients (
@@ -152,17 +154,22 @@ func (s *IDPStorage) Close() error {
 
 // User management methods
 
-// CreateUser creates a new user with hashed password
-func (s *IDPStorage) CreateUser(ctx context.Context, username, password string) error {
+// CreateUser creates a new user with hashed password and specified state
+func (s *IDPStorage) CreateUser(ctx context.Context, username, password, state string) error {
+	// Validate state
+	if state != "pending" && state != "active" && state != "admin" {
+		return fmt.Errorf("invalid user state: must be 'pending', 'active', or 'admin'")
+	}
+
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO idp_users (username, password_hash)
-		VALUES (?, ?)
-	`, username, string(passwordHash))
+		INSERT INTO idp_users (username, password_hash, state)
+		VALUES (?, ?, ?)
+	`, username, string(passwordHash), state)
 
 	return err
 }
@@ -170,9 +177,10 @@ func (s *IDPStorage) CreateUser(ctx context.Context, username, password string) 
 // AuthenticateUser verifies username and password
 func (s *IDPStorage) AuthenticateUser(ctx context.Context, username, password string) error {
 	var passwordHash string
+	var state string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT password_hash FROM idp_users WHERE username = ?
-	`, username).Scan(&passwordHash)
+		SELECT password_hash, state FROM idp_users WHERE username = ?
+	`, username).Scan(&passwordHash, &state)
 
 	if err == sql.ErrNoRows {
 		return fosite.ErrNotFound
@@ -181,11 +189,33 @@ func (s *IDPStorage) AuthenticateUser(ctx context.Context, username, password st
 		return err
 	}
 
+	// Check if user is active or admin (pending users cannot log in)
+	if state == "pending" {
+		return fmt.Errorf("user account is pending activation")
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		return fosite.ErrNotFound // Don't leak that user exists
 	}
 
 	return nil
+}
+
+// GetUserState retrieves the state of a user
+func (s *IDPStorage) GetUserState(ctx context.Context, username string) (string, error) {
+	var state string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT state FROM idp_users WHERE username = ?
+	`, username).Scan(&state)
+
+	if err == sql.ErrNoRows {
+		return "", fosite.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return state, nil
 }
 
 // UserExists checks if a user exists

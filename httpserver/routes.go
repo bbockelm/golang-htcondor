@@ -63,8 +63,7 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 
 	// IDP endpoints (if enabled)
 	if s.idpProvider != nil {
-		// OIDC discovery metadata
-		mux.HandleFunc("/.well-known/openid-configuration", s.handleIDPMetadata)
+		// OIDC discovery metadata (only under /idp prefix)
 		mux.HandleFunc("/idp/.well-known/openid-configuration", s.handleIDPMetadata)
 
 		// IDP OAuth2 endpoints

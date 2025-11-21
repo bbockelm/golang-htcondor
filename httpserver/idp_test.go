@@ -48,7 +48,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a test user
-	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword"); err != nil {
+	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword", "active"); err != nil {
 		t.Fatalf("Failed to create test user: %v", err)
 	}
 
@@ -80,7 +80,10 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Fatalf("Failed to create test client: %v", err)
 	}
 
-	// Test 1: Authorize endpoint without authentication should redirect to login
+	// ==============================================
+	// Test 1: OAuth2 client initiates authorization
+	// ==============================================
+	// OAuth2 Client: Request authorization without user being logged in
 	authURL := "/idp/authorize?client_id=test-client&response_type=code&redirect_uri=" + url.QueryEscape(redirectURI) + "&scope=openid+profile+offline_access&state=test-state-12345678"
 	req := httptest.NewRequest("GET", authURL, nil)
 	w := httptest.NewRecorder()
@@ -95,7 +98,10 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Errorf("Expected redirect to /idp/login, got %s", location)
 	}
 
-	// Test 2: Login with valid credentials
+	// =============================================
+	// Test 2: User authenticates via login form
+	// =============================================
+	// User Action: Submit login credentials
 	loginForm := url.Values{}
 	loginForm.Set("username", "testuser")
 	loginForm.Set("password", "testpassword")
@@ -111,7 +117,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Errorf("Expected status 302 or 303 after login, got %d", resp.StatusCode)
 	}
 
-	// Extract session cookie
+	// User Action: Extract session cookie from login response
 	var sessionCookie *http.Cookie
 	for _, cookie := range resp.Cookies() {
 		if cookie.Name == "idp_session" {
@@ -123,7 +129,10 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Fatal("Expected idp_session cookie after login")
 	}
 
-	// Test 3: Authorize endpoint with authentication should return authorization code
+	// ================================================
+	// Test 3: User grants authorization to OAuth2 client
+	// ================================================
+	// User Action: Return to authorization endpoint with session cookie
 	req = httptest.NewRequest("GET", authURL, nil)
 	req.AddCookie(sessionCookie)
 	w = httptest.NewRecorder()
@@ -138,7 +147,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Errorf("Expected authorization code in redirect URL, got %s", location)
 	}
 
-	// Extract authorization code
+	// OAuth2 Client: Extract authorization code from redirect URL
 	parsedURL, err := url.Parse(location)
 	if err != nil {
 		t.Fatalf("Failed to parse redirect URL: %v", err)
@@ -148,7 +157,10 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 		t.Fatal("Authorization code not found in redirect URL")
 	}
 
-	// Test 4: Exchange authorization code for tokens
+	// ===============================================
+	// Test 4: OAuth2 client exchanges code for tokens
+	// ===============================================
+	// OAuth2 Client: Exchange authorization code for access and refresh tokens
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", authCode)
@@ -215,7 +227,7 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a test user
-	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword"); err != nil {
+	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword", "active"); err != nil {
 		t.Fatalf("Failed to create test user: %v", err)
 	}
 
@@ -411,7 +423,7 @@ func TestIDPUserAuthentication(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a test user
-	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword"); err != nil {
+	if err := server.idpProvider.storage.CreateUser(ctx, "testuser", "testpassword", "active"); err != nil {
 		t.Fatalf("Failed to create test user: %v", err)
 	}
 

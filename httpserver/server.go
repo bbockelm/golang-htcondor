@@ -47,6 +47,7 @@ type Server struct {
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
 	idpProvider         *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
 	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
@@ -248,6 +249,11 @@ func NewServer(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("failed to create IDP provider: %w", err)
 		}
 		s.idpProvider = idpProvider
+		
+		// Create rate limiter for login attempts
+		// Allow 5 login attempts per second per IP with burst of 10
+		s.idpLoginLimiter = NewLoginRateLimiter(5, 10)
+		
 		logger.Info(logging.DestinationHTTP, "Built-in IDP enabled", "issuer", idpIssuer)
 	}
 

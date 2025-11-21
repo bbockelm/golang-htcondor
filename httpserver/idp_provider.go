@@ -17,10 +17,11 @@ import (
 
 // IDPProvider manages OAuth2 operations for the built-in IDP
 type IDPProvider struct {
-	oauth2   fosite.OAuth2Provider
-	storage  *IDPStorage
-	config   *fosite.Config
-	strategy *compose.CommonStrategy
+	oauth2     fosite.OAuth2Provider
+	storage    *IDPStorage
+	config     *fosite.Config
+	strategy   *compose.CommonStrategy
+	privateKey *rsa.PrivateKey
 }
 
 // NewIDPProvider creates a new IDP provider with SQLite storage
@@ -118,10 +119,11 @@ func NewIDPProvider(dbPath string, issuer string) (*IDPProvider, error) {
 	)
 
 	return &IDPProvider{
-		oauth2:   oauth2Provider,
-		storage:  storage,
-		config:   config,
-		strategy: strategy,
+		oauth2:     oauth2Provider,
+		storage:    storage,
+		config:     config,
+		strategy:   strategy,
+		privateKey: privateKey,
 	}, nil
 }
 

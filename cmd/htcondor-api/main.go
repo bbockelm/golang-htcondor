@@ -671,13 +671,12 @@ func runNormalMode() error {
 	idpDBPath := ""
 	idpIssuer := ""
 	if enableIDP {
-		// Load IDP database path
+		// Load IDP database path - default to same DB as OAuth2
 		if dbPath, ok := cfg.Get("HTTP_API_IDP_DB_PATH"); ok && dbPath != "" {
 			idpDBPath = dbPath
-		} else if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
-			idpDBPath = filepath.Join(localDir, "idp.db")
 		} else {
-			idpDBPath = "/var/lib/condor/idp.db"
+			// Use the same database path as OAuth2 by default
+			idpDBPath = loadOAuth2DBPath(cfg)
 		}
 		log.Printf("IDP database path: %s", idpDBPath)
 
@@ -874,11 +873,27 @@ func runDemoMode() error {
 	collector := htcondor.NewCollector("127.0.0.1:9618")
 	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", "127.0.0.1:9618")
 
-	// OAuth2 database path for MCP
+	// OAuth2 database path for MCP (shared with IDP)
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// IDP database path
-	idpDBPath := filepath.Join(tempDir, "idp.db")
+	// Generate self-signed certificate for demo mode to enable HTTPS
+	certPath := filepath.Join(tempDir, "server.crt")
+	keyPath := filepath.Join(tempDir, "server.key")
+	log.Println("Generating self-signed certificate for demo mode...")
+	if err := generateSelfSignedCert(certPath, keyPath); err != nil {
+		log.Printf("Warning: failed to generate self-signed certificate: %v", err)
+		log.Println("Falling back to HTTP (cookie Secure flag will be disabled)")
+		certPath = ""
+		keyPath = ""
+	}
+
+	// Use HTTPS if we successfully generated certificates
+	protocol := "http"
+	if certPath != "" && keyPath != "" {
+		protocol = "https"
+		log.Println("Demo mode will use HTTPS with self-signed certificate")
+		log.Println("Note: You may need to accept the self-signed certificate in your browser")
+	}
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -887,15 +902,17 @@ func runDemoMode() error {
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
+		TLSCertFile:    certPath,
+		TLSKeyFile:     keyPath,
 		Collector:      collector,
 		Logger:         logger,
 		EnableMCP:      true,                                   // Enable MCP in demo mode
 		OAuth2DBPath:   oauth2DBPath,                           // OAuth2 database path
-		OAuth2Issuer:   "http://" + *listenAddr,                // OAuth2 issuer URL
+		OAuth2Issuer:   protocol + "://" + *listenAddr,         // OAuth2 issuer URL
 		OAuth2Scopes:   []string{"openid", "profile", "email"}, // Default scopes for demo
 		EnableIDP:      true,                                   // Enable built-in IDP in demo mode
-		IDPDBPath:      idpDBPath,                              // IDP database path
-		IDPIssuer:      "http://" + *listenAddr,                // IDP issuer URL
+		IDPDBPath:      oauth2DBPath,                           // IDP uses same database as OAuth2
+		IDPIssuer:      protocol + "://" + *listenAddr,         // IDP issuer URL
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -908,7 +925,12 @@ func runDemoMode() error {
 	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- server.Start()
+		// Start with TLS if certificates are available
+		if certPath != "" && keyPath != "" {
+			errChan <- server.StartTLS(certPath, keyPath)
+		} else {
+			errChan <- server.Start()
+		}
 	}()
 
 	// Wait for shutdown signal or error
@@ -1074,4 +1096,32 @@ func isScheddReady(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// generateSelfSignedCert generates a self-signed TLS certificate for demo mode
+func generateSelfSignedCert(certPath, keyPath string) error {
+	// Use crypto/tls for this import at the top
+	// For now, use openssl command if available as a simple approach
+	// Check if openssl is available
+	if _, err := exec.LookPath("openssl"); err != nil {
+		return fmt.Errorf("openssl not found in PATH (needed for self-signed cert generation): %w", err)
+	}
+
+	// Generate self-signed certificate valid for 365 days
+	// Use localhost and 127.0.0.1 as subject alternative names
+	cmd := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+		"-keyout", keyPath,
+		"-out", certPath,
+		"-days", "365",
+		"-subj", "/CN=localhost",
+		"-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to generate self-signed certificate: %w\nOutput: %s", err, string(output))
+	}
+
+	log.Printf("Generated self-signed certificate: %s", certPath)
+	log.Printf("Generated private key: %s", keyPath)
+	return nil
 }
