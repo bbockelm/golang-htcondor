@@ -319,3 +319,86 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 	}
 
 }
+
+// TestHandleJobFile tests the handleJobFile handler
+func TestHandleJobFile(t *testing.T) {
+	tests := []struct {
+		name               string
+		method             string
+		filename           string
+		wantStatusCode     int
+		wantErr            bool
+		wantContentType    string
+		wantContentPattern string
+	}{
+		{
+			name:            "POST method not allowed",
+			method:          http.MethodPost,
+			filename:        "test.txt",
+			wantStatusCode:  http.StatusMethodNotAllowed,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "empty filename returns bad request",
+			method:          http.MethodGet,
+			filename:        "",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with .. rejected",
+			method:          http.MethodGet,
+			filename:        "../etc/passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with / rejected",
+			method:          http.MethodGet,
+			filename:        "etc/passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with backslash rejected",
+			method:          http.MethodGet,
+			filename:        "etc\\passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/v1/jobs/123.0/files/"+tt.filename, nil)
+			w := httptest.NewRecorder()
+
+			// Create a minimal server instance for testing
+			server := &Server{}
+			server.handleJobFile(w, req, 123, 0, tt.filename)
+
+			resp := w.Result()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("Failed to close response body: %v", err)
+				}
+			}()
+
+			if resp.StatusCode != tt.wantStatusCode {
+				t.Errorf("handler status = %v, want %v", resp.StatusCode, tt.wantStatusCode)
+			}
+
+			if tt.wantContentType != "" {
+				gotContentType := resp.Header.Get("Content-Type")
+				if gotContentType != tt.wantContentType {
+					t.Errorf("Content-Type = %v, want %v", gotContentType, tt.wantContentType)
+				}
+			}
+		})
+	}
+}

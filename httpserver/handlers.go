@@ -403,6 +403,17 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check if this is a file fetch operation: /api/v1/jobs/{id}/files/{filename}
+	if len(parts) == 3 && parts[1] == "files" {
+		cluster, proc, err := parseJobID(jobID)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+			return
+		}
+		s.handleJobFile(w, r, cluster, proc, parts[2])
+		return
+	}
+
 	// Handle job operations
 	switch r.Method {
 	case http.MethodGet:
@@ -1690,6 +1701,88 @@ func (s *Server) handleJobStdout(w http.ResponseWriter, r *http.Request, cluster
 // handleJobStderr handles GET /api/v1/jobs/{cluster}.{proc}/stderr
 func (s *Server) handleJobStderr(w http.ResponseWriter, r *http.Request, cluster, proc int) {
 	s.handleJobOutputFile(w, r, cluster, proc, "stderr", "Err")
+}
+
+// handleJobFile handles GET /api/v1/jobs/{cluster}.{proc}/files/{filename}
+func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, proc int, filename string) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Validate filename - prevent path traversal attacks
+	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		s.writeError(w, http.StatusBadRequest, "Invalid filename: path traversal not allowed")
+		return
+	}
+
+	if filename == "" {
+		s.writeError(w, http.StatusBadRequest, "Filename is required")
+		return
+	}
+
+	// Build constraint for specific job
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+
+	// Download the job sandbox
+	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var sandboxBuf bytes.Buffer
+	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+
+	if err := <-errChan; err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to download job sandbox", "error", err, "job", fmt.Sprintf("%d.%d", cluster, proc))
+		s.writeError(w, http.StatusInternalServerError, "Failed to download job sandbox")
+		return
+	}
+
+	// Extract the requested file from the tar archive
+	tarReader := tar.NewReader(&sandboxBuf)
+	var fileContent []byte
+	var found bool
+
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to read tar archive", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to read tar archive")
+			return
+		}
+
+		// Check if this is the file we're looking for
+		baseName := filepath.Base(header.Name)
+		if baseName == filename {
+			content, err := io.ReadAll(tarReader)
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to read file content", "error", err, "filename", filename)
+				s.writeError(w, http.StatusInternalServerError, "Failed to read file content")
+				return
+			}
+			fileContent = content
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("File '%s' not found in job sandbox", filename))
+		return
+	}
+
+	// Detect content type from the file content
+	contentType := http.DetectContentType(fileContent)
+
+	// Set headers and return the file
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(fileContent)
 }
 
 // handleJobOutputFile is a helper function to retrieve stdout or stderr from a job
