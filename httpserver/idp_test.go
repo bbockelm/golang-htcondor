@@ -104,7 +104,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	req = httptest.NewRequest("POST", "/idp/login", strings.NewReader(loginForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w = httptest.NewRecorder()
-	server.handleIDPLoginSubmit(w, req)
+	server.handleIDPLogin(w, req)
 
 	resp = w.Result()
 	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {

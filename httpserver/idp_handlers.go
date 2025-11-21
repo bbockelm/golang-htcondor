@@ -148,12 +148,13 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Create session for authenticated user
 	// Store username in cookie or session store (using simple cookie for now)
+	// TODO: Set Secure flag to true in production with HTTPS
 	http.SetCookie(w, &http.Cookie{
 		Name:     "idp_session",
 		Value:    username,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
+		Secure:   false, // Set to true when using HTTPS in production
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   3600, // 1 hour
 	})
@@ -351,10 +352,14 @@ func (s *Server) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleIDPJWKS handles JWKS endpoint for IDP
 func (s *Server) handleIDPJWKS(w http.ResponseWriter, r *http.Request) {
-	// This would normally return the public keys for token verification
-	// For simplicity, we'll return an empty JWKS for now
-	// In production, you'd extract the public key from the RSA private key
-
+	// TODO: Implement full JWKS support with public key export
+	// For now, return empty JWKS. This is acceptable for internal use
+	// but clients cannot verify tokens without the public key.
+	// To implement:
+	// 1. Extract RSA public key from the IDP provider's private key
+	// 2. Convert to JWK format with proper kid, use, alg fields
+	// 3. Return as part of the keys array
+	
 	jwks := map[string]interface{}{
 		"keys": []interface{}{},
 	}
@@ -368,12 +373,19 @@ func (s *Server) handleIDPJWKS(w http.ResponseWriter, r *http.Request) {
 
 // generateRandomPassword generates a random password for the admin user
 func generateRandomPassword(length int) (string, error) {
-	// Use URL-safe base64 encoding for password characters
-	bytes := make([]byte, length)
+	// Generate enough random bytes to ensure we have at least 'length' valid base64 characters
+	// Base64 encoding produces 4 characters for every 3 bytes, so we need at least (length * 3) / 4 bytes
+	numBytes := ((length * 3) + 3) / 4 // Round up
+	bytes := make([]byte, numBytes)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
-	return base64.URLEncoding.EncodeToString(bytes)[:length], nil
+	// Encode to URL-safe base64 and take the first 'length' characters
+	encoded := base64.URLEncoding.EncodeToString(bytes)
+	if len(encoded) < length {
+		return encoded, nil
+	}
+	return encoded[:length], nil
 }
 
 // initializeIDPUsers initializes default users if needed

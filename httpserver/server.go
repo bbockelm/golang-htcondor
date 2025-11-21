@@ -306,6 +306,33 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// initializeIDP initializes the IDP provider with actual listening address
+func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
+	if s.idpProvider == nil {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	// Update issuer with actual listening address
+	actualAddr := ln.Addr().String()
+	issuer := protocol + "://" + actualAddr
+	s.idpProvider.UpdateIssuer(issuer)
+
+	// Initialize default users
+	if err := s.initializeIDPUsers(ctx); err != nil {
+		return fmt.Errorf("failed to initialize IDP users: %w", err)
+	}
+
+	// Initialize auto-generated client with redirect URI
+	redirectURI := issuer + "/idp/callback"
+	if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
+		return fmt.Errorf("failed to initialize IDP client: %w", err)
+	}
+
+	return nil
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
@@ -319,24 +346,8 @@ func (s *Server) Start() error {
 	s.listener = ln
 
 	// Initialize IDP if enabled
-	if s.idpProvider != nil {
-		ctx := context.Background()
-
-		// Update issuer with actual listening address
-		actualAddr := ln.Addr().String()
-		issuer := "http://" + actualAddr
-		s.idpProvider.UpdateIssuer(issuer)
-
-		// Initialize default users
-		if err := s.initializeIDPUsers(ctx); err != nil {
-			return fmt.Errorf("failed to initialize IDP users: %w", err)
-		}
-
-		// Initialize auto-generated client with redirect URI
-		redirectURI := issuer + "/idp/callback"
-		if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
-			return fmt.Errorf("failed to initialize IDP client: %w", err)
-		}
+	if err := s.initializeIDP(ln, "http"); err != nil {
+		return err
 	}
 
 	// Start schedd address updater if address was discovered from collector
@@ -361,24 +372,8 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.listener = ln
 
 	// Initialize IDP if enabled
-	if s.idpProvider != nil {
-		ctx := context.Background()
-
-		// Update issuer with actual listening address
-		actualAddr := ln.Addr().String()
-		issuer := "https://" + actualAddr
-		s.idpProvider.UpdateIssuer(issuer)
-
-		// Initialize default users
-		if err := s.initializeIDPUsers(ctx); err != nil {
-			return fmt.Errorf("failed to initialize IDP users: %w", err)
-		}
-
-		// Initialize auto-generated client with redirect URI
-		redirectURI := issuer + "/idp/callback"
-		if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
-			return fmt.Errorf("failed to initialize IDP client: %w", err)
-		}
+	if err := s.initializeIDP(ln, "https"); err != nil {
+		return err
 	}
 
 	// Start schedd address updater if address was discovered from collector
