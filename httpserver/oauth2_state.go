@@ -13,6 +13,7 @@ import (
 type OAuth2StateEntry struct {
 	AuthorizeRequest fosite.AuthorizeRequester
 	Timestamp        time.Time
+	OriginalURL      string // Original URL to redirect back to after authentication
 }
 
 // OAuth2StateStore manages OAuth2 state parameters for the authorization flow
@@ -42,25 +43,37 @@ func (s *OAuth2StateStore) GenerateState() (string, error) {
 
 // Store stores an authorize request with the given state
 func (s *OAuth2StateStore) Store(state string, ar fosite.AuthorizeRequester) {
+	s.StoreWithURL(state, ar, "")
+}
+
+// StoreWithURL stores an authorize request with the given state and original URL
+func (s *OAuth2StateStore) StoreWithURL(state string, ar fosite.AuthorizeRequester, originalURL string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries[state] = &OAuth2StateEntry{
 		AuthorizeRequest: ar,
 		Timestamp:        time.Now(),
+		OriginalURL:      originalURL,
 	}
 }
 
 // Get retrieves and removes an authorize request for the given state
 func (s *OAuth2StateStore) Get(state string) (fosite.AuthorizeRequester, bool) {
+	ar, _, ok := s.GetWithURL(state)
+	return ar, ok
+}
+
+// GetWithURL retrieves and removes an authorize request for the given state along with the original URL
+func (s *OAuth2StateStore) GetWithURL(state string) (fosite.AuthorizeRequester, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.entries[state]
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	// Remove entry after retrieval (one-time use)
 	delete(s.entries, state)
-	return entry.AuthorizeRequest, true
+	return entry.AuthorizeRequest, entry.OriginalURL, true
 }
 
 // cleanupExpired periodically removes expired state entries

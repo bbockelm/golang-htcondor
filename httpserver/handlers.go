@@ -20,6 +20,28 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
 
+// isBrowserRequest checks if the request is from a browser
+// by checking the Accept header for text/html
+func isBrowserRequest(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	// Check if Accept header includes text/html
+	return strings.Contains(accept, "text/html")
+}
+
+// requireAuthentication wraps the createAuthenticatedContext call and handles
+// browser redirects for unauthenticated requests
+func (s *Server) requireAuthentication(r *http.Request) (context.Context, error, bool) {
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		// Check if this is a browser request and OAuth2 SSO is configured
+		if isBrowserRequest(r) && s.oauth2Config != nil {
+			return nil, err, true // redirect needed
+		}
+		return nil, err, false // no redirect
+	}
+	return ctx, nil, false
+}
+
 // isAuthenticationError checks if an error is a genuine authentication/authorization error
 // vs a connection error that happens to mention "security" or "authentication"
 func isAuthenticationError(err error) bool {
@@ -86,8 +108,12 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 //nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -261,8 +287,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // handleSubmitJob handles POST /api/v1/jobs
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -389,8 +419,12 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 // handleGetJob handles GET /api/v1/jobs/{id}
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -438,8 +472,12 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 // handleDeleteJob handles DELETE /api/v1/jobs/{id}
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -501,8 +539,12 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 // handleEditJob handles PATCH /api/v1/jobs/{id}
 func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -604,8 +646,12 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
 func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -666,8 +712,12 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 // handleBulkEditJobs handles PATCH /api/v1/jobs with constraint-based bulk editing
 func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -825,8 +875,12 @@ type JobActionFunc func(ctx context.Context, constraint, reason string) (*htcond
 // handleBulkJobAction is a generic handler for bulk job actions (hold, release, etc.)
 func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, actionName, actionVerb string, actionFunc JobActionFunc) {
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -871,8 +925,12 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	}
 
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -938,8 +996,12 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID s
 	}
 
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -1124,8 +1186,12 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 	}
 
 	// Create authenticated context
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, needsRedirect := s.requireAuthentication(r)
 	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
@@ -1685,7 +1751,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create authenticated context to get user information
-	ctx, err := s.createAuthenticatedContext(r)
+	ctx, err, _ := s.requireAuthentication(r)
 	if err != nil {
 		// Authentication failed - return unauthenticated response
 		s.writeJSON(w, http.StatusOK, WhoAmIResponse{
@@ -1869,4 +1935,148 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+// handleWelcome serves the welcome page at the root
+func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
+	// Only serve on exact root path
+	if r.URL.Path != "/" {
+		s.writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+
+	// Check if user is authenticated
+	var username string
+	if sessionData, ok := s.getSessionFromRequest(r); ok {
+		username = sessionData.Username
+	}
+
+	// Serve static HTML page
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTCondor HTTP API</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 30px;
+        }
+        .status {
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .authenticated {
+            border-left-color: #27ae60;
+            background: #f0fff4;
+        }
+        .unauthenticated {
+            border-left-color: #e74c3c;
+            background: #fff5f5;
+        }
+        .endpoints {
+            list-style: none;
+            padding: 0;
+        }
+        .endpoints li {
+            background: #fff;
+            border: 1px solid #ddd;
+            margin: 10px 0;
+            padding: 12px;
+            border-radius: 4px;
+        }
+        .endpoints code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .login-btn {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            text-decoration: none;
+            margin-top: 10px;
+        }
+        .login-btn:hover {
+            background: #2980b9;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>HTCondor HTTP API</h1>
+    `
+
+	if username != "" {
+		html += fmt.Sprintf(`
+    <div class="status authenticated">
+        <strong>✓ Authenticated</strong> as <code>%s</code>
+    </div>
+`, username)
+	} else {
+		html += `
+    <div class="status unauthenticated">
+        <strong>⚠ Not authenticated</strong>
+    </div>
+`
+		if s.oauth2Config != nil {
+			html += `
+    <p>To access protected resources, please log in:</p>
+    <a href="/api/v1/jobs" class="login-btn">Log In</a>
+`
+		}
+	}
+
+	html += `
+    <h2>Available Endpoints</h2>
+    <ul class="endpoints">
+        <li><code>GET /api/v1/jobs</code> - List jobs</li>
+        <li><code>POST /api/v1/jobs</code> - Submit a job</li>
+        <li><code>GET /api/v1/jobs/{id}</code> - Get job details</li>
+        <li><code>DELETE /api/v1/jobs/{id}</code> - Remove a job</li>
+        <li><code>GET /api/v1/whoami</code> - Check authentication status</li>
+        <li><code>GET /api/v1/ping</code> - Ping collector and schedd</li>
+        <li><code>GET /openapi.json</code> - OpenAPI schema</li>
+    </ul>
+
+    <h2>Documentation</h2>
+    <p>For more information about the HTCondor HTTP API, see:</p>
+    <ul>
+        <li><a href="/openapi.json">OpenAPI Specification</a></li>
+        <li><a href="https://htcondor.readthedocs.io/">HTCondor Documentation</a></li>
+    </ul>
+</body>
+</html>`
+
+	_, _ = w.Write([]byte(html))
 }

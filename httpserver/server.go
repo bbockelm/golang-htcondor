@@ -1066,3 +1066,38 @@ func (s *Server) performPeriodicPing() {
 		s.logger.Debug(logging.DestinationHTTP, "Periodic schedd ping succeeded")
 	}
 }
+
+// redirectToLogin redirects a browser request to the OAuth2 login flow
+// preserving the original URL in the state parameter
+func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Config == nil {
+		s.writeError(w, http.StatusUnauthorized, "Authentication required but no OAuth2 provider configured")
+		return
+	}
+
+	// Build the original URL (relative path with query string)
+	originalURL := r.URL.Path
+	if r.URL.RawQuery != "" {
+		originalURL += "?" + r.URL.RawQuery
+	}
+
+	// Generate state parameter
+	state, err := s.oauth2StateStore.GenerateState()
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+		return
+	}
+
+	// Store the state with the original URL (no authorize request for browser flow)
+	s.oauth2StateStore.StoreWithURL(state, nil, originalURL)
+
+	// Build authorization URL
+	authURL := s.oauth2Config.AuthCodeURL(state)
+
+	s.logger.Info(logging.DestinationHTTP, "Redirecting unauthenticated browser to login",
+		"original_url", originalURL, "state", state, "auth_url", authURL)
+
+	// Redirect to IDP
+	http.Redirect(w, r, authURL, http.StatusFound)
+}

@@ -13,18 +13,18 @@ import (
 // createTestSessionStore creates a session store with an in-memory database for testing
 func createTestSessionStore(t *testing.T, ttl time.Duration) *SessionStore {
 	t.Helper()
-	
+
 	// Use in-memory database for tests
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to open test database: %v", err)
 	}
-	
+
 	store, err := NewSessionStore(db, ttl)
 	if err != nil {
 		t.Fatalf("Failed to create session store: %v", err)
 	}
-	
+
 	return store
 }
 

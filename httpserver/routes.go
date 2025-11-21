@@ -22,6 +22,9 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 		})
 	}
 
+	// Welcome page at root
+	mux.HandleFunc("/", s.handleWelcome)
+
 	// OpenAPI schema
 	mux.Handle("/openapi.json", cors(http.HandlerFunc(s.handleOpenAPISchema)))
 
