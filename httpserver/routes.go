@@ -29,6 +29,9 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(s.handleJobs)))
 	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(s.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
+	// Authentication endpoint
+	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(s.handleWhoAmI)))
+
 	// Collector endpoints
 	mux.HandleFunc("/api/v1/collector/", s.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
 

@@ -1662,6 +1662,40 @@ func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, clu
 	_, _ = w.Write([]byte(outputContent))
 }
 
+// WhoAmIResponse represents a whoami response
+type WhoAmIResponse struct {
+	Authenticated bool   `json:"authenticated"`
+	User          string `json:"user,omitempty"` // Omit if not authenticated
+}
+
+// handleWhoAmI handles GET /api/v1/whoami endpoint
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context to get user information
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		// Authentication failed - return unauthenticated response
+		s.writeJSON(w, http.StatusOK, WhoAmIResponse{
+			Authenticated: false,
+		})
+		return
+	}
+
+	// Get authenticated username from context
+	username := htcondor.GetAuthenticatedUserFromContext(ctx)
+
+	response := WhoAmIResponse{
+		Authenticated: username != "",
+		User:          username,
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
 // handleCollectorPath handles /api/v1/collector/* paths with routing
 func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 	// Strip /api/v1/collector/ prefix
