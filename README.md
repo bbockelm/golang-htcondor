@@ -54,6 +54,14 @@ if err != nil {
     log.Fatal(err)
 }
 
+// Ping collector for health check and authentication info
+pingResult, err := collector.Ping(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Collector ping: auth=%s, user=%s, encryption=%v\n",
+    pingResult.AuthMethod, pingResult.User, pingResult.Encryption)
+
 // Locate a daemon
 location, err := collector.LocateDaemon(ctx, "Schedd", "schedd_name")
 if err != nil {
@@ -79,6 +87,13 @@ schedd := htcondor.NewSchedd("schedd_name", "schedd.example.com:9618")
 // Create a context with timeout
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
+
+// Ping schedd for health check and authentication info
+pingResult, err := schedd.Ping(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Schedd ping: auth=%s, user=%s\n", pingResult.AuthMethod, pingResult.User)
 
 // Submit a job using submit file content
 submitFile := `
@@ -166,6 +181,9 @@ The server works out-of-the-box with minimal configuration:
 - `GET /api/v1/jobs/{id}` - Get job details
 - `PUT /api/v1/jobs/{id}/input` - Upload input files (tarball)
 - `GET /api/v1/jobs/{id}/output` - Download output files (tarball)
+- `GET /api/v1/ping` - Ping both collector and schedd for health check
+- `GET /api/v1/schedd/ping` - Ping schedd only
+- `GET /api/v1/collector/ping` - Ping collector only
 - `GET /metrics` - Prometheus metrics endpoint
 - `GET /openapi.json` - OpenAPI 3.0 specification
 
@@ -184,6 +202,9 @@ curl http://localhost:8080/api/v1/jobs?constraint=Owner==\"user\" \
 # Get job details
 curl http://localhost:8080/api/v1/jobs/1.0 \
   -H "Authorization: Bearer $TOKEN"
+
+# Ping daemons for health check
+curl http://localhost:8080/api/v1/ping
 
 # Get Prometheus metrics
 curl http://localhost:8080/metrics
