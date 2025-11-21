@@ -30,17 +30,17 @@ func NewSessionStore(db *sql.DB, ttl time.Duration) (*SessionStore, error) {
 	if ttl == 0 {
 		ttl = 24 * time.Hour // Default: 24 hours
 	}
-	
+
 	store := &SessionStore{
 		db:  db,
 		ttl: ttl,
 	}
-	
+
 	// Create sessions table if it doesn't exist
 	if err := store.createTable(); err != nil {
 		return nil, fmt.Errorf("failed to create sessions table: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -59,7 +59,7 @@ func (s *SessionStore) createTable() error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON http_sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_sessions_username ON http_sessions(username);
 	`
-	
+
 	_, err := s.db.ExecContext(context.Background(), schema)
 	return err
 }
@@ -104,25 +104,25 @@ func (s *SessionStore) Create(username string) (string, *SessionData, error) {
 // Returns nil if session doesn't exist or has expired
 func (s *SessionStore) Get(sessionID string) *SessionData {
 	ctx := context.Background()
-	
+
 	var session SessionData
 	var token sql.NullString
-	
+
 	err := s.db.QueryRowContext(ctx,
 		`SELECT username, created_at, expires_at, token 
 		 FROM http_sessions 
 		 WHERE session_id = ? AND expires_at > ?`,
 		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token)
-	
+
 	if err != nil {
 		// Session not found or expired
 		return nil
 	}
-	
+
 	if token.Valid {
 		session.Token = token.String
 	}
-	
+
 	return &session
 }
 
