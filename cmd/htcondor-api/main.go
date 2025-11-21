@@ -3,10 +3,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1102,25 +1109,59 @@ func isScheddReady(ctx context.Context) bool {
 
 // generateSelfSignedCert generates a self-signed TLS certificate for demo mode
 func generateSelfSignedCert(certPath, keyPath string) error {
-	// Use crypto/tls for this import at the top
-	// For now, use openssl command if available as a simple approach
-	// Check if openssl is available
-	if _, err := exec.LookPath("openssl"); err != nil {
-		return fmt.Errorf("openssl not found in PATH (needed for self-signed cert generation): %w", err)
+	// Generate RSA private key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate RSA key: %w", err)
 	}
 
-	// Generate self-signed certificate valid for 365 days
-	// Use localhost and 127.0.0.1 as subject alternative names
-	cmd := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-		"-keyout", keyPath,
-		"-out", certPath,
-		"-days", "365",
-		"-subj", "/CN=localhost",
-		"-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
-	
-	output, err := cmd.CombinedOutput()
+	// Create certificate template
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return fmt.Errorf("failed to generate self-signed certificate: %w\nOutput: %s", err, string(output))
+		return fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "localhost",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+
+	// Create self-signed certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Write certificate to file
+	certFile, err := os.Create(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate file: %w", err)
+	}
+	defer certFile.Close()
+
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("failed to encode certificate: %w", err)
+	}
+
+	// Write private key to file
+	keyFile, err := os.Create(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create key file: %w", err)
+	}
+	defer keyFile.Close()
+
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
+		return fmt.Errorf("failed to encode private key: %w", err)
 	}
 
 	log.Printf("Generated self-signed certificate: %s", certPath)
