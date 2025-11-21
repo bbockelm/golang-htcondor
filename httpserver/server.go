@@ -50,6 +50,8 @@ type Server struct {
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
 	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
 	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
+	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
+	pingStopCh          chan struct{}     // Channel to signal ping goroutine to stop
 }
 
 // Config holds server configuration
@@ -85,11 +87,14 @@ type Config struct {
 	MCPAccessGroup      string              // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup        string              // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
+	PingInterval        time.Duration       // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
 	StreamBufferSize    int                 // Buffer size for streaming queries (default: 100)
 	StreamWriteTimeout  time.Duration       // Write timeout for streaming queries (default: 5s)
 }
 
 // NewServer creates a new HTTP API server
+//
+//nolint:gocyclo // Initialization function with many configuration options
 func NewServer(cfg Config) (*Server, error) {
 	// Initialize logger if not provided
 	logger := cfg.Logger
@@ -279,6 +284,17 @@ func NewServer(cfg Config) (*Server, error) {
 		IdleTimeout:  idleTimeout,
 	}
 
+	// Setup periodic ping if configured
+	pingInterval := cfg.PingInterval
+	if pingInterval == 0 {
+		pingInterval = 1 * time.Minute // Default to 1 minute
+	}
+	if pingInterval > 0 {
+		s.pingInterval = pingInterval
+		s.pingStopCh = make(chan struct{})
+		s.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
+	}
+
 	return s, nil
 }
 
@@ -297,6 +313,11 @@ func (s *Server) Start() error {
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
+	}
+
+	// Start periodic ping goroutine if enabled
+	if s.pingInterval > 0 {
+		go s.periodicPing()
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
@@ -320,6 +341,11 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 		s.startScheddAddressUpdater()
 	}
 
+	// Start periodic ping goroutine if enabled
+	if s.pingInterval > 0 {
+		go s.periodicPing()
+	}
+
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
 	return s.httpServer.ServeTLS(ln, certFile, keyFile)
 }
@@ -327,6 +353,11 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 // Shutdown gracefully shuts down the HTTP server
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info(logging.DestinationHTTP, "Shutting down HTTP server")
+
+	// Stop periodic ping goroutine if enabled
+	if s.pingStopCh != nil {
+		close(s.pingStopCh)
+	}
 
 	// Signal background goroutines to stop
 	close(s.stopChan)
@@ -860,4 +891,46 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 		return "", fmt.Errorf("timeout after %v: schedd '%s' not found in collector", timeout, scheddName)
 	}
 	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
+}
+
+// periodicPing runs in a goroutine and periodically pings the collector and schedd
+func (s *Server) periodicPing() {
+	ticker := time.NewTicker(s.pingInterval)
+	defer ticker.Stop()
+
+	s.logger.Info(logging.DestinationHTTP, "Starting periodic daemon ping", "interval", s.pingInterval)
+
+	for {
+		select {
+		case <-s.pingStopCh:
+			s.logger.Info(logging.DestinationHTTP, "Stopping periodic daemon ping")
+			return
+		case <-ticker.C:
+			s.performPeriodicPing()
+		}
+	}
+}
+
+// performPeriodicPing performs a single ping to collector and schedd
+func (s *Server) performPeriodicPing() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Ping collector if configured
+	if s.collector != nil {
+		_, err := s.collector.Ping(ctx)
+		if err != nil {
+			s.logger.Warn(logging.DestinationHTTP, "Periodic collector ping failed", "error", err)
+		} else {
+			s.logger.Debug(logging.DestinationHTTP, "Periodic collector ping succeeded")
+		}
+	}
+
+	// Ping schedd
+	_, err := s.schedd.Ping(ctx)
+	if err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Periodic schedd ping failed", "error", err)
+	} else {
+		s.logger.Debug(logging.DestinationHTTP, "Periodic schedd ping succeeded")
+	}
 }

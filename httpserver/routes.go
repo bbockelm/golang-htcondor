@@ -32,6 +32,11 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// Collector endpoints
 	mux.HandleFunc("/api/v1/collector/", s.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
 
+	// Ping endpoints
+	mux.HandleFunc("/api/v1/ping", s.handlePing)              // Ping both collector and schedd
+	mux.HandleFunc("/api/v1/schedd/ping", s.handleScheddPing) // Ping schedd only
+	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
+
 	// MCP endpoints (OAuth2 protected)
 	if s.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
