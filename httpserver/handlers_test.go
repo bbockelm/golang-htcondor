@@ -246,14 +246,18 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 	store := createTestSessionStore(t, 1*time.Hour)
 
 	// Create a test session
-	sessionID, session, err := store.Create("testuser")
+	sessionID, _, err := store.Create("testuser")
 	if err != nil {
 		t.Fatalf("Failed to create test session: %v", err)
 	}
 
 	// Verify session exists in store before logout
-	if retrieved := store.Get(sessionID); retrieved == nil {
+	sessionBefore := store.Get(sessionID)
+	if sessionBefore == nil {
 		t.Fatal("Session should exist before logout")
+	}
+	if sessionBefore.Username != "testuser" {
+		t.Errorf("Session username = %v, want testuser", sessionBefore.Username)
 	}
 
 	// Create a request with the session cookie
@@ -314,6 +318,4 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 		t.Error("Session cookie should be cleared in response")
 	}
 
-	// Verify session data to silence unused variable warning
-	_ = session
 }

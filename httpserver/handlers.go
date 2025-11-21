@@ -1058,6 +1058,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		sessionID, err := getSessionCookie(r)
 		if err == nil && sessionID != "" {
 			s.sessionStore.Delete(sessionID)
+			if s.logger != nil {
+				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_id", sessionID[:8]+"...")
+			}
 		}
 	}
 
