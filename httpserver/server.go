@@ -276,31 +276,6 @@ func NewServer(cfg Config) (*Server, error) {
 		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
 	}
 
-	// Setup built-in IDP if enabled
-	if cfg.EnableIDP {
-		idpDBPath := cfg.IDPDBPath
-		if idpDBPath == "" {
-			idpDBPath = "idp.db"
-		}
-
-		idpIssuer := cfg.IDPIssuer
-		if idpIssuer == "" {
-			idpIssuer = "http://" + cfg.ListenAddr
-		}
-
-		idpProvider, err := NewIDPProvider(idpDBPath, idpIssuer)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create IDP provider: %w", err)
-		}
-		s.idpProvider = idpProvider
-		
-		// Create rate limiter for login attempts
-		// Allow 5 login attempts per second per IP with burst of 10
-		s.idpLoginLimiter = NewLoginRateLimiter(5, 10)
-		
-		logger.Info(logging.DestinationHTTP, "Built-in IDP enabled", "issuer", idpIssuer)
-	}
-
 	// Setup metrics if collector is provided
 	enableMetrics := cfg.EnableMetrics
 	if cfg.Collector != nil && !cfg.EnableMetrics {
