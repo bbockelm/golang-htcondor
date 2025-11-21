@@ -107,6 +107,20 @@ const openAPISchema = `{
             "description": "Error message if an error occurred during streaming. When present, the jobs array contains all successfully streamed jobs before the error."
           }
         }
+      },
+      "WhoAmIResponse": {
+        "type": "object",
+        "required": ["authenticated"],
+        "properties": {
+          "authenticated": {
+            "type": "boolean",
+            "description": "Whether the request was authenticated"
+          },
+          "user": {
+            "type": "string",
+            "description": "The authenticated username (only present if authenticated is true)"
+          }
+        }
       }
     }
   },
@@ -861,6 +875,25 @@ const openAPISchema = `{
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/whoami": {
+      "get": {
+        "summary": "Get current authenticated user",
+        "description": "Returns the currently-authenticated user based on the authentication with the schedd",
+        "operationId": "whoami",
+        "responses": {
+          "200": {
+            "description": "User information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
                 }
               }
             }

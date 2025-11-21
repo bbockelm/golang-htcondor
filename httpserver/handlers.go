@@ -33,8 +33,17 @@ func isAuthenticationError(err error) bool {
 		strings.Contains(errMsg, "forbidden") {
 		return true
 	}
+	// Don't treat connection errors as authentication errors, even if they mention "authentication"
+	// Connection errors include: "failed to connect", "EOF", "connection refused", "failed to read", "failed to parse"
+	if strings.Contains(errMsg, "failed to connect") ||
+		strings.Contains(errMsg, "EOF") ||
+		strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "failed to read") ||
+		strings.Contains(errMsg, "failed to parse") {
+		return false
+	}
 	// Check for authentication errors that are not connection errors
-	if strings.Contains(errMsg, "authentication") && !strings.Contains(errMsg, "connection") {
+	if strings.Contains(errMsg, "authentication") {
 		return true
 	}
 	return false
@@ -1690,6 +1699,43 @@ func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, clu
 	_, _ = w.Write([]byte(outputContent))
 }
 
+// WhoAmIResponse represents a whoami response
+type WhoAmIResponse struct {
+	Authenticated bool   `json:"authenticated"`
+	User          string `json:"user,omitempty"` // Omit if not authenticated
+}
+
+// handleWhoAmI handles GET /api/v1/whoami endpoint
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context to get user information
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		// Authentication failed - return unauthenticated response
+		s.writeJSON(w, http.StatusOK, WhoAmIResponse{
+			Authenticated: false,
+		})
+		return
+	}
+
+	// Get authenticated username from context
+	// If createAuthenticatedContext succeeded, authentication is valid
+	username := htcondor.GetAuthenticatedUserFromContext(ctx)
+
+	// Authentication succeeded - always return authenticated=true
+	// Username should always be non-empty but handle edge case gracefully
+	response := WhoAmIResponse{
+		Authenticated: true,
+		User:          username,
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
 // handleCollectorPath handles /api/v1/collector/* paths with routing
 func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 	// Strip /api/v1/collector/ prefix
@@ -1714,7 +1760,141 @@ func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 		s.handleCollectorAdByName(w, r, parts[1], parts[2])
 	case parts[0] == "ads":
 		s.writeError(w, http.StatusNotFound, "Invalid collector path")
+	case parts[0] == "ping" && len(parts) == 1:
+		// GET /api/v1/collector/ping
+		s.handleCollectorPing(w, r)
 	default:
 		s.writeError(w, http.StatusNotFound, "Collector endpoint not found")
 	}
+}
+
+// PingResponse represents a ping response for a daemon
+type PingResponse struct {
+	Daemon         string `json:"daemon"`               // "collector" or "schedd"
+	AuthMethod     string `json:"auth_method"`          // Authentication method used
+	User           string `json:"user"`                 // Authenticated username
+	SessionID      string `json:"session_id"`           // Session identifier
+	ValidCommands  string `json:"valid_commands"`       // Commands authorized
+	Encryption     bool   `json:"encryption"`           // Whether encryption is enabled
+	Authentication bool   `json:"authentication"`       // Whether authentication is enabled
+	Authorized     bool   `json:"authorized,omitempty"` // Whether authorized for requested permission (if permission checked)
+	Permission     string `json:"permission,omitempty"` // Permission level checked (if any)
+}
+
+// handleCollectorPing handles GET /api/v1/collector/ping
+func (s *Server) handleCollectorPing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.collector == nil {
+		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	result, err := s.collector.Ping(ctx)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Ping failed: %v", err))
+		return
+	}
+
+	response := PingResponse{
+		Daemon:         "collector",
+		AuthMethod:     result.AuthMethod,
+		User:           result.User,
+		SessionID:      result.SessionID,
+		ValidCommands:  result.ValidCommands,
+		Encryption:     result.Encryption,
+		Authentication: result.Authentication,
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// handleScheddPing handles GET /api/v1/schedd/ping
+func (s *Server) handleScheddPing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	result, err := s.schedd.Ping(ctx)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Ping failed: %v", err))
+		return
+	}
+
+	response := PingResponse{
+		Daemon:         "schedd",
+		AuthMethod:     result.AuthMethod,
+		User:           result.User,
+		SessionID:      result.SessionID,
+		ValidCommands:  result.ValidCommands,
+		Encryption:     result.Encryption,
+		Authentication: result.Authentication,
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// handlePing handles GET /api/v1/ping to ping both collector and schedd
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	response := make(map[string]interface{})
+
+	// Ping collector if configured
+	if s.collector != nil {
+		collectorResult, err := s.collector.Ping(ctx)
+		if err != nil {
+			response["collector"] = map[string]interface{}{
+				"status": "error",
+				"error":  err.Error(),
+			}
+		} else {
+			response["collector"] = PingResponse{
+				Daemon:         "collector",
+				AuthMethod:     collectorResult.AuthMethod,
+				User:           collectorResult.User,
+				SessionID:      collectorResult.SessionID,
+				ValidCommands:  collectorResult.ValidCommands,
+				Encryption:     collectorResult.Encryption,
+				Authentication: collectorResult.Authentication,
+			}
+		}
+	}
+
+	// Ping schedd
+	scheddResult, err := s.schedd.Ping(ctx)
+	if err != nil {
+		response["schedd"] = map[string]interface{}{
+			"status": "error",
+			"error":  err.Error(),
+		}
+	} else {
+		response["schedd"] = PingResponse{
+			Daemon:         "schedd",
+			AuthMethod:     scheddResult.AuthMethod,
+			User:           scheddResult.User,
+			SessionID:      scheddResult.SessionID,
+			ValidCommands:  scheddResult.ValidCommands,
+			Encryption:     scheddResult.Encryption,
+			Authentication: scheddResult.Authentication,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }

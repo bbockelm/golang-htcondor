@@ -29,8 +29,16 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(s.handleJobs)))
 	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(s.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
+	// Authentication endpoint
+	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(s.handleWhoAmI)))
+
 	// Collector endpoints
 	mux.HandleFunc("/api/v1/collector/", s.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
+
+	// Ping endpoints
+	mux.HandleFunc("/api/v1/ping", s.handlePing)              // Ping both collector and schedd
+	mux.HandleFunc("/api/v1/schedd/ping", s.handleScheddPing) // Ping schedd only
+	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
 
 	// MCP endpoints (OAuth2 protected)
 	if s.oauth2Provider != nil {
