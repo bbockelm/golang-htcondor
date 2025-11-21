@@ -39,7 +39,11 @@ func TestHandleWhoAmI(t *testing.T) {
 		s.handleWhoAmI(w, req)
 
 		resp := w.Result()
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Failed to close response body: %v", err)
+			}
+		}()
 
 		// Check status code
 		if resp.StatusCode != http.StatusOK {
@@ -77,7 +81,11 @@ func TestHandleWhoAmI(t *testing.T) {
 		s.handleWhoAmI(w, req)
 
 		resp := w.Result()
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Failed to close response body: %v", err)
+			}
+		}()
 
 		// Check status code
 		if resp.StatusCode != http.StatusOK {
@@ -115,7 +123,11 @@ func TestHandleWhoAmI(t *testing.T) {
 		s.handleWhoAmI(w, req)
 
 		resp := w.Result()
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Failed to close response body: %v", err)
+			}
+		}()
 
 		// Check status code
 		if resp.StatusCode != http.StatusMethodNotAllowed {
