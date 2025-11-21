@@ -3,10 +3,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -660,6 +667,35 @@ func runNormalMode() error {
 	// Load MCP configuration
 	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig)
 
+	// Check if IDP should be enabled
+	enableIDP := false
+	if idpEnable, ok := cfg.Get("HTTP_API_ENABLE_IDP"); ok && idpEnable == "true" {
+		enableIDP = true
+		log.Println("Built-in IDP enabled via configuration")
+	}
+
+	// Load IDP configuration
+	idpDBPath := ""
+	idpIssuer := ""
+	if enableIDP {
+		// Load IDP database path - default to same DB as OAuth2
+		if dbPath, ok := cfg.Get("HTTP_API_IDP_DB_PATH"); ok && dbPath != "" {
+			idpDBPath = dbPath
+		} else {
+			// Use the same database path as OAuth2 by default
+			idpDBPath = loadOAuth2DBPath(cfg)
+		}
+		log.Printf("IDP database path: %s", idpDBPath)
+
+		// Load IDP issuer
+		if issuer, ok := cfg.Get("HTTP_API_IDP_ISSUER"); ok && issuer != "" {
+			idpIssuer = issuer
+		} else {
+			idpIssuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
+		}
+		log.Printf("IDP issuer: %s", idpIssuer)
+	}
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:          listenAddrFromConfig,
@@ -691,6 +727,9 @@ func runNormalMode() error {
 		MCPAccessGroup:      mcpCfg.mcpAccessGroup,
 		MCPReadGroup:        mcpCfg.mcpReadGroup,
 		MCPWriteGroup:       mcpCfg.mcpWriteGroup,
+		EnableIDP:           enableIDP,
+		IDPDBPath:           idpDBPath,
+		IDPIssuer:           idpIssuer,
 		HTCondorConfig:      cfg,
 	})
 	if err != nil {
@@ -842,22 +881,46 @@ func runDemoMode() error {
 	collector := htcondor.NewCollector("127.0.0.1:9618")
 	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", "127.0.0.1:9618")
 
-	// OAuth2 database path for MCP
+	// OAuth2 database path for MCP (shared with IDP)
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Create and start HTTP server with MCP enabled
+	// Generate self-signed certificate for demo mode to enable HTTPS
+	certPath := filepath.Join(tempDir, "server.crt")
+	keyPath := filepath.Join(tempDir, "server.key")
+	log.Println("Generating self-signed certificate for demo mode...")
+	if err := generateSelfSignedCert(certPath, keyPath); err != nil {
+		log.Printf("Warning: failed to generate self-signed certificate: %v", err)
+		log.Println("Falling back to HTTP (cookie Secure flag will be disabled)")
+		certPath = ""
+		keyPath = ""
+	}
+
+	// Use HTTPS if we successfully generated certificates
+	protocol := "http"
+	if certPath != "" && keyPath != "" {
+		protocol = "https"
+		log.Println("Demo mode will use HTTPS with self-signed certificate")
+		log.Println("Note: You may need to accept the self-signed certificate in your browser")
+	}
+
+	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     *listenAddr,
 		UserHeader:     *userHeader,
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
+		TLSCertFile:    certPath,
+		TLSKeyFile:     keyPath,
 		Collector:      collector,
 		Logger:         logger,
 		EnableMCP:      true,                                   // Enable MCP in demo mode
 		OAuth2DBPath:   oauth2DBPath,                           // OAuth2 database path
-		OAuth2Issuer:   "http://" + *listenAddr,                // OAuth2 issuer URL
+		OAuth2Issuer:   protocol + "://" + *listenAddr,         // OAuth2 issuer URL
 		OAuth2Scopes:   []string{"openid", "profile", "email"}, // Default scopes for demo
+		EnableIDP:      true,                                   // Enable built-in IDP in demo mode
+		IDPDBPath:      oauth2DBPath,                           // IDP uses same database as OAuth2
+		IDPIssuer:      protocol + "://" + *listenAddr,         // IDP issuer URL
 		HTCondorConfig: cfg,
 	})
 	if err != nil {
@@ -871,7 +934,12 @@ func runDemoMode() error {
 	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- server.Start()
+		// Start with TLS if certificates are available
+		if certPath != "" && keyPath != "" {
+			errChan <- server.StartTLS(certPath, keyPath)
+		} else {
+			errChan <- server.Start()
+		}
 	}()
 
 	// Wait for shutdown signal or error
@@ -1037,4 +1105,76 @@ func isScheddReady(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// generateSelfSignedCert generates a self-signed TLS certificate for demo mode
+func generateSelfSignedCert(certPath, keyPath string) error {
+	// Generate RSA private key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate RSA key: %w", err)
+	}
+
+	// Create certificate template
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "localhost",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+
+	// Create self-signed certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Write certificate to file
+	//nolint:gosec // Path is from config, admin-controlled
+	certFile, err := os.Create(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate file: %w", err)
+	}
+	defer func() {
+		if err := certFile.Close(); err != nil {
+			log.Printf("Warning: failed to close cert file: %v", err)
+		}
+	}()
+
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("failed to encode certificate: %w", err)
+	}
+
+	// Write private key to file
+	//nolint:gosec // Path is from config, admin-controlled
+	keyFile, err := os.Create(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create key file: %w", err)
+	}
+	defer func() {
+		if err := keyFile.Close(); err != nil {
+			log.Printf("Warning: failed to close key file: %v", err)
+		}
+	}()
+
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
+		return fmt.Errorf("failed to encode private key: %w", err)
+	}
+
+	log.Printf("Generated self-signed certificate: %s", certPath)
+	log.Printf("Generated private key: %s", keyPath)
+	return nil
 }

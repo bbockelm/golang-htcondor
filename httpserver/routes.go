@@ -64,6 +64,21 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 		s.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
 	}
 
+	// IDP endpoints (if enabled)
+	if s.idpProvider != nil {
+		// OIDC discovery metadata (only under /idp prefix)
+		mux.HandleFunc("/idp/.well-known/openid-configuration", s.handleIDPMetadata)
+
+		// IDP OAuth2 endpoints
+		mux.HandleFunc("/idp/login", s.handleIDPLogin)
+		mux.HandleFunc("/idp/authorize", s.handleIDPAuthorize)
+		mux.HandleFunc("/idp/token", s.handleIDPToken)
+		mux.HandleFunc("/idp/userinfo", s.handleIDPUserInfo)
+		mux.HandleFunc("/idp/.well-known/jwks.json", s.handleIDPJWKS)
+
+		s.logger.Info(logging.DestinationHTTP, "IDP endpoints enabled", "path_prefix", "/idp")
+	}
+
 	// Metrics endpoint (if enabled)
 	if s.prometheusExporter != nil {
 		mux.HandleFunc("/metrics", s.handleMetrics)

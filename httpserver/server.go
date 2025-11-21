@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
 	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 )
 
 // Server represents the HTTP API server
@@ -50,6 +51,8 @@ type Server struct {
 	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
+	idpProvider         *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
 	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
@@ -91,6 +94,9 @@ type Config struct {
 	MCPAccessGroup      string              // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup        string              // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string              // Group required for write operations (empty = all have write)
+	EnableIDP           bool                // Enable built-in IDP (always enabled in demo mode)
+	IDPDBPath           string              // Path to IDP SQLite database (default: "idp.db")
+	IDPIssuer           string              // IDP issuer URL (default: listen address)
 	SessionTTL          time.Duration       // HTTP session TTL (default: 24h)
 	HTCondorConfig      *config.Config      // HTCondor configuration (optional, used for LOCAL_DIR default)
 	PingInterval        time.Duration       // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
@@ -271,6 +277,27 @@ func NewServer(cfg Config) (*Server, error) {
 		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
 	}
 
+	// Setup IDP provider if enabled (can work independently of MCP)
+	if cfg.EnableIDP {
+		idpDBPath := cfg.IDPDBPath
+		if idpDBPath == "" {
+			idpDBPath = getDefaultDBPath(cfg.HTCondorConfig, "idp.db")
+		}
+
+		idpIssuer := cfg.IDPIssuer
+		if idpIssuer == "" {
+			idpIssuer = "http://" + cfg.ListenAddr
+		}
+
+		idpProvider, err := NewIDPProvider(idpDBPath, idpIssuer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create IDP provider: %w", err)
+		}
+		s.idpProvider = idpProvider
+		s.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
+		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
+	}
+
 	// Setup metrics if collector is provided
 	enableMetrics := cfg.EnableMetrics
 	if cfg.Collector != nil && !cfg.EnableMetrics {
@@ -342,6 +369,33 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// initializeIDP initializes the IDP provider with actual listening address
+func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
+	if s.idpProvider == nil {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	// Update issuer with actual listening address
+	actualAddr := ln.Addr().String()
+	issuer := protocol + "://" + actualAddr
+	s.idpProvider.UpdateIssuer(issuer)
+
+	// Initialize default users
+	if err := s.initializeIDPUsers(ctx); err != nil {
+		return fmt.Errorf("failed to initialize IDP users: %w", err)
+	}
+
+	// Initialize auto-generated client with redirect URI
+	redirectURI := issuer + "/idp/callback"
+	if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
+		return fmt.Errorf("failed to initialize IDP client: %w", err)
+	}
+
+	return nil
+}
+
 // getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
 func getDefaultDBPath(cfg *config.Config, filename string) string {
 	if cfg != nil {
@@ -364,6 +418,11 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
 	s.listener = ln
+
+	// Initialize IDP if enabled
+	if err := s.initializeIDP(ln, "http"); err != nil {
+		return err
+	}
 
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
@@ -393,6 +452,11 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
 	s.listener = ln
+
+	// Initialize IDP if enabled
+	if err := s.initializeIDP(ln, "https"); err != nil {
+		return err
+	}
 
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
@@ -442,6 +506,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.oauth2Provider != nil {
 		if err := s.oauth2Provider.Close(); err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to close OAuth2 provider", "error", err)
+		}
+	}
+
+	// Close IDP provider if enabled
+	if s.idpProvider != nil {
+		if err := s.idpProvider.Close(); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to close IDP provider", "error", err)
 		}
 	}
 
