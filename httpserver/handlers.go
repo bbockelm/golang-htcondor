@@ -30,16 +30,16 @@ func isBrowserRequest(r *http.Request) bool {
 
 // requireAuthentication wraps the createAuthenticatedContext call and handles
 // browser redirects for unauthenticated requests
-func (s *Server) requireAuthentication(r *http.Request) (context.Context, error, bool) {
+func (s *Server) requireAuthentication(r *http.Request) (context.Context, bool, error) {
 	ctx, err := s.createAuthenticatedContext(r)
 	if err != nil {
 		// Check if this is a browser request and OAuth2 SSO is configured
 		if isBrowserRequest(r) && s.oauth2Config != nil {
-			return nil, err, true // redirect needed
+			return nil, true, err // redirect needed
 		}
-		return nil, err, false // no redirect
+		return nil, false, err // no redirect
 	}
-	return ctx, nil, false
+	return ctx, false, nil
 }
 
 // isAuthenticationError checks if an error is a genuine authentication/authorization error
@@ -108,7 +108,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 //nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -287,7 +287,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // handleSubmitJob handles POST /api/v1/jobs
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -419,7 +419,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 // handleGetJob handles GET /api/v1/jobs/{id}
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -472,7 +472,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 // handleDeleteJob handles DELETE /api/v1/jobs/{id}
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -539,7 +539,7 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 // handleEditJob handles PATCH /api/v1/jobs/{id}
 func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -646,7 +646,7 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
 func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -712,7 +712,7 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 // handleBulkEditJobs handles PATCH /api/v1/jobs with constraint-based bulk editing
 func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -875,7 +875,7 @@ type JobActionFunc func(ctx context.Context, constraint, reason string) (*htcond
 // handleBulkJobAction is a generic handler for bulk job actions (hold, release, etc.)
 func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, actionName, actionVerb string, actionFunc JobActionFunc) {
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -925,7 +925,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	}
 
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -996,7 +996,7 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID s
 	}
 
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -1186,7 +1186,7 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 	}
 
 	// Create authenticated context
-	ctx, err, needsRedirect := s.requireAuthentication(r)
+	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
@@ -1751,7 +1751,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create authenticated context to get user information
-	ctx, err, _ := s.requireAuthentication(r)
+	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {
 		// Authentication failed - return unauthenticated response
 		s.writeJSON(w, http.StatusOK, WhoAmIResponse{

@@ -76,7 +76,11 @@ func TestBrowserRedirectWithoutOAuth2(t *testing.T) {
 	server.handleListJobs(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	// Should return 401 Unauthorized, not redirect
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -123,7 +127,11 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 	server.handleListJobs(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	// Should redirect
 	if resp.StatusCode != http.StatusFound {
@@ -156,7 +164,11 @@ func TestWelcomePageUnauthenticated(t *testing.T) {
 	server.handleWelcome(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -179,7 +191,11 @@ func TestWelcomePageNotFound(t *testing.T) {
 	server.handleWelcome(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Expected status 404, got %d", resp.StatusCode)
