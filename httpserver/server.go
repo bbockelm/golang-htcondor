@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,8 +16,10 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
 	"golang.org/x/oauth2"
 )
 
@@ -37,6 +40,7 @@ type Server struct {
 	metricsRegistry     *metricsd.Registry
 	prometheusExporter  *metricsd.PrometheusExporter
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -75,7 +79,7 @@ type Config struct {
 	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
 	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
 	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: "oauth2.db")
+	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
 	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
 	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
 	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
@@ -92,6 +96,8 @@ type Config struct {
 	EnableIDP           bool                // Enable built-in IDP (always enabled in demo mode)
 	IDPDBPath           string              // Path to IDP SQLite database (default: "idp.db")
 	IDPIssuer           string              // IDP issuer URL (default: listen address)
+	SessionTTL          time.Duration       // HTTP session TTL (default: 24h)
+	HTCondorConfig      *config.Config      // HTCondor configuration (optional, used for LOCAL_DIR default)
 	PingInterval        time.Duration       // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
 	StreamBufferSize    int                 // Buffer size for streaming queries (default: 100)
 	StreamWriteTimeout  time.Duration       // Write timeout for streaming queries (default: 5s)
@@ -99,7 +105,7 @@ type Config struct {
 
 // NewServer creates a new HTTP API server
 //
-//nolint:gocyclo // Initialization function with many configuration options
+//nolint:gocyclo // Initialization logic with sequential checks is acceptable
 func NewServer(cfg Config) (*Server, error) {
 	// Initialize logger if not provided
 	logger := cfg.Logger
@@ -134,6 +140,12 @@ func NewServer(cfg Config) (*Server, error) {
 	// Create schedd with the address as-is (can be host:port or sinful string)
 	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
 
+	// Set session TTL
+	sessionTTL := cfg.SessionTTL
+	if sessionTTL == 0 {
+		sessionTTL = 24 * time.Hour // Default: 24 hours
+	}
+
 	// Set streaming defaults
 	streamBufferSize := cfg.StreamBufferSize
 	if streamBufferSize == 0 {
@@ -164,7 +176,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.EnableMCP {
 		oauth2DBPath := cfg.OAuth2DBPath
 		if oauth2DBPath == "" {
-			oauth2DBPath = "oauth2.db"
+			oauth2DBPath = getDefaultDBPath(cfg.HTCondorConfig, "oauth2.db")
 		}
 
 		oauth2Issuer := cfg.OAuth2Issuer
@@ -230,6 +242,38 @@ func NewServer(cfg Config) (*Server, error) {
 		if s.mcpWriteGroup != "" {
 			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", s.mcpWriteGroup)
 		}
+
+		// Initialize session store with shared database connection
+		sessionStore, err := NewSessionStore(s.oauth2Provider.GetStorage().GetDB(), sessionTTL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create session store: %w", err)
+		}
+		s.sessionStore = sessionStore
+		logger.Info(logging.DestinationHTTP, "Session store enabled with database persistence", "ttl", sessionTTL)
+	} else {
+		// OAuth2 not enabled, create standalone database for sessions
+		// Use a separate database file for sessions
+		sessionDBPath := cfg.OAuth2DBPath
+		if sessionDBPath == "" {
+			sessionDBPath = getDefaultDBPath(cfg.HTCondorConfig, "sessions.db")
+		} else {
+			// Use same path but different file name if OAuth2 DB is configured
+			sessionDBPath += ".sessions"
+		}
+
+		// Open database for sessions
+		sessionDB, err := sql.Open("sqlite", sessionDBPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open session database: %w", err)
+		}
+
+		sessionStore, err := NewSessionStore(sessionDB, sessionTTL)
+		if err != nil {
+			_ = sessionDB.Close()
+			return nil, fmt.Errorf("failed to create session store: %w", err)
+		}
+		s.sessionStore = sessionStore
+		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
 	}
 
 	// Setup built-in IDP if enabled
@@ -355,6 +399,17 @@ func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
 	return nil
 }
 
+// getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
+func getDefaultDBPath(cfg *config.Config, filename string) string {
+	if cfg != nil {
+		if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
+			return filepath.Join(localDir, filename)
+		}
+	}
+	// Fallback to standard HTCondor location
+	return filepath.Join("/var/lib/condor", filename)
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
@@ -376,6 +431,9 @@ func (s *Server) Start() error {
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
 	}
+
+	// Start session cleanup goroutine
+	s.startSessionCleanup()
 
 	// Start periodic ping goroutine if enabled
 	if s.pingInterval > 0 {
@@ -407,6 +465,9 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
 	}
+
+	// Start session cleanup goroutine
+	s.startSessionCleanup()
 
 	// Start periodic ping goroutine if enabled
 	if s.pingInterval > 0 {
@@ -519,6 +580,34 @@ func (s *Server) startScheddAddressUpdater() {
 	}()
 }
 
+// startSessionCleanup starts a background goroutine that periodically
+// cleans up expired sessions
+func (s *Server) startSessionCleanup() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		// Clean up expired sessions every hour
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		s.logger.Info(logging.DestinationHTTP, "Started session cleanup goroutine", "interval", "1h")
+
+		for {
+			select {
+			case <-ticker.C:
+				s.sessionStore.Cleanup()
+				s.logger.Debug(logging.DestinationHTTP, "Cleaned up expired sessions",
+					"active_sessions", s.sessionStore.Size())
+
+			case <-s.stopChan:
+				s.logger.Info(logging.DestinationHTTP, "Stopping session cleanup goroutine")
+				return
+			}
+		}
+	}()
+}
+
 // GetOAuth2Provider returns the OAuth2 provider (for testing)
 func (s *Server) GetOAuth2Provider() *OAuth2Provider {
 	return s.oauth2Provider
@@ -589,12 +678,15 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 
 		// Extract identity from context (will be set by auth middleware if present)
 		identity := "-"
-		if s.userHeader != "" {
+		// Try session cookie first
+		if sessionData, ok := s.getSessionFromRequest(r); ok {
+			identity = sessionData.Username
+		} else if s.userHeader != "" {
 			if username := r.Header.Get(s.userHeader); username != "" {
 				identity = username
 			}
 		}
-		// Try to extract from bearer token if no user header
+		// Try to extract from bearer token if no session or user header
 		if identity == "-" {
 			if token, err := extractBearerToken(r); err == nil && token != "" {
 				// For now, just indicate that token auth was used
@@ -734,13 +826,49 @@ func extractBearerToken(r *http.Request) (string, error) {
 }
 
 // extractOrGenerateToken extracts a bearer token from the Authorization header,
-// or if userHeader is set and no auth token is present, generates a token for
-// the username from the specified header
+// checks for a session cookie, or if userHeader is set and no auth token is present,
+// generates a token for the username from the specified header.
+// Priority: Bearer token → Session cookie → User header
 func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 	// Try to extract bearer token first
 	token, err := extractBearerToken(r)
 	if err == nil {
 		return token, nil
+	}
+
+	// Try to get username from session cookie
+	if sessionData, ok := s.getSessionFromRequest(r); ok {
+		username := sessionData.Username
+		// If session has a cached token, use it
+		if sessionData.Token != "" {
+			return sessionData.Token, nil
+		}
+
+		// Generate a token for the session username if signing key is available
+		if s.signingKeyPath != "" {
+			iat := time.Now().Unix()
+			exp := time.Now().Add(1 * time.Minute).Unix()
+			issuer := s.trustDomain
+			if issuer == "" {
+				return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
+			}
+			if !strings.Contains(username, "@") {
+				if s.uidDomain == "" {
+					return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
+				}
+				username = username + "@" + s.uidDomain
+			}
+			kid := filepath.Base(s.signingKeyPath)
+			s.logger.Debug(logging.DestinationSecurity, "Generating token for session user", "username", username, "issuer", issuer, "key", kid)
+			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
+			if err != nil {
+				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)
+			}
+			return token, nil
+		}
+
+		// No signing key configured, cannot generate token from session
+		return "", fmt.Errorf("session cookie found but token generation not configured")
 	}
 
 	// If userHeader is configured and signing key is available, try to generate token
@@ -849,7 +977,11 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)
 	var username string
-	if s.userHeader != "" {
+
+	// Try to get username from session cookie first
+	if sessionData, ok := s.getSessionFromRequest(r); ok {
+		username = sessionData.Username
+	} else if s.userHeader != "" {
 		// Check if using user header mode
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {

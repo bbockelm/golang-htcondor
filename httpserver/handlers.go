@@ -33,8 +33,17 @@ func isAuthenticationError(err error) bool {
 		strings.Contains(errMsg, "forbidden") {
 		return true
 	}
+	// Don't treat connection errors as authentication errors, even if they mention "authentication"
+	// Connection errors include: "failed to connect", "EOF", "connection refused", "failed to read", "failed to parse"
+	if strings.Contains(errMsg, "failed to connect") ||
+		strings.Contains(errMsg, "EOF") ||
+		strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "failed to read") ||
+		strings.Contains(errMsg, "failed to parse") {
+		return false
+	}
 	// Check for authentication errors that are not connection errors
-	if strings.Contains(errMsg, "authentication") && !strings.Contains(errMsg, "connection") {
+	if strings.Contains(errMsg, "authentication") {
 		return true
 	}
 	return false
@@ -1660,6 +1669,43 @@ func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, clu
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(outputContent))
+}
+
+// WhoAmIResponse represents a whoami response
+type WhoAmIResponse struct {
+	Authenticated bool   `json:"authenticated"`
+	User          string `json:"user,omitempty"` // Omit if not authenticated
+}
+
+// handleWhoAmI handles GET /api/v1/whoami endpoint
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context to get user information
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		// Authentication failed - return unauthenticated response
+		s.writeJSON(w, http.StatusOK, WhoAmIResponse{
+			Authenticated: false,
+		})
+		return
+	}
+
+	// Get authenticated username from context
+	// If createAuthenticatedContext succeeded, authentication is valid
+	username := htcondor.GetAuthenticatedUserFromContext(ctx)
+
+	// Authentication succeeded - always return authenticated=true
+	// Username should always be non-empty but handle edge case gracefully
+	response := WhoAmIResponse{
+		Authenticated: true,
+		User:          username,
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 // handleCollectorPath handles /api/v1/collector/* paths with routing

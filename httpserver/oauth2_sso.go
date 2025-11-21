@@ -269,6 +269,19 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create HTTP session cookie for browser-based authentication
+	// This allows the user to make subsequent API calls without re-authenticating
+	sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
+			"error", err, "subject", userInfo.Subject)
+		// Continue anyway - session cookie is optional
+	} else {
+		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
+		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie",
+			"subject", userInfo.Subject, "session_id", sessionID[:8]+"...", "expires_at", sessionData.ExpiresAt)
+	}
+
 	s.logger.Info(logging.DestinationHTTP, "OAuth2 callback completed successfully",
 		"subject", userInfo.Subject, "granted_scopes", grantedScopes)
 	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)

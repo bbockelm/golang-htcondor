@@ -723,6 +723,7 @@ func runNormalMode() error {
 		EnableIDP:           enableIDP,
 		IDPDBPath:           idpDBPath,
 		IDPIssuer:           idpIssuer,
+		HTCondorConfig:      cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -913,6 +914,7 @@ func runDemoMode() error {
 		EnableIDP:      true,                                   // Enable built-in IDP in demo mode
 		IDPDBPath:      oauth2DBPath,                           // IDP uses same database as OAuth2
 		IDPIssuer:      protocol + "://" + *listenAddr,         // IDP issuer URL
+		HTCondorConfig: cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
