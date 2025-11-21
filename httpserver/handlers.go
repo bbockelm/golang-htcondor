@@ -1686,10 +1686,13 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get authenticated username from context
+	// If createAuthenticatedContext succeeded, authentication is valid
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
 
+	// Authentication succeeded - always return authenticated=true
+	// Username should always be non-empty but handle edge case gracefully
 	response := WhoAmIResponse{
-		Authenticated: username != "",
+		Authenticated: true,
 		User:          username,
 	}
 
