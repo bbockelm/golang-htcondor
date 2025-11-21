@@ -76,81 +76,100 @@ func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, 
 
 	// Note: We use manual authentication here instead of ConnectAndAuthenticate because we need
 	// access to the negotiation result to get the authenticated user and verify auth method.
-	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", address, err)
-	}
+	// We implement retry logic for session resumption failures similar to ConnectAndAuthenticateWithConfig.
+	const maxRetries = 2 // Initial attempt + 1 retry on session resumption failure
 
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
-	// Perform DC_AUTHENTICATE handshake
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
-	if err != nil {
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("authentication handshake failed: %w", err)
-	}
-
-	// Verify authentication succeeded (accept any of the configured auth methods)
-	authMethodValid := false
-	for _, method := range secConfig.AuthMethods {
-		if negotiation.NegotiatedAuth == method {
-			authMethodValid = true
-			break
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Establish connection using cedar client
+		htcondorClient, err := client.ConnectToAddress(ctx, address)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to connect to schedd at %s: %w", address, err)
+			continue
 		}
-	}
-	if !authMethodValid {
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("authentication failed: expected one of %v, got %s", secConfig.AuthMethods, negotiation.NegotiatedAuth)
+
+		// Get CEDAR stream from client
+		cedarStream := htcondorClient.GetStream()
+
+		// Perform DC_AUTHENTICATE handshake
+		auth := security.NewAuthenticator(secConfig, cedarStream)
+		negotiation, err := auth.ClientHandshake(ctx)
+
+		// Check if this is a session resumption error
+		if security.IsSessionResumptionError(err) {
+			// Close the connection and retry with a fresh connection
+			_ = htcondorClient.Close()
+			lastErr = fmt.Errorf("session resumption failed, retrying with new connection: %w", err)
+			continue
+		}
+
+		if err != nil {
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("authentication handshake failed: %w", err)
+		}
+
+		// Verify authentication succeeded (accept any of the configured auth methods)
+		authMethodValid := false
+		for _, method := range secConfig.AuthMethods {
+			if negotiation.NegotiatedAuth == method {
+				authMethodValid = true
+				break
+			}
+		}
+		if !authMethodValid {
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("authentication failed: expected one of %v, got %s", secConfig.AuthMethods, negotiation.NegotiatedAuth)
+		}
+
+		// Check return code - should be AUTHORIZED
+		// The post-auth response should contain ReturnCode
+		// If DENIED, the connection is not authorized for QMGMT operations
+
+		// Stream should now be ready for QMGMT commands
+		// Mark stream as authenticated
+		cedarStream.SetAuthenticated(true)
+
+		// Query capabilities - this is required before other QMGMT operations
+		// Send CONDOR_GetCapabilities (10036) command
+		capMsg := message.NewMessageForStream(cedarStream)
+		if err := capMsg.PutInt(ctx, CONDOR_GetCapabilities); err != nil {
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("failed to send GetCapabilities command: %w", err)
+		}
+		if err := capMsg.PutInt(ctx, 0); err != nil { // flags = 0
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("failed to send GetCapabilities flags: %w", err)
+		}
+		if err := capMsg.FinishMessage(ctx); err != nil {
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("failed to finish GetCapabilities message: %w", err)
+		}
+
+		// Read capabilities response
+		// Note: GetCapabilities is special - it returns a ClassAd directly, no status code
+		capResponse := message.NewMessageFromStream(cedarStream)
+		capabilities, err := capResponse.GetClassAd(ctx)
+		if err != nil {
+			_ = htcondorClient.Close()
+			return nil, fmt.Errorf("failed to read capabilities ClassAd: %w", err)
+		}
+
+		// TODO: Parse capabilities to set hasJobsets, allowsLateMat, lateMaterializeVer
+		_ = capabilities
+
+		q := &QmgmtConnection{
+			address:           address,
+			htcondorClient:    htcondorClient,
+			stream:            cedarStream,
+			authenticatedUser: negotiation.User, // Store authenticated user
+			inTransaction:     true,             // GetCapabilities implicitly starts a transaction
+		}
+
+		// Success!
+		return q, nil
 	}
 
-	// Check return code - should be AUTHORIZED
-	// The post-auth response should contain ReturnCode
-	// If DENIED, the connection is not authorized for QMGMT operations
-
-	// Stream should now be ready for QMGMT commands
-	// Mark stream as authenticated
-	cedarStream.SetAuthenticated(true)
-
-	// Query capabilities - this is required before other QMGMT operations
-	// Send CONDOR_GetCapabilities (10036) command
-	capMsg := message.NewMessageForStream(cedarStream)
-	if err := capMsg.PutInt(ctx, CONDOR_GetCapabilities); err != nil {
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("failed to send GetCapabilities command: %w", err)
-	}
-	if err := capMsg.PutInt(ctx, 0); err != nil { // flags = 0
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("failed to send GetCapabilities flags: %w", err)
-	}
-	if err := capMsg.FinishMessage(ctx); err != nil {
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("failed to finish GetCapabilities message: %w", err)
-	}
-
-	// Read capabilities response
-	// Note: GetCapabilities is special - it returns a ClassAd directly, no status code
-	capResponse := message.NewMessageFromStream(cedarStream)
-	capabilities, err := capResponse.GetClassAd(ctx)
-	if err != nil {
-		_ = htcondorClient.Close()
-		return nil, fmt.Errorf("failed to read capabilities ClassAd: %w", err)
-	}
-
-	// TODO: Parse capabilities to set hasJobsets, allowsLateMat, lateMaterializeVer
-	_ = capabilities
-
-	q := &QmgmtConnection{
-		address:           address,
-		htcondorClient:    htcondorClient,
-		stream:            cedarStream,
-		authenticatedUser: negotiation.User, // Store authenticated user
-		inTransaction:     true,             // GetCapabilities implicitly starts a transaction
-	}
-
-	return q, nil
+	return nil, fmt.Errorf("failed to connect and authenticate after %d attempts: %w", maxRetries, lastErr)
 }
 
 // Close disconnects from the schedd queue
