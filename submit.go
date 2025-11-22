@@ -296,6 +296,9 @@ func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
 }
 
 // setArguments sets the arguments attribute
+// HTCondor supports two styles of argument quoting:
+// 1. Old style: no surrounding quotes, uses Args attribute, backslash escapes quotes
+// 2. New style: surrounded by double quotes, uses Arguments attribute
 func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 	// Check both "arguments" and "args"
 	args, ok := sf.cfg.Get("arguments")
@@ -303,13 +306,110 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 		args, ok = sf.cfg.Get("args")
 	}
 
-	if ok && args != "" {
-		_ = ad.Set("Args", args)
-	} else {
+	if !ok || args == "" {
 		_ = ad.Set("Args", "")
+		return nil
+	}
+
+	// Detect style by checking if the argument string is surrounded by double quotes
+	trimmed := strings.TrimSpace(args)
+	isNewStyle := strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) && len(trimmed) >= 2
+
+	if isNewStyle {
+		// New style: remove outer quotes and process
+		inner := trimmed[1 : len(trimmed)-1]
+		processed := processNewStyleArguments(inner)
+		_ = ad.Set("Arguments", processed)
+	} else {
+		// Old style: process backslash escapes then set Args
+		processed := processOldStyleArguments(args)
+		_ = ad.Set("Args", processed)
 	}
 
 	return nil
+}
+
+// processOldStyleArguments processes old style argument quoting
+// In old style: backslash escapes double quotes: \" becomes "
+// This matches HTCondor's V1 argument parsing
+func processOldStyleArguments(s string) string {
+	// Replace backslash-escaped double quotes
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
+// processNewStyleArguments processes new style argument quoting
+// In new style (string already has outer quotes removed):
+//   - Double quotes are escaped by doubling: "" becomes "
+//   - Single quotes delimit arguments with embedded spaces
+//   - Special characters (space, tab, newline, single quote) are wrapped in single quotes
+//   - When starting a quoted section, if the previous character is already a quote,
+//     erase it first to combine sections (this prevents repeated quotes)
+//   - Doubled single quotes (”) become a single literal quote
+//   - This creates the V2 storage format that HTCondor's executor can parse
+//   - Backslash has no special meaning
+func processNewStyleArguments(s string) string {
+	var result strings.Builder
+	inSingleQuote := false
+	i := 0
+
+	for i < len(s) {
+		ch := s[i]
+
+		switch {
+		case ch == '"' && i+1 < len(s) && s[i+1] == '"':
+			// Doubled double quote -> single double quote
+			result.WriteByte('"')
+			i += 2
+
+		case ch == '\'' && i+1 < len(s) && s[i+1] == '\'':
+			// Doubled single quote - represents a literal single quote
+			// Apply the combining logic: if previous char is ', erase it first
+			resultStr := result.String()
+			if len(resultStr) > 0 && resultStr[len(resultStr)-1] == '\'' {
+				// Erase the trailing quote to combine sections
+				result.Reset()
+				result.WriteString(resultStr[:len(resultStr)-1])
+			} else {
+				// Start a new quoted section
+				result.WriteByte('\'')
+			}
+			// Write the escaped quote (two quotes)
+			result.WriteString("''")
+			// End the quoted section
+			result.WriteByte('\'')
+			i += 2
+
+		case ch == '\'':
+			// Single quote - toggle quote mode
+			inSingleQuote = !inSingleQuote
+			// Don't write the single quote delimiter itself
+			i++
+
+		case (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') && inSingleQuote:
+			// Whitespace inside single quotes - wrap in quotes
+			// Apply the combining logic: if previous char is ', erase it first
+			resultStr := result.String()
+			if len(resultStr) > 0 && resultStr[len(resultStr)-1] == '\'' {
+				// Erase the trailing quote to combine sections
+				result.Reset()
+				result.WriteString(resultStr[:len(resultStr)-1])
+			} else {
+				// Start a new quoted section
+				result.WriteByte('\'')
+			}
+			// Write the whitespace character
+			result.WriteByte(ch)
+			// End the quoted section
+			result.WriteByte('\'')
+			i++
+
+		default:
+			result.WriteByte(ch)
+			i++
+		}
+	}
+
+	return result.String()
 }
 
 // setEnvironment sets the environment attribute

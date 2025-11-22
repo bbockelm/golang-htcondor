@@ -55,7 +55,7 @@ func (s *SessionStore) createTable() error {
 		token TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
-	
+
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON http_sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_sessions_username ON http_sessions(username);
 	`
@@ -109,8 +109,8 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 	var token sql.NullString
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT username, created_at, expires_at, token 
-		 FROM http_sessions 
+		`SELECT username, created_at, expires_at, token
+		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
 		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token)
 
