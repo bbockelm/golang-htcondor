@@ -122,103 +122,8 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 
 	// 8. For each job, receive job ad and files
 	for i := int32(0); i < jobCount; i++ {
-		// a. Receive job ClassAd
-		responseMsg = message.NewMessageFromStream(cedarStream)
-		jobAd, err := responseMsg.GetClassAd(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive job ad %d: %w", i, err)
-		}
-
-		// b. EOM (implicit)
-
-		// Get cluster.proc for directory prefix
-		clusterExpr, ok := jobAd.Lookup("ClusterId")
-		if !ok {
-			return fmt.Errorf("job ad %d missing ClusterId", i)
-		}
-		clusterVal := clusterExpr.Eval(nil)
-		clusterID, err := clusterVal.IntValue()
-		if err != nil {
-			return fmt.Errorf("job ad %d: ClusterId not an integer: %w", i, err)
-		}
-
-		procExpr, ok := jobAd.Lookup("ProcId")
-		if !ok {
-			return fmt.Errorf("job ad %d missing ProcId", i)
-		}
-		procVal := procExpr.Eval(nil)
-		procID, err := procVal.IntValue()
-		if err != nil {
-			return fmt.Errorf("job ad %d: ProcId not an integer: %w", i, err)
-		}
-
-		dirPrefix := fmt.Sprintf("%d.%d", clusterID, procID)
-		if jobCount == 1 {
-			dirPrefix = ""
-		}
-
-		// Get list of transfer output files (if specified)
-		var transferOutputFiles map[string]bool
-		// Check TransferOutput (standard) and TransferOutputFiles (legacy/internal)
-		lookupAttr := "TransferOutput"
-		expr, ok := jobAd.Lookup(lookupAttr)
-		if !ok {
-			lookupAttr = "TransferOutputFiles"
-			expr, ok = jobAd.Lookup(lookupAttr)
-		}
-
-		if ok {
-			val := expr.Eval(nil)
-			if str, err := val.StringValue(); err == nil && str != "" {
-				fileList := parseFileList(str)
-				transferOutputFiles = make(map[string]bool)
-				for _, f := range fileList {
-					transferOutputFiles[f] = true
-				}
-			}
-		}
-
-		// Also add Stdout and Stderr files if they exist and we are filtering
-		if transferOutputFiles != nil {
-			// Add standard output file
-			if outExpr, ok := jobAd.Lookup("Out"); ok {
-				val := outExpr.Eval(nil)
-				if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
-					transferOutputFiles[str] = true
-				}
-			}
-
-			// Add standard error file
-			if errExpr, ok := jobAd.Lookup("Err"); ok {
-				val := errExpr.Eval(nil)
-				if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
-					transferOutputFiles[str] = true
-				}
-			}
-		}
-
-		// c-e. Receive files using FileTransfer protocol
-		// First receive the transfer protocol headers (final_transfer flag and xfer_info)
-		headerMsg := message.NewMessageFromStream(cedarStream)
-
-		// Read final_transfer flag
-		finalTransfer, err := headerMsg.GetInt32(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive final_transfer flag: %w", err)
-		}
-		_ = finalTransfer // 0 = intermediate, 1 = final
-
-		// Read xfer_info ClassAd
-		xferInfo, err := headerMsg.GetClassAd(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive xfer_info ClassAd: %w", err)
-		}
-		_ = xferInfo // Contains SandboxSize
-		// EOM after xfer_info (implicit)
-
-		// Now receive the files
-		if err := s.receiveJobFiles(ctx, cedarStream, tarWriter, dirPrefix, transferOutputFiles); err != nil {
-			return fmt.Errorf("failed to receive files for job %d.%d: %w", clusterID, procID, err)
+		if err := s.processJobSandbox(ctx, cedarStream, tarWriter, jobCount, i); err != nil {
+			return err
 		}
 	}
 
@@ -231,6 +136,110 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 	// 10. EOM
 	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish OK reply: %w", err)
+	}
+
+	return nil
+}
+
+// processJobSandbox handles the reception of a single job's sandbox
+func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stream, tarWriter *tar.Writer, jobCount int32, i int32) error {
+	// a. Receive job ClassAd
+	responseMsg := message.NewMessageFromStream(cedarStream)
+	jobAd, err := responseMsg.GetClassAd(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to receive job ad %d: %w", i, err)
+	}
+
+	// b. EOM (implicit)
+
+	// Get cluster.proc for directory prefix
+	clusterExpr, ok := jobAd.Lookup("ClusterId")
+	if !ok {
+		return fmt.Errorf("job ad %d missing ClusterId", i)
+	}
+	clusterVal := clusterExpr.Eval(nil)
+	clusterID, err := clusterVal.IntValue()
+	if err != nil {
+		return fmt.Errorf("job ad %d: ClusterId not an integer: %w", i, err)
+	}
+
+	procExpr, ok := jobAd.Lookup("ProcId")
+	if !ok {
+		return fmt.Errorf("job ad %d missing ProcId", i)
+	}
+	procVal := procExpr.Eval(nil)
+	procID, err := procVal.IntValue()
+	if err != nil {
+		return fmt.Errorf("job ad %d: ProcId not an integer: %w", i, err)
+	}
+
+	dirPrefix := fmt.Sprintf("%d.%d", clusterID, procID)
+	if jobCount == 1 {
+		dirPrefix = ""
+	}
+
+	// Get list of transfer output files (if specified)
+	var transferOutputFiles map[string]bool
+	// Check TransferOutput (standard) and TransferOutputFiles (legacy/internal)
+	lookupAttr := "TransferOutput"
+	expr, ok := jobAd.Lookup(lookupAttr)
+	if !ok {
+		lookupAttr = "TransferOutputFiles"
+		expr, ok = jobAd.Lookup(lookupAttr)
+	}
+
+	if ok {
+		val := expr.Eval(nil)
+		if str, err := val.StringValue(); err == nil && str != "" {
+			fileList := parseFileList(str)
+			transferOutputFiles = make(map[string]bool)
+			for _, f := range fileList {
+				transferOutputFiles[f] = true
+			}
+		}
+	}
+
+	// Also add Stdout and Stderr files if they exist and we are filtering
+	if transferOutputFiles != nil {
+		// Add standard output file
+		if outExpr, ok := jobAd.Lookup("Out"); ok {
+			val := outExpr.Eval(nil)
+			if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
+				transferOutputFiles[str] = true
+			}
+		}
+
+		// Add standard error file
+		if errExpr, ok := jobAd.Lookup("Err"); ok {
+			val := errExpr.Eval(nil)
+			if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
+				transferOutputFiles[str] = true
+			}
+		}
+	}
+
+	// c-e. Receive files using FileTransfer protocol
+	// First receive the transfer protocol headers (final_transfer flag and xfer_info)
+	headerMsg := message.NewMessageFromStream(cedarStream)
+
+	// Read final_transfer flag
+	finalTransfer, err := headerMsg.GetInt32(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to receive final_transfer flag: %w", err)
+	}
+	_ = finalTransfer // 0 = intermediate, 1 = final
+
+	// Read xfer_info ClassAd
+	xferInfo, err := headerMsg.GetClassAd(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to receive xfer_info ClassAd: %w", err)
+	}
+	_ = xferInfo // Contains SandboxSize
+	// EOM after xfer_info (implicit)
+
+	// Now receive the files
+	if err := s.receiveJobFiles(ctx, cedarStream, tarWriter, dirPrefix, transferOutputFiles); err != nil {
+		return fmt.Errorf("failed to receive files for job %d.%d: %w", clusterID, procID, err)
 	}
 
 	return nil

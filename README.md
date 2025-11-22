@@ -307,12 +307,17 @@ go test -race ./...
 # Run integration tests (requires HTCondor installed)
 go test -tags=integration -v ./httpserver/
 
+# Run CLI device code flow integration test
+go test -tags=integration -v ./cmd/htcondor-api/ -run TestDeviceCodeCLIFlow
+
 # Or use make
 make test
 make test-integration
 ```
 
-The integration test verifies the complete HTTP API workflow:
+Integration tests include:
+
+**HTTP API Integration Tests** (`httpserver/`):
 1. Starts a mini HTCondor instance
 2. Launches the HTTP API server
 3. Submits a job via HTTP
@@ -321,7 +326,15 @@ The integration test verifies the complete HTTP API workflow:
 6. Downloads output tarball
 7. Verifies results
 
-See [httpserver/INTEGRATION_TEST.md](httpserver/INTEGRATION_TEST.md) for details.
+**Device Code CLI Flow Test** (`cmd/htcondor-api/`):
+1. Builds htcondor-api CLI binary
+2. Starts server in demo mode
+3. Runs `htcondor-api token fetch` command
+4. Simulates browser-based authentication
+5. Verifies token storage and usage
+6. Tests token with protected API endpoints
+
+All integration tests use isolated temporary directories for parallel execution.
 
 ## API Reference
 

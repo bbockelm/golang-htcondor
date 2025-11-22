@@ -4,6 +4,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -120,7 +122,7 @@ func runTokenFetch(args []string) error {
 	if exists && tokenInfo.RefreshToken != "" {
 		// Try to refresh the token
 		fmt.Println("Found existing refresh token, attempting to refresh...")
-		newTokenInfo, err := refreshToken(tokenInfo, config)
+		newTokenInfo, err := refreshToken(tokenInfo)
 		if err == nil {
 			fmt.Println("Successfully refreshed access token!")
 			store.Tokens[trustDomain] = newTokenInfo
@@ -192,9 +194,10 @@ func registerClient(config *TokenFetchConfig) (string, string, error) {
 	registerURL := config.IssuerURL + "/mcp/oauth2/register"
 
 	reqBody := map[string]interface{}{
-		"client_name": "HTCondor API CLI",
-		"grant_types": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
-		"scope":       config.Scopes,
+		"client_name":   "HTCondor API CLI",
+		"grant_types":   []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
+		"scope":         config.Scopes,
+		"redirect_uris": []string{"http://localhost"},
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -209,7 +212,7 @@ func registerClient(config *TokenFetchConfig) (string, string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
@@ -253,7 +256,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -319,6 +322,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 			}
 			tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+			client := getHTTPClient()
 			tokenResp, err := client.Do(tokenReq)
 			if err != nil {
 				return nil, err
@@ -377,7 +381,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 }
 
 // refreshToken refreshes an access token using a refresh token
-func refreshToken(tokenInfo *TokenInfo, _ *TokenFetchConfig) (*TokenInfo, error) {
+func refreshToken(tokenInfo *TokenInfo) (*TokenInfo, error) {
 	tokenURL := tokenInfo.IssuerURL + "/mcp/oauth2/token"
 
 	data := url.Values{}
@@ -393,7 +397,7 @@ func refreshToken(tokenInfo *TokenInfo, _ *TokenFetchConfig) (*TokenInfo, error)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -671,4 +675,39 @@ func transformScopes(userScopes []string) []string {
 		transformed = append(transformed, "condor:/"+scope)
 	}
 	return transformed
+}
+
+// getHTTPClient returns an HTTP client with the specified security settings
+func getHTTPClient() *http.Client {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load config to check for AUTH_SSL_CLIENT_CAFILE
+	cfg, err := config.New()
+	if err == nil {
+		if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok && caFile != "" {
+			// Load CA cert
+			//nolint:gosec // Path is from config, admin-controlled
+			caCert, err := os.ReadFile(caFile)
+			if err == nil {
+				caCertPool := x509.NewCertPool()
+				if caCertPool.AppendCertsFromPEM(caCert) {
+					tlsConfig.RootCAs = caCertPool
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: failed to parse CA certificate from %s\n", caFile)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: failed to read CA certificate file %s: %v\n", caFile, err)
+			}
+		}
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
 }
