@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/golang-htcondor/config"
 )
 
@@ -131,7 +133,7 @@ HasFileTransfer = True
 STARTD_DETECT_GPUS = false
 
 # Security settings - permissive for testing
-SEC_DEFAULT_AUTHENTICATION = OPTIONAL
+SEC_DEFAULT_AUTHENTICATION = PREFERRED
 SEC_DEFAULT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
 SEC_DEFAULT_ENCRYPTION = OPTIONAL
 SEC_DEFAULT_INTEGRITY = OPTIONAL
@@ -140,10 +142,13 @@ SEC_CLIENT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
 # Allow all operations for testing
 ALLOW_READ = *
 ALLOW_WRITE = *
+ALLOW_ADVERTISE = *
 ALLOW_NEGOTIATOR = *
 ALLOW_ADMINISTRATOR = *
 ALLOW_OWNER = *
 ALLOW_CLIENT = *
+ALLOW_DAEMON = *
+# ALLOW_CONFIG = *
 
 # Specifically allow queue management operations for testing
 QUEUE_SUPER_USERS = root, condor, $(CONDOR_IDS)
@@ -159,6 +164,9 @@ NETWORK_INTERFACE = 127.0.0.1
 	SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY D_SYSCALLS
 	SCHEDD_LOG = $(LOG)/ScheddLog
 	MAX_SCHEDD_LOG = 10000000
+	COLLECTOR_DEBUG = D_FULLDEBUG D_SECURITY D_COMMAND
+	COLLECTOR_LOG = $(LOG)/CollectorLog
+	MAX_COLLECTOR_LOG = 10000000
 
 # Fast polling for testing
 POLLING_INTERVAL = 5
@@ -593,5 +601,91 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		} else {
 			t.Logf("Got expected error: %v", err)
 		}
+	})
+
+	// Test 6: Advertise a custom ad
+	t.Run("AdvertiseAd", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Create a Startd ad
+		startdAd := classad.New()
+		_ = startdAd.Set("MyType", "Machine")
+		_ = startdAd.Set("TargetType", "Machine")
+		_ = startdAd.Set("Name", "test-advertise-slot@localhost")
+		_ = startdAd.Set("Machine", "localhost")
+		_ = startdAd.Set("Start", true)
+		_ = startdAd.Set("DaemonStartTime", time.Now().Unix())
+		_ = startdAd.Set("UpdateSequenceNumber", 1)
+
+		// Advertise it with standard command
+		opts := &AdvertiseOptions{
+			Command: commands.CommandType(60), // UPDATE_STARTD_AD_WITH_ACK
+			WithAck: true,
+		}
+		err := collector.Advertise(ctx, startdAd, opts)
+		if err != nil {
+			harness.printCollectorLog()
+			t.Fatalf("Failed to advertise startd ad: %v", err)
+		}
+
+		t.Log("Successfully advertised startd ad")
+
+		// Wait a bit for the collector to process it
+		time.Sleep(1 * time.Second)
+
+		// Query for it
+		ads, err := collector.QueryAds(ctx, "Machine", "Name == \"test-advertise-slot@localhost\"")
+		if err != nil {
+			t.Fatalf("Failed to query advertised ad: %v", err)
+		}
+
+		if len(ads) == 0 {
+			harness.printCollectorLog()
+			t.Errorf("Advertised ad not found")
+		} else {
+			t.Logf("Found advertised ad")
+			// Verify attributes
+			if val, ok := ads[0].EvaluateAttrString("Name"); !ok || val != "test-advertise-slot@localhost" {
+				t.Errorf("Advertised ad has wrong name")
+			}
+		}
+	})
+
+	// Test 7: Discover advertise command
+	t.Run("DiscoverAdvertiseCommand", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Create a dummy ad file
+		adContent := `
+MyType = "Machine"
+TargetType = "Machine"
+Name = "discovery-ad"
+Machine = "localhost"
+Start = True
+DaemonStartTime = 100
+UpdateSequenceNumber = 1
+`
+		adFile := filepath.Join(harness.tmpDir, "discovery_ad")
+		if err := os.WriteFile(adFile, []byte(adContent), 0600); err != nil {
+			t.Fatalf("Failed to write ad file: %v", err)
+		}
+
+		// Run condor_advertise
+		// We use -tcp to match our client behavior
+		//nolint:gosec // This is a test, using variable in command is fine
+		cmd := exec.CommandContext(ctx, "condor_advertise", "-tcp", "UPDATE_STARTD_AD", adFile)
+		cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+harness.configFile)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("condor_advertise output: %s", string(out))
+			t.Fatalf("condor_advertise failed: %v", err)
+		}
+
+		t.Log("condor_advertise succeeded")
+
+		// Print collector log to see what command was received
+		harness.printCollectorLog()
 	})
 }
