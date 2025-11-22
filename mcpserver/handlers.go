@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/golang-jwt/jwt/v5"
@@ -252,6 +253,32 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 				"required": []string{"job_id"},
 			},
 		},
+		{
+			Name:        "advertise_to_collector",
+			Description: "Advertise a ClassAd to the HTCondor collector. The UPDATE command is determined from the ad's MyType attribute if not explicitly specified.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"ad": map[string]interface{}{
+						"type":        "object",
+						"description": "ClassAd to advertise as a JSON object (e.g., {\"MyType\": \"Machine\", \"Name\": \"slot1@host\", \"State\": \"Unclaimed\"})",
+					},
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional UPDATE command (e.g., 'UPDATE_STARTD_AD'). If not specified, determined from ad's MyType",
+					},
+					"with_ack": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Request acknowledgment from collector (default: false)",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"ad"},
+			},
+		},
 	}
 
 	return map[string]interface{}{
@@ -318,6 +345,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJobStdout(ctx, request.Arguments)
 	case "get_job_stderr":
 		result, err = s.toolGetJobStderr(ctx, request.Arguments)
+	case "advertise_to_collector":
+		result, err = s.toolAdvertiseToCollector(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
@@ -897,3 +926,102 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 		},
 	}, nil
 }
+
+// toolAdvertiseToCollector handles advertise_to_collector tool calls
+func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	// Check if collector is configured
+	if s.collector == nil {
+		return nil, fmt.Errorf("collector not configured")
+	}
+
+	// Parse arguments
+	adData, ok := args["ad"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("ad must be a JSON object")
+	}
+
+	// Convert map to ClassAd
+	adJSON, err := json.Marshal(adData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal ad: %w", err)
+	}
+
+	ad := classad.New()
+	if err := json.Unmarshal(adJSON, ad); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ad: %w", err)
+	}
+
+	// Build advertise options
+	opts := &htcondor.AdvertiseOptions{
+		UseTCP: true,
+	}
+
+	// Parse optional with_ack
+	if withAck, ok := args["with_ack"].(bool); ok {
+		opts.WithAck = withAck
+	}
+
+	// Parse optional command
+	if cmdStr, ok := args["command"].(string); ok && cmdStr != "" {
+		// Import commands package if needed
+		cmd, valid := parseAdvertiseCommand(cmdStr)
+		if !valid {
+			return nil, fmt.Errorf("invalid command: %s", cmdStr)
+		}
+		opts.Command = cmd
+	}
+
+	// Advertise the ad
+	if err := s.collector.Advertise(ctx, ad, opts); err != nil {
+		return nil, fmt.Errorf("failed to advertise: %w", err)
+	}
+
+	// Get ad name for response
+	adName := "unknown"
+	if nameStr, ok := ad.EvaluateAttrString("Name"); ok {
+		adName = nameStr
+	}
+
+	adType := "Generic"
+	if typeStr, ok := ad.EvaluateAttrString("MyType"); ok {
+		adType = typeStr
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Successfully advertised %s ad '%s' to collector", adType, adName),
+			},
+		},
+		"metadata": map[string]interface{}{
+			"ad_name": adName,
+			"ad_type": adType,
+			"with_ack": opts.WithAck,
+		},
+	}, nil
+}
+
+// parseAdvertiseCommand parses an UPDATE command string to CommandType
+func parseAdvertiseCommand(cmd string) (commands.CommandType, bool) {
+	// Map command strings to command types
+	cmdMap := map[string]commands.CommandType{
+		"UPDATE_STARTD_AD":          commands.UPDATE_STARTD_AD,
+		"UPDATE_SCHEDD_AD":          commands.UPDATE_SCHEDD_AD,
+		"UPDATE_MASTER_AD":          commands.UPDATE_MASTER_AD,
+		"UPDATE_SUBMITTOR_AD":       commands.UPDATE_SUBMITTOR_AD,
+		"UPDATE_COLLECTOR_AD":       commands.UPDATE_COLLECTOR_AD,
+		"UPDATE_NEGOTIATOR_AD":      commands.UPDATE_NEGOTIATOR_AD,
+		"UPDATE_LICENSE_AD":         commands.UPDATE_LICENSE_AD,
+		"UPDATE_STORAGE_AD":         commands.UPDATE_STORAGE_AD,
+		"UPDATE_ACCOUNTING_AD":      commands.UPDATE_ACCOUNTING_AD,
+		"UPDATE_GRID_AD":            commands.UPDATE_GRID_AD,
+		"UPDATE_HAD_AD":             commands.UPDATE_HAD_AD,
+		"UPDATE_AD_GENERIC":         commands.UPDATE_AD_GENERIC,
+		"UPDATE_STARTD_AD_WITH_ACK": commands.UPDATE_STARTD_AD_WITH_ACK,
+	}
+
+	cmdType, ok := cmdMap[strings.ToUpper(cmd)]
+	return cmdType, ok
+}
+
