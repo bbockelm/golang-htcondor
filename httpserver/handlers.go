@@ -2,7 +2,6 @@ package httpserver
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1064,6 +1063,93 @@ func parseJobID(jobID string) (cluster, proc int, err error) {
 	return cluster, proc, nil
 }
 
+// streamFileFromTar extracts a specific file from a tar archive stream and writes it to the HTTP response
+// This uses io.Pipe to avoid buffering the entire tar archive in memory
+func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename string, w http.ResponseWriter, detectContentType bool) error {
+	// Create a pipe for streaming the tar archive
+	pipeReader, pipeWriter := io.Pipe()
+	
+	// Start receiving the job sandbox in the background
+	errChan := s.schedd.ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	
+	// Process the tar stream in the current goroutine
+	tarReader := tar.NewReader(pipeReader)
+	found := false
+	var extractErr error
+	
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			extractErr = fmt.Errorf("failed to read tar archive: %w", err)
+			break
+		}
+		
+		// Check if this is the file we're looking for
+		baseName := filepath.Base(header.Name)
+		if baseName == filename {
+			found = true
+			
+			// If we need to detect content type, we need to read the first 512 bytes
+			if detectContentType {
+				// Create a limited reader for the first 512 bytes
+				buf := make([]byte, 512)
+				n, err := io.ReadFull(tarReader, buf)
+				if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+					extractErr = fmt.Errorf("failed to read file for content type detection: %w", err)
+					break
+				}
+				
+				// Detect content type
+				contentType := http.DetectContentType(buf[:n])
+				w.Header().Set("Content-Type", contentType)
+				w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+				w.WriteHeader(http.StatusOK)
+				
+				// Write the buffer we already read
+				if _, err := w.Write(buf[:n]); err != nil {
+					extractErr = fmt.Errorf("failed to write content: %w", err)
+					break
+				}
+			} else {
+				// Set headers without content type detection
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+			}
+			
+			// Stream the rest of the file with an 8KB buffer
+			buf := make([]byte, 8192)
+			_, copyErr := io.CopyBuffer(w, tarReader, buf)
+			if copyErr != nil {
+				extractErr = fmt.Errorf("failed to stream file content: %w", copyErr)
+			}
+			break
+		}
+	}
+	
+	// Close the pipe writer to signal completion
+	pipeWriter.Close()
+	
+	// Wait for the sandbox receive to complete
+	if err := <-errChan; err != nil {
+		return fmt.Errorf("failed to download job sandbox: %w", err)
+	}
+	
+	// Check if we encountered an error during extraction
+	if extractErr != nil {
+		return extractErr
+	}
+	
+	// Check if we found the file
+	if !found {
+		return fmt.Errorf("file not found in sandbox")
+	}
+	
+	return nil
+}
+
 // handleMetrics handles GET /metrics endpoint for Prometheus scraping
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1718,8 +1804,12 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
-	// Prevent path traversal attacks
-	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+	// Prevent path traversal attacks using filepath.Clean
+	// Clean removes any .. and / elements, and if the result differs from the input,
+	// it means there was a path traversal attempt
+	// Also explicitly reject backslashes as they can be path separators
+	cleanedFilename := filepath.Clean(filename)
+	if cleanedFilename != filename || strings.Contains(filename, string(filepath.Separator)) || strings.Contains(filename, "\\") {
 		s.writeError(w, http.StatusBadRequest, "Invalid filename: path traversal not allowed")
 		return
 	}
@@ -1727,63 +1817,21 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, 
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Download the job sandbox
+	// Set timeout for the sandbox download
 	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to download job sandbox", "error", err, "job", fmt.Sprintf("%d.%d", cluster, proc))
-		s.writeError(w, http.StatusInternalServerError, "Failed to download job sandbox")
+	// Stream the file from the tar archive without buffering in memory
+	err := s.streamFileFromTar(sandboxCtx, constraint, filename, w, true)
+	if err != nil {
+		if strings.Contains(err.Error(), "file not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("File '%s' not found in job sandbox", filename))
+		} else {
+			s.logger.Error(logging.DestinationHTTP, "Failed to fetch file from sandbox", "error", err, "job", fmt.Sprintf("%d.%d", cluster, proc), "filename", filename)
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch file: %v", err))
+		}
 		return
 	}
-
-	// Extract the requested file from the tar archive
-	tarReader := tar.NewReader(&sandboxBuf)
-	var fileContent []byte
-	var found bool
-
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to read tar archive", "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to read tar archive")
-			return
-		}
-
-		// Check if this is the file we're looking for
-		baseName := filepath.Base(header.Name)
-		if baseName == filename {
-			content, err := io.ReadAll(tarReader)
-			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to read file content", "error", err, "filename", filename)
-				s.writeError(w, http.StatusInternalServerError, "Failed to read file content")
-				return
-			}
-			fileContent = content
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		s.writeError(w, http.StatusNotFound, fmt.Sprintf("File '%s' not found in job sandbox", filename))
-		return
-	}
-
-	// Detect content type from the file content
-	contentType := http.DetectContentType(fileContent)
-
-	// Set headers and return the file
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(fileContent)
 }
 
 // handleJobOutputFile is a helper function to retrieve stdout or stderr from a job
@@ -1824,57 +1872,21 @@ func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, clu
 		return
 	}
 
-	// Download the job sandbox
+	// Set timeout for the sandbox download
 	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to download job sandbox", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to download job sandbox")
+	// Stream the file from the tar archive without buffering in memory
+	err = s.streamFileFromTar(sandboxCtx, constraint, outputFile, w, false)
+	if err != nil {
+		if strings.Contains(err.Error(), "file not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("%s file not found in job sandbox", outputType))
+		} else {
+			s.logger.Error(logging.DestinationHTTP, "Failed to fetch output file", "error", err, "outputType", outputType)
+			s.writeError(w, http.StatusInternalServerError, "Failed to fetch output file")
+		}
 		return
 	}
-
-	// Extract the output file from the tar archive
-	tarReader := tar.NewReader(&sandboxBuf)
-	var outputContent string
-
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to read tar archive", "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to read tar archive")
-			return
-		}
-
-		// Check if this is the output file we're looking for
-		baseName := filepath.Base(header.Name)
-		if baseName == outputFile {
-			content, err := io.ReadAll(tarReader)
-			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to read output content", "error", err)
-				s.writeError(w, http.StatusInternalServerError, "Failed to read output content")
-				return
-			}
-			outputContent = string(content)
-			break
-		}
-	}
-
-	if outputContent == "" {
-		s.writeError(w, http.StatusNotFound, fmt.Sprintf("%s file not found in job sandbox", outputType))
-		return
-	}
-
-	// Return the output as plain text
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(outputContent))
 }
 
 // WhoAmIResponse represents a whoami response

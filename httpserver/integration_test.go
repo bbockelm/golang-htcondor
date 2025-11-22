@@ -1707,3 +1707,205 @@ ENABLE_WEB_SERVER = False
 
 	return os.WriteFile(configFile, []byte(config), 0600)
 }
+
+// TestFileFetchIntegration tests fetching individual files from job output sandbox
+func TestFileFetchIntegration(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Create temporary directory for mini condor
+	tempDir, err := os.MkdirTemp("", "htcondor-file-fetch-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create secure socket directory in /tmp to avoid path length issues
+	socketDir, err := os.MkdirTemp("/tmp", "htc_sock_*")
+	if err != nil {
+		t.Fatalf("Failed to create socket directory: %v", err)
+	}
+	defer os.RemoveAll(socketDir)
+
+	t.Logf("Using temporary directory: %s", tempDir)
+	t.Logf("Using socket directory: %s", socketDir)
+
+	// Generate signing key for demo authentication
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to write signing key: %v", err)
+	}
+
+	trustDomain := "test.htcondor.org"
+
+	// Write mini condor configuration
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Set CONDOR_CONFIG environment variable
+	t.Setenv("CONDOR_CONFIG", configFile)
+	htcondor.ReloadDefaultConfig()
+
+	// Start condor_master
+	t.Log("Starting condor_master...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	condorMaster, err := startCondorMaster(ctx, configFile, tempDir)
+	if err != nil {
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+	defer stopCondorMaster(condorMaster, t)
+
+	// Wait for condor to be ready
+	t.Log("Waiting for HTCondor to be ready...")
+	if err := waitForCondor(tempDir, 60*time.Second, t); err != nil {
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+	t.Log("HTCondor is ready!")
+
+	// Find the actual schedd address
+	scheddAddr, err := getScheddAddress(tempDir, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to get schedd address: %v", err)
+	}
+	t.Logf("Using schedd address: %s", scheddAddr)
+
+	// Start HTTP server
+	server, baseURL := startTestHTTPServer(ctx, tempDir, scheddAddr, passwordsDir, t)
+	defer server.Shutdown(ctx)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	user := "testuser"
+
+	// Submit a job that creates multiple output files
+	submitFile := `
+executable = /bin/sh
+arguments = "-c 'echo hello > output.txt; echo world > result.json; echo test > data.log'"
+output = stdout.txt
+error = stderr.txt
+log = job.log
+request_cpus = 1
+request_memory = 128
+request_disk = 1024
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+queue
+`
+
+	jobID := submitJob(t, client, baseURL, user, submitFile)
+	t.Logf("Submitted job: %s", jobID)
+
+	// Wait for job to complete
+	waitForJobCompletion(t, client, baseURL, user, jobID, tempDir, 120*time.Second)
+	t.Log("Job completed!")
+
+	// Test fetching individual files
+	testCases := []struct {
+		filename        string
+		expectedContent string
+		expectSuccess   bool
+	}{
+		{"output.txt", "hello\n", true},
+		{"result.json", "world\n", true},
+		{"data.log", "test\n", true},
+		{"stdout.txt", "", true},      // stdout should exist but be empty
+		{"nonexistent.txt", "", false}, // should return 404
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("fetch_%s", tc.filename), func(t *testing.T) {
+			req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs/%s/files/%s", baseURL, jobID, tc.filename), nil)
+			if err != nil {
+				t.Fatalf("Failed to create request: %v", err)
+			}
+			req.Header.Set("X-Test-User", user)
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Failed to fetch file: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if tc.expectSuccess {
+				if resp.StatusCode != http.StatusOK {
+					body, _ := io.ReadAll(resp.Body)
+					t.Fatalf("Expected status 200, got %d: %s", resp.StatusCode, string(body))
+				}
+
+				// Read the content
+				content, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatalf("Failed to read response body: %v", err)
+				}
+
+				// Verify content for non-empty files
+				if tc.expectedContent != "" {
+					if string(content) != tc.expectedContent {
+						t.Errorf("Expected content %q, got %q", tc.expectedContent, string(content))
+					}
+				}
+
+				// Verify Content-Type header was set
+				contentType := resp.Header.Get("Content-Type")
+				if contentType == "" {
+					t.Error("Content-Type header not set")
+				}
+				t.Logf("Content-Type: %s", contentType)
+
+				// Verify Content-Disposition header
+				contentDisposition := resp.Header.Get("Content-Disposition")
+				if !strings.Contains(contentDisposition, tc.filename) {
+					t.Errorf("Content-Disposition doesn't contain filename: %s", contentDisposition)
+				}
+			} else {
+				if resp.StatusCode != http.StatusNotFound {
+					body, _ := io.ReadAll(resp.Body)
+					t.Fatalf("Expected status 404, got %d: %s", resp.StatusCode, string(body))
+				}
+			}
+		})
+	}
+
+	// Test path traversal protection
+	t.Run("path_traversal_protection", func(t *testing.T) {
+		maliciousFilenames := []string{
+			"../etc/passwd",
+			"etc/passwd",
+			"etc\\passwd",
+			"..",
+		}
+
+		for _, filename := range maliciousFilenames {
+			req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/jobs/%s/files/%s", baseURL, jobID, filename), nil)
+			if err != nil {
+				t.Fatalf("Failed to create request: %v", err)
+			}
+			req.Header.Set("X-Test-User", user)
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Failed to make request: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("Expected status 400 for %q, got %d: %s", filename, resp.StatusCode, string(body))
+			}
+		}
+	})
+}
+
