@@ -373,6 +373,12 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check for /input/multipart path
+	if len(parts) == 3 && parts[1] == "input" && parts[2] == "multipart" {
+		s.handleJobInputMultipart(w, r, jobID)
+		return
+	}
+
 	// Handle job operations
 	switch r.Method {
 	case http.MethodGet:
@@ -926,6 +932,142 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Job input files uploaded successfully",
+		"job_id":  jobID,
+	})
+}
+
+// handleJobInputMultipart handles POST /api/v1/jobs/{id}/input/multipart
+// Accepts multipart/form-data and converts it to a tarball for SpoolJobFilesFromTar
+func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Create authenticated context
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Parse job ID
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+		return
+	}
+
+	// First, query for the job to get its proc ad with transfer attributes
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
+	if err != nil {
+		if ratelimit.IsRateLimitError(err) {
+			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
+			return
+		}
+		if isAuthenticationError(err) {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+		return
+	}
+
+	if len(jobAds) == 0 {
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
+	// Parse multipart form with a size limit (1GB)
+	err = r.ParseMultipartForm(1024 * 1024 * 1024) // 1GB limit
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+
+	// Create a pipe for streaming tar conversion
+	pr, pw := io.Pipe()
+
+	// Start goroutine to convert multipart to tar
+	errChan := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		tw := tar.NewWriter(pw)
+		defer tw.Close()
+
+		// Process each file in the multipart form
+		for fieldName, fileHeaders := range r.MultipartForm.File {
+			for _, fileHeader := range fileHeaders {
+				// Open the multipart file
+				file, err := fileHeader.Open()
+				if err != nil {
+					errChan <- fmt.Errorf("failed to open multipart file %s: %w", fileHeader.Filename, err)
+					return
+				}
+
+				// Determine file mode based on field name
+				// "executable" field gets 0755, all others get 0644
+				var fileMode int64 = 0644
+				if fieldName == "executable" {
+					fileMode = 0755
+				}
+
+				// Create tar header
+				header := &tar.Header{
+					Name:    fileHeader.Filename,
+					Size:    fileHeader.Size,
+					Mode:    fileMode,
+					ModTime: time.Now(),
+				}
+
+				// Write header
+				if err := tw.WriteHeader(header); err != nil {
+					file.Close()
+					errChan <- fmt.Errorf("failed to write tar header for %s: %w", fileHeader.Filename, err)
+					return
+				}
+
+				// Stream file content directly to tar (no buffering)
+				_, err = io.Copy(tw, file)
+				file.Close()
+				if err != nil {
+					errChan <- fmt.Errorf("failed to copy file %s to tar: %w", fileHeader.Filename, err)
+					return
+				}
+			}
+		}
+
+		errChan <- nil
+	}()
+
+	// Spool job files from the tar stream
+	spoolErr := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, pr)
+
+	// Wait for tar conversion to complete
+	conversionErr := <-errChan
+
+	// Check for errors
+	if conversionErr != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to convert multipart to tar: %v", conversionErr))
+		return
+	}
+
+	if spoolErr != nil {
+		if isAuthenticationError(spoolErr) {
+			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", spoolErr))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", spoolErr))
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"message": "Job input files uploaded successfully via multipart",
 		"job_id":  jobID,
 	})
 }
