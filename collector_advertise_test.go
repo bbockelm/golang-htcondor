@@ -173,10 +173,10 @@ func TestEnsureMyAddress(t *testing.T) {
 
 func TestEstimateClassAdSize(t *testing.T) {
 	tests := []struct {
-		name     string
-		attrs    map[string]interface{}
-		minSize  int
-		maxSize  int
+		name    string
+		attrs   map[string]interface{}
+		minSize int
+		maxSize int
 	}{
 		{
 			name:    "Empty ad",
@@ -187,9 +187,9 @@ func TestEstimateClassAdSize(t *testing.T) {
 		{
 			name: "Small ad",
 			attrs: map[string]interface{}{
-				"MyType":    "Machine",
-				"Name":      "slot1@hostname",
-				"State":     "Unclaimed",
+				"MyType": "Machine",
+				"Name":   "slot1@hostname",
+				"State":  "Unclaimed",
 			},
 			minSize: 200,
 			maxSize: 500,

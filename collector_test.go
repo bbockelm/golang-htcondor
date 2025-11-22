@@ -38,13 +38,13 @@ func TestCollectorAdvertise(t *testing.T) {
 	ad := classad.New()
 	_ = ad.Set("MyType", "Generic")
 	_ = ad.Set("Name", "test")
-	
+
 	// This will fail to connect, but that's expected in unit tests
 	err := collector.Advertise(ctx, ad, nil)
 	if err == nil {
 		t.Error("Expected error when connecting to non-existent collector")
 	}
-	
+
 	// Test with nil ad
 	err = collector.Advertise(ctx, nil, nil)
 	if err == nil {

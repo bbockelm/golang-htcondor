@@ -121,6 +121,54 @@ const openAPISchema = `{
             "description": "The authenticated username (only present if authenticated is true)"
           }
         }
+      },
+      "AdvertiseRequest": {
+        "type": "object",
+        "properties": {
+          "ad": {
+            "type": "object",
+            "description": "ClassAd to advertise (JSON format)"
+          },
+          "command": {
+            "type": "string",
+            "description": "Optional UPDATE command (e.g., 'UPDATE_STARTD_AD'). If not specified, determined from ad's MyType",
+            "enum": ["UPDATE_STARTD_AD", "UPDATE_SCHEDD_AD", "UPDATE_MASTER_AD", "UPDATE_SUBMITTOR_AD", "UPDATE_COLLECTOR_AD", "UPDATE_NEGOTIATOR_AD", "UPDATE_LICENSE_AD", "UPDATE_STORAGE_AD", "UPDATE_ACCOUNTING_AD", "UPDATE_GRID_AD", "UPDATE_HAD_AD", "UPDATE_AD_GENERIC", "UPDATE_STARTD_AD_WITH_ACK"]
+          },
+          "with_ack": {
+            "type": "boolean",
+            "description": "Request acknowledgment from collector (forces TCP)",
+            "default": false
+          }
+        }
+      },
+      "AdvertiseResponse": {
+        "type": "object",
+        "required": ["success", "succeeded", "failed"],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Whether all advertisements succeeded"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable status message"
+          },
+          "succeeded": {
+            "type": "integer",
+            "description": "Number of ads successfully advertised"
+          },
+          "failed": {
+            "type": "integer",
+            "description": "Number of ads that failed to advertise"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Error messages for failed ads (if any)"
+          }
+        }
       }
     }
   },
@@ -1415,6 +1463,171 @@ const openAPISchema = `{
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Collector not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/collector/advertise": {
+      "post": {
+        "summary": "Advertise to collector",
+        "description": "Send one or more ClassAd advertisements to the HTCondor collector. Supports single ad (JSON), text/plain (old ClassAd format), or multipart/form-data (multiple ads). The UPDATE command is determined from the ad's MyType attribute if not explicitly specified. Multiple ads use the multi-sending protocol with a 1MB buffer limit.",
+        "operationId": "advertiseToCollector",
+        "requestBody": {
+          "description": "ClassAd(s) to advertise",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdvertiseRequest"
+              },
+              "example": {
+                "ad": {
+                  "MyType": "Machine",
+                  "Name": "slot1@hostname.example.com",
+                  "State": "Unclaimed",
+                  "Activity": "Idle",
+                  "Memory": 8192,
+                  "Cpus": 4
+                },
+                "with_ack": false
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string",
+                "description": "ClassAd in old format"
+              },
+              "example": "MyType = \"Machine\"\nName = \"slot1@hostname\"\nState = \"Unclaimed\"\n"
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ad1": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "First ClassAd file"
+                  },
+                  "ad2": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Second ClassAd file (optional)"
+                  },
+                  "with_ack": {
+                    "type": "string",
+                    "description": "Request acknowledgment (true/false)",
+                    "default": "false"
+                  },
+                  "command": {
+                    "type": "string",
+                    "description": "Optional UPDATE command override"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "with_ack",
+            "in": "query",
+            "description": "Request acknowledgment from collector (for text/plain)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "command",
+            "in": "query",
+            "description": "UPDATE command to use (for text/plain)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All advertisements succeeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdvertiseResponse"
+                },
+                "example": {
+                  "success": true,
+                  "message": "Advertisement successful",
+                  "succeeded": 1,
+                  "failed": 0
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Partial success (multi-status)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdvertiseResponse"
+                },
+                "example": {
+                  "success": false,
+                  "message": "2 of 5 ads failed to advertise",
+                  "succeeded": 3,
+                  "failed": 2,
+                  "errors": ["ad 1: connection timeout", "ad 3: invalid MyType"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (invalid ad format, invalid command, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "All advertisements failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdvertiseResponse"
+                },
+                "example": {
+                  "success": false,
+                  "message": "Failed to advertise",
+                  "succeeded": 0,
+                  "failed": 1,
+                  "errors": ["failed to connect to collector"]
                 }
               }
             }

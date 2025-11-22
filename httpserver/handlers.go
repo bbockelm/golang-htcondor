@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/commands"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
@@ -1992,6 +1993,9 @@ func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 		s.handleCollectorAdByName(w, r, parts[1], parts[2])
 	case parts[0] == "ads":
 		s.writeError(w, http.StatusNotFound, "Invalid collector path")
+	case parts[0] == "advertise" && len(parts) == 1:
+		// POST /api/v1/collector/advertise
+		s.handleCollectorAdvertise(w, r)
 	case parts[0] == "ping" && len(parts) == 1:
 		// GET /api/v1/collector/ping
 		s.handleCollectorPing(w, r)
@@ -2273,4 +2277,255 @@ func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
 </html>`
 
 	_, _ = w.Write([]byte(html))
+}
+
+// AdvertiseRequest represents a request to advertise to the collector
+type AdvertiseRequest struct {
+	Ad      *classad.ClassAd `json:"ad,omitempty"`       // Single ad (JSON body)
+	Command string           `json:"command,omitempty"`  // Optional UPDATE command (e.g., "UPDATE_STARTD_AD")
+	WithAck bool             `json:"with_ack,omitempty"` // Request acknowledgment
+}
+
+// AdvertiseResponse represents the response from advertise
+type AdvertiseResponse struct {
+	Success   bool     `json:"success"`
+	Message   string   `json:"message,omitempty"`
+	Succeeded int      `json:"succeeded"`        // Number of ads successfully advertised
+	Failed    int      `json:"failed"`           // Number of ads that failed
+	Errors    []string `json:"errors,omitempty"` // Error messages for failed ads
+}
+
+// handleCollectorAdvertise handles POST /api/v1/collector/advertise
+// Accepts:
+// - application/json: single ClassAd in request body
+// - multipart/form-data: multiple ClassAds as files (one ad per file)
+// - text/plain: ClassAd in old format
+func (s *Server) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.collector == nil {
+		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
+		return
+	}
+
+	// Create authenticated context (optional for advertise, but recommended)
+	ctx := r.Context()
+	if authCtx, err := s.createAuthenticatedContext(r); err == nil {
+		ctx = authCtx
+	}
+
+	// Add timeout
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	contentType := r.Header.Get("Content-Type")
+
+	var ads []*classad.ClassAd
+	var withAck bool
+	var command string
+
+	switch {
+	case strings.HasPrefix(contentType, "multipart/form-data"):
+		// Handle multiple ads from multipart form
+		adsFromForm, ackFromForm, cmdFromForm, err := s.parseAdvertiseMultipart(r)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
+			return
+		}
+		ads = adsFromForm
+		withAck = ackFromForm
+		command = cmdFromForm
+
+	case strings.HasPrefix(contentType, "application/json"):
+		// Handle single ad from JSON
+		var req AdvertiseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse JSON: %v", err))
+			return
+		}
+		if req.Ad == nil {
+			s.writeError(w, http.StatusBadRequest, "Missing 'ad' field in request")
+			return
+		}
+		ads = []*classad.ClassAd{req.Ad}
+		withAck = req.WithAck
+		command = req.Command
+
+	case strings.HasPrefix(contentType, "text/plain"):
+		// Handle ClassAd in old format
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024)) // 1MB limit
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to read body: %v", err))
+			return
+		}
+
+		// Parse ClassAd from old format
+		ad, err := classad.ParseOld(string(body))
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse ClassAd: %v", err))
+			return
+		}
+		ads = []*classad.ClassAd{ad}
+		withAck = r.URL.Query().Get("with_ack") == "true"
+		command = r.URL.Query().Get("command")
+
+	default:
+		s.writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json, text/plain, or multipart/form-data")
+		return
+	}
+
+	if len(ads) == 0 {
+		s.writeError(w, http.StatusBadRequest, "No ads provided")
+		return
+	}
+
+	// Build advertise options
+	opts := &htcondor.AdvertiseOptions{
+		WithAck: withAck,
+		UseTCP:  true,
+	}
+
+	// Parse command if provided
+	if command != "" {
+		cmdInt, ok := parseUpdateCommand(command)
+		if !ok {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid command: %s", command))
+			return
+		}
+		opts.Command = cmdInt
+	}
+
+	// Advertise the ads
+	response := AdvertiseResponse{
+		Success:   true,
+		Succeeded: 0,
+		Failed:    0,
+	}
+
+	if len(ads) == 1 {
+		// Single ad - use Advertise
+		err := s.collector.Advertise(ctx, ads[0], opts)
+		if err != nil {
+			response.Success = false
+			response.Failed = 1
+			response.Errors = []string{err.Error()}
+			response.Message = "Failed to advertise"
+		} else {
+			response.Succeeded = 1
+			response.Message = "Advertisement successful"
+		}
+	} else {
+		// Multiple ads - use AdvertiseMultiple
+		errors := s.collector.AdvertiseMultiple(ctx, ads, opts)
+		for i, err := range errors {
+			if err != nil {
+				response.Failed++
+				response.Errors = append(response.Errors, fmt.Sprintf("ad %d: %v", i, err))
+			} else {
+				response.Succeeded++
+			}
+		}
+		if response.Failed > 0 {
+			response.Success = false
+			response.Message = fmt.Sprintf("%d of %d ads failed to advertise", response.Failed, len(ads))
+		} else {
+			response.Message = fmt.Sprintf("Successfully advertised %d ads", response.Succeeded)
+		}
+	}
+
+	// Return appropriate status code
+	statusCode := http.StatusOK
+	if response.Failed > 0 && response.Succeeded == 0 {
+		statusCode = http.StatusInternalServerError
+	} else if response.Failed > 0 {
+		statusCode = http.StatusMultiStatus // 207
+	}
+
+	s.writeJSON(w, statusCode, response)
+}
+
+// parseAdvertiseMultipart parses multipart form data containing ClassAds
+// Returns ads, withAck flag, command, and error
+func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
+	// Parse multipart form with 10MB limit (multiple ads shouldn't exceed this)
+	err := r.ParseMultipartForm(10 * 1024 * 1024)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("failed to parse multipart form: %w", err)
+	}
+	defer func() {
+		_ = r.MultipartForm.RemoveAll()
+	}()
+
+	var ads []*classad.ClassAd
+	totalSize := 0
+	const maxTotalSize = 1024 * 1024 // 1MB total limit for all ads
+
+	// Process each file in the multipart form
+	for _, fileHeaders := range r.MultipartForm.File {
+		for _, fileHeader := range fileHeaders {
+			// Check total size limit
+			if totalSize+int(fileHeader.Size) > maxTotalSize {
+				return nil, false, "", fmt.Errorf("total size of ads exceeds 1MB limit")
+			}
+
+			// Open the file
+			file, err := fileHeader.Open()
+			if err != nil {
+				return nil, false, "", fmt.Errorf("failed to open file %s: %w", fileHeader.Filename, err)
+			}
+
+			// Read file content
+			content, err := io.ReadAll(file)
+			_ = file.Close()
+			if err != nil {
+				return nil, false, "", fmt.Errorf("failed to read file %s: %w", fileHeader.Filename, err)
+			}
+
+			totalSize += len(content)
+
+			// Parse ClassAd - try new format first, then old format
+			ad, err := classad.Parse(string(content))
+			if err != nil {
+				// Try old format
+				ad, err = classad.ParseOld(string(content))
+				if err != nil {
+					return nil, false, "", fmt.Errorf("failed to parse ClassAd from %s: %w", fileHeader.Filename, err)
+				}
+			}
+
+			ads = append(ads, ad)
+		}
+	}
+
+	// Get options from form values
+	withAck := r.FormValue("with_ack") == "true"
+	command := r.FormValue("command")
+
+	return ads, withAck, command, nil
+}
+
+// parseUpdateCommand parses an UPDATE command string to CommandType
+func parseUpdateCommand(cmd string) (commands.CommandType, bool) {
+	// Map command strings to command types
+	cmdMap := map[string]commands.CommandType{
+		"UPDATE_STARTD_AD":          commands.UPDATE_STARTD_AD,
+		"UPDATE_SCHEDD_AD":          commands.UPDATE_SCHEDD_AD,
+		"UPDATE_MASTER_AD":          commands.UPDATE_MASTER_AD,
+		"UPDATE_SUBMITTOR_AD":       commands.UPDATE_SUBMITTOR_AD,
+		"UPDATE_COLLECTOR_AD":       commands.UPDATE_COLLECTOR_AD,
+		"UPDATE_NEGOTIATOR_AD":      commands.UPDATE_NEGOTIATOR_AD,
+		"UPDATE_LICENSE_AD":         commands.UPDATE_LICENSE_AD,
+		"UPDATE_STORAGE_AD":         commands.UPDATE_STORAGE_AD,
+		"UPDATE_ACCOUNTING_AD":      commands.UPDATE_ACCOUNTING_AD,
+		"UPDATE_GRID_AD":            commands.UPDATE_GRID_AD,
+		"UPDATE_HAD_AD":             commands.UPDATE_HAD_AD,
+		"UPDATE_AD_GENERIC":         commands.UPDATE_AD_GENERIC,
+		"UPDATE_STARTD_AD_WITH_ACK": commands.UPDATE_STARTD_AD_WITH_ACK,
+	}
+
+	cmdType, ok := cmdMap[strings.ToUpper(cmd)]
+	return cmdType, ok
 }
