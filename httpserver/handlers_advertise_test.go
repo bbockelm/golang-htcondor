@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/commands"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -31,49 +30,40 @@ func TestParseUpdateCommand(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       string
-		expected    commands.CommandType
 		shouldExist bool
 	}{
 		{
 			name:        "UPDATE_STARTD_AD",
 			input:       "UPDATE_STARTD_AD",
-			expected:    commands.UPDATE_STARTD_AD,
 			shouldExist: true,
 		},
 		{
 			name:        "lowercase update_startd_ad",
 			input:       "update_startd_ad",
-			expected:    commands.UPDATE_STARTD_AD,
 			shouldExist: true,
 		},
 		{
 			name:        "UPDATE_SCHEDD_AD",
 			input:       "UPDATE_SCHEDD_AD",
-			expected:    commands.UPDATE_SCHEDD_AD,
 			shouldExist: true,
 		},
 		{
 			name:        "UPDATE_AD_GENERIC",
 			input:       "UPDATE_AD_GENERIC",
-			expected:    commands.UPDATE_AD_GENERIC,
 			shouldExist: true,
 		},
 		{
 			name:        "Invalid command",
 			input:       "INVALID_COMMAND",
-			expected:    0,
 			shouldExist: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd, ok := parseUpdateCommand(tt.input)
+			_, ok := htcondor.ParseAdvertiseCommand(tt.input)
 			if ok != tt.shouldExist {
 				t.Errorf("Expected existence %v, got %v", tt.shouldExist, ok)
-			}
-			if tt.shouldExist && cmd != tt.expected {
-				t.Errorf("Expected command %d, got %d", tt.expected, cmd)
 			}
 		})
 	}

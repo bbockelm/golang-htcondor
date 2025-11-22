@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/golang-jwt/jwt/v5"
@@ -964,7 +963,7 @@ func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]i
 	// Parse optional command
 	if cmdStr, ok := args["command"].(string); ok && cmdStr != "" {
 		// Import commands package if needed
-		cmd, valid := parseAdvertiseCommand(cmdStr)
+		cmd, valid := htcondor.ParseAdvertiseCommand(cmdStr)
 		if !valid {
 			return nil, fmt.Errorf("invalid command: %s", cmdStr)
 		}
@@ -1000,28 +999,5 @@ func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]i
 			"with_ack": opts.WithAck,
 		},
 	}, nil
-}
-
-// parseAdvertiseCommand parses an UPDATE command string to CommandType
-func parseAdvertiseCommand(cmd string) (commands.CommandType, bool) {
-	// Map command strings to command types
-	cmdMap := map[string]commands.CommandType{
-		"UPDATE_STARTD_AD":          commands.UPDATE_STARTD_AD,
-		"UPDATE_SCHEDD_AD":          commands.UPDATE_SCHEDD_AD,
-		"UPDATE_MASTER_AD":          commands.UPDATE_MASTER_AD,
-		"UPDATE_SUBMITTOR_AD":       commands.UPDATE_SUBMITTOR_AD,
-		"UPDATE_COLLECTOR_AD":       commands.UPDATE_COLLECTOR_AD,
-		"UPDATE_NEGOTIATOR_AD":      commands.UPDATE_NEGOTIATOR_AD,
-		"UPDATE_LICENSE_AD":         commands.UPDATE_LICENSE_AD,
-		"UPDATE_STORAGE_AD":         commands.UPDATE_STORAGE_AD,
-		"UPDATE_ACCOUNTING_AD":      commands.UPDATE_ACCOUNTING_AD,
-		"UPDATE_GRID_AD":            commands.UPDATE_GRID_AD,
-		"UPDATE_HAD_AD":             commands.UPDATE_HAD_AD,
-		"UPDATE_AD_GENERIC":         commands.UPDATE_AD_GENERIC,
-		"UPDATE_STARTD_AD_WITH_ACK": commands.UPDATE_STARTD_AD_WITH_ACK,
-	}
-
-	cmdType, ok := cmdMap[strings.ToUpper(cmd)]
-	return cmdType, ok
 }
 

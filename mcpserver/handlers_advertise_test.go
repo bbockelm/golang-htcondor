@@ -32,7 +32,7 @@ func TestParseAdvertiseCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, ok := parseAdvertiseCommand(tt.input)
+			_, ok := htcondor.ParseAdvertiseCommand(tt.input)
 			if ok != tt.shouldExist {
 				t.Errorf("Expected existence %v, got %v", tt.shouldExist, ok)
 			}

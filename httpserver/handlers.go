@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/commands"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
@@ -2390,7 +2389,7 @@ func (s *Server) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request
 
 	// Parse command if provided
 	if command != "" {
-		cmdInt, ok := parseUpdateCommand(command)
+		cmdInt, ok := htcondor.ParseAdvertiseCommand(command)
 		if !ok {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid command: %s", command))
 			return
@@ -2461,13 +2460,12 @@ func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, b
 
 	var ads []*classad.ClassAd
 	totalSize := 0
-	const maxTotalSize = 1024 * 1024 // 1MB total limit for all ads
 
 	// Process each file in the multipart form
 	for _, fileHeaders := range r.MultipartForm.File {
 		for _, fileHeader := range fileHeaders {
 			// Check total size limit
-			if totalSize+int(fileHeader.Size) > maxTotalSize {
+			if totalSize+int(fileHeader.Size) > htcondor.MaxAdvertiseBufferSize {
 				return nil, false, "", fmt.Errorf("total size of ads exceeds 1MB limit")
 			}
 
@@ -2505,27 +2503,4 @@ func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, b
 	command := r.FormValue("command")
 
 	return ads, withAck, command, nil
-}
-
-// parseUpdateCommand parses an UPDATE command string to CommandType
-func parseUpdateCommand(cmd string) (commands.CommandType, bool) {
-	// Map command strings to command types
-	cmdMap := map[string]commands.CommandType{
-		"UPDATE_STARTD_AD":          commands.UPDATE_STARTD_AD,
-		"UPDATE_SCHEDD_AD":          commands.UPDATE_SCHEDD_AD,
-		"UPDATE_MASTER_AD":          commands.UPDATE_MASTER_AD,
-		"UPDATE_SUBMITTOR_AD":       commands.UPDATE_SUBMITTOR_AD,
-		"UPDATE_COLLECTOR_AD":       commands.UPDATE_COLLECTOR_AD,
-		"UPDATE_NEGOTIATOR_AD":      commands.UPDATE_NEGOTIATOR_AD,
-		"UPDATE_LICENSE_AD":         commands.UPDATE_LICENSE_AD,
-		"UPDATE_STORAGE_AD":         commands.UPDATE_STORAGE_AD,
-		"UPDATE_ACCOUNTING_AD":      commands.UPDATE_ACCOUNTING_AD,
-		"UPDATE_GRID_AD":            commands.UPDATE_GRID_AD,
-		"UPDATE_HAD_AD":             commands.UPDATE_HAD_AD,
-		"UPDATE_AD_GENERIC":         commands.UPDATE_AD_GENERIC,
-		"UPDATE_STARTD_AD_WITH_ACK": commands.UPDATE_STARTD_AD_WITH_ACK,
-	}
-
-	cmdType, ok := cmdMap[strings.ToUpper(cmd)]
-	return cmdType, ok
 }

@@ -13,6 +13,17 @@ import (
 	"github.com/bbockelm/cedar/stream"
 )
 
+const (
+	// MaxAdvertiseBufferSize is the maximum buffer size for multiple ad advertisements (1MB)
+	MaxAdvertiseBufferSize = 1024 * 1024
+
+	// DefaultMyAddress is the default MyAddress value for ads without one set
+	DefaultMyAddress = "<127.0.0.1:0>"
+
+	// AvgBytesPerAttribute is the estimated average size per ClassAd attribute for buffer management
+	AvgBytesPerAttribute = 100
+)
+
 // Collector represents an HTCondor collector daemon
 type Collector struct {
 	address string
@@ -641,7 +652,6 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 
 	// Send all ads using the multi-sending protocol
 	errors := make([]error, len(ads))
-	const maxBufferSize = 1024 * 1024 // 1MB buffer limit
 
 	bufferSize := 0
 	for i, ad := range ads {
@@ -663,7 +673,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 
 		// Estimate ad size (rough approximation)
 		adSize := estimateClassAdSize(ad)
-		if bufferSize+adSize > maxBufferSize && bufferSize > 0 {
+		if bufferSize+adSize > MaxAdvertiseBufferSize && bufferSize > 0 {
 			// Flush buffer by sending DC_NOP and reconnecting
 			if err := sendGracefulHangup(ctx, cedarStream); err != nil {
 				// Continue anyway, not fatal
@@ -761,8 +771,7 @@ func ensureMyAddress(ad *classad.ClassAd) error {
 	// Generate a MyAddress using local IP
 	// TODO: Use proper IP detection (IPv4/IPv6)
 	// For now, use a placeholder that HTCondor will accept
-	myAddr := "<127.0.0.1:0>"
-	if err := ad.Set("MyAddress", myAddr); err != nil {
+	if err := ad.Set("MyAddress", DefaultMyAddress); err != nil {
 		return fmt.Errorf("failed to set MyAddress: %w", err)
 	}
 
@@ -771,10 +780,10 @@ func ensureMyAddress(ad *classad.ClassAd) error {
 
 // estimateClassAdSize estimates the serialized size of a ClassAd
 func estimateClassAdSize(ad *classad.ClassAd) int {
-	// Rough estimation: assume average 100 bytes per attribute
+	// Rough estimation: assume average bytes per attribute
 	// This is conservative to avoid buffer overflow
 	attrs := ad.GetAttributes()
-	return len(attrs) * 100
+	return len(attrs) * AvgBytesPerAttribute
 }
 
 // sendGracefulHangup sends DC_NOP command for graceful connection closure
