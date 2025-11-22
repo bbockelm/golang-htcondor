@@ -30,12 +30,13 @@ import (
 )
 
 var (
-	demoMode      = flag.Bool("demo", false, "Run in demo mode with mini condor")
-	listenAddr    = flag.String("listen", ":8080", "Address to listen on")
-	userHeader    = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
-	collectorHost = flag.String("collector", "", "Collector host:port (overrides COLLECTOR_HOST from config)")
-	scheddName    = flag.String("schedd", "", "Schedd name (overrides SCHEDD_NAME from config)")
-	scheddAddr    = flag.String("schedd-addr", "", "Schedd address (if specified, schedd name is ignored)")
+	demoMode          = flag.Bool("demo", false, "Run in demo mode with mini condor")
+	demoShutdownAfter = flag.Duration("demo-shutdown-after", 0, "Shutdown demo mode after specified duration (e.g., 30s, 5m, 1h). 0 = run indefinitely")
+	listenAddr        = flag.String("listen", ":8080", "Address to listen on")
+	userHeader        = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
+	collectorHost     = flag.String("collector", "", "Collector host:port (overrides COLLECTOR_HOST from config)")
+	scheddName        = flag.String("schedd", "", "Schedd name (overrides SCHEDD_NAME from config)")
+	scheddAddr        = flag.String("schedd-addr", "", "Schedd address (if specified, schedd name is ignored)")
 )
 
 func main() {
@@ -929,10 +930,6 @@ func runDemoMode() error {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
@@ -944,16 +941,52 @@ func runDemoMode() error {
 		}
 	}()
 
-	// Wait for shutdown signal or error
+	// Wait for shutdown
+	return waitForShutdown(server, errChan)
+}
+
+// waitForShutdown waits for a signal, timer, or server error and handles graceful shutdown
+func waitForShutdown(server *httpserver.Server, errChan <-chan error) error {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Set up shutdown timer if specified
+	var shutdownTimer *time.Timer
+	if *demoShutdownAfter > 0 {
+		shutdownTimer = time.NewTimer(*demoShutdownAfter)
+		log.Printf("Demo mode will automatically shutdown after %v", *demoShutdownAfter)
+	}
+
+	// Wait for shutdown signal, timer, or error
 	select {
 	case sig := <-sigChan:
 		log.Printf("Received signal: %v, shutting down...", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return server.Shutdown(ctx)
+		if err := server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown server: %w", err)
+		}
+		log.Println("Server stopped gracefully")
+	case <-func() <-chan time.Time {
+		if shutdownTimer != nil {
+			return shutdownTimer.C
+		}
+		// Return a channel that never fires if no timer
+		return make(chan time.Time)
+	}():
+		log.Printf("Shutdown timer expired after %v, shutting down...", *demoShutdownAfter)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown server: %w", err)
+		}
+		log.Println("Server stopped gracefully")
 	case err := <-errChan:
 		return err
 	}
+
+	return nil
 }
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor

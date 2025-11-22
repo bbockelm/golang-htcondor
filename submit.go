@@ -6,6 +6,7 @@ package htcondor
 import (
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -1396,12 +1397,17 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 
 // setAutoAttributes sets auto-generated attributes
 func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
-	// IWD (Initial Working Directory) - defaults to submit directory
-	// In a real implementation, this would be the directory where condor_submit is run
-	// For now, we'll only set it if explicitly specified
-	if iwd, ok := sf.cfg.Get("initialdir"); ok {
-		_ = ad.Set("Iwd", iwd)
+	// IWD (Initial Working Directory) - defaults to current working directory
+	iwd, ok := sf.cfg.Get("initialdir")
+	if !ok || iwd == "" {
+		// If not specified, use current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current working directory: %w", err)
+		}
+		iwd = cwd
 	}
+	_ = ad.Set("Iwd", iwd)
 
 	// Owner - the user submitting the job
 	// This would typically come from the authenticated user

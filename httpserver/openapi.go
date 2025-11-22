@@ -169,6 +169,24 @@ const openAPISchema = `{
             "description": "Error messages for failed ads (if any)"
           }
         }
+      },
+      "HistoryListResponse": {
+        "type": "object",
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "History record ClassAd as a JSON object"
+            },
+            "description": "Array of history ClassAds (only present in non-streaming mode)"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if an error occurred during streaming. When present in streaming mode, records up to the error were already sent."
+          }
+        },
+        "description": "History records response. In non-streaming mode, returns a JSON object with 'records' array. In streaming mode (stream_results=true), returns JSON Lines format with one record per line."
       }
     }
   },
@@ -1001,6 +1019,96 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/files/{filename}": {
+      "get": {
+        "summary": "Download a specific file from job output sandbox",
+        "description": "Download a specific file from the job's output sandbox by filename. Uses http.DetectContentType to set the appropriate Content-Type header based on file content.",
+        "operationId": "downloadJobFile",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "description": "Name of the file to download from the job sandbox (e.g., 'output.txt', 'result.json'). Path traversal characters are not allowed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File content with auto-detected Content-Type",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID or filename",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job or file not found in sandbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to download sandbox or read file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/jobs/hold": {
       "post": {
         "summary": "Hold jobs by constraint",
@@ -1150,6 +1258,396 @@ const openAPISchema = `{
           },
           "404": {
             "description": "No jobs matched the constraint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/archive": {
+      "get": {
+        "summary": "Query job archive",
+        "description": "Query the HTCondor schedd for archived job records. Returns completed jobs from the history file.",
+        "operationId": "queryJobArchive",
+        "parameters": [
+          {
+            "name": "constraint",
+            "in": "query",
+            "description": "ClassAd constraint expression (default: 'true' for all archived jobs)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "true"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return. Default: ClusterId,ProcId,Owner,JobStatus,EnteredCurrentStatus,CompletionDate,RemoveReason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of archived records to return (use * for unlimited)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scan_limit",
+            "in": "query",
+            "description": "Maximum number of archived records to scan before stopping",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "backwards",
+            "in": "query",
+            "description": "Scan history backwards from most recent (default: true)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "stream_results",
+            "in": "query",
+            "description": "Stream results line-by-line in JSON Lines format (default: false)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return records after this timestamp (ISO8601 format)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job history records (JSON array or JSON Lines stream)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/epochs": {
+      "get": {
+        "summary": "Query job epoch history",
+        "description": "Query the HTCondor schedd for job epoch records. Each job epoch represents a restart or execution attempt.",
+        "operationId": "queryJobEpochs",
+        "parameters": [
+          {
+            "name": "constraint",
+            "in": "query",
+            "description": "ClassAd constraint expression (default: 'true' for all epochs)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "true"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return. Default: ClusterId,ProcId,EpochNumber,Owner,JobStartDate,JobCurrentStartDate,RemoteHost",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of epoch records to return (use * for unlimited)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scan_limit",
+            "in": "query",
+            "description": "Maximum number of epoch records to scan before stopping",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "backwards",
+            "in": "query",
+            "description": "Scan history backwards from most recent (default: true)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "stream_results",
+            "in": "query",
+            "description": "Stream results line-by-line in JSON Lines format (default: false)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return records after this timestamp (ISO8601 format)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job epoch records (JSON array or JSON Lines stream)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/transfers": {
+      "get": {
+        "summary": "Query transfer history",
+        "description": "Query the HTCondor schedd for file transfer history records.",
+        "operationId": "queryTransferHistory",
+        "parameters": [
+          {
+            "name": "constraint",
+            "in": "query",
+            "description": "ClassAd constraint expression (default: 'true' for all transfers)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "true"
+            }
+          },
+          {
+            "name": "projection",
+            "in": "query",
+            "description": "Comma-separated list of attributes to return. Default: ClusterId,ProcId,TransferType,TransferStartTime,TransferEndTime,TransferSuccess,TransferFileBytes",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of transfer records to return (use * for unlimited)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scan_limit",
+            "in": "query",
+            "description": "Maximum number of transfer records to scan before stopping",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "backwards",
+            "in": "query",
+            "description": "Scan history backwards from most recent (default: true)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "stream_results",
+            "in": "query",
+            "description": "Stream results line-by-line in JSON Lines format (default: false)",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return records after this timestamp (ISO8601 format)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transfer_types",
+            "in": "query",
+            "description": "Comma-separated list of transfer types to include (INPUT_FILES, OUTPUT_FILES, CHECKPOINT_FILES)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transfer history records (JSON array or JSON Lines stream)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
             "content": {
               "application/json": {
                 "schema": {
