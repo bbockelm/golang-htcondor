@@ -5,9 +5,6 @@
 *.so
 *.dylib
 
-# Main binary
-htcondor-api
-
 # Test binary, built with `go test -c`
 *.test
 
@@ -43,8 +40,8 @@ examples/queue_demo/queue_demo
 cmd/htcondor-api/tmp/
 
 # Command binaries
-htcondor-api
-htcondor-mcp
+/htcondor-api
+/htcondor-mcp
 
 # Test databases
 oauth2.db
