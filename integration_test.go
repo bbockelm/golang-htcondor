@@ -326,7 +326,7 @@ func (h *condorTestHarness) printStarterLogs() {
 
 	for _, logPath := range matches {
 		// Skip StarterLog.test
-		if filepath.Base(logPath) == "StarterLog.test" {
+		if filepath.Base(logPath) == "StarterLog.testing" {
 			continue
 		}
 
