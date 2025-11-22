@@ -93,7 +93,8 @@ SEC_PASSWORD_DIRECTORY = %s
 	t.Log("Step 1: Building htcondor-api CLI tool...")
 	cliBinary := filepath.Join(tempDir, "htcondor-api")
 	buildCmd := exec.Command("go", "build", "-o", cliBinary, ".")
-	buildCmd.Dir = "/home/runner/work/golang-htcondor/golang-htcondor/cmd/htcondor-api"
+	// Build in the current directory (where this test file is located)
+	// When tests run, the working directory is the package directory
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build htcondor-api: %v\nOutput: %s", err, output)
 	}
