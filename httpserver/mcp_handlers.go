@@ -902,6 +902,13 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 		}
 
 		if username == "" {
+			// Check for IDP session cookie
+			if cookie, err := r.Cookie("idp_session"); err == nil {
+				username = cookie.Value
+			}
+		}
+
+		if username == "" {
 			s.writeHTMLError(w, "Authentication required")
 			return
 		}

@@ -848,11 +848,12 @@ func runDemoMode() error {
 
 	// Wait for condor to be ready
 	log.Println("Waiting for HTCondor to be ready...")
-	if err := waitForCondor(tempDir); err != nil {
+	collectorAddr, err := waitForCondor(tempDir)
+	if err != nil {
 		return fmt.Errorf("condor failed to start: %w", err)
 	}
 
-	log.Println("HTCondor is ready!")
+	log.Printf("HTCondor is ready! Collector address: %s", collectorAddr)
 
 	// Determine signing key path for token generation
 	// HTCondor auto-generates $(LOCAL_DIR)/passwords.d/POOL when needed
@@ -877,19 +878,20 @@ func runDemoMode() error {
 		}
 	}
 
-	// Create collector for demo mode (points to local collector at 127.0.0.1:9618)
-	collector := htcondor.NewCollector("127.0.0.1:9618")
-	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", "127.0.0.1:9618")
+	// Create collector for demo mode
+	collector := htcondor.NewCollector(collectorAddr)
+	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", collectorAddr)
 
 	// OAuth2 database path for MCP (shared with IDP)
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Generate self-signed certificate for demo mode to enable HTTPS
+	// Generate CA and server certificate for demo mode to enable HTTPS
+	caPath := filepath.Join(tempDir, "ca.crt")
 	certPath := filepath.Join(tempDir, "server.crt")
 	keyPath := filepath.Join(tempDir, "server.key")
-	log.Println("Generating self-signed certificate for demo mode...")
-	if err := generateSelfSignedCert(certPath, keyPath); err != nil {
-		log.Printf("Warning: failed to generate self-signed certificate: %v", err)
+	log.Println("Generating CA and server certificate for demo mode...")
+	if err := generateCAAndCert(caPath, certPath, keyPath); err != nil {
+		log.Printf("Warning: failed to generate certificates: %v", err)
 		log.Println("Falling back to HTTP (cookie Secure flag will be disabled)")
 		certPath = ""
 		keyPath = ""
@@ -899,8 +901,8 @@ func runDemoMode() error {
 	protocol := "http"
 	if certPath != "" && keyPath != "" {
 		protocol = "https"
-		log.Println("Demo mode will use HTTPS with self-signed certificate")
-		log.Println("Note: You may need to accept the self-signed certificate in your browser")
+		log.Println("Demo mode will use HTTPS with generated certificate")
+		log.Printf("CA Certificate: %s", caPath)
 	}
 
 	// Create and start HTTP server with MCP and IDP enabled
@@ -956,6 +958,53 @@ func runDemoMode() error {
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
 func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
+	// Determine LIBEXEC directory by looking for condor_shared_port
+	var libexecDir string
+	sharedPortPath, err := exec.LookPath("condor_shared_port")
+	if err == nil {
+		// Found condor_shared_port, use its parent directory
+		libexecDir = filepath.Dir(sharedPortPath)
+		log.Printf("Found condor_shared_port at %s, using LIBEXEC=%s", sharedPortPath, libexecDir)
+	} else {
+		// Not found in PATH, try deriving from condor_master location
+		masterPath, _ := exec.LookPath("condor_master")
+		if masterPath != "" {
+			sbinDir := filepath.Dir(masterPath)
+			derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
+
+			// Check if the derived path exists
+			if _, err := os.Stat(filepath.Join(derivedLibexec, "condor_shared_port")); err == nil {
+				libexecDir = derivedLibexec
+				log.Printf("Using derived LIBEXEC=%s (from condor_master location)", libexecDir)
+			} else {
+				// Try standard location /usr/libexec/condor
+				stdLibexec := "/usr/libexec/condor"
+				if _, err := os.Stat(filepath.Join(stdLibexec, "condor_shared_port")); err == nil {
+					libexecDir = stdLibexec
+					log.Printf("Using standard LIBEXEC=%s", libexecDir)
+				}
+			}
+		}
+	}
+
+	// Compute SBIN path from condor_master location
+	var sbinDir string
+	if masterPath, err := exec.LookPath("condor_master"); err == nil {
+		sbinDir = filepath.Dir(masterPath)
+	}
+
+	// Build LIBEXEC line if we found a valid directory
+	libexecLine := "LIBEXEC = $(RELEASE_DIR)/libexec\n"
+	if libexecDir != "" {
+		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
+	}
+
+	// Build SBIN line if we found it
+	sbinLine := "SBIN = $(RELEASE_DIR)/sbin\n"
+	if sbinDir != "" {
+		sbinLine = fmt.Sprintf("SBIN = %s\n", sbinDir)
+	}
+
 	config := fmt.Sprintf(`# Mini HTCondor Configuration for Demo Mode
 LOCAL_DIR = %s
 RELEASE_DIR = %s
@@ -963,9 +1012,8 @@ LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
 EXECUTE = $(LOCAL_DIR)/execute
 BIN = $(RELEASE_DIR)/bin
-SBIN = $(RELEASE_DIR)/sbin
 LIB = $(RELEASE_DIR)/lib
-LIBEXEC = $(RELEASE_DIR)/libexec
+%s%s
 
 # Run all daemons locally
 DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD
@@ -978,7 +1026,19 @@ KILL = FALSE
 
 # Network settings
 CONDOR_HOST = 127.0.0.1
-COLLECTOR_HOST = $(CONDOR_HOST):9618
+COLLECTOR_HOST = $(CONDOR_HOST):0
+DAEMON_SOCKET_DIR = $(LOCAL_DIR)/log
+SHARED_PORT_ADDRESS_FILE = $(LOG)/shared_port_ad
+SHARED_PORT_DEBUG = D_FULLDEBUG D_SECURITY D_NETWORK:2 D_COMMAND
+SHARED_PORT_MAX_WORKERS = 1000
+BIND_ALL_INTERFACES = FALSE
+NETWORK_INTERFACE = 127.0.0.1
+
+# Collector configuration
+COLLECTOR_ADDRESS_FILE = $(LOG)/.collector_address
+
+# Schedd configuration
+SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
 
 # Security settings - allow local access
 ALLOW_WRITE = 127.0.0.1, $(IP_ADDRESS)
@@ -1005,7 +1065,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, releaseDir)
+`, localDir, releaseDir, sbinLine, libexecLine)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
@@ -1073,61 +1133,101 @@ func stopCondorMaster(cmd *exec.Cmd) {
 	}
 }
 
-// waitForCondor waits for HTCondor to be ready
-func waitForCondor(localDir string) error {
-	maxWait := 30 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), maxWait)
-	defer cancel()
-
+// waitForCondor waits for HTCondor to be ready and returns the collector address
+func waitForCondor(localDir string) (string, error) {
+	maxWait := 20 * time.Second
 	deadline := time.Now().Add(maxWait)
 
+	collectorAddrFile := filepath.Join(localDir, "log", ".collector_address")
+	scheddAddrFile := filepath.Join(localDir, "log", ".schedd_address")
+
 	for time.Now().Before(deadline) {
-		// Check if schedd log exists and contains startup message
-		scheddLog := filepath.Join(localDir, "log", "SchedLog")
-		if _, err := os.Stat(scheddLog); err == nil {
-			// Log exists, check if schedd is accepting connections
-			if isScheddReady(ctx) {
-				return nil
+		// Check if collector address file exists
+		cAddr, err := readAddressFile(collectorAddrFile)
+		if err == nil && cAddr != "" {
+			// Check if schedd address file exists (ensure schedd is also ready)
+			sAddr, err := readAddressFile(scheddAddrFile)
+			if err == nil && sAddr != "" {
+				return cAddr, nil
 			}
 		}
-
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	return fmt.Errorf("timeout waiting for HTCondor to be ready")
+	return "", fmt.Errorf("timeout waiting for HTCondor to be ready")
 }
 
-// isScheddReady checks if the schedd is accepting connections
-func isScheddReady(ctx context.Context) bool {
-	// Try running condor_q to check if schedd is ready
-	cmd := exec.CommandContext(ctx, "condor_q", "-version")
-	if err := cmd.Run(); err != nil {
-		return false
-	}
-	return true
-}
-
-// generateSelfSignedCert generates a self-signed TLS certificate for demo mode
-func generateSelfSignedCert(certPath, keyPath string) error {
-	// Generate RSA private key
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+// readAddressFile reads an HTCondor address file and returns the address
+func readAddressFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to generate RSA key: %w", err)
+		return "", err
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "$") {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("no valid address found in %s", path)
+}
+
+// generateCAAndCert generates a CA and a server certificate signed by that CA
+func generateCAAndCert(caPath, certPath, keyPath string) error {
+	// 1. Generate CA
+	caPrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate CA key: %w", err)
 	}
 
-	// Create certificate template
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "HTCondor Demo CA",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	caBytes, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caPrivKey.PublicKey, caPrivKey)
+	if err != nil {
+		return fmt.Errorf("failed to create CA certificate: %w", err)
+	}
+
+	// Write CA cert to file
+	//nolint:gosec // Path is from config, admin-controlled
+	caFile, err := os.Create(caPath)
+	if err != nil {
+		return fmt.Errorf("failed to create CA file: %w", err)
+	}
+	if err := pem.Encode(caFile, &pem.Block{Type: "CERTIFICATE", Bytes: caBytes}); err != nil {
+		caFile.Close()
+		return fmt.Errorf("failed to encode CA certificate: %w", err)
+	}
+	caFile.Close()
+
+	// 2. Generate Server Certificate
+	serverPrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate server key: %w", err)
+	}
+
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
-	template := x509.Certificate{
+	serverTemplate := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName: "localhost",
 		},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -1135,46 +1235,38 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 
-	// Create self-signed certificate
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	serverBytes, err := x509.CreateCertificate(rand.Reader, &serverTemplate, &caTemplate, &serverPrivKey.PublicKey, caPrivKey)
 	if err != nil {
-		return fmt.Errorf("failed to create certificate: %w", err)
+		return fmt.Errorf("failed to create server certificate: %w", err)
 	}
 
-	// Write certificate to file
+	// Write server cert
 	//nolint:gosec // Path is from config, admin-controlled
 	certFile, err := os.Create(certPath)
 	if err != nil {
-		return fmt.Errorf("failed to create certificate file: %w", err)
+		return fmt.Errorf("failed to create cert file: %w", err)
 	}
-	defer func() {
-		if err := certFile.Close(); err != nil {
-			log.Printf("Warning: failed to close cert file: %v", err)
-		}
-	}()
-
-	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
-		return fmt.Errorf("failed to encode certificate: %w", err)
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverBytes}); err != nil {
+		certFile.Close()
+		return fmt.Errorf("failed to encode server certificate: %w", err)
 	}
+	certFile.Close()
 
-	// Write private key to file
+	// Write server key
 	//nolint:gosec // Path is from config, admin-controlled
 	keyFile, err := os.Create(keyPath)
 	if err != nil {
 		return fmt.Errorf("failed to create key file: %w", err)
 	}
-	defer func() {
-		if err := keyFile.Close(); err != nil {
-			log.Printf("Warning: failed to close key file: %v", err)
-		}
-	}()
-
-	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(serverPrivKey)
 	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
+		keyFile.Close()
 		return fmt.Errorf("failed to encode private key: %w", err)
 	}
+	keyFile.Close()
 
-	log.Printf("Generated self-signed certificate: %s", certPath)
-	log.Printf("Generated private key: %s", keyPath)
+	log.Printf("Generated CA certificate: %s", caPath)
+	log.Printf("Generated server certificate: %s", certPath)
+	log.Printf("Generated server private key: %s", keyPath)
 	return nil
 }

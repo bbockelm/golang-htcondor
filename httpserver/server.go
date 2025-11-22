@@ -396,6 +396,18 @@ func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
 	return nil
 }
 
+// initializeOAuth2 initializes the OAuth2 provider with actual listening address
+func (s *Server) initializeOAuth2(ln net.Listener, protocol string) {
+	if s.oauth2Provider == nil {
+		return
+	}
+
+	// Update issuer with actual listening address
+	actualAddr := ln.Addr().String()
+	issuer := protocol + "://" + actualAddr
+	s.oauth2Provider.UpdateIssuer(issuer)
+}
+
 // getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
 func getDefaultDBPath(cfg *config.Config, filename string) string {
 	if cfg != nil {
@@ -424,6 +436,9 @@ func (s *Server) Start() error {
 		return err
 	}
 
+	// Initialize OAuth2 provider with actual address
+	s.initializeOAuth2(ln, "http")
+
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
@@ -438,6 +453,8 @@ func (s *Server) Start() error {
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	// Print to stdout for integration tests to detect start up
+	fmt.Printf("Server started on http://%s\n", ln.Addr().String())
 	return s.httpServer.Serve(ln)
 }
 
@@ -458,6 +475,9 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 		return err
 	}
 
+	// Initialize OAuth2 provider with actual address
+	s.initializeOAuth2(ln, "https")
+
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
@@ -472,6 +492,8 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	// Print to stdout for integration tests to detect start up
+	fmt.Printf("Server started on https://%s\n", ln.Addr().String())
 	return s.httpServer.ServeTLS(ln, certFile, keyFile)
 }
 
@@ -1024,6 +1046,12 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 
 		ads, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
 		cancel()
+
+		if err != nil {
+			logger.Warn(logging.DestinationSchedd, "QueryAdsWithOptions failed", "error", err)
+		} else {
+			logger.Info(logging.DestinationSchedd, "QueryAdsWithOptions returned ads", "count", len(ads))
+		}
 
 		if err == nil && len(ads) > 0 {
 			var selectedAd *classad.ClassAd

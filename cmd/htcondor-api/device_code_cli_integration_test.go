@@ -31,10 +31,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -93,8 +96,6 @@ SEC_PASSWORD_DIRECTORY = %s
 	t.Log("Step 1: Building htcondor-api CLI tool...")
 	cliBinary := filepath.Join(tempDir, "htcondor-api")
 	buildCmd := exec.Command("go", "build", "-o", cliBinary, ".")
-	// Build in the current directory (where this test file is located)
-	// When tests run, the working directory is the package directory
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build htcondor-api: %v\nOutput: %s", err, output)
 	}
@@ -129,22 +130,32 @@ SEC_PASSWORD_DIRECTORY = %s
 	}()
 
 	// Wait for server to start and extract the actual listening address and IDP credentials
-	t.Log("Waiting for server to start and extract IDP credentials...")
-	serverURL, idpUsername, idpPassword, err := waitForServerStartup(serverStdout, serverStderr, 60*time.Second, t)
+	serverURL, username, password, caPath, err := waitForServerStartup(serverStdout, serverStderr, 10*time.Second, t)
 	if err != nil {
-		t.Fatalf("Server failed to start: %v", err)
+		t.Fatalf("Failed to wait for server startup: %v", err)
 	}
-	t.Logf("Server started at: %s", serverURL)
-	t.Logf("IDP Username: %s", idpUsername)
-	t.Logf("IDP Password: %s", idpPassword)
+	t.Logf("Server started at %s with user=%s, pass=%s, ca=%s", serverURL, username, password, caPath)
+
+	// Create a temporary condor_config for the client that includes the CA file
+	clientConfigPath := filepath.Join(tempDir, "condor_config.client")
+	clientConfigContent := fmt.Sprintf(`
+# Client configuration for device code CLI flow
+LOCAL_DIR = %s
+SEC_TOKEN_DIRECTORY = %s
+AUTH_SSL_CLIENT_CAFILE = %s
+`, tempDir, tokensDir, caPath)
+	if err := os.WriteFile(clientConfigPath, []byte(clientConfigContent), 0644); err != nil {
+		t.Fatalf("Failed to write client config: %v", err)
+	}
 
 	// Give server a moment to fully initialize
 	time.Sleep(2 * time.Second)
 
 	// Step 3: Run htcondor-api token fetch
 	t.Log("Step 3: Running htcondor-api token fetch...")
+	// Note: We removed --insecure and added the client config with CA file
 	fetchCmd := exec.Command(cliBinary, "token", "fetch", serverURL, "--trust-domain", "test.local")
-	fetchCmd.Env = append(os.Environ(), "CONDOR_CONFIG="+configFile)
+	fetchCmd.Env = append(os.Environ(), "CONDOR_CONFIG="+clientConfigPath)
 
 	// Capture stdout to read device code information
 	fetchStdout, err := fetchCmd.StdoutPipe()
@@ -152,15 +163,29 @@ SEC_PASSWORD_DIRECTORY = %s
 		t.Fatalf("Failed to create stdout pipe for token fetch: %v", err)
 	}
 
+	// Capture stderr to debug failures
+	fetchStderr, err := fetchCmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("Failed to create stderr pipe for token fetch: %v", err)
+	}
+
 	if err := fetchCmd.Start(); err != nil {
 		t.Fatalf("Failed to start token fetch: %v", err)
 	}
+
+	// Read stderr in background
+	var stderrBuf bytes.Buffer
+	go func() {
+		io.Copy(&stderrBuf, fetchStderr)
+	}()
 
 	// Step 4: Read stdout to get device code URL and user code
 	t.Log("Step 4: Reading device code information from CLI output...")
 	verificationURL, userCode, err := readDeviceCodeFromOutput(fetchStdout, 30*time.Second, t)
 	if err != nil {
+		// Wait for command to finish to ensure we get all stderr
 		fetchCmd.Wait()
+		t.Logf("Token fetch stderr: %s", stderrBuf.String())
 		t.Fatalf("Failed to read device code: %v", err)
 	}
 	t.Logf("Verification URL: %s", verificationURL)
@@ -168,7 +193,11 @@ SEC_PASSWORD_DIRECTORY = %s
 
 	// Step 5: Simulate browser authentication using IDP credentials
 	t.Log("Step 5: Simulating browser-based authentication with IDP...")
-	if err := approveDeviceViaBrowser(verificationURL, userCode, idpUsername, idpPassword); err != nil {
+	if err := approveDeviceViaBrowser(verificationURL, userCode, username, password, caPath); err != nil {
+		// Kill the process if approval fails to avoid hanging on Wait()
+		if fetchCmd.Process != nil {
+			_ = fetchCmd.Process.Kill()
+		}
 		fetchCmd.Wait()
 		t.Fatalf("Failed to approve device: %v", err)
 	}
@@ -216,7 +245,7 @@ SEC_PASSWORD_DIRECTORY = %s
 
 	// Step 7: Use the token to authenticate against the web API
 	t.Log("Step 7: Testing token with protected MCP API endpoint...")
-	if err := testMCPAPIWithToken(serverURL, token); err != nil {
+	if err := testMCPAPIWithToken(serverURL, token, caPath); err != nil {
 		t.Fatalf("Failed to use token with MCP API: %v", err)
 	}
 	t.Log("Token successfully used to authenticate with MCP API!")
@@ -224,44 +253,90 @@ SEC_PASSWORD_DIRECTORY = %s
 	t.Log("✅ All device code CLI flow tests passed!")
 }
 
-// waitForServerStartup waits for the server to start and returns the server URL, IDP username, and password
-func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *testing.T) (string, string, string, error) {
+// waitForServerStartup waits for the server to start and returns the server URL, IDP username, password, and CA path
+func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *testing.T) (string, string, string, string, error) {
 	deadline := time.Now().Add(timeout)
 
 	// Read stdout and stderr concurrently
 	urlChan := make(chan string, 1)
 	usernameChan := make(chan string, 1)
 	passwordChan := make(chan string, 1)
+	caChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
+	// Buffer to capture output for debugging
+	var outputBuf bytes.Buffer
+	var outputMu sync.Mutex
+
+	// Merge stdout and stderr into a single reader
+	pr, pw := io.Pipe()
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
-		scanner := bufio.NewScanner(io.MultiReader(stdout, stderr))
+		defer wg.Done()
+		_, _ = io.Copy(pw, stdout)
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(pw, stderr)
+	}()
+
+	go func() {
+		wg.Wait()
+		pw.Close()
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(pr)
 		// Look for patterns that indicate server is listening
 		// Examples: "HTTP server listening on: http://127.0.0.1:8080" or "Server started on 127.0.0.1:8080"
-		listenPattern := regexp.MustCompile(`(?i)(listening|started).*(http://[^\s]+|https://[^\s]+|\d+\.\d+\.\d+\.\d+:\d+)`)
+		// Also handles structured logging: msg="Listening on" address=127.0.0.1:8080
+		listenPattern := regexp.MustCompile(`(?i)(listening|started).*?(http://[^\s"]+|https://[^\s"]+|address=["]?([0-9a-fA-F:.]+:\d+)["]?|\d+\.\d+\.\d+\.\d+:\d+)`)
 		// Look for IDP credentials: "Username: admin" and "Password: <password>"
 		usernamePattern := regexp.MustCompile(`Username:\s*(\S+)`)
 		passwordPattern := regexp.MustCompile(`Password:\s*(\S+)`)
+		// Look for CA certificate: "CA Certificate: /path/to/ca.crt"
+		caPattern := regexp.MustCompile(`CA Certificate:\s*(\S+)`)
 
-		var serverURL, username, password string
+		var serverURL, username, password, caPath string
 
 		for scanner.Scan() {
 			line := scanner.Text()
 			t.Logf("[SERVER] %s", line)
 
+			outputMu.Lock()
+			outputBuf.WriteString(line + "\n")
+			outputMu.Unlock()
+
 			// Look for listening address
 			if matches := listenPattern.FindStringSubmatch(line); len(matches) > 0 {
 				// Extract the URL or address
 				for _, match := range matches[1:] {
+					if match == "" {
+						continue
+					}
+					// Check for address=... format
+					if strings.HasPrefix(match, "address=") {
+						addr := strings.TrimPrefix(match, "address=")
+						addr = strings.Trim(addr, "\"")
+						serverURL = "http://" + addr
+						t.Logf("Found server address from structured log: %s", serverURL)
+						break
+					}
+					// Check for captured group from address=...
+					if strings.Contains(match, ":") && !strings.Contains(match, "address=") && !strings.Contains(match, "listening") && !strings.Contains(match, "started") {
+						// This could be the inner group of address=... or the plain IP:Port
+						if !strings.HasPrefix(match, "http") {
+							serverURL = "http://" + match
+							t.Logf("Found server address: %s", serverURL)
+							break
+						}
+					}
 					if strings.HasPrefix(match, "http://") || strings.HasPrefix(match, "https://") {
 						serverURL = match
 						t.Logf("Found server URL: %s", serverURL)
-						break
-					}
-					if strings.Contains(match, ":") && !strings.Contains(match, "//") {
-						// It's an address without protocol, add http://
-						serverURL = "http://" + match
-						t.Logf("Found server address: %s", serverURL)
 						break
 					}
 				}
@@ -292,11 +367,18 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 				t.Logf("Found IDP password: %s", password)
 			}
 
-			// If we have all three, return them
-			if serverURL != "" && username != "" && password != "" {
+			// Look for CA certificate
+			if matches := caPattern.FindStringSubmatch(line); len(matches) > 1 {
+				caPath = matches[1]
+				t.Logf("Found CA certificate: %s", caPath)
+			}
+
+			// If we have all four, return them
+			if serverURL != "" && username != "" && password != "" && caPath != "" {
 				urlChan <- serverURL
 				usernameChan <- username
 				passwordChan <- password
+				caChan <- caPath
 				return
 			}
 		}
@@ -307,35 +389,46 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 			errChan <- fmt.Errorf("server output ended without finding listen address")
 		} else if username == "" || password == "" {
 			errChan <- fmt.Errorf("server output ended without finding IDP credentials (username: %q, password: %q)", username, password)
+		} else if caPath == "" {
+			errChan <- fmt.Errorf("server output ended without finding CA certificate")
 		}
 	}()
 
-	var serverURL, username, password string
+	var serverURL, username, password, caPath string
 	for time.Now().Before(deadline) {
 		select {
 		case url := <-urlChan:
 			serverURL = url
-			if username != "" && password != "" {
-				return serverURL, username, password, nil
+			if username != "" && password != "" && caPath != "" {
+				return serverURL, username, password, caPath, nil
 			}
 		case user := <-usernameChan:
 			username = user
-			if serverURL != "" && password != "" {
-				return serverURL, username, password, nil
+			if serverURL != "" && password != "" && caPath != "" {
+				return serverURL, username, password, caPath, nil
 			}
 		case pass := <-passwordChan:
 			password = pass
-			if serverURL != "" && username != "" {
-				return serverURL, username, password, nil
+			if serverURL != "" && username != "" && caPath != "" {
+				return serverURL, username, password, caPath, nil
+			}
+		case ca := <-caChan:
+			caPath = ca
+			if serverURL != "" && username != "" && password != "" {
+				return serverURL, username, password, caPath, nil
 			}
 		case err := <-errChan:
-			return "", "", "", err
+			return "", "", "", "", err
 		case <-time.After(500 * time.Millisecond):
 			// Continue waiting
 		}
 	}
 
-	return "", "", "", fmt.Errorf("timeout waiting for server to start")
+	outputMu.Lock()
+	capturedOutput := outputBuf.String()
+	outputMu.Unlock()
+
+	return "", "", "", "", fmt.Errorf("timeout waiting for server to start. Captured output:\n%s", capturedOutput)
 }
 
 // readDeviceCodeFromOutput reads the device code information from CLI output
@@ -411,12 +504,33 @@ func readDeviceCodeFromOutput(stdout io.Reader, timeout time.Duration, t *testin
 }
 
 // approveDeviceViaBrowser simulates a browser approval by logging in to IDP and approving the device
-func approveDeviceViaBrowser(verificationURL, userCode, username, password string) error {
+func approveDeviceViaBrowser(verificationURL, userCode, username, password, caPath string) error {
 	// Create an HTTP client that handles cookies (for session management)
-	jar := &cookieJar{cookies: make(map[string][]*http.Cookie)}
+	// Configure transport to use the CA certificate
+	caCert, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return fmt.Errorf("failed to append CA certificate to pool")
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: caCertPool,
+		},
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return fmt.Errorf("failed to create cookie jar: %w", err)
+	}
+
 	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Jar:     jar,
+		Transport: tr,
+		Timeout:   30 * time.Second,
+		Jar:       jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Allow up to 10 redirects
 			if len(via) >= 10 {
@@ -497,49 +611,27 @@ func approveDeviceViaBrowser(verificationURL, userCode, username, password strin
 	return nil
 }
 
-// cookieJar implements http.CookieJar for session management
-type cookieJar struct {
-	cookies map[string][]*http.Cookie
-	mu      sync.Mutex
-}
-
-func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	// Append new cookies instead of replacing all cookies for the host
-	existing := j.cookies[u.Host]
-	if existing == nil {
-		j.cookies[u.Host] = cookies
-	} else {
-		// Merge cookies, replacing any with the same name
-		merged := make([]*http.Cookie, 0, len(existing)+len(cookies))
-		merged = append(merged, existing...)
-		for _, newCookie := range cookies {
-			replaced := false
-			for i, oldCookie := range merged {
-				if oldCookie.Name == newCookie.Name {
-					merged[i] = newCookie
-					replaced = true
-					break
-				}
-			}
-			if !replaced {
-				merged = append(merged, newCookie)
-			}
-		}
-		j.cookies[u.Host] = merged
-	}
-}
-
-func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.cookies[u.Host]
-}
-
 // testMCPAPIWithToken tests using the token with a protected MCP API endpoint
-func testMCPAPIWithToken(serverURL, token string) error {
-	client := &http.Client{Timeout: 30 * time.Second}
+func testMCPAPIWithToken(serverURL, token, caPath string) error {
+	// Configure transport to use the CA certificate
+	caCert, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return fmt.Errorf("failed to append CA certificate to pool")
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: caCertPool,
+		},
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second,
+	}
 
 	// Test MCP initialize endpoint
 	mcpRequest := map[string]interface{}{
