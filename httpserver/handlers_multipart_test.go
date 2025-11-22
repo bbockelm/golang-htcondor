@@ -22,7 +22,9 @@ w := httptest.NewRecorder()
 server.handleJobInputMultipart(w, req, "123.0")
 
 resp := w.Result()
-defer resp.Body.Close()
+defer func() {
+_ = resp.Body.Close()
+}()
 
 if resp.StatusCode != http.StatusMethodNotAllowed {
 t.Errorf("Expected status 405 for method %s, got %d", method, resp.StatusCode)
@@ -37,7 +39,7 @@ server := &Server{}
 
 body := &bytes.Buffer{}
 writer := multipart.NewWriter(body)
-writer.Close()
+_ = writer.Close()
 
 req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/123.0/input/multipart", body)
 req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -47,7 +49,9 @@ w := httptest.NewRecorder()
 server.handleJobInputMultipart(w, req, "123.0")
 
 resp := w.Result()
-defer resp.Body.Close()
+defer func() {
+_ = resp.Body.Close()
+}()
 
 // Without authentication, should return 401
 if resp.StatusCode != http.StatusUnauthorized {
@@ -79,7 +83,9 @@ w := httptest.NewRecorder()
 server.handleJobByID(w, req)
 
 resp := w.Result()
-defer resp.Body.Close()
+defer func() {
+_ = resp.Body.Close()
+}()
 
 if tc.shouldMatch {
 // Should hit handleJobInputMultipart, which will return 401 (no auth)

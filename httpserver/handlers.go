@@ -982,13 +982,15 @@ func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Parse multipart form with a size limit (1GB)
-	err = r.ParseMultipartForm(1024 * 1024 * 1024) // 1GB limit
+	// Parse multipart form with a size limit (100MB)
+	err = r.ParseMultipartForm(100 * 1024 * 1024) // 100MB limit
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
 		return
 	}
-	defer r.MultipartForm.RemoveAll()
+	defer func() {
+		_ = r.MultipartForm.RemoveAll()
+	}()
 
 	// Create a pipe for streaming tar conversion
 	pr, pw := io.Pipe()
@@ -996,9 +998,13 @@ func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request,
 	// Start goroutine to convert multipart to tar
 	errChan := make(chan error, 1)
 	go func() {
-		defer pw.Close()
+		defer func() {
+			_ = pw.Close()
+		}()
 		tw := tar.NewWriter(pw)
-		defer tw.Close()
+		defer func() {
+			_ = tw.Close()
+		}()
 
 		// Process each file in the multipart form
 		for fieldName, fileHeaders := range r.MultipartForm.File {
@@ -1027,14 +1033,14 @@ func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request,
 
 				// Write header
 				if err := tw.WriteHeader(header); err != nil {
-					file.Close()
+					_ = file.Close()
 					errChan <- fmt.Errorf("failed to write tar header for %s: %w", fileHeader.Filename, err)
 					return
 				}
 
 				// Stream file content directly to tar (no buffering)
 				_, err = io.Copy(tw, file)
-				file.Close()
+				_ = file.Close()
 				if err != nil {
 					errChan <- fmt.Errorf("failed to copy file %s to tar: %w", fileHeader.Filename, err)
 					return
