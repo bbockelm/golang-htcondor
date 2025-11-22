@@ -4,19 +4,22 @@ Package classadlog provides functionality to read and parse HTCondor's job queue
 
 ## Status
 
-**Work in Progress** - Related to [Issue #47](https://github.com/bbockelm/golang-htcondor/issues/47)
+**Functional MVP Complete** - Related to [Issue #47](https://github.com/bbockelm/golang-htcondor/issues/47)
 
 ### Completed
 - ✅ Design document (`design_notes/CLASSAD_LOG_READER_DESIGN.md`)
 - ✅ Log entry types (`entry.go`)
 - ✅ In-memory ClassAd collection with thread-safe access (`collection.go`)
+- ✅ Log file parser (`parser.go`)
+- ✅ File change prober (`prober.go`)
+- ✅ Reader coordinator (`reader.go`)
 
 ### TODO
-- ⏳ Log file parser (`parser.go`)
-- ⏳ File change prober (`prober.go`)
-- ⏳ Reader coordinator (`reader.go`)
-- ⏳ Unit tests
-- ⏳ Integration tests with sample log files
+- ⏳ Comprehensive unit tests
+- ⏳ Integration tests with real HTCondor log files
+- ⏳ Verify log format against actual HTCondor job_queue.log files
+- ⏳ Performance testing with large log files
+- ⏳ Documentation improvements based on real-world usage
 
 ## Components
 
@@ -32,6 +35,31 @@ In-memory ClassAd storage with thread-safe access:
 - Query with constraint evaluation and projection support
 - Auto-creates ClassAds when SetAttribute is called before NewClassAd (handles ordering)
 - Returns copies of ClassAds to prevent external modifications
+
+### parser.go  
+Reads and parses HTCondor job queue log files:
+- Line-by-line log file reader with buffered I/O
+- Parses all log operations (NewClassAd, DestroyClassAd, SetAttribute, DeleteAttribute, etc.)
+- Maintains file offset for incremental reads
+- Handles comments and empty lines
+- Returns `io.EOF` when end of file reached
+
+### prober.go
+Monitors log file for changes:
+- Detects file additions (new entries)
+- Detects compressions/rotations (file truncated or rewritten)
+- Tracks file size and modification time
+- Returns `ProbeResult` indicating type of change
+- `Update()` method to refresh state after successful read
+
+### reader.go
+Main coordinator that ties everything together:
+- `NewReader()` creates reader for a log file
+- `Poll()` checks for changes and updates state
+- Handles both full reloads and incremental updates
+- Thread-safe with RWMutex (multiple readers, single writer)
+- `Query()` with constraint and projection support
+- `GetClassAd()`, `GetAllKeys()`, `Len()` accessor methods
 
 ## Usage Example (Planned)
 
