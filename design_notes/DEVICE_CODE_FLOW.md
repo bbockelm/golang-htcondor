@@ -124,9 +124,9 @@ while true; do
   response=$(curl -s -X POST http://localhost:8080/mcp/oauth2/token \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=$device_code&client_id=YOUR_CLIENT_ID")
-  
+
   error=$(echo $response | jq -r '.error // empty')
-  
+
   if [ "$error" = "authorization_pending" ]; then
     echo "Waiting for user authorization..."
     sleep 5

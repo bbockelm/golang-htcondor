@@ -634,11 +634,11 @@ func getTokenDirectory() (string, error) {
 func transformScopes(userScopes []string) []string {
 	// Standard OAuth2 scopes that should not be prefixed
 	standardScopes := map[string]bool{
-		"openid":  true,
-		"profile": true,
-		"email":   true,
-		"address": true,
-		"phone":   true,
+		"openid":         true,
+		"profile":        true,
+		"email":          true,
+		"address":        true,
+		"phone":          true,
 		"offline_access": true,
 	}
 

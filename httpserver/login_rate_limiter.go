@@ -35,7 +35,7 @@ func (l *LoginRateLimiter) getLimiter(ip string) *rate.Limiter {
 	if !exists {
 		limiter = rate.NewLimiter(l.rate, l.burst)
 		l.limiters[ip] = limiter
-		
+
 		// Clean up old limiters after 1 hour of inactivity
 		go func() {
 			time.Sleep(1 * time.Hour)

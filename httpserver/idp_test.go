@@ -27,14 +27,14 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	tempDBPath := t.TempDir() + "/test_idp.db"
 
 	server, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableIDP:  true,
-		IDPDBPath:  tempDBPath,
-		IDPIssuer:  "http://localhost:8080",
+		EnableIDP:    true,
+		IDPDBPath:    tempDBPath,
+		IDPIssuer:    "http://localhost:8080",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -208,14 +208,14 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	tempDBPath := t.TempDir() + "/test_idp_refresh.db"
 
 	server, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableIDP:  true,
-		IDPDBPath:  tempDBPath,
-		IDPIssuer:  "http://localhost:8080",
+		EnableIDP:    true,
+		IDPDBPath:    tempDBPath,
+		IDPIssuer:    "http://localhost:8080",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -308,14 +308,14 @@ func TestIDPLoginForm(t *testing.T) {
 	tempDBPath := t.TempDir() + "/test_idp_login.db"
 
 	server, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableIDP:  true,
-		IDPDBPath:  tempDBPath,
-		IDPIssuer:  "http://localhost:8080",
+		EnableIDP:    true,
+		IDPDBPath:    tempDBPath,
+		IDPIssuer:    "http://localhost:8080",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -356,14 +356,14 @@ func TestIDPMetadata(t *testing.T) {
 	tempDBPath := t.TempDir() + "/test_idp_metadata.db"
 
 	server, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableIDP:  true,
-		IDPDBPath:  tempDBPath,
-		IDPIssuer:  "http://localhost:8080",
+		EnableIDP:    true,
+		IDPDBPath:    tempDBPath,
+		IDPIssuer:    "http://localhost:8080",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -407,14 +407,14 @@ func TestIDPUserAuthentication(t *testing.T) {
 	tempDBPath := t.TempDir() + "/test_idp_auth.db"
 
 	server, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableIDP:  true,
-		IDPDBPath:  tempDBPath,
-		IDPIssuer:  "http://localhost:8080",
+		EnableIDP:    true,
+		IDPDBPath:    tempDBPath,
+		IDPIssuer:    "http://localhost:8080",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

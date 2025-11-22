@@ -153,7 +153,7 @@ opts := &htcondor.QueryOptions{
 }
 jobs, pageInfo, err := schedd.QueryWithOptions(ctx, "true", opts)
 
-fmt.Printf("Returned: %d, Has more: %v\n", 
+fmt.Printf("Returned: %d, Has more: %v\n",
     pageInfo.TotalReturned, pageInfo.HasMoreResults)
 ```
 
