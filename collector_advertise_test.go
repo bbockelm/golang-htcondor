@@ -103,10 +103,7 @@ func TestGetCommandForAdvertise(t *testing.T) {
 				t.Fatalf("Failed to set MyType: %v", err)
 			}
 
-			cmd, err := getCommandForAdvertise(ad)
-			if err != nil {
-				t.Fatalf("getCommandForAdvertise failed: %v", err)
-			}
+			cmd := getCommandForAdvertise(ad)
 
 			if cmd != tt.expected {
 				t.Errorf("Expected command %d, got %d", tt.expected, cmd)
@@ -119,10 +116,7 @@ func TestGetCommandForAdvertise_NoMyType(t *testing.T) {
 	ad := classad.New()
 	// Don't set MyType
 
-	cmd, err := getCommandForAdvertise(ad)
-	if err != nil {
-		t.Fatalf("getCommandForAdvertise failed: %v", err)
-	}
+	cmd := getCommandForAdvertise(ad)
 
 	if cmd != commands.UPDATE_AD_GENERIC {
 		t.Errorf("Expected UPDATE_AD_GENERIC for ad without MyType, got %d", cmd)
@@ -233,10 +227,8 @@ func TestEstimateClassAdSize(t *testing.T) {
 
 func TestAdvertiseOptions_Defaults(t *testing.T) {
 	t.Run("Nil options", func(t *testing.T) {
-		var opts *AdvertiseOptions
-		if opts == nil {
-			opts = &AdvertiseOptions{}
-		}
+		// Simulate ApplyDefaults logic
+		opts := &AdvertiseOptions{}
 		if !opts.WithAck && !opts.UseTCP {
 			opts.UseTCP = true
 		}

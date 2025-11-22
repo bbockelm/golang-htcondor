@@ -2,7 +2,6 @@ package httpserver
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -378,20 +377,6 @@ func TestHandleCollectorPath_Advertise(t *testing.T) {
 	if w.Code == http.StatusNotFound {
 		t.Error("Routing failed - got 404")
 	}
-}
-
-// Mock collector for testing successful advertise
-type mockCollector struct {
-	advertiseCallCount int
-	shouldFail         bool
-}
-
-func (m *mockCollector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *htcondor.AdvertiseOptions) error {
-	m.advertiseCallCount++
-	if m.shouldFail {
-		return context.DeadlineExceeded
-	}
-	return nil
 }
 
 func TestAdvertiseResponse_StatusCodes(t *testing.T) {

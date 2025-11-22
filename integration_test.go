@@ -148,7 +148,7 @@ ALLOW_ADMINISTRATOR = *
 ALLOW_OWNER = *
 ALLOW_CLIENT = *
 ALLOW_DAEMON = *
-ALLOW_CONFIG = *
+# ALLOW_CONFIG = *
 
 # Specifically allow queue management operations for testing
 QUEUE_SUPER_USERS = root, condor, $(CONDOR_IDS)
@@ -654,6 +654,9 @@ func TestCollectorQueryIntegration(t *testing.T) {
 
 	// Test 7: Discover advertise command
 	t.Run("DiscoverAdvertiseCommand", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
 		// Create a dummy ad file
 		adContent := `
 MyType = "Machine"
@@ -665,13 +668,14 @@ DaemonStartTime = 100
 UpdateSequenceNumber = 1
 `
 		adFile := filepath.Join(harness.tmpDir, "discovery_ad")
-		if err := os.WriteFile(adFile, []byte(adContent), 0644); err != nil {
+		if err := os.WriteFile(adFile, []byte(adContent), 0600); err != nil {
 			t.Fatalf("Failed to write ad file: %v", err)
 		}
 
 		// Run condor_advertise
 		// We use -tcp to match our client behavior
-		cmd := exec.Command("condor_advertise", "-tcp", "UPDATE_STARTD_AD", adFile)
+		//nolint:gosec // This is a test, using variable in command is fine
+		cmd := exec.CommandContext(ctx, "condor_advertise", "-tcp", "UPDATE_STARTD_AD", adFile)
 		cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+harness.configFile)
 		out, err := cmd.CombinedOutput()
 		if err != nil {

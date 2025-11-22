@@ -506,11 +506,7 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 	// Determine command if not specified
 	cmd := opts.Command
 	if cmd == 0 {
-		var err error
-		cmd, err = getCommandForAdvertise(ad)
-		if err != nil {
-			return err
-		}
+		cmd = getCommandForAdvertise(ad)
 	}
 
 	// Apply rate limiting if configured
@@ -599,15 +595,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 	// Determine command from first ad if not specified
 	cmd := opts.Command
 	if cmd == 0 {
-		var err error
-		cmd, err = getCommandForAdvertise(ads[0])
-		if err != nil {
-			errors := make([]error, len(ads))
-			for i := range errors {
-				errors[i] = err
-			}
-			return errors
-		}
+		cmd = getCommandForAdvertise(ads[0])
 	}
 
 	// Apply rate limiting
@@ -677,9 +665,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 		// we need to flush and reconnect to avoid protocol violations and memory issues on the collector side.
 		if bufferSize+adSize > MaxAdvertiseBufferSize && bufferSize > 0 {
 			// Flush buffer by sending DC_NOP and reconnecting
-			if err := sendGracefulHangup(ctx, cedarStream); err != nil {
-				// Continue anyway, not fatal
-			}
+			_ = sendGracefulHangup(ctx, cedarStream)
 
 			// Close and reconnect
 			_ = htcondorClient.Close()
@@ -710,56 +696,54 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 	}
 
 	// Send graceful hangup (DC_NOP) for collector v7.7.3+
-	if err := sendGracefulHangup(ctx, cedarStream); err != nil {
-		// Not fatal, just log it
-	}
+	_ = sendGracefulHangup(ctx, cedarStream)
 
 	return errors
 }
 
 // getCommandForAdvertise determines the UPDATE command based on ad's MyType
-func getCommandForAdvertise(ad *classad.ClassAd) (commands.CommandType, error) {
+func getCommandForAdvertise(ad *classad.ClassAd) commands.CommandType {
 	_, ok := ad.Lookup("MyType")
 	if !ok {
 		// Default to UPDATE_AD_GENERIC if no MyType
-		return commands.UPDATE_AD_GENERIC, nil
+		return commands.UPDATE_AD_GENERIC
 	}
 
 	myTypeStr, ok := ad.EvaluateAttrString("MyType")
 	if !ok {
-		return commands.UPDATE_AD_GENERIC, nil
+		return commands.UPDATE_AD_GENERIC
 	}
 
 	// Map MyType to UPDATE command
 	// Based on HTCondor's advertise.cpp logic
 	switch strings.ToUpper(myTypeStr) {
 	case "MACHINE", "STARTD":
-		return commands.UPDATE_STARTD_AD, nil
+		return commands.UPDATE_STARTD_AD
 	case "SCHEDULER", "SCHEDD":
-		return commands.UPDATE_SCHEDD_AD, nil
+		return commands.UPDATE_SCHEDD_AD
 	case "DAEMONMASTER", "MASTER":
-		return commands.UPDATE_MASTER_AD, nil
+		return commands.UPDATE_MASTER_AD
 	case "SUBMITTER":
-		return commands.UPDATE_SUBMITTOR_AD, nil
+		return commands.UPDATE_SUBMITTOR_AD
 	case "COLLECTOR":
-		return commands.UPDATE_COLLECTOR_AD, nil
+		return commands.UPDATE_COLLECTOR_AD
 	case "NEGOTIATOR":
-		return commands.UPDATE_NEGOTIATOR_AD, nil
+		return commands.UPDATE_NEGOTIATOR_AD
 	case "LICENSE":
-		return commands.UPDATE_LICENSE_AD, nil
+		return commands.UPDATE_LICENSE_AD
 	case "STORAGE":
-		return commands.UPDATE_STORAGE_AD, nil
+		return commands.UPDATE_STORAGE_AD
 	case "ACCOUNTING":
-		return commands.UPDATE_ACCOUNTING_AD, nil
+		return commands.UPDATE_ACCOUNTING_AD
 	case "GRID":
-		return commands.UPDATE_GRID_AD, nil
+		return commands.UPDATE_GRID_AD
 	case "HAD":
-		return commands.UPDATE_HAD_AD, nil
+		return commands.UPDATE_HAD_AD
 	case "GENERIC":
-		return commands.UPDATE_AD_GENERIC, nil
+		return commands.UPDATE_AD_GENERIC
 	default:
 		// Unknown type, use GENERIC
-		return commands.UPDATE_AD_GENERIC, nil
+		return commands.UPDATE_AD_GENERIC
 	}
 }
 
