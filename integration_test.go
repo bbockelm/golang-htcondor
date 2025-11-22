@@ -296,6 +296,50 @@ func (h *condorTestHarness) printMasterLog() {
 	h.t.Logf("=== MasterLog contents ===\n%s\n=== End MasterLog ===", string(data))
 }
 
+// printShadowLog prints the shadow log contents for debugging
+func (h *condorTestHarness) printShadowLog() {
+	shadowLog := filepath.Join(h.logDir, "ShadowLog")
+	data, err := os.ReadFile(shadowLog) //nolint:gosec // Test code reading test logs
+	if err != nil {
+		h.t.Logf("Failed to read ShadowLog: %v", err)
+		return
+	}
+
+	h.t.Logf("=== ShadowLog contents ===\n%s\n=== End ShadowLog ===", string(data))
+}
+
+// printStarterLogs prints all starter log contents for debugging
+// Starter logs are dynamically named (StarterLog.slot1, StarterLog.slot2, etc.)
+func (h *condorTestHarness) printStarterLogs() {
+	// Find all StarterLog.* files, but skip StarterLog.test
+	pattern := filepath.Join(h.logDir, "StarterLog.*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		h.t.Logf("Failed to glob StarterLog files: %v", err)
+		return
+	}
+
+	if len(matches) == 0 {
+		h.t.Log("No StarterLog files found")
+		return
+	}
+
+	for _, logPath := range matches {
+		// Skip StarterLog.test
+		if filepath.Base(logPath) == "StarterLog.test" {
+			continue
+		}
+
+		data, err := os.ReadFile(logPath) //nolint:gosec // Test code reading test logs
+		if err != nil {
+			h.t.Logf("Failed to read %s: %v", logPath, err)
+			continue
+		}
+
+		h.t.Logf("=== %s contents ===\n%s\n=== End %s ===", filepath.Base(logPath), string(data), filepath.Base(logPath))
+	}
+}
+
 // checkStartdStatus checks if startd has crashed and prints its log
 //
 //nolint:unused // Test helper function kept for debugging
