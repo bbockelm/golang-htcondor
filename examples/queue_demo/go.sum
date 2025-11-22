@@ -1,7 +1,7 @@
 github.com/PelicanPlatform/classad v0.0.4 h1:CKRLqSe+6tTvYELE/P1uYYugse8aAMKAnb+IC5HDqIU=
 github.com/PelicanPlatform/classad v0.0.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/bbockelm/cedar v0.0.17 h1:Ed5zdUy6/t6pWwz05DqdZIaqBeOlNi3P01rzCM1tI5M=
-github.com/bbockelm/cedar v0.0.17/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
+github.com/bbockelm/cedar v0.0.19 h1:OMi3CE2qiWWe/ja6TTgbhjOIdxYPxlNa6g2lzA5ZvFQ=
+github.com/bbockelm/cedar v0.0.19/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
 github.com/golang-jwt/jwt/v5 v5.3.0 h1:pv4AsKCKKZuqlgs5sUmn4x8UlGa0kEVt/puTpKx9vvo=
 github.com/golang-jwt/jwt/v5 v5.3.0/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=

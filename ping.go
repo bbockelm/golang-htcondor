@@ -6,7 +6,6 @@ import (
 
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
-	"github.com/bbockelm/cedar/security"
 )
 
 // Permission levels for DC_SEC_QUERY authorization checking.
@@ -67,20 +66,6 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 		opts = &PingOptions{}
 	}
 
-	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, c.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to collector: %w", err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
 	// Determine command based on whether we're checking permissions
 	// For basic ping, use DC_NOP (no operation) command
 	// For permission checks, use DC_SEC_QUERY
@@ -103,11 +88,21 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 		secConfig.AuthCommand = opts.CheckPermission
 	}
 
-	// Perform security handshake
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
+	// Establish connection and authenticate
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("ping handshake failed: %w", err)
+		return nil, fmt.Errorf("failed to connect and authenticate to collector: %w", err)
+	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// Get security negotiation result
+	negotiation := htcondorClient.GetSecurityNegotiation()
+	if negotiation == nil {
+		return nil, fmt.Errorf("no security negotiation performed")
 	}
 
 	// Convert negotiation result to PingResult
@@ -145,20 +140,6 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 		opts = &PingOptions{}
 	}
 
-	// Establish connection using cedar client
-	htcondorClient, err := client.ConnectToAddress(ctx, s.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
-	}
-	defer func() {
-		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close connection: %w", cerr)
-		}
-	}()
-
-	// Get CEDAR stream from client
-	cedarStream := htcondorClient.GetStream()
-
 	// Determine command based on whether we're checking permissions
 	// For basic ping, use DC_NOP (no operation) command
 	// For permission checks, use DC_SEC_QUERY
@@ -181,11 +162,21 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 		secConfig.AuthCommand = opts.CheckPermission
 	}
 
-	// Perform security handshake
-	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake(ctx)
+	// Establish connection and authenticate
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("ping handshake failed: %w", err)
+		return nil, fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
+	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	// Get security negotiation result
+	negotiation := htcondorClient.GetSecurityNegotiation()
+	if negotiation == nil {
+		return nil, fmt.Errorf("no security negotiation performed")
 	}
 
 	// Convert negotiation result to PingResult
