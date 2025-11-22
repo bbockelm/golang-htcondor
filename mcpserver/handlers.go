@@ -253,14 +253,14 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 			},
 		},
 		{
-			Name:        "query_job_history",
-			Description: "Query job history records from HTCondor (completed jobs)",
+			Name:        "query_job_archive",
+			Description: "Query archived job records from HTCondor (completed jobs)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"constraint": map[string]interface{}{
 						"type":        "string",
-						"description": "ClassAd constraint expression (default: 'true' for all history)",
+						"description": "ClassAd constraint expression (default: 'true' for all archived jobs)",
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
@@ -271,15 +271,15 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of history records to return. Use -1 for unlimited.",
+						"description": "Maximum number of archived records to return. Use -1 for unlimited.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of history records to scan before stopping",
+						"description": "Maximum number of archived records to scan before stopping",
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Scan history backwards from most recent (default: true)",
+						"description": "Scan archive backwards from most recent (default: true)",
 					},
 					"since": map[string]interface{}{
 						"type":        "string",
@@ -445,7 +445,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJobStdout(ctx, request.Arguments)
 	case "get_job_stderr":
 		result, err = s.toolGetJobStderr(ctx, request.Arguments)
-	case "query_job_history":
+	case "query_job_archive":
 		result, err = s.toolQueryJobHistory(ctx, request.Arguments)
 	case "query_job_epochs":
 		result, err = s.toolQueryJobEpochs(ctx, request.Arguments)

@@ -19,7 +19,7 @@ type HistoryListResponse struct {
 	Ads []*classad.ClassAd `json:"ads"`
 }
 
-// handleJobHistory handles GET /api/v1/jobs/history
+// handleJobHistory handles GET /api/v1/jobs/archive
 // Queries job history (completed jobs)
 func (s *Server) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

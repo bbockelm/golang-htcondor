@@ -928,17 +928,6 @@ func runDemoMode() error {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	// Set up shutdown timer if specified
-	var shutdownTimer *time.Timer
-	if *demoShutdownAfter > 0 {
-		shutdownTimer = time.NewTimer(*demoShutdownAfter)
-		log.Printf("Demo mode will automatically shutdown after %v", *demoShutdownAfter)
-	}
-
 	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
@@ -949,6 +938,23 @@ func runDemoMode() error {
 			errChan <- server.Start()
 		}
 	}()
+
+	// Wait for shutdown
+	return waitForShutdown(server, errChan)
+}
+
+// waitForShutdown waits for a signal, timer, or server error and handles graceful shutdown
+func waitForShutdown(server *httpserver.Server, errChan <-chan error) error {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Set up shutdown timer if specified
+	var shutdownTimer *time.Timer
+	if *demoShutdownAfter > 0 {
+		shutdownTimer = time.NewTimer(*demoShutdownAfter)
+		log.Printf("Demo mode will automatically shutdown after %v", *demoShutdownAfter)
+	}
 
 	// Wait for shutdown signal, timer, or error
 	select {

@@ -900,16 +900,16 @@ const openAPISchema = `{
         }
       }
     },
-    "/jobs/history": {
+    "/jobs/archive": {
       "get": {
-        "summary": "Query job history",
-        "description": "Query the HTCondor schedd for job history records. Returns completed jobs from the history file.",
-        "operationId": "queryJobHistory",
+        "summary": "Query job archive",
+        "description": "Query the HTCondor schedd for archived job records. Returns completed jobs from the history file.",
+        "operationId": "queryJobArchive",
         "parameters": [
           {
             "name": "constraint",
             "in": "query",
-            "description": "ClassAd constraint expression (default: 'true' for all history)",
+            "description": "ClassAd constraint expression (default: 'true' for all archived jobs)",
             "required": false,
             "schema": {
               "type": "string",
@@ -928,7 +928,7 @@ const openAPISchema = `{
           {
             "name": "limit",
             "in": "query",
-            "description": "Maximum number of history records to return (use * for unlimited)",
+            "description": "Maximum number of archived records to return (use * for unlimited)",
             "required": false,
             "schema": {
               "type": "string"
@@ -937,7 +937,7 @@ const openAPISchema = `{
           {
             "name": "scan_limit",
             "in": "query",
-            "description": "Maximum number of history records to scan before stopping",
+            "description": "Maximum number of archived records to scan before stopping",
             "required": false,
             "schema": {
               "type": "integer"
