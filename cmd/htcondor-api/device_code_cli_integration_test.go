@@ -438,12 +438,22 @@ func approveDeviceViaBrowser(verificationURL, userCode, username, password strin
 	resp.Body.Close()
 
 	// Step 2: Submit login credentials to the IDP login endpoint
-	// The IDP login endpoint is /idp/login
-	baseURL := verificationURL[:strings.Index(verificationURL[8:], "/")+8] // Extract base URL
-	loginURL := baseURL + "/idp/login?redirect_uri=" + verificationURL
+	// Parse the verification URL to extract the base URL safely
+	parsedURL, err := url.Parse(verificationURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse verification URL: %w", err)
+	}
+	baseURL := parsedURL.Scheme + "://" + parsedURL.Host
 
-	loginData := fmt.Sprintf("username=%s&password=%s", username, password)
-	req, err = http.NewRequest("POST", loginURL, strings.NewReader(loginData))
+	// Build login URL with properly encoded redirect URI
+	loginURL := baseURL + "/idp/login?redirect_uri=" + url.QueryEscape(verificationURL)
+
+	// Use url.Values for proper form encoding
+	loginData := url.Values{}
+	loginData.Set("username", username)
+	loginData.Set("password", password)
+
+	req, err = http.NewRequest("POST", loginURL, strings.NewReader(loginData.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create login request: %w", err)
 	}
@@ -461,9 +471,12 @@ func approveDeviceViaBrowser(verificationURL, userCode, username, password strin
 	}
 
 	// Step 3: After login, approve the device by submitting the device verification form
-	// The form should be at the verification URL
-	approvalData := fmt.Sprintf("user_code=%s&action=approve", userCode)
-	req, err = http.NewRequest("POST", verificationURL, strings.NewReader(approvalData))
+	// Use url.Values for proper form encoding
+	approvalData := url.Values{}
+	approvalData.Set("user_code", userCode)
+	approvalData.Set("action", "approve")
+
+	req, err = http.NewRequest("POST", verificationURL, strings.NewReader(approvalData.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create approval request: %w", err)
 	}
