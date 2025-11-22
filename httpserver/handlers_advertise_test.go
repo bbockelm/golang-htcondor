@@ -328,8 +328,8 @@ func TestParseAdvertiseMultipart_SizeLimit(t *testing.T) {
 		t.Fatalf("Failed to create form file: %v", err)
 	}
 
-	// Write > 1MB of data
-	largeData := make([]byte, 1024*1024+1)
+	// Write > 1MB of data (exceeds MaxAdvertiseBufferSize)
+	largeData := make([]byte, htcondor.MaxAdvertiseBufferSize+1)
 	_, _ = part.Write(largeData)
 
 	if err := writer.Close(); err != nil {

@@ -673,6 +673,8 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 
 		// Estimate ad size (rough approximation)
 		adSize := estimateClassAdSize(ad)
+		// HTCondor's multi-sending protocol has buffer limits. When buffer exceeds MaxAdvertiseBufferSize,
+		// we need to flush and reconnect to avoid protocol violations and memory issues on the collector side.
 		if bufferSize+adSize > MaxAdvertiseBufferSize && bufferSize > 0 {
 			// Flush buffer by sending DC_NOP and reconnecting
 			if err := sendGracefulHangup(ctx, cedarStream); err != nil {
@@ -770,7 +772,9 @@ func ensureMyAddress(ad *classad.ClassAd) error {
 
 	// Generate a MyAddress using local IP
 	// TODO: Use proper IP detection (IPv4/IPv6)
-	// For now, use a placeholder that HTCondor will accept
+	// LIMITATION: The default address <127.0.0.1:0> may not work in distributed environments
+	// where the collector needs to contact the advertising daemon. Users should set
+	// MyAddress explicitly in the ad for production use.
 	if err := ad.Set("MyAddress", DefaultMyAddress); err != nil {
 		return fmt.Errorf("failed to set MyAddress: %w", err)
 	}

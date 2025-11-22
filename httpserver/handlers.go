@@ -2449,8 +2449,10 @@ func (s *Server) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request
 // parseAdvertiseMultipart parses multipart form data containing ClassAds
 // Returns ads, withAck flag, command, and error
 func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
-	// Parse multipart form with 10MB limit (multiple ads shouldn't exceed this)
-	err := r.ParseMultipartForm(10 * 1024 * 1024)
+	// Parse multipart form with 10MB limit for the HTTP form data itself
+	// (this is larger than the 1MB ClassAd content limit to account for multipart encoding overhead)
+	const maxMultipartFormSize = 10 * 1024 * 1024
+	err := r.ParseMultipartForm(maxMultipartFormSize)
 	if err != nil {
 		return nil, false, "", fmt.Errorf("failed to parse multipart form: %w", err)
 	}
@@ -2464,7 +2466,8 @@ func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, b
 	// Process each file in the multipart form
 	for _, fileHeaders := range r.MultipartForm.File {
 		for _, fileHeader := range fileHeaders {
-			// Check total size limit
+			// Check total ClassAd content size limit (note: fileHeader.Size is the encoded size in the form)
+			// We use MaxAdvertiseBufferSize as a conservative limit for the total content
 			if totalSize+int(fileHeader.Size) > htcondor.MaxAdvertiseBufferSize {
 				return nil, false, "", fmt.Errorf("total size of ads exceeds 1MB limit")
 			}
