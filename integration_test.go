@@ -40,6 +40,16 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 	// Determine daemon binary directory from condor_master location
 	sbinDir := filepath.Dir(masterPath)
 
+	// Determine bin directory for condor_history
+	// First try to find condor_history in PATH
+	var binDir string
+	if historyPath, err := exec.LookPath("condor_history"); err == nil {
+		binDir = filepath.Dir(historyPath)
+	} else {
+		// If not in PATH, assume bin is sibling of sbin
+		binDir = filepath.Join(filepath.Dir(sbinDir), "bin")
+	}
+
 	// Also check for other required daemons
 	requiredDaemons := []string{"condor_collector", "condor_schedd", "condor_negotiator", "condor_startd"}
 	for _, daemon := range requiredDaemons {
@@ -79,6 +89,7 @@ COLLECTOR_HOST = $(CONDOR_HOST)
 
 # Daemon binary locations
 SBIN = %s
+BIN = %s
 
 # Use local directory structure
 LOCAL_DIR = %s
@@ -157,7 +168,7 @@ UPDATE_INTERVAL = 5
 # Disable unwanted features for testing
 ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
-`, sbinDir, h.tmpDir, h.scheddName)
+`, sbinDir, binDir, h.tmpDir, h.scheddName)
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
@@ -294,6 +305,50 @@ func (h *condorTestHarness) printMasterLog() {
 	}
 
 	h.t.Logf("=== MasterLog contents ===\n%s\n=== End MasterLog ===", string(data))
+}
+
+// printShadowLog prints the shadow log contents for debugging
+func (h *condorTestHarness) printShadowLog() {
+	shadowLog := filepath.Join(h.logDir, "ShadowLog")
+	data, err := os.ReadFile(shadowLog) //nolint:gosec // Test code reading test logs
+	if err != nil {
+		h.t.Logf("Failed to read ShadowLog: %v", err)
+		return
+	}
+
+	h.t.Logf("=== ShadowLog contents ===\n%s\n=== End ShadowLog ===", string(data))
+}
+
+// printStarterLogs prints all starter log contents for debugging
+// Starter logs are dynamically named (StarterLog.slot1, StarterLog.slot2, etc.)
+func (h *condorTestHarness) printStarterLogs() {
+	// Find all StarterLog.* files, but skip StarterLog.test
+	pattern := filepath.Join(h.logDir, "StarterLog.*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		h.t.Logf("Failed to glob StarterLog files: %v", err)
+		return
+	}
+
+	if len(matches) == 0 {
+		h.t.Log("No StarterLog files found")
+		return
+	}
+
+	for _, logPath := range matches {
+		// Skip StarterLog.test
+		if filepath.Base(logPath) == "StarterLog.testing" {
+			continue
+		}
+
+		data, err := os.ReadFile(logPath) //nolint:gosec // Test code reading test logs
+		if err != nil {
+			h.t.Logf("Failed to read %s: %v", logPath, err)
+			continue
+		}
+
+		h.t.Logf("=== %s contents ===\n%s\n=== End %s ===", filepath.Base(logPath), string(data), filepath.Base(logPath))
+	}
 }
 
 // checkStartdStatus checks if startd has crashed and prints its log

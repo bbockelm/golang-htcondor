@@ -252,6 +252,133 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 				"required": []string{"job_id"},
 			},
 		},
+		{
+			Name:        "query_job_archive",
+			Description: "Query archived job records from HTCondor (completed jobs)",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"constraint": map[string]interface{}{
+						"type":        "string",
+						"description": "ClassAd constraint expression (default: 'true' for all archived jobs)",
+					},
+					"projection": map[string]interface{}{
+						"type":        "array",
+						"description": "List of attributes to include in results. Default: ClusterId, ProcId, Owner, JobStatus, EnteredCurrentStatus, CompletionDate, RemoveReason",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of archived records to return. Use -1 for unlimited.",
+					},
+					"scan_limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of archived records to scan before stopping",
+					},
+					"backwards": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Scan archive backwards from most recent (default: true)",
+					},
+					"since": map[string]interface{}{
+						"type":        "string",
+						"description": "Only return records after this timestamp (ISO8601 format)",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+			},
+		},
+		{
+			Name:        "query_job_epochs",
+			Description: "Query job epoch history records (job restarts and execution attempts)",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"constraint": map[string]interface{}{
+						"type":        "string",
+						"description": "ClassAd constraint expression (default: 'true' for all epochs)",
+					},
+					"projection": map[string]interface{}{
+						"type":        "array",
+						"description": "List of attributes to include in results. Default: ClusterId, ProcId, EpochNumber, Owner, JobStartDate, JobCurrentStartDate, RemoteHost",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of epoch records to return. Use -1 for unlimited.",
+					},
+					"scan_limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of epoch records to scan before stopping",
+					},
+					"backwards": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Scan history backwards from most recent (default: true)",
+					},
+					"since": map[string]interface{}{
+						"type":        "string",
+						"description": "Only return records after this timestamp (ISO8601 format)",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+			},
+		},
+		{
+			Name:        "query_transfer_history",
+			Description: "Query file transfer history records",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"constraint": map[string]interface{}{
+						"type":        "string",
+						"description": "ClassAd constraint expression (default: 'true' for all transfers)",
+					},
+					"projection": map[string]interface{}{
+						"type":        "array",
+						"description": "List of attributes to include in results. Default: ClusterId, ProcId, TransferType, TransferStartTime, TransferEndTime, TransferSuccess, TransferFileBytes",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of transfer records to return. Use -1 for unlimited.",
+					},
+					"scan_limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of transfer records to scan before stopping",
+					},
+					"backwards": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Scan history backwards from most recent (default: true)",
+					},
+					"since": map[string]interface{}{
+						"type":        "string",
+						"description": "Only return records after this timestamp (ISO8601 format)",
+					},
+					"transfer_types": map[string]interface{}{
+						"type":        "array",
+						"description": "List of transfer types to include (INPUT_FILES, OUTPUT_FILES, CHECKPOINT_FILES)",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+			},
+		},
 	}
 
 	return map[string]interface{}{
@@ -318,6 +445,12 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJobStdout(ctx, request.Arguments)
 	case "get_job_stderr":
 		result, err = s.toolGetJobStderr(ctx, request.Arguments)
+	case "query_job_archive":
+		result, err = s.toolQueryJobHistory(ctx, request.Arguments)
+	case "query_job_epochs":
+		result, err = s.toolQueryJobEpochs(ctx, request.Arguments)
+	case "query_transfer_history":
+		result, err = s.toolQueryTransferHistory(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
@@ -894,6 +1027,116 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 			"output_type": outputType,
 			"filename":    outputFile,
 			"size":        len(outputContent),
+		},
+	}, nil
+}
+
+// toolQueryJobHistory handles job history queries
+func (s *Server) toolQueryJobHistory(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.toolQueryHistory(ctx, args, htcondor.HistorySourceJobHistory, "job history")
+}
+
+// toolQueryJobEpochs handles job epoch history queries
+func (s *Server) toolQueryJobEpochs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.toolQueryHistory(ctx, args, htcondor.HistorySourceJobEpoch, "job epochs")
+}
+
+// toolQueryTransferHistory handles transfer history queries
+func (s *Server) toolQueryTransferHistory(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.toolQueryHistory(ctx, args, htcondor.HistorySourceTransfer, "transfer history")
+}
+
+// toolQueryHistory is a helper function for history queries
+func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface{}, source htcondor.HistoryRecordSource, typeName string) (interface{}, error) {
+	constraint, _ := args["constraint"].(string)
+	if constraint == "" {
+		constraint = "true"
+	}
+
+	// Parse projection
+	var projection []string
+	if projArray, ok := args["projection"].([]interface{}); ok {
+		projection = make([]string, len(projArray))
+		for i, p := range projArray {
+			projection[i], _ = p.(string)
+		}
+	}
+
+	// Build query options
+	opts := &htcondor.HistoryQueryOptions{
+		Source:     source,
+		Projection: projection,
+		Backwards:  true, // Default to backwards
+	}
+
+	// Parse limit (default: no limit for history queries)
+	if limitVal, ok := args["limit"].(float64); ok {
+		opts.Limit = int(limitVal)
+	}
+
+	// Parse scan_limit
+	if scanLimitVal, ok := args["scan_limit"].(float64); ok {
+		opts.ScanLimit = int(scanLimitVal)
+	}
+
+	// Parse backwards
+	if backwardsVal, ok := args["backwards"].(bool); ok {
+		opts.Backwards = backwardsVal
+	}
+
+	// Parse since timestamp
+	if sinceVal, ok := args["since"].(string); ok && sinceVal != "" {
+		// Store as constraint string
+		opts.Since = sinceVal
+	}
+
+	// Parse transfer_types for transfer history
+	if source == htcondor.HistorySourceTransfer {
+		if typesArray, ok := args["transfer_types"].([]interface{}); ok && len(typesArray) > 0 {
+			var transferTypes []htcondor.TransferType
+			for _, t := range typesArray {
+				typeStr, _ := t.(string)
+				switch typeStr {
+				case "INPUT_FILES", "INPUT":
+					transferTypes = append(transferTypes, htcondor.TransferTypeInput)
+				case "OUTPUT_FILES", "OUTPUT":
+					transferTypes = append(transferTypes, htcondor.TransferTypeOutput)
+				case "CHECKPOINT_FILES", "CHECKPOINT":
+					transferTypes = append(transferTypes, htcondor.TransferTypeCheckpoint)
+				}
+			}
+			if len(transferTypes) > 0 {
+				opts.TransferTypes = transferTypes
+			}
+		}
+	}
+
+	// Execute query
+	records, err := s.schedd.QueryHistoryWithOptions(ctx, constraint, opts)
+	if err != nil {
+		return nil, fmt.Errorf("history query failed: %w", err)
+	}
+
+	// Convert ClassAds to JSON
+	recordsJSON, err := json.Marshal(records)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize records: %w", err)
+	}
+
+	resultText := fmt.Sprintf("Found %d %s record(s):\n%s",
+		len(records), typeName, string(recordsJSON))
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": resultText,
+			},
+		},
+		"metadata": map[string]interface{}{
+			"total_records": len(records),
+			"constraint":    constraint,
+			"source":        string(source),
 		},
 	}, nil
 }
