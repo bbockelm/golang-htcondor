@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -318,4 +319,141 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 		t.Error("Session cookie should be cleared in response")
 	}
 
+}
+
+// TestHandleJobFile tests the handleJobFile handler
+func TestHandleJobFile(t *testing.T) {
+	tests := []struct {
+		name               string
+		method             string
+		filename           string
+		wantStatusCode     int
+		wantErr            bool
+		wantContentType    string
+		wantContentPattern string
+	}{
+		{
+			name:            "POST method not allowed",
+			method:          http.MethodPost,
+			filename:        "test.txt",
+			wantStatusCode:  http.StatusMethodNotAllowed,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "empty filename returns bad request",
+			method:          http.MethodGet,
+			filename:        "",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with .. rejected",
+			method:          http.MethodGet,
+			filename:        "../etc/passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with / rejected",
+			method:          http.MethodGet,
+			filename:        "etc/passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+		{
+			name:            "path traversal with backslash rejected",
+			method:          http.MethodGet,
+			filename:        "etc\\passwd",
+			wantStatusCode:  http.StatusBadRequest,
+			wantErr:         true,
+			wantContentType: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/v1/jobs/123.0/files/"+tt.filename, nil)
+			w := httptest.NewRecorder()
+
+			// Create a minimal server instance for testing
+			server := &Server{}
+			server.handleJobFile(w, req, 123, 0, tt.filename)
+
+			resp := w.Result()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("Failed to close response body: %v", err)
+				}
+			}()
+
+			if resp.StatusCode != tt.wantStatusCode {
+				t.Errorf("handler status = %v, want %v", resp.StatusCode, tt.wantStatusCode)
+			}
+
+			if tt.wantContentType != "" {
+				gotContentType := resp.Header.Get("Content-Type")
+				if gotContentType != tt.wantContentType {
+					t.Errorf("Content-Type = %v, want %v", gotContentType, tt.wantContentType)
+				}
+			}
+		})
+	}
+}
+
+// TestDetectContentType verifies that http.DetectContentType works as expected
+func TestDetectContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     []byte
+		wantPattern string // Substring that should be in the content type
+	}{
+		{
+			name:        "text file",
+			content:     []byte("Hello, World!\nThis is a text file.\n"),
+			wantPattern: "text/plain",
+		},
+		{
+			name:        "JSON file",
+			content:     []byte(`{"key": "value", "number": 123}`),
+			wantPattern: "text/plain", // JSON is detected as text/plain by DetectContentType
+		},
+		{
+			name:        "HTML file",
+			content:     []byte(`<!DOCTYPE html><html><body><h1>Test</h1></body></html>`),
+			wantPattern: "text/html",
+		},
+		{
+			name:        "PNG image",
+			content:     []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, // PNG header
+			wantPattern: "image/png",
+		},
+		{
+			name:        "JPEG image",
+			content:     []byte{0xFF, 0xD8, 0xFF}, // JPEG header
+			wantPattern: "image/jpeg",
+		},
+		{
+			name:        "PDF document",
+			content:     []byte("%PDF-1.4\n"),
+			wantPattern: "application/pdf",
+		},
+		{
+			name:        "empty file",
+			content:     []byte{},
+			wantPattern: "text/plain", // Empty files default to text/plain
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contentType := http.DetectContentType(tt.content)
+			if !strings.Contains(contentType, tt.wantPattern) {
+				t.Errorf("DetectContentType() = %v, want to contain %v", contentType, tt.wantPattern)
+			}
+		})
+	}
 }
