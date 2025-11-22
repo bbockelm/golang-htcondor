@@ -187,15 +187,22 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the stored authorize request
-	ar, ok := s.oauth2StateStore.Get(state)
+	// Retrieve the stored authorize request and original URL
+	ar, originalURL, ok := s.oauth2StateStore.GetWithURL(state)
 	if !ok {
 		s.logger.Error(logging.DestinationHTTP, "Invalid or expired OAuth2 state", "state", state)
 		s.writeError(w, http.StatusBadRequest, "Invalid or expired state parameter")
 		return
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Processing OAuth2 callback", "state", state, "client_id", ar.GetClient().GetID())
+	// Check if this is a browser-initiated flow (no authorize request)
+	isBrowserFlow := (ar == nil)
+
+	if !isBrowserFlow {
+		s.logger.Info(logging.DestinationHTTP, "Processing OAuth2 callback", "state", state, "client_id", ar.GetClient().GetID())
+	} else {
+		s.logger.Info(logging.DestinationHTTP, "Processing OAuth2 callback for browser flow", "state", state, "original_url", originalURL)
+	}
 
 	// Exchange authorization code for token
 	token, err := s.oauth2Config.Exchange(ctx, code)
@@ -228,9 +235,41 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if err := s.validateGroupAccess(userGroups); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "User denied access", "subject", userInfo.Subject, "error", err)
 
+		// For browser flow, show an error page instead of OAuth2 error
+		if isBrowserFlow {
+			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Access denied: %v", err))
+			return
+		}
+
 		// Create RFC6749 error to redirect back to client
 		accessDeniedErr := fosite.ErrAccessDenied.WithDescription(err.Error()).WithHintf("User does not have required group membership")
 		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, accessDeniedErr)
+		return
+	}
+
+	// For browser flow, create session and redirect back to original URL
+	if isBrowserFlow {
+		// Create HTTP session cookie for browser-based authentication
+		sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
+				"error", err, "subject", userInfo.Subject)
+			s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+			return
+		}
+		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
+		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie for browser flow",
+			"subject", userInfo.Subject, "session_id", sessionID[:8]+"...",
+			"expires_at", sessionData.ExpiresAt)
+
+		// Redirect back to original URL or default to root
+		redirectURL := originalURL
+		if redirectURL == "" {
+			redirectURL = "/"
+		}
+		s.logger.Info(logging.DestinationHTTP, "Browser authentication successful, redirecting",
+			"subject", userInfo.Subject, "redirect_url", redirectURL)
+		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
 
@@ -269,20 +308,9 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create HTTP session cookie for browser-based authentication
-	// This allows the user to make subsequent API calls without re-authenticating
-	sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject)
-	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
-			"error", err, "subject", userInfo.Subject)
-		// Continue anyway - session cookie is optional
-	} else {
-		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
-		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie",
-			"subject", userInfo.Subject, "session_id", sessionID[:8]+"...", "expires_at", sessionData.ExpiresAt)
-	}
-
 	s.logger.Info(logging.DestinationHTTP, "OAuth2 callback completed successfully",
 		"subject", userInfo.Subject, "granted_scopes", grantedScopes)
+
+	// OAuth2 client flow - write the standard OAuth2 response
 	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
 }
