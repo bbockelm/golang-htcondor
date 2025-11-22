@@ -1712,14 +1712,15 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, 
 
 	ctx := r.Context()
 
-	// Validate filename - prevent path traversal attacks
-	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
-		s.writeError(w, http.StatusBadRequest, "Invalid filename: path traversal not allowed")
+	// Validate filename
+	if filename == "" {
+		s.writeError(w, http.StatusBadRequest, "Filename is required")
 		return
 	}
 
-	if filename == "" {
-		s.writeError(w, http.StatusBadRequest, "Filename is required")
+	// Prevent path traversal attacks
+	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		s.writeError(w, http.StatusBadRequest, "Invalid filename: path traversal not allowed")
 		return
 	}
 

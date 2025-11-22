@@ -451,7 +451,6 @@ func TestDetectContentType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			contentType := http.DetectContentType(tt.content)
-			// strings package is already imported at the top of the file
 			if !strings.Contains(contentType, tt.wantPattern) {
 				t.Errorf("DetectContentType() = %v, want to contain %v", contentType, tt.wantPattern)
 			}
