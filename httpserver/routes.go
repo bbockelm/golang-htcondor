@@ -32,6 +32,11 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(s.handleJobs)))
 	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(s.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
+	// Job history endpoints
+	mux.Handle("/api/v1/jobs/history", cors(http.HandlerFunc(s.handleJobHistory)))
+	mux.Handle("/api/v1/jobs/epochs", cors(http.HandlerFunc(s.handleJobEpochs)))
+	mux.Handle("/api/v1/jobs/transfers", cors(http.HandlerFunc(s.handleJobTransfers)))
+
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(s.handleWhoAmI)))
 
