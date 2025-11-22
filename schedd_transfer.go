@@ -178,6 +178,25 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 			}
 		}
 
+		// Also add Stdout and Stderr files if they exist and we are filtering
+		if transferOutputFiles != nil {
+			// Add standard output file
+			if outExpr, ok := jobAd.Lookup("Out"); ok {
+				val := outExpr.Eval(nil)
+				if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
+					transferOutputFiles[str] = true
+				}
+			}
+
+			// Add standard error file
+			if errExpr, ok := jobAd.Lookup("Err"); ok {
+				val := errExpr.Eval(nil)
+				if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
+					transferOutputFiles[str] = true
+				}
+			}
+		}
+
 		// c-e. Receive files using FileTransfer protocol
 		// First receive the transfer protocol headers (final_transfer flag and xfer_info)
 		headerMsg := message.NewMessageFromStream(cedarStream)
