@@ -36,10 +36,11 @@ func TestScheddQueryJobHistoryIntegration(t *testing.T) {
 	submitFile := `
 universe = vanilla
 executable = /bin/echo
-arguments = "Hello from history test"
+arguments = Hello from history test
 output = test_history.out
 error = test_history.err
 log = test_history.log
+transfer_executable = false
 queue
 `
 

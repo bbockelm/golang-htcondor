@@ -40,6 +40,16 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 	// Determine daemon binary directory from condor_master location
 	sbinDir := filepath.Dir(masterPath)
 
+	// Determine bin directory for condor_history
+	// First try to find condor_history in PATH
+	var binDir string
+	if historyPath, err := exec.LookPath("condor_history"); err == nil {
+		binDir = filepath.Dir(historyPath)
+	} else {
+		// If not in PATH, assume bin is sibling of sbin
+		binDir = filepath.Join(filepath.Dir(sbinDir), "bin")
+	}
+
 	// Also check for other required daemons
 	requiredDaemons := []string{"condor_collector", "condor_schedd", "condor_negotiator", "condor_startd"}
 	for _, daemon := range requiredDaemons {
@@ -79,6 +89,7 @@ COLLECTOR_HOST = $(CONDOR_HOST)
 
 # Daemon binary locations
 SBIN = %s
+BIN = %s
 
 # Use local directory structure
 LOCAL_DIR = %s
@@ -157,7 +168,7 @@ UPDATE_INTERVAL = 5
 # Disable unwanted features for testing
 ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
-`, sbinDir, h.tmpDir, h.scheddName)
+`, sbinDir, binDir, h.tmpDir, h.scheddName)
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
