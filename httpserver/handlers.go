@@ -403,27 +403,40 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a file fetch operation: /api/v1/jobs/{id}/files/{filename}
-	if len(parts) == 3 && parts[1] == "files" {
+	if len(parts) >= 3 && parts[1] == "files" {
 		cluster, proc, err := parseJobID(jobID)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
 			return
 		}
-		s.handleJobFile(w, r, cluster, proc, parts[2])
+		filename := strings.Join(parts[2:], "/")
+		s.handleJobFile(w, r, cluster, proc, filename)
 		return
 	}
 
 	// Handle job operations
 	switch r.Method {
 	case http.MethodGet:
-		s.handleGetJob(w, r, jobID)
+		if len(parts) == 1 {
+			s.handleGetJob(w, r, jobID)
+			return
+		}
 	case http.MethodDelete:
-		s.handleDeleteJob(w, r, jobID)
+		if len(parts) == 1 {
+			s.handleDeleteJob(w, r, jobID)
+			return
+		}
 	case http.MethodPatch:
-		s.handleEditJob(w, r, jobID)
+		if len(parts) == 1 {
+			s.handleEditJob(w, r, jobID)
+			return
+		}
 	default:
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
 	}
+
+	s.writeError(w, http.StatusNotFound, "Resource not found")
 }
 
 // handleGetJob handles GET /api/v1/jobs/{id}
@@ -1068,15 +1081,30 @@ func parseJobID(jobID string) (cluster, proc int, err error) {
 func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename string, w http.ResponseWriter, detectContentType bool) error {
 	// Create a pipe for streaming the tar archive
 	pipeReader, pipeWriter := io.Pipe()
-	
+
 	// Start receiving the job sandbox in the background
-	errChan := s.schedd.ReceiveJobSandbox(ctx, constraint, pipeWriter)
-	
+	// We need to ensure pipeWriter is closed when transfer finishes
+	sandboxErrChan := s.schedd.ReceiveJobSandbox(ctx, constraint, pipeWriter)
+
+	// Channel to capture the final error from ReceiveJobSandbox
+	finalErrChan := make(chan error, 1)
+
+	go func() {
+		err := <-sandboxErrChan
+		// Close the writer so the reader sees EOF or error
+		if err != nil {
+			_ = pipeWriter.CloseWithError(err)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		finalErrChan <- err
+	}()
+
 	// Process the tar stream in the current goroutine
 	tarReader := tar.NewReader(pipeReader)
 	found := false
 	var extractErr error
-	
+
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -1086,12 +1114,12 @@ func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename str
 			extractErr = fmt.Errorf("failed to read tar archive: %w", err)
 			break
 		}
-		
+
 		// Check if this is the file we're looking for
 		baseName := filepath.Base(header.Name)
 		if baseName == filename {
 			found = true
-			
+
 			// If we need to detect content type, we need to read the first 512 bytes
 			if detectContentType {
 				// Create a limited reader for the first 512 bytes
@@ -1101,13 +1129,13 @@ func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename str
 					extractErr = fmt.Errorf("failed to read file for content type detection: %w", err)
 					break
 				}
-				
+
 				// Detect content type
 				contentType := http.DetectContentType(buf[:n])
 				w.Header().Set("Content-Type", contentType)
 				w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 				w.WriteHeader(http.StatusOK)
-				
+
 				// Write the buffer we already read
 				if _, err := w.Write(buf[:n]); err != nil {
 					extractErr = fmt.Errorf("failed to write content: %w", err)
@@ -1118,9 +1146,10 @@ func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename str
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
 			}
-			
+
 			// Stream the rest of the file with an 8KB buffer
 			buf := make([]byte, 8192)
+			//nolint:gosec // Trusted source, streaming file content
 			_, copyErr := io.CopyBuffer(w, tarReader, buf)
 			if copyErr != nil {
 				extractErr = fmt.Errorf("failed to stream file content: %w", copyErr)
@@ -1128,25 +1157,32 @@ func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename str
 			break
 		}
 	}
-	
-	// Close the pipe writer to signal completion
-	pipeWriter.Close()
-	
+
+	// Close the pipe reader to stop the writer (if it's still running)
+	_ = pipeReader.Close()
+
 	// Wait for the sandbox receive to complete
-	if err := <-errChan; err != nil {
+	err := <-finalErrChan
+
+	// If we found the file, we expect "closed pipe" error because we closed the reader early
+	if found && err != nil && strings.Contains(err.Error(), "closed pipe") {
+		err = nil
+	}
+
+	if err != nil {
 		return fmt.Errorf("failed to download job sandbox: %w", err)
 	}
-	
+
 	// Check if we encountered an error during extraction
 	if extractErr != nil {
 		return extractErr
 	}
-	
+
 	// Check if we found the file
 	if !found {
 		return fmt.Errorf("file not found in sandbox")
 	}
-	
+
 	return nil
 }
 

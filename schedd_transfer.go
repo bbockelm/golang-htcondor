@@ -159,7 +159,15 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 
 		// Get list of transfer output files (if specified)
 		var transferOutputFiles map[string]bool
-		if expr, ok := jobAd.Lookup("TransferOutputFiles"); ok {
+		// Check TransferOutput (standard) and TransferOutputFiles (legacy/internal)
+		lookupAttr := "TransferOutput"
+		expr, ok := jobAd.Lookup(lookupAttr)
+		if !ok {
+			lookupAttr = "TransferOutputFiles"
+			expr, ok = jobAd.Lookup(lookupAttr)
+		}
+
+		if ok {
 			val := expr.Eval(nil)
 			if str, err := val.StringValue(); err == nil && str != "" {
 				fileList := parseFileList(str)
@@ -1403,4 +1411,18 @@ func (s *Schedd) sendTransferProtocolHeaders(ctx context.Context, cedarStream *s
 	}
 
 	return nil
+}
+
+// releaseJobsWithEmptySpool performs an empty spool for jobs that don't need input files.
+// This triggers the schedd to release the job from the hold state and set the Iwd.
+func (s *Schedd) releaseJobsWithEmptySpool(ctx context.Context, jobAds []*classad.ClassAd) error {
+	// Create an empty tarball
+	pr, pw := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(pw)
+		_ = tw.Close()
+		_ = pw.Close()
+	}()
+
+	return s.SpoolJobFilesFromTar(ctx, jobAds, pr)
 }

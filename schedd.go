@@ -652,31 +652,14 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		return 0, nil, submissionErr
 	}
 
+	var jobsWithoutSpooling []*classad.ClassAd
+
 	// For remote submission, configure job attributes similar to HTCondor's behavior
 	// This mimics what condor_submit does when using the -name option (remote submission)
 	for _, procAd := range submitResult.ProcAds {
-		// Set ShouldTransferFiles to YES if not already set
-		if expr, ok := procAd.Lookup("ShouldTransferFiles"); !ok || expr == nil {
-			_ = procAd.Set("ShouldTransferFiles", "YES")
-		}
-
-		// Ensure WhenToTransferOutput is set
-		if expr, ok := procAd.Lookup("WhenToTransferOutput"); !ok || expr == nil {
-			_ = procAd.Set("WhenToTransferOutput", "ON_EXIT")
-		}
-
-		// Remote jobs start in HELD status with SpoolingInput hold reason
-		// JobStatus: 5 = HELD
-		_ = procAd.Set("JobStatus", int64(5))
-		// HoldReasonCode: 16 = SpoolingInput
-		_ = procAd.Set("HoldReasonCode", int64(16))
-		_ = procAd.Set("HoldReason", "Spooling input data files")
-
-		// Set LeaveJobInQueue expression for remote jobs
-		// Keep job in queue for 10 days after completion to allow output retrieval
-		if expr, ok := procAd.Lookup("LeaveJobInQueue"); !ok || expr == nil {
-			leaveInQueueExpr, _ := classad.ParseExpr("JobStatus == 4 && (CompletionDate =?= UNDEFINED || CompletionDate == 0 || ((time() - CompletionDate) < 864000))")
-			_ = procAd.Set("LeaveJobInQueue", leaveInQueueExpr)
+		needsSpooling := configureRemoteJobAd(procAd)
+		if !needsSpooling {
+			jobsWithoutSpooling = append(jobsWithoutSpooling, procAd)
 		}
 	}
 
@@ -709,6 +692,22 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		return 0, nil, submissionErr
 	}
 
+	// Close qmgmt connection to free up resources before spooling
+	// This is important because SpoolJobFilesFromTar creates a new connection
+	// and we want to avoid holding multiple connections/sessions open if possible.
+	_ = qmgmt.Close()
+	qmgmt = nil // Prevent double close in defer
+
+	// If we don't need input spooling, release the hold immediately.
+	// Note: the hold + release triggers schedd logic that sets the Iwd to
+	// be the spool directory. Without that, the shadow doesn't know where
+	// to place output files and will fail to start.
+	if len(jobsWithoutSpooling) > 0 {
+		if err := s.releaseJobsWithEmptySpool(ctx, jobsWithoutSpooling); err != nil {
+			return clusterIDInt, resultProcAds, fmt.Errorf("failed to release jobs without input files: %w", err)
+		}
+	}
+
 	return clusterIDInt, resultProcAds, nil
 }
 
@@ -716,4 +715,59 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 func (s *Schedd) Edit(_ context.Context, _ string, _ string, _ string) error {
 	// TODO: Implement job edit using cedar protocol
 	return fmt.Errorf("not implemented")
+}
+
+// configureRemoteJobAd sets up job attributes for remote submission and determines if spooling is needed.
+func configureRemoteJobAd(procAd *classad.ClassAd) bool {
+	// Set ShouldTransferFiles to YES if not already set
+	if expr, ok := procAd.Lookup("ShouldTransferFiles"); !ok || expr == nil {
+		_ = procAd.Set("ShouldTransferFiles", "YES")
+	}
+
+	// Ensure WhenToTransferOutput is set
+	if expr, ok := procAd.Lookup("WhenToTransferOutput"); !ok || expr == nil {
+		_ = procAd.Set("WhenToTransferOutput", "ON_EXIT")
+	}
+
+	// Check if we need to spool input files
+	needsSpooling := false
+
+	// Check TransferExecutable (default is true)
+	transferExe := true
+	if val, ok := procAd.EvaluateAttrBool("TransferExecutable"); ok {
+		transferExe = val
+	}
+	if transferExe {
+		needsSpooling = true
+	}
+
+	// Check Input (stdin)
+	if !needsSpooling {
+		if val, ok := procAd.EvaluateAttrString("Input"); ok && val != "" {
+			needsSpooling = true
+		}
+	}
+
+	// Check TransferInputFiles
+	if !needsSpooling {
+		if val, ok := procAd.EvaluateAttrString("TransferInputFiles"); ok && val != "" {
+			needsSpooling = true
+		}
+	}
+
+	// Remote jobs start in HELD status with SpoolingInput hold reason
+	// JobStatus: 5 = HELD
+	_ = procAd.Set("JobStatus", int64(5))
+	// HoldReasonCode: 16 = SpoolingInput
+	_ = procAd.Set("HoldReasonCode", int64(16))
+	_ = procAd.Set("HoldReason", "Spooling input data files")
+
+	// Set LeaveJobInQueue expression for remote jobs
+	// Keep job in queue for 10 days after completion to allow output retrieval
+	if expr, ok := procAd.Lookup("LeaveJobInQueue"); !ok || expr == nil {
+		leaveInQueueExpr, _ := classad.ParseExpr("JobStatus == 4 && (CompletionDate =?= UNDEFINED || CompletionDate == 0 || ((time() - CompletionDate) < 864000))")
+		_ = procAd.Set("LeaveJobInQueue", leaveInQueueExpr)
+	}
+
+	return needsSpooling
 }
