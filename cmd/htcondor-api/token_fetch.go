@@ -45,20 +45,18 @@ type TokenFetchConfig struct {
 	Scopes       []string
 	ClientID     string
 	ClientSecret string
-	Insecure     bool
 }
 
 // runTokenFetch implements the "token fetch" subcommand
 func runTokenFetch(args []string) error {
 	// Parse flags for token fetch
 	if len(args) < 1 {
-		return fmt.Errorf("usage: htcondor-api token fetch <issuer-url> [--trust-domain DOMAIN] [--scopes SCOPES] [--insecure]")
+		return fmt.Errorf("usage: htcondor-api token fetch <issuer-url> [--trust-domain DOMAIN] [--scopes SCOPES]")
 	}
 
 	issuerURL := args[0]
 	trustDomain := ""
 	scopes := []string{"openid", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE"}
-	insecure := false
 
 	// Simple flag parsing
 	for i := 1; i < len(args); i++ {
@@ -75,8 +73,6 @@ func runTokenFetch(args []string) error {
 				scopes = transformScopes(userScopes)
 				i++
 			}
-		case "--insecure":
-			insecure = true
 		}
 	}
 
@@ -93,7 +89,6 @@ func runTokenFetch(args []string) error {
 		IssuerURL:   issuerURL,
 		TrustDomain: trustDomain,
 		Scopes:      scopes,
-		Insecure:    insecure,
 	}
 
 	// Load existing token info
@@ -127,7 +122,7 @@ func runTokenFetch(args []string) error {
 	if exists && tokenInfo.RefreshToken != "" {
 		// Try to refresh the token
 		fmt.Println("Found existing refresh token, attempting to refresh...")
-		newTokenInfo, err := refreshToken(tokenInfo, config)
+		newTokenInfo, err := refreshToken(tokenInfo)
 		if err == nil {
 			fmt.Println("Successfully refreshed access token!")
 			store.Tokens[trustDomain] = newTokenInfo
@@ -217,7 +212,7 @@ func registerClient(config *TokenFetchConfig) (string, string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := getHTTPClient(config.Insecure)
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
@@ -261,7 +256,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := getHTTPClient(config.Insecure)
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -327,7 +322,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 			}
 			tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-			client := getHTTPClient(config.Insecure)
+			client := getHTTPClient()
 			tokenResp, err := client.Do(tokenReq)
 			if err != nil {
 				return nil, err
@@ -386,7 +381,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 }
 
 // refreshToken refreshes an access token using a refresh token
-func refreshToken(tokenInfo *TokenInfo, config *TokenFetchConfig) (*TokenInfo, error) {
+func refreshToken(tokenInfo *TokenInfo) (*TokenInfo, error) {
 	tokenURL := tokenInfo.IssuerURL + "/mcp/oauth2/token"
 
 	data := url.Values{}
@@ -402,7 +397,7 @@ func refreshToken(tokenInfo *TokenInfo, config *TokenFetchConfig) (*TokenInfo, e
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := getHTTPClient(config.Insecure)
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -683,27 +678,27 @@ func transformScopes(userScopes []string) []string {
 }
 
 // getHTTPClient returns an HTTP client with the specified security settings
-func getHTTPClient(insecure bool) *http.Client {
-	tlsConfig := &tls.Config{InsecureSkipVerify: insecure}
+func getHTTPClient() *http.Client {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
-	// If not insecure, try to load CA from config
-	if !insecure {
-		// Load config to check for AUTH_SSL_CLIENT_CAFILE
-		cfg, err := config.New()
-		if err == nil {
-			if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok && caFile != "" {
-				// Load CA cert
-				caCert, err := os.ReadFile(caFile)
-				if err == nil {
-					caCertPool := x509.NewCertPool()
-					if caCertPool.AppendCertsFromPEM(caCert) {
-						tlsConfig.RootCAs = caCertPool
-					} else {
-						fmt.Fprintf(os.Stderr, "Warning: failed to parse CA certificate from %s\n", caFile)
-					}
+	// Load config to check for AUTH_SSL_CLIENT_CAFILE
+	cfg, err := config.New()
+	if err == nil {
+		if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok && caFile != "" {
+			// Load CA cert
+			//nolint:gosec // Path is from config, admin-controlled
+			caCert, err := os.ReadFile(caFile)
+			if err == nil {
+				caCertPool := x509.NewCertPool()
+				if caCertPool.AppendCertsFromPEM(caCert) {
+					tlsConfig.RootCAs = caCertPool
 				} else {
-					fmt.Fprintf(os.Stderr, "Warning: failed to read CA certificate file %s: %v\n", caFile, err)
+					fmt.Fprintf(os.Stderr, "Warning: failed to parse CA certificate from %s\n", caFile)
 				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: failed to read CA certificate file %s: %v\n", caFile, err)
 			}
 		}
 	}

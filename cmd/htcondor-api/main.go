@@ -1159,6 +1159,7 @@ func waitForCondor(localDir string) (string, error) {
 
 // readAddressFile reads an HTCondor address file and returns the address
 func readAddressFile(path string) (string, error) {
+	//nolint:gosec // Path is from config, admin-controlled
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -1205,10 +1206,12 @@ func generateCAAndCert(caPath, certPath, keyPath string) error {
 		return fmt.Errorf("failed to create CA file: %w", err)
 	}
 	if err := pem.Encode(caFile, &pem.Block{Type: "CERTIFICATE", Bytes: caBytes}); err != nil {
-		caFile.Close()
+		_ = caFile.Close()
 		return fmt.Errorf("failed to encode CA certificate: %w", err)
 	}
-	caFile.Close()
+	if err := caFile.Close(); err != nil {
+		return fmt.Errorf("failed to close CA file: %w", err)
+	}
 
 	// 2. Generate Server Certificate
 	serverPrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -1247,10 +1250,12 @@ func generateCAAndCert(caPath, certPath, keyPath string) error {
 		return fmt.Errorf("failed to create cert file: %w", err)
 	}
 	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverBytes}); err != nil {
-		certFile.Close()
+		_ = certFile.Close()
 		return fmt.Errorf("failed to encode server certificate: %w", err)
 	}
-	certFile.Close()
+	if err := certFile.Close(); err != nil {
+		return fmt.Errorf("failed to close cert file: %w", err)
+	}
 
 	// Write server key
 	//nolint:gosec // Path is from config, admin-controlled
@@ -1260,10 +1265,12 @@ func generateCAAndCert(caPath, certPath, keyPath string) error {
 	}
 	privateKeyBytes := x509.MarshalPKCS1PrivateKey(serverPrivKey)
 	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
-		keyFile.Close()
+		_ = keyFile.Close()
 		return fmt.Errorf("failed to encode private key: %w", err)
 	}
-	keyFile.Close()
+	if err := keyFile.Close(); err != nil {
+		return fmt.Errorf("failed to close key file: %w", err)
+	}
 
 	log.Printf("Generated CA certificate: %s", caPath)
 	log.Printf("Generated server certificate: %s", certPath)
