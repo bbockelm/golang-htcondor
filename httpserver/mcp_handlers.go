@@ -272,44 +272,371 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// User authenticated via header or query parameter - continue with authorization
-	s.logger.Info(logging.DestinationHTTP, "User authenticated, creating authorize response",
+	// User authenticated via header or query parameter - redirect to consent page
+	s.logger.Info(logging.DestinationHTTP, "User authenticated, redirecting to consent page",
 		"username", username, "client_id", ar.GetClient().GetID())
 
-	// Create session for this user
-	session := DefaultOpenIDConnectSession(username)
-
-	// Grant requested scopes
-	requestedScopes := ar.GetRequestedScopes()
-	s.logger.Info(logging.DestinationHTTP, "Creating authorize response", "username", username, "client_id", ar.GetClient().GetID(), "requested_scopes", requestedScopes)
-
-	// Grant all requested scopes (in production, you'd validate these)
-	for _, scope := range requestedScopes {
-		ar.GrantScope(scope)
-	}
-
-	// Generate response
-	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+	// Generate state parameter for consent
+	state, err := s.oauth2StateStore.GenerateState()
 	if err != nil {
-		// Extract more detailed error information
-		errorDetails := fmt.Sprintf("%v", err)
-
-		// Try to unwrap to get RFC6749Error
-		var rfc6749Err *fosite.RFC6749Error
-		if errors.As(err, &rfc6749Err) {
-			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
-				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
-		}
-
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response",
-			"error", err, "error_type", fmt.Sprintf("%T", err), "error_details", errorDetails,
-			"username", username, "client_id", ar.GetClient().GetID())
-		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate consent state", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
 		return
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Successfully created authorize response", "username", username)
-	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+	// Store authorize request and username for consent page
+	s.oauth2StateStore.StoreWithUsername(state, ar, "", username)
+
+	// Redirect to consent page
+	consentURL := fmt.Sprintf("/mcp/oauth2/consent?state=%s", state)
+	http.Redirect(w, r, consentURL, http.StatusFound)
+}
+
+// getScopeDescription returns a human-readable description of an OAuth2 scope
+func getScopeDescription(scope string) string {
+	descriptions := map[string]string{
+		"openid":                    "Basic authentication information",
+		"profile":                   "Access to your profile information",
+		"email":                     "Access to your email address",
+		"offline_access":            "Ability to refresh access tokens",
+		"mcp:read":                  "Read-only access to HTCondor jobs and resources via MCP protocol",
+		"mcp:write":                 "Full access to submit and manage HTCondor jobs via MCP protocol",
+		"condor:/READ":              "HTCondor READ authorization - allows reading job and daemon information",
+		"condor:/WRITE":             "HTCondor WRITE authorization - allows submitting and managing jobs",
+		"condor:/ADVERTISE_STARTD":  "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
+		"condor:/ADVERTISE_SCHEDD":  "HTCondor ADVERTISE_SCHEDD authorization - allows advertising schedd daemons",
+		"condor:/ADVERTISE_MASTER":  "HTCondor ADVERTISE_MASTER authorization - allows advertising master daemons",
+		"condor:/ADMINISTRATOR":     "HTCondor ADMINISTRATOR authorization - full administrative access",
+		"condor:/CONFIG":            "HTCondor CONFIG authorization - allows modifying configuration",
+		"condor:/DAEMON":            "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
+		"condor:/NEGOTIATOR":        "HTCondor NEGOTIATOR authorization - allows negotiator operations",
+	}
+
+	if desc, ok := descriptions[scope]; ok {
+		return desc
+	}
+
+	// Handle custom condor:/* scopes
+	if strings.HasPrefix(scope, "condor:/") {
+		authLevel := strings.TrimPrefix(scope, "condor:/")
+		return fmt.Sprintf("HTCondor %s authorization", authLevel)
+	}
+
+	// Default for unknown scopes
+	return fmt.Sprintf("Access with scope: %s", scope)
+}
+
+// handleOAuth2Consent handles the OAuth2 consent page
+func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+	
+	// Get state from query parameter for GET or form value for POST
+	state := r.URL.Query().Get("state")
+	if state == "" && r.Method == http.MethodPost {
+		// Parse form first if POST
+		if err := r.ParseForm(); err == nil {
+			state = r.FormValue("state")
+		}
+	}
+
+	if state == "" {
+		s.writeError(w, http.StatusBadRequest, "Missing state parameter")
+		return
+	}
+
+	// Retrieve the authorize request and username
+	ar, username, ok := s.oauth2StateStore.GetWithUsername(state)
+	if !ok || ar == nil {
+		s.logger.Error(logging.DestinationHTTP, "Invalid or expired consent state", "state", state)
+		s.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		// Display consent form
+		client := ar.GetClient()
+		requestedScopes := ar.GetRequestedScopes()
+
+		// Build scopes list with descriptions
+		type scopeInfo struct {
+			Name        string
+			Description string
+		}
+		var scopes []scopeInfo
+		for _, scope := range requestedScopes {
+			scopes = append(scopes, scopeInfo{
+				Name:        scope,
+				Description: getScopeDescription(scope),
+			})
+		}
+
+		// Generate HTML for scopes list
+		var scopesHTML strings.Builder
+		scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
+		for _, scope := range scopes {
+			scopesHTML.WriteString(fmt.Sprintf("                <li>\n"+
+				"                    <strong>%s</strong>\n"+
+				"                    <p>%s</p>\n"+
+				"                </li>\n", scope.Name, scope.Description))
+		}
+		scopesHTML.WriteString("            </ul>")
+
+		html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorize Application</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 600px;
+            width: 100%%;
+            padding: 40px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .user-info {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 30px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .user-info strong {
+            color: #333;
+        }
+        .client-info {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            border-radius: 6px;
+        }
+        .client-info h2 {
+            font-size: 16px;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        .client-info p {
+            color: #555;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .permissions {
+            margin-bottom: 30px;
+        }
+        .permissions h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .scopes-list {
+            list-style: none;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .scopes-list li {
+            padding: 16px 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .scopes-list li:last-child {
+            border-bottom: none;
+        }
+        .scopes-list li strong {
+            display: block;
+            color: #667eea;
+            font-size: 14px;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .scopes-list li p {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+            margin: 0;
+        }
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+        button {
+            flex: 1;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button.approve {
+            background: #667eea;
+            color: white;
+        }
+        button.approve:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button.deny {
+            background: #e0e0e0;
+            color: #666;
+        }
+        button.deny:hover {
+            background: #d0d0d0;
+            color: #333;
+        }
+        .warning {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #856404;
+            line-height: 1.5;
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 30px 20px;
+            }
+            h1 {
+                font-size: 24px;
+            }
+            .actions {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Authorize Application</h1>
+        <div class="user-info">
+            Logged in as <strong>%s</strong>
+        </div>
+        
+        <div class="client-info">
+            <h2>Application Information</h2>
+            <p><strong>Client ID:</strong> %s</p>
+        </div>
+
+        <div class="permissions">
+            <h2>Requested Permissions</h2>
+            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                This application is requesting access to:
+            </p>
+            %s
+        </div>
+
+        <form method="POST" action="/mcp/oauth2/consent">
+            <input type="hidden" name="state" value="%s">
+            <div class="actions">
+                <button type="submit" name="action" value="approve" class="approve">Authorize</button>
+                <button type="submit" name="action" value="deny" class="deny">Deny</button>
+            </div>
+        </form>
+
+        <div class="warning">
+            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust. 
+            This will allow the application to perform actions on your behalf with the permissions listed above.
+        </div>
+    </div>
+</body>
+</html>`, username, client.GetID(), scopesHTML.String(), state)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(html))
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Form already parsed above when getting state
+		// Handle approval/denial
+		action := r.FormValue("action")
+
+		if action == "approve" {
+			// User approved - create session and complete authorization
+			session := DefaultOpenIDConnectSession(username)
+
+			// Grant all requested scopes
+			requestedScopes := ar.GetRequestedScopes()
+			for _, scope := range requestedScopes {
+				ar.GrantScope(scope)
+			}
+
+			s.logger.Info(logging.DestinationHTTP, "User approved consent",
+				"username", username, "client_id", ar.GetClient().GetID(), "scopes", requestedScopes)
+
+			// Generate OAuth2 response
+			response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response after consent",
+					"error", err, "username", username)
+				s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+				// Remove the state entry
+				s.oauth2StateStore.Remove(state)
+				return
+			}
+
+			s.logger.Info(logging.DestinationHTTP, "Successfully created authorize response after consent", "username", username)
+
+			// Remove the state entry
+			s.oauth2StateStore.Remove(state)
+
+			// Write the OAuth2 response
+			s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+			return
+		}
+
+		if action == "deny" {
+			// User denied - return access denied error
+			s.logger.Info(logging.DestinationHTTP, "User denied consent",
+				"username", username, "client_id", ar.GetClient().GetID())
+
+			// Remove the state entry
+			s.oauth2StateStore.Remove(state)
+
+			// Return access denied error to client
+			accessDeniedErr := fosite.ErrAccessDenied.WithDescription("User denied authorization")
+			s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, accessDeniedErr)
+			return
+		}
+
+		// Invalid action
+		s.writeError(w, http.StatusBadRequest, "Invalid action")
+		return
+	}
+
+	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
 // handleOAuth2Token handles OAuth2 token requests

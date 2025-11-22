@@ -56,6 +56,7 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 
 		// OAuth2 endpoints
 		mux.HandleFunc("/mcp/oauth2/authorize", s.handleOAuth2Authorize)
+		mux.HandleFunc("/mcp/oauth2/consent", s.handleOAuth2Consent) // Consent page
 		mux.HandleFunc("/mcp/oauth2/callback", s.handleOAuth2Callback) // SSO callback
 		mux.HandleFunc("/mcp/oauth2/token", s.handleOAuth2Token)
 		mux.HandleFunc("/mcp/oauth2/introspect", s.handleOAuth2Introspect)
