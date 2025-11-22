@@ -2,9 +2,7 @@ package htcondor
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -88,13 +86,7 @@ queue
 	}
 
 	if !leftQueue {
-		// Print ScheddLog for debugging
-		scheddLog := filepath.Join(harness.logDir, "SchedLog")
-		if logContent, err := os.ReadFile(scheddLog); err == nil { //nolint:gosec // scheddLog path is controlled by test harness
-			t.Logf("ScheddLog contents (last 5000 chars):\n%s", string(logContent[max(0, len(logContent)-5000):]))
-		} else {
-			t.Logf("Failed to read ScheddLog: %v", err)
-		}
+		harness.printScheddLog()
 		t.Fatalf("Job did not leave queue in time after %v", maxWait)
 	}
 
