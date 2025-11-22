@@ -548,8 +548,8 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 	if err := msg.PutClassAd(ctx, ad); err != nil {
 		return fmt.Errorf("failed to send ClassAd: %w", err)
 	}
-	if err := msg.FlushFrame(ctx, true); err != nil {
-		return fmt.Errorf("failed to flush message: %w", err)
+	if err := msg.FinishMessage(ctx); err != nil {
+		return fmt.Errorf("failed to finish message: %w", err)
 	}
 
 	// Wait for acknowledgment if requested

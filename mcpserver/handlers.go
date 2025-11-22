@@ -1127,8 +1127,8 @@ func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]i
 			},
 		},
 		"metadata": map[string]interface{}{
-			"ad_name": adName,
-			"ad_type": adType,
+			"ad_name":  adName,
+			"ad_type":  adType,
 			"with_ack": opts.WithAck,
 		},
 	}, nil
