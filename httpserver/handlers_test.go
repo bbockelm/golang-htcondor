@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -451,19 +452,9 @@ func TestDetectContentType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			contentType := http.DetectContentType(tt.content)
 			// strings package is already imported at the top of the file
-			if !containsString(contentType, tt.wantPattern) {
+			if !strings.Contains(contentType, tt.wantPattern) {
 				t.Errorf("DetectContentType() = %v, want to contain %v", contentType, tt.wantPattern)
 			}
 		})
 	}
-}
-
-// containsString checks if a string contains a substring
-func containsString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if i+len(substr) <= len(s) && s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
