@@ -35,11 +35,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -125,13 +127,15 @@ SEC_PASSWORD_DIRECTORY = %s
 		serverCmd.Wait()
 	}()
 
-	// Wait for server to start and extract the actual listening address
-	t.Log("Waiting for server to start...")
-	serverURL, err := waitForServerStartup(serverStdout, serverStderr, 60*time.Second, t)
+	// Wait for server to start and extract the actual listening address and IDP credentials
+	t.Log("Waiting for server to start and extract IDP credentials...")
+	serverURL, idpUsername, idpPassword, err := waitForServerStartup(serverStdout, serverStderr, 60*time.Second, t)
 	if err != nil {
 		t.Fatalf("Server failed to start: %v", err)
 	}
 	t.Logf("Server started at: %s", serverURL)
+	t.Logf("IDP Username: %s", idpUsername)
+	t.Logf("IDP Password: %s", idpPassword)
 
 	// Give server a moment to fully initialize
 	time.Sleep(2 * time.Second)
@@ -161,10 +165,9 @@ SEC_PASSWORD_DIRECTORY = %s
 	t.Logf("Verification URL: %s", verificationURL)
 	t.Logf("User code: %s", userCode)
 
-	// Step 5: Simulate browser authentication
-	t.Log("Step 5: Simulating browser-based authentication...")
-	testUser := "testuser"
-	if err := approveDeviceViaBrowser(verificationURL, userCode, testUser); err != nil {
+	// Step 5: Simulate browser authentication using IDP credentials
+	t.Log("Step 5: Simulating browser-based authentication with IDP...")
+	if err := approveDeviceViaBrowser(verificationURL, userCode, idpUsername, idpPassword); err != nil {
 		fetchCmd.Wait()
 		t.Fatalf("Failed to approve device: %v", err)
 	}
@@ -220,12 +223,14 @@ SEC_PASSWORD_DIRECTORY = %s
 	t.Log("✅ All device code CLI flow tests passed!")
 }
 
-// waitForServerStartup waits for the server to start and returns the server URL
-func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *testing.T) (string, error) {
+// waitForServerStartup waits for the server to start and returns the server URL, IDP username, and password
+func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *testing.T) (string, string, string, error) {
 	deadline := time.Now().Add(timeout)
 
 	// Read stdout and stderr concurrently
 	urlChan := make(chan string, 1)
+	usernameChan := make(chan string, 1)
+	passwordChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
@@ -233,6 +238,11 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 		// Look for patterns that indicate server is listening
 		// Examples: "HTTP server listening on: http://127.0.0.1:8080" or "Server started on 127.0.0.1:8080"
 		listenPattern := regexp.MustCompile(`(?i)(listening|started).*(http://[^\s]+|https://[^\s]+|\d+\.\d+\.\d+\.\d+:\d+)`)
+		// Look for IDP credentials: "Username: admin" and "Password: <password>"
+		usernamePattern := regexp.MustCompile(`Username:\s*(\S+)`)
+		passwordPattern := regexp.MustCompile(`Password:\s*(\S+)`)
+
+		var serverURL, username, password string
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -243,13 +253,15 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 				// Extract the URL or address
 				for _, match := range matches[1:] {
 					if strings.HasPrefix(match, "http://") || strings.HasPrefix(match, "https://") {
-						urlChan <- match
-						return
+						serverURL = match
+						t.Logf("Found server URL: %s", serverURL)
+						break
 					}
 					if strings.Contains(match, ":") && !strings.Contains(match, "//") {
 						// It's an address without protocol, add http://
-						urlChan <- "http://" + match
-						return
+						serverURL = "http://" + match
+						t.Logf("Found server address: %s", serverURL)
+						break
 					}
 				}
 			}
@@ -261,32 +273,68 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 					// Extract the URL (last part after final ":")
 					urlPart := strings.TrimSpace(strings.Join(parts[len(parts)-2:], ":"))
 					if strings.HasPrefix(urlPart, "http") {
-						urlChan <- urlPart
-						return
+						serverURL = urlPart
+						t.Logf("Found server URL from message: %s", serverURL)
 					}
 				}
+			}
+
+			// Look for IDP username
+			if matches := usernamePattern.FindStringSubmatch(line); len(matches) > 1 {
+				username = matches[1]
+				t.Logf("Found IDP username: %s", username)
+			}
+
+			// Look for IDP password
+			if matches := passwordPattern.FindStringSubmatch(line); len(matches) > 1 {
+				password = matches[1]
+				t.Logf("Found IDP password: %s", password)
+			}
+
+			// If we have all three, return them
+			if serverURL != "" && username != "" && password != "" {
+				urlChan <- serverURL
+				usernameChan <- username
+				passwordChan <- password
+				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
 			errChan <- err
-		} else {
+		} else if serverURL == "" {
 			errChan <- fmt.Errorf("server output ended without finding listen address")
+		} else if username == "" || password == "" {
+			errChan <- fmt.Errorf("server output ended without finding IDP credentials (username: %q, password: %q)", username, password)
 		}
 	}()
 
+	var serverURL, username, password string
 	for time.Now().Before(deadline) {
 		select {
 		case url := <-urlChan:
-			return url, nil
+			serverURL = url
+			if username != "" && password != "" {
+				return serverURL, username, password, nil
+			}
+		case user := <-usernameChan:
+			username = user
+			if serverURL != "" && password != "" {
+				return serverURL, username, password, nil
+			}
+		case pass := <-passwordChan:
+			password = pass
+			if serverURL != "" && username != "" {
+				return serverURL, username, password, nil
+			}
 		case err := <-errChan:
-			return "", err
+			return "", "", "", err
 		case <-time.After(500 * time.Millisecond):
 			// Continue waiting
 		}
 	}
 
-	return "", fmt.Errorf("timeout waiting for server to start")
+	return "", "", "", fmt.Errorf("timeout waiting for server to start")
 }
 
 // readDeviceCodeFromOutput reads the device code information from CLI output
@@ -361,32 +409,96 @@ func readDeviceCodeFromOutput(stdout io.Reader, timeout time.Duration, t *testin
 	return "", "", fmt.Errorf("timeout waiting for device code information")
 }
 
-// approveDeviceViaBrowser simulates a browser approval by sending HTTP requests
-func approveDeviceViaBrowser(verificationURL, userCode, username string) error {
-	client := &http.Client{Timeout: 30 * time.Second}
+// approveDeviceViaBrowser simulates a browser approval by logging in to IDP and approving the device
+func approveDeviceViaBrowser(verificationURL, userCode, username, password string) error {
+	// Create an HTTP client that handles cookies (for session management)
+	jar := &cookieJar{cookies: make(map[string][]*http.Cookie)}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Jar:     jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Allow up to 10 redirects
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
 
-	// Send approval request
-	data := fmt.Sprintf("user_code=%s&action=approve&username=%s", userCode, username)
-	req, err := http.NewRequest("POST", verificationURL, strings.NewReader(data))
+	// Step 1: GET the verification URL to get the login form and any session cookies
+	req, err := http.NewRequest("GET", verificationURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create verification request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to get verification page: %w", err)
+	}
+	resp.Body.Close()
+
+	// Step 2: Submit login credentials to the IDP login endpoint
+	// The IDP login endpoint is /idp/login
+	baseURL := verificationURL[:strings.Index(verificationURL[8:], "/")+8] // Extract base URL
+	loginURL := baseURL + "/idp/login?redirect_uri=" + verificationURL
+
+	loginData := fmt.Sprintf("username=%s&password=%s", username, password)
+	req, err = http.NewRequest("POST", loginURL, strings.NewReader(loginData))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit login: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Step 3: After login, approve the device by submitting the device verification form
+	// The form should be at the verification URL
+	approvalData := fmt.Sprintf("user_code=%s&action=approve", userCode)
+	req, err = http.NewRequest("POST", verificationURL, strings.NewReader(approvalData))
 	if err != nil {
 		return fmt.Errorf("failed to create approval request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Test-User", username)
 
-	resp, err := client.Do(req)
+	resp, err = client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send approval request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("approval request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
+}
+
+// cookieJar implements http.CookieJar for session management
+type cookieJar struct {
+	cookies map[string][]*http.Cookie
+	mu      sync.Mutex
+}
+
+func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.cookies[u.Host] = cookies
+}
+
+func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.cookies[u.Host]
 }
 
 // testMCPAPIWithToken tests using the token with a protected MCP API endpoint
