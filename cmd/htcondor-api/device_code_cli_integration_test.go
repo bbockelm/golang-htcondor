@@ -505,7 +505,29 @@ type cookieJar struct {
 func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.cookies[u.Host] = cookies
+	// Append new cookies instead of replacing all cookies for the host
+	existing := j.cookies[u.Host]
+	if existing == nil {
+		j.cookies[u.Host] = cookies
+	} else {
+		// Merge cookies, replacing any with the same name
+		merged := make([]*http.Cookie, 0, len(existing)+len(cookies))
+		merged = append(merged, existing...)
+		for _, newCookie := range cookies {
+			replaced := false
+			for i, oldCookie := range merged {
+				if oldCookie.Name == newCookie.Name {
+					merged[i] = newCookie
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				merged = append(merged, newCookie)
+			}
+		}
+		j.cookies[u.Host] = merged
+	}
 }
 
 func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {
