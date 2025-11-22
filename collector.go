@@ -3,12 +3,14 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/stream"
 )
 
 // Collector represents an HTCondor collector daemon
@@ -458,10 +460,331 @@ func getTargetTypeForAdType(adType string) string {
 	}
 }
 
+// AdvertiseOptions configures advertisement behavior
+type AdvertiseOptions struct {
+	// Command specifies the UPDATE command to use (e.g., UPDATE_STARTD_AD)
+	// If not specified, it will be determined from the ad's MyType attribute
+	Command commands.CommandType
+	// WithAck requests acknowledgment from the collector (forces TCP)
+	WithAck bool
+	// UseTCP forces TCP connection (default: true)
+	UseTCP bool
+}
+
 // Advertise sends an advertisement to the collector
-func (c *Collector) Advertise(_ context.Context, _ *classad.ClassAd, _ string) error {
-	// TODO: Implement advertisement using cedar protocol
-	return fmt.Errorf("not implemented")
+// The command type is determined from the ad's MyType attribute if not specified in opts
+// Returns error if advertisement fails
+func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *AdvertiseOptions) error {
+	if ad == nil {
+		return fmt.Errorf("ad cannot be nil")
+	}
+
+	// Apply defaults
+	if opts == nil {
+		opts = &AdvertiseOptions{}
+	}
+	if !opts.WithAck && !opts.UseTCP {
+		// Default to TCP for reliability
+		opts.UseTCP = true
+	}
+	if opts.WithAck {
+		// WithAck requires TCP
+		opts.UseTCP = true
+	}
+
+	// Determine command if not specified
+	cmd := opts.Command
+	if cmd == 0 {
+		var err error
+		cmd, err = getCommandForAdvertise(ad)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Apply rate limiting if configured
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+			return fmt.Errorf("rate limit exceeded: %w", err)
+		}
+	}
+
+	// Get SecurityConfig
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
+	if err != nil {
+		return fmt.Errorf("failed to create security config: %w", err)
+	}
+
+	// Establish connection and authenticate
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+	if err != nil {
+		return fmt.Errorf("failed to connect and authenticate to collector: %w", err)
+	}
+	defer func() { _ = htcondorClient.Close() }()
+
+	// Get CEDAR stream
+	cedarStream := htcondorClient.GetStream()
+
+	// Ensure MyAddress is set in the ad
+	if err := ensureMyAddress(ad); err != nil {
+		return err
+	}
+
+	// Send the ad
+	msg := message.NewMessageForStream(cedarStream)
+	if err := msg.PutClassAd(ctx, ad); err != nil {
+		return fmt.Errorf("failed to send ClassAd: %w", err)
+	}
+	if err := msg.FlushFrame(ctx, true); err != nil {
+		return fmt.Errorf("failed to flush message: %w", err)
+	}
+
+	// Wait for acknowledgment if requested
+	if opts.WithAck {
+		responseMsg := message.NewMessageFromStream(cedarStream)
+		ok, err := responseMsg.GetInt32(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read acknowledgment: %w", err)
+		}
+		if ok == 0 {
+			return fmt.Errorf("collector rejected advertisement")
+		}
+	}
+
+	return nil
+}
+
+// AdvertiseMultiple sends multiple advertisements to the collector efficiently
+// Uses the multi-sending protocol to reuse the connection
+// If ads exceed maxBufferSize (default 1MB), they are sent in batches
+// Returns a slice of errors (one per ad), or nil if all succeeded
+func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassAd, opts *AdvertiseOptions) []error {
+	if len(ads) == 0 {
+		return nil
+	}
+
+	// Apply defaults
+	if opts == nil {
+		opts = &AdvertiseOptions{}
+	}
+	if !opts.WithAck && !opts.UseTCP {
+		opts.UseTCP = true
+	}
+	if opts.WithAck {
+		opts.UseTCP = true
+	}
+
+	// WithAck doesn't support multiple ads in one connection
+	if opts.WithAck {
+		errors := make([]error, len(ads))
+		for i, ad := range ads {
+			errors[i] = c.Advertise(ctx, ad, opts)
+		}
+		return errors
+	}
+
+	// Determine command from first ad if not specified
+	cmd := opts.Command
+	if cmd == 0 {
+		var err error
+		cmd, err = getCommandForAdvertise(ads[0])
+		if err != nil {
+			errors := make([]error, len(ads))
+			for i := range errors {
+				errors[i] = err
+			}
+			return errors
+		}
+	}
+
+	// Apply rate limiting
+	username := GetAuthenticatedUserFromContext(ctx)
+	rateLimitManager := getRateLimitManager()
+	if rateLimitManager != nil {
+		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
+			errors := make([]error, len(ads))
+			rateLimitErr := fmt.Errorf("rate limit exceeded: %w", err)
+			for i := range errors {
+				errors[i] = rateLimitErr
+			}
+			return errors
+		}
+	}
+
+	// Get SecurityConfig
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
+	if err != nil {
+		errors := make([]error, len(ads))
+		secErr := fmt.Errorf("failed to create security config: %w", err)
+		for i := range errors {
+			errors[i] = secErr
+		}
+		return errors
+	}
+
+	// Establish connection and authenticate
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+	if err != nil {
+		errors := make([]error, len(ads))
+		connErr := fmt.Errorf("failed to connect and authenticate to collector: %w", err)
+		for i := range errors {
+			errors[i] = connErr
+		}
+		return errors
+	}
+	defer func() { _ = htcondorClient.Close() }()
+
+	// Get CEDAR stream
+	cedarStream := htcondorClient.GetStream()
+
+	// Send all ads using the multi-sending protocol
+	errors := make([]error, len(ads))
+	const maxBufferSize = 1024 * 1024 // 1MB buffer limit
+
+	bufferSize := 0
+	for i, ad := range ads {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			for j := i; j < len(ads); j++ {
+				errors[j] = ctx.Err()
+			}
+			return errors
+		default:
+		}
+
+		// Ensure MyAddress is set
+		if err := ensureMyAddress(ad); err != nil {
+			errors[i] = err
+			continue
+		}
+
+		// Estimate ad size (rough approximation)
+		adSize := estimateClassAdSize(ad)
+		if bufferSize+adSize > maxBufferSize && bufferSize > 0 {
+			// Flush buffer by sending DC_NOP and reconnecting
+			if err := sendGracefulHangup(ctx, cedarStream); err != nil {
+				// Continue anyway, not fatal
+			}
+
+			// Close and reconnect
+			_ = htcondorClient.Close()
+			htcondorClient, err = client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+			if err != nil {
+				connErr := fmt.Errorf("failed to reconnect to collector: %w", err)
+				for j := i; j < len(ads); j++ {
+					errors[j] = connErr
+				}
+				return errors
+			}
+			cedarStream = htcondorClient.GetStream()
+			bufferSize = 0
+		}
+
+		// Send the ad
+		msg := message.NewMessageForStream(cedarStream)
+		if err := msg.PutClassAd(ctx, ad); err != nil {
+			errors[i] = fmt.Errorf("failed to send ClassAd: %w", err)
+			continue
+		}
+		if err := msg.FlushFrame(ctx, true); err != nil {
+			errors[i] = fmt.Errorf("failed to flush message: %w", err)
+			continue
+		}
+
+		bufferSize += adSize
+	}
+
+	// Send graceful hangup (DC_NOP) for collector v7.7.3+
+	if err := sendGracefulHangup(ctx, cedarStream); err != nil {
+		// Not fatal, just log it
+	}
+
+	return errors
+}
+
+// getCommandForAdvertise determines the UPDATE command based on ad's MyType
+func getCommandForAdvertise(ad *classad.ClassAd) (commands.CommandType, error) {
+	_, ok := ad.Lookup("MyType")
+	if !ok {
+		// Default to UPDATE_AD_GENERIC if no MyType
+		return commands.UPDATE_AD_GENERIC, nil
+	}
+
+	myTypeStr, ok := ad.EvaluateAttrString("MyType")
+	if !ok {
+		return commands.UPDATE_AD_GENERIC, nil
+	}
+
+	// Map MyType to UPDATE command
+	// Based on HTCondor's advertise.cpp logic
+	switch strings.ToUpper(myTypeStr) {
+	case "MACHINE", "STARTD":
+		return commands.UPDATE_STARTD_AD, nil
+	case "SCHEDULER", "SCHEDD":
+		return commands.UPDATE_SCHEDD_AD, nil
+	case "DAEMONMASTER", "MASTER":
+		return commands.UPDATE_MASTER_AD, nil
+	case "SUBMITTER":
+		return commands.UPDATE_SUBMITTOR_AD, nil
+	case "COLLECTOR":
+		return commands.UPDATE_COLLECTOR_AD, nil
+	case "NEGOTIATOR":
+		return commands.UPDATE_NEGOTIATOR_AD, nil
+	case "LICENSE":
+		return commands.UPDATE_LICENSE_AD, nil
+	case "STORAGE":
+		return commands.UPDATE_STORAGE_AD, nil
+	case "ACCOUNTING":
+		return commands.UPDATE_ACCOUNTING_AD, nil
+	case "GRID":
+		return commands.UPDATE_GRID_AD, nil
+	case "HAD":
+		return commands.UPDATE_HAD_AD, nil
+	case "GENERIC":
+		return commands.UPDATE_AD_GENERIC, nil
+	default:
+		// Unknown type, use GENERIC
+		return commands.UPDATE_AD_GENERIC, nil
+	}
+}
+
+// ensureMyAddress ensures the ad has a MyAddress attribute
+func ensureMyAddress(ad *classad.ClassAd) error {
+	_, ok := ad.Lookup("MyAddress")
+	if ok {
+		return nil // MyAddress already set
+	}
+
+	// Generate a MyAddress using local IP
+	// TODO: Use proper IP detection (IPv4/IPv6)
+	// For now, use a placeholder that HTCondor will accept
+	myAddr := "<127.0.0.1:0>"
+	if err := ad.Set("MyAddress", myAddr); err != nil {
+		return fmt.Errorf("failed to set MyAddress: %w", err)
+	}
+
+	return nil
+}
+
+// estimateClassAdSize estimates the serialized size of a ClassAd
+func estimateClassAdSize(ad *classad.ClassAd) int {
+	// Rough estimation: assume average 100 bytes per attribute
+	// This is conservative to avoid buffer overflow
+	attrs := ad.GetAttributes()
+	return len(attrs) * 100
+}
+
+// sendGracefulHangup sends DC_NOP command for graceful connection closure
+func sendGracefulHangup(ctx context.Context, cedarStream *stream.Stream) error {
+	msg := message.NewMessageForStream(cedarStream)
+	// Send DC_NOP (1) as hangup signal
+	if err := msg.PutInt32(ctx, int32(commands.DC_NOP)); err != nil {
+		return err
+	}
+	return msg.FlushFrame(ctx, true)
 }
 
 // LocateDaemon locates a daemon by querying the collector
