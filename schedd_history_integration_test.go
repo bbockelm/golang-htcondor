@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestScheddQueryJobHistoryIntegration(t *testing.T) {
 	schedd := NewSchedd("local", addr)
 
 	// Submit a test job that completes quickly
-	submitFile := `
+	submitFile := fmt.Sprintf(`
 universe = vanilla
 executable = /bin/echo
 arguments = Hello from history test
@@ -41,8 +42,9 @@ output = test_history.out
 error = test_history.err
 log = test_history.log
 transfer_executable = false
+initialdir = %s
 queue
-`
+`, harness.tmpDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
