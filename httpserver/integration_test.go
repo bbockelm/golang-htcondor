@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -218,6 +219,201 @@ queue`
 	t.Log("✅ Integration test passed! Full job lifecycle completed successfully.")
 }
 
+// TestHTTPAPIMultipartUploadIntegration tests the multipart form-data upload endpoint
+func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
+	// Skip if condor_master is not available
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not found in PATH, skipping integration test")
+	}
+
+	// Create temporary directory for mini condor
+	tempDir, err := os.MkdirTemp("", "htcondor-http-multipart-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create secure socket directory in /tmp to avoid path length issues
+	socketDir, err := os.MkdirTemp("/tmp", "htc_sock_mp_*")
+	if err != nil {
+		t.Fatalf("Failed to create socket directory: %v", err)
+	}
+	defer os.RemoveAll(socketDir)
+
+	t.Logf("Using temporary directory: %s", tempDir)
+	t.Logf("Using socket directory: %s", socketDir)
+
+	// Generate signing key for demo authentication in passwords.d directory
+	passwordsDir := filepath.Join(tempDir, "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	// Generate a simple signing key for testing
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to write signing key: %v", err)
+	}
+
+	trustDomain := "test.htcondor.org"
+
+	// Write mini condor configuration
+	configFile := filepath.Join(tempDir, "condor_config")
+	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Set CONDOR_CONFIG environment variable and reload configuration
+	t.Setenv("CONDOR_CONFIG", configFile)
+	htcondor.ReloadDefaultConfig()
+
+	// Start condor_master
+	t.Log("Starting condor_master...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	condorMaster, err := startCondorMaster(ctx, configFile, tempDir)
+	if err != nil {
+		t.Fatalf("Failed to start condor_master: %v", err)
+	}
+	defer stopCondorMaster(condorMaster, t)
+
+	// Wait for condor to be ready
+	t.Log("Waiting for HTCondor to be ready...")
+	if err := waitForCondor(tempDir, 60*time.Second, t); err != nil {
+		t.Fatalf("Condor failed to start: %v", err)
+	}
+	t.Log("HTCondor is ready!")
+
+	// Find the actual schedd address
+	scheddAddr, err := getScheddAddress(tempDir, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to get schedd address: %v", err)
+	}
+	t.Logf("Using schedd address: %s", scheddAddr)
+
+	// Use dynamic port for HTTP server
+	serverAddr := "127.0.0.1:0"
+
+	// Create HTTP server with collector for collector tests
+	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+
+	// Create a directory for the DB to avoid any interference from Condor
+	dbDir := filepath.Join(tempDir, "db")
+	if err := os.Mkdir(dbDir, 0700); err != nil {
+		t.Fatalf("Failed to create db directory: %v", err)
+	}
+	// Set OAuth2DBPath to tempDir to avoid permission issues
+	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
+
+	server, err := NewServer(Config{
+		ListenAddr:     serverAddr,
+		ScheddName:     "local",
+		ScheddAddr:     scheddAddr,
+		UserHeader:     "X-Test-User",
+		SigningKeyPath: signingKeyPath,
+		TrustDomain:    trustDomain,
+		UIDDomain:      "test.htcondor.org",
+		Collector:      collector,
+		OAuth2DBPath:   oauth2DBPath,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Start server in background
+	serverErrChan := make(chan error, 1)
+	go func() {
+		serverErrChan <- server.Start()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get actual server address using GetAddr() method
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Wait for server to be fully ready
+	if err := waitForServer(baseURL, 10*time.Second); err != nil {
+		t.Fatalf("Server failed to start: %v", err)
+	}
+	t.Logf("Server is ready on %s", baseURL)
+
+	// Ensure server is stopped at the end
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Logf("Warning: server shutdown error: %v", err)
+		}
+	}()
+
+	// Create HTTP client
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Test user for authentication
+	testUser := "testuser"
+
+	// Step 1: Submit a job via HTTP
+	t.Log("Step 1: Submitting job via HTTP...")
+	submitFile := `executable = /bin/bash
+arguments = script.sh
+transfer_input_files = input.txt, script.sh
+transfer_output_files = output.txt
+transfer_executable = NO
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+queue`
+
+	clusterID, jobID := submitJob(t, client, baseURL, testUser, submitFile)
+	t.Logf("Job submitted: ClusterID=%d, JobID=%s", clusterID, jobID)
+
+	// Step 2: Upload input files via multipart form-data
+	t.Log("Step 2: Uploading input files via multipart form-data...")
+	uploadInputMultipart(t, client, baseURL, testUser, jobID, map[string]string{
+		"input.txt": "This is test input data from multipart upload\n",
+		"script.sh": "#!/bin/bash\necho 'Hello from multipart upload!' > output.txt\necho 'Multipart test successful' >> output.txt\n",
+	})
+	t.Log("Input files uploaded successfully via multipart")
+
+	// Step 3: Poll job status until complete
+	t.Log("Step 3: Polling job status until complete...")
+	waitForJobCompletion(t, client, baseURL, testUser, jobID, tempDir, 60*time.Second)
+	t.Log("Job completed successfully!")
+
+	// Step 4: Download output tarball
+	t.Log("Step 4: Downloading output tarball...")
+	outputTar := downloadOutputTarball(t, client, baseURL, testUser, jobID)
+	t.Log("Output tarball downloaded successfully")
+
+	// Step 5: Verify the results
+	t.Log("Step 5: Verifying results...")
+	outputFiles := extractTarball(t, outputTar)
+
+	// Check if output.txt exists
+	outputContent, ok := outputFiles["output.txt"]
+	if !ok {
+		t.Fatalf("output.txt not found in output tarball. Available files: %v", getFileNames(outputFiles))
+	}
+
+	// Verify content
+	expectedContent := "Hello from multipart upload!\nMultipart test successful\n"
+	if outputContent != expectedContent {
+		t.Errorf("Output content mismatch.\nExpected:\n%s\nGot:\n%s", expectedContent, outputContent)
+	}
+
+	t.Log("✅ Multipart integration test passed! Full job lifecycle with multipart upload completed successfully.")
+}
+
 // submitJob submits a job via HTTP POST and returns cluster ID and job ID
 func submitJob(t *testing.T, client *http.Client, baseURL, user, submitFile string) (int, string) {
 	t.Helper()
@@ -335,6 +531,55 @@ func uploadInputTarball(t *testing.T, client *http.Client, baseURL, user, jobID 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("Input upload failed with status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// uploadInputMultipart uploads input files via multipart form-data HTTP POST
+func uploadInputMultipart(t *testing.T, client *http.Client, baseURL, user, jobID string, files map[string]string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writer := io.MultiWriter(&buf)
+	mw := multipart.NewWriter(writer)
+
+	// Add each file to the multipart form
+	for filename, content := range files {
+		// Determine field name - use "executable" for .sh files, "file" for others
+		fieldName := "file"
+		if strings.HasSuffix(filename, ".sh") {
+			fieldName = "executable"
+		}
+
+		part, err := mw.CreateFormFile(fieldName, filename)
+		if err != nil {
+			t.Fatalf("Failed to create form file for %s: %v", filename, err)
+		}
+		if _, err := part.Write([]byte(content)); err != nil {
+			t.Fatalf("Failed to write content for %s: %v", filename, err)
+		}
+	}
+
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Failed to close multipart writer: %v", err)
+	}
+
+	// Create request
+	req, err := http.NewRequest("POST", baseURL+"/api/v1/jobs/"+jobID+"/input/multipart", &buf)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Test-User", user)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to upload multipart input: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Multipart input upload failed with status %d: %s", resp.StatusCode, string(body))
 	}
 }
 

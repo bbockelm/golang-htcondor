@@ -489,6 +489,115 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/input/multipart": {
+      "post": {
+        "summary": "Upload job input files via multipart form-data",
+        "description": "Upload input files using multipart/form-data. Files are converted to a tarball server-side and spooled to the job. Use 'executable' field name for executable files (0755 permissions), all other files get 0644 permissions. Streaming implementation ensures no memory buffering.",
+        "operationId": "uploadJobInputMultipart",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "executable": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Executable file (will have 0755 permissions)"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Input file (will have 0644 permissions)"
+                  }
+                },
+                "description": "Multiple files can be uploaded. Use 'executable' as field name for executable files, any other field name for regular files."
+              },
+              "encoding": {
+                "executable": {
+                  "contentType": "application/octet-stream"
+                },
+                "file": {
+                  "contentType": "application/octet-stream"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Input files uploaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID or multipart form",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to spool job files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/jobs/{jobId}/output": {
       "get": {
         "summary": "Download job output files",
