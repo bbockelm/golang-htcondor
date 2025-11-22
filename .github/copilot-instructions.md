@@ -197,6 +197,16 @@ Install with: `make pre-commit-install` or `pip install pre-commit && pre-commit
 
 ## Common Development Tasks
 
+### Adding a New HTTP API Endpoint
+1. Implement the handler function in `httpserver/handlers.go`
+2. Add route in `httpserver/routes.go` if needed
+3. **IMPORTANT: Update the OpenAPI schema in `httpserver/openapi.go`** to document the new endpoint
+4. Add unit tests in `httpserver/*_test.go`
+5. Test the endpoint manually or with integration tests
+6. Update any relevant API documentation
+
+**Note**: Always keep the OpenAPI schema synchronized with the actual HTTP API endpoints. This ensures API documentation is accurate and up-to-date for consumers.
+
 ### Adding a New Schedd Method
 1. Define the method signature in `schedd.go` (matching Python bindings if applicable)
 2. Implement the protocol interaction in appropriate `schedd_*.go` file
