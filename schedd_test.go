@@ -62,8 +62,24 @@ func TestScheddEdit(t *testing.T) {
 	schedd := NewSchedd("test_schedd", "schedd.example.com:9618")
 	ctx := context.Background()
 
-	err := schedd.Edit(ctx, "ClusterId == 1", "JobPrio", "10")
+	// Test EditJob with validation (should fail because not connected to real schedd)
+	attributes := map[string]string{
+		"RequestMemory": "512",
+	}
+	err := schedd.EditJob(ctx, 1, 0, attributes, nil)
 	if err == nil {
-		t.Error("Expected error for unimplemented method")
+		t.Error("Expected error when not connected to real schedd")
+	}
+
+	// Test EditJobByID
+	err = schedd.EditJobByID(ctx, "1.0", attributes, nil)
+	if err == nil {
+		t.Error("Expected error when not connected to real schedd")
+	}
+
+	// Test EditJobs with constraint
+	_, err = schedd.EditJobs(ctx, "ClusterId == 1", attributes, nil)
+	if err == nil {
+		t.Error("Expected error when not connected to real schedd")
 	}
 }

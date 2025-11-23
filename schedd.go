@@ -674,12 +674,6 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 	return clusterIDInt, resultProcAds, nil
 }
 
-// Edit modifies job attributes
-func (s *Schedd) Edit(_ context.Context, _ string, _ string, _ string) error {
-	// TODO: Implement job edit using cedar protocol
-	return fmt.Errorf("not implemented")
-}
-
 // configureRemoteJobAd sets up job attributes for remote submission and determines if spooling is needed.
 func configureRemoteJobAd(procAd *classad.ClassAd) bool {
 	// Set ShouldTransferFiles to YES if not already set
