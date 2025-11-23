@@ -776,6 +776,7 @@ func runDemoMode() error {
 			logging.DestinationGeneral:  logging.VerbosityDebug,
 			logging.DestinationHTTP:     logging.VerbosityDebug,
 			logging.DestinationSecurity: logging.VerbosityDebug,
+			logging.DestinationCedar:    logging.VerbosityInfo, // Reduce Cedar noise in demo mode
 		},
 	})
 	if err != nil {
