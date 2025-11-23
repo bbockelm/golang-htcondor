@@ -233,11 +233,12 @@ universe = vanilla
 executable = /bin/sleep
 arguments = 300
 log = test_http_bulk_edit.log
-MyTestTag = "bulk_test"
++MyTestTag = "bulk_test"
 queue 3
 `
 	clusterID, err := schedd.Submit(ctx, submitFile)
 	if err != nil {
+		harness.printScheddLogs(t)
 		t.Fatalf("Failed to submit test jobs: %v", err)
 	}
 
