@@ -298,6 +298,46 @@ func getOAuth2TokenWithCondorScopes(t *testing.T, httpClient *http.Client, baseU
 		}
 	}
 
+	// Check if we were redirected to the consent page
+	if strings.Contains(location, "/mcp/oauth2/consent") {
+		t.Log("Redirected to consent page, approving...")
+
+		// Extract state from consent URL
+		consentURL, err := url.Parse(location)
+		if err != nil {
+			t.Fatalf("Failed to parse consent URL: %v", err)
+		}
+		state := consentURL.Query().Get("state")
+		if state == "" {
+			t.Fatal("No state parameter in consent URL")
+		}
+
+		// Submit consent form
+		consentReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", bytes.NewBufferString(
+			fmt.Sprintf("state=%s&action=approve", state),
+		))
+		if err != nil {
+			t.Fatalf("Failed to create consent request: %v", err)
+		}
+		consentReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		consentReq.Header.Set("X-Test-User", username) // Ensure we are still the same user
+
+		consentResp, err := httpClient.Do(consentReq)
+		if err != nil {
+			t.Fatalf("Failed to send consent request: %v", err)
+		}
+		defer consentResp.Body.Close()
+
+		// Should be redirected back to callback
+		if consentResp.StatusCode != http.StatusFound && consentResp.StatusCode != http.StatusSeeOther {
+			body, _ := io.ReadAll(consentResp.Body)
+			t.Fatalf("Consent request failed: status %d, body: %s", consentResp.StatusCode, string(body))
+		}
+
+		location = consentResp.Header.Get("Location")
+		t.Logf("Consent redirect location: %s", location)
+	}
+
 	// Parse the authorization code from the redirect URL
 	code := extractCodeFromURL(t, location)
 	if code == "" {

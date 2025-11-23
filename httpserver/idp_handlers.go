@@ -35,8 +35,11 @@ func (s *Server) handleIDPLogin(w http.ResponseWriter, r *http.Request) {
 
 // serveIDPLoginForm serves the login form HTML
 func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
-	// Get redirect_uri from query params to pass through
+	// Get redirect_uri or return_url from query params to pass through
 	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = r.URL.Query().Get("return_url")
+	}
 
 	html := `<!DOCTYPE html>
 <html>
@@ -102,7 +105,7 @@ func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
     <div class="login-container">
         <h2>HTCondor IDP Login</h2>
         <form method="POST" action="/idp/login">
-            <input type="hidden" name="redirect_uri" value="` + redirectURI + `">
+            <input type="hidden" name="return_url" value="` + redirectURI + `">
             <div class="form-group">
                 <label for="username">Username:</label>
                 <input type="text" id="username" name="username" required autofocus>
@@ -140,6 +143,9 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 	redirectURI := r.FormValue("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = r.FormValue("return_url")
+	}
 
 	if username == "" || password == "" {
 		s.writeError(w, http.StatusBadRequest, "Username and password required")
