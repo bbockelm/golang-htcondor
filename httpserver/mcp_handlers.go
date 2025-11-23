@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -306,21 +307,21 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 // getScopeDescription returns a human-readable description of an OAuth2 scope
 func getScopeDescription(scope string) string {
 	descriptions := map[string]string{
-		"openid":                    "Basic authentication information",
-		"profile":                   "Access to your profile information",
-		"email":                     "Access to your email address",
-		"offline_access":            "Ability to refresh access tokens",
-		"mcp:read":                  "Read-only access to HTCondor jobs and resources via MCP protocol",
-		"mcp:write":                 "Full access to submit and manage HTCondor jobs via MCP protocol",
-		"condor:/READ":              "HTCondor READ authorization - allows reading job and daemon information",
-		"condor:/WRITE":             "HTCondor WRITE authorization - allows submitting and managing jobs",
-		"condor:/ADVERTISE_STARTD":  "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
-		"condor:/ADVERTISE_SCHEDD":  "HTCondor ADVERTISE_SCHEDD authorization - allows advertising schedd daemons",
-		"condor:/ADVERTISE_MASTER":  "HTCondor ADVERTISE_MASTER authorization - allows advertising master daemons",
-		"condor:/ADMINISTRATOR":     "HTCondor ADMINISTRATOR authorization - full administrative access",
-		"condor:/CONFIG":            "HTCondor CONFIG authorization - allows modifying configuration",
-		"condor:/DAEMON":            "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
-		"condor:/NEGOTIATOR":        "HTCondor NEGOTIATOR authorization - allows negotiator operations",
+		"openid":                   "Basic authentication information",
+		"profile":                  "Access to your profile information",
+		"email":                    "Access to your email address",
+		"offline_access":           "Ability to refresh access tokens",
+		"mcp:read":                 "Read-only access to HTCondor jobs and resources via MCP protocol",
+		"mcp:write":                "Full access to submit and manage HTCondor jobs via MCP protocol",
+		"condor:/READ":             "HTCondor READ authorization - allows reading job and daemon information",
+		"condor:/WRITE":            "HTCondor WRITE authorization - allows submitting and managing jobs",
+		"condor:/ADVERTISE_STARTD": "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
+		"condor:/ADVERTISE_SCHEDD": "HTCondor ADVERTISE_SCHEDD authorization - allows advertising schedd daemons",
+		"condor:/ADVERTISE_MASTER": "HTCondor ADVERTISE_MASTER authorization - allows advertising master daemons",
+		"condor:/ADMINISTRATOR":    "HTCondor ADMINISTRATOR authorization - full administrative access",
+		"condor:/CONFIG":           "HTCondor CONFIG authorization - allows modifying configuration",
+		"condor:/DAEMON":           "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
+		"condor:/NEGOTIATOR":       "HTCondor NEGOTIATOR authorization - allows negotiator operations",
 	}
 
 	if desc, ok := descriptions[scope]; ok {
@@ -345,7 +346,7 @@ func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	
+
 	// Get state from query parameter for GET or form value for POST
 	state := r.URL.Query().Get("state")
 	if state == "" && r.Method == http.MethodPost {
@@ -553,7 +554,7 @@ func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
         <div class="user-info">
             Logged in as <strong>%s</strong>
         </div>
-        
+
         <div class="client-info">
             <h2>Application Information</h2>
             <p><strong>Client ID:</strong> %s</p>
@@ -576,7 +577,7 @@ func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
         </form>
 
         <div class="warning">
-            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust. 
+            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust.
             This will allow the application to perform actions on your behalf with the permissions listed above.
         </div>
     </div>
@@ -835,6 +836,13 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Check if condor:/* scopes are requested - generate HTCondor IDTOKEN instead
+	grantedScopes := request.GetGrantedScopes()
+	if hasCondorScopes(grantedScopes) {
+		s.handleDeviceCodeCondorToken(ctx, w, r, request)
+		return
+	}
+
 	// Generate tokens using fosite
 	strategy := s.oauth2Provider.GetStrategy()
 	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
@@ -873,6 +881,77 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 		"expires_in":    int(s.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         strings.Join(request.GetGrantedScopes(), " "),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// handleDeviceCodeCondorToken handles device code token requests when condor scopes are requested
+// It generates an HTCondor IDTOKEN instead of a standard OAuth2 access token
+func (s *Server) handleDeviceCodeCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, request fosite.Requester) {
+	// Check if we can generate HTCondor tokens
+	if s.signingKeyPath == "" || s.trustDomain == "" {
+		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Server not configured to issue HTCondor tokens")
+		return
+	}
+
+	// Get the username from the session
+	username := request.GetSession().GetSubject()
+	if username == "" {
+		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Cannot determine user identity")
+		return
+	}
+
+	// Get granted scopes
+	grantedScopes := request.GetGrantedScopes()
+
+	// Generate HTCondor IDTOKEN
+	idtoken, err := s.generateHTCondorTokenWithScopes(username, grantedScopes)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
+			"error", err,
+			"username", username,
+			"scopes", grantedScopes)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate HTCondor IDTOKEN")
+		return
+	}
+
+	s.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for device code flow",
+		"username", username,
+		"scopes", grantedScopes)
+
+	// Generate refresh token using fosite
+	strategy := s.oauth2Provider.GetStrategy()
+	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	// Store the refresh token session
+	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
+	if err := s.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	// Build response with HTCondor IDTOKEN as access token
+	response := map[string]interface{}{
+		"access_token":  idtoken,
+		"token_type":    "Bearer",
+		"expires_in":    int(s.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"refresh_token": refreshToken,
+		"scope":         strings.Join(grantedScopes, " "),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1176,9 +1255,64 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	if r.Method == http.MethodGet {
-		// Display verification form
+		// Check authentication before showing the form
+		username := ""
+
+		// Method 1: User header (demo mode)
+		if s.userHeader != "" {
+			username = r.Header.Get(s.userHeader)
+		}
+
+		// Method 2: Check for session
+		if username == "" {
+			if session, ok := s.getSessionFromRequest(r); ok {
+				username = session.Username
+			}
+		}
+
+		// Method 3: Check for IDP session cookie
+		if username == "" && s.idpProvider != nil {
+			if cookie, err := r.Cookie("idp_session"); err == nil {
+				sessionID := cookie.Value
+				user, err := s.idpProvider.storage.GetSession(ctx, sessionID)
+				if err == nil && user != "" {
+					username = user
+				}
+			}
+		}
+
+		// If no authentication and IDP is available, redirect to login
+		if username == "" && s.idpProvider != nil {
+			// Store the current URL to redirect back after login
+			returnURL := r.URL.String()
+			loginURL := fmt.Sprintf("/idp/login?return_url=%s", url.QueryEscape(returnURL))
+			s.logger.Info(logging.DestinationHTTP, "Redirecting to login for device verification", "return_url", returnURL)
+			http.Redirect(w, r, loginURL, http.StatusFound)
+			return
+		}
+
+		// Get user code from query parameter
 		userCode := r.URL.Query().Get("user_code")
-		html := fmt.Sprintf(`<!DOCTYPE html>
+
+		// If user code is provided, look up the device code session and show consent page
+		if userCode != "" {
+			userCode = strings.ToUpper(strings.TrimSpace(userCode))
+
+			// Get device code session by user code
+			_, request, err := s.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+				s.writeHTMLError(w, "Invalid or expired user code")
+				return
+			}
+
+			// Show consent page with scopes
+			s.renderDeviceConsentPage(w, r, username, userCode, request)
+			return
+		}
+
+		// Display verification form (for entering user code)
+		html := `<!DOCTYPE html>
 <html>
 <head>
     <title>Device Authorization</title>
@@ -1186,9 +1320,8 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
         body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
         h1 { color: #333; }
         form { margin-top: 20px; }
-        input[type="text"] { font-size: 18px; padding: 10px; width: 100%%; margin: 10px 0; text-transform: uppercase; }
-        button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; cursor: pointer; font-size: 16px; width: 100%%; margin: 5px 0; }
-        button.deny { background-color: #f44336; }
+        input[type="text"] { font-size: 18px; padding: 10px; width: 100%; margin: 10px 0; text-transform: uppercase; }
+        button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; cursor: pointer; font-size: 16px; width: 100%; margin: 5px 0; }
         button:hover { opacity: 0.8; }
         .error { color: red; margin: 10px 0; }
         .success { color: green; margin: 10px 0; }
@@ -1197,13 +1330,12 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 <body>
     <h1>Device Authorization</h1>
     <p>Enter the code displayed on your device:</p>
-    <form method="POST" action="/mcp/oauth2/device/verify">
-        <input type="text" name="user_code" placeholder="Enter code" value="%s" required pattern="[A-Z0-9-]+" />
-        <button type="submit" name="action" value="approve">Approve</button>
-        <button type="submit" name="action" value="deny" class="deny">Deny</button>
+    <form method="GET" action="/mcp/oauth2/device/verify">
+        <input type="text" name="user_code" placeholder="Enter code" required pattern="[A-Z0-9-]+" />
+        <button type="submit">Continue</button>
     </form>
 </body>
-</html>`, userCode)
+</html>`
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(html))
@@ -1282,7 +1414,7 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
     </style>
 </head>
 <body>
-    <h1>✓ Authorization Complete</h1>
+    <h1>Authorization Complete</h1>
     <p>You have successfully authorized the device.</p>
     <p>You can close this window now.</p>
 </body>
@@ -1327,6 +1459,216 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 	}
 
 	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+// renderDeviceConsentPage renders the consent page for device code flow
+func (s *Server) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
+	client := request.GetClient()
+	requestedScopes := request.GetRequestedScopes()
+
+	// Build scopes list with descriptions
+	type scopeInfo struct {
+		Name        string
+		Description string
+	}
+	var scopes []scopeInfo
+	for _, scope := range requestedScopes {
+		scopes = append(scopes, scopeInfo{
+			Name:        scope,
+			Description: getScopeDescription(scope),
+		})
+	}
+
+	// Generate HTML for scopes list
+	var scopesHTML strings.Builder
+	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
+	for _, scope := range scopes {
+		scopesHTML.WriteString(fmt.Sprintf("                <li>\n"+
+			"                    <strong>%s</strong>\n"+
+			"                    <p>%s</p>\n"+
+			"                </li>\n", scope.Name, scope.Description))
+	}
+	scopesHTML.WriteString("            </ul>")
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorize Device</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 600px;
+            width: 100%%;
+            padding: 40px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .user-info {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 30px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .user-info strong {
+            color: #333;
+        }
+        .client-info {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            border-radius: 6px;
+        }
+        .client-info h2 {
+            font-size: 16px;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        .client-info p {
+            color: #555;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .device-code {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+            font-family: monospace;
+            letter-spacing: 2px;
+        }
+        .permissions {
+            margin-bottom: 30px;
+        }
+        .permissions h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .scopes-list {
+            list-style: none;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .scopes-list li {
+            padding: 16px 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .scopes-list li:last-child {
+            border-bottom: none;
+        }
+        .scopes-list li strong {
+            display: block;
+            color: #667eea;
+            font-size: 14px;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .scopes-list li p {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+            margin: 0;
+        }
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+        .actions button {
+            flex: 1;
+            padding: 14px 28px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .btn-approve {
+            background: #667eea;
+            color: white;
+        }
+        .btn-approve:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .btn-deny {
+            background: #f0f0f0;
+            color: #666;
+        }
+        .btn-deny:hover {
+            background: #e0e0e0;
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 30px 20px;
+            }
+            h1 {
+                font-size: 24px;
+            }
+            .actions {
+                flex-direction: column-reverse;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Authorize Device</h1>
+        <div class="user-info">
+            Logged in as: <strong>%s</strong>
+        </div>
+        <div class="client-info">
+            <h2>Device Code</h2>
+            <p class="device-code">%s</p>
+            <p style="margin-top: 10px; font-size: 12px;">Verify this code matches the one shown on your device.</p>
+        </div>
+        <div class="client-info">
+            <h2>Application</h2>
+            <p><strong>%s</strong> wants to access your account on your device.</p>
+        </div>
+        <div class="permissions">
+            <h2>This application will be able to:</h2>
+            %s
+        </div>
+        <form method="POST" action="/mcp/oauth2/device/verify">
+            <input type="hidden" name="user_code" value="%s">
+            <div class="actions">
+                <button type="submit" name="action" value="deny" class="btn-deny">Deny</button>
+                <button type="submit" name="action" value="approve" class="btn-approve">Approve</button>
+            </div>
+        </form>
+    </div>
+</body>
+</html>`, username, userCode, client.GetID(), scopesHTML.String(), userCode)
+
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(html))
 }
 
 // writeHTMLError writes an HTML error page

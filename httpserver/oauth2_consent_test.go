@@ -14,7 +14,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func TestOAuth2ConsentPage(t *testing.T) {
+// setupTestOAuth2Server creates a test server with OAuth2 provider for testing
+func setupTestOAuth2Server(t *testing.T) (*Server, *OAuth2Provider, string, context.Context) {
+	t.Helper()
+
 	// Create a logger
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stderr",
@@ -28,11 +31,6 @@ func TestOAuth2ConsentPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create OAuth2 provider: %v", err)
 	}
-	defer func() {
-		if err := oauth2Provider.Close(); err != nil {
-			t.Errorf("Failed to close OAuth2 provider: %v", err)
-		}
-	}()
 
 	// Create a test client
 	ctx := context.Background()
@@ -67,6 +65,17 @@ func TestOAuth2ConsentPage(t *testing.T) {
 		oauth2Provider:   oauth2Provider,
 		oauth2StateStore: NewOAuth2StateStore(),
 	}
+
+	return server, oauth2Provider, clientID, ctx
+}
+
+func TestOAuth2ConsentPage_GetConsentPage(t *testing.T) {
+	server, oauth2Provider, clientID, ctx := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
 
 	t.Run("GetConsentPage", func(t *testing.T) {
 		// Create a mock authorize request
@@ -141,6 +150,15 @@ func TestOAuth2ConsentPage(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestOAuth2ConsentPage_ApproveConsent(t *testing.T) {
+	server, oauth2Provider, clientID, ctx := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
 
 	t.Run("ApproveConsent", func(t *testing.T) {
 		// Create a mock authorize request
@@ -203,6 +221,15 @@ func TestOAuth2ConsentPage(t *testing.T) {
 			t.Errorf("Expected code parameter in redirect URL, got %s", location)
 		}
 	})
+}
+
+func TestOAuth2ConsentPage_DenyConsent(t *testing.T) {
+	server, oauth2Provider, clientID, ctx := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
 
 	t.Run("DenyConsent", func(t *testing.T) {
 		// Create a mock authorize request
@@ -262,6 +289,15 @@ func TestOAuth2ConsentPage(t *testing.T) {
 			t.Errorf("Expected access_denied error in redirect URL, got %s", location)
 		}
 	})
+}
+
+func TestOAuth2ConsentPage_InvalidState(t *testing.T) {
+	server, oauth2Provider, _, _ := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
 
 	t.Run("InvalidState", func(t *testing.T) {
 		// Create consent page request with invalid state
@@ -283,6 +319,15 @@ func TestOAuth2ConsentPage(t *testing.T) {
 			t.Errorf("Expected status 400, got %d", resp.StatusCode)
 		}
 	})
+}
+
+func TestOAuth2ConsentPage_MissingState(t *testing.T) {
+	server, oauth2Provider, _, _ := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
 
 	t.Run("MissingState", func(t *testing.T) {
 		// Create consent page request without state
