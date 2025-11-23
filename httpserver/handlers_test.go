@@ -154,10 +154,10 @@ func TestLogoutEndpoint(t *testing.T) {
 			checkCookies:   true,
 		},
 		{
-			name:           "GET /logout returns Method Not Allowed",
+			name:           "GET /logout returns success",
 			method:         http.MethodGet,
 			cookies:        nil,
-			wantStatusCode: http.StatusMethodNotAllowed,
+			wantStatusCode: http.StatusOK,
 			wantStatus:     "",
 			wantMessage:    "",
 			checkCookies:   false,
@@ -455,5 +455,38 @@ func TestDetectContentType(t *testing.T) {
 				t.Errorf("DetectContentType() = %v, want to contain %v", contentType, tt.wantPattern)
 			}
 		})
+	}
+}
+
+// TestSwaggerUI tests the Swagger UI handler
+func TestSwaggerUI(t *testing.T) {
+	server := &Server{}
+
+	req := httptest.NewRequest("GET", "/docs", nil)
+	w := httptest.NewRecorder()
+
+	server.handleSwaggerUI(w, req)
+
+	resp := w.Result()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Check content type
+	contentType := resp.Header.Get("Content-Type")
+	if contentType != "text/html; charset=utf-8" {
+		t.Errorf("Expected Content-Type text/html, got %s", contentType)
+	}
+
+	// Check for Swagger UI assets
+	body := w.Body.String()
+	if !strings.Contains(body, "swagger-ui-bundle.js") {
+		t.Error("Expected Swagger UI bundle in response")
 	}
 }

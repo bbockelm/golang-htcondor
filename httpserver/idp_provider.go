@@ -116,6 +116,7 @@ func NewIDPProvider(dbPath string, issuer string) (*IDPProvider, error) {
 		compose.OpenIDConnectExplicitFactory,
 		compose.OAuth2TokenIntrospectionFactory,
 		compose.OAuth2TokenRevocationFactory,
+		compose.OAuth2PKCEFactory,
 	)
 
 	return &IDPProvider{

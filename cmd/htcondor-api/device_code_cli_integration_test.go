@@ -375,6 +375,10 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 
 			// If we have all four, return them
 			if serverURL != "" && username != "" && password != "" && caPath != "" {
+				// If we have a CA certificate, we must be using HTTPS
+				if strings.HasPrefix(serverURL, "http://") {
+					serverURL = strings.Replace(serverURL, "http://", "https://", 1)
+				}
 				urlChan <- serverURL
 				usernameChan <- username
 				passwordChan <- password

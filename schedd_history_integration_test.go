@@ -20,10 +20,10 @@ func TestScheddQueryJobHistoryIntegration(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -215,10 +215,10 @@ func TestScheddQueryJobEpochsIntegration(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -284,10 +284,10 @@ func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 

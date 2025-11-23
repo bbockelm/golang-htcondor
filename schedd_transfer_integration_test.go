@@ -17,7 +17,7 @@ import (
 )
 
 // getScheddAddress queries the collector for the schedd address
-func getScheddAddress(t *testing.T, harness *condorTestHarness) string {
+func getScheddAddress(t *testing.T, harness *CondorTestHarness) string {
 	t.Helper()
 
 	// Parse collector address
@@ -79,10 +79,10 @@ func minInt(a, b int) int {
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestSpoolJobFilesIntegration(t *testing.T) {
 	// Setup HTCondor test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -340,10 +340,10 @@ queue
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestSpoolJobFilesFromTarIntegration(t *testing.T) {
 	// Setup HTCondor test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -597,10 +597,10 @@ queue
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestReceiveJobSandboxIntegration(t *testing.T) {
 	// Setup HTCondor test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 

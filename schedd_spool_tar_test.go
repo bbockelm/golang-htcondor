@@ -30,7 +30,7 @@ func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Parse collector address to get schedd
 	addr := harness.GetCollectorAddr()
@@ -155,7 +155,7 @@ func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Parse collector address to get schedd
 	addr := harness.GetCollectorAddr()
@@ -365,7 +365,7 @@ func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Parse collector address to get schedd
 	addr := harness.GetCollectorAddr()
@@ -490,7 +490,7 @@ func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Parse collector address to get schedd
 	addr := harness.GetCollectorAddr()

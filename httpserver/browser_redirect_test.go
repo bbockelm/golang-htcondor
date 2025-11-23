@@ -3,6 +3,7 @@ package httpserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -12,39 +13,39 @@ import (
 // TestIsBrowserRequest tests the browser detection logic
 func TestIsBrowserRequest(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		acceptHeader string
-		expected    bool
+		expected     bool
 	}{
 		{
-			name:        "Browser request with text/html",
+			name:         "Browser request with text/html",
 			acceptHeader: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "Browser request with only text/html",
+			name:         "Browser request with only text/html",
 			acceptHeader: "text/html",
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "API request with JSON",
+			name:         "API request with JSON",
 			acceptHeader: "application/json",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "API request with XML",
+			name:         "API request with XML",
 			acceptHeader: "application/xml",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "Empty Accept header",
+			name:         "Empty Accept header",
 			acceptHeader: "",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "Wildcard Accept",
+			name:         "Wildcard Accept",
 			acceptHeader: "*/*",
-			expected:    false,
+			expected:     false,
 		},
 	}
 
@@ -178,6 +179,45 @@ func TestWelcomePageUnauthenticated(t *testing.T) {
 	contentType := resp.Header.Get("Content-Type")
 	if contentType != "text/html; charset=utf-8" {
 		t.Errorf("Expected Content-Type text/html, got %s", contentType)
+	}
+
+	// Check for login button
+	body := w.Body.String()
+	if !strings.Contains(body, "Log In") {
+		t.Error("Expected login button in welcome page")
+	}
+
+	// Check for Swagger UI link
+	if !strings.Contains(body, "/docs") {
+		t.Error("Expected Swagger UI link in welcome page")
+	}
+}
+
+// TestWelcomePageWithIDP tests the welcome page with IDP enabled
+func TestWelcomePageWithIDP(t *testing.T) {
+	server := &Server{
+		idpProvider: &IDPProvider{},
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleWelcome(w, req)
+
+	resp := w.Result()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("Failed to close response body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "/login") {
+		t.Error("Expected login link in welcome page")
 	}
 }
 

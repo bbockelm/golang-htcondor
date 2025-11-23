@@ -538,14 +538,15 @@ func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue strin
 }
 
 // getHTTPConfig extracts HTTP API configuration from config
-func getHTTPConfig(cfg *config.Config) (listenAddrResult, tlsCertFile, tlsKeyFile string) {
+func getHTTPConfig(cfg *config.Config) (listenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
 	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
 		listenAddrResult = addr
 	}
 	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
 	tlsKeyFile, _ = cfg.Get("HTTP_API_TLS_KEY")
-	return listenAddrResult, tlsCertFile, tlsKeyFile
+	tlsCACertFile, _ = cfg.Get("HTTP_API_TLS_CA_CERT")
+	return listenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile
 }
 
 // getTimeoutConfig parses timeout configuration with defaults
@@ -628,7 +629,7 @@ func runNormalMode() error {
 	scheddNameValue, scheddAddrValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
-	listenAddrFromConfig, tlsCertFile, tlsKeyFile := getHTTPConfig(cfg)
+	listenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
 
 	// Get timeout configuration
 	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
@@ -706,6 +707,7 @@ func runNormalMode() error {
 		SigningKeyPath:      signingKeyPath,
 		TLSCertFile:         tlsCertFile,
 		TLSKeyFile:          tlsKeyFile,
+		TLSCACertFile:       tlsCACertFile,
 		TrustDomain:         trustDomain,
 		UIDDomain:           uidDomain,
 		ReadTimeout:         readTimeout,
@@ -769,6 +771,11 @@ func runDemoMode() error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
+		DestinationLevels: map[logging.Destination]logging.Verbosity{
+			logging.DestinationGeneral:  logging.VerbosityDebug,
+			logging.DestinationHTTP:     logging.VerbosityDebug,
+			logging.DestinationSecurity: logging.VerbosityDebug,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
@@ -858,25 +865,25 @@ func runDemoMode() error {
 
 	// Determine signing key path for token generation
 	// HTCondor auto-generates $(LOCAL_DIR)/passwords.d/POOL when needed
-	var signingKeyPath string
+	// In demo mode, we always want to enable token generation for IDP/session support
+	signingKeyPath := filepath.Join(tempDir, "passwords.d", "POOL")
+	log.Printf("Will use HTCondor-generated signing key at: %s", signingKeyPath)
+
 	if *userHeader != "" {
-		signingKeyPath = filepath.Join(tempDir, "passwords.d", "POOL")
 		log.Printf("User header mode enabled: %s", *userHeader)
-		log.Printf("Will use HTCondor-generated signing key at: %s", signingKeyPath)
 	}
 
 	uidDomain := ""
 	trustDomain := ""
-	if *userHeader != "" {
-		log.Printf("Using user header: %s", *userHeader)
-		if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
-			uidDomain = domain
-			log.Printf("Using UID_DOMAIN: %s", uidDomain)
-		}
-		if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
-			trustDomain = domain
-			log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
-		}
+
+	// Always try to load domains from config
+	if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
+		uidDomain = domain
+		log.Printf("Using UID_DOMAIN: %s", uidDomain)
+	}
+	if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
+		trustDomain = domain
+		log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
 	}
 
 	// Create collector for demo mode
@@ -908,23 +915,29 @@ func runDemoMode() error {
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:     *listenAddr,
-		UserHeader:     *userHeader,
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      uidDomain,
-		TLSCertFile:    certPath,
-		TLSKeyFile:     keyPath,
-		Collector:      collector,
-		Logger:         logger,
-		EnableMCP:      true,                                   // Enable MCP in demo mode
-		OAuth2DBPath:   oauth2DBPath,                           // OAuth2 database path
-		OAuth2Issuer:   protocol + "://" + *listenAddr,         // OAuth2 issuer URL
-		OAuth2Scopes:   []string{"openid", "profile", "email"}, // Default scopes for demo
-		EnableIDP:      true,                                   // Enable built-in IDP in demo mode
-		IDPDBPath:      oauth2DBPath,                           // IDP uses same database as OAuth2
-		IDPIssuer:      protocol + "://" + *listenAddr,         // IDP issuer URL
-		HTCondorConfig: cfg,
+		ListenAddr:         *listenAddr,
+		UserHeader:         *userHeader,
+		SigningKeyPath:     signingKeyPath,
+		TrustDomain:        trustDomain,
+		UIDDomain:          uidDomain,
+		TLSCertFile:        certPath,
+		TLSKeyFile:         keyPath,
+		TLSCACertFile:      caPath,
+		Collector:          collector,
+		Logger:             logger,
+		EnableMCP:          true,                           // Enable MCP in demo mode
+		OAuth2DBPath:       oauth2DBPath,                   // OAuth2 database path
+		OAuth2Issuer:       protocol + "://" + *listenAddr, // OAuth2 issuer URL
+		OAuth2ClientID:     "demo-client",                  // Demo client ID
+		OAuth2ClientSecret: "demo-secret",                  // Demo client secret
+		OAuth2AuthURL:      protocol + "://" + *listenAddr + "/mcp/oauth2/authorize",
+		OAuth2TokenURL:     protocol + "://" + *listenAddr + "/mcp/oauth2/token",
+		OAuth2RedirectURL:  protocol + "://" + *listenAddr + "/mcp/oauth2/callback",
+		OAuth2Scopes:       []string{"openid", "profile", "email"}, // Default scopes for demo
+		EnableIDP:          true,                                   // Enable built-in IDP in demo mode
+		IDPDBPath:          oauth2DBPath,                           // IDP uses same database as OAuth2
+		IDPIssuer:          protocol + "://" + *listenAddr,         // IDP issuer URL
+		HTCondorConfig:     cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
