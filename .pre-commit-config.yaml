@@ -33,8 +33,10 @@ repos:
     hooks:
       - id: trailing-whitespace
         name: Trim trailing whitespace
+        exclude: 'classadlog/testdata/.*'
       - id: end-of-file-fixer
         name: Fix end of files
+        exclude: 'classadlog/testdata/.*'
       - id: check-yaml
         name: Check YAML syntax
       - id: check-added-large-files

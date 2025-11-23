@@ -21,7 +21,7 @@ func TestCommitTransactionWithSubmitRequirement(t *testing.T) {
 	}
 
 	// Set up mini HTCondor with submit requirement
-	h := setupCondorHarnessWithConfig(t, getSubmitRequirementConfig())
+	h := SetupCondorHarnessWithConfig(t, getSubmitRequirementConfig())
 
 	// Get schedd connection info
 	scheddAddr := getScheddAddressFromHarness(t, h)
@@ -81,7 +81,7 @@ queue
 }
 
 // getScheddAddressFromHarness queries the collector to get the schedd address
-func getScheddAddressFromHarness(t *testing.T, harness *condorTestHarness) string {
+func getScheddAddressFromHarness(t *testing.T, harness *CondorTestHarness) string {
 	t.Helper()
 
 	// Parse collector address
@@ -134,12 +134,12 @@ SUBMIT_REQUIREMENT_MinimalRequestMemory_REASON = strcat("Job requested ", TARGET
 `
 }
 
-// setupCondorHarnessWithConfig creates a test HTCondor instance with custom configuration
+// SetupCondorHarnessWithConfig creates a test HTCondor instance with custom configuration
 // built into the initial config file before the daemons start
-func setupCondorHarnessWithConfig(t *testing.T, additionalConfig string) *condorTestHarness {
+func SetupCondorHarnessWithConfig(t *testing.T, additionalConfig string) *CondorTestHarness {
 	t.Helper()
 
-	// This is based on setupCondorHarness but includes the additional config
+	// This is based on SetupCondorHarness but includes the additional config
 	// Check dependencies first
 	masterPath, err := exec.LookPath("condor_master")
 	if err != nil {
@@ -157,7 +157,7 @@ func setupCondorHarnessWithConfig(t *testing.T, additionalConfig string) *condor
 	// Create temporary directory structure
 	tmpDir := t.TempDir()
 
-	h := &condorTestHarness{
+	h := &CondorTestHarness{
 		tmpDir:     tmpDir,
 		configFile: filepath.Join(tmpDir, "condor_config"),
 		logDir:     filepath.Join(tmpDir, "log"),
@@ -279,7 +279,7 @@ ENABLE_WEB_SERVER = False
 		h.Shutdown()
 	})
 
-	if err := h.waitForDaemons(); err != nil {
+	if err := h.WaitForDaemons(); err != nil {
 		t.Fatalf("Failed to wait for daemons: %v", err)
 	}
 

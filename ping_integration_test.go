@@ -14,7 +14,7 @@ func TestCollectorPingIntegration(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	t.Logf("HTCondor instance started with collector at: %s", harness.GetCollectorAddr())
 
@@ -74,7 +74,7 @@ func TestScheddPingIntegration(t *testing.T) {
 	}
 
 	// Setup mini HTCondor instance
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	t.Logf("HTCondor instance started with collector at: %s", harness.GetCollectorAddr())
 

@@ -1,0 +1,54 @@
+107 1 CreationTimestamp 1763853165
+101 0.0 Job Machine
+105 
+103 0.0 UidDomain "f4hp7ql65f-2.local"
+106 
+105 
+101 0.2 Owner (empty)
+103 0.2 User "bbockelm@f4hp7ql65f-2.local"
+103 0.2 Owner "bbockelm"
+103 0.2 OsUser "bbockelm"
+103 0.2 Enabled 1
+106 
+103 0.0 NextClusterNum 1
+105 
+103 0.0 NextClusterNum 2
+101 01.-1 Job Machine
+101 1.-2 ClusterPvt (empty)
+101 1.0 Job Machine
+103 1.0 GlobalJobId "test_schedd_96043@f4hp7ql65f-2.local#1.0#1763853169"
+103 1.0 ClusterId 1
+103 1.0 ProcId 0
+103 1.0 JobUniverse 5
+103 1.0 JobStatus 5
+103 1.0 Cmd "/bin/sleep"
+103 1.0 Args "2"
+103 1.0 Out "test.out"
+103 1.0 Err "test.err"
+103 1.0 UserLog "test.log"
+103 1.0 ShouldTransferFiles "YES"
+103 1.0 WhenToTransferOutput "ON_EXIT"
+103 1.0 TransferExecutable true
+103 1.0 Requirements ((TARGET.Arch isnt undefined) && (TARGET.OpSys isnt undefined))
+103 1.0 RequestCpus 1
+103 1.0 RequestMemory 128
+103 1.0 RequestDisk 1024
+103 1.0 EmailAttributes "NEVER"
+103 1.0 Rank 0
+103 1.0 Iwd "/Users/bbockelm/projects/golang-htcondor/classadlog"
+103 1.0 NumJobStarts 0
+103 1.0 NumRestarts 0
+103 1.0 NumSystemHolds 0
+103 1.0 JobRunCount 0
+103 1.0 HoldReasonCode 16
+103 1.0 HoldReason "Spooling input data files"
+103 1.0 LeaveJobInQueue ((JobStatus == 4) && (((CompletionDate is undefined) || (CompletionDate == 0)) || ((time() - CompletionDate) < 864000)))
+103 01.-1 TotalSubmitProcs 1
+103 01.-1 User "bbockelm@f4hp7ql65f-2.local"
+103 01.-1 Owner "bbockelm"
+103 1.0 SUBMIT_Iwd "/Users/bbockelm/projects/golang-htcondor/classadlog"
+103 1.0 Iwd "/var/folders/3r/xl19t4ks0wsd5httjlvvm86r0000gp/T/TestWatchLogWithJobSubmission1354687113/001/spool/1/0/cluster1.proc0.subproc0"
+103 1.0 TransferOutputRemaps Undefined
+103 1.0 SUBMIT_Cmd "/bin/sleep"
+103 1.0 Cmd "sleep"
+106 

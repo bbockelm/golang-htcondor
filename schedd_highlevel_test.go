@@ -10,7 +10,7 @@ import (
 )
 
 // discoverSchedd discovers the schedd address from the test harness
-func discoverSchedd(t *testing.T, harness *condorTestHarness) string {
+func discoverSchedd(t *testing.T, harness *CondorTestHarness) string {
 	t.Helper()
 
 	// Parse collector address
@@ -61,10 +61,10 @@ func TestScheddSubmitHighLevel(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -109,10 +109,10 @@ func TestScheddSubmitMultiProc(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -157,10 +157,10 @@ func TestScheddSubmitWithVariables(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -205,10 +205,10 @@ func TestScheddQueryIntegration(t *testing.T) {
 	}
 
 	// Setup test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
