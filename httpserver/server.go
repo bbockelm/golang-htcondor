@@ -2,6 +2,8 @@ package httpserver
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -19,7 +21,8 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
-	_ "github.com/glebarez/sqlite" // SQLite driver for sessions
+	"github.com/ory/fosite"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
 	"golang.org/x/time/rate"
 )
@@ -37,6 +40,7 @@ type Server struct {
 	signingKeyPath      string
 	trustDomain         string
 	uidDomain           string
+	tlsCACertFile       string
 	logger              *logging.Logger
 	metricsRegistry     *metricsd.Registry
 	prometheusExporter  *metricsd.PrometheusExporter
@@ -72,6 +76,7 @@ type Config struct {
 	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
 	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
 	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
 	ReadTimeout         time.Duration       // HTTP read timeout (default: 30s)
 	WriteTimeout        time.Duration       // HTTP write timeout (default: 30s)
 	IdleTimeout         time.Duration       // HTTP idle timeout (default: 120s)
@@ -166,6 +171,7 @@ func NewServer(cfg Config) (*Server, error) {
 		uidDomain:          cfg.UIDDomain,
 		userHeader:         cfg.UserHeader,
 		signingKeyPath:     cfg.SigningKeyPath,
+		tlsCACertFile:      cfg.TLSCACertFile,
 		logger:             logger,
 		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
 		streamBufferSize:   streamBufferSize,
@@ -221,6 +227,35 @@ func NewServer(cfg Config) (*Server, error) {
 			}
 			s.oauth2UserInfoURL = cfg.OAuth2UserInfoURL
 			logger.Info(logging.DestinationHTTP, "OAuth2 SSO client configured", "auth_url", cfg.OAuth2AuthURL, "scopes", scopes)
+
+			// If we are also the provider (EnableMCP), ensure the client exists
+			if cfg.EnableMCP {
+				// Check if client exists
+				_, err := s.oauth2Provider.GetStorage().GetClient(context.Background(), cfg.OAuth2ClientID)
+				if err != nil {
+					// Assume it doesn't exist or error, try to create it
+					// Hash the secret
+					hashedSecret, err := bcrypt.GenerateFromPassword([]byte(cfg.OAuth2ClientSecret), bcrypt.DefaultCost)
+					if err != nil {
+						logger.Error(logging.DestinationHTTP, "Failed to hash OAuth2 client secret", "error", err)
+					} else {
+						client := &fosite.DefaultClient{
+							ID:            cfg.OAuth2ClientID,
+							Secret:        hashedSecret,
+							RedirectURIs:  []string{cfg.OAuth2RedirectURL},
+							ResponseTypes: []string{"code"},
+							GrantTypes:    []string{"authorization_code", "refresh_token"},
+							Scopes:        scopes,
+							Public:        false,
+						}
+						if err := s.oauth2Provider.GetStorage().CreateClient(context.Background(), client); err != nil {
+							logger.Error(logging.DestinationHTTP, "Failed to auto-register OAuth2 client", "error", err)
+						} else {
+							logger.Info(logging.DestinationHTTP, "Auto-registered OAuth2 client", "client_id", cfg.OAuth2ClientID)
+						}
+					}
+				}
+			}
 		}
 
 		// Set groups claim name (default: "groups")
@@ -296,6 +331,11 @@ func NewServer(cfg Config) (*Server, error) {
 		s.idpProvider = idpProvider
 		s.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
+
+		// Ensure OAuth2 state store is initialized if we might use SSO (which IDP enables)
+		if s.oauth2StateStore == nil {
+			s.oauth2StateStore = NewOAuth2StateStore()
+		}
 	}
 
 	// Setup metrics if collector is provided
@@ -392,6 +432,112 @@ func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
 	if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
 		return fmt.Errorf("failed to initialize IDP client: %w", err)
 	}
+
+	// Configure internal IDP as the upstream OAuth2 provider for the server
+	// This allows the server to use its own IDP for authentication (SSO)
+	clientID := "internal-client"
+	clientSecret := "internal-secret"
+	ssoRedirectURI := issuer + "/mcp/oauth2/callback"
+
+	// Check if client exists
+	_, err := s.idpProvider.storage.GetClient(ctx, clientID)
+	if err != nil {
+		// Create client if not found (or error)
+		// Hash the secret
+		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("failed to hash client secret: %w", err)
+		}
+
+		client := &fosite.DefaultClient{
+			ID:            clientID,
+			Secret:        hashedSecret,
+			RedirectURIs:  []string{ssoRedirectURI},
+			ResponseTypes: []string{"code"},
+			GrantTypes:    []string{"authorization_code", "refresh_token"},
+			Scopes:        []string{"openid", "profile", "email"},
+			Public:        false,
+		}
+
+		if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
+			return fmt.Errorf("failed to create internal IDP client: %w", err)
+		}
+		s.logger.Info(logging.DestinationHTTP, "Created internal IDP client", "client_id", clientID)
+	}
+
+	// Create Swagger UI client (public client)
+	swaggerClientID := "swagger-client"
+	swaggerRedirectURIs := []string{issuer + "/docs/oauth2-redirect"}
+
+	// Add localhost/127.0.0.1 variants if issuer uses wildcard or unspecified address
+	// This ensures Swagger UI works when accessed via localhost even if server listens on [::]
+	if strings.Contains(issuer, "[::]") || strings.Contains(issuer, "0.0.0.0") {
+		_, port, _ := net.SplitHostPort(actualAddr)
+		if port != "" {
+			swaggerRedirectURIs = append(swaggerRedirectURIs,
+				protocol+"://localhost:"+port+"/docs/oauth2-redirect",
+				protocol+"://127.0.0.1:"+port+"/docs/oauth2-redirect",
+			)
+		}
+	}
+
+	// Check if client exists
+	_, err = s.idpProvider.storage.GetClient(ctx, swaggerClientID)
+	if err != nil {
+		// Create client if not found (or error)
+		client := &fosite.DefaultClient{
+			ID:            swaggerClientID,
+			Secret:        nil, // Public client has no secret
+			RedirectURIs:  swaggerRedirectURIs,
+			ResponseTypes: []string{"code"},
+			GrantTypes:    []string{"authorization_code"},
+			Scopes:        []string{"openid", "profile", "email"},
+			Public:        true,
+		}
+
+		if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
+			return fmt.Errorf("failed to create Swagger IDP client: %w", err)
+		}
+		s.logger.Info(logging.DestinationHTTP, "Created Swagger IDP client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
+	}
+
+	// Also ensure the client exists in the OAuth2 provider if enabled
+	// This is required because Swagger UI is configured to use the MCP OAuth2 endpoints
+	if s.oauth2Provider != nil {
+		_, err = s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
+		if err != nil {
+			client := &fosite.DefaultClient{
+				ID:            swaggerClientID,
+				Secret:        nil, // Public client has no secret
+				RedirectURIs:  swaggerRedirectURIs,
+				ResponseTypes: []string{"code"},
+				GrantTypes:    []string{"authorization_code"},
+				Scopes:        []string{"openid", "profile", "email"},
+				Public:        true,
+			}
+
+			if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
+			} else {
+				s.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID)
+			}
+		}
+	}
+
+	// Configure s.oauth2Config to use the internal IDP
+	s.oauth2Config = &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  issuer + "/idp/authorize",
+			TokenURL: issuer + "/idp/token",
+		},
+		RedirectURL: ssoRedirectURI,
+		Scopes:      []string{"openid", "profile", "email"},
+	}
+	s.oauth2UserInfoURL = issuer + "/idp/userinfo"
+
+	s.logger.Info(logging.DestinationHTTP, "Configured OAuth2 SSO to use internal IDP", "issuer", issuer)
 
 	return nil
 }
@@ -980,10 +1126,31 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 			// Add to cache which will validate expiration and create session cache
 			entry, err := s.tokenCache.Add(token)
 			if err != nil {
-				return nil, fmt.Errorf("failed to cache token: %w", err)
+				// If failed to parse as JWT, check if it's an opaque token and we have OAuth2 provider
+				if s.oauth2Provider != nil {
+					// Try to validate as opaque token
+					session, accessErr := s.oauth2Provider.IntrospectToken(r.Context(), token)
+					if accessErr == nil {
+						username := session.GetSubject()
+						expiration := session.GetExpiresAt(fosite.AccessToken)
+
+						entry, err = s.tokenCache.AddValidated(token, username, expiration)
+						if err != nil {
+							return nil, fmt.Errorf("failed to cache validated token: %w", err)
+						}
+						sessionCache = entry.SessionCache
+						s.logger.Debug(logging.DestinationSecurity, "Validated opaque token via OAuth2 storage", "username", username)
+					} else {
+						// Both JWT parsing and opaque token introspection failed
+						return nil, fmt.Errorf("failed to validate token: %w (jwt error: %s)", accessErr, err.Error())
+					}
+				} else {
+					return nil, fmt.Errorf("failed to cache token: %w", err)
+				}
+			} else {
+				sessionCache = entry.SessionCache
+				s.logger.Debug(logging.DestinationSecurity, "Created new session cache for token", "expiration", entry.Expiration)
 			}
-			sessionCache = entry.SessionCache
-			s.logger.Debug(logging.DestinationSecurity, "Created new session cache for token", "expiration", entry.Expiration)
 		}
 	}
 
@@ -1058,18 +1225,16 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 
 			// If scheddName is empty, try to match hostname or use first schedd
 			if scheddName == "" {
-				hostname, err := os.Hostname()
-				if err == nil {
-					// Try to find a schedd whose name matches the hostname
-					for _, ad := range ads {
-						if nameExpr, ok := ad.Lookup("Name"); ok {
-							name := nameExpr.String()
-							name = strings.Trim(name, "\"")
-							if name == hostname {
-								selectedAd = ad
-								logger.Info(logging.DestinationSchedd, "Found schedd matching hostname", "hostname", hostname)
-								break
-							}
+				hostname, _ := os.Hostname()
+				// Try to find a schedd whose name matches the hostname
+				for _, ad := range ads {
+					if nameExpr, ok := ad.Lookup("Name"); ok {
+						name := nameExpr.String()
+						name = strings.Trim(name, "\"")
+						if name == hostname {
+							selectedAd = ad
+							logger.Info(logging.DestinationSchedd, "Found schedd matching hostname", "hostname", hostname)
+							break
 						}
 					}
 				}
@@ -1175,9 +1340,18 @@ func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the original URL (relative path with query string)
-	originalURL := r.URL.Path
-	if r.URL.RawQuery != "" {
-		originalURL += "?" + r.URL.RawQuery
+	// Check if a return_to parameter is provided (e.g. from /login?return_to=/dashboard)
+	originalURL := r.URL.Query().Get("return_to")
+	if originalURL == "" {
+		originalURL = r.URL.Path
+		if r.URL.RawQuery != "" {
+			originalURL += "?" + r.URL.RawQuery
+		}
+	}
+
+	// If the original URL is /login (or starts with /login), default to root to avoid loops
+	if strings.HasPrefix(originalURL, "/login") {
+		originalURL = "/"
 	}
 
 	// Generate state parameter
@@ -1199,4 +1373,30 @@ func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Redirect to IDP
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// getHTTPClient returns an HTTP client with the configured CA certificate
+func (s *Server) getHTTPClient() *http.Client {
+	if s.tlsCACertFile == "" {
+		return http.DefaultClient
+	}
+
+	// Load CA cert
+	caCert, err := os.ReadFile(s.tlsCACertFile)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to read CA certificate", "error", err)
+		return http.DefaultClient
+	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    caCertPool,
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+	}
 }

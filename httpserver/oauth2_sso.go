@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/ory/fosite"
+	"golang.org/x/oauth2"
+
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // UserInfo represents user information from the IDP
@@ -119,7 +121,9 @@ func (s *Server) fetchUserInfo(ctx context.Context, accessToken string) (*UserIn
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use custom HTTP client if configured
+	client := s.getHTTPClient()
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user info: %w", err)
 	}
@@ -205,6 +209,10 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange authorization code for token
+	// Use custom HTTP client if configured (e.g. for self-signed certs)
+	client := s.getHTTPClient()
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
+
 	token, err := s.oauth2Config.Exchange(ctx, code)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to exchange code for token", "error", err)
@@ -213,6 +221,7 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch user info from IDP
+	// Use the same client for user info fetch
 	userInfo, err := s.fetchUserInfo(ctx, token.AccessToken)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to fetch user info", "error", err)
@@ -313,4 +322,20 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	// OAuth2 client flow - write the standard OAuth2 response
 	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+}
+
+// handleLogin initiates the OAuth2 login flow
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// Check if already authenticated
+	if _, ok := s.getSessionFromRequest(r); ok {
+		// Already authenticated, redirect to return_to or root
+		returnURL := r.URL.Query().Get("return_to")
+		if returnURL == "" {
+			returnURL = "/"
+		}
+		http.Redirect(w, r, returnURL, http.StatusFound)
+		return
+	}
+
+	s.redirectToLogin(w, r)
 }

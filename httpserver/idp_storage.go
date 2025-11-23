@@ -2,15 +2,17 @@ package httpserver
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
-	"github.com/ory/fosite/handler/openid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -31,6 +33,11 @@ func NewIDPStorage(dbPath string) (*IDPStorage, error) {
 	if err := storage.createTables(); err != nil {
 		_ = db.Close() // Ignore error on cleanup
 		return nil, fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	if err := storage.migrateTables(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to migrate tables: %w", err)
 	}
 
 	return storage, nil
@@ -103,6 +110,21 @@ func (s *IDPStorage) createTables() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS idp_pkce_requests (
+		signature TEXT PRIMARY KEY,
+		request_id TEXT NOT NULL,
+		requested_at TIMESTAMP NOT NULL,
+		client_id TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		granted_scopes TEXT NOT NULL,
+		form_data TEXT NOT NULL,
+		session_data TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		active INTEGER NOT NULL DEFAULT 1,
+		expires_at TIMESTAMP NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE TABLE IF NOT EXISTS idp_rsa_keys (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		private_key_pem TEXT NOT NULL,
@@ -136,15 +158,58 @@ func (s *IDPStorage) createTables() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS idp_sessions (
+		session_id TEXT PRIMARY KEY,
+		username TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		expires_at TIMESTAMP NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_idp_access_tokens_client ON idp_access_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_idp_refresh_tokens_client ON idp_refresh_tokens(client_id);
 	CREATE INDEX IF NOT EXISTS idx_idp_authorization_codes_client ON idp_authorization_codes(client_id);
 	CREATE INDEX IF NOT EXISTS idx_idp_oidc_sessions_client ON idp_oidc_sessions(client_id);
 	CREATE INDEX IF NOT EXISTS idx_idp_jwt_assertions_expires ON idp_jwt_assertions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_idp_sessions_expires ON idp_sessions(expires_at);
 	`
 
 	_, err := s.db.ExecContext(context.Background(), schema)
 	return err
+}
+
+// migrateTables ensures that all tables have the required columns
+// This handles schema updates for existing databases
+func (s *IDPStorage) migrateTables() error {
+	tables := []string{
+		"idp_access_tokens",
+		"idp_refresh_tokens",
+		"idp_authorization_codes",
+		"idp_oidc_sessions",
+		"idp_pkce_requests",
+	}
+
+	for _, table := range tables {
+		// Check if active column exists
+		var count int
+		// Use pragma_table_info to check for column existence
+		// Note: pragma_table_info is available in modern SQLite versions
+		err := s.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='active'", table).Scan(&count)
+		if err != nil {
+			// If pragma_table_info fails, we might be on an old SQLite or it's not supported.
+			// In that case, we can try to select the column and see if it fails.
+			// But for now, let's assume it works or return error.
+			return fmt.Errorf("failed to check table info for %s: %w", table, err)
+		}
+
+		if count == 0 {
+			// Add active column
+			_, err := s.db.ExecContext(context.Background(), "ALTER TABLE "+table+" ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+			if err != nil {
+				return fmt.Errorf("failed to add active column to %s: %w", table, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Close closes the database connection
@@ -238,6 +303,7 @@ var validIDPTableNames = map[string]bool{
 	"idp_refresh_tokens":      true,
 	"idp_authorization_codes": true,
 	"idp_oidc_sessions":       true,
+	"idp_pkce_requests":       true,
 }
 
 // buildIDPInsertQuery builds an INSERT query for a valid IDP table name
@@ -305,6 +371,8 @@ func (s *IDPStorage) CreateClient(ctx context.Context, client *fosite.DefaultCli
 }
 
 // GetClient retrieves a client by ID
+//
+//nolint:dupl // This method is similar to OAuth2Storage.GetClient but uses a different table
 func (s *IDPStorage) GetClient(ctx context.Context, clientID string) (fosite.Client, error) {
 	var (
 		secret        string
@@ -392,6 +460,58 @@ func (s *IDPStorage) GetAuthorizeCodeSession(ctx context.Context, signature stri
 // InvalidateAuthorizeCodeSession invalidates an authorization code
 func (s *IDPStorage) InvalidateAuthorizeCodeSession(ctx context.Context, signature string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE idp_authorization_codes SET active = 0 WHERE signature = ?`, signature)
+	return err
+}
+
+// CreateSession creates a new session for the given username
+func (s *IDPStorage) CreateSession(ctx context.Context, username string) (string, error) {
+	// Generate random session ID
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
+	sessionID := base64.RawURLEncoding.EncodeToString(b)
+
+	now := time.Now()
+	expiresAt := now.Add(24 * time.Hour) // 24 hour session
+
+	_, err := s.db.ExecContext(ctx,
+		"INSERT INTO idp_sessions (session_id, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		sessionID, username, now, expiresAt)
+	if err != nil {
+		return "", fmt.Errorf("failed to store session: %w", err)
+	}
+
+	return sessionID, nil
+}
+
+// GetSession retrieves the username for a given session ID
+func (s *IDPStorage) GetSession(ctx context.Context, sessionID string) (string, error) {
+	var username string
+	var expiresAt time.Time
+
+	err := s.db.QueryRowContext(ctx,
+		"SELECT username, expires_at FROM idp_sessions WHERE session_id = ?",
+		sessionID).Scan(&username, &expiresAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil // Not found
+		}
+		return "", fmt.Errorf("failed to get session: %w", err)
+	}
+
+	if time.Now().After(expiresAt) {
+		// Session expired, delete it
+		_ = s.DeleteSession(ctx, sessionID)
+		return "", nil
+	}
+
+	return username, nil
+}
+
+// DeleteSession deletes a session
+func (s *IDPStorage) DeleteSession(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM idp_sessions WHERE session_id = ?", sessionID)
 	return err
 }
 
@@ -496,16 +616,16 @@ func (s *IDPStorage) getTokenSession(ctx context.Context, table string, signatur
 	}
 	request.GrantedScope = grantedScopesList
 
-	// Only unmarshal session data if we have a valid session to unmarshal into
-	if session != nil && sessionData != "" {
-		if err := json.Unmarshal([]byte(sessionData), session); err != nil {
-			return nil, err
-		}
-		request.Session = session
-	} else {
-		// Create a default session if none provided
-		request.Session = &openid.DefaultSession{}
+	var form url.Values
+	if err := json.Unmarshal([]byte(formData), &form); err != nil {
+		return nil, err
 	}
+	request.Form = form
+
+	if err := json.Unmarshal([]byte(sessionData), session); err != nil {
+		return nil, err
+	}
+	request.Session = session
 
 	return request, nil
 }
@@ -613,4 +733,19 @@ func (s *IDPStorage) GetOpenIDConnectSession(ctx context.Context, signature stri
 // DeleteOpenIDConnectSession implements openid.OpenIDConnectRequestStorage interface
 func (s *IDPStorage) DeleteOpenIDConnectSession(ctx context.Context, signature string) error {
 	return s.deleteTokenSession(ctx, "idp_oidc_sessions", signature)
+}
+
+// CreatePKCERequestSession stores a PKCE request session
+func (s *IDPStorage) CreatePKCERequestSession(ctx context.Context, signature string, request fosite.Requester) error {
+	return s.createTokenSession(ctx, "idp_pkce_requests", signature, request)
+}
+
+// GetPKCERequestSession retrieves a PKCE request session
+func (s *IDPStorage) GetPKCERequestSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
+	return s.getTokenSession(ctx, "idp_pkce_requests", signature, session)
+}
+
+// DeletePKCERequestSession deletes a PKCE request session
+func (s *IDPStorage) DeletePKCERequestSession(ctx context.Context, signature string) error {
+	return s.deleteTokenSession(ctx, "idp_pkce_requests", signature)
 }

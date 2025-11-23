@@ -186,6 +186,53 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	return entry, nil
 }
 
+// AddValidated adds a pre-validated token (e.g. opaque token) to the cache
+func (tc *TokenCache) AddValidated(token, username string, expiration time.Time) (*TokenCacheEntry, error) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	// Check if already cached
+	if entry, exists := tc.entries[token]; exists {
+		// Check if expired
+		if time.Now().After(entry.Expiration) {
+			// Remove expired entry
+			delete(tc.entries, token)
+		} else {
+			return entry, nil
+		}
+	}
+
+	// Check if already expired
+	if time.Now().After(expiration) {
+		return nil, fmt.Errorf("token is already expired")
+	}
+
+	// Create a new session cache for this token
+	sessionCache := security.NewSessionCache()
+
+	// Create context for cleanup goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+
+	entry := &TokenCacheEntry{
+		Token:         token,
+		Username:      username,
+		Expiration:    expiration,
+		SessionCache:  sessionCache,
+		cancelCleanup: cancel,
+	}
+
+	// Schedule automatic cleanup when token expires
+	duration := time.Until(expiration)
+	entry.expiryTimer = time.AfterFunc(duration, func() {
+		tc.Remove(token)
+	})
+
+	tc.entries[token] = entry
+	_ = ctx // Silence unused variable warning
+
+	return entry, nil
+}
+
 // Get retrieves a token cache entry if it exists and is not expired
 func (tc *TokenCache) Get(token string) (*TokenCacheEntry, bool) {
 	tc.mu.RLock()

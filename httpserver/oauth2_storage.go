@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
@@ -79,6 +80,21 @@ func (s *OAuth2Storage) createTables() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS oauth2_authorization_codes (
+		signature TEXT PRIMARY KEY,
+		request_id TEXT NOT NULL,
+		requested_at TIMESTAMP NOT NULL,
+		client_id TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		granted_scopes TEXT NOT NULL,
+		form_data TEXT NOT NULL,
+		session_data TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		active INTEGER NOT NULL DEFAULT 1,
+		expires_at TIMESTAMP NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS oauth2_pkce_requests (
 		signature TEXT PRIMARY KEY,
 		request_id TEXT NOT NULL,
 		requested_at TIMESTAMP NOT NULL,
@@ -173,6 +189,7 @@ var validTableNames = map[string]bool{
 	"oauth2_refresh_tokens":      true,
 	"oauth2_authorization_codes": true,
 	"oauth2_oidc_sessions":       true,
+	"oauth2_pkce_requests":       true,
 }
 
 // buildInsertQuery builds an INSERT query for a valid table name
@@ -240,6 +257,8 @@ func (s *OAuth2Storage) CreateClient(ctx context.Context, client *fosite.Default
 }
 
 // GetClient retrieves a client by ID
+//
+//nolint:dupl // This method is similar to IDPStorage.GetClient but uses a different table
 func (s *OAuth2Storage) GetClient(ctx context.Context, clientID string) (fosite.Client, error) {
 	var (
 		secret        string
@@ -328,6 +347,21 @@ func (s *OAuth2Storage) GetAuthorizeCodeSession(ctx context.Context, signature s
 func (s *OAuth2Storage) InvalidateAuthorizeCodeSession(ctx context.Context, signature string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE oauth2_authorization_codes SET active = 0 WHERE signature = ?`, signature)
 	return err
+}
+
+// CreatePKCERequestSession stores a PKCE request session
+func (s *OAuth2Storage) CreatePKCERequestSession(ctx context.Context, signature string, request fosite.Requester) error {
+	return s.createTokenSession(ctx, "oauth2_pkce_requests", signature, request)
+}
+
+// GetPKCERequestSession retrieves a PKCE request session
+func (s *OAuth2Storage) GetPKCERequestSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
+	return s.getTokenSession(ctx, "oauth2_pkce_requests", signature, session)
+}
+
+// DeletePKCERequestSession deletes a PKCE request session
+func (s *OAuth2Storage) DeletePKCERequestSession(ctx context.Context, signature string) error {
+	return s.deleteTokenSession(ctx, "oauth2_pkce_requests", signature)
 }
 
 // Helper methods
@@ -430,6 +464,12 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 		return nil, err
 	}
 	request.GrantedScope = grantedScopesList
+
+	var form url.Values
+	if err := json.Unmarshal([]byte(formData), &form); err != nil {
+		return nil, err
+	}
+	request.Form = form
 
 	// Only unmarshal session data if we have a valid session to unmarshal into
 	if session != nil && sessionData != "" {

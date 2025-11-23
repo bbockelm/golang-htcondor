@@ -157,15 +157,22 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info(logging.DestinationHTTP, "IDP user authenticated", "username", username)
 
 	// Create session for authenticated user
-	// Store username in cookie or session store (using simple cookie for now)
+	sessionID, err := s.idpProvider.storage.CreateSession(ctx, username)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create IDP session", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+
+	// Store session ID in cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "idp_session",
-		Value:    username,
+		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true, // Always set to true - server should use HTTPS
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   3600, // 1 hour
+		MaxAge:   3600 * 24, // 24 hours
 	})
 
 	// Redirect back to authorization endpoint or provided redirect_uri
@@ -200,7 +207,58 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	username := cookie.Value
+	// Verify session
+	sessionID := cookie.Value
+	username, err := s.idpProvider.storage.GetSession(ctx, sessionID)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to get IDP session", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	if username == "" {
+		// Session not found or expired
+		// Clear invalid cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     "idp_session",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
+		http.Redirect(w, r, loginURL, http.StatusFound)
+		return
+	}
+
+	// Verify user exists in DB (prevents using stale cookies after DB reset)
+	exists, err := s.idpProvider.storage.UserExists(ctx, username)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to check user existence", "username", username, "error", err)
+		// Treat error as not authenticated
+		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
+		http.Redirect(w, r, loginURL, http.StatusFound)
+		return
+	}
+	if !exists {
+		s.logger.Warn(logging.DestinationHTTP, "User from session cookie not found in DB", "username", username)
+		// Clear invalid cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     "idp_session",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		// Redirect to login
+		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
+		http.Redirect(w, r, loginURL, http.StatusFound)
+		return
+	}
 
 	// Create a new authorization request
 	ar, err := s.idpProvider.oauth2.NewAuthorizeRequest(ctx, r)
@@ -226,6 +284,10 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 			ar.GrantScope(scope)
 		}
 	}
+
+	// If this is a browser request, we should show a consent screen
+	// For now, we'll auto-approve if the user is authenticated via session
+	// In a production system, you would redirect to a consent page here
 
 	// Create the authorization response
 	response, err := s.idpProvider.oauth2.NewAuthorizeResponse(ctx, ar, session)
