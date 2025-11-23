@@ -253,6 +253,32 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 			},
 		},
 		{
+			Name:        "advertise_to_collector",
+			Description: "Advertise a ClassAd to the HTCondor collector. The UPDATE command is determined from the ad's MyType attribute if not explicitly specified.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"ad": map[string]interface{}{
+						"type":        "object",
+						"description": "ClassAd to advertise as a JSON object (e.g., {\"MyType\": \"Machine\", \"Name\": \"slot1@host\", \"State\": \"Unclaimed\"})",
+					},
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional UPDATE command (e.g., 'UPDATE_STARTD_AD'). If not specified, determined from ad's MyType",
+					},
+					"with_ack": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Request acknowledgment from collector (default: false)",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"ad"},
+			},
+		},
+		{
 			Name:        "query_job_archive",
 			Description: "Query archived job records from HTCondor (completed jobs)",
 			InputSchema: map[string]interface{}{
@@ -445,6 +471,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJobStdout(ctx, request.Arguments)
 	case "get_job_stderr":
 		result, err = s.toolGetJobStderr(ctx, request.Arguments)
+	case "advertise_to_collector":
+		result, err = s.toolAdvertiseToCollector(ctx, request.Arguments)
 	case "query_job_archive":
 		result, err = s.toolQueryJobHistory(ctx, request.Arguments)
 	case "query_job_epochs":
@@ -1027,6 +1055,81 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 			"output_type": outputType,
 			"filename":    outputFile,
 			"size":        len(outputContent),
+		},
+	}, nil
+}
+
+// toolAdvertiseToCollector handles advertise_to_collector tool calls
+func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	// Check if collector is configured
+	if s.collector == nil {
+		return nil, fmt.Errorf("collector not configured")
+	}
+
+	// Parse arguments
+	adData, ok := args["ad"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("ad must be a JSON object")
+	}
+
+	// Convert map to ClassAd
+	adJSON, err := json.Marshal(adData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal ad: %w", err)
+	}
+
+	ad := classad.New()
+	if err := json.Unmarshal(adJSON, ad); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ad: %w", err)
+	}
+
+	// Build advertise options
+	opts := &htcondor.AdvertiseOptions{
+		UseTCP: true,
+	}
+
+	// Parse optional with_ack
+	if withAck, ok := args["with_ack"].(bool); ok {
+		opts.WithAck = withAck
+	}
+
+	// Parse optional command
+	if cmdStr, ok := args["command"].(string); ok && cmdStr != "" {
+		// Import commands package if needed
+		cmd, valid := htcondor.ParseAdvertiseCommand(cmdStr)
+		if !valid {
+			return nil, fmt.Errorf("invalid command: %s", cmdStr)
+		}
+		opts.Command = cmd
+	}
+
+	// Advertise the ad
+	if err := s.collector.Advertise(ctx, ad, opts); err != nil {
+		return nil, fmt.Errorf("failed to advertise: %w", err)
+	}
+
+	// Get ad name for response
+	adName := "unknown"
+	if nameStr, ok := ad.EvaluateAttrString("Name"); ok {
+		adName = nameStr
+	}
+
+	adType := "Generic"
+	if typeStr, ok := ad.EvaluateAttrString("MyType"); ok {
+		adType = typeStr
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Successfully advertised %s ad '%s' to collector", adType, adName),
+			},
+		},
+		"metadata": map[string]interface{}{
+			"ad_name":  adName,
+			"ad_type":  adType,
+			"with_ack": opts.WithAck,
 		},
 	}, nil
 }

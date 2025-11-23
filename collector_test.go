@@ -30,14 +30,25 @@ func TestCollectorQueryAds(t *testing.T) {
 }
 
 func TestCollectorAdvertise(t *testing.T) {
+	// This test verifies that Advertise can be called with valid parameters
+	// It won't succeed without a real collector, but should not panic
 	collector := NewCollector("collector.example.com:9618")
 	ctx := context.Background()
 
 	ad := classad.New()
+	_ = ad.Set("MyType", "Generic")
 	_ = ad.Set("Name", "test")
-	err := collector.Advertise(ctx, ad, "UPDATE_AD")
+
+	// This will fail to connect, but that's expected in unit tests
+	err := collector.Advertise(ctx, ad, nil)
 	if err == nil {
-		t.Error("Expected error for unimplemented method")
+		t.Error("Expected error when connecting to non-existent collector")
+	}
+
+	// Test with nil ad
+	err = collector.Advertise(ctx, nil, nil)
+	if err == nil {
+		t.Error("Expected error for nil ad")
 	}
 }
 
