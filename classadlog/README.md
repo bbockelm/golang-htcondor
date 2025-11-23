@@ -28,7 +28,7 @@ Defines the log entry operations and types:
 - `OpType` enum for log operations (NewClassAd, DestroyClassAd, SetAttribute, etc.)
 - `LogEntry` struct representing a single log operation
 
-### collection.go  
+### collection.go
 In-memory ClassAd storage with thread-safe access:
 - `Collection` struct with RWMutex for concurrent access
 - CRUD operations: NewClassAd, DestroyClassAd, SetAttribute, DeleteAttribute
@@ -36,7 +36,7 @@ In-memory ClassAd storage with thread-safe access:
 - Auto-creates ClassAds when SetAttribute is called before NewClassAd (handles ordering)
 - Returns copies of ClassAds to prevent external modifications
 
-### parser.go  
+### parser.go
 Reads and parses HTCondor job queue log files:
 - Line-by-line log file reader with buffered I/O
 - Parses all log operations (NewClassAd, DestroyClassAd, SetAttribute, DeleteAttribute, etc.)
@@ -70,7 +70,7 @@ import (
     "context"
     "fmt"
     "time"
-    
+
     "github.com/bbockelm/golang-htcondor/classadlog"
 )
 
@@ -81,25 +81,25 @@ func main() {
         panic(err)
     }
     defer reader.Close()
-    
+
     // Initial load
     ctx := context.Background()
     if err := reader.Poll(ctx); err != nil {
         panic(err)
     }
-    
+
     // Query for running jobs
     jobs, err := reader.Query("JobStatus == 2", []string{"ClusterId", "ProcId", "Owner"})
     if err != nil {
         panic(err)
     }
-    
+
     fmt.Printf("Found %d running jobs\n", len(jobs))
-    
+
     // Poll for updates periodically
     ticker := time.NewTicker(5 * time.Second)
     defer ticker.Stop()
-    
+
     for range ticker.C {
         if err := reader.Poll(ctx); err != nil {
             fmt.Printf("Poll error: %v\n", err)

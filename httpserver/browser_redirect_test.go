@@ -12,39 +12,39 @@ import (
 // TestIsBrowserRequest tests the browser detection logic
 func TestIsBrowserRequest(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		acceptHeader string
-		expected    bool
+		expected     bool
 	}{
 		{
-			name:        "Browser request with text/html",
+			name:         "Browser request with text/html",
 			acceptHeader: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "Browser request with only text/html",
+			name:         "Browser request with only text/html",
 			acceptHeader: "text/html",
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "API request with JSON",
+			name:         "API request with JSON",
 			acceptHeader: "application/json",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "API request with XML",
+			name:         "API request with XML",
 			acceptHeader: "application/xml",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "Empty Accept header",
+			name:         "Empty Accept header",
 			acceptHeader: "",
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "Wildcard Accept",
+			name:         "Wildcard Accept",
 			acceptHeader: "*/*",
-			expected:    false,
+			expected:     false,
 		},
 	}
 
