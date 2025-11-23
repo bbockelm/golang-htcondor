@@ -25,8 +25,14 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// Welcome page at root
 	mux.HandleFunc("/", s.handleWelcome)
 
-	// OpenAPI schema
+	// Login endpoint
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
+
+	// OpenAPI schema and Swagger UI
 	mux.Handle("/openapi.json", cors(http.HandlerFunc(s.handleOpenAPISchema)))
+	mux.HandleFunc("/docs", s.handleSwaggerUI)
+	mux.HandleFunc("/docs/oauth2-redirect", s.handleSwaggerOAuth2Redirect)
 
 	// Job management endpoints
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(s.handleJobs)))
@@ -95,7 +101,4 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// Health and readiness endpoints for Kubernetes
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
-
-	// Logout endpoint
-	mux.HandleFunc("/logout", s.handleLogout)
 }

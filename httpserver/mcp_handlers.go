@@ -237,27 +237,38 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Method 2: OAuth2 SSO flow
-	if username == "" && s.oauth2Config != nil {
-		// Generate state parameter
-		state, err := s.oauth2StateStore.GenerateState()
-		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+	if username == "" {
+		// Check if user has a session
+		if session, ok := s.getSessionFromRequest(r); ok {
+			username = session.Username
+			s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+		}
+	}
+
+	if username == "" {
+		// If OAuth2 SSO is configured, redirect to upstream IDP
+		if s.oauth2Config != nil {
+			// Generate state parameter
+			state, err := s.oauth2StateStore.GenerateState()
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				return
+			}
+
+			// Store authorize request for later retrieval
+			s.oauth2StateStore.Store(state, ar)
+
+			// Build authorization URL
+			authURL := s.oauth2Config.AuthCodeURL(state)
+
+			s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
+				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
+
+			// Redirect to IDP
+			http.Redirect(w, r, authURL, http.StatusFound)
 			return
 		}
-
-		// Store authorize request for later retrieval
-		s.oauth2StateStore.Store(state, ar)
-
-		// Build authorization URL
-		authURL := s.oauth2Config.AuthCodeURL(state)
-
-		s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
-			"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
-
-		// Redirect to IDP
-		http.Redirect(w, r, authURL, http.StatusFound)
-		return
 	}
 
 	// Method 3: Query parameter (backward compatibility for testing)
@@ -904,7 +915,12 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 		if username == "" {
 			// Check for IDP session cookie
 			if cookie, err := r.Cookie("idp_session"); err == nil {
-				username = cookie.Value
+				// Verify session
+				sessionID := cookie.Value
+				user, err := s.idpProvider.storage.GetSession(r.Context(), sessionID)
+				if err == nil && user != "" {
+					username = user
+				}
 			}
 		}
 

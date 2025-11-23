@@ -1390,8 +1390,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogout handles POST /logout endpoint to clear session cookies
+// Also supports GET for browser-based logout
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
@@ -1427,6 +1428,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			Secure:   r.TLS != nil,
 			SameSite: http.SameSiteLaxMode,
 		})
+	}
+
+	if isBrowserRequest(r) {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
@@ -2089,6 +2095,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context to get user information
 	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "WhoAmI authentication failed", "error", err)
 		// Authentication failed - return unauthenticated response
 		s.writeJSON(w, http.StatusOK, WhoAmIResponse{
 			Authenticated: false,
@@ -2380,6 +2387,7 @@ func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
 		html += fmt.Sprintf(`
     <div class="status authenticated">
         <strong>✓ Authenticated</strong> as <code>%s</code>
+        <a href="/logout" class="login-btn" style="background: #e74c3c; margin-left: 10px;">Log Out</a>
     </div>
 `, username)
 	} else {
@@ -2391,7 +2399,12 @@ func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
 		if s.oauth2Config != nil {
 			html += `
     <p>To access protected resources, please log in:</p>
-    <a href="/api/v1/jobs" class="login-btn">Log In</a>
+    <a href="/login" class="login-btn">Log In</a>
+`
+		} else if s.idpProvider != nil {
+			html += `
+    <p>To access protected resources, please log in:</p>
+    <a href="/login" class="login-btn">Log In</a>
 `
 		}
 	}
@@ -2406,12 +2419,14 @@ func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
         <li><code>GET /api/v1/whoami</code> - Check authentication status</li>
         <li><code>GET /api/v1/ping</code> - Ping collector and schedd</li>
         <li><code>GET /openapi.json</code> - OpenAPI schema</li>
+        <li><code>GET /docs</code> - Swagger UI documentation</li>
     </ul>
 
     <h2>Documentation</h2>
     <p>For more information about the HTCondor HTTP API, see:</p>
     <ul>
-        <li><a href="/openapi.json">OpenAPI Specification</a></li>
+        <li><a href="/docs">Swagger UI Documentation</a></li>
+        <li><a href="/openapi.json">OpenAPI Specification (JSON)</a></li>
         <li><a href="https://htcondor.readthedocs.io/">HTCondor Documentation</a></li>
     </ul>
 </body>

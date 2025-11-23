@@ -115,6 +115,7 @@ func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
 		compose.OpenIDConnectExplicitFactory,
 		compose.OAuth2TokenIntrospectionFactory,
 		compose.OAuth2TokenRevocationFactory,
+		compose.OAuth2PKCEFactory,
 	)
 
 	return &OAuth2Provider{
@@ -164,4 +165,14 @@ func DefaultOpenIDConnectSession(username string) *openid.DefaultSession {
 		Headers: &jwt.Headers{},
 		Subject: username,
 	}
+}
+
+// IntrospectToken validates an access token and returns the session
+func (p *OAuth2Provider) IntrospectToken(ctx context.Context, token string) (fosite.Session, error) {
+	session := DefaultOpenIDConnectSession("")
+	_, _, err := p.oauth2.IntrospectToken(ctx, token, fosite.AccessToken, session, []string{}...)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
 }
