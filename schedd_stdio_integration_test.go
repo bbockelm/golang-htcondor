@@ -25,10 +25,10 @@ import (
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestStdioFilesIntegration(t *testing.T) {
 	// Setup HTCondor test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -238,10 +238,10 @@ queue
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestStdioFilesFromTarIntegration(t *testing.T) {
 	// Setup HTCondor test harness
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 

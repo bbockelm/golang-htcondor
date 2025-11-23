@@ -20,10 +20,10 @@ func TestScheddRemoveJobsIntegration(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -112,10 +112,10 @@ func TestScheddRemoveJobsByIDIntegration(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -199,10 +199,10 @@ func TestScheddRemoveNonExistentJob(t *testing.T) {
 	}
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 

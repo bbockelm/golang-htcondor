@@ -33,7 +33,7 @@ func TestScheddQueryRateLimit(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	h := setupCondorHarness(t)
+	h := SetupCondorHarness(t)
 
 	// Print logs on failure to help diagnose CI issues
 	defer func() {
@@ -195,7 +195,7 @@ func TestCollectorQueryRateLimit(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	h := setupCondorHarness(t)
+	h := SetupCondorHarness(t)
 
 	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
 	// Extract the host:port from within the angle brackets

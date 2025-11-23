@@ -2,9 +2,11 @@ package classadlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
@@ -16,6 +18,12 @@ type Reader struct {
 	prober     *Prober
 	collection *Collection
 	mu         sync.RWMutex // Protects collection during updates
+
+	// Watch support
+	watchCtx    context.Context
+	watchCancel context.CancelFunc
+	watchCh     chan struct{}
+	watchMu     sync.Mutex // Protects watch state
 }
 
 // NewReader creates a new ClassAd log reader
@@ -82,7 +90,7 @@ func (r *Reader) fullReload(ctx context.Context) error {
 	if err := r.parser.Open(); err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer r.parser.Close()
+	defer func() { _ = r.parser.Close() }()
 
 	for {
 		// Check context cancellation
@@ -93,7 +101,7 @@ func (r *Reader) fullReload(ctx context.Context) error {
 		}
 
 		entry, err := r.parser.ReadEntry()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -123,7 +131,7 @@ func (r *Reader) incrementalUpdate(ctx context.Context) error {
 	if err := r.parser.Open(); err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer r.parser.Close()
+	defer func() { _ = r.parser.Close() }()
 
 	for {
 		// Check context cancellation
@@ -134,7 +142,7 @@ func (r *Reader) incrementalUpdate(ctx context.Context) error {
 		}
 
 		entry, err := r.parser.ReadEntry()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -214,5 +222,85 @@ func (r *Reader) Len() int {
 
 // Close closes the reader and releases resources
 func (r *Reader) Close() error {
+	// Stop watching if active
+	r.watchMu.Lock()
+	if r.watchCancel != nil {
+		r.watchCancel()
+		r.watchCancel = nil
+	}
+	r.watchMu.Unlock()
+
 	return r.parser.Close()
+}
+
+// Watch starts monitoring the log file for changes and returns a channel
+// that will receive notifications when the file is updated.
+// The channel is closed when the context is cancelled or Close() is called.
+// Only one watcher can be active at a time; calling Watch multiple times
+// will cancel the previous watcher.
+//
+// Example usage:
+//
+//	ctx := context.Background()
+//	updates := reader.Watch(ctx, 1*time.Second)
+//	for {
+//	    select {
+//	    case <-updates:
+//	        // File was updated, call Poll() to read changes
+//	        if err := reader.Poll(ctx); err != nil {
+//	            log.Printf("Poll error: %v", err)
+//	        }
+//	    case <-ctx.Done():
+//	        return
+//	    }
+//	}
+func (r *Reader) Watch(ctx context.Context, pollInterval time.Duration) <-chan struct{} {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+
+	// Cancel previous watcher if any
+	if r.watchCancel != nil {
+		r.watchCancel()
+	}
+
+	// Create new context and channel
+	r.watchCtx, r.watchCancel = context.WithCancel(ctx)
+	r.watchCh = make(chan struct{}, 1) // Buffered to avoid blocking
+
+	// Start background goroutine to monitor file
+	go r.watchLoop(r.watchCtx, pollInterval)
+
+	return r.watchCh
+}
+
+// watchLoop monitors the file for changes and sends notifications
+func (r *Reader) watchLoop(ctx context.Context, pollInterval time.Duration) {
+	defer close(r.watchCh)
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Check if file has changed
+			result, err := r.prober.Probe(r.filename, r.parser.GetNextOffset())
+			if err != nil {
+				// Ignore probe errors in watch loop
+				continue
+			}
+
+			// Notify if there are changes
+			if result != ProbeNoChange {
+				select {
+				case r.watchCh <- struct{}{}:
+					// Notification sent
+				default:
+					// Channel already has pending notification, skip
+				}
+			}
+		}
+	}
 }

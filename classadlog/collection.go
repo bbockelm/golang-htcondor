@@ -1,3 +1,4 @@
+// Package classadlog provides functionality for reading and parsing HTCondor job_queue.log files.
 package classadlog
 
 import (
@@ -113,14 +114,14 @@ func (c *Collection) Get(key string) *classad.ClassAd {
 
 	// Return a copy to prevent external modifications
 	// We create a new ClassAd and copy all attributes
-	copy := classad.New()
+	copiedAd := classad.New()
 	attrs := ad.GetAttributes()
 	for _, attrName := range attrs {
 		if expr, ok := ad.Lookup(attrName); ok {
-			copy.InsertExpr(attrName, expr)
+			copiedAd.InsertExpr(attrName, expr)
 		}
 	}
-	return copy
+	return copiedAd
 }
 
 // Query returns ClassAds matching the constraint

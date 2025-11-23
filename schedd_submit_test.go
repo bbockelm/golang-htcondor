@@ -20,10 +20,10 @@ func TestScheddSubmitIntegration(t *testing.T) {
 	t.Logf("Found condor_master at: %s", masterPath)
 
 	// Set up mini HTCondor environment
-	harness := setupCondorHarness(t)
+	harness := SetupCondorHarness(t)
 
 	// Wait for daemons to start
-	if err := harness.waitForDaemons(); err != nil {
+	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func parseCollectorSinfulString(addr string) string {
 //    - CONDOR_CloseSocket (509)
 //
 // 4. Test Infrastructure Updates:
-//    - Update condorTestHarness to track schedd address (similar to collector)
+//    - Update CondorTestHarness to track schedd address (similar to collector)
 //    - Add methods to get schedd address from harness
 //    - Ensure schedd is fully initialized before attempting connections
 //
