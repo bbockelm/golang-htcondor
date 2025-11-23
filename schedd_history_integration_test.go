@@ -89,7 +89,7 @@ queue
 	}
 
 	if !leftQueue {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		harness.printShadowLog()
 		harness.printStarterLogs()
 		t.Fatalf("Job did not leave queue in time after %v", maxWait)

@@ -7,15 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // TestHTTPEditJobIntegration tests editing a job via HTTP API
@@ -37,25 +38,83 @@ func TestHTTPEditJobIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverScheddForTest(t, harness)
+	// Locate schedd using collector
+	addr := harness.GetCollectorAddr()
+
+	collector := htcondor.NewCollector(addr)
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := htcondor.NewSchedd("local", addr)
+	schedd := htcondor.NewSchedd(location.Name, location.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Setup test server
-	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
+	// Test user for authentication
+	testUser := "testuser"
+
+	// Setup signing key for user header authentication
+	passwordsDir := filepath.Join(harness.GetSpoolDir(), "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	// Generate a simple signing key for testing
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to create signing key: %v", err)
 	}
 
-	server := &Server{
-		logger: logger,
-		schedd: schedd,
+	// Setup test server
+	server, err := NewServer(Config{
+		ListenAddr:     "127.0.0.1:0",
+		ScheddName:     location.Name,
+		ScheddAddr:     location.Address,
+		UserHeader:     "X-Test-User", // Enable header-based auth for testing
+		SigningKeyPath: signingKeyPath,
+		TrustDomain:    "test.htcondor.org",
+		UIDDomain:      "test.htcondor.org",
+		OAuth2DBPath:   filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
+
+	// Start server in background
+	serverErrChan := make(chan error, 1)
+	go func() {
+		serverErrChan <- server.Start()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get actual server address
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Ensure server is stopped at the end
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Logf("Warning: server shutdown error: %v", err)
+		}
+	}()
+
+	// Create HTTP client
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	// Submit a test job first
 	submitFile := `
@@ -98,14 +157,22 @@ queue
 			t.Fatalf("Failed to marshal request: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/jobs/%s", jobID), bytes.NewReader(bodyBytes))
+		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, jobID), bytes.NewReader(bodyBytes))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
 		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
+		req.Header.Set("X-Test-User", testUser)
 
-		server.handleEditJob(w, req, jobID)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
 
-		if w.Code != http.StatusOK {
-			t.Errorf("HTTP status = %d, want %d. Body: %s", w.Code, http.StatusOK, w.Body.String())
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("HTTP status = %d, want %d. Body: %s", resp.StatusCode, http.StatusOK, string(body))
 		}
 
 		// Verify the changes
@@ -150,16 +217,23 @@ queue
 			t.Fatalf("Failed to marshal request: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodPatch, "/api/v1/jobs/999999.0", bytes.NewReader(bodyBytes))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		server.handleEditJob(w, req, "999999.0")
-
-		if w.Code == http.StatusOK {
-			t.Errorf("Expected error for invalid job ID, got status %d", w.Code)
+		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/v1/jobs/999999.0", baseURL), bytes.NewReader(bodyBytes))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
 		}
-		t.Logf("✓ Correctly rejected invalid job ID with status %d", w.Code)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Test-User", testUser)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("Expected error for invalid job ID, got status %d", resp.StatusCode)
+		}
+		t.Logf("✓ Correctly rejected invalid job ID with status %d", resp.StatusCode)
 	})
 
 	// Test editing immutable attribute
@@ -175,16 +249,23 @@ queue
 			t.Fatalf("Failed to marshal request: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/jobs/%s", jobID), bytes.NewReader(bodyBytes))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		server.handleEditJob(w, req, jobID)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("HTTP status = %d, want %d for immutable attribute", w.Code, http.StatusBadRequest)
+		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, jobID), bytes.NewReader(bodyBytes))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
 		}
-		t.Logf("✓ Correctly rejected immutable attribute with status %d", w.Code)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Test-User", testUser)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("HTTP status = %d, want %d for immutable attribute", resp.StatusCode, http.StatusBadRequest)
+		}
+		t.Logf("✓ Correctly rejected immutable attribute with status %d", resp.StatusCode)
 	})
 }
 
@@ -207,25 +288,88 @@ func TestHTTPBulkEditJobsIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverScheddForTest(t, harness)
+	// Locate schedd using collector
+	addr := harness.GetCollectorAddr()
+	addr = strings.TrimPrefix(addr, "<")
+	if idx := strings.Index(addr, "?"); idx > 0 {
+		addr = addr[:idx]
+	}
+	addr = strings.TrimSuffix(addr, ">")
+
+	collector := htcondor.NewCollector(addr)
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := htcondor.NewSchedd("local", addr)
+	schedd := htcondor.NewSchedd(location.Name, location.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Setup test server
-	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
+	// Test user for authentication
+	testUser := "testuser"
+
+	// Setup signing key for user header authentication
+	passwordsDir := filepath.Join(harness.GetSpoolDir(), "passwords.d")
+	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
+		t.Fatalf("Failed to create passwords.d directory: %v", err)
+	}
+	signingKeyPath := filepath.Join(passwordsDir, "POOL")
+	// Generate a simple signing key for testing
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("Failed to create signing key: %v", err)
 	}
 
-	server := &Server{
-		logger: logger,
-		schedd: schedd,
+	// Setup test server
+	server, err := NewServer(Config{
+		ListenAddr:     "127.0.0.1:0",
+		ScheddName:     location.Name,
+		ScheddAddr:     location.Address,
+		UserHeader:     "X-Test-User", // Enable header-based auth for testing
+		SigningKeyPath: signingKeyPath,
+		TrustDomain:    "test.htcondor.org",
+		UIDDomain:      "test.htcondor.org",
+		OAuth2DBPath:   filepath.Join(harness.GetSpoolDir(), "oauth2.db"), // Use temp directory for database
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
+
+	// Start server in background
+	serverErrChan := make(chan error, 1)
+	go func() {
+		serverErrChan <- server.Start()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get actual server address
+	actualAddr := server.GetAddr()
+	if actualAddr == "" {
+		t.Fatalf("Failed to get server address")
+	}
+	baseURL := fmt.Sprintf("http://%s", actualAddr)
+	t.Logf("HTTP server listening on: %s", baseURL)
+
+	// Ensure server is stopped at the end
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Logf("Warning: server shutdown error: %v", err)
+		}
+	}()
+
+	// Create HTTP client
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	// Submit multiple test jobs
 	submitFile := `
@@ -238,7 +382,7 @@ queue 3
 `
 	clusterID, err := schedd.Submit(ctx, submitFile)
 	if err != nil {
-		harness.printScheddLogs(t)
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit test jobs: %v", err)
 	}
 
@@ -270,19 +414,27 @@ queue 3
 			t.Fatalf("Failed to marshal request: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodPatch, "/api/v1/jobs", bytes.NewReader(bodyBytes))
+		req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/v1/jobs", baseURL), bytes.NewReader(bodyBytes))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
 		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
+		req.Header.Set("X-Test-User", testUser)
 
-		server.handleBulkEditJobs(w, req)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
 
-		if w.Code != http.StatusOK {
-			t.Fatalf("HTTP status = %d, want %d. Body: %s", w.Code, http.StatusOK, w.Body.String())
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("HTTP status = %d, want %d. Body: %s", resp.StatusCode, http.StatusOK, string(body))
 		}
 
 		// Parse response
 		var response map[string]interface{}
-		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
@@ -319,15 +471,4 @@ queue 3
 			}
 		}
 	})
-}
-
-// Helper function to discover schedd address from harness
-func discoverScheddForTest(t *testing.T, harness *htcondor.CondorTestHarness) string {
-	addr := harness.GetCollectorAddr()
-	addr = strings.TrimPrefix(addr, "<")
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx]
-	}
-	addr = strings.TrimSuffix(addr, ">")
-	return addr
 }

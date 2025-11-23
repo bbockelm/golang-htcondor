@@ -39,7 +39,7 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	defer func() {
 		if t.Failed() {
 			t.Log("Test failed, printing HTCondor logs for diagnosis:")
-			h.printScheddLog()
+			h.PrintScheddLog()
 			h.printMasterLog()
 			h.printCollectorLog()
 		}

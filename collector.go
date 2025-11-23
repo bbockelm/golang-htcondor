@@ -785,9 +785,61 @@ func sendGracefulHangup(ctx context.Context, cedarStream *stream.Stream) error {
 }
 
 // LocateDaemon locates a daemon by querying the collector
-func (c *Collector) LocateDaemon(_ context.Context, _ string, _ string) (*DaemonLocation, error) {
-	// TODO: Implement daemon location logic
-	return nil, fmt.Errorf("not implemented")
+// daemonType specifies the type of daemon to locate (e.g., "Schedd", "Startd", "Master")
+// name is the name of the daemon to locate (optional, pass empty string to find any)
+func (c *Collector) LocateDaemon(ctx context.Context, daemonType string, name string) (*DaemonLocation, error) {
+	// Construct constraint to match the daemon name if provided
+	constraint := ""
+	if name != "" {
+		constraint = fmt.Sprintf("Name == %s", classad.Quote(name))
+	}
+
+	// Query for at most one result with projection on Name and MyAddress
+	projection := []string{"Name", "MyAddress"}
+	opts := &QueryOptions{
+		Limit:      1,
+		Projection: projection,
+	}
+
+	ads, _, err := c.QueryAdsWithOptions(ctx, daemonType, constraint, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query collector for %s daemon: %w", daemonType, err)
+	}
+
+	if len(ads) == 0 {
+		if name != "" {
+			return nil, fmt.Errorf("daemon %s of type %s not found", name, daemonType)
+		}
+		return nil, fmt.Errorf("no daemon of type %s found", daemonType)
+	}
+
+	ad := ads[0]
+
+	// Extract Name attribute
+	daemonName := ""
+	if nameExpr, ok := ad.Lookup("Name"); ok {
+		nameStr := nameExpr.String()
+		// Remove quotes if present
+		daemonName = strings.Trim(nameStr, "\"")
+	}
+
+	// Extract MyAddress attribute
+	address := ""
+	if addrExpr, ok := ad.Lookup("MyAddress"); ok {
+		addrStr := addrExpr.String()
+		// Remove quotes if present
+		address = strings.Trim(addrStr, "\"")
+	}
+
+	if address == "" {
+		return nil, fmt.Errorf("daemon ad missing MyAddress attribute")
+	}
+
+	return &DaemonLocation{
+		Name:    daemonName,
+		Address: address,
+		Pool:    c.address,
+	}, nil
 }
 
 // DaemonLocation represents the location information for a daemon

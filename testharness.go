@@ -62,6 +62,31 @@ func SetupCondorHarness(t TestingT) *CondorTestHarness {
 		binDir = filepath.Join(filepath.Dir(sbinDir), "bin")
 	}
 
+	// Determine LIBEXEC directory by looking for condor_shared_port
+	var libexecDir string
+	sharedPortPath, err := exec.LookPath("condor_shared_port")
+	if err == nil {
+		// Found condor_shared_port, use its parent directory
+		libexecDir = filepath.Dir(sharedPortPath)
+		t.Logf("Found condor_shared_port at %s, using LIBEXEC=%s", sharedPortPath, libexecDir)
+	} else {
+		// Not found in PATH, try deriving from condor_master location
+		derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
+
+		// Check if the derived path exists
+		if _, err := os.Stat(filepath.Join(derivedLibexec, "condor_shared_port")); err == nil {
+			libexecDir = derivedLibexec
+			t.Logf("Using derived LIBEXEC=%s (from condor_master location)", libexecDir)
+		} else {
+			// Try standard location /usr/libexec/condor
+			stdLibexec := "/usr/libexec/condor"
+			if _, err := os.Stat(filepath.Join(stdLibexec, "condor_shared_port")); err == nil {
+				libexecDir = stdLibexec
+				t.Logf("Using standard LIBEXEC=%s", libexecDir)
+			}
+		}
+	}
+
 	// Also check for other required daemons
 	requiredDaemons := []string{"condor_collector", "condor_schedd", "condor_negotiator", "condor_startd"}
 	for _, daemon := range requiredDaemons {
@@ -94,6 +119,12 @@ func SetupCondorHarness(t TestingT) *CondorTestHarness {
 	h.collectorAddr = "127.0.0.1:0" // Use dynamic port
 	h.scheddName = fmt.Sprintf("test_schedd_%d", os.Getpid())
 
+	// Build LIBEXEC line if we found a valid directory
+	libexecLine := ""
+	if libexecDir != "" {
+		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
+	}
+
 	configContent := fmt.Sprintf(`
 # Mini HTCondor configuration for integration testing
 CONDOR_HOST = 127.0.0.1
@@ -102,7 +133,7 @@ COLLECTOR_HOST = $(CONDOR_HOST)
 # Daemon binary locations
 SBIN = %s
 BIN = %s
-
+%s
 # Use local directory structure
 LOCAL_DIR = %s
 LOG = $(LOCAL_DIR)/log
@@ -113,8 +144,7 @@ LOCK = $(LOCAL_DIR)/lock
 # Daemon list - run collector, schedd, negotiator, and startd
 DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, NEGOTIATOR, STARTD
 
-# Disable shared port for testing to avoid complexity
-USE_SHARED_PORT = False
+USE_SHARED_PORT = True
 
 # Collector configuration
 COLLECTOR_NAME = test_collector
@@ -167,10 +197,10 @@ SCHEDD.ALLOW_ADMINISTRATOR = *
 BIND_ALL_INTERFACES = False
 NETWORK_INTERFACE = 127.0.0.1
 
-	# Logging configuration
-	SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY D_SYSCALLS
-	SCHEDD_LOG = $(LOG)/ScheddLog
-	MAX_SCHEDD_LOG = 10000000
+# Logging configuration
+SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY D_SYSCALLS
+SCHEDD_LOG = $(LOG)/ScheddLog
+MAX_SCHEDD_LOG = 10000000
 
 # Fast polling for testing
 POLLING_INTERVAL = 5
@@ -180,7 +210,7 @@ UPDATE_INTERVAL = 5
 # Disable unwanted features for testing
 ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
-`, sbinDir, binDir, h.tmpDir, h.scheddName)
+`, sbinDir, binDir, libexecLine, h.tmpDir, h.scheddName)
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
@@ -293,8 +323,8 @@ func (h *CondorTestHarness) printStartdLog() {
 	h.t.Logf("=== StartLog contents ===\n%s\n=== End StartLog ===", string(data))
 }
 
-// printScheddLog prints the schedd log contents for debugging
-func (h *CondorTestHarness) printScheddLog() {
+// PrintScheddLog prints the schedd log contents for debugging
+func (h *CondorTestHarness) PrintScheddLog() {
 	scheddLog := filepath.Join(h.logDir, "ScheddLog")
 	data, err := os.ReadFile(scheddLog) //nolint:gosec // Test code reading test logs
 	if err != nil {

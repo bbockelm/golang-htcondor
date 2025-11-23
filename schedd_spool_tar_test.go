@@ -94,7 +94,7 @@ queue
 	// Use SubmitRemote to get procAds with all necessary attributes
 	clusterIDInt, procAds, err := schedd.SubmitRemote(submitCtx, submitDesc)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -141,7 +141,7 @@ queue
 
 	err = schedd.SpoolJobFilesFromTar(spoolCtx, procAds, bytes.NewReader(tarBuf.Bytes()))
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to spool files: %v", err)
 	}
 
@@ -219,7 +219,7 @@ queue 2
 	// Use SubmitRemote to get procAds with all necessary attributes
 	clusterIDInt, procAds, err := schedd.SubmitRemote(submitCtx, submitDesc)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit jobs: %v", err)
 	}
 
@@ -262,7 +262,7 @@ queue 2
 
 		err = schedd.SpoolJobFilesFromTar(spoolCtx, []*classad.ClassAd{procAd}, bytes.NewReader(tarBuf.Bytes()))
 		if err != nil {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			t.Fatalf("Failed to spool files for proc %d: %v", i, err)
 		}
 
@@ -429,7 +429,7 @@ queue
 	// Use SubmitRemote to get procAds with all necessary attributes
 	clusterIDInt, procAds, err := schedd.SubmitRemote(submitCtx, submitDesc)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -475,7 +475,7 @@ queue
 
 	err = schedd.SpoolJobFilesFromTar(spoolCtx, procAds, bytes.NewReader(tarBuf.Bytes()))
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to spool files: %v", err)
 	}
 
@@ -554,7 +554,7 @@ queue
 	// Use SubmitRemote to get procAds with all necessary attributes
 	clusterIDInt, procAds, err := schedd.SubmitRemote(submitCtx, submitDesc)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -599,7 +599,7 @@ queue
 
 	err = schedd.SpoolJobFilesFromTar(spoolCtx, procAds, bytes.NewReader(tarBuf.Bytes()))
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to spool files: %v", err)
 	}
 

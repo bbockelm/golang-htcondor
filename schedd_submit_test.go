@@ -83,7 +83,7 @@ func TestScheddSubmitIntegration(t *testing.T) {
 		// Note: NewQmgmtConnection calls GetCapabilities which implicitly starts a transaction
 		qmgmt, err := NewQmgmtConnection(ctx, scheddAddr)
 		if err != nil {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			t.Fatalf("Failed to connect to schedd: %v", err)
 		}
 		defer func() {
@@ -99,12 +99,12 @@ func TestScheddSubmitIntegration(t *testing.T) {
 		// We can't set arbitrary owners unless we're a superuser
 		owner := qmgmt.authenticatedUser
 		if owner == "" {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			_ = qmgmt.AbortTransaction(ctx)
 			t.Fatal("No authenticated user from QMGMT connection")
 		}
 		if err := qmgmt.SetEffectiveOwner(ctx, owner); err != nil {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			_ = qmgmt.AbortTransaction(ctx)
 			t.Fatalf("Failed to set effective owner: %v", err)
 		}

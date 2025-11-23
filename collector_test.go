@@ -58,6 +58,6 @@ func TestCollectorLocateDaemon(t *testing.T) {
 
 	_, err := collector.LocateDaemon(ctx, "Schedd", "test_schedd")
 	if err == nil {
-		t.Error("Expected error for unimplemented method")
+		t.Error("Expected error when connecting to non-existent collector")
 	}
 }

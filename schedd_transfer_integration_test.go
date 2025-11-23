@@ -112,7 +112,7 @@ queue
 	t.Logf("Submitting job remotely...")
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, submitFile)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -373,7 +373,7 @@ queue
 	t.Logf("Submitting job remotely...")
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, submitFile)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -638,7 +638,7 @@ queue
 	t.Logf("Submitting job remotely...")
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, submitFile)
 	if err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to submit job: %v", err)
 	}
 
@@ -662,7 +662,7 @@ queue
 	defer spoolCancel()
 
 	if err := schedd.SpoolJobFilesFromFS(spoolCtx, procAds, testFS); err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to spool files: %v", err)
 	}
 
@@ -707,7 +707,7 @@ queue
 
 	if !jobCompleted {
 		// Print schedd log for debugging
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 
 		// Query the job ad to see what attributes are set
 		t.Logf("Querying job ad for cluster %d...", clusterID)
@@ -775,7 +775,7 @@ queue
 
 	// Wait for download to complete
 	if err := <-errChan; err != nil {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		t.Fatalf("Failed to download job sandbox: %v", err)
 	}
 
