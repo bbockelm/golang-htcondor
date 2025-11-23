@@ -47,8 +47,81 @@ type TokenFetchConfig struct {
 	ClientSecret string
 }
 
+// printTokenFetchHelp prints comprehensive help for the token fetch command
+func printTokenFetchHelp() {
+	helpText := `USAGE:
+    htcondor-api token fetch <issuer-url> [OPTIONS]
+
+DESCRIPTION:
+    Fetch an OAuth2 access token using the device code flow (RFC 8628).
+    This command initiates a device authorization flow where you'll receive
+    a verification URL to authenticate in your browser. After successful
+    authentication, the token is stored locally for future use.
+
+ARGUMENTS:
+    <issuer-url>    OAuth2 issuer URL (e.g., https://localhost:8080)
+
+OPTIONS:
+    --trust-domain DOMAIN
+                    Trust domain for the token. If not specified, defaults
+                    to the hostname from the issuer URL.
+
+    --scopes SCOPES
+                    Comma-separated list of OAuth2 scopes to request.
+                    Scopes are automatically transformed to condor:/ format.
+
+                    Default scopes:
+                      - openid (OpenID Connect identity)
+                      - mcp:read (MCP read access)
+                      - mcp:write (MCP write access)
+                      - condor:/READ (HTCondor read access)
+                      - condor:/WRITE (HTCondor write access)
+
+    --help, -h      Show this help message
+
+EXAMPLES:
+    # Basic usage - fetch token with default scopes
+    htcondor-api token fetch https://localhost:8080
+
+    # Specify custom trust domain
+    htcondor-api token fetch https://localhost:8080 --trust-domain my-domain.com
+
+    # Request specific scopes (automatically prefixed with condor:/)
+    htcondor-api token fetch https://localhost:8080 --scopes READ,WRITE,ADVERTISE
+
+    # Request custom MCP scopes
+    htcondor-api token fetch https://localhost:8080 --scopes mcp:admin,condor:/ADMINISTRATOR
+
+TOKEN STORAGE:
+    Tokens are stored in ~/.condor/token_info.json and automatically refreshed
+    when they expire. Each token is associated with its trust domain.
+
+AUTHENTICATION FLOW:
+    1. Command initiates device authorization request
+    2. You receive a verification URL and user code
+    3. Visit the URL in your browser and enter the code
+    4. Authenticate and consent to the requested scopes
+    5. Token is automatically retrieved and stored
+
+SEE ALSO:
+    htcondor-api token list    List all stored tokens
+    htcondor-api token delete  Delete a stored token
+`
+	fmt.Print(helpText)
+}
+
 // runTokenFetch implements the "token fetch" subcommand
+//
+//nolint:gocyclo // CLI command handlers are inherently complex
 func runTokenFetch(args []string) error {
+	// Check for help flag
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			printTokenFetchHelp()
+			return nil
+		}
+	}
+
 	// Parse flags for token fetch
 	if len(args) < 1 {
 		return fmt.Errorf("usage: htcondor-api token fetch <issuer-url> [--trust-domain DOMAIN] [--scopes SCOPES]")
