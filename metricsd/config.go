@@ -270,7 +270,8 @@ func NewCollectorMetricsCollector(collector *htcondor.Collector, configDir strin
 	}, nil
 }
 
-// Collect gathers metrics based on the metric definitions
+// Collect gathers metrics based on the metric definitions using streaming API
+// Each ad type is queried only once per collection cycle, processing ads one at a time
 func (c *CollectorMetricsCollector) Collect(ctx context.Context) ([]Metric, error) {
 	metrics := make([]Metric, 0)
 
@@ -293,7 +294,7 @@ func (c *CollectorMetricsCollector) Collect(ctx context.Context) ([]Metric, erro
 		}
 	}
 
-	// Query for each type
+	// Query for each type - ONLY ONCE per cycle
 	adTypes := []string{"Scheduler", "Negotiator", "Collector", "Startd"}
 
 	for _, adType := range adTypes {
@@ -305,20 +306,27 @@ func (c *CollectorMetricsCollector) Collect(ctx context.Context) ([]Metric, erro
 			continue
 		}
 
-		// Query collector for this type
-		ads, _, err := c.collector.QueryAdsWithOptions(ctx, adType, "", nil)
+		// Query collector for this type using streaming API
+		// Process one ad at a time without buffering
+		resultCh, err := c.collector.QueryAdsStream(ctx, adType, "", nil, -1, nil)
 		if err != nil {
 			// Continue with other types
 			continue
 		}
 
-		// Process each ad
-		for _, ad := range ads {
+		// Process ads as they arrive - no buffering
+		for result := range resultCh {
+			if result.Err != nil {
+				// Log error but continue
+				break
+			}
+			ad := result.Ad
+
 			myType, _ := ad.EvaluateAttrString("MyType")
 			name, _ := ad.EvaluateAttrString("Name")
 			machine, _ := ad.EvaluateAttrString("Machine")
 
-			// Process each metric definition
+			// Process each metric definition for this ad
 			for _, def := range relevantDefs {
 				if !def.matchesTargetType(myType) {
 					continue

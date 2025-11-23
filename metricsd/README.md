@@ -4,11 +4,15 @@ The `metricsd` package provides a flexible metrics collection and export system 
 
 ## Features
 
+- **Streaming API**: Uses HTCondor's streaming APIs to process ClassAds one at a time without buffering large result sets in memory
+- **Background Collection**: Automatically launches a background goroutine for periodic metric collection after the first query
+- **Configurable Query Interval**: Control how often metrics are collected from HTCondor (default: 60 seconds)
+- **Pre-calculated Results**: Subsequent metric scrapes return cached results, avoiding expensive collector queries
 - **Flexible Collector Interface**: Implement custom collectors to gather any metrics
 - **Built-in Collectors**:
-  - `PoolCollector`: Collects HTCondor pool-wide metrics (machines, jobs, resources)
+  - `PoolCollector`: Collects HTCondor pool-wide metrics (machines, jobs, resources) using streaming API
   - `ProcessCollector`: Collects process-level metrics (memory, goroutines)
-  - `CollectorMetricsCollector`: Configuration-driven collector using HTCondor ClassAd metric definitions
+  - `CollectorMetricsCollector`: Configuration-driven collector using HTCondor ClassAd metric definitions with streaming API
 - **HTCondor-Compatible Configuration**:
   - ClassAd-based metric definitions (compatible with condor_gangliad)
   - Embedded default metrics (136 metrics)
@@ -19,9 +23,24 @@ The `metricsd` package provides a flexible metrics collection and export system 
 - **Metric Caching**: Configurable TTL-based caching to reduce collection overhead
 - **Thread-Safe**: Safe for concurrent access from multiple goroutines
 
+## Architecture
+
+The metricsd package uses a two-tier caching architecture:
+
+1. **Query Interval** (default 60s): Controls how often background collection queries HTCondor
+2. **Cache TTL** (default 10s): Controls how long results are served before triggering a new query
+
+On the first call to `Collect()`, if query interval > 0, a background goroutine is launched that:
+- Queries HTCondor at the configured interval
+- Processes ClassAds one at a time using streaming APIs
+- Updates the cache with aggregated metrics
+- Each ad type (Startd, Schedd, etc.) is queried only once per cycle
+
+Subsequent calls to `Collect()` return the pre-calculated cached results without querying HTCondor again until the cache expires.
+
 ## Usage
 
-### Basic Setup
+### Basic Setup with Background Collection
 
 ```go
 package main
@@ -37,11 +56,13 @@ import (
 
 func main() {
     // Create a collector client
-    collector := htcondor.NewCollector("collector.example.com", 9618)
+    collector := htcondor.NewCollector("collector.example.com:9618")
 
     // Create metrics registry
     registry := metricsd.NewRegistry()
-    registry.SetCacheTTL(10 * time.Second)
+    registry.SetCacheTTL(10 * time.Second)       // How long to serve cached results
+    registry.SetQueryInterval(60 * time.Second)  // How often to query HTCondor
+    defer registry.Stop()  // Stop background collection on exit
 
     // Register collectors
     poolCollector := metricsd.NewPoolCollector(collector)
@@ -53,7 +74,7 @@ func main() {
     // Create Prometheus exporter
     exporter := metricsd.NewPrometheusExporter(registry)
 
-    // Export metrics
+    // First call starts background collection
     ctx := context.Background()
     metricsText, err := exporter.Export(ctx)
     if err != nil {
@@ -61,6 +82,8 @@ func main() {
     }
 
     log.Println(metricsText)
+    
+    // Subsequent calls will return pre-calculated results from cache
 }
 ```
 
@@ -234,15 +257,6 @@ func (c *MyCollector) Collect(ctx context.Context) ([]metricsd.Metric, error) {
 registry.Register(&MyCollector{})
 ```
 
-## Architecture
-
-The `metricsd` package is inspired by HTCondor's `condor_gangliad` daemon, which historically collected metrics and published them to Ganglia. This implementation modernizes that concept:
-
-- **Pluggable collectors**: Like `condor_gangliad` polling different subsystems
-- **Prometheus format**: Industry-standard observability format
-- **Cloud-native**: Works with modern monitoring stacks (Prometheus, Grafana, etc.)
-- **Go-native**: Efficient and concurrent metric collection
-
 ## Comparison with condor_gangliad
 
 | Feature | condor_gangliad | metricsd |
@@ -252,12 +266,38 @@ The `metricsd` package is inspired by HTCondor's `condor_gangliad` daemon, which
 | Extensibility | Limited | Pluggable collectors |
 | Integration | Separate daemon | Embedded in services |
 | Caching | Fixed | Configurable TTL |
+| Query Method | Buffered | Streaming (one ad at a time) |
+| Background Collection | N/A | Configurable (default 60s) |
+| Memory Efficiency | Buffers all ads | Processes ads one at a time |
 
 ## Performance
 
-- **Caching**: Metrics are cached with configurable TTL (default 10s) to reduce collector overhead
+- **Streaming API**: ClassAds are processed one at a time, never buffering more than one ad in memory
+- **Background Collection**: After first query, metrics are collected in background goroutine at configurable interval (default 60s)
+- **Pre-calculated Results**: Subsequent scrapes return cached results without querying HTCondor
+- **Query Efficiency**: Each ad type (Startd, Schedd, etc.) is queried only once per collection cycle
+- **Caching**: Metrics are cached with configurable TTL (default 10s) to reduce overhead
 - **Concurrent**: Safe for concurrent scraping from multiple Prometheus instances
-- **Efficient**: Only queries HTCondor when cache expires
+- **Memory Efficient**: Streaming approach avoids buffering large datasets, suitable for large HTCondor pools
+
+### Tuning
+
+For optimal performance:
+
+1. **Query Interval**: Set to match your monitoring needs
+   - Smaller pools: 30-60 seconds is usually sufficient
+   - Larger pools: Consider 60-120 seconds to reduce collector load
+   - `registry.SetQueryInterval(60 * time.Second)`
+
+2. **Cache TTL**: Set based on Prometheus scrape interval
+   - Should be less than your Prometheus scrape interval
+   - Typical: 5-15 seconds for 30s scrape interval
+   - `registry.SetCacheTTL(10 * time.Second)`
+
+3. **Prometheus Scraping**: 
+   - Set scrape interval to match your monitoring requirements
+   - Recommended: 30-60 seconds for most use cases
+   - Cache TTL should be shorter than scrape interval
 
 ## Testing
 

@@ -21,35 +21,32 @@ func NewPoolCollector(collector *htcondor.Collector) *PoolCollector {
 	}
 }
 
-// Collect gathers pool-wide metrics from the collector
+// Collect gathers pool-wide metrics from the collector using streaming API
 func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 	metrics := make([]Metric, 0)
 	now := time.Now()
 
-	// Query for startd (machine) ads
-	startdAds, _, err := c.collector.QueryAdsWithOptions(ctx, "Startd", "", nil)
+	// Query for startd (machine) ads using streaming API
+	startdCh, err := c.collector.QueryAdsStream(ctx, "Startd", "", nil, -1, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query startd ads: %w", err)
 	}
 
-	// Count total machines and states
-	totalMachines := len(startdAds)
-	metrics = append(metrics, Metric{
-		Name:      "htcondor_pool_machines_total",
-		Type:      MetricTypeGauge,
-		Value:     float64(totalMachines),
-		Timestamp: now,
-		Help:      "Total number of machines in the pool",
-	})
-
-	// Count machines by state
+	// Process startd ads one at a time - no buffering
+	totalMachines := 0
 	stateCount := make(map[string]int)
 	totalCPUs := int64(0)
 	totalMemory := int64(0)
 	usedCPUs := int64(0)
 	usedMemory := int64(0)
 
-	for _, ad := range startdAds {
+	for result := range startdCh {
+		if result.Err != nil {
+			return nil, fmt.Errorf("error streaming startd ads: %w", result.Err)
+		}
+		ad := result.Ad
+		totalMachines++
+
 		// Get state
 		if state := ad.EvaluateAttr("State"); !state.IsError() {
 			if stateStr, err := state.StringValue(); err == nil {
@@ -91,6 +88,15 @@ func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 			}
 		}
 	}
+
+	// Add machine count metric
+	metrics = append(metrics, Metric{
+		Name:      "htcondor_pool_machines_total",
+		Type:      MetricTypeGauge,
+		Value:     float64(totalMachines),
+		Timestamp: now,
+		Help:      "Total number of machines in the pool",
+	})
 
 	// Add state metrics
 	for state, count := range stateCount {
@@ -137,20 +143,20 @@ func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 		Help:      "Used memory in MB in the pool",
 	})
 
-	// Query for schedd ads
-	scheddAds, _, err := c.collector.QueryAdsWithOptions(ctx, "Schedd", "", nil)
+	// Query for schedd ads using streaming API
+	scheddCh, err := c.collector.QueryAdsStream(ctx, "Schedd", "", nil, -1, nil)
 	if err == nil {
-		metrics = append(metrics, Metric{
-			Name:      "htcondor_pool_schedds_total",
-			Type:      MetricTypeGauge,
-			Value:     float64(len(scheddAds)),
-			Timestamp: now,
-			Help:      "Total number of schedd daemons in the pool",
-		})
-
-		// Count total jobs across all schedds
+		totalSchedds := 0
 		totalJobs := int64(0)
-		for _, ad := range scheddAds {
+
+		for result := range scheddCh {
+			if result.Err != nil {
+				// Log error but continue
+				break
+			}
+			ad := result.Ad
+			totalSchedds++
+
 			if jobs := ad.EvaluateAttr("TotalIdleJobs"); !jobs.IsError() {
 				if count, err := jobs.IntValue(); err == nil {
 					totalJobs += count
@@ -167,6 +173,14 @@ func (c *PoolCollector) Collect(ctx context.Context) ([]Metric, error) {
 				}
 			}
 		}
+
+		metrics = append(metrics, Metric{
+			Name:      "htcondor_pool_schedds_total",
+			Type:      MetricTypeGauge,
+			Value:     float64(totalSchedds),
+			Timestamp: now,
+			Help:      "Total number of schedd daemons in the pool",
+		})
 
 		metrics = append(metrics, Metric{
 			Name:      "htcondor_pool_jobs_total",
