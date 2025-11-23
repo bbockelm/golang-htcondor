@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver"
@@ -775,6 +776,7 @@ func runDemoMode() error {
 			logging.DestinationGeneral:  logging.VerbosityDebug,
 			logging.DestinationHTTP:     logging.VerbosityDebug,
 			logging.DestinationSecurity: logging.VerbosityDebug,
+			logging.DestinationCedar:    logging.VerbosityInfo, // Reduce Cedar noise in demo mode
 		},
 	})
 	if err != nil {
@@ -863,6 +865,29 @@ func runDemoMode() error {
 
 	log.Printf("HTCondor is ready! Collector address: %s", collectorAddr)
 
+	uidDomain := ""
+	trustDomain := ""
+
+	// Load domains from config first (needed for token generation)
+	if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
+		uidDomain = domain
+		log.Printf("Using UID_DOMAIN: %s", uidDomain)
+	}
+	if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
+		trustDomain = domain
+		log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
+	}
+
+	// Generate a token for the server to use for self-operations (like ping)
+	// The token must use the same trust domain as the HTCondor daemons
+	log.Println("Generating server token...")
+	serverToken, err := generateServerToken(tempDir, trustDomain)
+	if err != nil {
+		log.Printf("Warning: failed to generate server token: %v", err)
+	} else {
+		log.Println("Generated server token successfully")
+	}
+
 	// Determine signing key path for token generation
 	// HTCondor auto-generates $(LOCAL_DIR)/passwords.d/POOL when needed
 	// In demo mode, we always want to enable token generation for IDP/session support
@@ -871,19 +896,6 @@ func runDemoMode() error {
 
 	if *userHeader != "" {
 		log.Printf("User header mode enabled: %s", *userHeader)
-	}
-
-	uidDomain := ""
-	trustDomain := ""
-
-	// Always try to load domains from config
-	if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
-		uidDomain = domain
-		log.Printf("Using UID_DOMAIN: %s", uidDomain)
-	}
-	if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
-		trustDomain = domain
-		log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
 	}
 
 	// Create collector for demo mode
@@ -925,6 +937,7 @@ func runDemoMode() error {
 		TLSCACertFile:      caPath,
 		Collector:          collector,
 		Logger:             logger,
+		Token:              serverToken,                    // Token for daemon authentication
 		EnableMCP:          true,                           // Enable MCP in demo mode
 		OAuth2DBPath:       oauth2DBPath,                   // OAuth2 database path
 		OAuth2Issuer:       protocol + "://" + *listenAddr, // OAuth2 issuer URL
@@ -1322,4 +1335,24 @@ func generateCAAndCert(caPath, certPath, keyPath string) error {
 	log.Printf("Generated server certificate: %s", certPath)
 	log.Printf("Generated server private key: %s", keyPath)
 	return nil
+}
+
+// generateServerToken generates a token for the server to use
+func generateServerToken(tempDir, trustDomain string) (string, error) {
+	// Use Cedar's GenerateJWT function to create a token
+	// The signing key should be at $(LOCAL_DIR)/passwords.d/POOL
+	keyDir := filepath.Join(tempDir, "passwords.d")
+	keyID := "POOL"
+	subject := "htcondor-api@" + trustDomain
+	issuer := trustDomain // Issuer must match the trust domain of HTCondor daemons
+	issuedAt := time.Now().Unix()
+	expiration := time.Now().Add(24 * time.Hour).Unix() // Valid for 24 hours
+	authzLimits := []string{"READ", "WRITE", "DAEMON", "ADMINISTRATOR"} // Full permissions for server operations
+
+	token, err := security.GenerateJWT(keyDir, keyID, subject, issuer, issuedAt, expiration, authzLimits)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate JWT token: %w", err)
+	}
+
+	return token, nil
 }

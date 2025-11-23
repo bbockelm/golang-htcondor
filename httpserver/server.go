@@ -63,6 +63,7 @@ type Server struct {
 	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
 	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
 	pingStopCh          chan struct{}     // Channel to signal ping goroutine to stop
+	token               string            // Token for daemon authentication
 }
 
 // Config holds server configuration
@@ -107,6 +108,7 @@ type Config struct {
 	PingInterval        time.Duration       // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
 	StreamBufferSize    int                 // Buffer size for streaming queries (default: 100)
 	StreamWriteTimeout  time.Duration       // Write timeout for streaming queries (default: 5s)
+	Token               string              // Token for daemon authentication (optional)
 }
 
 // NewServer creates a new HTTP API server
@@ -177,6 +179,7 @@ func NewServer(cfg Config) (*Server, error) {
 		streamBufferSize:   streamBufferSize,
 		streamWriteTimeout: streamWriteTimeout,
 		stopChan:           make(chan struct{}),
+		token:              cfg.Token,
 	}
 
 	// Setup OAuth2 provider if MCP is enabled
@@ -1311,6 +1314,16 @@ func (s *Server) periodicPing() {
 func (s *Server) performPeriodicPing() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// If we have a token, configure security
+	if s.token != "" {
+		secConfig, err := ConfigureSecurityForToken(s.token)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
+		} else {
+			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+		}
+	}
 
 	// Ping collector if configured
 	if s.collector != nil {
