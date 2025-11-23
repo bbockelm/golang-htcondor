@@ -24,7 +24,7 @@ type dynamicCollector struct {
 	getValue func() float64
 }
 
-func (c *dynamicCollector) Collect(ctx context.Context) ([]Metric, error) {
+func (c *dynamicCollector) Collect(_ context.Context) ([]Metric, error) {
 	return []Metric{
 		{
 			Name:      c.name,

@@ -5,7 +5,6 @@
 //
 // Build: go build -o metricsd_streaming_example examples/metricsd_streaming_example.go
 // Run: ./metricsd_streaming_example
-
 package main
 
 import (
@@ -70,7 +69,8 @@ func main() {
 	metricsText, err := exporter.Export(ctx)
 	duration := time.Since(startTime)
 	if err != nil {
-		log.Fatalf("Error collecting metrics: %v", err)
+		log.Printf("Error collecting metrics: %v", err)
+		return
 	}
 
 	fmt.Printf("   Collected in %v\n", duration)
@@ -96,7 +96,8 @@ func main() {
 	metricsText2, err := exporter.Export(ctx)
 	duration2 := time.Since(startTime)
 	if err != nil {
-		log.Fatalf("Error collecting metrics: %v", err)
+		log.Printf("Error collecting metrics: %v", err)
+		return
 	}
 
 	fmt.Printf("   Returned cached results in %v (much faster!)\n", duration2)
@@ -111,7 +112,8 @@ func main() {
 	_, err = exporter.Export(ctx)
 	duration3 := time.Since(startTime)
 	if err != nil {
-		log.Fatalf("Error collecting metrics: %v", err)
+		log.Printf("Error collecting metrics: %v", err)
+		return
 	}
 
 	fmt.Printf("   Returned in %v\n", duration3)
