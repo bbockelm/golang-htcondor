@@ -27,11 +27,16 @@ func TestScheddRemoveJobsIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a test job
 	submitFile := `
@@ -119,11 +124,16 @@ func TestScheddRemoveJobsByIDIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit multiple test jobs
 	submitFile := `
@@ -206,11 +216,16 @@ func TestScheddRemoveNonExistentJob(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -17,43 +17,19 @@ import (
 )
 
 // getScheddAddress queries the collector for the schedd address
-func getScheddAddress(t *testing.T, harness *CondorTestHarness) string {
+func getScheddAddress(t *testing.T, harness *CondorTestHarness) *DaemonLocation {
 	t.Helper()
 
-	// Parse collector address
-	collectorAddr := harness.GetCollectorAddr()
-	addr := parseCollectorSinfulString(collectorAddr)
+	t.Logf("Querying collector for schedd location")
 
-	t.Logf("Querying collector at %s for schedd location", addr)
-
-	collector := NewCollector(addr)
+	collector := NewCollector(harness.GetCollectorAddr())
 	ctx := context.Background()
-	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query collector for schedd ads: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
 
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd ads found in collector")
-	}
-
-	// Extract schedd address from ad
-	scheddAd := scheddAds[0]
-
-	// Get MyAddress attribute
-	myAddressExpr, ok := scheddAd.Lookup("MyAddress")
-	if !ok {
-		t.Fatal("Schedd ad does not have MyAddress attribute")
-	}
-
-	myAddress := myAddressExpr.String()
-	// Remove quotes if present
-	myAddress = strings.Trim(myAddress, "\"")
-
-	// Parse schedd sinful string
-	scheddAddr := parseCollectorSinfulString(myAddress)
-
-	return scheddAddr
+	return location
 }
 
 // minInt returns the minimum of two integers
@@ -87,14 +63,14 @@ func TestSpoolJobFilesIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
+	scheddLocation := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddAddr)
+	schedd := NewSchedd(scheddLocation.Name, scheddLocation.Address)
 
 	// Create a submit file for remote submission with input files
 	submitFile := `
@@ -348,14 +324,14 @@ func TestSpoolJobFilesFromTarIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
+	scheddLocation := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddAddr)
+	schedd := NewSchedd(scheddLocation.Name, scheddLocation.Address)
 
 	// Create a submit file for remote submission with input files
 	submitFile := `
@@ -605,14 +581,14 @@ func TestReceiveJobSandboxIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
+	scheddLocation := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddAddr)
+	schedd := NewSchedd(scheddLocation.Name, scheddLocation.Address)
 
 	// Create a trivial job that produces output
 	// Create a submit file

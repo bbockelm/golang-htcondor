@@ -69,10 +69,15 @@ func TestScheddSubmitHighLevel(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Simple submit file content
 	submitFile := `
@@ -117,10 +122,15 @@ func TestScheddSubmitMultiProc(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit file with multiple procs
 	submitFile := `
@@ -165,10 +175,15 @@ func TestScheddSubmitWithVariables(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit file with queue variables (use 'in' for inline lists)
 	submitFile := `
@@ -213,10 +228,15 @@ func TestScheddQueryIntegration(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// First, submit a test job so we have something to query
 	// Use /bin/sleep to keep job in queue longer for testing

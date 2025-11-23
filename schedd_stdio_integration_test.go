@@ -33,14 +33,18 @@ func TestStdioFilesIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	collector := NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
+	t.Logf("Schedd discovered: name=%s, address=%s", location.Name, location.Address)
+
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Create a job that reads from stdin and writes to stdout/stderr
 	// The job script will:
@@ -246,14 +250,18 @@ func TestStdioFilesFromTarIntegration(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	collector := NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
+	t.Logf("Schedd discovered: name=%s, address=%s", location.Name, location.Address)
+
 	// Create schedd client
-	schedd := NewSchedd(harness.scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Create a job that reads from stdin using a shell script file
 	// This avoids argument parsing issues in the submit file

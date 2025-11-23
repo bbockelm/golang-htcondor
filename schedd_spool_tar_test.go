@@ -32,47 +32,19 @@ func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
 	// Setup mini HTCondor instance
 	harness := SetupCondorHarness(t)
 
-	// Parse collector address to get schedd
-	addr := harness.GetCollectorAddr()
-	addr = parseCollectorAddr(addr)
-
 	// Create collector to find schedd
-	collector := NewCollector(addr)
+	collector := NewCollector(harness.GetCollectorAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Query for schedd
-	scheddAds, err := collector.QueryAds(ctx, "Schedd", "")
+	// Locate schedd
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query for schedd: %v", err)
-	}
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd found")
-	}
-
-	// Get schedd address
-	scheddAd := scheddAds[0]
-	scheddAddrVal := scheddAd.EvaluateAttr("MyAddress")
-	if scheddAddrVal.IsError() {
-		t.Fatal("Schedd ad missing MyAddress attribute")
-	}
-	scheddAddr, err := scheddAddrVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd address: %v", err)
-	}
-	scheddAddr = parseCollectorAddr(scheddAddr)
-
-	scheddNameVal := scheddAd.EvaluateAttr("Name")
-	if scheddNameVal.IsError() {
-		t.Fatal("Schedd ad missing Name attribute")
-	}
-	scheddName, err := scheddNameVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd name: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
 
 	// Create schedd client
-	schedd := NewSchedd(scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a simple job first to get a real cluster ID
 	submitDesc := `
@@ -157,47 +129,19 @@ func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
 	// Setup mini HTCondor instance
 	harness := SetupCondorHarness(t)
 
-	// Parse collector address to get schedd
-	addr := harness.GetCollectorAddr()
-	addr = parseCollectorAddr(addr)
-
 	// Create collector to find schedd
-	collector := NewCollector(addr)
+	collector := NewCollector(harness.GetCollectorAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Query for schedd
-	scheddAds, err := collector.QueryAds(ctx, "Schedd", "")
+	// Locate schedd
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query for schedd: %v", err)
-	}
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd found")
-	}
-
-	// Get schedd address and name
-	scheddAd := scheddAds[0]
-	scheddAddrVal := scheddAd.EvaluateAttr("MyAddress")
-	if scheddAddrVal.IsError() {
-		t.Fatal("Schedd ad missing MyAddress attribute")
-	}
-	scheddAddr, err := scheddAddrVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd address: %v", err)
-	}
-	scheddAddr = parseCollectorAddr(scheddAddr)
-
-	scheddNameVal := scheddAd.EvaluateAttr("Name")
-	if scheddNameVal.IsError() {
-		t.Fatal("Schedd ad missing Name attribute")
-	}
-	scheddName, err := scheddNameVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd name: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
 
 	// Create schedd client
-	schedd := NewSchedd(scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit multiple jobs
 	submitDesc := `
@@ -367,47 +311,19 @@ func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
 	// Setup mini HTCondor instance
 	harness := SetupCondorHarness(t)
 
-	// Parse collector address to get schedd
-	addr := harness.GetCollectorAddr()
-	addr = parseCollectorAddr(addr)
-
 	// Create collector to find schedd
-	collector := NewCollector(addr)
+	collector := NewCollector(harness.GetCollectorAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Query for schedd
-	scheddAds, err := collector.QueryAds(ctx, "Schedd", "")
+	// Locate schedd
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query for schedd: %v", err)
-	}
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd found")
-	}
-
-	// Get schedd address and name
-	scheddAd := scheddAds[0]
-	scheddAddrVal := scheddAd.EvaluateAttr("MyAddress")
-	if scheddAddrVal.IsError() {
-		t.Fatal("Schedd ad missing MyAddress attribute")
-	}
-	scheddAddr, err := scheddAddrVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd address: %v", err)
-	}
-	scheddAddr = parseCollectorAddr(scheddAddr)
-
-	scheddNameVal := scheddAd.EvaluateAttr("Name")
-	if scheddNameVal.IsError() {
-		t.Fatal("Schedd ad missing Name attribute")
-	}
-	scheddName, err := scheddNameVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd name: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
 
 	// Create schedd client
-	schedd := NewSchedd(scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a job that only requests input1.txt and input2.dat (not extra files)
 	submitDesc := `
@@ -492,47 +408,19 @@ func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
 	// Setup mini HTCondor instance
 	harness := SetupCondorHarness(t)
 
-	// Parse collector address to get schedd
-	addr := harness.GetCollectorAddr()
-	addr = parseCollectorAddr(addr)
-
 	// Create collector to find schedd
-	collector := NewCollector(addr)
+	collector := NewCollector(harness.GetCollectorAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Query for schedd
-	scheddAds, err := collector.QueryAds(ctx, "Schedd", "")
+	// Locate schedd
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query for schedd: %v", err)
-	}
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd found")
-	}
-
-	// Get schedd address and name
-	scheddAd := scheddAds[0]
-	scheddAddrVal := scheddAd.EvaluateAttr("MyAddress")
-	if scheddAddrVal.IsError() {
-		t.Fatal("Schedd ad missing MyAddress attribute")
-	}
-	scheddAddr, err := scheddAddrVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd address: %v", err)
-	}
-	scheddAddr = parseCollectorAddr(scheddAddr)
-
-	scheddNameVal := scheddAd.EvaluateAttr("Name")
-	if scheddNameVal.IsError() {
-		t.Fatal("Schedd ad missing Name attribute")
-	}
-	scheddName, err := scheddNameVal.StringValue()
-	if err != nil {
-		t.Fatalf("Failed to get schedd name: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
 
 	// Create schedd client
-	schedd := NewSchedd(scheddName, scheddAddr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a job - the path traversal attempts should be filtered out
 	submitDesc := `

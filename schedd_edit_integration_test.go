@@ -30,11 +30,16 @@ func TestEditJobIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -185,11 +190,16 @@ func TestEditJobsIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
