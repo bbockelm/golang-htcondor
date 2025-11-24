@@ -203,6 +203,73 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 	return accessRequest, nil
 }
 
+// filterRequestedScopes filters the requested scopes to only include those allowed for the client.
+// This prevents errors when clients request scopes that were added after registration.
+func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*http.Request, error) {
+	// Get client_id from the request
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		// No client_id, can't filter - return original request
+		return r, nil
+	}
+
+	// Get the client from storage
+	client, err := s.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	if err != nil {
+		// Client not found or error - let fosite handle it
+		return r, nil
+	}
+
+	// Get requested scopes from the request
+	requestedScopesStr := r.FormValue("scope")
+	if requestedScopesStr == "" {
+		// No scopes requested, nothing to filter
+		return r, nil
+	}
+
+	requestedScopes := strings.Fields(requestedScopesStr)
+	allowedScopes := client.GetScopes()
+
+	// Create a map of allowed scopes for quick lookup
+	allowedScopeMap := make(map[string]bool)
+	for _, scope := range allowedScopes {
+		allowedScopeMap[scope] = true
+	}
+
+	// Filter to only allowed scopes
+	filteredScopes := make([]string, 0, len(requestedScopes))
+	for _, scope := range requestedScopes {
+		if allowedScopeMap[scope] {
+			filteredScopes = append(filteredScopes, scope)
+		} else {
+			s.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for client",
+				"client_id", clientID, "scope", scope)
+		}
+	}
+
+	// If no scopes were filtered, return original request
+	if len(filteredScopes) == len(requestedScopes) {
+		return r, nil
+	}
+
+	// Create a new request with filtered scopes
+	// Clone the request and modify the Form values
+	newReq := r.Clone(ctx)
+	if err := newReq.ParseForm(); err != nil {
+		return r, err
+	}
+
+	// Update the scope parameter
+	newReq.Form.Set("scope", strings.Join(filteredScopes, " "))
+
+	s.logger.Info(logging.DestinationHTTP, "Filtered scopes for client",
+		"client_id", clientID,
+		"requested", len(requestedScopes),
+		"allowed", len(filteredScopes))
+
+	return newReq, nil
+}
+
 // handleOAuth2Authorize handles OAuth2 authorization requests
 func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 	if s.oauth2Provider == nil {
@@ -212,8 +279,16 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Filter requested scopes to only those allowed for the client
+	filteredReq, err := s.filterRequestedScopes(ctx, r)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		// Continue with original request if filtering fails
+		filteredReq = r
+	}
+
 	// Parse authorization request
-	ar, err := s.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, r)
+	ar, err := s.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, filteredReq)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
 		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
@@ -661,6 +736,15 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
 		return
 	}
+
+	// Filter requested scopes to only those allowed for the client
+	filteredReq, err := s.filterRequestedScopes(ctx, r)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		// Continue with original request if filtering fails
+		filteredReq = r
+	}
+	r = filteredReq
 
 	grantType := r.FormValue("grant_type")
 
@@ -1219,6 +1303,29 @@ func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Requ
 	} else {
 		// Default scopes
 		scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+
+	// Filter scopes to only those allowed for the client
+	allowedScopes := client.GetScopes()
+	allowedScopeMap := make(map[string]bool)
+	for _, scope := range allowedScopes {
+		allowedScopeMap[scope] = true
+	}
+
+	filteredScopes := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if allowedScopeMap[scope] {
+			filteredScopes = append(filteredScopes, scope)
+		} else {
+			s.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for device authorization",
+				"client_id", clientID, "scope", scope)
+		}
+	}
+	scopes = filteredScopes
+
+	if len(scopes) > 0 {
+		s.logger.Info(logging.DestinationHTTP, "Device authorization with filtered scopes",
+			"client_id", clientID, "scopes", strings.Join(scopes, " "))
 	}
 
 	// Create device code handler
