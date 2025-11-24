@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -223,8 +222,8 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 
 	// Determine authentication method:
 	// 1. If userHeader is configured, use that (for demo/testing mode)
-	// 2. If OAuth2 SSO is configured and no userHeader, initiate SSO flow
-	// 3. If neither, check query parameter (backward compatibility for tests)
+	// 2. If existing session, use that
+	// 3. If OAuth2 SSO is configured and no userHeader, initiate SSO flow
 
 	username := ""
 
@@ -237,7 +236,7 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Method 2: OAuth2 SSO flow
+	// Method 2: Existing session
 	if username == "" {
 		// Check if user has a session
 		if session, ok := s.getSessionFromRequest(r); ok {
@@ -246,6 +245,7 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Method 3: OAuth2 SSO flow
 	if username == "" {
 		// If OAuth2 SSO is configured, redirect to upstream IDP
 		if s.oauth2Config != nil {
@@ -270,11 +270,6 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, authURL, http.StatusFound)
 			return
 		}
-	}
-
-	// Method 3: Query parameter (backward compatibility for testing)
-	if username == "" {
-		username = r.URL.Query().Get("username")
 	}
 
 	// If still no username, authentication is required
@@ -1255,39 +1250,55 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	if r.Method == http.MethodGet {
-		// Check authentication before showing the form
+		// Check authentication before showing the form (same as handleOAuth2Authorize)
 		username := ""
 
 		// Method 1: User header (demo mode)
 		if s.userHeader != "" {
 			username = r.Header.Get(s.userHeader)
+			if username != "" {
+				s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", s.userHeader)
+			}
 		}
 
 		// Method 2: Check for session
 		if username == "" {
 			if session, ok := s.getSessionFromRequest(r); ok {
 				username = session.Username
+				s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 			}
 		}
 
-		// Method 3: Check for IDP session cookie
-		if username == "" && s.idpProvider != nil {
-			if cookie, err := r.Cookie("idp_session"); err == nil {
-				sessionID := cookie.Value
-				user, err := s.idpProvider.storage.GetSession(ctx, sessionID)
-				if err == nil && user != "" {
-					username = user
-				}
+		// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
+		if username == "" && s.oauth2Config != nil {
+			// Generate state parameter
+			state, err := s.oauth2StateStore.GenerateState()
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				s.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+				return
 			}
-		}
 
-		// If no authentication and IDP is available, redirect to login
-		if username == "" && s.idpProvider != nil {
-			// Store the current URL to redirect back after login
+			// Store the return URL (current device verification URL)
 			returnURL := r.URL.String()
-			loginURL := fmt.Sprintf("/idp/login?return_url=%s", url.QueryEscape(returnURL))
-			s.logger.Info(logging.DestinationHTTP, "Redirecting to login for device verification", "return_url", returnURL)
-			http.Redirect(w, r, loginURL, http.StatusFound)
+			s.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
+
+			// Build authorization URL
+			authURL := s.oauth2Config.AuthCodeURL(state)
+
+			s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
+				"state", state, "auth_url", authURL, "return_url", returnURL)
+
+			// Redirect to IDP
+			http.Redirect(w, r, authURL, http.StatusFound)
+			return
+		}
+
+		// If still no username, authentication is required
+		if username == "" {
+			s.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+			s.writeError(w, http.StatusUnauthorized, "Authentication required")
 			return
 		}
 
@@ -1360,30 +1371,32 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		// Determine authentication method (similar to authorize endpoint)
+		// Determine authentication method (same as handleOAuth2Authorize):
+		// 1. If userHeader is configured, use that (for demo/testing mode)
+		// 2. If OAuth2 SSO is configured and no userHeader, check for session
+		// 3. If neither, authentication is required
 		username := ""
+
+		// Method 1: User header (demo mode)
 		if s.userHeader != "" {
 			username = r.Header.Get(s.userHeader)
-		}
-
-		if username == "" {
-			// For simplicity in testing, use a query parameter
-			username = r.URL.Query().Get("username")
-		}
-
-		if username == "" {
-			// Check for IDP session cookie
-			if cookie, err := r.Cookie("idp_session"); err == nil {
-				// Verify session
-				sessionID := cookie.Value
-				user, err := s.idpProvider.storage.GetSession(r.Context(), sessionID)
-				if err == nil && user != "" {
-					username = user
-				}
+			if username != "" {
+				s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", s.userHeader)
 			}
 		}
 
+		// Method 2: Check for session
 		if username == "" {
+			if session, ok := s.getSessionFromRequest(r); ok {
+				username = session.Username
+				s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+			}
+		}
+
+		// If still no username, authentication is required
+		if username == "" {
+			s.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
 			s.writeHTMLError(w, "Authentication required")
 			return
 		}
