@@ -1155,7 +1155,11 @@ func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, e
 	}
 
 	// Convert token to SecurityConfig with the appropriate session cache
-	secConfig, err := ConfigureSecurityForTokenWithCache(token, sessionCache)
+	// Determine if we should allow FS fallback:
+	// - In user-header mode, tokens are generated but not validated by schedd, so FS fallback is needed
+	// - In session-based auth, tokens are properly signed and validated, so TOKEN-only should be used
+	allowFSFallback := s.userHeader != ""
+	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, allowFSFallback)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}

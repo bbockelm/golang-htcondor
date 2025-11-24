@@ -36,14 +36,30 @@ func ConfigureSecurityForToken(token string) (*security.SecurityConfig, error) {
 // ConfigureSecurityForTokenWithCache configures security settings with an optional session cache
 // If sessionCache is nil, the global cache will be used
 func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.SessionCache) (*security.SecurityConfig, error) {
+	return ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, false)
+}
+
+// ConfigureSecurityForTokenWithCacheAndFallback configures security settings with optional session cache
+// and optional FS authentication fallback. If allowFSFallback is true, FS authentication will be added
+// as a fallback method (used for user-header mode where tokens are generated but not validated by schedd).
+// If allowFSFallback is false, only TOKEN authentication is used (for session-based authentication with
+// properly signed and validated tokens).
+func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token provided")
 	}
 
-	// Create a security configuration that prefers TOKEN but allows FS fallback
-	// The token content is stored in TokenFile field (cedar supports both file paths and direct content)
+	// Determine authentication methods
+	authMethods := []security.AuthMethod{security.AuthToken}
+	if allowFSFallback {
+		// Add FS as fallback for user-header mode (tokens generated but not validated)
+		authMethods = append(authMethods, security.AuthFS)
+	}
+
+	// Create a security configuration for TOKEN authentication
+	// The token content is stored in Token field (cedar supports both JWT content and file paths)
 	secConfig := &security.SecurityConfig{
-		AuthMethods:    []security.AuthMethod{security.AuthToken, security.AuthFS},
+		AuthMethods:    authMethods,
 		Authentication: security.SecurityRequired,
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,
