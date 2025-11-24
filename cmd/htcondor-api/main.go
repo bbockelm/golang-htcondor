@@ -103,7 +103,7 @@ func fixConfigDefaults(cfg *config.Config, debug bool) {
 				log.Println("DEBUG: condor user does not exist, setting LOCAL_DIR to /usr and LOG to /var/log/condor")
 			}
 			cfg.Set("LOCAL_DIR", "/usr")
-			cfg.Set("LOG", "/var/log/condor")
+			cfg.Set("HTTP_API_LOG", "/var/log/condor")
 		}
 	}
 }
@@ -148,32 +148,38 @@ func checkLogPathWritable(logPath string) error {
 
 // createLogger creates a logger with reasonable defaults for unprivileged operation
 func createLogger(cfg *config.Config) (*logging.Logger, error) {
-	// Check if we can write to the LOG path specified in config
-	logPath, hasLogPath := cfg.Get("LOG")
+	// Check if LOG path is configured and writable
+	logPath, hasLogPath := cfg.Get("HTTP_API_LOG")
+	needStdout := false
 
-	// If no LOG path is configured, default to stdout
-	if !hasLogPath || logPath == "" {
-		log.Println("Using stdout logging")
-		return logging.New(&logging.Config{
-			OutputPath: "stdout",
-		})
+	if hasLogPath && logPath != "" && logPath != "stdout" && logPath != "stderr" {
+		if err := checkLogPathWritable(logPath); err != nil {
+			log.Printf("LOG directory '%s' is not writable: %v", logPath, err)
+			log.Println("Falling back to stdout logging (debug config preserved)")
+			needStdout = true
+		}
+	} else if !hasLogPath || logPath == "" {
+		log.Println("No LOG path configured, using stdout")
+		needStdout = true
 	}
 
-	// Check if LOG directory exists and is writable
-	if err := checkLogPathWritable(logPath); err != nil {
-		log.Printf("LOG directory '%s' is not writable: %v", logPath, err)
-		log.Println("Using stdout logging")
-		return logging.New(&logging.Config{
-			OutputPath: "stdout",
-		})
+	// Temporarily override LOG to stdout if needed
+	originalLog := logPath
+	if needStdout {
+		cfg.Set("HTTP_API_LOG", "stdout")
 	}
 
-	// Try to create logger from config
-	logger, err := logging.FromConfig(cfg)
+	// Create logger with HTTP_API daemon-specific settings
+	logger, err := logging.FromConfigWithDaemon("HTTP_API", cfg)
+
+	// Restore original LOG value if we changed it
+	if needStdout && hasLogPath {
+		cfg.Set("HTTP_API_LOG", originalLog)
+	}
+
 	if err != nil {
-		// If it fails (e.g., permission denied), fall back to stdout
-		log.Printf("Failed to create logger with configured path '%s': %v", logPath, err)
-		log.Println("Using stdout logging")
+		log.Printf("Failed to create logger: %v", err)
+		// Fall back to basic stdout logger
 		return logging.New(&logging.Config{
 			OutputPath: "stdout",
 		})
@@ -1346,7 +1352,7 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 	subject := "htcondor-api@" + trustDomain
 	issuer := trustDomain // Issuer must match the trust domain of HTCondor daemons
 	issuedAt := time.Now().Unix()
-	expiration := time.Now().Add(24 * time.Hour).Unix() // Valid for 24 hours
+	expiration := time.Now().Add(24 * time.Hour).Unix()                 // Valid for 24 hours
 	authzLimits := []string{"READ", "WRITE", "DAEMON", "ADMINISTRATOR"} // Full permissions for server operations
 
 	token, err := security.GenerateJWT(keyDir, keyID, subject, issuer, issuedAt, expiration, authzLimits)

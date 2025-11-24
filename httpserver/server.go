@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -412,6 +413,40 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// shouldUpdateIssuer checks if an issuer URL needs to be updated with the actual listening address.
+// Returns true if the issuer is empty or if the host ends with :0 (indicating a dynamic port).
+func shouldUpdateIssuer(issuer string) bool {
+	if issuer == "" {
+		return true
+	}
+	// Parse the issuer URL to check if port is 0
+	u, err := parseURL(issuer)
+	if err != nil {
+		// If we can't parse it, assume it needs updating
+		return true
+	}
+
+	// Check if the port is "0" (dynamic port)
+	port := u.Port()
+	return port == "0"
+}
+
+// parseURL is a helper to parse URLs that may or may not include a scheme
+func parseURL(urlStr string) (*url.URL, error) {
+	// Try parsing as-is first
+	u, err := url.Parse(urlStr)
+	if err == nil && u.Scheme != "" {
+		return u, nil
+	}
+
+	// If no scheme, try adding http://
+	if !strings.Contains(urlStr, "://") {
+		urlStr = "http://" + urlStr
+	}
+
+	return url.Parse(urlStr)
+}
+
 // initializeIDP initializes the IDP provider with actual listening address
 func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
 	if s.idpProvider == nil {
@@ -420,10 +455,17 @@ func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
 
 	ctx := context.Background()
 
-	// Update issuer with actual listening address
+	// Update issuer with actual listening address only if needed
 	actualAddr := ln.Addr().String()
 	issuer := protocol + "://" + actualAddr
-	s.idpProvider.UpdateIssuer(issuer)
+
+	// Only update if the issuer was empty or had a dynamic port (:0)
+	if shouldUpdateIssuer(s.idpProvider.config.AccessTokenIssuer) {
+		s.idpProvider.UpdateIssuer(issuer)
+	} else {
+		// Use the configured issuer instead
+		issuer = s.idpProvider.config.AccessTokenIssuer
+	}
 
 	// Initialize default users
 	if err := s.initializeIDPUsers(ctx); err != nil {
@@ -551,10 +593,12 @@ func (s *Server) initializeOAuth2(ln net.Listener, protocol string) {
 		return
 	}
 
-	// Update issuer with actual listening address
-	actualAddr := ln.Addr().String()
-	issuer := protocol + "://" + actualAddr
-	s.oauth2Provider.UpdateIssuer(issuer)
+	// Only update issuer if it was empty or had a dynamic port (:0)
+	if shouldUpdateIssuer(s.oauth2Provider.config.AccessTokenIssuer) {
+		actualAddr := ln.Addr().String()
+		issuer := protocol + "://" + actualAddr
+		s.oauth2Provider.UpdateIssuer(issuer)
+	}
 }
 
 // getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config

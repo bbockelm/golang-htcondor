@@ -196,7 +196,7 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 
 	// Parse output path
 	outputPath := "stderr"
-	if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
+	if logPath, ok := cfg.Get(strings.ToUpper(daemonName) + "_LOG"); ok && logPath != "" {
 		outputPath = logPath
 	}
 
