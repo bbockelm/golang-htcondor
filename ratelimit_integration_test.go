@@ -39,15 +39,14 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	defer func() {
 		if t.Failed() {
 			t.Log("Test failed, printing HTCondor logs for diagnosis:")
-			h.printScheddLog()
+			h.PrintScheddLog()
 			h.printMasterLog()
 			h.printCollectorLog()
 		}
 	}()
 
-	// Parse collector address - HTCondor uses "sinful strings" like <127.0.0.1:9618?addrs=...>
-	// Extract the host:port from within the angle brackets
-	collectorAddr := parseSinfulString(h.GetCollectorAddr())
+	// Get collector address
+	collectorAddr := h.GetCollectorAddr()
 
 	// Get schedd - we need to query the collector to find it
 	ctx := context.Background()
@@ -62,8 +61,6 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	if !ok {
 		t.Fatal("Schedd ad missing MyAddress")
 	}
-	// Parse schedd address - same sinful string format as collector
-	scheddAddr = parseSinfulString(scheddAddr)
 
 	scheddName, ok := scheddAds[0].EvaluateAttrString("Name")
 	if !ok {

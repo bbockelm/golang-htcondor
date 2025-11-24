@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -27,42 +26,15 @@ func TestScheddSubmitIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Parse collector address
-	collectorAddr := harness.GetCollectorAddr()
-	addr := parseCollectorSinfulString(collectorAddr)
-
-	t.Logf("Querying collector at %s for schedd location", addr)
-
-	collector := NewCollector(addr)
 	ctx := context.Background()
-	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
+
+	// Use LocateDaemon to discover schedd
+	collector := NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query collector for schedd ads: %v", err)
+		t.Fatalf("Failed to locate schedd: %v", err)
 	}
-
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd ads found in collector")
-	}
-
-	// Extract schedd address from ad
-	scheddAd := scheddAds[0]
-	t.Logf("Found schedd ad with attributes: %v", scheddAd.GetAttributes())
-
-	// Get MyAddress attribute
-	myAddressExpr, ok := scheddAd.Lookup("MyAddress")
-	if !ok {
-		t.Fatal("Schedd ad does not have MyAddress attribute")
-	}
-
-	myAddress := myAddressExpr.String()
-	// Remove quotes if present
-	myAddress = strings.Trim(myAddress, "\"")
-	t.Logf("Schedd MyAddress: %s", myAddress)
-
-	// Parse schedd sinful string
-	scheddAddr := parseCollectorSinfulString(myAddress)
-
-	t.Logf("Schedd discovered at: %s", scheddAddr)
+	t.Logf("Schedd discovered: name=%s, address=%s", location.Name, location.Address)
 
 	// Test 1: Create a simple job ClassAd
 	t.Run("SubmitSimpleJob", func(t *testing.T) {
@@ -81,9 +53,9 @@ func TestScheddSubmitIntegration(t *testing.T) {
 
 		// Connect to schedd's queue management interface
 		// Note: NewQmgmtConnection calls GetCapabilities which implicitly starts a transaction
-		qmgmt, err := NewQmgmtConnection(ctx, scheddAddr)
+		qmgmt, err := NewQmgmtConnection(ctx, location.Address)
 		if err != nil {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			t.Fatalf("Failed to connect to schedd: %v", err)
 		}
 		defer func() {
@@ -99,12 +71,12 @@ func TestScheddSubmitIntegration(t *testing.T) {
 		// We can't set arbitrary owners unless we're a superuser
 		owner := qmgmt.authenticatedUser
 		if owner == "" {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			_ = qmgmt.AbortTransaction(ctx)
 			t.Fatal("No authenticated user from QMGMT connection")
 		}
 		if err := qmgmt.SetEffectiveOwner(ctx, owner); err != nil {
-			harness.printScheddLog()
+			harness.PrintScheddLog()
 			_ = qmgmt.AbortTransaction(ctx)
 			t.Fatalf("Failed to set effective owner: %v", err)
 		}
@@ -145,24 +117,7 @@ func TestScheddSubmitIntegration(t *testing.T) {
 	})
 }
 
-// parseCollectorSinfulString extracts host:port from HTCondor sinful string format
-// HTCondor uses format: <host:port?addrs=host-port&alias=hostname>
-func parseCollectorSinfulString(addr string) string {
-	// Remove angle brackets
-	addr = strings.TrimPrefix(addr, "<")
-
-	// Split on ? to remove query parameters
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx]
-	}
-
-	// Remove trailing >
-	addr = strings.TrimSuffix(addr, ">")
-
-	return addr
-}
-
-// Integration Test Design Notes:
+// TestScheddTransactionManagement tests the transaction management in QMGMT
 //
 // This integration test demonstrates the structure for job submission testing.
 // It's currently skipped due to missing authentication infrastructure.

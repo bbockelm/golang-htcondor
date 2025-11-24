@@ -81,6 +81,11 @@ type JobSubmitResponse struct {
 	JobIDs    []string `json:"job_ids"` // Array of "cluster.proc" strings
 }
 
+// JobEditRequest represents a job edit request
+type JobEditRequest struct {
+	Attributes map[string]interface{} `json:"attributes"` // Attributes to update
+}
+
 // JobListResponse represents a job listing response
 type JobListResponse struct {
 	Jobs []*classad.ClassAd `json:"jobs"`
@@ -586,25 +591,28 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 	}
 
 	// Parse request body with attributes to edit
-	var updates map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+	var req JobEditRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
 
-	if len(updates) == 0 {
+	if len(req.Attributes) == 0 {
 		s.writeError(w, http.StatusBadRequest, "No attributes to update")
 		return
 	}
 
 	// Convert interface{} values to strings for SetAttribute
+	// If the value is already a string, assume it's in ClassAd format
+	// Otherwise, convert to appropriate ClassAd format
 	attributes := make(map[string]string)
-	for key, value := range updates {
+	for key, value := range req.Attributes {
 		// Convert value to string representation
 		switch v := value.(type) {
 		case string:
-			// Quote string values for ClassAd
-			attributes[key] = fmt.Sprintf("%q", v)
+			// String values are assumed to be in ClassAd format already
+			// (either literals like "256" or quoted strings like "\"hello\"")
+			attributes[key] = v
 		case float64:
 			// JSON numbers are float64
 			if v == float64(int64(v)) {
@@ -776,13 +784,16 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert interface{} values to strings for SetAttribute
+	// If the value is already a string, assume it's in ClassAd format
+	// Otherwise, convert to appropriate ClassAd format
 	attributes := make(map[string]string)
 	for key, value := range req.Attributes {
 		// Convert value to string representation
 		switch v := value.(type) {
 		case string:
-			// Quote string values for ClassAd
-			attributes[key] = fmt.Sprintf("%q", v)
+			// String values are assumed to be in ClassAd format already
+			// (either literals like "256" or quoted strings like "\"hello\"")
+			attributes[key] = v
 		case float64:
 			// JSON numbers are float64
 			if v == float64(int64(v)) {

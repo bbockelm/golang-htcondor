@@ -13,8 +13,9 @@ type Statement interface {
 
 // Assignment represents a variable assignment
 type Assignment struct {
-	Name  string
-	Value string
+	Name        string
+	Value       string
+	ClassAdExpr bool // True if this is a +Attribute = expr (ClassAd expression)
 }
 
 func (a *Assignment) statement() {}
@@ -92,7 +93,7 @@ func (q *QueueStatement) statement() {}
 %token <str> IF ELIF ELSE ENDIF DEFINED VERSION
 %token <str> INCLUDE USE TRUE FALSE YES NO ERROR WARNING IFEXIST COMMAND INTO
 %token <str> QUEUE FROM IN MATCHING
-%token COLON LPAREN RPAREN LBRACK RBRACK COMMA
+%token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS
 %token EOF ILLEGAL COMMENT
 
 %type <stmts> config_file statement_list
@@ -158,6 +159,16 @@ assignment:
 		$$ = &Assignment{
 			Name:  $1,
 			Value: $2,
+		}
+	}
+	| PLUS identifier ASSIGN
+	{
+		// +Attribute = expr - ClassAd expression to be integrated into job
+		// Strip the + prefix and mark as ClassAd expression
+		$$ = &Assignment{
+			Name:        $2,
+			Value:       $3,
+			ClassAdExpr: true,
 		}
 	}
 

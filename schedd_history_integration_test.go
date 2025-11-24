@@ -27,13 +27,18 @@ func TestScheddQueryJobHistoryIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
-	// Submit a test job that completes quickly
+	// Create a simple job that completes quickly
 	submitFile := fmt.Sprintf(`
 universe = vanilla
 executable = /bin/echo
@@ -89,7 +94,7 @@ queue
 	}
 
 	if !leftQueue {
-		harness.printScheddLog()
+		harness.PrintScheddLog()
 		harness.printShadowLog()
 		harness.printStarterLogs()
 		t.Fatalf("Job did not leave queue in time after %v", maxWait)
@@ -222,11 +227,16 @@ func TestScheddQueryJobEpochsIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a simple test job
 	submitFile := `
@@ -291,11 +301,16 @@ func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
 
-	// Discover schedd address
-	addr := discoverSchedd(t, harness)
+	// Locate schedd using collector
+	collector := NewCollector(harness.GetCollectorAddr())
+	locateCtx := context.Background()
+	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
 
 	// Create Schedd instance
-	schedd := NewSchedd("local", addr)
+	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a job with file transfer
 	submitFile := `
