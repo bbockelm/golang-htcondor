@@ -421,6 +421,8 @@ func (l *Lexer) readHeredoc() string {
 }
 
 // NextToken returns the next token
+//
+//nolint:gocyclo // Lexer naturally has high complexity due to many token types
 func (l *Lexer) NextToken() *TokenInfo {
 	// Special handling after ERROR or WARNING keywords - read rest of line after optional colon
 	if l.afterErrorOrWarning {
@@ -538,15 +540,13 @@ func (l *Lexer) NextToken() *TokenInfo {
 		l.readChar()
 
 	case '+':
-		// Check if followed by an identifier (for +Attribute syntax)
+		// For +Attribute syntax, require identifier to follow
+		tok.Lit = "+"
+		l.readChar()
 		if isIdentStart(l.peekChar()) {
 			tok.Token = PLUS
-			tok.Lit = "+"
-			l.readChar()
 		} else {
 			tok.Token = ILLEGAL
-			tok.Lit = string(l.ch)
-			l.readChar()
 		}
 
 	case '"', '\'':
