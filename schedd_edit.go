@@ -95,6 +95,7 @@ func (s *Schedd) EditJob(ctx context.Context, clusterID, procID int, attributes 
 	}
 
 	// Open QMGMT connection
+	// Note: NewQmgmtConnection automatically starts a transaction via GetCapabilities
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to open QMGMT connection: %w", err)
@@ -105,12 +106,7 @@ func (s *Schedd) EditJob(ctx context.Context, clusterID, procID int, attributes 
 		}
 	}()
 
-	// Begin transaction
-	if err := qmgmt.BeginTransaction(ctx); err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-
-	// Set attributes
+	// Set attributes (transaction is already started by GetCapabilities)
 	for attrName, attrValue := range attributes {
 		if err := qmgmt.SetAttribute(ctx, clusterID, procID, attrName, attrValue, 0); err != nil {
 			// Try to abort transaction on error
@@ -174,6 +170,7 @@ func (s *Schedd) EditJobs(ctx context.Context, constraint string, attributes map
 	}
 
 	// Open QMGMT connection
+	// Note: NewQmgmtConnection automatically starts a transaction via GetCapabilities
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open QMGMT connection: %w", err)
@@ -184,12 +181,7 @@ func (s *Schedd) EditJobs(ctx context.Context, constraint string, attributes map
 		}
 	}()
 
-	// Begin transaction
-	if err := qmgmt.BeginTransaction(ctx); err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-
-	// Edit each job
+	// Edit each job (transaction is already started by GetCapabilities)
 	jobsEdited := 0
 	for _, ad := range ads {
 		// Use EvaluateAttrInt to get attribute values

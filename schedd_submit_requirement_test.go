@@ -85,8 +85,7 @@ func getScheddAddressFromHarness(t *testing.T, harness *CondorTestHarness) strin
 	t.Helper()
 
 	// Parse collector address
-	collectorAddr := harness.GetCollectorAddr()
-	addr := parseCollectorSinfulString(collectorAddr)
+	addr := harness.GetCollectorAddr()
 
 	t.Logf("Querying collector at %s for schedd location", addr)
 
@@ -120,8 +119,7 @@ func getScheddAddressFromHarness(t *testing.T, harness *CondorTestHarness) strin
 	myAddress = strings.Trim(myAddress, "\"")
 
 	// Parse sinful string to extract host:port
-	scheddAddr := parseCollectorSinfulString(myAddress)
-	return scheddAddr
+	return myAddress
 }
 
 // getSubmitRequirementConfig returns HTCondor configuration with a submit requirement

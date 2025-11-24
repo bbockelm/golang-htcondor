@@ -5,23 +5,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
-
-// parseCollectorAddr extracts host:port from HTCondor "sinful string" format
-// like <127.0.0.1:9618?addrs=...>
-func parseCollectorAddr(addr string) string {
-	addr = strings.TrimPrefix(addr, "<")
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx] // Remove query parameters
-	}
-	addr = strings.TrimSuffix(addr, ">")
-	return addr
-}
 
 // TestSpoolJobFilesFromTar_SingleJob tests spooling files from a tar archive for a single job
 func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {

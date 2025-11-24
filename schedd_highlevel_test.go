@@ -4,56 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
 
-// discoverSchedd discovers the schedd address from the test harness
-func discoverSchedd(t *testing.T, harness *CondorTestHarness) string {
+// setupScheddForTest discovers and returns a Schedd instance for testing
+func setupScheddForTest(t *testing.T) *Schedd {
 	t.Helper()
-
-	// Parse collector address
-	collectorAddr := harness.GetCollectorAddr()
-	addr := parseCollectorSinfulString(collectorAddr)
-
-	// Query collector for schedd location
-	collector := NewCollector(addr)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
-	if err != nil {
-		t.Fatalf("Failed to query collector for schedd ads: %v", err)
-	}
-
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd ads found in collector")
-	}
-
-	// Extract schedd address from ad
-	scheddAd := scheddAds[0]
-
-	// Get MyAddress attribute
-	myAddressExpr, ok := scheddAd.Lookup("MyAddress")
-	if !ok {
-		t.Fatal("Schedd ad does not have MyAddress attribute")
-	}
-
-	myAddress := myAddressExpr.String()
-	myAddress = strings.Trim(myAddress, "\"")
-
-	// Parse schedd sinful string
-	scheddAddr := parseCollectorSinfulString(myAddress)
-
-	return scheddAddr
-}
-
-// TestScheddSubmitHighLevel tests the high-level Schedd.Submit API
-func TestScheddSubmitHighLevel(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Check if condor_master is available
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -78,6 +35,17 @@ func TestScheddSubmitHighLevel(t *testing.T) {
 
 	// Create Schedd instance
 	schedd := NewSchedd(location.Name, location.Address)
+
+	return schedd
+}
+
+// TestScheddSubmitHighLevel tests the high-level Schedd.Submit API
+func TestScheddSubmitHighLevel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	schedd := setupScheddForTest(t)
 
 	// Simple submit file content
 	submitFile := `
@@ -108,29 +76,7 @@ func TestScheddSubmitMultiProc(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Check if condor_master is available
-	if _, err := exec.LookPath("condor_master"); err != nil {
-		t.Skip("condor_master not found in PATH - skipping integration test")
-	}
-
-	// Set up mini HTCondor environment
-	harness := SetupCondorHarness(t)
-
-	// Wait for daemons to start
-	if err := harness.WaitForDaemons(); err != nil {
-		t.Fatalf("Daemons failed to start: %v", err)
-	}
-
-	// Discover schedd address
-	collector := NewCollector(harness.GetCollectorAddr())
-	locateCtx := context.Background()
-	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
-	if err != nil {
-		t.Fatalf("Failed to locate schedd: %v", err)
-	}
-
-	// Create Schedd instance
-	schedd := NewSchedd(location.Name, location.Address)
+	schedd := setupScheddForTest(t)
 
 	// Submit file with multiple procs
 	submitFile := `
@@ -161,29 +107,7 @@ func TestScheddSubmitWithVariables(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Check if condor_master is available
-	if _, err := exec.LookPath("condor_master"); err != nil {
-		t.Skip("condor_master not found in PATH - skipping integration test")
-	}
-
-	// Set up mini HTCondor environment
-	harness := SetupCondorHarness(t)
-
-	// Wait for daemons to start
-	if err := harness.WaitForDaemons(); err != nil {
-		t.Fatalf("Daemons failed to start: %v", err)
-	}
-
-	// Discover schedd address
-	collector := NewCollector(harness.GetCollectorAddr())
-	locateCtx := context.Background()
-	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
-	if err != nil {
-		t.Fatalf("Failed to locate schedd: %v", err)
-	}
-
-	// Create Schedd instance
-	schedd := NewSchedd(location.Name, location.Address)
+	schedd := setupScheddForTest(t)
 
 	// Submit file with queue variables (use 'in' for inline lists)
 	submitFile := `
@@ -214,29 +138,7 @@ func TestScheddQueryIntegration(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Check if condor_master is available
-	if _, err := exec.LookPath("condor_master"); err != nil {
-		t.Skip("condor_master not found in PATH - skipping integration test")
-	}
-
-	// Setup test harness
-	harness := SetupCondorHarness(t)
-
-	// Wait for daemons to start
-	if err := harness.WaitForDaemons(); err != nil {
-		t.Fatalf("Daemons failed to start: %v", err)
-	}
-
-	// Discover schedd address
-	collector := NewCollector(harness.GetCollectorAddr())
-	locateCtx := context.Background()
-	location, err := collector.LocateDaemon(locateCtx, "Schedd", "")
-	if err != nil {
-		t.Fatalf("Failed to locate schedd: %v", err)
-	}
-
-	// Create Schedd instance
-	schedd := NewSchedd(location.Name, location.Address)
+	schedd := setupScheddForTest(t)
 
 	// First, submit a test job so we have something to query
 	// Use /bin/sleep to keep job in queue longer for testing

@@ -262,8 +262,8 @@ queue
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("HTTP status = %d, want %d for immutable attribute", resp.StatusCode, http.StatusBadRequest)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("HTTP status = %d, want %d for immutable attribute", resp.StatusCode, http.StatusForbidden)
 		}
 		t.Logf("✓ Correctly rejected immutable attribute with status %d", resp.StatusCode)
 	})
@@ -398,6 +398,16 @@ queue 3
 
 	// Wait a bit for jobs to settle
 	time.Sleep(2 * time.Second)
+
+	// Verify all jobs are in the queue before editing
+	verifyAds, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %s", clusterID), []string{"ProcId"})
+	if err != nil {
+		t.Fatalf("Failed to query jobs before edit: %v", err)
+	}
+	t.Logf("Found %d jobs in queue after submission", len(verifyAds))
+	if len(verifyAds) != 3 {
+		t.Fatalf("Expected 3 jobs after submission, found %d", len(verifyAds))
+	}
 
 	// Test bulk edit via HTTP PATCH
 	t.Run("HTTPPatchBulk", func(t *testing.T) {

@@ -3,7 +3,6 @@ package htcondor
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -118,24 +117,7 @@ func TestScheddSubmitIntegration(t *testing.T) {
 	})
 }
 
-// parseCollectorSinfulString extracts host:port from HTCondor sinful string format
-// HTCondor uses format: <host:port?addrs=host-port&alias=hostname>
-func parseCollectorSinfulString(addr string) string {
-	// Remove angle brackets
-	addr = strings.TrimPrefix(addr, "<")
-
-	// Split on ? to remove query parameters
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx]
-	}
-
-	// Remove trailing >
-	addr = strings.TrimSuffix(addr, ">")
-
-	return addr
-}
-
-// Integration Test Design Notes:
+// TestScheddTransactionManagement tests the transaction management in QMGMT
 //
 // This integration test demonstrates the structure for job submission testing.
 // It's currently skipped due to missing authentication infrastructure.
