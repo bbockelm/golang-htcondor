@@ -195,9 +195,22 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 	}
 
 	// Parse output path
+	// First try daemon-specific log path (e.g., HTTP_API_LOG)
+	// Then fall back to global LOG parameter
 	outputPath := "stderr"
-	if logPath, ok := cfg.Get(strings.ToUpper(daemonName) + "_LOG"); ok && logPath != "" {
+	daemonLogParam := strings.ToUpper(daemonName) + "_LOG"
+	if logPath, ok := cfg.Get(daemonLogParam); ok && logPath != "" {
 		outputPath = logPath
+	} else if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
+		outputPath = logPath
+	}
+
+	// Normalize paths that reference stdout or stderr in a directory structure
+	// (e.g., "stdout/SchedLog" should just be "stdout")
+	if strings.HasPrefix(outputPath, "stdout/") || strings.HasPrefix(outputPath, "stdout\\") {
+		outputPath = "stdout"
+	} else if strings.HasPrefix(outputPath, "stderr/") || strings.HasPrefix(outputPath, "stderr\\") {
+		outputPath = "stderr"
 	}
 
 	// Parse destination levels from <DAEMON>_DEBUG

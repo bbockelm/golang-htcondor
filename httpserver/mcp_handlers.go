@@ -56,19 +56,106 @@ func (s *Server) extractUsernameFromToken(token fosite.AccessRequester) string {
 
 // handleMCPMessage handles MCP JSON-RPC messages over HTTP
 func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
-	// Validate OAuth2 token
+	// Validate OAuth2 token or detect HTCondor token
 	token, err := s.validateOAuth2Token(r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "OAuth2 validation failed", "error", err)
-		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing OAuth2 token")
+		s.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
+		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
 		return
 	}
 
-	// Extract username from token using configured claim
-	username := s.extractUsernameFromToken(token)
-	if username == "" {
-		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
-		return
+	// Create context with security config for HTCondor operations
+	ctx := r.Context()
+
+	// Check if this is an HTCondor token (token == nil && err == nil)
+	if token == nil {
+		// This is an HTCondor token - extract it and pass to HTCondor for validation
+		auth := r.Header.Get("Authorization")
+		parts := strings.SplitN(auth, " ", 2)
+		if len(parts) != 2 {
+			s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
+			return
+		}
+		htcToken := parts[1]
+
+		s.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
+
+		// Create security config with the HTCondor token
+		// HTCondor will validate the token and enforce authorization
+		secConfig := &security.SecurityConfig{
+			AuthMethods:    []security.AuthMethod{security.AuthToken},
+			Authentication: security.SecurityRequired,
+			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+			Encryption:     security.SecurityOptional,
+			Integrity:      security.SecurityOptional,
+			Token:          htcToken,
+		}
+		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+		// For HTCondor tokens, we don't validate scopes here - HTCondor does that
+		// Just process the MCP message
+	} else {
+		// This is an OAuth2 token - validate scopes and generate HTCondor token
+
+		// Extract username from token using configured claim
+		username := s.extractUsernameFromToken(token)
+		if username == "" {
+			s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
+			return
+		}
+
+		s.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
+
+		// Read MCP message from request body to check scopes
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+			s.writeError(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+
+		// Parse MCP message
+		var mcpRequest mcpserver.MCPMessage
+		if err := json.Unmarshal(body, &mcpRequest); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+			s.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+			return
+		}
+
+		// Check if the requested MCP method is allowed based on OAuth2 scopes
+		if !s.isMethodAllowedByScopes(token, &mcpRequest) {
+			s.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
+			s.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
+			return
+		}
+
+		s.logger.Info(logging.DestinationHTTP, "Signing key path", "path", s.signingKeyPath, "trust_domain", s.trustDomain)
+
+		// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
+		// If we have a signing key, generate an HTCondor token for this user
+		if s.signingKeyPath != "" && s.trustDomain != "" {
+			htcToken, err := s.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
+			if err != nil {
+				s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
+				s.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+				return
+			}
+
+			// Create security config with the generated token
+			secConfig := &security.SecurityConfig{
+				AuthMethods:    []security.AuthMethod{security.AuthToken},
+				Authentication: security.SecurityRequired,
+				CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+				Encryption:     security.SecurityOptional,
+				Integrity:      security.SecurityOptional,
+				Token:          htcToken,
+				SecurityTag:    username,
+			}
+			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+		}
+
+		// Restore the body for later reading
+		r.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
 	// Read MCP message from request body
@@ -85,43 +172,6 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
 		s.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
 		return
-	}
-
-	s.logger.Info(logging.DestinationHTTP, "Received MCP message", "method", mcpRequest.Method, "username", username)
-
-	// Check if the requested MCP method is allowed based on OAuth2 scopes
-	if !s.isMethodAllowedByScopes(token, &mcpRequest) {
-		s.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
-		s.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
-		return
-	}
-
-	// Create context with security config for HTCondor operations
-	ctx := r.Context()
-
-	s.logger.Info(logging.DestinationHTTP, "Signing key path", "path", s.signingKeyPath, "trust_domain", s.trustDomain)
-
-	// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
-	// If we have a signing key, generate an HTCondor token for this user
-	if s.signingKeyPath != "" && s.trustDomain != "" {
-		htcToken, err := s.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
-		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
-			s.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
-			return
-		}
-
-		// Create security config with the token
-		secConfig := &security.SecurityConfig{
-			AuthMethods:    []security.AuthMethod{security.AuthToken},
-			Authentication: security.SecurityRequired,
-			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-			Encryption:     security.SecurityOptional,
-			Integrity:      security.SecurityOptional,
-			Token:          htcToken,
-			SecurityTag:    username,
-		}
-		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 	}
 
 	// Create a temporary MCP server to handle this request
@@ -184,7 +234,7 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 
 	tokenString := parts[1]
 
-	// Validate the token using fosite
+	// First try to validate as OAuth2 token using fosite
 	ctx := r.Context()
 	session := &openid.DefaultSession{}
 
@@ -196,11 +246,24 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 	)
 	_ = tokenType // Not used but returned by IntrospectToken
 
-	if err != nil {
-		return nil, fmt.Errorf("token validation failed: %w", err)
+	if err == nil {
+		// Successfully validated as OAuth2 token
+		return accessRequest, nil
 	}
 
-	return accessRequest, nil
+	// If OAuth2 validation failed, check if this might be an HTCondor IDTOKEN
+	// HTCondor IDTOKENs are JWTs with 3 parts separated by dots
+	// Return (nil, nil) to signal that this is an HTCondor token that should be
+	// passed directly to HTCondor for validation (not validated by us)
+	if len(strings.Split(tokenString, ".")) == 3 {
+		s.logger.Info(logging.DestinationHTTP, "OAuth2 validation failed, detected possible HTCondor token - will pass to HTCondor for validation")
+		// Return nil token with nil error to signal HTCondor token
+		// The caller must extract the token from the Authorization header
+		return nil, nil
+	}
+
+	// Not an OAuth2 token or HTCondor token
+	return nil, fmt.Errorf("token validation failed: %w", err)
 }
 
 // filterRequestedScopes filters the requested scopes to only include those allowed for the client.
