@@ -176,7 +176,9 @@ queue
 		}
 
 		// Verify the changes
-		ads, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %s", clusterID), []string{"RequestMemory", "MyCustomAttr"})
+		ads, _, err := schedd.QueryWithOptions(ctx, fmt.Sprintf("ClusterId == %s", clusterID), &htcondor.QueryOptions{
+			Projection: []string{"RequestMemory", "MyCustomAttr"},
+		})
 		if err != nil {
 			t.Fatalf("Failed to query job: %v", err)
 		}
@@ -396,11 +398,10 @@ queue 3
 		_, _ = schedd.RemoveJobs(cleanupCtx, constraint, "Test cleanup")
 	}()
 
-	// Wait a bit for jobs to settle
-	time.Sleep(2 * time.Second)
-
 	// Verify all jobs are in the queue before editing
-	verifyAds, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %s", clusterID), []string{"ProcId"})
+	verifyAds, _, err := schedd.QueryWithOptions(ctx, fmt.Sprintf("ClusterId == %s", clusterID), &htcondor.QueryOptions{
+		Projection: []string{"ProcId"},
+	})
 	if err != nil {
 		t.Fatalf("Failed to query jobs before edit: %v", err)
 	}
@@ -460,7 +461,9 @@ queue 3
 		t.Logf("✓ Successfully bulk edited %d jobs via HTTP API", int(jobsEdited))
 
 		// Verify the changes
-		ads, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %s", clusterID), []string{"RequestMemory", "MyBulkEdit", "ProcId"})
+		ads, _, err := schedd.QueryWithOptions(ctx, fmt.Sprintf("ClusterId == %s", clusterID), &htcondor.QueryOptions{
+			Projection: []string{"RequestMemory", "MyBulkEdit", "ProcId"},
+		})
 		if err != nil {
 			t.Fatalf("Failed to query jobs: %v", err)
 		}

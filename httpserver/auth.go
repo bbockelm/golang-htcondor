@@ -40,10 +40,10 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 		return nil, fmt.Errorf("empty token provided")
 	}
 
-	// Create a security configuration that uses TOKEN authentication
+	// Create a security configuration that prefers TOKEN but allows FS fallback
 	// The token content is stored in TokenFile field (cedar supports both file paths and direct content)
 	secConfig := &security.SecurityConfig{
-		AuthMethods:    []security.AuthMethod{security.AuthToken},
+		AuthMethods:    []security.AuthMethod{security.AuthToken, security.AuthFS},
 		Authentication: security.SecurityRequired,
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,

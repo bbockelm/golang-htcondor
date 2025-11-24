@@ -537,6 +537,18 @@ func (l *Lexer) NextToken() *TokenInfo {
 		tok.Lit = ","
 		l.readChar()
 
+	case '+':
+		// Check if followed by an identifier (for +Attribute syntax)
+		if isIdentStart(l.peekChar()) {
+			tok.Token = PLUS
+			tok.Lit = "+"
+			l.readChar()
+		} else {
+			tok.Token = ILLEGAL
+			tok.Lit = string(l.ch)
+			l.readChar()
+		}
+
 	case '"', '\'':
 		quote := l.ch
 		tok.Token = STRING
