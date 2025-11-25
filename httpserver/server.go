@@ -621,11 +621,52 @@ func (s *Server) initializeOAuth2(ln net.Listener, protocol string) {
 		return
 	}
 
+	actualAddr := ln.Addr().String()
+	issuer := s.oauth2Provider.config.AccessTokenIssuer
+
 	// Only update issuer if it was empty or had a dynamic port (:0)
-	if shouldUpdateIssuer(s.oauth2Provider.config.AccessTokenIssuer) {
-		actualAddr := ln.Addr().String()
-		issuer := protocol + "://" + actualAddr
+	if shouldUpdateIssuer(issuer) {
+		issuer = protocol + "://" + actualAddr
 		s.oauth2Provider.UpdateIssuer(issuer)
+	}
+
+	// Create Swagger UI client (public client) if not already present
+	// This ensures Swagger UI can authenticate via OAuth2 in normal mode (MCP enabled without IDP)
+	ctx := context.Background()
+	swaggerClientID := "swagger-client"
+	swaggerRedirectURIs := []string{issuer + "/docs/oauth2-redirect"}
+
+	// Add localhost/127.0.0.1 variants if issuer uses wildcard or unspecified address
+	// This ensures Swagger UI works when accessed via localhost even if server listens on [::]
+	if strings.Contains(issuer, "[::]") || strings.Contains(issuer, "0.0.0.0") {
+		_, port, _ := net.SplitHostPort(actualAddr)
+		if port != "" {
+			swaggerRedirectURIs = append(swaggerRedirectURIs,
+				protocol+"://localhost:"+port+"/docs/oauth2-redirect",
+				protocol+"://127.0.0.1:"+port+"/docs/oauth2-redirect",
+			)
+		}
+	}
+
+	// Check if client exists
+	_, err := s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
+	if err != nil {
+		// Create client if not found (or error)
+		client := &fosite.DefaultClient{
+			ID:            swaggerClientID,
+			Secret:        nil, // Public client has no secret
+			RedirectURIs:  swaggerRedirectURIs,
+			ResponseTypes: []string{"code"},
+			GrantTypes:    []string{"authorization_code"},
+			Scopes:        []string{"openid", "profile", "email"},
+			Public:        true,
+		}
+
+		if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
+		} else {
+			s.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
+		}
 	}
 }
 
