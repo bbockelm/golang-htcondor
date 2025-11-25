@@ -811,3 +811,223 @@ queue
 
 	t.Logf("Job sandbox download and verification complete")
 }
+
+// TestTransferOutputRemapsIntegration tests the transfer_output_remaps feature
+// This verifies that:
+// 1. Files are renamed correctly in the output tarball based on remaps
+// 2. Multiple remaps work correctly
+//
+//nolint:gocyclo // Integration test requires complex setup and verification logic
+func TestTransferOutputRemapsIntegration(t *testing.T) {
+	// Setup HTCondor test harness
+	harness := SetupCondorHarness(t)
+
+	// Wait for daemons to start
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("Daemons failed to start: %v", err)
+	}
+
+	// Get schedd connection info
+	scheddLocation := getScheddAddress(t, harness)
+	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create schedd client
+	schedd := NewSchedd(scheddLocation.Name, scheddLocation.Address)
+
+	// Create a submit file with transfer_output_remaps
+	// The job will produce original.txt and data.out, but they should be renamed
+	// to results/renamed.txt and data_renamed.out in the tarball
+	submitFile := `
+universe = vanilla
+executable = /bin/sh
+arguments = job_script.sh
+transfer_executable = false
+transfer_input_files = job_script.sh
+transfer_output_files = original.txt, data.out
+transfer_output_remaps = "original.txt=results/renamed.txt; data.out=data_renamed.out"
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+request_cpus = 1
+request_memory = 128
+request_disk = 1024
+output = job.out
+error = job.err
+log = job.log
+queue
+`
+
+	// Submit the job remotely
+	t.Logf("Submitting job remotely...")
+	clusterID, procAds, err := schedd.SubmitRemote(ctx, submitFile)
+	if err != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("Failed to submit job: %v", err)
+	}
+
+	t.Logf("Job submitted successfully: cluster=%d, num_procs=%d", clusterID, len(procAds))
+
+	// Verify the TransferOutputRemaps attribute was set
+	if len(procAds) > 0 {
+		if remapsExpr, ok := procAds[0].Lookup("TransferOutputRemaps"); ok {
+			t.Logf("TransferOutputRemaps in job ad: %s", remapsExpr)
+		} else {
+			t.Logf("Warning: TransferOutputRemaps not found in job ad")
+		}
+	}
+
+	// Create input files including a job script that produces the output files
+	testFS := fstest.MapFS{
+		"job_script.sh": &fstest.MapFile{
+			Data: []byte("#!/bin/sh\n" +
+				"echo 'Content from original file' > original.txt\n" +
+				"echo 'Content from data file' > data.out\n"),
+			Mode: 0755,
+		},
+	}
+
+	// Spool the input files
+	t.Logf("Spooling input files for job %d.0", clusterID)
+	spoolCtx, spoolCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer spoolCancel()
+
+	if err := schedd.SpoolJobFilesFromFS(spoolCtx, procAds, testFS); err != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("Failed to spool files: %v", err)
+	}
+
+	t.Logf("Successfully spooled input files")
+
+	// Wait for job to complete (with timeout)
+	t.Logf("Waiting for job to complete...")
+	jobCompleted := false
+	startTime := time.Now()
+	maxWait := 20 * time.Second
+	var lastStatus int64 = -1
+
+	for time.Since(startTime) < maxWait {
+		queryResult, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %d", clusterID), []string{"JobStatus"})
+		if err != nil {
+			t.Logf("Warning: Failed to query job status: %v", err)
+		} else if len(queryResult) > 0 {
+			jobAd := queryResult[0]
+			if statusExpr, ok := jobAd.Lookup("JobStatus"); ok {
+				statusVal := statusExpr.Eval(nil)
+				if statusInt, err := statusVal.IntValue(); err == nil {
+					t.Logf("Job status: %d (1=IDLE, 2=RUNNING, 4=COMPLETED, 5=HELD)", statusInt)
+
+					// If status changed, extend timeout
+					if lastStatus != -1 && statusInt != lastStatus {
+						maxWait += 10 * time.Second
+						t.Logf("Job status changed - extending timeout")
+					}
+					lastStatus = statusInt
+
+					if statusInt == 4 {
+						t.Logf("Job completed!")
+						jobCompleted = true
+						break
+					}
+				}
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if !jobCompleted {
+		harness.PrintScheddLog()
+		t.Fatalf("Job did not complete within timeout")
+	}
+
+	// Download the job sandbox
+	t.Logf("Downloading job sandbox with output remaps...")
+	var sandboxBuf bytes.Buffer
+	constraint := fmt.Sprintf("ClusterId == %d", clusterID)
+
+	downloadCtx, downloadCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer downloadCancel()
+
+	errChan := schedd.ReceiveJobSandbox(downloadCtx, constraint, &sandboxBuf)
+
+	// Wait for download to complete
+	if err := <-errChan; err != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("Failed to download job sandbox: %v", err)
+	}
+
+	t.Logf("Successfully downloaded job sandbox (%d bytes)", sandboxBuf.Len())
+
+	// Extract and verify the tar archive
+	t.Logf("Extracting and verifying sandbox contents with remapped names...")
+	tarReader := tar.NewReader(&sandboxBuf)
+
+	filesFound := make(map[string]string) // path -> content
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Failed to read tar entry: %v", err)
+		}
+
+		t.Logf("Found file in sandbox: %s (size: %d bytes)", header.Name, header.Size)
+
+		// Read file content
+		content, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatalf("Failed to read file content: %v", err)
+		}
+
+		filesFound[header.Name] = string(content)
+	}
+
+	// Log all files found
+	t.Logf("All files found in sandbox:")
+	for name, content := range filesFound {
+		t.Logf("  %s: %q", name, content)
+	}
+
+	// Verify that the REMAPPED filenames are present (not the original names)
+	// The files should be renamed according to transfer_output_remaps
+	expectedRemaps := map[string]struct {
+		originalName string
+		content      string
+	}{
+		"results/renamed.txt": {originalName: "original.txt", content: "Content from original file"},
+		"data_renamed.out":    {originalName: "data.out", content: "Content from data file"},
+	}
+
+	for remappedName, expected := range expectedRemaps {
+		content, found := filesFound[remappedName]
+		if !found {
+			// Check if the original name is present instead (which would be wrong)
+			if _, hasOriginal := filesFound[expected.originalName]; hasOriginal {
+				t.Errorf("File %s was NOT remapped to %s - remap may have failed",
+					expected.originalName, remappedName)
+			} else {
+				t.Errorf("Expected remapped file %s not found in sandbox", remappedName)
+			}
+			continue
+		}
+
+		if !strings.Contains(content, expected.content) {
+			t.Errorf("Remapped file %s does not contain expected content. Got: %q, Want to contain: %q",
+				remappedName, content, expected.content)
+		} else {
+			t.Logf("✓ File %s correctly remapped with expected content", remappedName)
+		}
+	}
+
+	// Verify that original names are NOT present (they should have been remapped)
+	for remappedName, expected := range expectedRemaps {
+		if _, hasOriginal := filesFound[expected.originalName]; hasOriginal {
+			t.Errorf("Original file %s should have been remapped to %s, but both exist",
+				expected.originalName, remappedName)
+		}
+	}
+
+	t.Logf("Transfer output remaps integration test complete")
+}

@@ -1039,6 +1039,8 @@ func parseFileList(list string) []string {
 // Returns a map of source -> destination paths
 func parseRemaps(remaps string) map[string]string {
 	result := make(map[string]string)
+	// Strip outer quotes if present (submit file often wraps value in quotes)
+	remaps = strings.Trim(remaps, "\"")
 	pairs := strings.Split(remaps, ";")
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
