@@ -41,6 +41,7 @@ type Server struct {
 	signingKeyPath      string
 	trustDomain         string
 	uidDomain           string
+	httpBaseURL         string // Base URL for HTTP API (for generating MCP file download links)
 	tlsCACertFile       string
 	logger              *logging.Logger
 	metricsRegistry     *metricsd.Registry
@@ -76,6 +77,7 @@ type Config struct {
 	SigningKeyPath      string              // Path to token signing key (optional, for token generation)
 	TrustDomain         string              // Trust domain for token issuer (optional; only used if UserHeader is set)
 	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL         string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
 	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
 	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
@@ -172,6 +174,7 @@ func NewServer(cfg Config) (*Server, error) {
 		collector:          cfg.Collector,
 		trustDomain:        cfg.TrustDomain,
 		uidDomain:          cfg.UIDDomain,
+		httpBaseURL:        cfg.HTTPBaseURL,
 		userHeader:         cfg.UserHeader,
 		signingKeyPath:     cfg.SigningKeyPath,
 		tlsCACertFile:      cfg.TLSCACertFile,

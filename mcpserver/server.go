@@ -21,6 +21,7 @@ type Server struct {
 	signingKeyPath     string
 	trustDomain        string
 	uidDomain          string
+	httpBaseURL        string // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
@@ -44,6 +45,7 @@ type Config struct {
 	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
 	TrustDomain     string              // Trust domain for token issuer (optional)
 	UIDDomain       string              // UID domain for generated token username (optional)
+	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
 	Collector       *htcondor.Collector // Collector for metrics and discovery (optional)
 	EnableMetrics   bool                // Enable metrics collection (default: true if Collector is set)
 	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
@@ -109,6 +111,7 @@ func NewServer(cfg Config) (*Server, error) {
 		trustDomain:     cfg.TrustDomain,
 		uidDomain:       cfg.UIDDomain,
 		signingKeyPath:  cfg.SigningKeyPath,
+		httpBaseURL:     cfg.HTTPBaseURL,
 		logger:          logger,
 		stdin:           stdin,
 		stdout:          stdout,

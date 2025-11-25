@@ -77,8 +77,11 @@ const openAPISchema = `{
         "properties": {
           "submit_file": {
             "type": "string",
-            "description": "HTCondor submit file content"
+            "description": "HTCondor submit file content. Basic format: executable, arguments, output, error, log, and queue directive."
           }
+        },
+        "example": {
+          "submit_file": "executable = /bin/echo\narguments = Hello World\noutput = hello.out\nerror = hello.err\nlog = hello.log\nqueue"
         }
       },
       "JobSubmitResponse": {
@@ -253,6 +256,16 @@ const openAPISchema = `{
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "owned_by_me",
+            "in": "query",
+            "description": "Filter jobs to only those owned by the authenticated user. Default: true for security. Set to false to see all jobs (requires appropriate permissions).",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
           }
         ],
         "responses": {
@@ -290,7 +303,7 @@ const openAPISchema = `{
       },
       "post": {
         "summary": "Submit a job",
-        "description": "Submit a new job to the schedd using SubmitRemote. Jobs are submitted with input file spooling enabled and start in HELD status until input files are uploaded.",
+        "description": "Submit a new job to the schedd using SubmitRemote. Jobs are submitted with input file spooling enabled and start in HELD status until input files are uploaded via PUT /jobs/{jobId}/input. After uploading input files, poll GET /jobs/{jobId} to check job status (JobStatus: 1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held).",
         "operationId": "submitJob",
         "requestBody": {
           "required": true,
@@ -298,6 +311,29 @@ const openAPISchema = `{
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/JobSubmitRequest"
+              },
+              "examples": {
+                "hello_world": {
+                  "summary": "Simple Hello World job",
+                  "description": "A minimal job that prints Hello World to stdout",
+                  "value": {
+                    "submit_file": "executable = /bin/echo\narguments = Hello World\noutput = hello.out\nerror = hello.err\nlog = hello.log\nqueue"
+                  }
+                },
+                "sleep_job": {
+                  "summary": "Sleep job for testing",
+                  "description": "A job that sleeps for 30 seconds - useful for testing job management",
+                  "value": {
+                    "submit_file": "executable = /bin/sleep\narguments = 30\noutput = sleep.out\nerror = sleep.err\nlog = sleep.log\nqueue"
+                  }
+                },
+                "custom_script": {
+                  "summary": "Custom script job",
+                  "description": "Job with a custom executable script - upload script via PUT /jobs/{jobId}/input",
+                  "value": {
+                    "submit_file": "executable = my_script.sh\narguments = arg1 arg2\ntransfer_input_files = data.txt\noutput = output.txt\nerror = errors.txt\nlog = job.log\nqueue"
+                  }
+                }
               }
             }
           }
@@ -2226,7 +2262,7 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
         ],
         layout: "StandaloneLayout",
       });
-      
+
       window.ui.initOAuth({
         clientId: "swagger-client",
         appName: "HTCondor API",

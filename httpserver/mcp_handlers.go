@@ -182,6 +182,7 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		SigningKeyPath: s.signingKeyPath,
 		TrustDomain:    s.trustDomain,
 		UIDDomain:      s.uidDomain,
+		HTTPBaseURL:    s.httpBaseURL,
 		Logger:         s.logger,
 	})
 	if err != nil {
