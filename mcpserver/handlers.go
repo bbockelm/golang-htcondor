@@ -5,14 +5,17 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
@@ -40,7 +43,7 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 	tools := []Tool{
 		{
 			Name:        "submit_job",
-			Description: "Submit an HTCondor job using a submit file",
+			Description: "Submit an HTCondor job using a submit file. After submission, use upload_job_input to upload the executable and any input files (<100KB total recommended). For large input files (>100KB), use HTTP/HTTPS URLs in transfer_input_files instead of uploading via upload_job_input.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -405,6 +408,68 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 				},
 			},
 		},
+		{
+			Name:        "upload_job_input",
+			Description: "Upload input files to a job's sandbox. Use this for small files (<100KB total). For larger files, use HTTP/HTTPS URLs in transfer_input_files instead.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+					},
+					"files": map[string]interface{}{
+						"type":        "array",
+						"description": "Array of files to upload",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"filename": map[string]interface{}{
+									"type":        "string",
+									"description": "Name of the file (e.g., 'script.sh', 'data.txt')",
+								},
+								"data": map[string]interface{}{
+									"type":        "string",
+									"description": "File content. For text files, provide plain text. For binary files, provide base64-encoded data and set is_base64=true.",
+								},
+								"is_base64": map[string]interface{}{
+									"type":        "boolean",
+									"description": "If true, the data field is base64-encoded binary content (default: false, meaning plain text)",
+								},
+								"is_executable": map[string]interface{}{
+									"type":        "boolean",
+									"description": "If true, set executable permissions on the file (default: false)",
+								},
+							},
+							"required": []string{"filename", "data"},
+						},
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"job_id", "files"},
+			},
+		},
+		{
+			Name:        "get_job_output",
+			Description: "Get all output files from a job's sandbox as structured data. Files are returned with their content (text or base64-encoded for binary), truncated if larger than 100KB per file.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
 	}
 
 	return map[string]interface{}{
@@ -479,6 +544,10 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolQueryJobEpochs(ctx, request.Arguments)
 	case "query_transfer_history":
 		result, err = s.toolQueryTransferHistory(ctx, request.Arguments)
+	case "upload_job_input":
+		result, err = s.toolUploadJobInput(ctx, request.Arguments)
+	case "get_job_output":
+		result, err = s.toolGetJobOutputFiles(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
@@ -514,12 +583,80 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
+	// Determine if job likely needs input file spooling by parsing the submit file
+	// and checking the generated ClassAd attributes directly
+	needsSpooling := true // Default to true for safety
+	if sf, err := htcondor.ParseSubmitFile(strings.NewReader(submitFile)); err == nil {
+		// Generate a job ad to check transfer attributes
+		jobID := htcondor.JobID{Cluster: clusterID, Proc: 0}
+		if ad, err := sf.MakeJobAd(jobID, nil); err == nil {
+			// Check TransferExecutable - defaults to true
+			transferExec := true
+			if val, ok := ad.EvaluateAttrBool("TransferExecutable"); ok {
+				transferExec = val
+			}
+
+			// Check TransferInputFiles - if set, files need to be spooled
+			hasInputFiles := false
+			if val, _ := ad.EvaluateAttrString("TransferInputFiles"); val != "" {
+				hasInputFiles = true
+			}
+
+			// Check Input (stdin redirection) - if set, the input file needs to be spooled
+			hasStdinFile := false
+			if val, _ := ad.EvaluateAttrString("Input"); val != "" {
+				hasStdinFile = true
+			}
+
+			// Spooling is needed if executable will be transferred OR input files are specified
+			needsSpooling = transferExec || hasInputFiles || hasStdinFile
+		}
+	}
+
+	var nextSteps string
+	if needsSpooling {
+		nextSteps = fmt.Sprintf(`
+
+NEXT STEPS:
+1. The job is currently HELD (JobStatus=5) waiting for input files to be uploaded.
+2. Upload input files (executable script, data files) using the HTTP PUT endpoint for job input.
+3. After uploading, the job will be automatically released and transition to IDLE (JobStatus=1).
+4. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
+5. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
+
+Job Status Values:
+- 1 = Idle (waiting for resources)
+- 2 = Running
+- 3 = Removed
+- 4 = Completed
+- 5 = Held (waiting for input files or user action)
+
+First job ID for status checks: %s`, jobIDs[0])
+	} else {
+		nextSteps = fmt.Sprintf(`
+
+NEXT STEPS:
+1. The job has been submitted and should transition to IDLE (JobStatus=1) shortly.
+   (No input file upload needed since the executable is a system command.)
+2. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
+3. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
+
+Job Status Values:
+- 1 = Idle (waiting for resources)
+- 2 = Running
+- 3 = Removed
+- 4 = Completed
+- 5 = Held (waiting for input files or user action)
+
+First job ID for status checks: %s`, jobIDs[0])
+	}
+
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Successfully submitted job cluster %d with %d proc(s): %s",
-					clusterID, len(jobIDs), strings.Join(jobIDs, ", ")),
+				"text": fmt.Sprintf("Successfully submitted job cluster %d with %d proc(s): %s%s",
+					clusterID, len(jobIDs), strings.Join(jobIDs, ", "), nextSteps),
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -530,6 +667,7 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 }
 
 // toolQueryJobs handles job queries
+// By default, only queries jobs owned by the authenticated user for security
 func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	constraint, _ := args["constraint"].(string)
 	if constraint == "" {
@@ -553,11 +691,17 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// Get page token
 	pageToken, _ := args["page_token"].(string)
 
-	// Build query options
+	// Build query options - filter by owner by default for security
 	opts := &htcondor.QueryOptions{
 		Limit:      limit,
 		Projection: projection,
 		PageToken:  pageToken,
+		FetchOpts:  htcondor.FetchMyJobs, // Only query jobs owned by the authenticated user
+	}
+
+	// Get authenticated user from context if available
+	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
+		opts.Owner = user
 	}
 
 	// Use streaming query
@@ -586,8 +730,23 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("failed to serialize jobs: %w", err)
 	}
 
-	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s",
-		len(jobAds), constraint, string(jobsJSON))
+	// Build helpful status information
+	statusGuide := `
+
+JOB STATUS REFERENCE:
+- JobStatus=1: Idle (waiting for resources)
+- JobStatus=2: Running
+- JobStatus=3: Removed
+- JobStatus=4: Completed (retrieve output with get_job_stdout/get_job_stderr)
+- JobStatus=5: Held (may need input files uploaded or user action)
+
+TIPS:
+- Poll job status no more frequently than every 5 seconds
+- Use constraint queries instead of fetching many individual jobs (e.g., "ClusterId == 123")
+- For completed jobs (JobStatus=4), use get_job_stdout to retrieve output`
+
+	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s%s",
+		len(jobAds), constraint, string(jobsJSON), statusGuide)
 
 	// Build metadata
 	metadata := map[string]interface{}{
@@ -1242,4 +1401,308 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 			"source":        string(source),
 		},
 	}, nil
+}
+
+// OutputFile represents a file from the job's output sandbox
+type OutputFile struct {
+	Filename    string `json:"filename"`
+	Data        string `json:"data"`
+	IsTruncated bool   `json:"is_truncated"`
+	URL         string `json:"url,omitempty"`
+	IsBase64    bool   `json:"is_base64"`
+	Size        int64  `json:"size"`
+}
+
+// maxFileSize is the maximum size of file content to include in response (100KB)
+const maxFileSize = 100 * 1024
+
+// toolUploadJobInput handles uploading input files to a job's sandbox
+func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	jobID, ok := args["job_id"].(string)
+	if !ok || jobID == "" {
+		return nil, fmt.Errorf("job_id is required")
+	}
+
+	filesRaw, ok := args["files"].([]interface{})
+	if !ok || len(filesRaw) == 0 {
+		return nil, fmt.Errorf("files array is required and must not be empty")
+	}
+
+	// Parse job ID
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid job_id: %w", err)
+	}
+
+	// Query for the job to get its proc ad with transfer attributes
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput", "Cmd", "TransferExecutable"}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: projection,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query job: %w", err)
+	}
+
+	if len(jobAds) == 0 {
+		return nil, fmt.Errorf("job %s not found", jobID)
+	}
+
+	// Build a tarball from the input files
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+
+	var uploadedFiles []string
+	var totalSize int64
+
+	for i, fileRaw := range filesRaw {
+		fileMap, ok := fileRaw.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("files[%d] must be an object", i)
+		}
+
+		filename, ok := fileMap["filename"].(string)
+		if !ok || filename == "" {
+			return nil, fmt.Errorf("files[%d].filename is required", i)
+		}
+
+		data, ok := fileMap["data"].(string)
+		if !ok {
+			return nil, fmt.Errorf("files[%d].data is required", i)
+		}
+
+		// Decode data if base64-encoded
+		var fileData []byte
+		isBase64, _ := fileMap["is_base64"].(bool)
+		if isBase64 {
+			decoded, err := base64.StdEncoding.DecodeString(data)
+			if err != nil {
+				return nil, fmt.Errorf("files[%d].data: invalid base64: %w", i, err)
+			}
+			fileData = decoded
+		} else {
+			fileData = []byte(data)
+		}
+
+		// Determine file mode
+		var fileMode int64 = 0644
+		isExecutable, _ := fileMap["is_executable"].(bool)
+		if isExecutable {
+			fileMode = 0755
+		}
+
+		// Write tar header
+		header := &tar.Header{
+			Name:    filename,
+			Size:    int64(len(fileData)),
+			Mode:    fileMode,
+			ModTime: time.Now(),
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			return nil, fmt.Errorf("failed to write tar header for %s: %w", filename, err)
+		}
+
+		// Write file content
+		if _, err := tw.Write(fileData); err != nil {
+			return nil, fmt.Errorf("failed to write tar content for %s: %w", filename, err)
+		}
+
+		uploadedFiles = append(uploadedFiles, filename)
+		totalSize += int64(len(fileData))
+	}
+
+	// Close the tar writer
+	if err := tw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close tar writer: %w", err)
+	}
+
+	// Check total size and warn if large
+	var sizeWarning string
+	if totalSize > maxFileSize {
+		sizeWarning = fmt.Sprintf("\n\nWARNING: Total upload size (%d bytes) exceeds recommended limit of 100KB. "+
+			"For large files, consider using HTTP/HTTPS URLs in transfer_input_files instead.", totalSize)
+	}
+
+	// Spool the files to the schedd
+	err = s.schedd.SpoolJobFilesFromTar(ctx, jobAds, &tarBuf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to spool job files: %w", err)
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Successfully uploaded %d file(s) to job %s: %s%s\n\n"+
+					"NEXT STEPS:\n"+
+					"1. The job should now be released from HELD state and transition to IDLE (JobStatus=1).\n"+
+					"2. Poll job status using query_jobs to monitor progress.\n"+
+					"3. When JobStatus=4 (Completed), use get_job_output to retrieve all output files.",
+					len(uploadedFiles), jobID, strings.Join(uploadedFiles, ", "), sizeWarning),
+			},
+		},
+		"metadata": map[string]interface{}{
+			"job_id":     jobID,
+			"file_count": len(uploadedFiles),
+			"files":      uploadedFiles,
+			"total_size": totalSize,
+		},
+	}, nil
+}
+
+// toolGetJobOutputFiles handles retrieving all output files from a job's sandbox
+func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	jobID, ok := args["job_id"].(string)
+	if !ok || jobID == "" {
+		return nil, fmt.Errorf("job_id is required")
+	}
+
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid job_id: %w", err)
+	}
+
+	// Build constraint for specific job
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+
+	// Download the job sandbox into a buffer
+	sandboxCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	var sandboxBuf bytes.Buffer
+	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+
+	if err := <-errChan; err != nil {
+		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
+	}
+
+	// Parse the tar archive and extract files
+	tarReader := tar.NewReader(&sandboxBuf)
+	var outputFiles []OutputFile
+
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tar archive: %w", err)
+		}
+
+		// Skip directories
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+
+		// Read file content (up to maxFileSize + 1 to detect truncation)
+		limitedReader := io.LimitReader(tarReader, maxFileSize+1)
+		content, err := io.ReadAll(limitedReader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file %s: %w", header.Name, err)
+		}
+
+		isTruncated := len(content) > maxFileSize
+		if isTruncated {
+			content = content[:maxFileSize]
+		}
+
+		// Determine if content is valid UTF-8 text or binary
+		isText := utf8.Valid(content) && !containsNullBytes(content)
+
+		file := OutputFile{
+			Filename:    header.Name,
+			IsTruncated: isTruncated,
+			Size:        header.Size,
+			IsBase64:    !isText,
+		}
+
+		if isText {
+			file.Data = string(content)
+		} else {
+			file.Data = base64.StdEncoding.EncodeToString(content)
+		}
+
+		// Generate HTTP URL if base URL is configured
+		if s.httpBaseURL != "" {
+			file.URL = s.buildFileDownloadURL(jobID, header.Name)
+		}
+
+		outputFiles = append(outputFiles, file)
+	}
+
+	if len(outputFiles) == 0 {
+		return map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("No output files found for job %s. The job may not have produced any output yet.", jobID),
+				},
+			},
+			"metadata": map[string]interface{}{
+				"job_id":     jobID,
+				"file_count": 0,
+			},
+		}, nil
+	}
+
+	// Build summary text
+	var summaryParts []string
+	var truncatedFiles []string
+	for _, f := range outputFiles {
+		encoding := "text"
+		if f.IsBase64 {
+			encoding = "base64"
+		}
+		summaryParts = append(summaryParts, fmt.Sprintf("- %s (%d bytes, %s)", f.Filename, f.Size, encoding))
+		if f.IsTruncated {
+			truncatedFiles = append(truncatedFiles, f.Filename)
+		}
+	}
+
+	summaryText := fmt.Sprintf("Retrieved %d output file(s) from job %s:\n%s",
+		len(outputFiles), jobID, strings.Join(summaryParts, "\n"))
+
+	if len(truncatedFiles) > 0 {
+		summaryText += fmt.Sprintf("\n\nWARNING: The following files were truncated to 100KB: %s",
+			strings.Join(truncatedFiles, ", "))
+		if s.httpBaseURL != "" {
+			summaryText += "\nUse the provided URLs to download the complete files."
+		}
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": summaryText,
+			},
+		},
+		"metadata": map[string]interface{}{
+			"job_id":     jobID,
+			"file_count": len(outputFiles),
+			"files":      outputFiles,
+		},
+	}, nil
+}
+
+// buildFileDownloadURL constructs the HTTP URL for downloading a specific file from a job's output
+func (s *Server) buildFileDownloadURL(jobID, filename string) string {
+	if s.httpBaseURL == "" {
+		return ""
+	}
+	// URL format: {baseURL}/api/v1/jobs/{jobID}/output/file/{filename}
+	return fmt.Sprintf("%s/api/v1/jobs/%s/output/file/%s",
+		strings.TrimSuffix(s.httpBaseURL, "/"),
+		url.PathEscape(jobID),
+		url.PathEscape(filename))
+}
+
+// containsNullBytes checks if the byte slice contains null bytes (common in binary files)
+func containsNullBytes(data []byte) bool {
+	for _, b := range data {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }

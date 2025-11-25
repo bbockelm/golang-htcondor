@@ -974,65 +974,9 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 	}
 
 	// Extract job IDs and create job info map
-	jobIDs := make([]procID, len(jobAds))
-	jobInfoMap := make(map[procID]*jobInfo)
-
-	for i, ad := range jobAds {
-		// Get ClusterId
-		clusterExpr, ok := ad.Lookup("ClusterId")
-		if !ok {
-			return fmt.Errorf("job ad %d missing ClusterId attribute", i)
-		}
-		clusterVal := clusterExpr.Eval(nil)
-		clusterInt, err := clusterVal.IntValue()
-		if err != nil {
-			return fmt.Errorf("job ad %d: ClusterId is not an integer: %w", i, err)
-		}
-
-		// Get ProcId
-		procExpr, ok := ad.Lookup("ProcId")
-		if !ok {
-			return fmt.Errorf("job ad %d missing ProcId attribute", i)
-		}
-		procVal := procExpr.Eval(nil)
-		procInt, err := procVal.IntValue()
-		if err != nil {
-			return fmt.Errorf("job ad %d: ProcId is not an integer: %w", i, err)
-		}
-
-		//nolint:gosec // ClusterId and ProcId are bounded by HTCondor to int32 range
-		id := procID{cluster: int32(clusterInt), proc: int32(procInt)}
-		jobIDs[i] = id
-
-		// Get list of input files for this job
-		var inputFiles []string
-		if expr, ok := ad.Lookup("TransferInputFiles"); ok {
-			val := expr.Eval(nil)
-			if str, err := val.StringValue(); err == nil && str != "" {
-				inputFiles = parseFileList(str)
-			}
-		}
-		if len(inputFiles) == 0 {
-			if expr, ok := ad.Lookup("TransferInput"); ok {
-				val := expr.Eval(nil)
-				if str, err := val.StringValue(); err == nil && str != "" {
-					inputFiles = parseFileList(str)
-				}
-			}
-		}
-
-		// Create set of input files for fast lookup
-		inputFileSet := make(map[string]bool)
-		for _, f := range inputFiles {
-			inputFileSet[f] = true
-		}
-
-		jobInfoMap[id] = &jobInfo{
-			ad:         ad,
-			inputFiles: inputFileSet,
-			index:      i,
-			jobID:      id,
-		}
+	jobIDs, jobInfoMap, err := parseJobAdsForSpooling(jobAds)
+	if err != nil {
+		return err
 	}
 
 	// Prepare security config
@@ -1108,6 +1052,103 @@ type jobInfo struct {
 	inputFiles map[string]bool // Set of files that should be transferred
 	index      int             // Index in the original jobAds array
 	jobID      procID
+}
+
+// parseJobAdsForSpooling extracts job IDs and builds a map of job info from job ads.
+// This includes determining which files need to be transferred for each job.
+func parseJobAdsForSpooling(jobAds []*classad.ClassAd) ([]procID, map[procID]*jobInfo, error) {
+	jobIDs := make([]procID, len(jobAds))
+	jobInfoMap := make(map[procID]*jobInfo)
+
+	for i, ad := range jobAds {
+		// Get ClusterId
+		clusterExpr, ok := ad.Lookup("ClusterId")
+		if !ok {
+			return nil, nil, fmt.Errorf("job ad %d missing ClusterId attribute", i)
+		}
+		clusterVal := clusterExpr.Eval(nil)
+		clusterInt, err := clusterVal.IntValue()
+		if err != nil {
+			return nil, nil, fmt.Errorf("job ad %d: ClusterId is not an integer: %w", i, err)
+		}
+
+		// Get ProcId
+		procExpr, ok := ad.Lookup("ProcId")
+		if !ok {
+			return nil, nil, fmt.Errorf("job ad %d missing ProcId attribute", i)
+		}
+		procVal := procExpr.Eval(nil)
+		procInt, err := procVal.IntValue()
+		if err != nil {
+			return nil, nil, fmt.Errorf("job ad %d: ProcId is not an integer: %w", i, err)
+		}
+
+		//nolint:gosec // ClusterId and ProcId are bounded by HTCondor to int32 range
+		id := procID{cluster: int32(clusterInt), proc: int32(procInt)}
+		jobIDs[i] = id
+
+		// Get list of input files for this job
+		inputFileSet := getInputFilesFromJobAd(ad)
+
+		jobInfoMap[id] = &jobInfo{
+			ad:         ad,
+			inputFiles: inputFileSet,
+			index:      i,
+			jobID:      id,
+		}
+	}
+
+	return jobIDs, jobInfoMap, nil
+}
+
+// getInputFilesFromJobAd extracts the set of files that need to be transferred for a job.
+// This includes TransferInputFiles, TransferInput, and the executable if TransferExecutable is true.
+func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
+	var inputFiles []string
+
+	if expr, ok := ad.Lookup("TransferInputFiles"); ok {
+		val := expr.Eval(nil)
+		if str, err := val.StringValue(); err == nil && str != "" {
+			inputFiles = parseFileList(str)
+		}
+	}
+	if len(inputFiles) == 0 {
+		if expr, ok := ad.Lookup("TransferInput"); ok {
+			val := expr.Eval(nil)
+			if str, err := val.StringValue(); err == nil && str != "" {
+				inputFiles = parseFileList(str)
+			}
+		}
+	}
+
+	// Create set of input files for fast lookup
+	inputFileSet := make(map[string]bool)
+	for _, f := range inputFiles {
+		inputFileSet[f] = true
+	}
+
+	// Also include the executable if TransferExecutable is true (the default)
+	// This is needed because the Cmd attribute contains the executable path
+	// and it must be spooled along with TransferInputFiles
+	transferExe := true // default is true
+	if expr, ok := ad.Lookup("TransferExecutable"); ok {
+		val := expr.Eval(nil)
+		if b, err := val.BoolValue(); err == nil {
+			transferExe = b
+		}
+	}
+	if transferExe {
+		if expr, ok := ad.Lookup("Cmd"); ok {
+			val := expr.Eval(nil)
+			if cmd, err := val.StringValue(); err == nil && cmd != "" {
+				// Extract just the filename from the path
+				exeFilename := path.Base(cmd)
+				inputFileSet[exeFilename] = true
+			}
+		}
+	}
+
+	return inputFileSet
 }
 
 // sendJobFilesFromTar processes the tar archive and sends files to schedd

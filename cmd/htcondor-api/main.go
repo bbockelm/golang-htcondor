@@ -337,27 +337,51 @@ func loadOAuth2DBPath(cfg *config.Config) string {
 	return "/var/lib/condor/oauth2.db"
 }
 
+// loadHTTPBaseURL constructs the HTTP base URL for the API server.
+// It uses HTTP_API_BASE_URL if configured, otherwise constructs from:
+// - Protocol: https if TLS is enabled, http otherwise
+// - Hostname: FULL_HOSTNAME if available, otherwise falls back to listen address
+// - Port: appended if non-standard for the protocol
+func loadHTTPBaseURL(cfg *config.Config, listenAddr string, useTLS bool) string {
+	// Check for explicit base URL configuration
+	if baseURL, ok := cfg.Get("HTTP_API_BASE_URL"); ok && baseURL != "" {
+		return strings.TrimSuffix(baseURL, "/")
+	}
+
+	// Determine protocol
+	protocol := "http"
+	defaultPort := "80"
+	if useTLS {
+		protocol = "https"
+		defaultPort = "443"
+	}
+
+	// Use FULL_HOSTNAME if available, otherwise use listen address
+	hostname := listenAddr
+	if fullHostname, ok := cfg.Get("FULL_HOSTNAME"); ok && fullHostname != "" {
+		hostname = fullHostname
+	}
+
+	// Extract port from listen address if it's just a port (e.g., ":8080")
+	// and append it to hostname if non-standard
+	if strings.HasPrefix(listenAddr, ":") {
+		port := strings.TrimPrefix(listenAddr, ":")
+		if port != defaultPort && port != "" {
+			hostname = hostname + ":" + port
+		}
+	}
+
+	return protocol + "://" + hostname
+}
+
 // loadOAuth2Issuer loads OAuth2 issuer from config or constructs it
 func loadOAuth2Issuer(cfg *config.Config, listenAddrFromConfig string) string {
 	if issuer, ok := cfg.Get("HTTP_API_OAUTH2_ISSUER"); ok && issuer != "" {
 		return issuer
 	}
 
-	// Default to https:// and use FULL_HOSTNAME if available
-	hostname := listenAddrFromConfig
-	if fullHostname, ok := cfg.Get("FULL_HOSTNAME"); ok && fullHostname != "" {
-		hostname = fullHostname
-	}
-
-	// Append port if non-standard (not 443 for https)
-	if strings.HasPrefix(listenAddrFromConfig, ":") {
-		port := strings.TrimPrefix(listenAddrFromConfig, ":")
-		if port != "443" && port != "" {
-			hostname = hostname + ":" + port
-		}
-	}
-
-	return "https://" + hostname
+	// Use loadHTTPBaseURL with TLS enabled (OAuth2 defaults to https)
+	return loadHTTPBaseURL(cfg, listenAddrFromConfig, true)
 }
 
 // loadOAuth2ClientSecret loads OAuth2 client secret from file
@@ -705,6 +729,11 @@ func runNormalMode() error {
 		log.Printf("IDP issuer: %s", idpIssuer)
 	}
 
+	// Compute HTTP base URL for MCP file download links
+	useTLS := tlsCertFile != "" && tlsKeyFile != ""
+	httpBaseURL := loadHTTPBaseURL(cfg, listenAddrFromConfig, useTLS)
+	log.Printf("HTTP base URL: %s", httpBaseURL)
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:          listenAddrFromConfig,
@@ -712,6 +741,7 @@ func runNormalMode() error {
 		ScheddAddr:          scheddAddrValue,
 		UserHeader:          userHeaderFromConfig,
 		SigningKeyPath:      signingKeyPath,
+		HTTPBaseURL:         httpBaseURL,
 		TLSCertFile:         tlsCertFile,
 		TLSKeyFile:          tlsKeyFile,
 		TLSCACertFile:       tlsCACertFile,
@@ -924,12 +954,20 @@ func runDemoMode() error {
 	}
 
 	// Use HTTPS if we successfully generated certificates
-	protocol := "http"
-	if certPath != "" && keyPath != "" {
-		protocol = "https"
+	useTLS := certPath != "" && keyPath != ""
+	if useTLS {
 		log.Println("Demo mode will use HTTPS with generated certificate")
 		log.Printf("CA Certificate: %s", caPath)
 	}
+
+	// Compute HTTP base URL - in demo mode, use the listen address directly
+	// since we don't have FULL_HOSTNAME configured
+	protocol := "http"
+	if useTLS {
+		protocol = "https"
+	}
+	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
+	log.Printf("HTTP base URL: %s", httpBaseURL)
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -938,6 +976,7 @@ func runDemoMode() error {
 		SigningKeyPath:     signingKeyPath,
 		TrustDomain:        trustDomain,
 		UIDDomain:          uidDomain,
+		HTTPBaseURL:        httpBaseURL,
 		TLSCertFile:        certPath,
 		TLSKeyFile:         keyPath,
 		TLSCACertFile:      caPath,
