@@ -47,9 +47,9 @@ type HistoryQueryOptions struct {
 	// Default is 50 if not specified.
 	Limit int
 
-	// ScanLimit specifies the maximum number of ads to scan
-	// Use 0 or negative value for no scan limit.
-	// Default is no limit.
+	// ScanLimit specifies the maximum number of ads to scan.
+	// Use 0 or negative value for unlimited scanning.
+	// Default is 10000 if not specified to prevent timeouts on large pools.
 	ScanLimit int
 
 	// Projection is a list of attributes to include in results.
@@ -158,9 +158,10 @@ func (opts *HistoryQueryOptions) ApplyDefaults() HistoryQueryOptions {
 		result.Limit = 50
 	}
 
-	// Apply default scan limit (no limit)
+	// Apply default scan limit if not set
+	// Default to 10k to prevent timeouts on large pools
 	if result.ScanLimit == 0 {
-		result.ScanLimit = -1
+		result.ScanLimit = 10000
 	}
 
 	// Default to backwards scanning
