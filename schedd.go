@@ -81,7 +81,11 @@ func (s *Schedd) Address() string {
 //
 // Deprecated: Use QueryWithOptions for pagination and default limits/projections
 func (s *Schedd) Query(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
-	return s.queryWithAuth(ctx, constraint, projection, false, nil)
+	// Build opts with projection
+	opts := &QueryOptions{
+		Projection: projection,
+	}
+	return s.queryWithAuth(ctx, constraint, false, opts)
 }
 
 // QueryWithOptions queries the schedd for job advertisements with pagination and limits
@@ -115,11 +119,8 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 		}
 	}
 
-	// Get effective projection
-	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
-
 	// Query with the effective options
-	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, projection, false, &effectiveOpts)
+	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, false, &effectiveOpts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,15 +193,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	effectiveOptsValue := effectiveOpts.ApplyDefaults()
 	effectiveOpts = &effectiveOptsValue
 
-	// Get effective projection
-	projection := effectiveOpts.GetEffectiveProjection(DefaultJobProjection())
-
-	// Get limit for query ad
-	limit := -1
-	if !effectiveOpts.IsUnlimited() {
-		limit = effectiveOpts.Limit
-	}
-
 	// Create channel for results
 	ch := make(chan JobAdResult, streamOptsApplied.BufferSize)
 
@@ -236,8 +228,8 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 			ctx = WithAuthenticatedUser(ctx, negotiation.User)
 		}
 
-		// Create query request ClassAd with limit
-		requestAd := createJobQueryAdWithLimit(constraint, projection, limit)
+		// Create query request ClassAd with options
+		requestAd := createJobQueryAd(constraint, effectiveOpts)
 
 		// Send query
 		queryMsg := message.NewMessageForStream(cedarStream)
@@ -325,7 +317,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 }
 
 // queryWithAuth performs the actual query with optional authentication and query options
-func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projection []string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
+func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
@@ -369,12 +361,8 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	// Note: ConnectAndAuthenticate doesn't expose negotiation details, so we can't get
 	// the authenticated user here. Username should be provided in the context if needed.
 
-	// Create query request ClassAd with limit
-	queryLimit := -1
-	if opts != nil && !opts.IsUnlimited() {
-		queryLimit = opts.Limit
-	}
-	requestAd := createJobQueryAdWithLimit(constraint, projection, queryLimit)
+	// Create query request ClassAd with options
+	requestAd := createJobQueryAd(constraint, opts)
 
 	// Send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -440,8 +428,8 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, projectio
 	return jobAds, nil
 }
 
-// createJobQueryAdWithLimit creates a request ClassAd for querying jobs with optional limit
-func createJobQueryAdWithLimit(constraint string, projection []string, limit int) *classad.ClassAd {
+// createJobQueryAd creates a request ClassAd for querying jobs with options
+func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
 	ad := classad.New()
 
 	// Set constraint (use "true" if empty)
@@ -456,15 +444,54 @@ func createJobQueryAdWithLimit(constraint string, projection []string, limit int
 	}
 	ad.InsertExpr("Requirements", constraintExpr)
 
-	// Set projection (newline-separated list of attributes)
-	if len(projection) > 0 {
-		projectionStr := strings.Join(projection, " ")
+	// Set projection if provided
+	if opts != nil && len(opts.Projection) > 0 {
+		projectionStr := strings.Join(opts.Projection, ",")
 		_ = ad.Set("Projection", projectionStr)
 	}
 
 	// Set LimitResults for server-side limit enforcement
-	if limit > 0 {
-		_ = ad.Set("LimitResults", int64(limit))
+	if opts != nil && opts.Limit > 0 {
+		_ = ad.Set("LimitResults", int64(opts.Limit))
+	}
+
+	// Handle fetch options
+	if opts != nil && opts.FetchOpts != FetchNormal {
+		// FetchMyJobs: Filter to jobs owned by user
+		if opts.FetchOpts&FetchMyJobs != 0 {
+			if opts.Owner != "" {
+				_ = ad.Set("Me", opts.Owner)
+			}
+			// MyJobs constraint filters to Owner == Me (or true if no Me attribute)
+			myJobsConstraint := "true"
+			if opts.Owner != "" {
+				myJobsConstraint = "(Owner == Me)"
+			}
+			myJobsExpr, err := classad.ParseExpr(myJobsConstraint)
+			if err == nil {
+				_ = ad.Set("MyJobs", myJobsExpr)
+			}
+		}
+
+		// FetchSummaryOnly: Return summary instead of individual ads
+		if opts.FetchOpts&FetchSummaryOnly != 0 {
+			_ = ad.Set("SummaryOnly", true)
+		}
+
+		// FetchIncludeClusterAd: Include cluster ads in results
+		if opts.FetchOpts&FetchIncludeClusterAd != 0 {
+			_ = ad.Set("IncludeClusterAd", true)
+		}
+
+		// FetchIncludeJobsetAds: Include jobset ads in results
+		if opts.FetchOpts&FetchIncludeJobsetAds != 0 {
+			_ = ad.Set("IncludeJobsetAds", true)
+		}
+
+		// FetchNoProcAds: Exclude proc ads, only cluster/jobset
+		if opts.FetchOpts&FetchNoProcAds != 0 {
+			_ = ad.Set("NoProcAds", true)
+		}
 	}
 
 	return ad

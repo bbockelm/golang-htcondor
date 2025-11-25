@@ -152,7 +152,13 @@ func TestCollectorLocateDaemonIntegration(t *testing.T) {
 	})
 
 	// Test locating the startd daemon
+	// The startd may take longer to advertise than other daemons, so wait for it first
 	t.Run("LocateStartd", func(t *testing.T) {
+		// Wait for startd to advertise (up to 30 seconds)
+		if err := harness.WaitForStartd(30 * time.Second); err != nil {
+			t.Fatalf("Startd did not advertise: %v", err)
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
