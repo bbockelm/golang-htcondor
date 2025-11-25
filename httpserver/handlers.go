@@ -160,11 +160,33 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Get page token
 	pageToken := r.URL.Query().Get("page_token")
 
+	// Parse owned_by_me parameter (defaults to true)
+	// When true, only returns jobs owned by the authenticated user
+	ownedByMe := true // default to true for security
+	if ownedByMeStr := r.URL.Query().Get("owned_by_me"); ownedByMeStr != "" {
+		ownedByMe, err = strconv.ParseBool(ownedByMeStr)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid owned_by_me parameter: %v", err))
+			return
+		}
+	}
+
+	// Build fetch options
+	fetchOpts := htcondor.FetchNormal
+	owner := ""
+	if ownedByMe {
+		fetchOpts |= htcondor.FetchMyJobs
+		// Extract owner from authenticated user in context
+		owner = htcondor.GetAuthenticatedUserFromContext(ctx)
+	}
+
 	// Build query options with limit
 	opts := &htcondor.QueryOptions{
 		Limit:      limit,
 		Projection: projection,
 		PageToken:  pageToken,
+		FetchOpts:  fetchOpts,
+		Owner:      owner,
 	}
 
 	// Start streaming query

@@ -98,17 +98,24 @@ func (s *Server) handleHistoryQuery(w http.ResponseWriter, r *http.Request, base
 	}
 
 	// Parse scan_limit parameter
-	scanLimit := -1 // no limit by default
+	// Default to 10k to prevent timeouts on large pools
+	scanLimit := 10000
 	if scanLimitStr := r.URL.Query().Get("scan_limit"); scanLimitStr != "" {
-		parsedScanLimit, err := strconv.Atoi(scanLimitStr)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid scan_limit parameter: %v", err))
-			return
+		if scanLimitStr == "*" {
+			scanLimit = -1 // unlimited
+		} else {
+			parsedScanLimit, err := strconv.Atoi(scanLimitStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid scan_limit parameter: %v", err))
+				return
+			}
+			scanLimit = parsedScanLimit
 		}
-		scanLimit = parsedScanLimit
 	}
 
 	// Parse projection parameter
+	// Default to source-specific projections if not specified
+	// This prevents transferring all attributes which can be large
 	projectionStr := r.URL.Query().Get("projection")
 	var projection []string
 	if projectionStr != "" {
@@ -119,6 +126,17 @@ func (s *Server) handleHistoryQuery(w http.ResponseWriter, r *http.Request, base
 			for i := range projection {
 				projection[i] = strings.TrimSpace(projection[i])
 			}
+		}
+	} else {
+		// Apply default projection based on source type
+		// This reduces data transfer and prevents timeouts
+		switch baseOpts.Source {
+		case htcondor.HistorySourceJobEpoch:
+			projection = htcondor.DefaultEpochProjection()
+		case htcondor.HistorySourceTransfer:
+			projection = htcondor.DefaultTransferProjection()
+		default:
+			projection = htcondor.DefaultHistoryProjection()
 		}
 	}
 

@@ -170,7 +170,7 @@ func (s *Schedd) createHistoryQueryAd(constraint string, opts *HistoryQueryOptio
 	if !opts.IsUnlimited() {
 		matchLimit = opts.Limit
 	}
-	_ = ad.Set("NumMatches", matchLimit)
+	_ = ad.Set("NumJobMatches", matchLimit)
 
 	// Set scan limit
 	if opts.ScanLimit > 0 {

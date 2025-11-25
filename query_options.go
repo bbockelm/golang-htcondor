@@ -7,6 +7,30 @@ import (
 	"strings"
 )
 
+// QueryFetchOpts specifies what types of ads to fetch in a job query
+type QueryFetchOpts int
+
+const (
+	// FetchNormal fetches normal job ads (default)
+	FetchNormal QueryFetchOpts = 0
+
+	// FetchMyJobs filters to only jobs owned by the authenticated user
+	// Requires Owner to be set in QueryOptions
+	FetchMyJobs QueryFetchOpts = 1 << 0
+
+	// FetchSummaryOnly returns summary information instead of individual job ads
+	FetchSummaryOnly QueryFetchOpts = 1 << 1
+
+	// FetchIncludeClusterAd includes cluster ads in addition to proc ads
+	FetchIncludeClusterAd QueryFetchOpts = 1 << 2
+
+	// FetchIncludeJobsetAds includes jobset ads in the query results
+	FetchIncludeJobsetAds QueryFetchOpts = 1 << 3
+
+	// FetchNoProcAds excludes proc ads, only returning cluster/jobset ads
+	FetchNoProcAds QueryFetchOpts = 1 << 4
+)
+
 // QueryOptions contains options for querying jobs and collector ads
 type QueryOptions struct {
 	// Limit specifies the maximum number of results to return.
@@ -22,6 +46,14 @@ type QueryOptions struct {
 	// PageToken is used for pagination. Empty string for first page.
 	// The token identifies where to continue fetching results.
 	PageToken string
+
+	// FetchOpts specifies query fetch options (MyJobs, SummaryOnly, etc.)
+	// Default is FetchNormal (0) which fetches all job ads
+	FetchOpts QueryFetchOpts
+
+	// Owner specifies the job owner for FetchMyJobs queries
+	// If empty and FetchMyJobs is set, uses authenticated username from context
+	Owner string
 }
 
 // DefaultJobProjection returns the default list of job attributes to include in query results

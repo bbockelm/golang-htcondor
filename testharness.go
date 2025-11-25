@@ -297,6 +297,38 @@ func (h *CondorTestHarness) WaitForDaemons() error {
 	}
 }
 
+// WaitForStartd waits for the startd daemon to advertise to the collector.
+// This is useful because the startd may take longer to start up and advertise
+// than the collector and schedd, especially on slower systems.
+func (h *CondorTestHarness) WaitForStartd(timeout time.Duration) error {
+	// Parse collector address
+	addr := h.collectorAddr
+
+	collector := NewCollector(addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			h.printStartdLog()
+			return fmt.Errorf("timeout waiting for startd to advertise to collector")
+		case <-ticker.C:
+			// Try to locate the startd
+			location, err := collector.LocateDaemon(ctx, "Startd", "")
+			if err == nil && location != nil && location.Address != "" {
+				h.t.Logf("Startd advertised at: %s", location.Address)
+				return nil
+			}
+			// Keep trying
+		}
+	}
+}
+
 // printCollectorLog prints the collector log contents for debugging
 func (h *CondorTestHarness) printCollectorLog() {
 	collectorLog := filepath.Join(h.logDir, "CollectorLog")
