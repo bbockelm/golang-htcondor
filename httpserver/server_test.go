@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -213,7 +214,7 @@ func TestSwaggerClientCreatedInNormalMode(t *testing.T) {
 	}
 
 	// Use a temporary database
-	tempDBPath := t.TempDir() + "/test_swagger_client.db"
+	tempDBPath := filepath.Join(t.TempDir(), "test_swagger_client.db")
 
 	// Create server with MCP enabled but IDP disabled (normal mode)
 	server, err := NewServer(Config{
@@ -293,7 +294,7 @@ func TestSwaggerClientNotDuplicatedWhenAlreadyExists(t *testing.T) {
 	}
 
 	// Use a temporary database
-	tempDBPath := t.TempDir() + "/test_swagger_duplicate.db"
+	tempDBPath := filepath.Join(t.TempDir(), "test_swagger_duplicate.db")
 
 	// Create server with MCP enabled
 	server, err := NewServer(Config{
