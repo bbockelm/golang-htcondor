@@ -218,6 +218,29 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 		}
 	}
 
+	// Parse TransferOutputRemaps for output file renaming
+	var outputRemaps map[string]OutputRemap
+
+	// Try to get TransferOutputRemaps - may be stored as SUBMIT_TransferOutputRemaps
+	var remapsStr string
+	for _, attrName := range []string{"TransferOutputRemaps", "SUBMIT_TransferOutputRemaps"} {
+		if remapsExpr, ok := jobAd.Lookup(attrName); ok {
+			val := remapsExpr.Eval(nil)
+			if str, err := val.StringValue(); err == nil && str != "" {
+				remapsStr = str
+				// Strip outer quotes if present (ClassAd string handling artifact)
+				// HTCondor stores string values with quotes as part of the value when using SUBMIT_* prefixed attrs
+				remapsStr = strings.Trim(remapsStr, "\"")
+				break
+			}
+		}
+	}
+
+	if remapsStr != "" {
+		remapsList := parseOutputRemaps(remapsStr)
+		outputRemaps = buildRemapLookup(remapsList)
+	}
+
 	// c-e. Receive files using FileTransfer protocol
 	// First receive the transfer protocol headers (final_transfer flag and xfer_info)
 	headerMsg := message.NewMessageFromStream(cedarStream)
@@ -238,7 +261,7 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 	// EOM after xfer_info (implicit)
 
 	// Now receive the files
-	if err := s.receiveJobFiles(ctx, cedarStream, tarWriter, dirPrefix, transferOutputFiles); err != nil {
+	if err := s.receiveJobFiles(ctx, cedarStream, tarWriter, dirPrefix, transferOutputFiles, outputRemaps); err != nil {
 		return fmt.Errorf("failed to receive files for job %d.%d: %w", clusterID, procID, err)
 	}
 
@@ -248,7 +271,7 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 // receiveJobFiles receives files for a single job and writes them to the tar archive
 //
 //nolint:gocyclo // Complex function required for HTCondor file transfer protocol
-func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream, tarWriter *tar.Writer, dirPrefix string, transferOutputFiles map[string]bool) error {
+func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream, tarWriter *tar.Writer, dirPrefix string, transferOutputFiles map[string]bool, outputRemaps map[string]OutputRemap) error {
 	// Track whether we've received GO_AHEAD_ALWAYS from the peer
 	goAheadAlways := false
 
@@ -423,8 +446,42 @@ func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream
 				continue
 			}
 
-			// Build full path in tar: dirPrefix/fileName
-			tarPath := path.Join(dirPrefix, cleanPath)
+			// Check for output remapping
+			// If a remap exists and destination is a URL, skip this file
+			// If a remap exists and destination is a path, use the remapped name
+			outputPath := cleanPath
+			if outputRemaps != nil {
+				// Check for remap using the original filename - supports both exact and prefix matching
+				if remappedPath, remap, found := applyOutputRemap(fileName, outputRemaps); found {
+					if remap.IsURL {
+						// File is remapped to a URL - it was transferred elsewhere, skip it
+						log.Printf("Skipping file %s (remapped to URL: %s)", fileName, remap.Destination)
+						discarded := int64(0)
+						const maxChunkSize = 256 * 1024
+						for discarded < fileSize {
+							remaining := fileSize - discarded
+							chunkSize := remaining
+							if chunkSize > maxChunkSize {
+								chunkSize = maxChunkSize
+							}
+
+							chunkMsg := message.NewMessageFromStream(cedarStream)
+							_, err := chunkMsg.GetBytes(ctx, int(chunkSize))
+							if err != nil {
+								return fmt.Errorf("failed to discard file data: %w", err)
+							}
+							discarded += chunkSize
+						}
+						continue
+					}
+					// Use the remapped destination path
+					outputPath = remappedPath
+					log.Printf("Remapping output file %s -> %s", fileName, outputPath)
+				}
+			}
+
+			// Build full path in tar: dirPrefix/outputPath
+			tarPath := path.Join(dirPrefix, outputPath)
 
 			// Write tar header
 			header := &tar.Header{
@@ -1494,4 +1551,194 @@ func (s *Schedd) releaseJobsWithEmptySpool(ctx context.Context, jobAds []*classa
 	}()
 
 	return s.SpoolJobFilesFromTar(ctx, jobAds, pr)
+}
+
+// OutputRemap represents a single output file remap entry
+type OutputRemap struct {
+	Source      string // Original filename from the job sandbox
+	Destination string // Remapped destination path or URL
+	IsURL       bool   // True if destination is a URL (should be skipped in tarball)
+}
+
+// parseOutputRemaps parses the TransferOutputRemaps format: "name1=path1;name2=path2"
+// Supports escaped characters: \= for literal = and \; for literal ;
+// If the destination is a URL (s3://, http://, https://, etc.), IsURL is set to true.
+// Returns a slice of OutputRemap structs preserving order.
+func parseOutputRemaps(remaps string) []OutputRemap {
+	if remaps == "" {
+		return nil
+	}
+
+	var result []OutputRemap
+
+	// Parse with escape handling
+	// Split by semicolons, respecting escaped semicolons (\;)
+	pairs := splitWithEscape(remaps, ';')
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		// Split by first =, respecting escaped equals (\=)
+		src, dst, found := splitFirstWithEscape(pair, '=')
+		if !found {
+			continue
+		}
+
+		src = strings.TrimSpace(src)
+		dst = strings.TrimSpace(dst)
+
+		if src == "" || dst == "" {
+			continue
+		}
+
+		// Unescape the strings
+		src = unescapeRemapString(src)
+		dst = unescapeRemapString(dst)
+
+		result = append(result, OutputRemap{
+			Source:      src,
+			Destination: dst,
+			IsURL:       isURL(dst),
+		})
+	}
+
+	return result
+}
+
+// splitWithEscape splits a string by a delimiter, respecting backslash escapes.
+// For example, "a\;b;c" with delimiter ';' returns ["a;b", "c"]
+func splitWithEscape(s string, delim byte) []string {
+	var result []string
+	var current strings.Builder
+
+	i := 0
+	for i < len(s) {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			// Escape sequence - include next character literally
+			current.WriteByte(s[i])
+			current.WriteByte(s[i+1])
+			i += 2
+		case s[i] == delim:
+			result = append(result, current.String())
+			current.Reset()
+			i++
+		default:
+			current.WriteByte(s[i])
+			i++
+		}
+	}
+	result = append(result, current.String())
+	return result
+}
+
+// splitFirstWithEscape splits a string at the first unescaped occurrence of the delimiter.
+// Returns (before, after, true) if found, or (s, "", false) if not found.
+func splitFirstWithEscape(s string, delim byte) (string, string, bool) {
+	i := 0
+	for i < len(s) {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			// Skip escape sequence
+			i += 2
+		case s[i] == delim:
+			return s[:i], s[i+1:], true
+		default:
+			i++
+		}
+	}
+	return s, "", false
+}
+
+// unescapeRemapString removes backslash escapes from a string.
+// Handles \= and \; specifically, and removes any other backslash escapes.
+func unescapeRemapString(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			// Unescape: skip the backslash and include the next character
+			result.WriteByte(s[i+1])
+			i += 2
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
+}
+
+// isURL checks if a path looks like a URL (has a scheme://)
+// Common schemes: s3://, http://, https://, gs://, file://, osdf://, etc.
+// Per RFC 3986, schemes must start with a letter.
+func isURL(path string) bool {
+	// Look for scheme://
+	idx := strings.Index(path, "://")
+	if idx <= 0 {
+		return false
+	}
+	// Check that scheme starts with a letter (RFC 3986)
+	scheme := path[:idx]
+	if len(scheme) == 0 {
+		return false
+	}
+	firstChar := scheme[0]
+	isLetter := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	if !isLetter(firstChar) {
+		return false
+	}
+	// Rest of scheme can be letters, digits, +, -, .
+	isValidSchemeChar := func(c byte) bool {
+		return isLetter(c) || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+	}
+	for i := 1; i < len(scheme); i++ {
+		if !isValidSchemeChar(scheme[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildRemapLookup converts a slice of OutputRemaps to a map for fast lookup.
+// The map key is the source filename, value is the OutputRemap.
+func buildRemapLookup(remaps []OutputRemap) map[string]OutputRemap {
+	lookup := make(map[string]OutputRemap)
+	for _, r := range remaps {
+		lookup[r.Source] = r
+	}
+	return lookup
+}
+
+// applyOutputRemap looks up a filename in the remap table and returns the remapped path.
+// It supports both exact matches and prefix-based directory remapping.
+// For prefix matching, if a remap source matches the start of the filename followed by a path separator,
+// the matching prefix is replaced with the destination.
+// For example, remap "result_files=files" will map "result_files/foo.txt" to "files/foo.txt".
+// Returns (remappedPath, remap, found). If found is false, the file has no remap.
+// If the remap destination is a URL, the caller should skip the file.
+func applyOutputRemap(fileName string, remaps map[string]OutputRemap) (string, OutputRemap, bool) {
+	// First, try exact match
+	if remap, found := remaps[fileName]; found {
+		return remap.Destination, remap, true
+	}
+
+	// Try prefix-based directory remapping
+	// Look for remaps where the source matches the beginning of fileName followed by "/"
+	for source, remap := range remaps {
+		// Check if fileName starts with "source/"
+		prefix := source + "/"
+		if strings.HasPrefix(fileName, prefix) {
+			// Replace the prefix with the destination
+			suffix := fileName[len(prefix):]
+			remappedPath := remap.Destination + "/" + suffix
+			return remappedPath, remap, true
+		}
+	}
+
+	return fileName, OutputRemap{}, false
 }
