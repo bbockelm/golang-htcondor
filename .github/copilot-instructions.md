@@ -15,6 +15,7 @@ golang-htcondor is a Go implementation of HTCondor client functionality, designe
 - Transfer files using HTCondor's file transfer protocol
 - HTTP/REST API server for job management
 - Prometheus metrics collection (inspired by `condor_gangliad`)
+- Model Context Protocol (MCP) server, providing AI agents access to HTCondor.
 
 ## Architecture and Components
 
@@ -33,6 +34,7 @@ golang-htcondor is a Go implementation of HTCondor client functionality, designe
 - **param/**: HTCondor configuration file parser
 - **cmd/**: Command-line utilities
 - **examples/**: Working examples and demos
+- **mcp/**: MCP server implementation
 
 ### Protocol Implementation
 - Uses Cedar protocol for HTCondor communication (github.com/bbockelm/cedar)
@@ -42,20 +44,20 @@ golang-htcondor is a Go implementation of HTCondor client functionality, designe
 ## Technology Stack
 
 ### Core Dependencies
-- **Go 1.21+** (tested on 1.21, 1.22, 1.23)
+- **Go 1.21+** (tested on 1.24, 1.25)
 - **github.com/bbockelm/cedar** (v0.0.10+): Cedar protocol bindings for HTCondor communication
 - **github.com/PelicanPlatform/classad** (v0.0.4+): ClassAd language implementation for job attributes
 
 ### Development Dependencies
-- **golangci-lint**: Comprehensive linting (see `.golangci.yml`)
+- **golangci-lint**: Comprehensive linting (see `.golangci.yml`); needs V2.6.1 or higher to work
 - **pre-commit**: Git hooks for code quality
 - **gofmt/goimports**: Code formatting
 - **go test**: Testing framework with race detector
 
 ### HTCondor Integration
 - HTCondor is **not required** for basic development and unit testing
-- Integration tests require HTCondor installation (marked with `// +build integration` or skipped automatically)
-- Mini HTCondor can be used for testing (see HTTP API demo mode)
+- Integration tests require HTCondor installation (marked with `//go:build integration` or skipped automatically)
+- The HTTP API demo mode generates a mini-condor instance for testing
 
 ## Code Style and Conventions
 
@@ -82,12 +84,13 @@ golang-htcondor is a Go implementation of HTCondor client functionality, designe
 - Include usage examples in godoc where helpful
 - Keep documentation in sync with implementation
 - Update README.md for significant API changes
+- If there are implementation or design notes, please put the `.md` files in `design_notes`.
 
 ## Testing Guidelines
 
 ### Test Organization
 - Unit tests: `*_test.go` files alongside implementation
-- Integration tests: Use build tags `// +build integration` or runtime checks for HTCondor
+- Integration tests: Use build tags `//go:build integration` or runtime checks for HTCondor
 - Test files should mirror the structure of implementation files
 
 ### Running Tests
@@ -205,7 +208,7 @@ Install with: `make pre-commit-install` or `pip install pre-commit && pre-commit
 5. Test the endpoint manually or with integration tests
 6. Update any relevant API documentation
 
-**Note**: Always keep the OpenAPI schema synchronized with the actual HTTP API endpoints. This ensures API documentation is accurate and up-to-date for consumers.
+**Note**: Always keep the OpenAPI schema synchronized with the actual HTTP API endpoints. This ensures API documentation is accurate and up-to-date for consumers.  This is true even when just adding a query parameter to the endpoint
 
 ### Adding a New Schedd Method
 1. Define the method signature in `schedd.go` (matching Python bindings if applicable)
