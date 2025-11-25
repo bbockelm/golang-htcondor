@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -196,5 +197,143 @@ func TestScheddDiscoveryFlag(t *testing.T) {
 				t.Errorf("scheddDiscovered = %v, want %v", s.scheddDiscovered, tt.wantUpdater)
 			}
 		})
+	}
+}
+
+// TestSwaggerClientCreatedInNormalMode tests that the swagger-client OAuth2 client
+// is automatically created when MCP is enabled without IDP (normal mode).
+// This addresses the issue where demo mode created the client but normal mode did not.
+func TestSwaggerClientCreatedInNormalMode(t *testing.T) {
+	// Create a logger for the test
+	logger, err := logging.New(&logging.Config{
+		OutputPath: "stderr",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Use a temporary database
+	tempDBPath := t.TempDir() + "/test_swagger_client.db"
+
+	// Create server with MCP enabled but IDP disabled (normal mode)
+	server, err := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
+		OAuth2DBPath: tempDBPath,
+		EnableMCP:    true,  // MCP enabled
+		EnableIDP:    false, // IDP disabled (normal mode)
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer func() {
+		if server.oauth2Provider != nil {
+			_ = server.oauth2Provider.Close()
+		}
+	}()
+
+	// Verify OAuth2 provider is initialized
+	if server.oauth2Provider == nil {
+		t.Fatal("OAuth2 provider should be initialized when EnableMCP is true")
+	}
+
+	// Create a mock listener to simulate server start
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create listener: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// Call initializeOAuth2 which should create the swagger client
+	server.initializeOAuth2(ln, "http")
+
+	// Verify the swagger-client was created
+	ctx := context.Background()
+	swaggerClient, err := server.oauth2Provider.GetStorage().GetClient(ctx, "swagger-client")
+	if err != nil {
+		t.Fatalf("swagger-client should exist after initializeOAuth2: %v", err)
+	}
+
+	// Verify client properties
+	if swaggerClient.GetID() != "swagger-client" {
+		t.Errorf("Client ID = %v, want swagger-client", swaggerClient.GetID())
+	}
+
+	// Verify client is public (no secret)
+	if !swaggerClient.IsPublic() {
+		t.Error("swagger-client should be a public client")
+	}
+
+	// Verify redirect URIs include the docs path
+	redirectURIs := swaggerClient.GetRedirectURIs()
+	found := false
+	for _, uri := range redirectURIs {
+		if uri == "http://"+ln.Addr().String()+"/docs/oauth2-redirect" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("swagger-client redirect URIs should include /docs/oauth2-redirect, got: %v", redirectURIs)
+	}
+}
+
+// TestSwaggerClientNotDuplicatedWhenAlreadyExists tests that the swagger-client
+// is not recreated if it already exists in the OAuth2 store.
+func TestSwaggerClientNotDuplicatedWhenAlreadyExists(t *testing.T) {
+	// Create a logger for the test
+	logger, err := logging.New(&logging.Config{
+		OutputPath: "stderr",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Use a temporary database
+	tempDBPath := t.TempDir() + "/test_swagger_duplicate.db"
+
+	// Create server with MCP enabled
+	server, err := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
+		OAuth2DBPath: tempDBPath,
+		EnableMCP:    true,
+		EnableIDP:    false,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer func() {
+		if server.oauth2Provider != nil {
+			_ = server.oauth2Provider.Close()
+		}
+	}()
+
+	// Create a mock listener
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create listener: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// Call initializeOAuth2 twice
+	server.initializeOAuth2(ln, "http")
+	server.initializeOAuth2(ln, "http")
+
+	// Verify the client still exists and is valid
+	ctx := context.Background()
+	swaggerClient, err := server.oauth2Provider.GetStorage().GetClient(ctx, "swagger-client")
+	if err != nil {
+		t.Fatalf("swagger-client should exist: %v", err)
+	}
+
+	if swaggerClient.GetID() != "swagger-client" {
+		t.Errorf("Client ID = %v, want swagger-client", swaggerClient.GetID())
 	}
 }
