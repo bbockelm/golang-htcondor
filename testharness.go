@@ -41,6 +41,13 @@ type CondorTestHarness struct {
 
 // SetupCondorHarness creates and starts a mini HTCondor instance
 func SetupCondorHarness(t TestingT) *CondorTestHarness {
+	return SetupCondorHarnessWithConfig(t, "")
+}
+
+// SetupCondorHarnessWithConfig is like SetupCondorHarness but appends extra configuration
+// to the generated condor_config. This allows tests to register custom daemons or tweak
+// logging without duplicating harness logic.
+func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHarness {
 	t.Helper()
 
 	// Check if condor_master is available
@@ -212,13 +219,17 @@ ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
 `, sbinDir, binDir, libexecLine, h.tmpDir, h.scheddName)
 
+	if extraConfig != "" {
+		configContent += "\n" + extraConfig + "\n"
+	}
+
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
 
 	// Start condor_master
 	ctx := context.Background()
-	h.masterCmd = exec.CommandContext(ctx, masterPath, "-f", "-t") //nolint:gosec // Test code launching condor_master
+	h.masterCmd = exec.CommandContext(ctx, masterPath, "-f") //nolint:gosec // Test code launching condor_master
 	h.masterCmd.Env = append(os.Environ(),
 		"CONDOR_CONFIG="+h.configFile,
 		"_CONDOR_LOCAL_DIR="+h.tmpDir,
@@ -498,4 +509,9 @@ func (h *CondorTestHarness) GetScheddName() string {
 // GetSpoolDir returns the spool directory path for this harness
 func (h *CondorTestHarness) GetSpoolDir() string {
 	return h.spoolDir
+}
+
+// GetLogDir returns the log directory path for this harness
+func (h *CondorTestHarness) GetLogDir() string {
+	return h.logDir
 }
