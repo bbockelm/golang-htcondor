@@ -4,10 +4,6 @@ package htcondor
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +76,16 @@ queue
 	t.Log("Successfully verified that error message includes submit requirement details!")
 }
 
+// getSubmitRequirementConfig returns HTCondor configuration with a submit requirement
+func getSubmitRequirementConfig() string {
+	return `
+# Submit requirement for testing error message parsing
+SUBMIT_REQUIREMENT_NAMES = MinimalRequestMemory
+SUBMIT_REQUIREMENT_MinimalRequestMemory = (TARGET.RequestMemory >= 1024)
+SUBMIT_REQUIREMENT_MinimalRequestMemory_REASON = strcat("Job requested ", TARGET.RequestMemory, " MB, but the minimum is 1024 MB")
+`
+}
+
 // getScheddAddressFromHarness queries the collector to get the schedd address
 func getScheddAddressFromHarness(t *testing.T, harness *CondorTestHarness) string {
 	t.Helper()
@@ -120,166 +126,4 @@ func getScheddAddressFromHarness(t *testing.T, harness *CondorTestHarness) strin
 
 	// Parse sinful string to extract host:port
 	return myAddress
-}
-
-// getSubmitRequirementConfig returns HTCondor configuration with a submit requirement
-func getSubmitRequirementConfig() string {
-	return `
-# Submit requirement for testing error message parsing
-SUBMIT_REQUIREMENT_NAMES = MinimalRequestMemory
-SUBMIT_REQUIREMENT_MinimalRequestMemory = (TARGET.RequestMemory >= 1024)
-SUBMIT_REQUIREMENT_MinimalRequestMemory_REASON = strcat("Job requested ", TARGET.RequestMemory, " MB, but the minimum is 1024 MB")
-`
-}
-
-// SetupCondorHarnessWithConfig creates a test HTCondor instance with custom configuration
-// built into the initial config file before the daemons start
-func SetupCondorHarnessWithConfig(t *testing.T, additionalConfig string) *CondorTestHarness {
-	t.Helper()
-
-	// This is based on SetupCondorHarness but includes the additional config
-	// Check dependencies first
-	masterPath, err := exec.LookPath("condor_master")
-	if err != nil {
-		t.Skip("condor_master not found in PATH, skipping integration test")
-	}
-
-	sbinDir := filepath.Dir(masterPath)
-	requiredDaemons := []string{"condor_collector", "condor_schedd", "condor_negotiator", "condor_startd"}
-	for _, daemon := range requiredDaemons {
-		if _, err := exec.LookPath(daemon); err != nil {
-			t.Skipf("%s not found in PATH, skipping integration test", daemon)
-		}
-	}
-
-	// Create temporary directory structure
-	tmpDir := t.TempDir()
-
-	h := &CondorTestHarness{
-		tmpDir:     tmpDir,
-		configFile: filepath.Join(tmpDir, "condor_config"),
-		logDir:     filepath.Join(tmpDir, "log"),
-		executeDir: filepath.Join(tmpDir, "execute"),
-		spoolDir:   filepath.Join(tmpDir, "spool"),
-		lockDir:    filepath.Join(tmpDir, "lock"),
-		t:          t,
-	}
-
-	// Create directories
-	for _, dir := range []string{h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			t.Fatalf("Failed to create directory %s: %v", dir, err)
-		}
-	}
-
-	// Generate HTCondor configuration WITH the additional config
-	h.collectorAddr = "127.0.0.1:0"
-	h.scheddName = fmt.Sprintf("test_schedd_%d", os.Getpid())
-
-	configContent := fmt.Sprintf(`
-# Mini HTCondor configuration for integration testing
-CONDOR_HOST = 127.0.0.1
-COLLECTOR_HOST = $(CONDOR_HOST)
-
-# Daemon binary locations
-SBIN = %s
-
-# Use local directory structure
-LOCAL_DIR = %s
-LOG = $(LOCAL_DIR)/log
-SPOOL = $(LOCAL_DIR)/spool
-EXECUTE = $(LOCAL_DIR)/execute
-LOCK = $(LOCAL_DIR)/lock
-
-# Daemon list
-DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, NEGOTIATOR, STARTD
-
-USE_SHARED_PORT = False
-
-# Collector configuration
-COLLECTOR_NAME = test_collector
-COLLECTOR_HOST = 127.0.0.1:0
-CONDOR_VIEW_HOST = $(COLLECTOR_HOST)
-
-# Schedd configuration
-SCHEDD_NAME = %s
-SCHEDD_INTERVAL = 5
-
-# Negotiator configuration
-NEGOTIATOR_INTERVAL = 2
-NEGOTIATOR_MIN_INTERVAL = 1
-
-# Startd configuration
-STARTD_NAME = test_startd@$(FULL_HOSTNAME)
-NUM_CPUS = 1
-MEMORY = 512
-STARTER_ALLOW_RUNAS_OWNER = False
-STARTD_ATTRS = HasFileTransfer
-HasFileTransfer = True
-STARTD_DETECT_GPUS = false
-
-# Security settings
-SEC_DEFAULT_AUTHENTICATION = OPTIONAL
-SEC_DEFAULT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
-SEC_DEFAULT_ENCRYPTION = OPTIONAL
-SEC_DEFAULT_INTEGRITY = OPTIONAL
-SEC_CLIENT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
-
-ALLOW_READ = *
-ALLOW_WRITE = *
-ALLOW_NEGOTIATOR = *
-ALLOW_ADMINISTRATOR = *
-ALLOW_OWNER = *
-ALLOW_CLIENT = *
-
-QUEUE_SUPER_USERS = root, condor, $(CONDOR_IDS)
-QUEUE_ALL_USERS_TRUSTED = True
-SCHEDD.ALLOW_WRITE = *
-SCHEDD.ALLOW_ADMINISTRATOR = *
-
-BIND_ALL_INTERFACES = False
-NETWORK_INTERFACE = 127.0.0.1
-
-SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY D_SYSCALLS
-SCHEDD_LOG = $(LOG)/ScheddLog
-MAX_SCHEDD_LOG = 10000000
-
-POLLING_INTERVAL = 5
-NEGOTIATOR_INTERVAL = 10
-UPDATE_INTERVAL = 5
-
-ENABLE_SOAP = False
-ENABLE_WEB_SERVER = False
-
-%s
-`, sbinDir, h.tmpDir, h.scheddName, additionalConfig)
-
-	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
-		t.Fatalf("Failed to write config file: %v", err)
-	}
-
-	// Start condor_master
-	ctx := context.Background()
-	h.masterCmd = exec.CommandContext(ctx, masterPath, "-f", "-t")
-	h.masterCmd.Env = append(os.Environ(),
-		"CONDOR_CONFIG="+h.configFile,
-		"_CONDOR_LOCAL_DIR="+h.tmpDir,
-	)
-	h.masterCmd.Dir = h.tmpDir
-	h.masterCmd.Stdout = os.Stdout
-	h.masterCmd.Stderr = os.Stderr
-
-	if err := h.masterCmd.Start(); err != nil {
-		t.Fatalf("Failed to start condor_master: %v", err)
-	}
-
-	t.Cleanup(func() {
-		h.Shutdown()
-	})
-
-	if err := h.WaitForDaemons(); err != nil {
-		t.Fatalf("Failed to wait for daemons: %v", err)
-	}
-
-	return h
 }
