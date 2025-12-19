@@ -596,9 +596,9 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 				transferExec = val
 			}
 
-			// Check TransferInputFiles - if set, files need to be spooled
+			// Check TransferInput - if set, files need to be spooled
 			hasInputFiles := false
-			if val, _ := ad.EvaluateAttrString("TransferInputFiles"); val != "" {
+			if val, _ := ad.EvaluateAttrString("TransferInput"); val != "" {
 				hasInputFiles = true
 			}
 
@@ -1436,7 +1436,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 
 	// Query for the job to get its proc ad with transfer attributes
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput", "Cmd", "TransferExecutable"}
+	projection := []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: projection,
 	})

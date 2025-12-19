@@ -174,7 +174,7 @@ Content-Type: application/x-tar
 < input.tar
 ```
 
-The tarball should contain the job's input files as specified in `TransferInputFiles`.
+The tarball should contain the job's input files as specified in `TransferInput`.
 
 #### Download Job Output Files
 ```bash

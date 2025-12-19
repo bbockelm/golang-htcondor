@@ -1007,7 +1007,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 	// First, query for the job to get its proc ad with transfer attributes
 	// We need transfer-related attributes for spooling to work
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	projection := []string{"ClusterId", "ProcId", "TransferInput"}
 	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: projection,
 	})
@@ -1074,7 +1074,7 @@ func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request,
 
 	// First, query for the job to get its proc ad with transfer attributes
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInputFiles", "TransferInput"}
+	projection := []string{"ClusterId", "ProcId", "TransferInput"}
 	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: projection,
 	})

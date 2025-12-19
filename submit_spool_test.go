@@ -215,9 +215,11 @@ queue
 		}
 	}
 
-	transferInput := ad.EvaluateAttr("TransferInput")
-	if transferInput.IsUndefined() {
+	transferInput, ok := ad.EvaluateAttrString("TransferInput")
+	if !ok || transferInput == "" {
 		t.Error("TransferInput attribute not set")
+	} else if transferInput != "input1.txt,input2.txt" {
+		t.Errorf("Unexpected TransferInput value: %s", transferInput)
 	}
 }
 

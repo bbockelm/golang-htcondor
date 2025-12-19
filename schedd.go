@@ -732,9 +732,9 @@ func configureRemoteJobAd(procAd *classad.ClassAd) bool {
 		}
 	}
 
-	// Check TransferInputFiles
+	// Check TransferInput
 	if !needsSpooling {
-		if val, ok := procAd.EvaluateAttrString("TransferInputFiles"); ok && val != "" {
+		if val, ok := procAd.EvaluateAttrString("TransferInput"); ok && val != "" {
 			needsSpooling = true
 		}
 	}

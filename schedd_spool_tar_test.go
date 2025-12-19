@@ -216,7 +216,7 @@ func TestSpoolJobFilesFromTar_MissingAttributes(t *testing.T) {
 			setupJobAd: func() *classad.ClassAd {
 				ad := classad.New()
 				_ = ad.Set("ProcId", int64(0))
-				_ = ad.Set("TransferInputFiles", "input.txt")
+				_ = ad.Set("TransferInput", "input.txt")
 				return ad
 			},
 			expectedErr: "missing ClusterId",
@@ -226,7 +226,7 @@ func TestSpoolJobFilesFromTar_MissingAttributes(t *testing.T) {
 			setupJobAd: func() *classad.ClassAd {
 				ad := classad.New()
 				_ = ad.Set("ClusterId", int64(123))
-				_ = ad.Set("TransferInputFiles", "input.txt")
+				_ = ad.Set("TransferInput", "input.txt")
 				return ad
 			},
 			expectedErr: "missing ProcId",
@@ -237,7 +237,7 @@ func TestSpoolJobFilesFromTar_MissingAttributes(t *testing.T) {
 				ad := classad.New()
 				_ = ad.Set("ClusterId", "not_a_number")
 				_ = ad.Set("ProcId", int64(0))
-				_ = ad.Set("TransferInputFiles", "input.txt")
+				_ = ad.Set("TransferInput", "input.txt")
 				return ad
 			},
 			expectedErr: "not an integer",
@@ -290,7 +290,7 @@ func TestSpoolJobFilesFromTar_EmptyJobAds(t *testing.T) {
 	}
 }
 
-// TestSpoolJobFilesFromTar_FileFiltering tests that only files in TransferInputFiles are processed
+// TestSpoolJobFilesFromTar_FileFiltering tests that only files in TransferInput are processed
 func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -343,7 +343,7 @@ queue
 
 	t.Logf("Submitted job cluster %d", clusterIDInt)
 
-	// Create tar archive with more files than specified in TransferInputFiles
+	// Create tar archive with more files than specified in TransferInput
 	var tarBuf bytes.Buffer
 	tarWriter := tar.NewWriter(&tarBuf)
 

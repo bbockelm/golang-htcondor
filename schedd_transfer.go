@@ -566,8 +566,8 @@ func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream
 // SpoolJobFilesFromFS uploads input files to the schedd for the specified jobs.
 // Files are read from the provided filesystem.
 //
-// The input files to transfer are determined from each job ad's TransferInputFiles attribute.
-// If TransferInputFiles is not present, an error is returned.
+// The input files to transfer are determined from each job ad's TransferInput attribute.
+// If TransferInput is not present, an error is returned.
 //
 // Protocol (based on DCSchedd::spoolJobFiles in reference/dc_schedd.cpp):
 //  1. Connect to schedd and send SPOOL_JOB_FILES_WITH_PERMS command
@@ -585,7 +585,7 @@ func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream
 //  10. Receive reply (int, 1 = success, 0 = failure)
 //  11. EOM
 //
-// jobAds: Array of job ClassAds containing ClusterId, ProcId, and TransferInputFiles
+// jobAds: Array of job ClassAds containing ClusterId, ProcId, and TransferInput
 // fsys: Filesystem containing the files to upload
 // Returns: error if the upload fails
 func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.ClassAd, fsys fs.FS) error {
@@ -623,18 +623,13 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 		//nolint:gosec // ClusterId and ProcId are bounded by HTCondor to int32 range
 		jobIDs[i] = procID{cluster: int32(clusterInt), proc: int32(procInt)}
 
-		// Get TransferInputFiles - this contains the comma-separated list of input files
-		transferInputFilesExpr, ok := ad.Lookup("TransferInputFiles")
-		if !ok {
-			return fmt.Errorf("job ad %d (job %d.%d) missing TransferInputFiles attribute", i, clusterInt, procInt)
-		}
+		// Get TransferInput - this contains the comma-separated list of input files
+		transferInputStr, ok := ad.EvaluateAttrString("TransferInput")
 
-		// Get the string representation
-		transferInputStr := transferInputFilesExpr.String()
 		transferInputStr = strings.Trim(transferInputStr, "\"") // Remove quotes if present
 
-		if transferInputStr == "" || transferInputStr == "UNDEFINED" {
-			return fmt.Errorf("job ad %d (job %d.%d): TransferInputFiles is empty or undefined", i, clusterInt, procInt)
+		if !ok || transferInputStr == "" || strings.EqualFold(transferInputStr, "UNDEFINED") {
+			return fmt.Errorf("job ad %d (job %d.%d) missing TransferInput attribute", i, clusterInt, procInt)
 		}
 
 		// Parse the file list
@@ -1019,7 +1014,7 @@ func (s *Schedd) sendJobFiles(ctx context.Context, cedarStream *stream.Stream, _
 //   - For multiple jobs: cluster.proc/filename (e.g., "123.0/input.txt")
 //
 // Files are spooled in the order they appear in the tar archive.
-// Only files listed in the job's TransferInputFiles are spooled.
+// Only files listed in the job's TransferInput are spooled.
 // Files for jobs not in jobAds are ignored.
 //
 // jobAds: Array of job ClassAds containing ClusterId, ProcId, and file transfer attributes
@@ -1159,23 +1154,12 @@ func parseJobAdsForSpooling(jobAds []*classad.ClassAd) ([]procID, map[procID]*jo
 }
 
 // getInputFilesFromJobAd extracts the set of files that need to be transferred for a job.
-// This includes TransferInputFiles, TransferInput, and the executable if TransferExecutable is true.
+// This includes TransferInput and the executable if TransferExecutable is true.
 func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	var inputFiles []string
 
-	if expr, ok := ad.Lookup("TransferInputFiles"); ok {
-		val := expr.Eval(nil)
-		if str, err := val.StringValue(); err == nil && str != "" {
-			inputFiles = parseFileList(str)
-		}
-	}
-	if len(inputFiles) == 0 {
-		if expr, ok := ad.Lookup("TransferInput"); ok {
-			val := expr.Eval(nil)
-			if str, err := val.StringValue(); err == nil && str != "" {
-				inputFiles = parseFileList(str)
-			}
-		}
+	if str, ok := ad.EvaluateAttrString("TransferInput"); ok && str != "" {
+		inputFiles = parseFileList(str)
 	}
 
 	// Create set of input files for fast lookup
@@ -1186,7 +1170,7 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 
 	// Also include the executable if TransferExecutable is true (the default)
 	// This is needed because the Cmd attribute contains the executable path
-	// and it must be spooled along with TransferInputFiles
+	// and it must be spooled along with TransferInput
 	transferExe := true // default is true
 	if expr, ok := ad.Lookup("TransferExecutable"); ok {
 		val := expr.Eval(nil)

@@ -474,7 +474,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		files := parseFileList(tif)
 		if len(files) > 0 {
 			// Join with commas for ClassAd string list format
-			_ = ad.Set("TransferInputFiles", strings.Join(files, ","))
+			_ = ad.Set("TransferInput", strings.Join(files, ","))
 		}
 	}
 
@@ -1451,15 +1451,6 @@ func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 	// JobRunCount - Number of times job has run
 	// Initialize to 0
 	_ = ad.Set("JobRunCount", 0)
-
-	// TransferInput - Set to true if input files are specified and streaming is disabled
-	// This should be true when transfer_input_files is specified
-	if tif, ok := sf.cfg.Get("transfer_input_files"); ok {
-		files := parseFileList(tif)
-		if len(files) > 0 {
-			_ = ad.Set("TransferInput", true)
-		}
-	}
 
 	return nil
 }

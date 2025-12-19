@@ -99,14 +99,14 @@ queue
 	defer queryCancel()
 
 	constraint := fmt.Sprintf("ClusterId == %d", clusterID)
-	projection := []string{"ClusterId", "ProcId", "TransferInput", "TransferInputFiles", "JobStatus"}
+	projection := []string{"ClusterId", "ProcId", "TransferInput", "JobStatus"}
 
 	queriedAds, err := schedd.Query(queryCtx, constraint, projection)
 	if err != nil {
 		t.Logf("Failed to query job: %v", err)
 	} else if len(queriedAds) > 0 {
 		t.Logf("Queried job ad attributes:")
-		for _, attr := range []string{"TransferInput", "TransferInputFiles"} {
+		for _, attr := range []string{"TransferInput"} {
 			if expr, ok := queriedAds[0].Lookup(attr); ok {
 				val := expr.Eval(nil)
 				if str, err := val.StringValue(); err == nil {
@@ -118,30 +118,24 @@ queue
 		}
 	}
 
-	// Verify that TransferInputFiles is set in the job ad
+	// Verify that TransferInput is set in the job ad
 	// This is required for the SpoolJobFilesFromFS function to work
 	if len(procAds) == 0 {
 		t.Fatal("No proc ads returned from SubmitRemote")
 	}
 
 	for i, ad := range procAds {
-		transferInputFilesExpr, ok := ad.Lookup("TransferInputFiles")
+		transferInputExpr, ok := ad.Lookup("TransferInput")
 		if !ok {
-			t.Fatalf("procAds[%d] missing TransferInputFiles attribute - cannot spool files", i)
+			t.Fatalf("procAds[%d] missing TransferInput attribute - cannot spool files", i)
 		}
 
-		inputFilesStr := strings.Trim(transferInputFilesExpr.String(), "\"")
+		inputFilesStr := strings.Trim(transferInputExpr.String(), "\"")
 		if inputFilesStr == "" || inputFilesStr == "UNDEFINED" {
-			t.Fatalf("procAds[%d] TransferInputFiles is empty or undefined - cannot spool files", i)
+			t.Fatalf("procAds[%d] TransferInput is empty or undefined - cannot spool files", i)
 		}
 
-		t.Logf("procAds[%d] TransferInputFiles: %s", i, inputFilesStr)
-
-		// Also verify TransferInput boolean is set
-		if transferInputExpr, ok := ad.Lookup("TransferInput"); ok {
-			transferInputVal := transferInputExpr.String()
-			t.Logf("procAds[%d] TransferInput (boolean): %s", i, transferInputVal)
-		}
+		t.Logf("procAds[%d] TransferInput: %s", i, inputFilesStr)
 	}
 
 	// Now spool the input files
@@ -157,7 +151,7 @@ queue
 		},
 	}
 
-	// Spool the files - the file list is now taken from each job ad's TransferInputFiles attribute
+	// Spool the files - the file list is now taken from each job ad's TransferInput attribute
 	t.Logf("Spooling input files for job %d.0", clusterID)
 	err = schedd.SpoolJobFilesFromFS(ctx, procAds, testFS)
 
@@ -355,23 +349,23 @@ queue
 
 	t.Logf("Job submitted successfully: cluster=%d, num_procs=%d", clusterID, len(procAds))
 
-	// Verify that TransferInputFiles is set in the job ad
+	// Verify that TransferInput is set in the job ad
 	if len(procAds) == 0 {
 		t.Fatal("No proc ads returned from SubmitRemote")
 	}
 
 	for i, ad := range procAds {
-		transferInputFilesExpr, ok := ad.Lookup("TransferInputFiles")
+		transferInputExpr, ok := ad.Lookup("TransferInput")
 		if !ok {
-			t.Fatalf("procAds[%d] missing TransferInputFiles attribute - cannot spool files", i)
+			t.Fatalf("procAds[%d] missing TransferInput attribute - cannot spool files", i)
 		}
 
-		inputFilesStr := strings.Trim(transferInputFilesExpr.String(), "\"")
+		inputFilesStr := strings.Trim(transferInputExpr.String(), "\"")
 		if inputFilesStr == "" || inputFilesStr == "UNDEFINED" {
-			t.Fatalf("procAds[%d] TransferInputFiles is empty or undefined - cannot spool files", i)
+			t.Fatalf("procAds[%d] TransferInput is empty or undefined - cannot spool files", i)
 		}
 
-		t.Logf("procAds[%d] TransferInputFiles: %s", i, inputFilesStr)
+		t.Logf("procAds[%d] TransferInput: %s", i, inputFilesStr)
 	}
 
 	// Create a tar archive with test files (single job mode - no cluster.proc prefix)
