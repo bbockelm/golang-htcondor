@@ -44,11 +44,9 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/jobs/transfers", cors(http.HandlerFunc(s.handleJobTransfers)))
 
 	// Credential management endpoints (credd)
-	mux.Handle("/api/v1/creds/password", cors(http.HandlerFunc(s.handlePasswordCredential)))
 	mux.Handle("/api/v1/creds/user", cors(http.HandlerFunc(s.handleUserCredential)))
-	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(s.handleServiceCredential)))
-	mux.Handle("/api/v1/creds/service/check", cors(http.HandlerFunc(s.handleServiceCredentialCheck)))
-	mux.Handle("/api/v1/creds/service/token", cors(http.HandlerFunc(s.handleServiceCredentialToken)))
+	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(s.handleServiceCredentialCollection)))
+	mux.Handle("/api/v1/creds/service/", cors(http.HandlerFunc(s.handleServiceCredentialItem)))
 
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(s.handleWhoAmI)))

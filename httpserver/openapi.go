@@ -223,28 +223,14 @@ const openAPISchema = `{
           }
         }
       },
-      "PasswordRequest": {
-        "type": "object",
-        "required": ["password"],
-        "properties": {
-          "password": {
-            "type": "string",
-            "description": "Password to store"
-          },
-          "user": {
-            "type": "string",
-            "description": "Optional user. Defaults to the authenticated user."
-          }
-        }
-      },
       "UserCredentialRequest": {
         "type": "object",
         "required": ["cred_type", "credential"],
         "properties": {
           "cred_type": {
             "type": "string",
-            "enum": ["Password", "Kerberos"],
-            "description": "Credential type"
+            "enum": ["Kerberos"],
+            "description": "Credential type (Kerberos)"
           },
           "credential": {
             "type": "string",
@@ -287,33 +273,6 @@ const openAPISchema = `{
           }
         }
       },
-      "ServiceCheckRequest": {
-        "type": "object",
-        "required": ["cred_type", "services"],
-        "properties": {
-          "cred_type": {
-            "type": "string",
-            "enum": ["OAuth"],
-            "description": "Credential type (OAuth only)"
-          },
-          "services": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "service": {"type": "string"},
-                "handle": {"type": "string"}
-              },
-              "required": ["service"]
-            },
-            "description": "List of services to check"
-          },
-          "user": {
-            "type": "string",
-            "description": "Optional user. Defaults to the authenticated user."
-          }
-        }
-      },
       "ServiceStatus": {
         "type": "object",
         "properties": {
@@ -335,60 +294,13 @@ const openAPISchema = `{
     }
   },
   "paths": {
-    "/creds/password": {
-      "get": {
-        "summary": "Query password credential",
-        "description": "Check if a password credential exists for the user.",
-        "operationId": "queryPassword",
-        "parameters": [
-          {
-            "name": "user",
-            "in": "query",
-            "description": "Optional user. Defaults to the authenticated user.",
-            "required": false,
-            "schema": {"type": "string"}
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Credential status",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}
-          },
-          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
-        }
-      },
-      "post": {
-        "summary": "Add password credential",
-        "description": "Store a password credential in the credd.",
-        "operationId": "addPassword",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PasswordRequest"}}}},
-        "responses": {
-          "201": {"description": "Stored", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}},
-          "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
-        }
-      },
-      "delete": {
-        "summary": "Delete password credential",
-        "description": "Delete the password credential for a user.",
-        "operationId": "deletePassword",
-        "parameters": [
-          {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Optional user."}
-        ],
-        "responses": {
-          "200": {"description": "Deleted", "content": {"application/json": {"schema": {"type": "object", "properties": {"deleted": {"type": "boolean"}}}}}},
-          "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
-        }
-      }
-    },
     "/creds/user": {
       "get": {
         "summary": "Query user credential",
         "description": "Check if a user credential exists for the given type.",
         "operationId": "queryUserCred",
         "parameters": [
-          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["Password", "Kerberos"]}},
+          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["Kerberos"]}},
           {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
         ],
         "responses": {
@@ -413,7 +325,7 @@ const openAPISchema = `{
         "description": "Delete a user credential.",
         "operationId": "deleteUserCred",
         "parameters": [
-          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["Password", "Kerberos"]}},
+          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["Kerberos"]}},
           {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
         ],
         "responses": {
@@ -426,25 +338,41 @@ const openAPISchema = `{
     },
     "/creds/service": {
       "get": {
+        "summary": "List service credentials",
+        "description": "List stored OAuth service credentials for the authenticated user (or provided user).",
+        "operationId": "listServiceCreds",
+        "parameters": [
+          {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Service credentials", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/ServiceStatus"}}}}},
+          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/creds/service/{service}": {
+      "get": {
         "summary": "Query service credential",
-        "description": "Check if an OAuth service credential exists.",
+        "description": "Check if an OAuth service credential exists for a service/handle.",
         "operationId": "queryServiceCred",
         "parameters": [
-          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["OAuth"]}},
-          {"name": "service", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
           {"name": "handle", "in": "query", "required": false, "schema": {"type": "string"}},
           {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
         ],
         "responses": {
           "200": {"description": "Credential status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}},
-          "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       },
       "post": {
-        "summary": "Add service credential",
-        "description": "Store an OAuth service credential.",
+        "summary": "Add or replace service credential",
+        "description": "Store an OAuth service credential for the given service (handle optional).",
         "operationId": "addServiceCred",
+        "parameters": [
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ServiceCredentialRequest"}}}},
         "responses": {
           "201": {"description": "Stored", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}},
@@ -454,43 +382,92 @@ const openAPISchema = `{
       },
       "delete": {
         "summary": "Delete service credential",
-        "description": "Delete an OAuth service credential.",
+        "description": "Delete an OAuth service credential for the given service/handle.",
         "operationId": "deleteServiceCred",
         "parameters": [
-          {"name": "cred_type", "in": "query", "required": true, "schema": {"type": "string", "enum": ["OAuth"]}},
-          {"name": "service", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
           {"name": "handle", "in": "query", "required": false, "schema": {"type": "string"}},
           {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
         ],
         "responses": {
           "200": {"description": "Deleted", "content": {"application/json": {"schema": {"type": "object", "properties": {"deleted": {"type": "boolean"}}}}}},
           "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
-    "/creds/service/check": {
-      "post": {
-        "summary": "Check OAuth service credentials",
-        "description": "Check whether OAuth credentials exist for the requested services.",
-        "operationId": "checkServiceCreds",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ServiceCheckRequest"}}}},
-        "responses": {
-          "200": {"description": "Statuses", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/ServiceStatus"}}}}},
-          "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
-        }
-      }
-    },
-    "/creds/service/token": {
+    "/creds/service/{service}/credential": {
       "get": {
         "summary": "Fetch OAuth credential",
-        "description": "Return the stored OAuth credential for the service/handle.",
-        "operationId": "getServiceToken",
+        "description": "Return the stored OAuth credential for the service (optional handle via query).",
+        "operationId": "getServiceCredential",
         "parameters": [
-          {"name": "service", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
           {"name": "handle", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OAuthCredentialResponse"}}}},
+          "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/creds/service/{service}/{handle}": {
+      "get": {
+        "summary": "Query service credential (handle)",
+        "description": "Check if an OAuth service credential exists for a specific handle.",
+        "operationId": "queryServiceCredHandle",
+        "parameters": [
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "handle", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Credential status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}},
+          "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Add or replace service credential (handle)",
+        "description": "Store an OAuth service credential for the given service and handle.",
+        "operationId": "addServiceCredHandle",
+        "parameters": [
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "handle", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ServiceCredentialRequest"}}}},
+        "responses": {
+          "201": {"description": "Stored", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatus"}}}},
+          "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Delete service credential (handle)",
+        "description": "Delete an OAuth service credential for the given service and handle.",
+        "operationId": "deleteServiceCredHandle",
+        "parameters": [
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "handle", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Deleted", "content": {"application/json": {"schema": {"type": "object", "properties": {"deleted": {"type": "boolean"}}}}}},
+          "404": {"description": "Not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/creds/service/{service}/{handle}/credential": {
+      "get": {
+        "summary": "Fetch OAuth credential (handle)",
+        "description": "Return the stored OAuth credential for the service and handle.",
+        "operationId": "getServiceCredentialHandle",
+        "parameters": [
+          {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "handle", "in": "path", "required": true, "schema": {"type": "string"}},
           {"name": "user", "in": "query", "required": false, "schema": {"type": "string"}}
         ],
         "responses": {
