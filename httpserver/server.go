@@ -638,18 +638,23 @@ func (s *Server) initializeOAuth2(ln net.Listener, protocol string) {
 
 	// Add localhost/127.0.0.1 variants if issuer uses wildcard or unspecified address
 	// This ensures Swagger UI works when accessed via localhost even if server listens on [::]
-	if strings.Contains(issuer, "[::]") || strings.Contains(issuer, "0.0.0.0") {
-		_, port, _ := net.SplitHostPort(actualAddr)
-		if port != "" {
-			swaggerRedirectURIs = append(swaggerRedirectURIs,
-				protocol+"://localhost:"+port+"/docs/oauth2-redirect",
-				protocol+"://127.0.0.1:"+port+"/docs/oauth2-redirect",
-			)
+	issuerURL, err := parseURL(issuer)
+	if err == nil {
+		hostname := issuerURL.Hostname()
+		port := issuerURL.Port()
+		if (hostname == "[::]" || hostname == "0.0.0.0") && port == "0" {
+			_, actualPort, _ := net.SplitHostPort(actualAddr)
+			if actualPort != "" {
+				swaggerRedirectURIs = append(swaggerRedirectURIs,
+					protocol+"://localhost:"+actualPort+"/docs/oauth2-redirect",
+					protocol+"://127.0.0.1:"+actualPort+"/docs/oauth2-redirect",
+				)
+			}
 		}
 	}
 
 	// Check if client exists
-	_, err := s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
+	_, err = s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
 	if err != nil {
 		// Create client if not found (or error)
 		client := &fosite.DefaultClient{
