@@ -6,17 +6,13 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/PelicanPlatform/classad/classad"
 )
 
 // CredType enumerates the credential types supported by the credd.
-// Mirrors the Python bindings CredType enum (Password, Kerberos, OAuth).
+// Mirrors the Python bindings CredType enum (Kerberos, OAuth).
 type CredType string
 
 const (
-	// CredTypePassword stores legacy password credentials.
-	CredTypePassword CredType = "Password"
 	// CredTypeKerberos stores Kerberos credentials.
 	CredTypeKerberos CredType = "Kerberos"
 	// CredTypeOAuth stores OAuth2 credentials.
@@ -41,19 +37,18 @@ type ServiceStatus struct {
 }
 
 // CreddClient defines the operations exposed by the credd (credential daemon).
-// The methods mirror the Python bindings htcondor2.Credd API.
+// The methods mirror the Python bindings htcondor2.Credd API but omit Windows password support.
 type CreddClient interface {
-	AddPassword(ctx context.Context, password string, user string) error
-	AddUserCred(ctx context.Context, credType CredType, credential []byte, user string) error
-	AddUserServiceCred(ctx context.Context, credType CredType, credential []byte, service string, handle string, user string, refresh *bool) error
-	CheckUserServiceCreds(ctx context.Context, credType CredType, serviceAds []*classad.ClassAd, user string) ([]ServiceStatus, error)
-	DeletePassword(ctx context.Context, user string) (bool, error)
+	PutUserCred(ctx context.Context, credType CredType, credential []byte, user string) error
 	DeleteUserCred(ctx context.Context, credType CredType, user string) error
-	DeleteUserServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) error
-	GetOAuth2Credential(ctx context.Context, service string, handle string, user string) (string, error)
-	QueryPassword(ctx context.Context, user string) (CredentialStatus, error)
-	QueryUserCred(ctx context.Context, credType CredType, user string) (CredentialStatus, error)
-	QueryUserServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) (CredentialStatus, error)
+	GetUserCredStatus(ctx context.Context, credType CredType, user string) (CredentialStatus, error)
+
+	PutServiceCred(ctx context.Context, credType CredType, credential []byte, service string, handle string, user string, refresh *bool) error
+	DeleteServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) error
+	GetServiceCredStatus(ctx context.Context, credType CredType, service string, handle string, user string) (CredentialStatus, error)
+	ListServiceCreds(ctx context.Context, credType CredType, user string) ([]ServiceStatus, error)
+
+	GetCredential(ctx context.Context, credType CredType, service string, handle string, user string) ([]byte, error)
 }
 
 // InMemoryCredd provides a lightweight, non-persistent credd implementation useful for testing
@@ -87,7 +82,7 @@ func NewInMemoryCredd() *InMemoryCredd {
 
 func validateCredTypeForUser(credType CredType) error {
 	switch credType {
-	case CredTypePassword, CredTypeKerberos:
+	case CredTypeKerberos:
 		return nil
 	default:
 		return fmt.Errorf("unsupported cred type for user credential: %s", credType)
@@ -101,19 +96,8 @@ func validateCredTypeForService(credType CredType) error {
 	return nil
 }
 
-// AddPassword stores a password credential for a user.
-func (c *InMemoryCredd) AddPassword(ctx context.Context, password string, user string) error {
-	if user == "" {
-		user = GetAuthenticatedUserFromContext(ctx)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.creds[credentialKey{user: user, credType: CredTypePassword}] = storedCredential{payload: []byte(password), updatedAt: c.clock()}
-	return nil
-}
-
-// AddUserCred stores a user credential of the given type (password or Kerberos).
-func (c *InMemoryCredd) AddUserCred(ctx context.Context, credType CredType, credential []byte, user string) error {
+// PutUserCred stores a user credential of the given type (Kerberos).
+func (c *InMemoryCredd) PutUserCred(ctx context.Context, credType CredType, credential []byte, user string) error {
 	if err := validateCredTypeForUser(credType); err != nil {
 		return err
 	}
@@ -126,8 +110,8 @@ func (c *InMemoryCredd) AddUserCred(ctx context.Context, credType CredType, cred
 	return nil
 }
 
-// AddUserServiceCred stores an OAuth service credential for a user.
-func (c *InMemoryCredd) AddUserServiceCred(ctx context.Context, credType CredType, credential []byte, service string, handle string, user string, refresh *bool) error {
+// PutServiceCred stores an OAuth service credential for a user.
+func (c *InMemoryCredd) PutServiceCred(ctx context.Context, credType CredType, credential []byte, service string, handle string, user string, refresh *bool) error {
 	if err := validateCredTypeForService(credType); err != nil {
 		return err
 	}
@@ -147,40 +131,6 @@ func (c *InMemoryCredd) AddUserServiceCred(ctx context.Context, credType CredTyp
 	return nil
 }
 
-// CheckUserServiceCreds reports the presence and update time of service credentials.
-func (c *InMemoryCredd) CheckUserServiceCreds(ctx context.Context, credType CredType, serviceAds []*classad.ClassAd, user string) ([]ServiceStatus, error) {
-	if err := validateCredTypeForService(credType); err != nil {
-		return nil, err
-	}
-	if user == "" {
-		user = GetAuthenticatedUserFromContext(ctx)
-	}
-
-	specs := extractServiceSpecs(serviceAds)
-	statuses := make([]ServiceStatus, 0, len(specs))
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, spec := range specs {
-		key := credentialKey{user: user, credType: credType, service: spec.Service, handle: spec.Handle}
-		stored, ok := c.creds[key]
-		status := ServiceStatus{Service: spec.Service, Handle: spec.Handle, Exists: ok}
-		if ok {
-			status.UpdatedAt = &stored.updatedAt
-		}
-		statuses = append(statuses, status)
-	}
-	return statuses, nil
-}
-
-// DeletePassword removes a stored password credential for a user.
-func (c *InMemoryCredd) DeletePassword(ctx context.Context, user string) (bool, error) {
-	if user == "" {
-		user = GetAuthenticatedUserFromContext(ctx)
-	}
-	return c.deleteCredential(credentialKey{user: user, credType: CredTypePassword})
-}
-
 // DeleteUserCred removes a user credential of the specified type.
 func (c *InMemoryCredd) DeleteUserCred(ctx context.Context, credType CredType, user string) error {
 	if err := validateCredTypeForUser(credType); err != nil {
@@ -193,8 +143,8 @@ func (c *InMemoryCredd) DeleteUserCred(ctx context.Context, credType CredType, u
 	return err
 }
 
-// DeleteUserServiceCred removes a service credential for a user.
-func (c *InMemoryCredd) DeleteUserServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) error {
+// DeleteServiceCred removes a service credential for a user.
+func (c *InMemoryCredd) DeleteServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) error {
 	if err := validateCredTypeForService(credType); err != nil {
 		return err
 	}
@@ -205,31 +155,26 @@ func (c *InMemoryCredd) DeleteUserServiceCred(ctx context.Context, credType Cred
 	return err
 }
 
-// GetOAuth2Credential returns the stored OAuth credential for service/handle.
-func (c *InMemoryCredd) GetOAuth2Credential(ctx context.Context, service string, handle string, user string) (string, error) {
+// GetCredential returns the stored credential payload for service/handle.
+func (c *InMemoryCredd) GetCredential(ctx context.Context, credType CredType, service string, handle string, user string) ([]byte, error) {
+	if err := validateCredTypeForService(credType); err != nil {
+		return nil, err
+	}
 	if user == "" {
 		user = GetAuthenticatedUserFromContext(ctx)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	key := credentialKey{user: user, credType: CredTypeOAuth, service: service, handle: handle}
+	key := credentialKey{user: user, credType: credType, service: service, handle: handle}
 	stored, ok := c.creds[key]
 	if !ok {
-		return "", ErrCredentialNotFound
+		return nil, ErrCredentialNotFound
 	}
-	return string(stored.payload), nil
+	return stored.payload, nil
 }
 
-// QueryPassword reports password credential status for a user.
-func (c *InMemoryCredd) QueryPassword(ctx context.Context, user string) (CredentialStatus, error) {
-	if user == "" {
-		user = GetAuthenticatedUserFromContext(ctx)
-	}
-	return c.queryCredential(credentialKey{user: user, credType: CredTypePassword})
-}
-
-// QueryUserCred reports credential status for the specified user credential type.
-func (c *InMemoryCredd) QueryUserCred(ctx context.Context, credType CredType, user string) (CredentialStatus, error) {
+// GetUserCredStatus reports credential status for the specified user credential type.
+func (c *InMemoryCredd) GetUserCredStatus(ctx context.Context, credType CredType, user string) (CredentialStatus, error) {
 	if err := validateCredTypeForUser(credType); err != nil {
 		return CredentialStatus{}, err
 	}
@@ -239,8 +184,8 @@ func (c *InMemoryCredd) QueryUserCred(ctx context.Context, credType CredType, us
 	return c.queryCredential(credentialKey{user: user, credType: credType})
 }
 
-// QueryUserServiceCred reports status for a stored service credential.
-func (c *InMemoryCredd) QueryUserServiceCred(ctx context.Context, credType CredType, service string, handle string, user string) (CredentialStatus, error) {
+// GetServiceCredStatus reports status for a stored service credential.
+func (c *InMemoryCredd) GetServiceCredStatus(ctx context.Context, credType CredType, service string, handle string, user string) (CredentialStatus, error) {
 	if err := validateCredTypeForService(credType); err != nil {
 		return CredentialStatus{}, err
 	}
@@ -248,6 +193,33 @@ func (c *InMemoryCredd) QueryUserServiceCred(ctx context.Context, credType CredT
 		user = GetAuthenticatedUserFromContext(ctx)
 	}
 	return c.queryCredential(credentialKey{user: user, credType: credType, service: service, handle: handle})
+}
+
+// ListServiceCreds returns all service credentials for the user and credType.
+func (c *InMemoryCredd) ListServiceCreds(ctx context.Context, credType CredType, user string) ([]ServiceStatus, error) {
+	if err := validateCredTypeForService(credType); err != nil {
+		return nil, err
+	}
+	if user == "" {
+		user = GetAuthenticatedUserFromContext(ctx)
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	statuses := make([]ServiceStatus, 0)
+	for key, stored := range c.creds {
+		if key.user != user || key.credType != credType || key.service == "" {
+			continue
+		}
+		ts := stored.updatedAt
+		statuses = append(statuses, ServiceStatus{
+			Service:   key.service,
+			Handle:    key.handle,
+			Exists:    true,
+			UpdatedAt: &ts,
+		})
+	}
+	return statuses, nil
 }
 
 func (c *InMemoryCredd) deleteCredential(key credentialKey) (bool, error) {
@@ -269,19 +241,4 @@ func (c *InMemoryCredd) queryCredential(key credentialKey) (CredentialStatus, er
 	}
 	ts := stored.updatedAt
 	return CredentialStatus{Exists: true, UpdatedAt: &ts}, nil
-}
-
-// extractServiceSpecs converts ClassAds to service specs. The ClassAds are expected
-// to include a "Service" attribute and optional "Handle" attribute.
-func extractServiceSpecs(serviceAds []*classad.ClassAd) []ServiceStatus {
-	specs := make([]ServiceStatus, 0, len(serviceAds))
-	for _, ad := range serviceAds {
-		if ad == nil {
-			continue
-		}
-		serviceStr, _ := ad.EvaluateAttrString("Service")
-		handleStr, _ := ad.EvaluateAttrString("Handle")
-		specs = append(specs, ServiceStatus{Service: serviceStr, Handle: handleStr})
-	}
-	return specs
 }

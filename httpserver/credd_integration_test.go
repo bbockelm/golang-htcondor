@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,8 @@ func TestCreddHTTPIntegration(t *testing.T) {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
+	apiBase := strings.TrimRight(baseURL, "/") + deriveAPIPrefix(t, baseURL)
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	user := "credd-integration"
 
@@ -94,7 +97,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 		"refresh":    false,
 	}
 	addBytes, _ := json.Marshal(addBody)
-	addReq, _ := http.NewRequest(http.MethodPost, baseURL+"/api/v1/creds/service/github", bytes.NewReader(addBytes))
+	addReq, _ := http.NewRequest(http.MethodPost, apiBase+"/creds/service/github", bytes.NewReader(addBytes))
 	addReq.Header.Set("Content-Type", "application/json")
 	addReq.Header.Set("X-Test-User", user)
 	addResp, err := client.Do(addReq)
@@ -108,7 +111,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	}
 
 	// Fetch credential payload
-	getReq, _ := http.NewRequest(http.MethodGet, baseURL+"/api/v1/creds/service/github/credential", nil)
+	getReq, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service/github/credential", nil)
 	getReq.Header.Set("X-Test-User", user)
 	getResp, err := client.Do(getReq)
 	if err != nil {
@@ -130,7 +133,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	}
 
 	// List credentials
-	listReq, _ := http.NewRequest(http.MethodGet, baseURL+"/api/v1/creds/service", nil)
+	listReq, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service", nil)
 	listReq.Header.Set("X-Test-User", user)
 	listResp, err := client.Do(listReq)
 	if err != nil {
@@ -150,7 +153,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	}
 
 	// Delete credential
-	deleteReq, _ := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/creds/service/github", nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, apiBase+"/creds/service/github", nil)
 	deleteReq.Header.Set("X-Test-User", user)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
@@ -163,7 +166,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	}
 
 	// Verify credential no longer exists
-	statusReq, _ := http.NewRequest(http.MethodGet, baseURL+"/api/v1/creds/service/github", nil)
+	statusReq, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service/github", nil)
 	statusReq.Header.Set("X-Test-User", user)
 	statusResp, err := client.Do(statusReq)
 	if err != nil {
@@ -181,4 +184,39 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	if status.Exists {
 		t.Fatalf("expected credential to be deleted")
 	}
+}
+
+// deriveAPIPrefix fetches /openapi.json and returns the first server URL (defaults to /api/v1).
+func deriveAPIPrefix(t *testing.T, baseURL string) string {
+	t.Helper()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(baseURL + "/openapi.json")
+	if err != nil {
+		t.Logf("failed to fetch openapi.json, defaulting prefix to /api/v1: %v", err)
+		return "/api/v1"
+	}
+	defer resp.Body.Close()
+
+	var schema struct {
+		Servers []struct {
+			URL string `json:"url"`
+		} `json:"servers"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&schema); err != nil {
+		t.Logf("failed to decode openapi.json, defaulting prefix to /api/v1: %v", err)
+		return "/api/v1"
+	}
+
+	for _, srv := range schema.Servers {
+		if srv.URL != "" {
+			if !strings.HasPrefix(srv.URL, "/") {
+				return "/" + srv.URL
+			}
+			return srv.URL
+		}
+	}
+
+	return "/api/v1"
 }
