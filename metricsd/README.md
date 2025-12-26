@@ -82,7 +82,7 @@ func main() {
     }
 
     log.Println(metricsText)
-    
+
     // Subsequent calls will return pre-calculated results from cache
 }
 ```
@@ -294,7 +294,7 @@ For optimal performance:
    - Typical: 5-15 seconds for 30s scrape interval
    - `registry.SetCacheTTL(10 * time.Second)`
 
-3. **Prometheus Scraping**: 
+3. **Prometheus Scraping**:
    - Set scrape interval to match your monitoring requirements
    - Recommended: 30-60 seconds for most use cases
    - Cache TTL should be shorter than scrape interval

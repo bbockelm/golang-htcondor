@@ -110,7 +110,7 @@ func TestToolAdvertiseToCollector_ValidAd(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := server.toolAdvertiseToCollector(ctx, args)
-	
+
 	// Should fail to connect, but that's expected
 	if err == nil {
 		t.Error("Expected connection error")
@@ -123,19 +123,19 @@ func TestToolAdvertiseToCollector_ValidAd(t *testing.T) {
 
 func TestHandleListTools_IncludesAdvertise(t *testing.T) {
 	server := &Server{}
-	
+
 	result := server.handleListTools(context.Background(), nil)
-	
+
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
 		t.Fatal("Result is not a map")
 	}
-	
+
 	tools, ok := resultMap["tools"].([]Tool)
 	if !ok {
 		t.Fatal("tools is not a []Tool")
 	}
-	
+
 	// Check that advertise_to_collector tool exists
 	found := false
 	for _, tool := range tools {
@@ -150,7 +150,7 @@ func TestHandleListTools_IncludesAdvertise(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !found {
 		t.Error("advertise_to_collector tool not found in list")
 	}
@@ -172,12 +172,12 @@ func TestToolAdvertiseToCollector_WithCommand(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := server.toolAdvertiseToCollector(ctx, args)
-	
+
 	// Should fail to connect
 	if err == nil {
 		t.Error("Expected connection error")
 	}
-	
+
 	// Verify command was parsed (no "invalid command" error)
 	if err.Error() == "invalid command: UPDATE_STARTD_AD" {
 		t.Error("Valid command was rejected")
@@ -199,11 +199,11 @@ func TestToolAdvertiseToCollector_InvalidCommand(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := server.toolAdvertiseToCollector(ctx, args)
-	
+
 	if err == nil {
 		t.Error("Expected error for invalid command")
 	}
-	
+
 	if err.Error() != "invalid command: INVALID_COMMAND" {
 		t.Errorf("Expected 'invalid command' error, got: %v", err)
 	}
