@@ -64,7 +64,7 @@ import (
 var (
 	name         = flag.String("name", "", "Daemon name (overrides config)")
 	n            = flag.String("n", "", "Daemon name (alias for -name)")
-	provider     = flag.String("provider", "", "Credential provider name (default from config: LOCAL_CREDMON_PROVIDER or 'github')")
+	providers    = flag.String("providers", "", "Credential provider names, comma-separated (default from config: LOCAL_CREDMON_PROVIDERS or 'github')")
 	credDir      = flag.String("cred-dir", "", "Credential directory to monitor (default from config: SEC_CREDENTIAL_DIRECTORY_OAUTH)")
 	scanInterval = flag.Duration("scan-interval", 0, "Scan interval for credential files (default from config: LOCAL_CREDMON_SCAN_INTERVAL or 5m)")
 	issuer       = flag.String("issuer", "", "Token issuer URL (default from config: LOCAL_CREDMON_ISSUER or 'https://localhost')")
@@ -77,7 +77,7 @@ var (
 // credmonConfig holds the runtime configuration for the credmon daemon
 type credmonConfig struct {
 	daemonName      string
-	providerName    string
+	providerNames   []string
 	credDirPath     string
 	scanIntervalDur time.Duration
 	issuerURL       string
@@ -101,13 +101,29 @@ func loadCredmonConfig(htcConfig *config.Config) (*credmonConfig, error) {
 		}
 	}
 
-	// Get provider from flag or config
-	cfg.providerName = *provider
-	if cfg.providerName == "" {
-		if p, ok := htcConfig.Get("LOCAL_CREDMON_PROVIDER"); ok {
-			cfg.providerName = p
+	// Get providers from flag or config (comma-separated list)
+	cfg.providerNames = nil
+	if *providers != "" {
+		// Parse comma-separated providers from flag
+		for _, p := range strings.Split(*providers, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.providerNames = append(cfg.providerNames, p)
+			}
+		}
+	}
+	if len(cfg.providerNames) == 0 {
+		if p, ok := htcConfig.Get("LOCAL_CREDMON_PROVIDERS"); ok {
+			// Parse comma-separated providers from config
+			for _, provider := range strings.Split(p, ",") {
+				provider = strings.TrimSpace(provider)
+				if provider != "" {
+					cfg.providerNames = append(cfg.providerNames, provider)
+				}
+			}
 		} else {
-			cfg.providerName = "github"
+			// Default to github for backward compatibility
+			cfg.providerNames = []string{"github"}
 		}
 	}
 
@@ -262,7 +278,7 @@ func run() error {
 	// Create localcredmon instance
 	credmon, err := localcredmon.New(localcredmon.Config{
 		CredDir:        cfg.credDirPath,
-		Provider:       cfg.providerName,
+		Providers:      cfg.providerNames,
 		PrivateKey:     privateKey,
 		KeyID:          cfg.keyIDStr,
 		Algorithm:      algorithm,
@@ -305,7 +321,7 @@ func run() error {
 	logger.Printf("Ready signal sent successfully")
 
 	// Start watching for credential requests
-	logger.Printf("Starting credential monitor (provider=%s, interval=%v)", cfg.providerName, cfg.scanIntervalDur)
+	logger.Printf("Starting credential monitor (providers=%v, interval=%v)", cfg.providerNames, cfg.scanIntervalDur)
 	if err := credmon.Watch(ctx, cfg.scanIntervalDur); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("credential monitor failed: %w", err)
 	}
