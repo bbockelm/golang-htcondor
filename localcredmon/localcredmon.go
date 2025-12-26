@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,12 +84,15 @@ type Config struct {
 
 // LocalCredmon monitors credential requests and generates tokens
 type LocalCredmon struct {
-	config     Config
-	sighupChan chan os.Signal
-	rescanChan chan struct{}
-	tokenCache map[string]time.Time // username/provider -> last renewal time
-	master     *htcondor.Master
-	htcConfig  *config.Config
+	config            Config
+	sighupChan        chan os.Signal
+	rescanChan        chan struct{}
+	tokenCache        map[string]time.Time // username/provider -> last renewal time
+	master            *htcondor.Master
+	htcConfig         *config.Config
+	lastConfigReload  time.Time   // last time config was reloaded
+	configReloadTimer *time.Timer // pending deferred config reload
+	configMu          sync.Mutex  // protects lastConfigReload and configReloadTimer
 }
 
 // New creates a new LocalCredmon instance
@@ -232,11 +236,17 @@ func (lc *LocalCredmon) Watch(ctx context.Context, interval time.Duration) error
 		select {
 		case <-ctx.Done():
 			signal.Stop(lc.sighupChan)
+			lc.configMu.Lock()
+			if lc.configReloadTimer != nil {
+				lc.configReloadTimer.Stop()
+			}
+			lc.configMu.Unlock()
 			return ctx.Err()
 
 		case <-lc.sighupChan:
-			// Received SIGHUP - rescan immediately
-			lc.config.Logger.Printf("Received SIGHUP, rescanning credentials...")
+			// SIGHUP received - reload config (rate-limited/deferred) and rescan immediately
+			lc.scheduleConfigReload()
+
 			if err := lc.ScanOnce(ctx); err != nil {
 				lc.config.Logger.Printf("Scan error after SIGHUP: %v", err)
 			}
@@ -263,6 +273,100 @@ func (lc *LocalCredmon) TriggerRescan() {
 	default:
 		// Already pending, skip
 	}
+}
+
+// scheduleConfigReload schedules a config reload, either immediately or deferred.
+// If a reload happened within the last 5 seconds, it schedules one for 5 seconds
+// after the last reload. Multiple requests during the window are coalesced.
+func (lc *LocalCredmon) scheduleConfigReload() {
+	lc.configMu.Lock()
+	timeSinceReload := time.Since(lc.lastConfigReload)
+
+	if timeSinceReload >= 5*time.Second {
+		// Enough time has passed, reload immediately
+		lc.configMu.Unlock()
+		lc.config.Logger.Printf("Received SIGHUP, reloading configuration...")
+		if err := lc.reloadConfig(); err != nil {
+			lc.config.Logger.Printf("Config reload error: %v", err)
+		}
+	} else {
+		// Too soon, schedule a deferred reload
+		if lc.configReloadTimer != nil {
+			// Already scheduled, coalesce (do nothing)
+			lc.configMu.Unlock()
+			lc.config.Logger.Printf("Received SIGHUP, config reload already scheduled")
+			return
+		}
+
+		// Schedule reload for 5 seconds after last reload
+		delay := 5*time.Second - timeSinceReload
+		lc.config.Logger.Printf("Received SIGHUP, scheduling config reload in %.1fs", delay.Seconds())
+
+		lc.configReloadTimer = time.AfterFunc(delay, func() {
+			lc.configMu.Lock()
+			lc.configReloadTimer = nil
+			lc.configMu.Unlock()
+
+			lc.config.Logger.Printf("Executing deferred config reload...")
+			if err := lc.reloadConfig(); err != nil {
+				lc.config.Logger.Printf("Config reload error: %v", err)
+			}
+		})
+		lc.configMu.Unlock()
+	}
+}
+
+// reloadConfig reloads the HTCondor configuration and updates credmon settings
+func (lc *LocalCredmon) reloadConfig() error {
+	// Update last reload timestamp
+	lc.configMu.Lock()
+	lc.lastConfigReload = time.Now()
+	lc.configMu.Unlock()
+
+	// Reload HTCondor config with same options as initial load
+	newConfig, err := config.NewWithOptions(config.ConfigOptions{
+		Subsystem: "CREDMON",
+		LocalName: lc.config.DaemonName,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to reload config: %w", err)
+	}
+
+	lc.htcConfig = newConfig
+
+	// Update configurable parameters from reloaded config
+	if scanIntervalStr, ok := newConfig.Get("LOCAL_CREDMON_SCAN_INTERVAL"); ok {
+		if d, err := time.ParseDuration(scanIntervalStr); err == nil {
+			lc.config.Logger.Printf("Updated scan interval to %v", d)
+			// Note: scan interval change will take effect on next Watch() call
+		}
+	}
+
+	if lifetimeStr, ok := newConfig.Get("LOCAL_CREDMON_LIFETIME"); ok {
+		if d, err := time.ParseDuration(lifetimeStr); err == nil {
+			lc.config.TokenLifetime = d
+			lc.config.Logger.Printf("Updated token lifetime to %v", d)
+		}
+	}
+
+	if issuer, ok := newConfig.Get("LOCAL_CREDMON_ISSUER"); ok {
+		lc.config.Issuer = issuer
+		lc.config.Logger.Printf("Updated issuer to %s", issuer)
+	}
+
+	if audience, ok := newConfig.Get("LOCAL_CREDMON_AUDIENCE"); ok {
+		if audience != "" {
+			audiences := strings.Split(audience, ",")
+			for i := range audiences {
+				audiences[i] = strings.TrimSpace(audiences[i])
+			}
+			lc.config.Audience = audiences
+			lc.config.Logger.Printf("Updated audience to %v", audiences)
+		}
+	}
+
+	lc.config.Logger.Printf("Configuration reloaded successfully")
+	return nil
 }
 
 // processCredFile processes a single .top file

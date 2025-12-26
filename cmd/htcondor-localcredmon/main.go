@@ -63,6 +63,7 @@ import (
 
 var (
 	name         = flag.String("name", "", "Daemon name (overrides config)")
+	n            = flag.String("n", "", "Daemon name (alias for -name)")
 	provider     = flag.String("provider", "", "Credential provider name (default from config: LOCAL_CREDMON_PROVIDER or 'github')")
 	credDir      = flag.String("cred-dir", "", "Credential directory to monitor (default from config: SEC_CREDENTIAL_DIRECTORY_OAUTH)")
 	scanInterval = flag.Duration("scan-interval", 0, "Scan interval for credential files (default from config: LOCAL_CREDMON_SCAN_INTERVAL or 5m)")
@@ -198,8 +199,17 @@ func main() {
 func run() error {
 	flag.Parse()
 
-	// Load HTCondor configuration first (before setting up logger)
-	htcConfig, err := config.New()
+	// Determine daemon name for config loading (respects -n or -name)
+	localName := *name
+	if localName == "" && *n != "" {
+		localName = *n
+	}
+
+	// Load HTCondor configuration with subsystem and local name
+	htcConfig, err := config.NewWithOptions(config.ConfigOptions{
+		Subsystem: "CREDMON",
+		LocalName: localName,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to load HTCondor config: %w", err)
 	}
