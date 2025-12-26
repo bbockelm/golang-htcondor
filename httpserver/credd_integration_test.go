@@ -113,7 +113,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	trustDomain := "test.htcondor.org"
 	configFile := filepath.Join(tempDir, "condor_config")
 	extraConfig := fmt.Sprintf(`
-# Enable credd daemon
+# Enable credd daemon and local credmon (single instance handling multiple providers)
 DAEMON_LIST = $(DAEMON_LIST), CREDD, LOCAL_CREDMON
 CREDD_ADDRESS_FILE = $(LOG)/.credd_address
 CREDD_USE_SHARED_PORT = FALSE
@@ -136,17 +136,17 @@ TRUST_CREDENTIAL_DIRECTORY = True
 # Allow daemons to communicate with master (for keepalive/ready signals)
 ALLOW_DAEMON = *
 
-# Configure local credmon daemon
+# Configure local credmon daemon (handles multiple providers)
 LOCAL_CREDMON = %s
 LOCAL_CREDMON_NAME = LOCAL_CREDMON
 LOCAL_CREDMON_LOG = $(LOG)/LocalCredmonLog
 LOCAL_CREDMON_DEBUG = D_FULLDEBUG
 
-# Local credmon configuration parameters
-LOCAL_CREDMON_PROVIDER = github
+# Local credmon configuration parameters (shared by all providers)
+LOCAL_CREDMON_PROVIDERS = github,gitlab
 LOCAL_CREDMON_KEY_FILE = %s
 LOCAL_CREDMON_ISSUER = https://test.htcondor.org
-LOCAL_CREDMON_AUDIENCE = https://github.com
+LOCAL_CREDMON_AUDIENCE = https://github.com https://gitlab.com
 LOCAL_CREDMON_LIFETIME = 20m
 LOCAL_CREDMON_SCAN_INTERVAL = 2s
 `, oauthCredsDir, localCredmonBin, privKeyPath)
@@ -299,7 +299,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	}
 	t.Logf("✅ Successfully fetched credential from .use file (len=%d)", len(credPayload.Credential))
 
-	// List credentials
+	// List credentials - should show only github
 	listReq, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service", nil)
 	listReq.Header.Set("X-Test-User", currentUsername)
 	listResp, err := client.Do(listReq)
@@ -316,8 +316,100 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 		t.Fatalf("failed to decode list response: %v", err)
 	}
 	if len(listPayload) != 1 || listPayload[0].Service != "github" || !listPayload[0].Exists {
-		t.Fatalf("unexpected list payload: %+v", listPayload)
+		t.Fatalf("unexpected list payload (expected 1 github credential): %+v", listPayload)
 	}
+	t.Logf("✅ List shows 1 credential: github")
+
+	// Add gitlab credential with refresh=true
+	addBody2 := map[string]any{
+		"cred_type":  "OAuth",
+		"credential": "gitlab-oauth-token",
+		"refresh":    true,
+	}
+	addBytes2, _ := json.Marshal(addBody2)
+	addReq2, _ := http.NewRequest(http.MethodPost, apiBase+"/creds/service/gitlab", bytes.NewReader(addBytes2))
+	addReq2.Header.Set("Content-Type", "application/json")
+	addReq2.Header.Set("X-Test-User", currentUsername)
+	addResp2, err := client.Do(addReq2)
+	if err != nil {
+		t.Fatalf("failed to add gitlab credential: %v", err)
+	}
+	defer addResp2.Body.Close()
+	if addResp2.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(addResp2.Body)
+		t.Fatalf("expected 201 created for gitlab, got %d: %s", addResp2.StatusCode, string(body))
+	}
+	t.Logf("✅ Added gitlab credential")
+
+	// Wait for gitlab credmon to process the .top file
+	var gitlabCredBytes []byte
+	waitStart2 := time.Now()
+	for time.Since(waitStart2) < maxWait {
+		getReq3, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service/gitlab/credential", nil)
+		getReq3.Header.Set("X-Test-User", currentUsername)
+		getResp3, err := client.Do(getReq3)
+		if err != nil {
+			t.Fatalf("failed to fetch gitlab credential: %v", err)
+		}
+
+		if getResp3.StatusCode == http.StatusOK {
+			gitlabCredBytes, _ = io.ReadAll(getResp3.Body)
+			getResp3.Body.Close()
+			break
+		}
+
+		getResp3.Body.Close()
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if gitlabCredBytes == nil {
+		t.Fatalf("credmon did not process gitlab .top file within %v", maxWait)
+	}
+	t.Logf("✅ Local credmon processed gitlab .top file")
+
+	var gitlabCred struct {
+		Credential string `json:"credential"`
+	}
+	if err := json.Unmarshal(gitlabCredBytes, &gitlabCred); err != nil {
+		t.Fatalf("failed to decode gitlab credential response: %v", err)
+	}
+	if gitlabCred.Credential == "" {
+		t.Fatalf("expected non-empty gitlab credential")
+	}
+	t.Logf("✅ Successfully fetched gitlab credential from .use file (len=%d)", len(gitlabCred.Credential))
+
+	// List credentials - should now show both github and gitlab
+	listReq2, _ := http.NewRequest(http.MethodGet, apiBase+"/creds/service", nil)
+	listReq2.Header.Set("X-Test-User", currentUsername)
+	listResp2, err := client.Do(listReq2)
+	if err != nil {
+		t.Fatalf("failed to list credentials after gitlab: %v", err)
+	}
+	defer listResp2.Body.Close()
+	if listResp2.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(listResp2.Body)
+		t.Fatalf("expected 200 on second list, got %d: %s", listResp2.StatusCode, string(body))
+	}
+	var listPayload2 []serviceStatusResponse
+	if err := json.NewDecoder(listResp2.Body).Decode(&listPayload2); err != nil {
+		t.Fatalf("failed to decode second list response: %v", err)
+	}
+	if len(listPayload2) != 2 {
+		t.Fatalf("expected 2 credentials in list, got %d: %+v", len(listPayload2), listPayload2)
+	}
+
+	// Verify both services are present
+	services := make(map[string]bool)
+	for _, item := range listPayload2 {
+		if !item.Exists {
+			t.Fatalf("expected credential %s to exist", item.Service)
+		}
+		services[item.Service] = true
+	}
+	if !services["github"] || !services["gitlab"] {
+		t.Fatalf("expected both 'github' and 'gitlab' in list, got: %+v", listPayload2)
+	}
+	t.Logf("✅ List shows 2 credentials: github and gitlab")
 
 	// Delete credential
 	deleteReq, _ := http.NewRequest(http.MethodDelete, apiBase+"/creds/service/github", nil)
@@ -353,7 +445,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	}
 }
 
-// waitForLocalCredmonReady waits for LOCAL_CREDMON to signal readiness to condor_master
+// waitForLocalCredmonReady waits for LOCAL_CREDMON daemon to signal readiness to condor_master
 func waitForLocalCredmonReady(tempDir string, timeout time.Duration) error {
 	masterLog := filepath.Join(tempDir, "log", "MasterLog")
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -371,10 +463,10 @@ func waitForLocalCredmonReady(tempDir string, timeout time.Duration) error {
 			if err != nil {
 				continue
 			}
+			logContent := string(data)
 			// Look for ready signal acknowledgment from master
-			// The master logs when a daemon signals readiness
-			if strings.Contains(string(data), "LOCAL_CREDMON") &&
-				(strings.Contains(string(data), "ready") || strings.Contains(string(data), "Ready")) {
+			if strings.Contains(logContent, "LOCAL_CREDMON") &&
+				(strings.Contains(logContent, "ready") || strings.Contains(logContent, "Ready")) {
 				return nil
 			}
 		}

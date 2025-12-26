@@ -39,8 +39,8 @@ type Config struct {
 	// CredDir is the credential directory to monitor
 	CredDir string
 
-	// Provider is the credential provider name (e.g., "github")
-	Provider string
+	// Providers is the list of credential provider names (e.g., ["github", "gitlab"])
+	Providers []string
 
 	// PrivateKey is the RSA or ECDSA private key for signing tokens
 	PrivateKey interface{} // *rsa.PrivateKey or *ecdsa.PrivateKey
@@ -198,20 +198,22 @@ func (lc *LocalCredmon) StartKeepAlive(ctx context.Context) (stop func(), errs <
 
 // ScanOnce scans for .top files and processes them once
 func (lc *LocalCredmon) ScanOnce(ctx context.Context) error {
-	pattern := filepath.Join(lc.config.CredDir, "*", lc.config.Provider+".top")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return fmt.Errorf("failed to glob pattern %s: %w", pattern, err)
-	}
-
-	lc.config.Logger.Printf("Found %d %s tokens to process", len(matches), lc.config.Provider)
-
-	for _, topFile := range matches {
-		if err := ctx.Err(); err != nil {
-			return err
+	for _, provider := range lc.config.Providers {
+		pattern := filepath.Join(lc.config.CredDir, "*", provider+".top")
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("failed to glob pattern %s: %w", pattern, err)
 		}
-		if err := lc.processCredFile(topFile); err != nil {
-			lc.config.Logger.Printf("Error processing %s: %v", topFile, err)
+
+		lc.config.Logger.Printf("Found %d %s tokens to process", len(matches), provider)
+
+		for _, topFile := range matches {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := lc.processCredFile(topFile, provider); err != nil {
+				lc.config.Logger.Printf("Error processing %s: %v", topFile, err)
+			}
 		}
 	}
 
@@ -370,15 +372,15 @@ func (lc *LocalCredmon) reloadConfig() error {
 }
 
 // processCredFile processes a single .top file
-func (lc *LocalCredmon) processCredFile(topFile string) error {
+func (lc *LocalCredmon) processCredFile(topFile string, provider string) error {
 	// Extract username from path: <cred_dir>/<username>/<provider>.top
 	dir := filepath.Dir(topFile)
 	username := filepath.Base(dir)
 
 	lc.config.Logger.Printf("Processing %s for user %s", topFile, username)
 
-	useFile := filepath.Join(dir, lc.config.Provider+".use")
-	cacheKey := username + "/" + lc.config.Provider
+	useFile := filepath.Join(dir, provider+".use")
+	cacheKey := username + "/" + provider
 
 	// Check if .use file exists
 	useFileInfo, err := os.Stat(useFile)
@@ -412,7 +414,7 @@ func (lc *LocalCredmon) processCredFile(topFile string) error {
 	}
 
 	// Generate and write the token
-	if err := lc.refreshAccessToken(username, lc.config.Provider, useFile); err != nil {
+	if err := lc.refreshAccessToken(username, provider, useFile); err != nil {
 		return fmt.Errorf("failed to refresh token for %s: %w", username, err)
 	}
 
