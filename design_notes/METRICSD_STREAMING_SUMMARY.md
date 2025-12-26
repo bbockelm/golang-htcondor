@@ -40,7 +40,7 @@ Successfully implemented streaming API support for the metricsd package to impro
 
 ### 3. CollectorMetricsCollector Changes (`metricsd/config.go`)
 
-#### Streaming Implementation  
+#### Streaming Implementation
 - Replaced `QueryAdsWithOptions()` with `QueryAdsStream()`
 - Query each ad type only once per cycle
 - Process ads one at a time through channel

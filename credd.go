@@ -222,6 +222,7 @@ func (c *InMemoryCredd) ListServiceCreds(ctx context.Context, credType CredType,
 	return statuses, nil
 }
 
+//nolint:unparam // bool return kept for potential future use
 func (c *InMemoryCredd) deleteCredential(key credentialKey) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
