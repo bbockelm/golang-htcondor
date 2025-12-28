@@ -22,6 +22,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 		tokenCache: NewTokenCache(),
 		credd:      htcondor.NewInMemoryCredd(),
 	}
+	s.creddAvailable.Store(true) // Mark credd as available for testing
 
 	token := createTestJWTToken(3600)
 

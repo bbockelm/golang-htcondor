@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -38,6 +39,8 @@ type Server struct {
 	scheddDiscovered    bool         // Whether schedd address was discovered from collector
 	collector           *htcondor.Collector
 	credd               htcondor.CreddClient
+	creddAvailable      atomic.Bool // Whether credd is available (nil credd = not available)
+	creddDiscovered     bool        // Whether credd address was discovered (and needs periodic updates)
 	userHeader          string
 	signingKeyPath      string
 	trustDomain         string
@@ -189,8 +192,23 @@ func NewServer(cfg Config) (*Server, error) {
 		token:              cfg.Token,
 	}
 
+	// Discover credd if not provided
 	if s.credd == nil {
-		s.credd = htcondor.NewInMemoryCredd()
+		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
+		creddAddr, err := discoverCredd(cfg.ScheddName, scheddAddr, cfg.Collector, logger)
+		if err != nil {
+			logger.Warn(logging.DestinationHTTP, "Failed to discover credd, credential endpoints will be disabled", "error", err)
+			s.creddAvailable.Store(false)
+			s.creddDiscovered = true // Mark for periodic discovery attempts
+		} else {
+			logger.Info(logging.DestinationHTTP, "Discovered credd", "address", creddAddr)
+			s.credd = htcondor.NewCedarCredd(creddAddr)
+			s.creddAvailable.Store(true)
+			s.creddDiscovered = true // Mark for periodic updates
+		}
+	} else {
+		s.creddAvailable.Store(true)
+		s.creddDiscovered = false // Explicitly provided, no need for updates
 	}
 
 	// Setup OAuth2 provider if MCP is enabled
@@ -647,6 +665,11 @@ func (s *Server) Start() error {
 		s.startScheddAddressUpdater()
 	}
 
+	// Start credd address updater if credd was discovered (or discovery failed but should retry)
+	if s.creddDiscovered && s.collector != nil {
+		s.startCreddAddressUpdater()
+	}
+
 	// Start session cleanup goroutine
 	s.startSessionCleanup()
 
@@ -684,6 +707,11 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	// Start schedd address updater if address was discovered from collector
 	if s.scheddDiscovered && s.collector != nil {
 		s.startScheddAddressUpdater()
+	}
+
+	// Start credd address updater if credd was discovered (or discovery failed but should retry)
+	if s.creddDiscovered && s.collector != nil {
+		s.startCreddAddressUpdater()
 	}
 
 	// Start session cleanup goroutine
@@ -796,6 +824,57 @@ func (s *Server) startScheddAddressUpdater() {
 
 			case <-s.stopChan:
 				s.logger.Info(logging.DestinationSchedd, "Stopping schedd address updater")
+				return
+			}
+		}
+	}()
+}
+
+// startCreddAddressUpdater starts a background goroutine that periodically
+// checks for credd address updates from the collector
+func (s *Server) startCreddAddressUpdater() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		// Use half of ping interval, or 30 seconds if ping is disabled
+		checkInterval := s.pingInterval / 2
+		if checkInterval == 0 {
+			checkInterval = 30 * time.Second
+		}
+
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+
+		s.logger.Info(logging.DestinationHTTP, "Starting periodic credd discovery", "interval", checkInterval)
+
+		for {
+			select {
+			case <-ticker.C:
+				// Get current schedd address for credd discovery
+				schedd := s.getSchedd()
+				scheddAddr := schedd.Address()
+
+				// Attempt to discover credd
+				creddAddr, err := discoverCredd(s.scheddName, scheddAddr, s.collector, s.logger)
+				if err != nil {
+					// Only log if credd is already available to avoid spam
+					if s.creddAvailable.Load() {
+						s.logger.Warn(logging.DestinationHTTP, "Credd became unavailable", "error", err)
+						s.creddAvailable.Store(false)
+					}
+					continue
+				}
+
+				// Update credd if it became available
+				if !s.creddAvailable.Load() {
+					s.logger.Info(logging.DestinationHTTP, "Credd became available", "address", creddAddr)
+					s.credd = htcondor.NewCedarCredd(creddAddr)
+					s.creddAvailable.Store(true)
+				}
+
+			case <-s.stopChan:
+				s.logger.Info(logging.DestinationHTTP, "Stopping credd address updater")
 				return
 			}
 		}
@@ -1348,6 +1427,99 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 		return "", fmt.Errorf("timeout after %v: schedd '%s' not found in collector", timeout, scheddName)
 	}
 	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
+}
+
+// discoverCredd discovers the credd address by:
+// 1. Checking for a local .credd_address file if schedd was found via address file
+// 2. Querying the collector for a CreddAd with the same Name as the schedd
+// Returns the credd address or error if not found
+func discoverCredd(scheddName string, scheddAddr string, collector *htcondor.Collector, logger *logging.Logger) (string, error) {
+	// First, try to find credd via local address file if schedd address looks local
+	if strings.Contains(scheddAddr, "127.0.0.1") || strings.Contains(scheddAddr, "localhost") {
+		logger.Info(logging.DestinationHTTP, "Schedd appears local, checking for .credd_address file")
+
+		// Try to find credd address file in common HTCondor locations
+		creddAddressFile := findCreddAddressFile(logger)
+		if creddAddressFile != "" {
+			data, err := os.ReadFile(creddAddressFile) //nolint:gosec // creddAddressFile comes from HTCondor config or known paths
+			if err == nil {
+				// Only take the first line (address), ignore version info
+				lines := strings.Split(string(data), "\n")
+				address := strings.TrimSpace(lines[0])
+				if address != "" && !strings.Contains(address, "(null)") {
+					logger.Info(logging.DestinationHTTP, "Found local credd via address file", "address", address)
+					return address, nil
+				}
+			}
+		}
+	}
+
+	// If no local credd found, query collector
+	if collector != nil {
+		logger.Info(logging.DestinationHTTP, "Querying collector for credd", "scheddName", scheddName)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Query for CreddAd with same Name as schedd
+		constraint := ""
+		if scheddName != "" {
+			constraint = fmt.Sprintf(`Name == "%s"`, scheddName)
+		}
+
+		ads, _, err := collector.QueryAdsWithOptions(ctx, "CredD", constraint, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to query collector for credd: %w", err)
+		}
+
+		if len(ads) == 0 {
+			return "", fmt.Errorf("no credd ads found in collector")
+		}
+
+		// Use the first credd ad
+		myAddressExpr, ok := ads[0].Lookup("MyAddress")
+		if !ok {
+			return "", fmt.Errorf("credd ad missing MyAddress attribute")
+		}
+
+		myAddress := myAddressExpr.String()
+		myAddress = strings.Trim(myAddress, `"`)
+
+		if myAddress != "" {
+			return myAddress, nil
+		}
+	}
+
+	return "", fmt.Errorf("no credd found via local file or collector")
+}
+
+// findCreddAddressFile searches for .credd_address file in common HTCondor locations
+func findCreddAddressFile(logger *logging.Logger) string {
+	// First, try to get the configured path from HTCondor config
+	if htcConfig, err := config.New(); err == nil {
+		if creddAddressFile, ok := htcConfig.Get("CREDD_ADDRESS_FILE"); ok {
+			if _, err := os.Stat(creddAddressFile); err == nil {
+				logger.Info(logging.DestinationHTTP, "Found credd address file from config", "path", creddAddressFile)
+				return creddAddressFile
+			}
+			logger.Debug(logging.DestinationHTTP, "CREDD_ADDRESS_FILE configured but not found", "path", creddAddressFile)
+		}
+	}
+
+	// Fall back to common locations
+	commonPaths := []string{
+		"/var/log/condor/.credd_address",
+		"/var/lib/condor/log/.credd_address",
+		"./log/.credd_address", // relative for testing
+	}
+
+	for _, path := range commonPaths {
+		if _, err := os.Stat(path); err == nil {
+			logger.Info(logging.DestinationHTTP, "Found credd address file", "path", path)
+			return path
+		}
+	}
+
+	return ""
 }
 
 // periodicPing runs in a goroutine and periodically pings the collector and schedd

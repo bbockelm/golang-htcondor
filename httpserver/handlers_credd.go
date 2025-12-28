@@ -120,6 +120,12 @@ func (s *Server) handleServiceCredentialCollection(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Check if credd is available
+	if !s.creddAvailable.Load() {
+		s.writeError(w, http.StatusServiceUnavailable, "Credential service (credd) is not available")
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -154,6 +160,12 @@ func (s *Server) handleServiceCredentialItem(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Check if credd is available
+	if !s.creddAvailable.Load() {
+		s.writeError(w, http.StatusServiceUnavailable, "Credential service (credd) is not available")
 		return
 	}
 
