@@ -5,6 +5,7 @@
 //   - Verbosity levels (Error, Warn, Info, Debug)
 //   - Configuration from HTCondor config files
 //   - Support for both structured and printf-style logging
+//   - Log rotation based on HTCondor daemon log rotation logic
 package logging
 
 import (
@@ -12,7 +13,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bbockelm/golang-htcondor/config"
 )
@@ -53,13 +56,35 @@ type Config struct {
 	// DestinationLevels specifies verbosity level for each destination
 	// If a destination is not in the map, it defaults to VerbosityWarn
 	DestinationLevels map[Destination]Verbosity
+	// MaxLogSize is the maximum size of the log file in bytes before rotation
+	// Default: 10 MB (10485760 bytes). Set to 0 to disable rotation.
+	MaxLogSize int64
+	// MaxNumLogs is the number of rotated log files to keep
+	// Old logs are named: <logfile>.old, <logfile>.old.1, <logfile>.old.2, etc.
+	// Default: 1
+	MaxNumLogs int
+	// TruncateOnOpen determines if the log file should be truncated on open
+	// If true, the log file is truncated (cleared) when the logger is created
+	// If false (default), logs are appended to the existing file
+	TruncateOnOpen bool
 }
 
 // Logger wraps slog.Logger with destination and verbosity filtering
 type Logger struct {
-	config *Config
-	logger *slog.Logger
+	config      *Config
+	logger      *slog.Logger
+	logFile     *os.File   // Current log file (nil for stdout/stderr)
+	logMutex    sync.Mutex // Protects log file operations
+	currentSize int64      // Current size of log file
 }
+
+// Default configuration values
+const (
+	// DefaultMaxLogSize is the default maximum log file size (10 MB)
+	DefaultMaxLogSize = 10 * 1024 * 1024 // 10 MB
+	// DefaultMaxNumLogs is the default number of rotated logs to keep
+	DefaultMaxNumLogs = 1
+)
 
 // New creates a new Logger with the given configuration
 func New(config *Config) (*Logger, error) {
@@ -67,23 +92,55 @@ func New(config *Config) (*Logger, error) {
 		config = &Config{
 			OutputPath:        "stderr",
 			DestinationLevels: nil, // Will default to VerbosityWarn for all
+			MaxLogSize:        DefaultMaxLogSize,
+			MaxNumLogs:        DefaultMaxNumLogs,
+			TruncateOnOpen:    false,
 		}
+	}
+
+	// Set defaults for rotation parameters if not specified
+	if config.MaxLogSize == 0 {
+		config.MaxLogSize = DefaultMaxLogSize
+	}
+	if config.MaxNumLogs == 0 {
+		config.MaxNumLogs = DefaultMaxNumLogs
 	}
 
 	// Determine output writer
 	var writer io.Writer
+	var logFile *os.File
+	var currentSize int64
+
 	switch config.OutputPath {
 	case "stdout", "":
 		writer = os.Stdout
 	case "stderr":
 		writer = os.Stderr
 	default:
-		// File path
-		f, err := os.OpenFile(config.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		// File path - handle truncation and get current size
+		flags := os.O_CREATE | os.O_WRONLY
+		if config.TruncateOnOpen {
+			flags |= os.O_TRUNC
+		} else {
+			flags |= os.O_APPEND
+		}
+
+		f, err := os.OpenFile(config.OutputPath, flags, 0600)
 		if err != nil {
 			return nil, err
 		}
+		logFile = f
 		writer = f
+
+		// Get current file size for rotation tracking
+		if !config.TruncateOnOpen {
+			stat, err := f.Stat()
+			if err != nil {
+				f.Close()
+				return nil, err
+			}
+			currentSize = stat.Size()
+		}
 	}
 
 	// Find the most verbose level across all destinations to set slog level
@@ -119,8 +176,10 @@ func New(config *Config) (*Logger, error) {
 	logger := slog.New(handler)
 
 	return &Logger{
-		config: config,
-		logger: logger,
+		config:      config,
+		logger:      logger,
+		logFile:     logFile,
+		currentSize: currentSize,
 	}, nil
 }
 
@@ -182,6 +241,9 @@ func parseDestination(dest string) (Destination, bool) {
 //     Example: "cedar:debug, http:info" or "cedar:2 http:1"
 //     Levels: error, warn, info, debug (or integers: 0=off, 1=info, 2=debug)
 //     Default level for all destinations is warn if not specified.
+//   - MAX_<DAEMON>_LOG: Maximum log file size in bytes before rotation. Default: 10 MB
+//   - MAX_NUM_<DAEMON>_LOG: Number of rotated logs to keep. Default: 1
+//   - TRUNC_<DAEMON>_LOG_ON_OPEN: If true, truncate log on startup. Default: false
 //
 // Example configuration:
 //
@@ -189,6 +251,9 @@ func parseDestination(dest string) (Destination, bool) {
 //	HTTP_API_DEBUG = cedar:debug, http:info, schedd:warn
 //	# or using integers:
 //	HTTP_API_DEBUG = cedar:2 http:1
+//	MAX_HTTP_API_LOG = 5242880
+//	MAX_NUM_HTTP_API_LOG = 3
+//	TRUNC_HTTP_API_LOG_ON_OPEN = false
 func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error) {
 	if cfg == nil {
 		return New(nil)
@@ -238,9 +303,35 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 		}
 	}
 
+	// Parse rotation parameters
+	maxLogSize := int64(DefaultMaxLogSize)
+	maxLogParam := "MAX_" + strings.ToUpper(daemonName) + "_LOG"
+	if maxLogStr, ok := cfg.Get(maxLogParam); ok && maxLogStr != "" {
+		if size, err := strconv.ParseInt(maxLogStr, 10, 64); err == nil && size > 0 {
+			maxLogSize = size
+		}
+	}
+
+	maxNumLogs := DefaultMaxNumLogs
+	maxNumParam := "MAX_NUM_" + strings.ToUpper(daemonName) + "_LOG"
+	if maxNumStr, ok := cfg.Get(maxNumParam); ok && maxNumStr != "" {
+		if num, err := strconv.Atoi(maxNumStr); err == nil && num > 0 {
+			maxNumLogs = num
+		}
+	}
+
+	truncateOnOpen := false
+	truncParam := "TRUNC_" + strings.ToUpper(daemonName) + "_LOG_ON_OPEN"
+	if truncStr, ok := cfg.Get(truncParam); ok && truncStr != "" {
+		truncateOnOpen = strings.ToLower(truncStr) == "true"
+	}
+
 	return New(&Config{
 		OutputPath:        outputPath,
 		DestinationLevels: destinationLevels,
+		MaxLogSize:        maxLogSize,
+		MaxNumLogs:        maxNumLogs,
+		TruncateOnOpen:    truncateOnOpen,
 	})
 }
 
@@ -300,12 +391,132 @@ func destinationString(dest Destination) string {
 	}
 }
 
+// rotateLogIfNeeded checks if log rotation is needed and performs it if necessary.
+// This should be called before writing log messages.
+// Returns error if rotation fails.
+func (l *Logger) rotateLogIfNeeded(estimatedMsgSize int64) error {
+	// Only rotate if we have a log file (not stdout/stderr)
+	if l.logFile == nil {
+		return nil
+	}
+
+	l.logMutex.Lock()
+	defer l.logMutex.Unlock()
+
+	// Check if we would exceed the max log size
+	if l.currentSize+estimatedMsgSize <= l.config.MaxLogSize {
+		return nil
+	}
+
+	// Perform rotation
+	logPath := l.config.OutputPath
+
+	// Close current log file
+	if err := l.logFile.Close(); err != nil {
+		return fmt.Errorf("failed to close log file: %w", err)
+	}
+
+	// Rotate existing log files
+	// Delete oldest log if we're at the limit
+	oldestLog := fmt.Sprintf("%s.old.%d", logPath, l.config.MaxNumLogs-1)
+	if _, err := os.Stat(oldestLog); err == nil {
+		if err := os.Remove(oldestLog); err != nil {
+			return fmt.Errorf("failed to remove oldest log: %w", err)
+		}
+	}
+
+	// Shift existing rotated logs (rename .old.N-1 to .old.N)
+	for i := l.config.MaxNumLogs - 1; i > 0; i-- {
+		oldName := fmt.Sprintf("%s.old.%d", logPath, i-1)
+		newName := fmt.Sprintf("%s.old.%d", logPath, i)
+
+		// Skip if source doesn't exist
+		if _, err := os.Stat(oldName); os.IsNotExist(err) {
+			continue
+		}
+
+		if err := os.Rename(oldName, newName); err != nil {
+			return fmt.Errorf("failed to rotate log %s to %s: %w", oldName, newName, err)
+		}
+	}
+
+	// Rename current log to .old
+	oldLog := logPath + ".old"
+	if err := os.Rename(logPath, oldLog); err != nil {
+		return fmt.Errorf("failed to rename current log to .old: %w", err)
+	}
+
+	// Create new log file
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create new log file: %w", err)
+	}
+
+	// Update logger with new file
+	l.logFile = f
+	l.currentSize = 0
+
+	// Create new handler and logger with the new file
+	var slogLevel slog.Level
+	minVerbosity := VerbosityWarn
+	for _, level := range l.config.DestinationLevels {
+		if level > minVerbosity {
+			minVerbosity = level
+		}
+	}
+	switch minVerbosity {
+	case VerbosityError:
+		slogLevel = slog.LevelError
+	case VerbosityWarn:
+		slogLevel = slog.LevelWarn
+	case VerbosityInfo:
+		slogLevel = slog.LevelInfo
+	case VerbosityDebug:
+		slogLevel = slog.LevelDebug
+	default:
+		slogLevel = slog.LevelWarn
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: slogLevel,
+	}
+	handler := slog.NewTextHandler(f, opts)
+	l.logger = slog.New(handler)
+
+	return nil
+}
+
+// updateSize updates the current log file size after a write.
+// This is an approximation based on the message length.
+func (l *Logger) updateSize(msgSize int64) {
+	if l.logFile == nil {
+		return
+	}
+
+	l.logMutex.Lock()
+	defer l.logMutex.Unlock()
+	l.currentSize += msgSize
+}
+
 // Error logs an error message
 func (l *Logger) Error(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
+	// Estimate message size (rough approximation)
+	estimatedSize := int64(len(msg) + 100) // Base message + overhead
+	for _, arg := range args {
+		estimatedSize += int64(len(fmt.Sprint(arg)))
+	}
+
+	// Check and perform rotation if needed
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		// If rotation fails, still try to log (but don't panic)
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
 	l.logger.Error(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	l.updateSize(estimatedSize)
 }
 
 // Warn logs a warning message
@@ -313,7 +524,17 @@ func (l *Logger) Warn(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
+	estimatedSize := int64(len(msg) + 100)
+	for _, arg := range args {
+		estimatedSize += int64(len(fmt.Sprint(arg)))
+	}
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
 	l.logger.Warn(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	l.updateSize(estimatedSize)
 }
 
 // Info logs an info message
@@ -321,7 +542,17 @@ func (l *Logger) Info(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
+	estimatedSize := int64(len(msg) + 100)
+	for _, arg := range args {
+		estimatedSize += int64(len(fmt.Sprint(arg)))
+	}
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
 	l.logger.Info(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	l.updateSize(estimatedSize)
 }
 
 // Debug logs a debug message
@@ -329,7 +560,17 @@ func (l *Logger) Debug(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
+	estimatedSize := int64(len(msg) + 100)
+	for _, arg := range args {
+		estimatedSize += int64(len(fmt.Sprint(arg)))
+	}
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
 	l.logger.Debug(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	l.updateSize(estimatedSize)
 }
 
 // Errorf logs an error message with Printf-style formatting
@@ -337,7 +578,15 @@ func (l *Logger) Errorf(dest Destination, format string, args ...any) {
 	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
-	l.logger.Error(formatMessage(format, args...), "destination", destinationString(dest))
+	msg := formatMessage(format, args...)
+	estimatedSize := int64(len(msg) + 100)
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
+	l.logger.Error(msg, "destination", destinationString(dest))
+	l.updateSize(estimatedSize)
 }
 
 // Warnf logs a warning message with Printf-style formatting
@@ -345,7 +594,15 @@ func (l *Logger) Warnf(dest Destination, format string, args ...any) {
 	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
-	l.logger.Warn(formatMessage(format, args...), "destination", destinationString(dest))
+	msg := formatMessage(format, args...)
+	estimatedSize := int64(len(msg) + 100)
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
+	l.logger.Warn(msg, "destination", destinationString(dest))
+	l.updateSize(estimatedSize)
 }
 
 // Infof logs an info message with Printf-style formatting
@@ -353,7 +610,15 @@ func (l *Logger) Infof(dest Destination, format string, args ...any) {
 	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
-	l.logger.Info(formatMessage(format, args...), "destination", destinationString(dest))
+	msg := formatMessage(format, args...)
+	estimatedSize := int64(len(msg) + 100)
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
+	l.logger.Info(msg, "destination", destinationString(dest))
+	l.updateSize(estimatedSize)
 }
 
 // Debugf logs a debug message with Printf-style formatting
@@ -361,7 +626,15 @@ func (l *Logger) Debugf(dest Destination, format string, args ...any) {
 	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
-	l.logger.Debug(formatMessage(format, args...), "destination", destinationString(dest))
+	msg := formatMessage(format, args...)
+	estimatedSize := int64(len(msg) + 100)
+
+	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
+	l.logger.Debug(msg, "destination", destinationString(dest))
+	l.updateSize(estimatedSize)
 }
 
 // formatMessage is a helper to format Printf-style messages
