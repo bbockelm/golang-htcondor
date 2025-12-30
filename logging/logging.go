@@ -15,7 +15,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/bbockelm/golang-htcondor/config"
 )
@@ -67,15 +69,21 @@ type Config struct {
 	// If true, the log file is truncated (cleared) when the logger is created
 	// If false (default), logs are appended to the existing file
 	TruncateOnOpen bool
+	// TouchLogInterval is the time interval between log file touches (in seconds)
+	// This updates the modification time and allows detection of external rotation.
+	// Default: 60 seconds. Set to 0 to disable.
+	TouchLogInterval int
 }
 
 // Logger wraps slog.Logger with destination and verbosity filtering
 type Logger struct {
-	config      *Config
-	logger      *slog.Logger
-	logFile     *os.File   // Current log file (nil for stdout/stderr)
-	logMutex    sync.Mutex // Protects log file operations
-	currentSize int64      // Current size of log file
+	config       *Config
+	logger       atomic.Pointer[slog.Logger] // Atomic pointer to allow handler updates
+	logFile      atomic.Pointer[os.File]     // Atomic pointer to current log file (nil for stdout/stderr)
+	currentSize  atomic.Int64                // Current size of log file
+	rotating     atomic.Int32                // Flag to indicate rotation in progress (0 or 1)
+	stopMaint    chan struct{}               // Channel to stop maintenance goroutine
+	maintRunning atomic.Bool                 // Indicates if maintenance is running
 }
 
 // Default configuration values
@@ -84,6 +92,8 @@ const (
 	DefaultMaxLogSize = 10 * 1024 * 1024 // 10 MB
 	// DefaultMaxNumLogs is the default number of rotated logs to keep
 	DefaultMaxNumLogs = 1
+	// DefaultTouchLogInterval is the default interval for touching log files (60 seconds)
+	DefaultTouchLogInterval = 60
 )
 
 // New creates a new Logger with the given configuration
@@ -95,6 +105,7 @@ func New(config *Config) (*Logger, error) {
 			MaxLogSize:        DefaultMaxLogSize,
 			MaxNumLogs:        DefaultMaxNumLogs,
 			TruncateOnOpen:    false,
+			TouchLogInterval:  DefaultTouchLogInterval,
 		}
 	}
 
@@ -104,6 +115,9 @@ func New(config *Config) (*Logger, error) {
 	}
 	if config.MaxNumLogs == 0 {
 		config.MaxNumLogs = DefaultMaxNumLogs
+	}
+	if config.TouchLogInterval == 0 {
+		config.TouchLogInterval = DefaultTouchLogInterval
 	}
 
 	// Determine output writer
@@ -175,12 +189,15 @@ func New(config *Config) (*Logger, error) {
 	handler := slog.NewTextHandler(writer, opts)
 	logger := slog.New(handler)
 
-	return &Logger{
-		config:      config,
-		logger:      logger,
-		logFile:     logFile,
-		currentSize: currentSize,
-	}, nil
+	l := &Logger{
+		config:    config,
+		stopMaint: make(chan struct{}),
+	}
+	l.logger.Store(logger)
+	l.logFile.Store(logFile)
+	l.currentSize.Store(currentSize)
+
+	return l, nil
 }
 
 // parseLevel converts a level string to a Verbosity level.
@@ -244,6 +261,7 @@ func parseDestination(dest string) (Destination, bool) {
 //   - MAX_<DAEMON>_LOG: Maximum log file size in bytes before rotation. Default: 10 MB
 //   - MAX_NUM_<DAEMON>_LOG: Number of rotated logs to keep. Default: 1
 //   - TRUNC_<DAEMON>_LOG_ON_OPEN: If true, truncate log on startup. Default: false
+//   - TOUCH_LOG_INTERVAL: Time interval in seconds between log file touches. Default: 60
 //
 // Example configuration:
 //
@@ -254,6 +272,7 @@ func parseDestination(dest string) (Destination, bool) {
 //	MAX_HTTP_API_LOG = 5242880
 //	MAX_NUM_HTTP_API_LOG = 3
 //	TRUNC_HTTP_API_LOG_ON_OPEN = false
+//	TOUCH_LOG_INTERVAL = 60
 func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error) {
 	if cfg == nil {
 		return New(nil)
@@ -326,12 +345,21 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 		truncateOnOpen = strings.ToLower(truncStr) == "true"
 	}
 
+	touchLogInterval := DefaultTouchLogInterval
+	touchParam := "TOUCH_LOG_INTERVAL"
+	if touchStr, ok := cfg.Get(touchParam); ok && touchStr != "" {
+		if interval, err := strconv.Atoi(touchStr); err == nil && interval > 0 {
+			touchLogInterval = interval
+		}
+	}
+
 	return New(&Config{
 		OutputPath:        outputPath,
 		DestinationLevels: destinationLevels,
 		MaxLogSize:        maxLogSize,
 		MaxNumLogs:        maxNumLogs,
 		TruncateOnOpen:    truncateOnOpen,
+		TouchLogInterval:  touchLogInterval,
 	})
 }
 
@@ -392,28 +420,38 @@ func destinationString(dest Destination) string {
 }
 
 // rotateLogIfNeeded checks if log rotation is needed and performs it if necessary.
-// This should be called before writing log messages.
-// Returns error if rotation fails.
-func (l *Logger) rotateLogIfNeeded(estimatedMsgSize int64) error {
+// Uses compare-and-swap to determine which goroutine performs the rotation.
+// It's OK to go one line over the limit.
+func (l *Logger) rotateLogIfNeeded() error {
 	// Only rotate if we have a log file (not stdout/stderr)
-	if l.logFile == nil {
+	logFile := l.logFile.Load()
+	if logFile == nil {
 		return nil
 	}
 
-	l.logMutex.Lock()
-	defer l.logMutex.Unlock()
-
-	// Check if we would exceed the max log size
-	if l.currentSize+estimatedMsgSize <= l.config.MaxLogSize {
+	// Check if we exceed the max log size
+	currentSize := l.currentSize.Load()
+	if currentSize <= l.config.MaxLogSize {
 		return nil
 	}
+
+	// Use compare-and-swap to determine if this goroutine should rotate
+	// If rotating flag is 0, set it to 1 and this goroutine wins
+	if !l.rotating.CompareAndSwap(0, 1) {
+		// Another goroutine is rotating, skip
+		return nil
+	}
+	defer l.rotating.Store(0)
 
 	// Perform rotation
 	logPath := l.config.OutputPath
 
 	// Close current log file
-	if err := l.logFile.Close(); err != nil {
-		return fmt.Errorf("failed to close log file: %w", err)
+	oldFile := l.logFile.Load()
+	if oldFile != nil {
+		if err := oldFile.Close(); err != nil {
+			return fmt.Errorf("failed to close log file: %w", err)
+		}
 	}
 
 	// Rotate existing log files
@@ -452,9 +490,9 @@ func (l *Logger) rotateLogIfNeeded(estimatedMsgSize int64) error {
 		return fmt.Errorf("failed to create new log file: %w", err)
 	}
 
-	// Update logger with new file
-	l.logFile = f
-	l.currentSize = 0
+	// Update file handle and reset size atomically
+	l.logFile.Store(f)
+	l.currentSize.Store(0)
 
 	// Create new handler and logger with the new file
 	var slogLevel slog.Level
@@ -481,21 +519,186 @@ func (l *Logger) rotateLogIfNeeded(estimatedMsgSize int64) error {
 		Level: slogLevel,
 	}
 	handler := slog.NewTextHandler(f, opts)
-	l.logger = slog.New(handler)
+	newLogger := slog.New(handler)
+	l.logger.Store(newLogger)
 
 	return nil
 }
 
-// updateSize updates the current log file size after a write.
-// This is an approximation based on the message length.
-func (l *Logger) updateSize(msgSize int64) {
-	if l.logFile == nil {
-		return
+// PerformMaintenance performs maintenance on the log file.
+// It checks if the log file has been externally rotated or deleted by comparing
+// the file handle's inode with the file path's inode. If different, it reopens the file.
+// This method is safe to call from multiple goroutines.
+func (l *Logger) PerformMaintenance() error {
+	logFile := l.logFile.Load()
+	if logFile == nil {
+		// No file to maintain (stdout/stderr)
+		return nil
 	}
 
-	l.logMutex.Lock()
-	defer l.logMutex.Unlock()
-	l.currentSize += msgSize
+	logPath := l.config.OutputPath
+
+	// fstat the current file handle
+	fileStat, err := logFile.Stat()
+	if err != nil {
+		// File handle is no longer valid, reopen
+		return l.reopenLogFile()
+	}
+
+	// stat the file path
+	pathStat, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File was deleted externally, reopen
+			return l.reopenLogFile()
+		}
+		return fmt.Errorf("failed to stat log path: %w", err)
+	}
+
+	// Compare inode and device ID
+	fileSys := fileStat.Sys().(*syscall.Stat_t)
+	pathSys := pathStat.Sys().(*syscall.Stat_t)
+
+	if fileSys.Ino != pathSys.Ino || fileSys.Dev != pathSys.Dev {
+		// File was rotated externally, reopen
+		return l.reopenLogFile()
+	}
+
+	// Touch the log file by updating its access and modification times
+	now := time.Now()
+	if err := os.Chtimes(logPath, now, now); err != nil {
+		return fmt.Errorf("failed to touch log file: %w", err)
+	}
+
+	return nil
+}
+
+// reopenLogFile reopens the log file after external rotation or deletion.
+func (l *Logger) reopenLogFile() error {
+	logPath := l.config.OutputPath
+
+	// Open new file
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to reopen log file: %w", err)
+	}
+
+	// Get current file size
+	stat, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("failed to stat reopened log file: %w", err)
+	}
+
+	// Swap file handle using compare-and-swap
+	oldFile := l.logFile.Swap(f)
+	if oldFile != nil {
+		oldFile.Close()
+	}
+
+	// Reset size to current file size
+	l.currentSize.Store(stat.Size())
+
+	// Create new handler and logger with the new file
+	var slogLevel slog.Level
+	minVerbosity := VerbosityWarn
+	for _, level := range l.config.DestinationLevels {
+		if level > minVerbosity {
+			minVerbosity = level
+		}
+	}
+	switch minVerbosity {
+	case VerbosityError:
+		slogLevel = slog.LevelError
+	case VerbosityWarn:
+		slogLevel = slog.LevelWarn
+	case VerbosityInfo:
+		slogLevel = slog.LevelInfo
+	case VerbosityDebug:
+		slogLevel = slog.LevelDebug
+	default:
+		slogLevel = slog.LevelWarn
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: slogLevel,
+	}
+	handler := slog.NewTextHandler(f, opts)
+	newLogger := slog.New(handler)
+	l.logger.Store(newLogger)
+
+	return nil
+}
+
+// StartMaintenance starts a goroutine that periodically performs maintenance
+// on the log file at the configured TouchLogInterval.
+// Returns an error if maintenance is already running.
+func (l *Logger) StartMaintenance() error {
+	if l.maintRunning.Load() {
+		return fmt.Errorf("maintenance already running")
+	}
+
+	if l.config.TouchLogInterval <= 0 {
+		return fmt.Errorf("TouchLogInterval must be positive")
+	}
+
+	l.maintRunning.Store(true)
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(l.config.TouchLogInterval) * time.Second)
+		defer ticker.Stop()
+		defer l.maintRunning.Store(false)
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := l.PerformMaintenance(); err != nil {
+					fmt.Fprintf(os.Stderr, "Log maintenance failed: %v\n", err)
+				}
+			case <-l.stopMaint:
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+// StopMaintenance stops the maintenance goroutine if it's running.
+func (l *Logger) StopMaintenance() {
+	if l.maintRunning.Load() {
+		close(l.stopMaint)
+		// Wait a bit for goroutine to finish
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// writeLog writes a log message and updates the size counter.
+// It's OK to go one line over the limit - rotation happens before the next write.
+func (l *Logger) writeLog(logFunc func()) {
+	// Check and perform rotation if needed (before write)
+	if err := l.rotateLogIfNeeded(); err != nil {
+		// If rotation fails, still try to log (but don't panic)
+		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
+	}
+
+	// Get current size before write
+	sizeBefore := l.currentSize.Load()
+
+	// Perform the log write
+	logFunc()
+
+	// Update size after write (get actual file size)
+	logFile := l.logFile.Load()
+	if logFile != nil {
+		if stat, err := logFile.Stat(); err == nil {
+			l.currentSize.Store(stat.Size())
+		} else {
+			// If we can't stat, just add estimated size
+			sizeAfter := sizeBefore + 100 // Rough estimate per line
+			l.currentSize.Store(sizeAfter)
+		}
+	}
 }
 
 // Error logs an error message
@@ -503,20 +706,10 @@ func (l *Logger) Error(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
-	// Estimate message size (rough approximation)
-	estimatedSize := int64(len(msg) + 100) // Base message + overhead
-	for _, arg := range args {
-		estimatedSize += int64(len(fmt.Sprint(arg)))
-	}
-
-	// Check and perform rotation if needed
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		// If rotation fails, still try to log (but don't panic)
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Error(msg, append([]any{"destination", destinationString(dest)}, args...)...)
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Error(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	})
 }
 
 // Warn logs a warning message
@@ -524,17 +717,10 @@ func (l *Logger) Warn(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
-	estimatedSize := int64(len(msg) + 100)
-	for _, arg := range args {
-		estimatedSize += int64(len(fmt.Sprint(arg)))
-	}
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Warn(msg, append([]any{"destination", destinationString(dest)}, args...)...)
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Warn(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	})
 }
 
 // Info logs an info message
@@ -542,17 +728,10 @@ func (l *Logger) Info(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
-	estimatedSize := int64(len(msg) + 100)
-	for _, arg := range args {
-		estimatedSize += int64(len(fmt.Sprint(arg)))
-	}
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Info(msg, append([]any{"destination", destinationString(dest)}, args...)...)
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Info(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	})
 }
 
 // Debug logs a debug message
@@ -560,17 +739,10 @@ func (l *Logger) Debug(dest Destination, msg string, args ...any) {
 	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
-	estimatedSize := int64(len(msg) + 100)
-	for _, arg := range args {
-		estimatedSize += int64(len(fmt.Sprint(arg)))
-	}
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Debug(msg, append([]any{"destination", destinationString(dest)}, args...)...)
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Debug(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+	})
 }
 
 // Errorf logs an error message with Printf-style formatting
@@ -579,14 +751,10 @@ func (l *Logger) Errorf(dest Destination, format string, args ...any) {
 		return
 	}
 	msg := formatMessage(format, args...)
-	estimatedSize := int64(len(msg) + 100)
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Error(msg, "destination", destinationString(dest))
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Error(msg, "destination", destinationString(dest))
+	})
 }
 
 // Warnf logs a warning message with Printf-style formatting
@@ -595,14 +763,10 @@ func (l *Logger) Warnf(dest Destination, format string, args ...any) {
 		return
 	}
 	msg := formatMessage(format, args...)
-	estimatedSize := int64(len(msg) + 100)
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Warn(msg, "destination", destinationString(dest))
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Warn(msg, "destination", destinationString(dest))
+	})
 }
 
 // Infof logs an info message with Printf-style formatting
@@ -611,14 +775,10 @@ func (l *Logger) Infof(dest Destination, format string, args ...any) {
 		return
 	}
 	msg := formatMessage(format, args...)
-	estimatedSize := int64(len(msg) + 100)
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Info(msg, "destination", destinationString(dest))
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Info(msg, "destination", destinationString(dest))
+	})
 }
 
 // Debugf logs a debug message with Printf-style formatting
@@ -627,14 +787,10 @@ func (l *Logger) Debugf(dest Destination, format string, args ...any) {
 		return
 	}
 	msg := formatMessage(format, args...)
-	estimatedSize := int64(len(msg) + 100)
-
-	if err := l.rotateLogIfNeeded(estimatedSize); err != nil {
-		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
-	}
-
-	l.logger.Debug(msg, "destination", destinationString(dest))
-	l.updateSize(estimatedSize)
+	logger := l.logger.Load()
+	l.writeLog(func() {
+		logger.Debug(msg, "destination", destinationString(dest))
+	})
 }
 
 // formatMessage is a helper to format Printf-style messages
