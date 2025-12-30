@@ -630,3 +630,196 @@ func TestLogRotation_FileNaming(t *testing.T) {
 		}
 	}
 }
+
+func TestPerformMaintenance_ExternalRotation(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 1000000,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write a message
+	logger.Info(DestinationGeneral, "Test message before rotation")
+
+	// Simulate external rotation by moving the log file
+	if err := os.Rename(logPath, logPath+".rotated"); err != nil {
+		t.Fatalf("Failed to simulate external rotation: %v", err)
+	}
+
+	// Perform maintenance - should detect the rotation and reopen
+	if err := logger.PerformMaintenance(); err != nil {
+		t.Fatalf("PerformMaintenance failed: %v", err)
+	}
+
+	// Write another message - should work with the new file
+	logger.Info(DestinationGeneral, "Test message after rotation")
+
+	// Verify the new file exists
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("Expected log file to be recreated after external rotation")
+	}
+
+	// Verify the rotated file still exists
+	if _, err := os.Stat(logPath + ".rotated"); os.IsNotExist(err) {
+		t.Error("Expected rotated file to still exist")
+	}
+}
+
+func TestPerformMaintenance_ExternalDeletion(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 1000000,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write a message
+	logger.Info(DestinationGeneral, "Test message before deletion")
+
+	// Simulate external deletion
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("Failed to simulate external deletion: %v", err)
+	}
+
+	// Perform maintenance - should detect the deletion and reopen
+	if err := logger.PerformMaintenance(); err != nil {
+		t.Fatalf("PerformMaintenance failed: %v", err)
+	}
+
+	// Write another message - should work with the new file
+	logger.Info(DestinationGeneral, "Test message after deletion")
+
+	// Verify the new file exists
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("Expected log file to be recreated after external deletion")
+	}
+}
+
+func TestStartMaintenance(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger with short touch interval for testing
+	logger, err := New(&Config{
+		OutputPath:       logPath,
+		TouchLogInterval: 1, // 1 second
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Start maintenance
+	if err := logger.StartMaintenance(); err != nil {
+		t.Fatalf("StartMaintenance failed: %v", err)
+	}
+
+	// Verify maintenance is running
+	if !logger.maintRunning.Load() {
+		t.Error("Expected maintenance to be running")
+	}
+
+	// Write a message
+	logger.Info(DestinationGeneral, "Test message")
+
+	// Stop maintenance
+	logger.StopMaintenance()
+
+	// Verify maintenance stopped
+	if logger.maintRunning.Load() {
+		t.Error("Expected maintenance to be stopped")
+	}
+}
+
+func TestFromConfigWithDaemon_TouchLogInterval(t *testing.T) {
+	tests := []struct {
+		name             string
+		configText       string
+		daemonName       string
+		expectedInterval int
+	}{
+		{
+			name:       "Custom touch interval",
+			daemonName: "HTTP_API",
+			configText: `
+HTTP_API_LOG = /tmp/http_api.log
+TOUCH_LOG_INTERVAL = 120
+`,
+			expectedInterval: 120,
+		},
+		{
+			name:       "Default touch interval",
+			daemonName: "SCHEDD",
+			configText: `
+SCHEDD_LOG = /tmp/schedd.log
+`,
+			expectedInterval: DefaultTouchLogInterval,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.NewFromReader(strings.NewReader(tt.configText))
+			if err != nil {
+				t.Fatalf("Failed to create config: %v", err)
+			}
+
+			logger, err := FromConfigWithDaemon(tt.daemonName, cfg)
+			if err != nil {
+				t.Fatalf("FromConfigWithDaemon() error = %v", err)
+			}
+
+			if logger.config.TouchLogInterval != tt.expectedInterval {
+				t.Errorf("TouchLogInterval = %v, expected %v", logger.config.TouchLogInterval, tt.expectedInterval)
+			}
+		})
+	}
+}
+
+func TestAtomicRotation(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger with small max size
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 200,
+		MaxNumLogs: 2,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write enough messages to trigger rotation
+	// The atomic logic should ensure only one goroutine rotates
+	for i := 0; i < 10; i++ {
+		logger.Info(DestinationGeneral, "Test message that may trigger rotation", "iteration", i)
+	}
+
+	// Verify rotation happened
+	if _, err := os.Stat(logPath + ".old"); os.IsNotExist(err) {
+		t.Error("Expected .old log file to exist after rotation")
+	}
+}
