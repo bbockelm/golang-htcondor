@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -22,54 +19,17 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
-	"golang.org/x/time/rate"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	httpServer          *http.Server
-	listener            net.Listener // Explicit listener to get actual address
-	schedd              *htcondor.Schedd
-	scheddMu            sync.RWMutex // Protects schedd instance for thread-safe updates
-	scheddName          string       // Schedd name for discovery
-	scheddDiscovered    bool         // Whether schedd address was discovered from collector
-	collector           *htcondor.Collector
-	credd               htcondor.CreddClient
-	creddAvailable      atomic.Bool // Whether credd is available (nil credd = not available)
-	creddDiscovered     bool        // Whether credd address was discovered (and needs periodic updates)
-	userHeader          string
-	signingKeyPath      string
-	trustDomain         string
-	uidDomain           string
-	httpBaseURL         string // Base URL for HTTP API (for generating MCP file download links)
-	tlsCACertFile       string
-	logger              *logging.Logger
-	metricsRegistry     *metricsd.Registry
-	prometheusExporter  *metricsd.PrometheusExporter
-	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
-	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
-	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
-	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
-	oauth2UserInfoURL   string            // User info endpoint for SSO
-	oauth2UsernameClaim string            // Claim name for username (default: "sub")
-	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
-	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup        string            // Group required for read access (empty = all users have read)
-	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
-	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
-	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
-	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
-	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
-	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
-	pingStopCh          chan struct{}     // Channel to signal ping goroutine to stop
-	token               string            // Token for daemon authentication
+	*Handler                        // Embedded handler for business logic
+	httpServer *http.Server         // HTTP server instance
+	listener   net.Listener         // Explicit listener to get actual address
+	logger     *logging.Logger      // Logger instance (duplicated for convenience)
 }
 
 // Config holds server configuration
@@ -121,290 +81,7 @@ type Config struct {
 
 // NewServer creates a new HTTP API server
 //
-//nolint:gocyclo // Initialization logic with sequential checks is acceptable
 func NewServer(cfg Config) (*Server, error) {
-	// Initialize logger if not provided
-	logger := cfg.Logger
-	if logger == nil {
-		var err error
-		logger, err = logging.New(&logging.Config{
-			OutputPath: "stderr",
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create logger: %w", err)
-		}
-	}
-
-	// Discover schedd address if not provided
-	scheddAddr := cfg.ScheddAddr
-	scheddDiscovered := false
-	if scheddAddr == "" {
-		if cfg.Collector == nil {
-			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
-		}
-
-		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
-		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover schedd: %w", err)
-		}
-		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
-		scheddDiscovered = true
-	}
-
-	// Create schedd with the address as-is (can be host:port or sinful string)
-	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
-
-	// Set session TTL
-	sessionTTL := cfg.SessionTTL
-	if sessionTTL == 0 {
-		sessionTTL = 24 * time.Hour // Default: 24 hours
-	}
-
-	// Set streaming defaults
-	streamBufferSize := cfg.StreamBufferSize
-	if streamBufferSize == 0 {
-		streamBufferSize = 100
-	}
-	streamWriteTimeout := cfg.StreamWriteTimeout
-	if streamWriteTimeout == 0 {
-		streamWriteTimeout = 5 * time.Second
-	}
-
-	s := &Server{
-		schedd:             schedd,
-		scheddName:         cfg.ScheddName,
-		scheddDiscovered:   scheddDiscovered,
-		collector:          cfg.Collector,
-		credd:              cfg.Credd,
-		trustDomain:        cfg.TrustDomain,
-		uidDomain:          cfg.UIDDomain,
-		httpBaseURL:        cfg.HTTPBaseURL,
-		userHeader:         cfg.UserHeader,
-		signingKeyPath:     cfg.SigningKeyPath,
-		tlsCACertFile:      cfg.TLSCACertFile,
-		logger:             logger,
-		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
-		streamBufferSize:   streamBufferSize,
-		streamWriteTimeout: streamWriteTimeout,
-		stopChan:           make(chan struct{}),
-		token:              cfg.Token,
-	}
-
-	// Discover credd if not provided
-	if s.credd == nil {
-		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
-		creddAddr, err := discoverCredd(cfg.ScheddName, scheddAddr, cfg.Collector, logger)
-		if err != nil {
-			logger.Warn(logging.DestinationHTTP, "Failed to discover credd, credential endpoints will be disabled", "error", err)
-			s.creddAvailable.Store(false)
-			s.creddDiscovered = true // Mark for periodic discovery attempts
-		} else {
-			logger.Info(logging.DestinationHTTP, "Discovered credd", "address", creddAddr)
-			s.credd = htcondor.NewCedarCredd(creddAddr)
-			s.creddAvailable.Store(true)
-			s.creddDiscovered = true // Mark for periodic updates
-		}
-	} else {
-		s.creddAvailable.Store(true)
-		s.creddDiscovered = false // Explicitly provided, no need for updates
-	}
-
-	// Setup OAuth2 provider if MCP is enabled
-	if cfg.EnableMCP {
-		oauth2DBPath := cfg.OAuth2DBPath
-		if oauth2DBPath == "" {
-			oauth2DBPath = getDefaultDBPath(cfg.HTCondorConfig, "oauth2.db")
-		}
-
-		oauth2Issuer := cfg.OAuth2Issuer
-		if oauth2Issuer == "" {
-			oauth2Issuer = "http://" + cfg.ListenAddr
-		}
-
-		oauth2Provider, err := NewOAuth2Provider(oauth2DBPath, oauth2Issuer)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)
-		}
-		s.oauth2Provider = oauth2Provider
-		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
-
-		// Set username claim name (default: "sub")
-		s.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
-		if s.oauth2UsernameClaim == "" {
-			s.oauth2UsernameClaim = "sub"
-		}
-
-		// Initialize OAuth2 state store
-		s.oauth2StateStore = NewOAuth2StateStore()
-
-		// Setup OAuth2 client config for SSO if configured
-		if cfg.OAuth2ClientID != "" && cfg.OAuth2AuthURL != "" && cfg.OAuth2TokenURL != "" {
-			// Set default scopes if not provided
-			scopes := cfg.OAuth2Scopes
-			if len(scopes) == 0 {
-				scopes = []string{"openid", "profile", "email"}
-			}
-
-			s.oauth2Config = &oauth2.Config{
-				ClientID:     cfg.OAuth2ClientID,
-				ClientSecret: cfg.OAuth2ClientSecret,
-				RedirectURL:  cfg.OAuth2RedirectURL,
-				Endpoint: oauth2.Endpoint{
-					AuthURL:  cfg.OAuth2AuthURL,
-					TokenURL: cfg.OAuth2TokenURL,
-				},
-				Scopes: scopes,
-			}
-			s.oauth2UserInfoURL = cfg.OAuth2UserInfoURL
-			logger.Info(logging.DestinationHTTP, "OAuth2 SSO client configured", "auth_url", cfg.OAuth2AuthURL, "scopes", scopes)
-
-			// If we are also the provider (EnableMCP), ensure the client exists
-			if cfg.EnableMCP {
-				// Check if client exists
-				_, err := s.oauth2Provider.GetStorage().GetClient(context.Background(), cfg.OAuth2ClientID)
-				if err != nil {
-					// Assume it doesn't exist or error, try to create it
-					// Hash the secret
-					hashedSecret, err := bcrypt.GenerateFromPassword([]byte(cfg.OAuth2ClientSecret), bcrypt.DefaultCost)
-					if err != nil {
-						logger.Error(logging.DestinationHTTP, "Failed to hash OAuth2 client secret", "error", err)
-					} else {
-						client := &fosite.DefaultClient{
-							ID:            cfg.OAuth2ClientID,
-							Secret:        hashedSecret,
-							RedirectURIs:  []string{cfg.OAuth2RedirectURL},
-							ResponseTypes: []string{"code"},
-							GrantTypes:    []string{"authorization_code", "refresh_token"},
-							Scopes:        scopes,
-							Public:        false,
-						}
-						if err := s.oauth2Provider.GetStorage().CreateClient(context.Background(), client); err != nil {
-							logger.Error(logging.DestinationHTTP, "Failed to auto-register OAuth2 client", "error", err)
-						} else {
-							logger.Info(logging.DestinationHTTP, "Auto-registered OAuth2 client", "client_id", cfg.OAuth2ClientID)
-						}
-					}
-				}
-			}
-		}
-
-		// Set groups claim name (default: "groups")
-		s.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
-		if s.oauth2GroupsClaim == "" {
-			s.oauth2GroupsClaim = "groups"
-		}
-
-		// Set group-based access control
-		s.mcpAccessGroup = cfg.MCPAccessGroup
-		s.mcpReadGroup = cfg.MCPReadGroup
-		s.mcpWriteGroup = cfg.MCPWriteGroup
-
-		if s.mcpAccessGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_group", s.mcpAccessGroup)
-		}
-		if s.mcpReadGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP read access control enabled", "read_group", s.mcpReadGroup)
-		}
-		if s.mcpWriteGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", s.mcpWriteGroup)
-		}
-
-		// Initialize session store with shared database connection
-		sessionStore, err := NewSessionStore(s.oauth2Provider.GetStorage().GetDB(), sessionTTL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create session store: %w", err)
-		}
-		s.sessionStore = sessionStore
-		logger.Info(logging.DestinationHTTP, "Session store enabled with database persistence", "ttl", sessionTTL)
-	} else {
-		// OAuth2 not enabled, create standalone database for sessions
-		// Use a separate database file for sessions
-		sessionDBPath := cfg.OAuth2DBPath
-		if sessionDBPath == "" {
-			sessionDBPath = getDefaultDBPath(cfg.HTCondorConfig, "sessions.db")
-		} else {
-			// Use same path but different file name if OAuth2 DB is configured
-			sessionDBPath += ".sessions"
-		}
-
-		// Open database for sessions
-		sessionDB, err := sql.Open("sqlite", sessionDBPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open session database: %w", err)
-		}
-
-		sessionStore, err := NewSessionStore(sessionDB, sessionTTL)
-		if err != nil {
-			_ = sessionDB.Close()
-			return nil, fmt.Errorf("failed to create session store: %w", err)
-		}
-		s.sessionStore = sessionStore
-		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
-	}
-
-	// Setup IDP provider if enabled (can work independently of MCP)
-	if cfg.EnableIDP {
-		idpDBPath := cfg.IDPDBPath
-		if idpDBPath == "" {
-			idpDBPath = getDefaultDBPath(cfg.HTCondorConfig, "idp.db")
-		}
-
-		idpIssuer := cfg.IDPIssuer
-		if idpIssuer == "" {
-			idpIssuer = "http://" + cfg.ListenAddr
-		}
-
-		idpProvider, err := NewIDPProvider(idpDBPath, idpIssuer)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create IDP provider: %w", err)
-		}
-		s.idpProvider = idpProvider
-		s.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
-		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
-
-		// Ensure OAuth2 state store is initialized if we might use SSO (which IDP enables)
-		if s.oauth2StateStore == nil {
-			s.oauth2StateStore = NewOAuth2StateStore()
-		}
-	}
-
-	// Setup metrics if collector is provided
-	enableMetrics := cfg.EnableMetrics
-	if cfg.Collector != nil && !cfg.EnableMetrics {
-		enableMetrics = true // Enable by default if collector is provided
-	}
-
-	if enableMetrics && cfg.Collector != nil {
-		registry := metricsd.NewRegistry()
-
-		// Set cache TTL
-		cacheTTL := cfg.MetricsCacheTTL
-		if cacheTTL == 0 {
-			cacheTTL = 10 * time.Second
-		}
-		registry.SetCacheTTL(cacheTTL)
-
-		// Register collectors
-		poolCollector := metricsd.NewPoolCollector(cfg.Collector)
-		registry.Register(poolCollector)
-
-		processCollector := metricsd.NewProcessCollector()
-		registry.Register(processCollector)
-
-		s.metricsRegistry = registry
-		s.prometheusExporter = metricsd.NewPrometheusExporter(registry)
-
-		s.logger.Info(logging.DestinationMetrics, "Metrics endpoint enabled", "path", "/metrics")
-	}
-
-	mux := http.NewServeMux()
-	s.setupRoutes(mux)
-
-	// Wrap with access logging middleware
-	handler := s.accessLogMiddleware(mux)
-
 	// Set default timeouts if not specified
 	readTimeout := cfg.ReadTimeout
 	if readTimeout == 0 {
@@ -419,24 +96,71 @@ func NewServer(cfg Config) (*Server, error) {
 		idleTimeout = 120 * time.Second
 	}
 
-	s.httpServer = &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      handler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-		IdleTimeout:  idleTimeout,
+	// Convert Config to HandlerConfig
+	handlerCfg := HandlerConfig{
+		ScheddName:          cfg.ScheddName,
+		ScheddAddr:          cfg.ScheddAddr,
+		UserHeader:          cfg.UserHeader,
+		SigningKeyPath:      cfg.SigningKeyPath,
+		TrustDomain:         cfg.TrustDomain,
+		UIDDomain:           cfg.UIDDomain,
+		HTTPBaseURL:         cfg.HTTPBaseURL,
+		TLSCACertFile:       cfg.TLSCACertFile,
+		Collector:           cfg.Collector,
+		EnableMetrics:       cfg.EnableMetrics,
+		MetricsCacheTTL:     cfg.MetricsCacheTTL,
+		Logger:              cfg.Logger,
+		EnableMCP:           cfg.EnableMCP,
+		OAuth2DBPath:        cfg.OAuth2DBPath,
+		OAuth2Issuer:        cfg.OAuth2Issuer,
+		OAuth2ClientID:      cfg.OAuth2ClientID,
+		OAuth2ClientSecret:  cfg.OAuth2ClientSecret,
+		OAuth2AuthURL:       cfg.OAuth2AuthURL,
+		OAuth2TokenURL:      cfg.OAuth2TokenURL,
+		OAuth2RedirectURL:   cfg.OAuth2RedirectURL,
+		OAuth2UserInfoURL:   cfg.OAuth2UserInfoURL,
+		OAuth2Scopes:        cfg.OAuth2Scopes,
+		OAuth2UsernameClaim: cfg.OAuth2UsernameClaim,
+		OAuth2GroupsClaim:   cfg.OAuth2GroupsClaim,
+		MCPAccessGroup:      cfg.MCPAccessGroup,
+		MCPReadGroup:        cfg.MCPReadGroup,
+		MCPWriteGroup:       cfg.MCPWriteGroup,
+		EnableIDP:           cfg.EnableIDP,
+		IDPDBPath:           cfg.IDPDBPath,
+		IDPIssuer:           cfg.IDPIssuer,
+		SessionTTL:          cfg.SessionTTL,
+		HTCondorConfig:      cfg.HTCondorConfig,
+		PingInterval:        cfg.PingInterval,
+		StreamBufferSize:    cfg.StreamBufferSize,
+		StreamWriteTimeout:  cfg.StreamWriteTimeout,
+		Token:               cfg.Token,
+		Credd:               cfg.Credd,
 	}
 
-	// Setup periodic ping if configured
-	pingInterval := cfg.PingInterval
-	if pingInterval == 0 {
-		pingInterval = 1 * time.Minute // Default to 1 minute
+	// Create the handler
+	handler, err := NewHandler(handlerCfg)
+	if err != nil {
+		return nil, err
 	}
-	if pingInterval > 0 {
-		s.pingInterval = pingInterval
-		s.pingStopCh = make(chan struct{})
-		s.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
+
+	// Create HTTP server with the handler
+	s := &Server{
+		Handler: handler,
+		httpServer: &http.Server{
+			Addr:         cfg.ListenAddr,
+			Handler:      nil, // Will be set below after wrapping with middleware
+			ReadTimeout:  readTimeout,
+			WriteTimeout: writeTimeout,
+			IdleTimeout:  idleTimeout,
+		},
+		logger: handler.logger,
 	}
+
+	// Setup routes on the handler
+	s.Handler.SetupRoutes(s.setupRoutes)
+
+	// Wrap handler with access logging middleware
+	s.httpServer.Handler = s.accessLogMiddleware(s.Handler)
 
 	return s, nil
 }
@@ -801,18 +525,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.logger.Warn(logging.DestinationHTTP, "Shutdown timeout waiting for background goroutines")
 	}
 
-	// Close OAuth2 provider if enabled
-	if s.oauth2Provider != nil {
-		if err := s.oauth2Provider.Close(); err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to close OAuth2 provider", "error", err)
-		}
-	}
-
-	// Close IDP provider if enabled
-	if s.idpProvider != nil {
-		if err := s.idpProvider.Close(); err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to close IDP provider", "error", err)
-		}
+	// Stop handler (closes OAuth2 and IDP providers)
+	if err := s.Handler.Stop(ctx); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to stop handler", "error", err)
 	}
 
 	return s.httpServer.Shutdown(ctx)
