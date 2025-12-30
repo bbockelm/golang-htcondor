@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -337,5 +339,294 @@ func TestFromConfigWithDaemon_Nil(t *testing.T) {
 	}
 	if logger == nil {
 		t.Fatal("FromConfigWithDaemon(nil) returned nil logger")
+	}
+}
+
+// Test log rotation functionality
+func TestLogRotation(t *testing.T) {
+	// Create temp directory for test logs
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger with small max size for testing
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 200, // Very small for testing
+		MaxNumLogs: 3,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write messages to trigger rotation
+	for i := 0; i < 5; i++ {
+		logger.Info(DestinationGeneral, "Test message that is long enough to trigger rotation", "iteration", i)
+	}
+
+	// Check that rotated log files exist
+	if _, err := os.Stat(logPath + ".old"); os.IsNotExist(err) {
+		t.Error("Expected .old log file to exist")
+	}
+}
+
+func TestLogRotation_MultipleRotations(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger with very small max size and multiple logs to keep
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 150,
+		MaxNumLogs: 3,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write enough messages to trigger multiple rotations
+	for i := 0; i < 10; i++ {
+		logger.Info(DestinationGeneral, "Test message iteration", "i", i, "data", "some additional data here")
+	}
+
+	// Check that current log exists
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("Expected current log file to exist")
+	}
+
+	// Check that .old exists
+	if _, err := os.Stat(logPath + ".old"); os.IsNotExist(err) {
+		t.Error("Expected .old log file to exist")
+	}
+
+	// Check that we don't have more than MaxNumLogs rotated logs
+	// We should have at most .old, .old.1, .old.2
+	oldestLog := logPath + ".old.3"
+	if _, err := os.Stat(oldestLog); !os.IsNotExist(err) {
+		t.Errorf("Expected oldest log %s to not exist (should have been deleted)", oldestLog)
+	}
+}
+
+func TestLogRotation_TruncateOnOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create a log file with existing content
+	err := os.WriteFile(logPath, []byte("existing content\n"), 0600)
+	if err != nil {
+		t.Fatalf("Failed to create initial log file: %v", err)
+	}
+
+	// Create logger with TruncateOnOpen = true
+	logger, err := New(&Config{
+		OutputPath:     logPath,
+		TruncateOnOpen: true,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write a message
+	logger.Info(DestinationGeneral, "New message after truncate")
+
+	// Read the log file
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// The old content should not be present
+	if strings.Contains(string(content), "existing content") {
+		t.Error("Expected old content to be truncated")
+	}
+
+	// New message should be present
+	if !strings.Contains(string(content), "New message after truncate") {
+		t.Error("Expected new message to be in log file")
+	}
+}
+
+func TestLogRotation_NoTruncateOnOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create a log file with existing content
+	existingContent := "existing content line 1\n"
+	err := os.WriteFile(logPath, []byte(existingContent), 0600)
+	if err != nil {
+		t.Fatalf("Failed to create initial log file: %v", err)
+	}
+
+	// Create logger with TruncateOnOpen = false (default)
+	logger, err := New(&Config{
+		OutputPath:     logPath,
+		TruncateOnOpen: false,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write a message
+	logger.Info(DestinationGeneral, "New message after opening")
+
+	// Read the log file
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Both old and new content should be present
+	if !strings.Contains(string(content), "existing content") {
+		t.Error("Expected old content to be preserved")
+	}
+
+	if !strings.Contains(string(content), "New message after opening") {
+		t.Error("Expected new message to be in log file")
+	}
+}
+
+func TestFromConfigWithDaemon_RotationParams(t *testing.T) {
+	tests := []struct {
+		name             string
+		configText       string
+		daemonName       string
+		expectedMaxSize  int64
+		expectedMaxNum   int
+		expectedTruncate bool
+	}{
+		{
+			name:       "Custom rotation parameters",
+			daemonName: "HTTP_API",
+			configText: `
+HTTP_API_LOG = /tmp/http_api.log
+MAX_HTTP_API_LOG = 5242880
+MAX_NUM_HTTP_API_LOG = 5
+TRUNC_HTTP_API_LOG_ON_OPEN = true
+`,
+			expectedMaxSize:  5242880,
+			expectedMaxNum:   5,
+			expectedTruncate: true,
+		},
+		{
+			name:       "Default rotation parameters",
+			daemonName: "SCHEDD",
+			configText: `
+SCHEDD_LOG = /tmp/schedd.log
+`,
+			expectedMaxSize:  DefaultMaxLogSize,
+			expectedMaxNum:   DefaultMaxNumLogs,
+			expectedTruncate: false,
+		},
+		{
+			name:       "Partial rotation parameters",
+			daemonName: "COLLECTOR",
+			configText: `
+COLLECTOR_LOG = /tmp/collector.log
+MAX_COLLECTOR_LOG = 1048576
+`,
+			expectedMaxSize:  1048576,
+			expectedMaxNum:   DefaultMaxNumLogs,
+			expectedTruncate: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.NewFromReader(strings.NewReader(tt.configText))
+			if err != nil {
+				t.Fatalf("Failed to create config: %v", err)
+			}
+
+			logger, err := FromConfigWithDaemon(tt.daemonName, cfg)
+			if err != nil {
+				t.Fatalf("FromConfigWithDaemon() error = %v", err)
+			}
+
+			if logger.config.MaxLogSize != tt.expectedMaxSize {
+				t.Errorf("MaxLogSize = %v, expected %v", logger.config.MaxLogSize, tt.expectedMaxSize)
+			}
+
+			if logger.config.MaxNumLogs != tt.expectedMaxNum {
+				t.Errorf("MaxNumLogs = %v, expected %v", logger.config.MaxNumLogs, tt.expectedMaxNum)
+			}
+
+			if logger.config.TruncateOnOpen != tt.expectedTruncate {
+				t.Errorf("TruncateOnOpen = %v, expected %v", logger.config.TruncateOnOpen, tt.expectedTruncate)
+			}
+		})
+	}
+}
+
+func TestLogRotation_StdoutStderr(t *testing.T) {
+	// Test that rotation is skipped for stdout/stderr
+	logger, err := New(&Config{
+		OutputPath: "stdout",
+		MaxLogSize: 100, // Small size
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Should not panic or error even though we write more than MaxLogSize
+	for i := 0; i < 10; i++ {
+		logger.Info(DestinationGeneral, "Test message to stdout that should not cause rotation issues")
+	}
+
+	// No errors expected - test passes if we get here
+}
+
+func TestLogRotation_FileNaming(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/daemon.log"
+
+	// Create logger
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		MaxLogSize: 150,
+		MaxNumLogs: 4,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationGeneral: VerbosityDebug,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Write enough to trigger several rotations
+	for i := 0; i < 15; i++ {
+		logger.Info(DestinationGeneral, "Message to trigger rotation with some extra data", "iteration", i)
+	}
+
+	// Check that current log exists
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Errorf("Expected current log file %s to exist", logPath)
+	}
+
+	// Check that at least .old exists (we definitely triggered at least one rotation)
+	if _, err := os.Stat(logPath + ".old"); os.IsNotExist(err) {
+		t.Errorf("Expected file %s to exist", logPath+".old")
+	}
+
+	// Optional: Check if numbered old files exist (may or may not, depending on rotation count)
+	// This is just informational, not a failure
+	for i := 1; i < 4; i++ {
+		numberedFile := fmt.Sprintf("%s.old.%d", logPath, i)
+		if _, err := os.Stat(numberedFile); err == nil {
+			t.Logf("Found numbered log file: %s", numberedFile)
+		}
 	}
 }
