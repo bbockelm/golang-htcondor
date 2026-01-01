@@ -382,7 +382,7 @@ func (h *Handler) SetupRoutes(setupFunc func(*http.ServeMux)) {
 }
 
 // ensureOAuth2ClientRegistered ensures an OAuth2 client is registered (extracted helper)
-func (h *Handler) ensureOAuth2ClientRegistered(clientID, clientSecret, redirectURL string, scopes []string) {
+func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _ /* redirectURL */ string, _ /* scopes */ []string) {
 	// Check if client exists
 	_, err := h.oauth2Provider.GetStorage().GetClient(context.Background(), clientID)
 	if err != nil {
@@ -399,7 +399,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Start starts background goroutines (address updaters, session cleanup, periodic ping)
 // This should be called after the handler is created and before serving requests
-func (h *Handler) Start(ln net.Listener, protocol string) error {
+func (h *Handler) Start(_ net.Listener, _ /* protocol */ string) error {
 	// Note: IDP and OAuth2 initialization, address updaters, session cleanup, and periodic ping
 	// are handled by the Server wrapper. If using Handler standalone, users need to call these
 	// initialization methods manually or implement their own lifecycle management.
@@ -407,7 +407,7 @@ func (h *Handler) Start(ln net.Listener, protocol string) error {
 }
 
 // Stop gracefully stops all background goroutines
-func (h *Handler) Stop(ctx context.Context) error {
+func (h *Handler) Stop(_ context.Context) error {
 	h.logger.Info(logging.DestinationHTTP, "Stopping HTTP handler")
 
 	// Close OAuth2 provider if enabled
@@ -436,26 +436,5 @@ func (h *Handler) GetOAuth2Provider() *OAuth2Provider {
 func (h *Handler) UpdateOAuth2RedirectURL(redirectURL string) {
 	if h.oauth2Config != nil {
 		h.oauth2Config.RedirectURL = redirectURL
-	}
-}
-
-// getSchedd returns the current schedd instance (thread-safe)
-func (h *Handler) getSchedd() *htcondor.Schedd {
-	h.scheddMu.RLock()
-	defer h.scheddMu.RUnlock()
-	return h.schedd
-}
-
-// updateSchedd updates the schedd instance with a new address (thread-safe)
-func (h *Handler) updateSchedd(newAddress string) {
-	h.scheddMu.Lock()
-	defer h.scheddMu.Unlock()
-
-	// Only update if the address has changed
-	if h.schedd.Address() != newAddress {
-		h.logger.Info(logging.DestinationSchedd, "Updating schedd address",
-			"old_address", h.schedd.Address(),
-			"new_address", newAddress)
-		h.schedd = htcondor.NewSchedd(h.scheddName, newAddress)
 	}
 }

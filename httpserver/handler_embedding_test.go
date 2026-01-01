@@ -51,8 +51,8 @@ func TestHandlerEmbedding(t *testing.T) {
 	// Test that handler can be embedded in a custom server
 	customMux := http.NewServeMux()
 	customMux.Handle("/htcondor/", http.StripPrefix("/htcondor", handler))
-	customMux.HandleFunc("/custom", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("custom endpoint"))
+	customMux.HandleFunc("/custom", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("custom endpoint"))
 	})
 
 	// Test custom endpoint

@@ -26,10 +26,10 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	*Handler                        // Embedded handler for business logic
-	httpServer *http.Server         // HTTP server instance
-	listener   net.Listener         // Explicit listener to get actual address
-	logger     *logging.Logger      // Logger instance (duplicated for convenience)
+	*Handler                   // Embedded handler for business logic
+	httpServer *http.Server    // HTTP server instance
+	listener   net.Listener    // Explicit listener to get actual address
+	logger     *logging.Logger // Logger instance (duplicated for convenience)
 }
 
 // Config holds server configuration
@@ -80,7 +80,6 @@ type Config struct {
 }
 
 // NewServer creates a new HTTP API server
-//
 func NewServer(cfg Config) (*Server, error) {
 	// Set default timeouts if not specified
 	readTimeout := cfg.ReadTimeout
@@ -157,7 +156,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	// Setup routes on the handler
-	s.Handler.SetupRoutes(s.setupRoutes)
+	s.SetupRoutes(s.setupRoutes)
 
 	// Wrap handler with access logging middleware
 	s.httpServer.Handler = s.accessLogMiddleware(s.Handler)
@@ -526,7 +525,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	// Stop handler (closes OAuth2 and IDP providers)
-	if err := s.Handler.Stop(ctx); err != nil {
+	if err := s.Stop(ctx); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to stop handler", "error", err)
 	}
 
