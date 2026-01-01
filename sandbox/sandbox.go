@@ -38,6 +38,7 @@ type remap struct {
 //   - Iwd: Initial working directory (base path for relative files)
 //   - Cmd: Executable path (included if TransferExecutable is true)
 //   - TransferExecutable: Whether to include the executable
+//   - In: Standard input file (included if set)
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -75,6 +76,17 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 
 		if err := addFileToTar(tw, execPath, iwd); err != nil {
 			return fmt.Errorf("failed to add executable %s: %w", execPath, err)
+		}
+	}
+
+	// Add stdin file if specified
+	stdinPath, hasStdin := classad.GetAs[string](jobAd, "In")
+	if hasStdin && stdinPath != "" {
+		// Skip URLs for stdin
+		if !isURL(stdinPath) {
+			if err := addFileToTar(tw, stdinPath, iwd); err != nil {
+				return fmt.Errorf("failed to add stdin file %s: %w", stdinPath, err)
+			}
 		}
 	}
 
@@ -219,6 +231,10 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 		remaps = parseRemaps(remapsStr)
 	}
 
+	// Get standard output/error file paths
+	stdoutPath, hasStdout := classad.GetAs[string](jobAd, "Out")
+	stderrPath, hasStderr := classad.GetAs[string](jobAd, "Err")
+
 	// Create tar reader
 	tr := tar.NewReader(r)
 
@@ -241,13 +257,38 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 			continue
 		}
 
-		// Check if this file should be extracted
-		if outputFiles != nil && !outputFiles[header.Name] {
-			continue
-		}
+		// Handle special HTCondor files
+		var destPath string
+		switch header.Name {
+		case "_condor_stdout":
+			// Map to Out attribute, skip if not set
+			if !hasStdout {
+				continue
+			}
+			if filepath.IsAbs(stdoutPath) {
+				destPath = stdoutPath
+			} else {
+				destPath = filepath.Join(iwd, stdoutPath)
+			}
+		case "_condor_stderr":
+			// Map to Err attribute, skip if not set
+			if !hasStderr {
+				continue
+			}
+			if filepath.IsAbs(stderrPath) {
+				destPath = stderrPath
+			} else {
+				destPath = filepath.Join(iwd, stderrPath)
+			}
+		default:
+			// Check if this file should be extracted
+			if outputFiles != nil && !outputFiles[header.Name] {
+				continue
+			}
 
-		// Determine destination path
-		destPath := getDestinationPath(header.Name, iwd, remaps)
+			// Determine destination path using normal rules
+			destPath = getDestinationPath(header.Name, iwd, remaps)
+		}
 
 		// Skip files that map to URLs (e.g., remapped to upload endpoints)
 		if isURL(destPath) {
