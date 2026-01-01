@@ -155,7 +155,7 @@ func (s *SessionStore) Size() int {
 const sessionCookieName = "htcondor_session"
 
 // setSessionCookie sets an HTTP session cookie
-func (s *Server) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) {
+func (s *Handler) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) {
 	// Determine if we should use Secure flag (HTTPS only)
 	// In production, sessions should only be transmitted over HTTPS
 	secure := true // Default to secure
@@ -185,7 +185,7 @@ func getSessionCookie(r *http.Request) (string, error) {
 }
 
 // clearSessionCookie clears the session cookie
-func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+func (s *Handler) clearSessionCookie(w http.ResponseWriter) {
 	cookie := &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -200,7 +200,7 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 
 // getSessionFromRequest extracts session data from the request
 // Returns the session data and true if a valid session exists
-func (s *Server) getSessionFromRequest(r *http.Request) (*SessionData, bool) {
+func (s *Handler) getSessionFromRequest(r *http.Request) (*SessionData, bool) {
 	sessionID, err := getSessionCookie(r)
 	if err != nil {
 		return nil, false

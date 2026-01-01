@@ -30,14 +30,14 @@ func TestScheddAddressUpdate(t *testing.T) {
 	}
 
 	// Test initial address
-	initialAddr := s.getSchedd().Address()
+	initialAddr := s.GetSchedd().Address()
 	if initialAddr != "127.0.0.1:9618" {
 		t.Errorf("Initial address = %v, want 127.0.0.1:9618", initialAddr)
 	}
 
 	// Update the address
 	newAddr := "127.0.0.1:9619"
-	s.updateSchedd(newAddr)
+	s.UpdateSchedd(newAddr)
 
 	// Verify the address was updated
 	updatedAddr := s.getSchedd().Address()
@@ -46,9 +46,9 @@ func TestScheddAddressUpdate(t *testing.T) {
 	}
 
 	// Test that updating with the same address doesn't create a new instance
-	oldSchedd := s.getSchedd()
-	s.updateSchedd(newAddr)
-	newSchedd := s.getSchedd()
+	oldSchedd := s.GetSchedd()
+	s.UpdateSchedd(newAddr)
+	newSchedd := s.GetSchedd()
 
 	// Both should point to the same address (though they're different instances)
 	if oldSchedd.Address() != newSchedd.Address() {
@@ -95,7 +95,7 @@ func TestScheddThreadSafety(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				addr := "127.0.0.1:" + string(rune('9'+'0'+j%10))
-				s.updateSchedd(addr)
+				s.UpdateSchedd(addr)
 				time.Sleep(1 * time.Millisecond)
 			}
 		}(i)

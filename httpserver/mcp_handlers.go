@@ -22,15 +22,15 @@ import (
 )
 
 // extractUsernameFromToken extracts the username from an OAuth2 token using the configured claim
-func (s *Server) extractUsernameFromToken(token fosite.AccessRequester) string {
+func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string {
 	// If user header is configured, that takes precedence (already set in context)
-	if s.userHeader != "" {
+	if h.userHeader != "" {
 		// This should have been handled earlier, but return subject as fallback
 		return token.GetSession().GetSubject()
 	}
 
 	// Use configured claim name (default: "sub")
-	claimName := s.oauth2UsernameClaim
+	claimName := h.oauth2UsernameClaim
 	if claimName == "" {
 		claimName = "sub"
 	}
@@ -55,12 +55,12 @@ func (s *Server) extractUsernameFromToken(token fosite.AccessRequester) string {
 }
 
 // handleMCPMessage handles MCP JSON-RPC messages over HTTP
-func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Validate OAuth2 token or detect HTCondor token
-	token, err := s.validateOAuth2Token(r)
+	token, err := h.validateOAuth2Token(r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
-		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
+		h.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
 		return
 	}
 
@@ -73,12 +73,12 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		parts := strings.SplitN(auth, " ", 2)
 		if len(parts) != 2 {
-			s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
+			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
 			return
 		}
 		htcToken := parts[1]
 
-		s.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
+		h.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
 
 		// Create security config with the HTCondor token
 		// HTCondor will validate the token and enforce authorization
@@ -98,46 +98,46 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		// This is an OAuth2 token - validate scopes and generate HTCondor token
 
 		// Extract username from token using configured claim
-		username := s.extractUsernameFromToken(token)
+		username := h.extractUsernameFromToken(token)
 		if username == "" {
-			s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
+			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
 			return
 		}
 
-		s.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
+		h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
 
 		// Read MCP message from request body to check scopes
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
-			s.writeError(w, http.StatusBadRequest, "Failed to read request body")
+			h.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+			h.writeError(w, http.StatusBadRequest, "Failed to read request body")
 			return
 		}
 
 		// Parse MCP message
 		var mcpRequest mcpserver.MCPMessage
 		if err := json.Unmarshal(body, &mcpRequest); err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
-			s.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+			h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+			h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
 			return
 		}
 
 		// Check if the requested MCP method is allowed based on OAuth2 scopes
-		if !s.isMethodAllowedByScopes(token, &mcpRequest) {
-			s.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
-			s.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
+		if !h.isMethodAllowedByScopes(token, &mcpRequest) {
+			h.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
+			h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
 			return
 		}
 
-		s.logger.Info(logging.DestinationHTTP, "Signing key path", "path", s.signingKeyPath, "trust_domain", s.trustDomain)
+		h.logger.Info(logging.DestinationHTTP, "Signing key path", "path", h.signingKeyPath, "trust_domain", h.trustDomain)
 
 		// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
 		// If we have a signing key, generate an HTCondor token for this user
-		if s.signingKeyPath != "" && s.trustDomain != "" {
-			htcToken, err := s.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
+		if h.signingKeyPath != "" && h.trustDomain != "" {
+			htcToken, err := h.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
 			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
-				s.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
+				h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
 				return
 			}
 
@@ -161,16 +161,16 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Read MCP message from request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
-		s.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		h.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+		h.writeError(w, http.StatusBadRequest, "Failed to read request body")
 		return
 	}
 
 	// Parse MCP message
 	var mcpRequest mcpserver.MCPMessage
 	if err := json.Unmarshal(body, &mcpRequest); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
-		s.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+		h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+		h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
 		return
 	}
 
@@ -178,16 +178,16 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// IMPORTANT: Reuse the HTTP server's schedd connection to avoid redundant
 	// authentication and key exchange on every MCP request
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		Schedd:         s.schedd,
-		SigningKeyPath: s.signingKeyPath,
-		TrustDomain:    s.trustDomain,
-		UIDDomain:      s.uidDomain,
-		HTTPBaseURL:    s.httpBaseURL,
-		Logger:         s.logger,
+		Schedd:         h.schedd,
+		SigningKeyPath: h.signingKeyPath,
+		TrustDomain:    h.trustDomain,
+		UIDDomain:      h.uidDomain,
+		HTTPBaseURL:    h.httpBaseURL,
+		Logger:         h.logger,
 	})
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Internal server error")
+		h.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
@@ -212,13 +212,13 @@ func (s *Server) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
 // validateOAuth2Token validates an OAuth2 token from the Authorization header
-func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, error) {
-	if s.oauth2Provider == nil {
+func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, error) {
+	if h.oauth2Provider == nil {
 		return nil, fmt.Errorf("OAuth2 not configured")
 	}
 
@@ -239,7 +239,7 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 	ctx := r.Context()
 	session := &openid.DefaultSession{}
 
-	tokenType, accessRequest, err := s.oauth2Provider.GetProvider().IntrospectToken(
+	tokenType, accessRequest, err := h.oauth2Provider.GetProvider().IntrospectToken(
 		ctx,
 		tokenString,
 		fosite.AccessToken,
@@ -257,7 +257,7 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 	// Return (nil, nil) to signal that this is an HTCondor token that should be
 	// passed directly to HTCondor for validation (not validated by us)
 	if len(strings.Split(tokenString, ".")) == 3 {
-		s.logger.Info(logging.DestinationHTTP, "OAuth2 validation failed, detected possible HTCondor token - will pass to HTCondor for validation")
+		h.logger.Info(logging.DestinationHTTP, "OAuth2 validation failed, detected possible HTCondor token - will pass to HTCondor for validation")
 		// Return nil token with nil error to signal HTCondor token
 		// The caller must extract the token from the Authorization header
 		return nil, nil
@@ -269,7 +269,7 @@ func (s *Server) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, e
 
 // filterRequestedScopes filters the requested scopes to only include those allowed for the client.
 // This prevents errors when clients request scopes that were added after registration.
-func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*http.Request, error) {
+func (h *Handler) filterRequestedScopes(ctx context.Context, r *http.Request) (*http.Request, error) {
 	// Get client_id from the request
 	clientID := r.FormValue("client_id")
 	if clientID == "" {
@@ -278,7 +278,7 @@ func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*h
 	}
 
 	// Get the client from storage
-	client, err := s.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	client, err := h.oauth2Provider.GetStorage().GetClient(ctx, clientID)
 	if err != nil {
 		// Client not found or error - let fosite handle it
 		return r, nil
@@ -306,7 +306,7 @@ func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*h
 		if allowedScopeMap[scope] {
 			filteredScopes = append(filteredScopes, scope)
 		} else {
-			s.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for client",
+			h.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for client",
 				"client_id", clientID, "scope", scope)
 		}
 	}
@@ -326,7 +326,7 @@ func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*h
 	// Update the scope parameter
 	newReq.Form.Set("scope", strings.Join(filteredScopes, " "))
 
-	s.logger.Info(logging.DestinationHTTP, "Filtered scopes for client",
+	h.logger.Info(logging.DestinationHTTP, "Filtered scopes for client",
 		"client_id", clientID,
 		"requested", len(requestedScopes),
 		"allowed", len(filteredScopes))
@@ -335,27 +335,27 @@ func (s *Server) filterRequestedScopes(ctx context.Context, r *http.Request) (*h
 }
 
 // handleOAuth2Authorize handles OAuth2 authorization requests
-func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
 	ctx := r.Context()
 
 	// Filter requested scopes to only those allowed for the client
-	filteredReq, err := s.filterRequestedScopes(ctx, r)
+	filteredReq, err := h.filterRequestedScopes(ctx, r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
 		// Continue with original request if filtering fails
 		filteredReq = r
 	}
 
 	// Parse authorization request
-	ar, err := s.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, filteredReq)
+	ar, err := h.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, filteredReq)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
-		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
+		h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
@@ -367,42 +367,42 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 	username := ""
 
 	// Method 1: User header (demo mode)
-	if s.userHeader != "" {
-		username = r.Header.Get(s.userHeader)
+	if h.userHeader != "" {
+		username = r.Header.Get(h.userHeader)
 		if username != "" {
-			s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-				"username", username, "header", s.userHeader)
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", h.userHeader)
 		}
 	}
 
 	// Method 2: Existing session
 	if username == "" {
 		// Check if user has a session
-		if session, ok := s.getSessionFromRequest(r); ok {
+		if session, ok := h.getSessionFromRequest(r); ok {
 			username = session.Username
-			s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 		}
 	}
 
 	// Method 3: OAuth2 SSO flow
 	if username == "" {
 		// If OAuth2 SSO is configured, redirect to upstream IDP
-		if s.oauth2Config != nil {
+		if h.oauth2Config != nil {
 			// Generate state parameter
-			state, err := s.oauth2StateStore.GenerateState()
+			state, err := h.oauth2StateStore.GenerateState()
 			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-				s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
 				return
 			}
 
 			// Store authorize request for later retrieval
-			s.oauth2StateStore.Store(state, ar)
+			h.oauth2StateStore.Store(state, ar)
 
 			// Build authorization URL
-			authURL := s.oauth2Config.AuthCodeURL(state)
+			authURL := h.oauth2Config.AuthCodeURL(state)
 
-			s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
+			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
 				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
 
 			// Redirect to IDP
@@ -413,25 +413,25 @@ func (s *Server) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
 
 	// If still no username, authentication is required
 	if username == "" {
-		s.logger.Error(logging.DestinationHTTP, "No authentication method available")
-		s.writeError(w, http.StatusUnauthorized, "Authentication required")
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available")
+		h.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
 
 	// User authenticated via header or query parameter - redirect to consent page
-	s.logger.Info(logging.DestinationHTTP, "User authenticated, redirecting to consent page",
+	h.logger.Info(logging.DestinationHTTP, "User authenticated, redirecting to consent page",
 		"username", username, "client_id", ar.GetClient().GetID())
 
 	// Generate state parameter for consent
-	state, err := s.oauth2StateStore.GenerateState()
+	state, err := h.oauth2StateStore.GenerateState()
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate consent state", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate consent state", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
 		return
 	}
 
 	// Store authorize request and username for consent page
-	s.oauth2StateStore.StoreWithUsername(state, ar, "", username)
+	h.oauth2StateStore.StoreWithUsername(state, ar, "", username)
 
 	// Redirect to consent page
 	consentURL := fmt.Sprintf("/mcp/oauth2/consent?state=%s", state)
@@ -473,9 +473,9 @@ func getScopeDescription(scope string) string {
 }
 
 // handleOAuth2Consent handles the OAuth2 consent page
-func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
@@ -491,15 +491,15 @@ func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if state == "" {
-		s.writeError(w, http.StatusBadRequest, "Missing state parameter")
+		h.writeError(w, http.StatusBadRequest, "Missing state parameter")
 		return
 	}
 
 	// Retrieve the authorize request and username
-	ar, username, ok := s.oauth2StateStore.GetWithUsername(state)
+	ar, username, ok := h.oauth2StateStore.GetWithUsername(state)
 	if !ok || ar == nil {
-		s.logger.Error(logging.DestinationHTTP, "Invalid or expired consent state", "state", state)
-		s.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
+		h.logger.Error(logging.DestinationHTTP, "Invalid or expired consent state", "state", state)
+		h.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
 		return
 	}
 
@@ -739,56 +739,56 @@ func (s *Server) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 				ar.GrantScope(scope)
 			}
 
-			s.logger.Info(logging.DestinationHTTP, "User approved consent",
+			h.logger.Info(logging.DestinationHTTP, "User approved consent",
 				"username", username, "client_id", ar.GetClient().GetID(), "scopes", requestedScopes)
 
 			// Generate OAuth2 response
-			response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+			response, err := h.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
 			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response after consent",
+				h.logger.Error(logging.DestinationHTTP, "Failed to create authorize response after consent",
 					"error", err, "username", username)
-				s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+				h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
 				// Remove the state entry
-				s.oauth2StateStore.Remove(state)
+				h.oauth2StateStore.Remove(state)
 				return
 			}
 
-			s.logger.Info(logging.DestinationHTTP, "Successfully created authorize response after consent", "username", username)
+			h.logger.Info(logging.DestinationHTTP, "Successfully created authorize response after consent", "username", username)
 
 			// Remove the state entry
-			s.oauth2StateStore.Remove(state)
+			h.oauth2StateStore.Remove(state)
 
 			// Write the OAuth2 response
-			s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+			h.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
 			return
 		}
 
 		if action == "deny" {
 			// User denied - return access denied error
-			s.logger.Info(logging.DestinationHTTP, "User denied consent",
+			h.logger.Info(logging.DestinationHTTP, "User denied consent",
 				"username", username, "client_id", ar.GetClient().GetID())
 
 			// Remove the state entry
-			s.oauth2StateStore.Remove(state)
+			h.oauth2StateStore.Remove(state)
 
 			// Return access denied error to client
 			accessDeniedErr := fosite.ErrAccessDenied.WithDescription("User denied authorization")
-			s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, accessDeniedErr)
+			h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, accessDeniedErr)
 			return
 		}
 
 		// Invalid action
-		s.writeError(w, http.StatusBadRequest, "Invalid action")
+		h.writeError(w, http.StatusBadRequest, "Invalid action")
 		return
 	}
 
-	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
 // handleOAuth2Token handles OAuth2 token requests
-func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
@@ -796,15 +796,15 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 
 	// Parse form data
 	if err := r.ParseForm(); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to parse form", "error", err)
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
+		h.logger.Error(logging.DestinationHTTP, "Failed to parse form", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
 		return
 	}
 
 	// Filter requested scopes to only those allowed for the client
-	filteredReq, err := s.filterRequestedScopes(ctx, r)
+	filteredReq, err := h.filterRequestedScopes(ctx, r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
 		// Continue with original request if filtering fails
 		filteredReq = r
 	}
@@ -813,14 +813,14 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	grantType := r.FormValue("grant_type")
 
 	// Log the incoming request for debugging
-	s.logger.Info(logging.DestinationHTTP, "Token request received",
+	h.logger.Info(logging.DestinationHTTP, "Token request received",
 		"grant_type", grantType,
 		"client_id", r.FormValue("client_id"),
 		"scope", r.FormValue("scope"))
 
 	// Handle device_code grant type separately
 	if grantType == "urn:ietf:params:oauth:grant-type:device_code" {
-		s.handleDeviceCodeTokenRequest(w, r)
+		h.handleDeviceCodeTokenRequest(w, r)
 		return
 	}
 
@@ -828,7 +828,7 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	session := &openid.DefaultSession{}
 
 	// Create access request
-	accessRequest, err := s.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
+	accessRequest, err := h.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
 	if err != nil {
 		// Extract more detailed error information
 		errorDetails := fmt.Sprintf("%v", err)
@@ -837,72 +837,72 @@ func (s *Server) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
 				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
 		}
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access request",
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access request",
 			"error", err, "error_details", errorDetails,
 			"client_id", r.FormValue("client_id"))
-		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
 
 	// Create access response (for all flows - this generates tokens including refresh token)
-	s.logger.Info(logging.DestinationHTTP, "Creating access response",
+	h.logger.Info(logging.DestinationHTTP, "Creating access response",
 		"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
 		"requested_scopes", accessRequest.GetRequestedScopes())
-	response, err := s.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
+	response, err := h.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
 	if err != nil {
 		// Log more details about the error - unwrap to see the root cause
 		rootErr := err
 		for errors.Unwrap(rootErr) != nil {
 			rootErr = errors.Unwrap(rootErr)
 		}
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access response",
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access response",
 			"error", err,
 			"root_error", rootErr,
 			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
 			"client_id", accessRequest.GetClient().GetID())
-		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
-	s.logger.Info(logging.DestinationHTTP, "Successfully created access response")
+	h.logger.Info(logging.DestinationHTTP, "Successfully created access response")
 
 	// Check if condor:/* scopes are requested
 	requestedScopes := accessRequest.GetRequestedScopes()
 	if hasCondorScopes(requestedScopes) {
 		// Generate HTCondor IDTOKEN and replace the access token
-		s.replaceWithCondorToken(ctx, w, r, accessRequest, response)
+		h.replaceWithCondorToken(ctx, w, r, accessRequest, response)
 		return
 	}
 
 	// Standard OAuth2 flow - write the response as-is
-	s.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
+	h.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
 }
 
 // replaceWithCondorToken replaces the OAuth2 access token with an HTCondor IDTOKEN
 // while preserving the refresh token and other fields
-func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, accessRequest fosite.AccessRequester, response fosite.AccessResponder) {
+func (h *Handler) replaceWithCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, accessRequest fosite.AccessRequester, response fosite.AccessResponder) {
 	// Check if we can generate HTCondor tokens
-	if s.signingKeyPath == "" || s.trustDomain == "" {
-		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
+	if h.signingKeyPath == "" || h.trustDomain == "" {
+		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
 		err := &fosite.RFC6749Error{
 			ErrorField:       "server_error",
 			DescriptionField: "Server not configured to issue HTCondor tokens",
 			HintField:        "Contact administrator to configure signing key and trust domain",
 			CodeField:        http.StatusInternalServerError,
 		}
-		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
 
 	// Get the username from the session
 	username := accessRequest.GetSession().GetSubject()
 	if username == "" {
-		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
+		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
 		err := &fosite.RFC6749Error{
 			ErrorField:       "invalid_request",
 			DescriptionField: "Cannot determine user identity",
 			CodeField:        http.StatusBadRequest,
 		}
-		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
 
@@ -910,9 +910,9 @@ func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWrit
 	requestedScopes := accessRequest.GetRequestedScopes()
 
 	// Generate HTCondor IDTOKEN
-	idtoken, err := s.generateHTCondorTokenWithScopes(username, requestedScopes)
+	idtoken, err := h.generateHTCondorTokenWithScopes(username, requestedScopes)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
 			"error", err,
 			"username", username,
 			"scopes", requestedScopes)
@@ -921,18 +921,18 @@ func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWrit
 			DescriptionField: "Failed to generate HTCondor IDTOKEN",
 			CodeField:        http.StatusInternalServerError,
 		}
-		s.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, fositeErr)
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, fositeErr)
 		return
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for condor scopes",
+	h.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for condor scopes",
 		"username", username,
 		"scopes", requestedScopes)
 
 	// Get the response as a map and replace the access token with HTCondor IDTOKEN
 	// The response already has the refresh token and other OAuth2 fields
 	tokenResponse := response.ToMap()
-	s.logger.Info(logging.DestinationHTTP, "Token response map created", "has_refresh_token", tokenResponse["refresh_token"] != nil)
+	h.logger.Info(logging.DestinationHTTP, "Token response map created", "has_refresh_token", tokenResponse["refresh_token"] != nil)
 	tokenResponse["access_token"] = idtoken
 	tokenResponse["token_type"] = "Bearer"
 
@@ -942,22 +942,22 @@ func (s *Server) replaceWithCondorToken(ctx context.Context, w http.ResponseWrit
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(tokenResponse); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode token response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode token response", "error", err)
 	}
 }
 
 // handleDeviceCodeTokenRequest handles token requests with device_code grant type
-func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	deviceCode := r.FormValue("device_code")
 	if deviceCode == "" {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code is required")
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code is required")
 		return
 	}
 
 	// Create device code handler
-	deviceHandler := NewDeviceCodeHandler(s.oauth2Provider.GetStorage(), s.oauth2Provider.config)
+	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
 
 	// Create session
 	session := &openid.DefaultSession{}
@@ -967,53 +967,53 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		// Map errors to OAuth error responses
 		if errors.Is(err, ErrAuthorizationPending) {
-			s.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
+			h.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
 			return
 		}
 		if errors.Is(err, fosite.ErrAccessDenied) {
-			s.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
+			h.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
 			return
 		}
-		s.logger.Error(logging.DestinationHTTP, "Device code token request failed", "error", err)
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid device code")
+		h.logger.Error(logging.DestinationHTTP, "Device code token request failed", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid device code")
 		return
 	}
 
 	// Check if condor:/* scopes are requested - generate HTCondor IDTOKEN instead
 	grantedScopes := request.GetGrantedScopes()
 	if hasCondorScopes(grantedScopes) {
-		s.handleDeviceCodeCondorToken(ctx, w, r, request)
+		h.handleDeviceCodeCondorToken(ctx, w, r, request)
 		return
 	}
 
 	// Generate tokens using fosite
-	strategy := s.oauth2Provider.GetStrategy()
+	strategy := h.oauth2Provider.GetStrategy()
 	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate access token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate access token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
 		return
 	}
 
 	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
 		return
 	}
 
 	// Store tokens
 	signature := strategy.AccessTokenSignature(ctx, accessToken)
-	if err := s.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, signature, request); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to store access token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+	if err := h.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, signature, request); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to store access token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
 
 	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
-	if err := s.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
 
@@ -1021,7 +1021,7 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 	response := map[string]interface{}{
 		"access_token":  accessToken,
 		"token_type":    "Bearer",
-		"expires_in":    int(s.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"expires_in":    int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         strings.Join(request.GetGrantedScopes(), " "),
 	}
@@ -1031,25 +1031,25 @@ func (s *Server) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
 // handleDeviceCodeCondorToken handles device code token requests when condor scopes are requested
 // It generates an HTCondor IDTOKEN instead of a standard OAuth2 access token
-func (s *Server) handleDeviceCodeCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, request fosite.Requester) {
+func (h *Handler) handleDeviceCodeCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, request fosite.Requester) {
 	// Check if we can generate HTCondor tokens
-	if s.signingKeyPath == "" || s.trustDomain == "" {
-		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Server not configured to issue HTCondor tokens")
+	if h.signingKeyPath == "" || h.trustDomain == "" {
+		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Server not configured to issue HTCondor tokens")
 		return
 	}
 
 	// Get the username from the session
 	username := request.GetSession().GetSubject()
 	if username == "" {
-		s.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Cannot determine user identity")
+		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Cannot determine user identity")
 		return
 	}
 
@@ -1057,34 +1057,34 @@ func (s *Server) handleDeviceCodeCondorToken(ctx context.Context, w http.Respons
 	grantedScopes := request.GetGrantedScopes()
 
 	// Generate HTCondor IDTOKEN
-	idtoken, err := s.generateHTCondorTokenWithScopes(username, grantedScopes)
+	idtoken, err := h.generateHTCondorTokenWithScopes(username, grantedScopes)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
 			"error", err,
 			"username", username,
 			"scopes", grantedScopes)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate HTCondor IDTOKEN")
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate HTCondor IDTOKEN")
 		return
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for device code flow",
+	h.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for device code flow",
 		"username", username,
 		"scopes", grantedScopes)
 
 	// Generate refresh token using fosite
-	strategy := s.oauth2Provider.GetStrategy()
+	strategy := h.oauth2Provider.GetStrategy()
 	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
 		return
 	}
 
 	// Store the refresh token session
 	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
-	if err := s.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
-		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
 
@@ -1092,7 +1092,7 @@ func (s *Server) handleDeviceCodeCondorToken(ctx context.Context, w http.Respons
 	response := map[string]interface{}{
 		"access_token":  idtoken,
 		"token_type":    "Bearer",
-		"expires_in":    int(s.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"expires_in":    int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         strings.Join(grantedScopes, " "),
 	}
@@ -1102,58 +1102,58 @@ func (s *Server) handleDeviceCodeCondorToken(ctx context.Context, w http.Respons
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
 // handleOAuth2Introspect handles OAuth2 token introspection requests
-func (s *Server) handleOAuth2Introspect(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Introspect(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
 	ctx := r.Context()
 	session := &openid.DefaultSession{}
 
-	ir, err := s.oauth2Provider.GetProvider().NewIntrospectionRequest(ctx, r, session)
+	ir, err := h.oauth2Provider.GetProvider().NewIntrospectionRequest(ctx, r, session)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create introspection request", "error", err)
-		s.oauth2Provider.GetProvider().WriteIntrospectionError(ctx, w, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create introspection request", "error", err)
+		h.oauth2Provider.GetProvider().WriteIntrospectionError(ctx, w, err)
 		return
 	}
 
-	s.oauth2Provider.GetProvider().WriteIntrospectionResponse(ctx, w, ir)
+	h.oauth2Provider.GetProvider().WriteIntrospectionResponse(ctx, w, ir)
 }
 
 // handleOAuth2Revoke handles OAuth2 token revocation requests
-func (s *Server) handleOAuth2Revoke(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Revoke(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
 	ctx := r.Context()
 
-	err := s.oauth2Provider.GetProvider().NewRevocationRequest(ctx, r)
+	err := h.oauth2Provider.GetProvider().NewRevocationRequest(ctx, r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to revoke token", "error", err)
-		s.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to revoke token", "error", err)
+		h.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, err)
 		return
 	}
 
-	s.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, nil)
+	h.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, nil)
 }
 
 // handleOAuth2Register handles dynamic client registration (RFC 7591)
-func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -1169,13 +1169,13 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&regReq); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid registration request")
+		h.writeError(w, http.StatusBadRequest, "Invalid registration request")
 		return
 	}
 
 	// Validate redirect URIs
 	if len(regReq.RedirectURIs) == 0 {
-		s.writeError(w, http.StatusBadRequest, "At least one redirect_uri is required")
+		h.writeError(w, http.StatusBadRequest, "At least one redirect_uri is required")
 		return
 	}
 
@@ -1186,8 +1186,8 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
 	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to register client")
+		h.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
 		return
 	}
 
@@ -1216,7 +1216,7 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !supportedScopes[scope] {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
 			return
 		}
 	}
@@ -1232,9 +1232,9 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		Public:        false,
 	}
 
-	if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create client", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to register client")
+	if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to create client", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
 		return
 	}
 
@@ -1252,7 +1252,7 @@ func (s *Server) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
@@ -1269,14 +1269,14 @@ func generateRandomString(length int) string {
 
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
 // Implements RFC 8414: OAuth 2.0 Authorization Server Metadata
-func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusNotFound, "OAuth2 not configured")
+func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusNotFound, "OAuth2 not configured")
 		return
 	}
 
 	// Get the issuer URL from the OAuth2 provider config
-	issuer := s.oauth2Provider.config.AccessTokenIssuer
+	issuer := h.oauth2Provider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
 		"issuer":                                issuer,
@@ -1298,21 +1298,21 @@ func (s *Server) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(metadata); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode metadata", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode metadata", "error", err)
 	}
 }
 
 // handleOAuth2ProtectedResourceMetadata handles OAuth 2.0 Protected Resource metadata discovery
 // Implements RFC 9068: OAuth 2.0 Protected Resource Metadata
 // See: https://datatracker.ietf.org/doc/html/rfc9068
-func (s *Server) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusNotFound, "OAuth2 not configured")
+func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusNotFound, "OAuth2 not configured")
 		return
 	}
 
 	// Get the issuer URL from the OAuth2 provider config
-	issuer := s.oauth2Provider.config.AccessTokenIssuer
+	issuer := h.oauth2Provider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
 		"resource":                              issuer,
@@ -1326,19 +1326,19 @@ func (s *Server) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(metadata); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode protected resource metadata", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode protected resource metadata", "error", err)
 	}
 }
 
 // handleOAuth2DeviceAuthorize handles device authorization requests (RFC 8628)
-func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -1347,15 +1347,15 @@ func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Requ
 	// Parse client credentials from request
 	clientID := r.FormValue("client_id")
 	if clientID == "" {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
 		return
 	}
 
 	// Get client
-	client, err := s.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	client, err := h.oauth2Provider.GetStorage().GetClient(ctx, clientID)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
-		s.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
+		h.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
 		return
 	}
 
@@ -1381,25 +1381,25 @@ func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Requ
 		if allowedScopeMap[scope] {
 			filteredScopes = append(filteredScopes, scope)
 		} else {
-			s.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for device authorization",
+			h.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for device authorization",
 				"client_id", clientID, "scope", scope)
 		}
 	}
 	scopes = filteredScopes
 
 	if len(scopes) > 0 {
-		s.logger.Info(logging.DestinationHTTP, "Device authorization with filtered scopes",
+		h.logger.Info(logging.DestinationHTTP, "Device authorization with filtered scopes",
 			"client_id", clientID, "scopes", strings.Join(scopes, " "))
 	}
 
 	// Create device code handler
-	deviceHandler := NewDeviceCodeHandler(s.oauth2Provider.GetStorage(), s.oauth2Provider.config)
+	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
 
 	// Handle device authorization
 	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Device authorization failed", "error", err)
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Device authorization failed")
+		h.logger.Error(logging.DestinationHTTP, "Device authorization failed", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Device authorization failed")
 		return
 	}
 
@@ -1407,14 +1407,14 @@ func (s *Server) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
 	}
 }
 
 // handleOAuth2DeviceVerify handles the user code verification page
-func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Provider == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
 
@@ -1425,40 +1425,40 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 		username := ""
 
 		// Method 1: User header (demo mode)
-		if s.userHeader != "" {
-			username = r.Header.Get(s.userHeader)
+		if h.userHeader != "" {
+			username = r.Header.Get(h.userHeader)
 			if username != "" {
-				s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-					"username", username, "header", s.userHeader)
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", h.userHeader)
 			}
 		}
 
 		// Method 2: Check for session
 		if username == "" {
-			if session, ok := s.getSessionFromRequest(r); ok {
+			if session, ok := h.getSessionFromRequest(r); ok {
 				username = session.Username
-				s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 			}
 		}
 
 		// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
-		if username == "" && s.oauth2Config != nil {
+		if username == "" && h.oauth2Config != nil {
 			// Generate state parameter
-			state, err := s.oauth2StateStore.GenerateState()
+			state, err := h.oauth2StateStore.GenerateState()
 			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-				s.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
 				return
 			}
 
 			// Store the return URL (current device verification URL)
 			returnURL := r.URL.String()
-			s.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
+			h.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
 
 			// Build authorization URL
-			authURL := s.oauth2Config.AuthCodeURL(state)
+			authURL := h.oauth2Config.AuthCodeURL(state)
 
-			s.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
+			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
 				"state", state, "auth_url", authURL, "return_url", returnURL)
 
 			// Redirect to IDP
@@ -1468,8 +1468,8 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 
 		// If still no username, authentication is required
 		if username == "" {
-			s.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			s.writeError(w, http.StatusUnauthorized, "Authentication required")
+			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+			h.writeError(w, http.StatusUnauthorized, "Authentication required")
 			return
 		}
 
@@ -1481,15 +1481,15 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			userCode = strings.ToUpper(strings.TrimSpace(userCode))
 
 			// Get device code session by user code
-			_, request, err := s.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
 			if err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-				s.writeHTMLError(w, "Invalid or expired user code")
+				h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+				h.writeHTMLError(w, "Invalid or expired user code")
 				return
 			}
 
 			// Show consent page with scopes
-			s.renderDeviceConsentPage(w, r, username, userCode, request)
+			h.renderDeviceConsentPage(w, r, username, userCode, request)
 			return
 		}
 
@@ -1530,15 +1530,15 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 		action := r.FormValue("action")
 
 		if userCode == "" {
-			s.writeHTMLError(w, "User code is required")
+			h.writeHTMLError(w, "User code is required")
 			return
 		}
 
 		// Get device code session by user code
-		_, request, err := s.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
 		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-			s.writeHTMLError(w, "Invalid or expired user code")
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
 			return
 		}
 
@@ -1549,26 +1549,26 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 		username := ""
 
 		// Method 1: User header (demo mode)
-		if s.userHeader != "" {
-			username = r.Header.Get(s.userHeader)
+		if h.userHeader != "" {
+			username = r.Header.Get(h.userHeader)
 			if username != "" {
-				s.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-					"username", username, "header", s.userHeader)
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", h.userHeader)
 			}
 		}
 
 		// Method 2: Check for session
 		if username == "" {
-			if session, ok := s.getSessionFromRequest(r); ok {
+			if session, ok := h.getSessionFromRequest(r); ok {
 				username = session.Username
-				s.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 			}
 		}
 
 		// If still no username, authentication is required
 		if username == "" {
-			s.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			s.writeHTMLError(w, "Authentication required")
+			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+			h.writeHTMLError(w, "Authentication required")
 			return
 		}
 
@@ -1578,13 +1578,13 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			session := DefaultOpenIDConnectSession(username)
 
 			// Approve the device code
-			if err := s.oauth2Provider.GetStorage().ApproveDeviceCodeSession(ctx, userCode, username, session); err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
-				s.writeHTMLError(w, "Failed to approve device")
+			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSession(ctx, userCode, username, session); err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
+				h.writeHTMLError(w, "Failed to approve device")
 				return
 			}
 
-			s.logger.Info(logging.DestinationHTTP, "Device code approved", "user_code", userCode, "username", username, "client_id", request.GetClient().GetID())
+			h.logger.Info(logging.DestinationHTTP, "Device code approved", "user_code", userCode, "username", username, "client_id", request.GetClient().GetID())
 
 			// Return success page
 			html := `<!DOCTYPE html>
@@ -1608,13 +1608,13 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			_, _ = w.Write([]byte(html))
 		case "deny":
 			// Deny the device code
-			if err := s.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
-				s.writeHTMLError(w, "Failed to deny device")
+			if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
+				h.writeHTMLError(w, "Failed to deny device")
 				return
 			}
 
-			s.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
+			h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
 
 			// Return denial page
 			html := `<!DOCTYPE html>
@@ -1637,16 +1637,16 @@ func (s *Server) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(html))
 		default:
-			s.writeHTMLError(w, "Invalid action")
+			h.writeHTMLError(w, "Invalid action")
 		}
 		return
 	}
 
-	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
 // renderDeviceConsentPage renders the consent page for device code flow
-func (s *Server) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
+func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
 	client := request.GetClient()
 	requestedScopes := request.GetRequestedScopes()
 
@@ -1856,7 +1856,7 @@ func (s *Server) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request,
 }
 
 // writeHTMLError writes an HTML error page
-func (s *Server) writeHTMLError(w http.ResponseWriter, message string) {
+func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -1878,7 +1878,7 @@ func (s *Server) writeHTMLError(w http.ResponseWriter, message string) {
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
-func (s *Server) isMethodAllowedByScopes(token fosite.AccessRequester, mcpRequest *mcpserver.MCPMessage) bool {
+func (h *Handler) isMethodAllowedByScopes(token fosite.AccessRequester, mcpRequest *mcpserver.MCPMessage) bool {
 	scopes := token.GetGrantedScopes()
 
 	// Check if user has mcp:write or mcp:read scopes
@@ -1894,7 +1894,7 @@ func (s *Server) isMethodAllowedByScopes(token fosite.AccessRequester, mcpReques
 	}
 
 	// Determine if the method requires write access
-	requiresWrite := s.methodRequiresWrite(mcpRequest)
+	requiresWrite := h.methodRequiresWrite(mcpRequest)
 
 	// Allow if user has write access, or has read access and method doesn't require write
 	if hasWrite {
@@ -1908,7 +1908,7 @@ func (s *Server) isMethodAllowedByScopes(token fosite.AccessRequester, mcpReques
 }
 
 // methodRequiresWrite determines if an MCP method requires write access
-func (s *Server) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
+func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 	// Read-only methods
 	readOnlyMethods := map[string]bool{
 		"initialize":     true,
@@ -1989,21 +1989,21 @@ func mapCondorScopesToAuthz(scopes []string) []string {
 }
 
 // generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
-func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
-	if s.signingKeyPath == "" {
+func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
+	if h.signingKeyPath == "" {
 		return "", fmt.Errorf("signing key path not configured")
 	}
 
-	if s.trustDomain == "" {
+	if h.trustDomain == "" {
 		return "", fmt.Errorf("trust domain not configured")
 	}
 
 	// Ensure username has domain suffix
 	if !strings.Contains(username, "@") {
-		if s.uidDomain == "" {
+		if h.uidDomain == "" {
 			return "", fmt.Errorf("UID domain not configured")
 		}
-		username = username + "@" + s.uidDomain
+		username = username + "@" + h.uidDomain
 	}
 
 	iat := time.Now().Unix()
@@ -2033,20 +2033,20 @@ func (s *Server) generateHTCondorTokenWithScopes(username string, scopes []strin
 		}
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",
+	h.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",
 		"username", username,
-		"trust_domain", s.trustDomain,
+		"trust_domain", h.trustDomain,
 		"iat", iat,
 		"exp", exp,
 		"authz", authz,
 		"scopes", scopes,
-		"signing_key_path", s.signingKeyPath,
+		"signing_key_path", h.signingKeyPath,
 	)
 	token, err := security.GenerateJWT(
-		filepath.Dir(s.signingKeyPath),
-		filepath.Base(s.signingKeyPath),
+		filepath.Dir(h.signingKeyPath),
+		filepath.Base(h.signingKeyPath),
 		username,
-		s.trustDomain,
+		h.trustDomain,
 		iat,
 		exp,
 		authz,

@@ -21,7 +21,7 @@ type HistoryListResponse struct {
 
 // handleJobHistory handles GET /api/v1/jobs/archive
 // Queries job history (completed jobs)
-func (s *Server) handleJobHistory(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -35,7 +35,7 @@ func (s *Server) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 
 // handleJobEpochs handles GET /api/v1/jobs/epochs
 // Queries job epoch history (per job run instance)
-func (s *Server) handleJobEpochs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleJobEpochs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -49,7 +49,7 @@ func (s *Server) handleJobEpochs(w http.ResponseWriter, r *http.Request) {
 
 // handleJobTransfers handles GET /api/v1/jobs/transfers
 // Queries transfer history from job epochs
-func (s *Server) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -64,7 +64,7 @@ func (s *Server) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
 // handleHistoryQuery is the common handler for all history query types
 //
 //nolint:gocyclo // Complex function for handling history streaming with error cases
-func (s *Server) handleHistoryQuery(w http.ResponseWriter, r *http.Request, baseOpts *htcondor.HistoryQueryOptions) {
+func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, baseOpts *htcondor.HistoryQueryOptions) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -200,7 +200,7 @@ func (s *Server) handleHistoryQuery(w http.ResponseWriter, r *http.Request, base
 }
 
 // streamHistoryQuery performs a streaming history query
-func (s *Server) streamHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
+func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
@@ -297,7 +297,7 @@ func (s *Server) streamHistoryQuery(ctx context.Context, w http.ResponseWriter, 
 }
 
 // bufferHistoryQuery performs a buffered history query
-func (s *Server) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
+func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
 	// Query history with buffering
 	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {

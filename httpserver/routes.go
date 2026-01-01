@@ -6,8 +6,9 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
-// setupRoutes sets up all HTTP routes
-func (s *Server) setupRoutes(mux *http.ServeMux) {
+// setupRoutes sets up all HTTP routes for the Handler
+func (h *Handler) setupRoutes() {
+	mux := h.mux
 	// CORS middleware: allow all origins
 	cors := func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -23,88 +24,88 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	}
 
 	// Welcome page at root
-	mux.HandleFunc("/", s.handleWelcome)
+	mux.HandleFunc("/", h.handleWelcome)
 
 	// Login endpoint
-	mux.HandleFunc("/login", s.handleLogin)
-	mux.HandleFunc("/logout", s.handleLogout)
+	mux.HandleFunc("/login", h.handleLogin)
+	mux.HandleFunc("/logout", h.handleLogout)
 
 	// OpenAPI schema and Swagger UI
-	mux.Handle("/openapi.json", cors(http.HandlerFunc(s.handleOpenAPISchema)))
-	mux.HandleFunc("/docs", s.handleSwaggerUI)
-	mux.HandleFunc("/docs/oauth2-redirect", s.handleSwaggerOAuth2Redirect)
+	mux.Handle("/openapi.json", cors(http.HandlerFunc(h.handleOpenAPISchema)))
+	mux.HandleFunc("/docs", h.handleSwaggerUI)
+	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
 
 	// Job management endpoints
-	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(s.handleJobs)))
-	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(s.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
+	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(h.handleJobs)))
+	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(h.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
 	// Job history endpoints
-	mux.Handle("/api/v1/jobs/archive", cors(http.HandlerFunc(s.handleJobHistory)))
-	mux.Handle("/api/v1/jobs/epochs", cors(http.HandlerFunc(s.handleJobEpochs)))
-	mux.Handle("/api/v1/jobs/transfers", cors(http.HandlerFunc(s.handleJobTransfers)))
+	mux.Handle("/api/v1/jobs/archive", cors(http.HandlerFunc(h.handleJobHistory)))
+	mux.Handle("/api/v1/jobs/epochs", cors(http.HandlerFunc(h.handleJobEpochs)))
+	mux.Handle("/api/v1/jobs/transfers", cors(http.HandlerFunc(h.handleJobTransfers)))
 
 	// Credential management endpoints (credd)
-	mux.Handle("/api/v1/creds/user", cors(http.HandlerFunc(s.handleUserCredential)))
-	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(s.handleServiceCredentialCollection)))
-	mux.Handle("/api/v1/creds/service/", cors(http.HandlerFunc(s.handleServiceCredentialItem)))
+	mux.Handle("/api/v1/creds/user", cors(http.HandlerFunc(h.handleUserCredential)))
+	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(h.handleServiceCredentialCollection)))
+	mux.Handle("/api/v1/creds/service/", cors(http.HandlerFunc(h.handleServiceCredentialItem)))
 
 	// Authentication endpoint
-	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(s.handleWhoAmI)))
+	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
 
 	// Collector endpoints
-	mux.HandleFunc("/api/v1/collector/", s.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
+	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
 
 	// Ping endpoints
-	mux.HandleFunc("/api/v1/ping", s.handlePing)              // Ping both collector and schedd
-	mux.HandleFunc("/api/v1/schedd/ping", s.handleScheddPing) // Ping schedd only
+	mux.HandleFunc("/api/v1/ping", h.handlePing)              // Ping both collector and schedd
+	mux.HandleFunc("/api/v1/schedd/ping", h.handleScheddPing) // Ping schedd only
 	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
 
 	// MCP endpoints (OAuth2 protected)
-	if s.oauth2Provider != nil {
+	if h.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
-		mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleOAuth2Metadata)
-		mux.HandleFunc("/.well-known/oauth-protected-resource", s.handleOAuth2ProtectedResourceMetadata)
+		mux.HandleFunc("/.well-known/oauth-authorization-server", h.handleOAuth2Metadata)
+		mux.HandleFunc("/.well-known/oauth-protected-resource", h.handleOAuth2ProtectedResourceMetadata)
 
 		// OAuth2 endpoints
-		mux.HandleFunc("/mcp/oauth2/authorize", s.handleOAuth2Authorize)
-		mux.HandleFunc("/mcp/oauth2/consent", s.handleOAuth2Consent)   // Consent page
-		mux.HandleFunc("/mcp/oauth2/callback", s.handleOAuth2Callback) // SSO callback
-		mux.HandleFunc("/mcp/oauth2/token", s.handleOAuth2Token)
-		mux.HandleFunc("/mcp/oauth2/introspect", s.handleOAuth2Introspect)
-		mux.HandleFunc("/mcp/oauth2/revoke", s.handleOAuth2Revoke)
-		mux.HandleFunc("/mcp/oauth2/register", s.handleOAuth2Register) // Dynamic client registration (RFC 7591)
+		mux.HandleFunc("/mcp/oauth2/authorize", h.handleOAuth2Authorize)
+		mux.HandleFunc("/mcp/oauth2/consent", h.handleOAuth2Consent)   // Consent page
+		mux.HandleFunc("/mcp/oauth2/callback", h.handleOAuth2Callback) // SSO callback
+		mux.HandleFunc("/mcp/oauth2/token", h.handleOAuth2Token)
+		mux.HandleFunc("/mcp/oauth2/introspect", h.handleOAuth2Introspect)
+		mux.HandleFunc("/mcp/oauth2/revoke", h.handleOAuth2Revoke)
+		mux.HandleFunc("/mcp/oauth2/register", h.handleOAuth2Register) // Dynamic client registration (RFC 7591)
 
 		// Device code flow endpoints (RFC 8628)
-		mux.HandleFunc("/mcp/oauth2/device/authorize", s.handleOAuth2DeviceAuthorize)
-		mux.HandleFunc("/mcp/oauth2/device/verify", s.handleOAuth2DeviceVerify)
+		mux.HandleFunc("/mcp/oauth2/device/authorize", h.handleOAuth2DeviceAuthorize)
+		mux.HandleFunc("/mcp/oauth2/device/verify", h.handleOAuth2DeviceVerify)
 
 		// MCP protocol endpoint
-		mux.HandleFunc("/mcp/message", s.handleMCPMessage)
+		mux.HandleFunc("/mcp/message", h.handleMCPMessage)
 
-		s.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
+		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
 	}
 
 	// IDP endpoints (if enabled)
-	if s.idpProvider != nil {
+	if h.idpProvider != nil {
 		// OIDC discovery metadata (only under /idp prefix)
-		mux.HandleFunc("/idp/.well-known/openid-configuration", s.handleIDPMetadata)
+		mux.HandleFunc("/idp/.well-known/openid-configuration", h.handleIDPMetadata)
 
 		// IDP OAuth2 endpoints
-		mux.HandleFunc("/idp/login", s.handleIDPLogin)
-		mux.HandleFunc("/idp/authorize", s.handleIDPAuthorize)
-		mux.HandleFunc("/idp/token", s.handleIDPToken)
-		mux.HandleFunc("/idp/userinfo", s.handleIDPUserInfo)
-		mux.HandleFunc("/idp/.well-known/jwks.json", s.handleIDPJWKS)
+		mux.HandleFunc("/idp/login", h.handleIDPLogin)
+		mux.HandleFunc("/idp/authorize", h.handleIDPAuthorize)
+		mux.HandleFunc("/idp/token", h.handleIDPToken)
+		mux.HandleFunc("/idp/userinfo", h.handleIDPUserInfo)
+		mux.HandleFunc("/idp/.well-known/jwks.json", h.handleIDPJWKS)
 
-		s.logger.Info(logging.DestinationHTTP, "IDP endpoints enabled", "path_prefix", "/idp")
+		h.logger.Info(logging.DestinationHTTP, "IDP endpoints enabled", "path_prefix", "/idp")
 	}
 
 	// Metrics endpoint (if enabled)
-	if s.prometheusExporter != nil {
-		mux.HandleFunc("/metrics", s.handleMetrics)
+	if h.prometheusExporter != nil {
+		mux.HandleFunc("/metrics", h.handleMetrics)
 	}
 
 	// Health and readiness endpoints for Kubernetes
-	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.HandleFunc("/readyz", s.handleReadyz)
+	mux.HandleFunc("/healthz", h.handleHealthz)
+	mux.HandleFunc("/readyz", h.handleReadyz)
 }

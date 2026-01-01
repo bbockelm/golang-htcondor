@@ -72,7 +72,7 @@ func hasGroup(userGroups []string, requiredGroup string) bool {
 
 // validateGroupAccess checks if the user has access based on group membership
 // Returns error if access is denied
-func (s *Server) validateGroupAccess(userGroups []string) error {
+func (s *Handler) validateGroupAccess(userGroups []string) error {
 	// If access group is configured, user must be in it
 	if s.mcpAccessGroup != "" && !hasGroup(userGroups, s.mcpAccessGroup) {
 		return fmt.Errorf("user not in required access group: %s", s.mcpAccessGroup)
@@ -81,7 +81,7 @@ func (s *Server) validateGroupAccess(userGroups []string) error {
 }
 
 // getScopesForGroups determines OAuth2 scopes based on group membership
-func (s *Server) getScopesForGroups(userGroups []string, requestedScopes []string) []string {
+func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []string) []string {
 	grantedScopes := []string{"openid"} // Always grant openid
 
 	// Check each requested scope
@@ -110,7 +110,7 @@ func (s *Server) getScopesForGroups(userGroups []string, requestedScopes []strin
 }
 
 // fetchUserInfo fetches user information from the IDP user info endpoint
-func (s *Server) fetchUserInfo(ctx context.Context, accessToken string) (*UserInfo, error) {
+func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserInfo, error) {
 	if s.oauth2UserInfoURL == "" {
 		return nil, fmt.Errorf("user info URL not configured")
 	}
@@ -165,7 +165,7 @@ func (s *Server) fetchUserInfo(ctx context.Context, accessToken string) (*UserIn
 }
 
 // handleOAuth2Callback handles the OAuth2 callback from the IDP
-func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if s.oauth2Provider == nil || s.oauth2Config == nil {
 		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
@@ -325,7 +325,7 @@ func (s *Server) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogin initiates the OAuth2 login flow
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Check if already authenticated
 	if _, ok := s.getSessionFromRequest(r); ok {
 		// Already authenticated, redirect to return_to or root

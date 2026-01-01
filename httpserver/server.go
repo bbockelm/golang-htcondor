@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,16 +19,16 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/ory/fosite"
-	"golang.org/x/crypto/bcrypt"
-	"golang.org/x/oauth2"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	*Handler                   // Embedded handler for business logic
-	httpServer *http.Server    // HTTP server instance
-	listener   net.Listener    // Explicit listener to get actual address
-	logger     *logging.Logger // Logger instance (duplicated for convenience)
+	*Handler                      // Embedded handler for business logic
+	httpServer *http.Server       // HTTP server instance
+	listener   net.Listener       // Explicit listener to get actual address
+	logger     *logging.Logger    // Logger instance (duplicated for convenience)
+	handlerCtx context.Context    // Context for handler's lifetime
+	cancelFunc context.CancelFunc // Function to cancel handler context
 }
 
 // Config holds server configuration
@@ -155,10 +154,8 @@ func NewServer(cfg Config) (*Server, error) {
 		logger: handler.logger,
 	}
 
-	// Setup routes on the handler
-	s.SetupRoutes(s.setupRoutes)
-
 	// Wrap handler with access logging middleware
+	// Routes will be set up in Handler.Initialize()
 	s.httpServer.Handler = s.accessLogMiddleware(s.Handler)
 
 	return s, nil
@@ -198,205 +195,7 @@ func parseURL(urlStr string) (*url.URL, error) {
 	return url.Parse(urlStr)
 }
 
-// initializeIDP initializes the IDP provider with actual listening address
-func (s *Server) initializeIDP(ln net.Listener, protocol string) error {
-	if s.idpProvider == nil {
-		return nil
-	}
-
-	ctx := context.Background()
-
-	// Update issuer with actual listening address only if needed
-	actualAddr := ln.Addr().String()
-	issuer := protocol + "://" + actualAddr
-
-	// Only update if the issuer was empty or had a dynamic port (:0)
-	if shouldUpdateIssuer(s.idpProvider.config.AccessTokenIssuer) {
-		s.idpProvider.UpdateIssuer(issuer)
-	} else {
-		// Use the configured issuer instead
-		issuer = s.idpProvider.config.AccessTokenIssuer
-	}
-
-	// Initialize default users
-	if err := s.initializeIDPUsers(ctx); err != nil {
-		return fmt.Errorf("failed to initialize IDP users: %w", err)
-	}
-
-	// Initialize auto-generated client with redirect URI
-	redirectURI := issuer + "/idp/callback"
-	if err := s.initializeIDPClient(ctx, redirectURI); err != nil {
-		return fmt.Errorf("failed to initialize IDP client: %w", err)
-	}
-
-	// Configure internal IDP as the upstream OAuth2 provider for the server
-	// This allows the server to use its own IDP for authentication (SSO)
-	clientID := "internal-client"
-	clientSecret := "internal-secret"
-	ssoRedirectURI := issuer + "/mcp/oauth2/callback"
-
-	// Check if client exists
-	_, err := s.idpProvider.storage.GetClient(ctx, clientID)
-	if err != nil {
-		// Create client if not found (or error)
-		// Hash the secret
-		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
-		if err != nil {
-			return fmt.Errorf("failed to hash client secret: %w", err)
-		}
-
-		client := &fosite.DefaultClient{
-			ID:            clientID,
-			Secret:        hashedSecret,
-			RedirectURIs:  []string{ssoRedirectURI},
-			ResponseTypes: []string{"code"},
-			GrantTypes:    []string{"authorization_code", "refresh_token"},
-			Scopes:        []string{"openid", "profile", "email"},
-			Public:        false,
-		}
-
-		if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
-			return fmt.Errorf("failed to create internal IDP client: %w", err)
-		}
-		s.logger.Info(logging.DestinationHTTP, "Created internal IDP client", "client_id", clientID)
-	}
-
-	// Create Swagger UI client (public client)
-	swaggerClientID := "swagger-client"
-	swaggerRedirectURIs := []string{issuer + "/docs/oauth2-redirect"}
-
-	// Add localhost/127.0.0.1 variants if issuer uses wildcard or unspecified address
-	// This ensures Swagger UI works when accessed via localhost even if server listens on [::]
-	if strings.Contains(issuer, "[::]") || strings.Contains(issuer, "0.0.0.0") {
-		_, port, _ := net.SplitHostPort(actualAddr)
-		if port != "" {
-			swaggerRedirectURIs = append(swaggerRedirectURIs,
-				protocol+"://localhost:"+port+"/docs/oauth2-redirect",
-				protocol+"://127.0.0.1:"+port+"/docs/oauth2-redirect",
-			)
-		}
-	}
-
-	// Check if client exists
-	_, err = s.idpProvider.storage.GetClient(ctx, swaggerClientID)
-	if err != nil {
-		// Create client if not found (or error)
-		client := &fosite.DefaultClient{
-			ID:            swaggerClientID,
-			Secret:        nil, // Public client has no secret
-			RedirectURIs:  swaggerRedirectURIs,
-			ResponseTypes: []string{"code"},
-			GrantTypes:    []string{"authorization_code"},
-			Scopes:        []string{"openid", "profile", "email"},
-			Public:        true,
-		}
-
-		if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
-			return fmt.Errorf("failed to create Swagger IDP client: %w", err)
-		}
-		s.logger.Info(logging.DestinationHTTP, "Created Swagger IDP client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
-	}
-
-	// Also ensure the client exists in the OAuth2 provider if enabled
-	// This is required because Swagger UI is configured to use the MCP OAuth2 endpoints
-	if s.oauth2Provider != nil {
-		_, err = s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
-		if err != nil {
-			client := &fosite.DefaultClient{
-				ID:            swaggerClientID,
-				Secret:        nil, // Public client has no secret
-				RedirectURIs:  swaggerRedirectURIs,
-				ResponseTypes: []string{"code"},
-				GrantTypes:    []string{"authorization_code"},
-				Scopes:        []string{"openid", "profile", "email"},
-				Public:        true,
-			}
-
-			if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
-				s.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
-			} else {
-				s.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID)
-			}
-		}
-	}
-
-	// Configure s.oauth2Config to use the internal IDP
-	s.oauth2Config = &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  issuer + "/idp/authorize",
-			TokenURL: issuer + "/idp/token",
-		},
-		RedirectURL: ssoRedirectURI,
-		Scopes:      []string{"openid", "profile", "email"},
-	}
-	s.oauth2UserInfoURL = issuer + "/idp/userinfo"
-
-	s.logger.Info(logging.DestinationHTTP, "Configured OAuth2 SSO to use internal IDP", "issuer", issuer)
-
-	return nil
-}
-
-// initializeOAuth2 initializes the OAuth2 provider with actual listening address
-func (s *Server) initializeOAuth2(ln net.Listener, protocol string) {
-	if s.oauth2Provider == nil {
-		return
-	}
-
-	actualAddr := ln.Addr().String()
-	issuer := s.oauth2Provider.config.AccessTokenIssuer
-
-	// Only update issuer if it was empty or had a dynamic port (:0)
-	if shouldUpdateIssuer(issuer) {
-		issuer = protocol + "://" + actualAddr
-		s.oauth2Provider.UpdateIssuer(issuer)
-	}
-
-	// Create Swagger UI client (public client) if not already present
-	// This ensures Swagger UI can authenticate via OAuth2 in normal mode (MCP enabled without IDP)
-	ctx := context.Background()
-	swaggerClientID := "swagger-client"
-	swaggerRedirectURIs := []string{issuer + "/docs/oauth2-redirect"}
-
-	// Add localhost/127.0.0.1 variants if issuer uses wildcard or unspecified address
-	// This ensures Swagger UI works when accessed via localhost even if server listens on [::]
-	issuerURL, err := parseURL(issuer)
-	if err == nil {
-		hostname := issuerURL.Hostname()
-		port := issuerURL.Port()
-		if (hostname == "[::]" || hostname == "0.0.0.0") && port == "0" {
-			_, actualPort, _ := net.SplitHostPort(actualAddr)
-			if actualPort != "" {
-				swaggerRedirectURIs = append(swaggerRedirectURIs,
-					protocol+"://localhost:"+actualPort+"/docs/oauth2-redirect",
-					protocol+"://127.0.0.1:"+actualPort+"/docs/oauth2-redirect",
-				)
-			}
-		}
-	}
-
-	// Check if client exists
-	_, err = s.oauth2Provider.GetStorage().GetClient(ctx, swaggerClientID)
-	if err != nil {
-		// Create client if not found (or error)
-		client := &fosite.DefaultClient{
-			ID:            swaggerClientID,
-			Secret:        nil, // Public client has no secret
-			RedirectURIs:  swaggerRedirectURIs,
-			ResponseTypes: []string{"code"},
-			GrantTypes:    []string{"authorization_code"},
-			Scopes:        []string{"openid", "profile", "email"},
-			Public:        true,
-		}
-
-		if err := s.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
-		} else {
-			s.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
-		}
-	}
-}
+// initializeOAuth2 initializes the OAuth2 provider with actual listening address (delegates to Handler)
 
 // getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
 func getDefaultDBPath(cfg *config.Config, filename string) string {
@@ -421,30 +220,12 @@ func (s *Server) Start() error {
 	}
 	s.listener = ln
 
-	// Initialize IDP if enabled
-	if err := s.initializeIDP(ln, "http"); err != nil {
+	// Create a cancellable context for the handler's lifetime
+	s.handlerCtx, s.cancelFunc = context.WithCancel(context.Background())
+
+	// Start Handler with actual listening address
+	if err := s.Handler.Start(s.handlerCtx, ln, "http"); err != nil {
 		return err
-	}
-
-	// Initialize OAuth2 provider with actual address
-	s.initializeOAuth2(ln, "http")
-
-	// Start schedd address updater if address was discovered from collector
-	if s.scheddDiscovered && s.collector != nil {
-		s.startScheddAddressUpdater()
-	}
-
-	// Start credd address updater if credd was discovered (or discovery failed but should retry)
-	if s.creddDiscovered && s.collector != nil {
-		s.startCreddAddressUpdater()
-	}
-
-	// Start session cleanup goroutine
-	s.startSessionCleanup()
-
-	// Start periodic ping goroutine if enabled
-	if s.pingInterval > 0 {
-		go s.periodicPing()
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
@@ -465,30 +246,12 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	}
 	s.listener = ln
 
-	// Initialize IDP if enabled
-	if err := s.initializeIDP(ln, "https"); err != nil {
+	// Create a cancellable context for the handler's lifetime
+	s.handlerCtx, s.cancelFunc = context.WithCancel(context.Background())
+
+	// Start Handler with actual listening address
+	if err := s.Handler.Start(s.handlerCtx, ln, "https"); err != nil {
 		return err
-	}
-
-	// Initialize OAuth2 provider with actual address
-	s.initializeOAuth2(ln, "https")
-
-	// Start schedd address updater if address was discovered from collector
-	if s.scheddDiscovered && s.collector != nil {
-		s.startScheddAddressUpdater()
-	}
-
-	// Start credd address updater if credd was discovered (or discovery failed but should retry)
-	if s.creddDiscovered && s.collector != nil {
-		s.startCreddAddressUpdater()
-	}
-
-	// Start session cleanup goroutine
-	s.startSessionCleanup()
-
-	// Start periodic ping goroutine if enabled
-	if s.pingInterval > 0 {
-		go s.periodicPing()
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
@@ -501,177 +264,17 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info(logging.DestinationHTTP, "Shutting down HTTP server")
 
-	// Stop periodic ping goroutine if enabled
-	if s.pingStopCh != nil {
-		close(s.pingStopCh)
+	// Cancel the handler's context to signal background goroutines to stop
+	if s.cancelFunc != nil {
+		s.cancelFunc()
 	}
 
-	// Signal background goroutines to stop
-	close(s.stopChan)
-
-	// Wait for background goroutines to finish (with timeout)
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-
-	// Wait for goroutines to finish or context to be done
-	select {
-	case <-done:
-		s.logger.Debug(logging.DestinationHTTP, "Background goroutines stopped")
-	case <-ctx.Done():
-		s.logger.Warn(logging.DestinationHTTP, "Shutdown timeout waiting for background goroutines")
-	}
-
-	// Stop handler (closes OAuth2 and IDP providers)
+	// Stop handler (waits for goroutines to finish and closes providers)
 	if err := s.Stop(ctx); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to stop handler", "error", err)
 	}
 
 	return s.httpServer.Shutdown(ctx)
-}
-
-// getSchedd returns the current schedd instance (thread-safe)
-func (s *Server) getSchedd() *htcondor.Schedd {
-	s.scheddMu.RLock()
-	defer s.scheddMu.RUnlock()
-	return s.schedd
-}
-
-// updateSchedd updates the schedd instance with a new address (thread-safe)
-func (s *Server) updateSchedd(newAddress string) {
-	s.scheddMu.Lock()
-	defer s.scheddMu.Unlock()
-
-	// Only update if the address has changed
-	if s.schedd.Address() != newAddress {
-		s.logger.Info(logging.DestinationSchedd, "Updating schedd address",
-			"old_address", s.schedd.Address(),
-			"new_address", newAddress)
-		s.schedd = htcondor.NewSchedd(s.scheddName, newAddress)
-	}
-}
-
-// startScheddAddressUpdater starts a background goroutine that periodically
-// checks for schedd address updates from the collector
-func (s *Server) startScheddAddressUpdater() {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-
-		s.logger.Info(logging.DestinationSchedd, "Started schedd address updater",
-			"interval", "60s",
-			"schedd_name", s.scheddName)
-
-		for {
-			select {
-			case <-ticker.C:
-				// Query collector for updated schedd address
-				newAddr, err := discoverSchedd(s.collector, s.scheddName, 5*time.Second, s.logger)
-				if err != nil {
-					s.logger.Warn(logging.DestinationSchedd, "Failed to discover schedd address",
-						"error", err,
-						"schedd_name", s.scheddName)
-					continue
-				}
-
-				// Update schedd if address changed
-				s.updateSchedd(newAddr)
-
-			case <-s.stopChan:
-				s.logger.Info(logging.DestinationSchedd, "Stopping schedd address updater")
-				return
-			}
-		}
-	}()
-}
-
-// startCreddAddressUpdater starts a background goroutine that periodically
-// checks for credd address updates from the collector
-func (s *Server) startCreddAddressUpdater() {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
-		// Use half of ping interval, or 30 seconds if ping is disabled
-		checkInterval := s.pingInterval / 2
-		if checkInterval == 0 {
-			checkInterval = 30 * time.Second
-		}
-
-		ticker := time.NewTicker(checkInterval)
-		defer ticker.Stop()
-
-		s.logger.Info(logging.DestinationHTTP, "Starting periodic credd discovery", "interval", checkInterval)
-
-		for {
-			select {
-			case <-ticker.C:
-				// Get current schedd address for credd discovery
-				schedd := s.getSchedd()
-				scheddAddr := schedd.Address()
-
-				// Attempt to discover credd
-				creddAddr, err := discoverCredd(s.scheddName, scheddAddr, s.collector, s.logger)
-				if err != nil {
-					// Only log if credd is already available to avoid spam
-					if s.creddAvailable.Load() {
-						s.logger.Warn(logging.DestinationHTTP, "Credd became unavailable", "error", err)
-						s.creddAvailable.Store(false)
-					}
-					continue
-				}
-
-				// Update credd if it became available
-				if !s.creddAvailable.Load() {
-					s.logger.Info(logging.DestinationHTTP, "Credd became available", "address", creddAddr)
-					s.credd = htcondor.NewCedarCredd(creddAddr)
-					s.creddAvailable.Store(true)
-				}
-
-			case <-s.stopChan:
-				s.logger.Info(logging.DestinationHTTP, "Stopping credd address updater")
-				return
-			}
-		}
-	}()
-}
-
-// startSessionCleanup starts a background goroutine that periodically
-// cleans up expired sessions
-func (s *Server) startSessionCleanup() {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
-		// Clean up expired sessions every hour
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-
-		s.logger.Info(logging.DestinationHTTP, "Started session cleanup goroutine", "interval", "1h")
-
-		for {
-			select {
-			case <-ticker.C:
-				s.sessionStore.Cleanup()
-				s.logger.Debug(logging.DestinationHTTP, "Cleaned up expired sessions",
-					"active_sessions", s.sessionStore.Size())
-
-			case <-s.stopChan:
-				s.logger.Info(logging.DestinationHTTP, "Stopping session cleanup goroutine")
-				return
-			}
-		}
-	}()
-}
-
-// GetOAuth2Provider returns the OAuth2 provider (for testing)
-func (s *Server) GetOAuth2Provider() *OAuth2Provider {
-	return s.oauth2Provider
 }
 
 // GetAddr returns the actual listening address of the server.
@@ -681,15 +284,6 @@ func (s *Server) GetAddr() string {
 		return ""
 	}
 	return s.listener.Addr().String()
-}
-
-// UpdateOAuth2RedirectURL updates the OAuth2 redirect URL for SSO integration.
-// This is useful when the server is started with a dynamic port (e.g., "127.0.0.1:0")
-// and you need to update the redirect URL after the server has started.
-func (s *Server) UpdateOAuth2RedirectURL(redirectURL string) {
-	if s.oauth2Config != nil {
-		s.oauth2Config.RedirectURL = redirectURL
-	}
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written
@@ -783,94 +377,6 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ErrorResponse represents an error response
-type ErrorResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message,omitempty"`
-	Code    int    `json:"code"`
-}
-
-// writeError writes an error response
-func (s *Server) writeError(w http.ResponseWriter, statusCode int, message string) {
-	// Add WWW-Authenticate header for 401 Unauthorized responses per RFC 6750
-	// This is required for Bearer token authentication regardless of OAuth2 provider
-	if statusCode == http.StatusUnauthorized {
-		s.addWWWAuthenticateHeader(w, "", "")
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(ErrorResponse{
-		Error:   http.StatusText(statusCode),
-		Message: message,
-		Code:    statusCode,
-	}); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode error response", "error", err, "status_code", statusCode)
-	}
-}
-
-// writeOAuthError writes an error response with appropriate WWW-Authenticate header
-func (s *Server) writeOAuthError(w http.ResponseWriter, statusCode int, errorCode, errorDescription string) {
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-		s.addWWWAuthenticateHeader(w, errorCode, errorDescription)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(ErrorResponse{
-		Error:   errorCode,
-		Message: errorDescription,
-		Code:    statusCode,
-	}); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode error response", "error", err, "status_code", statusCode)
-	}
-}
-
-// addWWWAuthenticateHeader adds RFC 6750 compliant WWW-Authenticate header
-// See: https://datatracker.ietf.org/doc/html/rfc6750#section-3
-func (s *Server) addWWWAuthenticateHeader(w http.ResponseWriter, errorCode, errorDescription string) {
-	var headerValue string
-
-	if s.oauth2Provider != nil {
-		// Get the issuer from OAuth2 provider config
-		realm := s.oauth2Provider.config.AccessTokenIssuer
-
-		// Build WWW-Authenticate header value with realm
-		headerValue = fmt.Sprintf(`Bearer realm="%s"`, realm)
-
-		if errorCode != "" {
-			headerValue += fmt.Sprintf(`, error="%s"`, errorCode)
-		}
-
-		if errorDescription != "" {
-			headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
-		}
-	} else {
-		// Even without OAuth2 provider, we should include WWW-Authenticate header
-		// for proper OAuth2/Bearer token authentication per RFC 6750
-		headerValue = "Bearer"
-
-		if errorCode != "" {
-			headerValue += fmt.Sprintf(` error="%s"`, errorCode)
-		}
-
-		if errorDescription != "" {
-			headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
-		}
-	}
-
-	w.Header().Set("WWW-Authenticate", headerValue)
-}
-
-// writeJSON writes a JSON response
-func (s *Server) writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if data != nil {
-		if err := json.NewEncoder(w).Encode(data); err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Error encoding JSON response", "error", err, "status_code", statusCode)
-		}
-	}
-}
-
 // extractBearerToken extracts the bearer token from the Authorization header
 func extractBearerToken(r *http.Request) (string, error) {
 	auth := r.Header.Get("Authorization")
@@ -890,7 +396,7 @@ func extractBearerToken(r *http.Request) (string, error) {
 // checks for a session cookie, or if userHeader is set and no auth token is present,
 // generates a token for the username from the specified header.
 // Priority: Bearer token → Session cookie → User header
-func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
+func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 	// Try to extract bearer token first
 	token, err := extractBearerToken(r)
 	if err == nil {
@@ -968,7 +474,7 @@ func (s *Server) extractOrGenerateToken(r *http.Request) (string, error) {
 
 // createAuthenticatedContext creates a context with both token and SecurityConfig set
 // This is a helper to avoid duplicating security setup code in every handler
-func (s *Server) createAuthenticatedContext(r *http.Request) (context.Context, error) {
+func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, error) {
 	// Extract bearer token or generate from user header
 	token, err := s.extractOrGenerateToken(r)
 	if err != nil {
@@ -1282,104 +788,8 @@ func findCreddAddressFile(logger *logging.Logger) string {
 	return ""
 }
 
-// periodicPing runs in a goroutine and periodically pings the collector and schedd
-func (s *Server) periodicPing() {
-	ticker := time.NewTicker(s.pingInterval)
-	defer ticker.Stop()
-
-	s.logger.Info(logging.DestinationHTTP, "Starting periodic daemon ping", "interval", s.pingInterval)
-
-	for {
-		select {
-		case <-s.pingStopCh:
-			s.logger.Info(logging.DestinationHTTP, "Stopping periodic daemon ping")
-			return
-		case <-ticker.C:
-			s.performPeriodicPing()
-		}
-	}
-}
-
-// performPeriodicPing performs a single ping to collector and schedd
-func (s *Server) performPeriodicPing() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// If we have a token, configure security
-	if s.token != "" {
-		secConfig, err := ConfigureSecurityForToken(s.token)
-		if err != nil {
-			s.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
-		} else {
-			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
-		}
-	}
-
-	// Ping collector if configured
-	if s.collector != nil {
-		_, err := s.collector.Ping(ctx)
-		if err != nil {
-			s.logger.Warn(logging.DestinationHTTP, "Periodic collector ping failed", "error", err)
-		} else {
-			s.logger.Debug(logging.DestinationHTTP, "Periodic collector ping succeeded")
-		}
-	}
-
-	// Ping schedd
-	_, err := s.schedd.Ping(ctx)
-	if err != nil {
-		s.logger.Warn(logging.DestinationHTTP, "Periodic schedd ping failed", "error", err)
-	} else {
-		s.logger.Debug(logging.DestinationHTTP, "Periodic schedd ping succeeded")
-	}
-}
-
-// redirectToLogin redirects a browser request to the OAuth2 login flow
-// preserving the original URL in the state parameter
-func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
-	if s.oauth2Config == nil {
-		s.writeError(w, http.StatusUnauthorized, "Authentication required but no OAuth2 provider configured")
-		return
-	}
-
-	// Build the original URL (relative path with query string)
-	// Check if a return_to parameter is provided (e.g. from /login?return_to=/dashboard)
-	originalURL := r.URL.Query().Get("return_to")
-	if originalURL == "" {
-		originalURL = r.URL.Path
-		if r.URL.RawQuery != "" {
-			originalURL += "?" + r.URL.RawQuery
-		}
-	}
-
-	// If the original URL is /login (or starts with /login), default to root to avoid loops
-	if strings.HasPrefix(originalURL, "/login") {
-		originalURL = "/"
-	}
-
-	// Generate state parameter
-	state, err := s.oauth2StateStore.GenerateState()
-	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
-		return
-	}
-
-	// Store the state with the original URL (no authorize request for browser flow)
-	s.oauth2StateStore.StoreWithURL(state, nil, originalURL)
-
-	// Build authorization URL
-	authURL := s.oauth2Config.AuthCodeURL(state)
-
-	s.logger.Info(logging.DestinationHTTP, "Redirecting unauthenticated browser to login",
-		"original_url", originalURL, "state", state, "auth_url", authURL)
-
-	// Redirect to IDP
-	http.Redirect(w, r, authURL, http.StatusFound)
-}
-
 // getHTTPClient returns an HTTP client with the configured CA certificate
-func (s *Server) getHTTPClient() *http.Client {
+func (s *Handler) getHTTPClient() *http.Client {
 	if s.tlsCACertFile == "" {
 		return http.DefaultClient
 	}

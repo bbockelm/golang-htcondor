@@ -43,7 +43,7 @@ type oauthCredentialResponse struct {
 	Credential string `json:"credential"`
 }
 
-func (s *Server) handleUserCredential(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleUserCredential(w http.ResponseWriter, r *http.Request) {
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
@@ -109,7 +109,7 @@ func (s *Server) handleUserCredential(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleServiceCredentialCollection manages the collection resource (/creds/service) for listing.
-func (s *Server) handleServiceCredentialCollection(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleServiceCredentialCollection(w http.ResponseWriter, r *http.Request) {
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
@@ -152,7 +152,7 @@ func (s *Server) handleServiceCredentialCollection(w http.ResponseWriter, r *htt
 }
 
 // handleServiceCredentialItem manages resource items (/creds/service/{service}[/{handle}][/(credential)]).
-func (s *Server) handleServiceCredentialItem(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Request) {
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
