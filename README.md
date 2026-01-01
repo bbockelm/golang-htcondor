@@ -11,6 +11,7 @@ This library provides a Go interface to HTCondor services, allowing you to:
 - Query the schedd for job information
 - Submit and manage jobs
 - Transfer files using HTCondor's file transfer protocol
+- Create and extract job sandboxes (input/output file management)
 - Rate limiting for query protection (configurable via HTCondor config)
 - **Query optimization with defaults, limits, and pagination** (see [QUERY_OPTIMIZATION.md](design_notes/QUERY_OPTIMIZATION.md))
 
@@ -137,6 +138,40 @@ The `Submit` method supports all HTCondor submit file features:
 - Multiple procs: `queue 5`
 - Queue with variables: `queue name from (Alice Bob Charlie)`
 - Full submit file syntax with macros and expressions
+
+### Sandbox Management
+
+The library includes a `sandbox` package for creating and extracting job sandboxes at the filesystem level:
+
+```go
+import (
+    "bytes"
+    "context"
+    "github.com/bbockelm/golang-htcondor/sandbox"
+    "github.com/PelicanPlatform/classad/classad"
+)
+
+// Create input sandbox tarball from job ad
+jobAd := getJobAd(clusterID)
+var inputTar bytes.Buffer
+if err := sandbox.CreateInputSandboxTar(ctx, jobAd, &inputTar); err != nil {
+    log.Fatal(err)
+}
+
+// Extract output sandbox to filesystem
+outputTar := downloadOutputSandbox(clusterID)
+if err := sandbox.ExtractOutputSandbox(ctx, jobAd, outputTar); err != nil {
+    log.Fatal(err)
+}
+```
+
+The sandbox package provides:
+- **Input sandbox creation**: Creates tarball from files specified in job ad
+- **Output sandbox extraction**: Extracts tarball to proper locations with remapping support
+- **Wildcard support**: Match output files with glob patterns
+- **Directory preservation**: Maintains directory structure in tarballs
+
+See [sandbox/README.md](sandbox/README.md) and [design_notes/SANDBOX_API.md](design_notes/SANDBOX_API.md) for complete documentation.
 
 ### HTTP API Server
 

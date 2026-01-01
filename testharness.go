@@ -208,6 +208,7 @@ NETWORK_INTERFACE = 127.0.0.1
 SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY D_SYSCALLS
 SCHEDD_LOG = $(LOG)/ScheddLog
 MAX_SCHEDD_LOG = 10000000
+STARTER_DEBUG = D_FULLDEBUG
 
 # Fast polling for testing
 POLLING_INTERVAL = 5
@@ -393,6 +394,7 @@ func (h *CondorTestHarness) printMasterLog() {
 }
 
 // printShadowLog prints the shadow log contents for debugging
+// Use PrintShadowLog() for public access from tests
 func (h *CondorTestHarness) printShadowLog() {
 	shadowLog := filepath.Join(h.logDir, "ShadowLog")
 	data, err := os.ReadFile(shadowLog) //nolint:gosec // Test code reading test logs
@@ -404,8 +406,13 @@ func (h *CondorTestHarness) printShadowLog() {
 	h.t.Logf("=== ShadowLog contents ===\n%s\n=== End ShadowLog ===", string(data))
 }
 
+// PrintShadowLog is the exported version for test access
+func (h *CondorTestHarness) PrintShadowLog() {
+	h.printShadowLog()
+}
+
 // printStarterLogs prints all starter log contents for debugging
-// Starter logs are dynamically named (StarterLog.slot1, StarterLog.slot2, etc.)
+// Use PrintStarterLogs() for public access from tests
 func (h *CondorTestHarness) printStarterLogs() {
 	// Find all StarterLog.* files, but skip StarterLog.test
 	pattern := filepath.Join(h.logDir, "StarterLog.*")
@@ -434,6 +441,11 @@ func (h *CondorTestHarness) printStarterLogs() {
 
 		h.t.Logf("=== %s contents ===\n%s\n=== End %s ===", filepath.Base(logPath), string(data), filepath.Base(logPath))
 	}
+}
+
+// PrintStarterLogs is the exported version for test access
+func (h *CondorTestHarness) PrintStarterLogs() {
+	h.printStarterLogs()
 }
 
 // checkStartdStatus checks if startd has crashed and prints its log
