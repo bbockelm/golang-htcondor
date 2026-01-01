@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -23,11 +22,11 @@ func TestScheddAddressUpdate(t *testing.T) {
 	}
 
 	// Create a simple server instance with minimal config
-	s := &Server{
-		scheddName: "test-schedd",
-		schedd:     htcondor.NewSchedd("test-schedd", "127.0.0.1:9618"),
-		stopChan:   make(chan struct{}),
-		logger:     logger,
+	cfg := newTestConfig(t)
+	cfg.Logger = logger
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Test initial address
@@ -67,11 +66,11 @@ func TestScheddThreadSafety(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	s := &Server{
-		scheddName: "test-schedd",
-		schedd:     htcondor.NewSchedd("test-schedd", "127.0.0.1:9618"),
-		stopChan:   make(chan struct{}),
-		logger:     logger,
+	cfg := newTestConfig(t)
+	cfg.Logger = logger
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	var wg sync.WaitGroup
@@ -114,11 +113,10 @@ func TestScheddThreadSafety(t *testing.T) {
 
 // TestServerShutdown tests the graceful shutdown of the server
 func TestServerShutdown(t *testing.T) {
-	s := &Server{
-		scheddName:       "test-schedd",
-		schedd:           htcondor.NewSchedd("test-schedd", "127.0.0.1:9618"),
-		scheddDiscovered: false,
-		stopChan:         make(chan struct{}),
+	cfg := newTestConfig(t)
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Start a goroutine that simulates background work
@@ -184,12 +182,13 @@ func TestScheddDiscoveryFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{
-				scheddName:       "test-schedd",
-				schedd:           htcondor.NewSchedd("test-schedd", "127.0.0.1:9618"),
-				scheddDiscovered: tt.scheddDiscovered,
-				stopChan:         make(chan struct{}),
+			cfg := newTestConfig(t)
+			s, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("Failed to create server: %v", err)
 			}
+			// Manually set the discovered flag for testing
+			s.scheddDiscovered = tt.scheddDiscovered
 
 			// The actual test would verify that startScheddAddressUpdater
 			// is only called when scheddDiscovered is true, but since
@@ -223,8 +222,9 @@ func TestSwaggerClientCreatedInNormalMode(t *testing.T) {
 		ScheddAddr:   "127.0.0.1:9618",
 		Logger:       logger,
 		OAuth2DBPath: tempDBPath,
-		EnableMCP:    true,  // MCP enabled
-		EnableIDP:    false, // IDP disabled (normal mode)
+		OAuth2Issuer: "http://localhost:0", // Use :0 so it gets updated to actual listener
+		EnableMCP:    true,                 // MCP enabled
+		EnableIDP:    false,                // IDP disabled (normal mode)
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -270,15 +270,21 @@ func TestSwaggerClientCreatedInNormalMode(t *testing.T) {
 
 	// Verify redirect URIs include the docs path
 	redirectURIs := swaggerClient.GetRedirectURIs()
+	if len(redirectURIs) == 0 {
+		t.Error("swagger-client should have at least one redirect URI")
+	}
+
+	// Since OAuth2Issuer was configured with :0, it should be updated to the actual listener address
+	expectedURI := "http://" + ln.Addr().String() + "/docs/oauth2-redirect"
 	found := false
 	for _, uri := range redirectURIs {
-		if uri == "http://"+ln.Addr().String()+"/docs/oauth2-redirect" {
+		if uri == expectedURI {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("swagger-client redirect URIs should include /docs/oauth2-redirect, got: %v", redirectURIs)
+		t.Errorf("swagger-client redirect URIs should include %s, got: %v", expectedURI, redirectURIs)
 	}
 }
 

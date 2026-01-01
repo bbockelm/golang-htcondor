@@ -19,17 +19,6 @@ func TestDynamicClientRegistrationScopes(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_oauth2.db")
 
-	// Create OAuth2 provider
-	oauth2Provider, err := NewOAuth2Provider(dbPath, "http://localhost:8080")
-	if err != nil {
-		t.Fatalf("Failed to create OAuth2 provider: %v", err)
-	}
-	defer func() {
-		if err := oauth2Provider.Close(); err != nil {
-			t.Errorf("Failed to close OAuth2 provider: %v", err)
-		}
-	}()
-
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
@@ -38,10 +27,17 @@ func TestDynamicClientRegistrationScopes(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create server
-	server := &Server{
-		oauth2Provider: oauth2Provider,
-		logger:         logger,
+	// Create server with OAuth2 enabled
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: dbPath,
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	tests := []struct {
@@ -161,17 +157,6 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_oauth2.db")
 
-	// Create OAuth2 provider
-	oauth2Provider, err := NewOAuth2Provider(dbPath, "http://localhost:8080")
-	if err != nil {
-		t.Fatalf("Failed to create OAuth2 provider: %v", err)
-	}
-	defer func() {
-		if err := oauth2Provider.Close(); err != nil {
-			t.Errorf("Failed to close OAuth2 provider: %v", err)
-		}
-	}()
-
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
@@ -180,10 +165,17 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create server
-	server := &Server{
-		oauth2Provider: oauth2Provider,
-		logger:         logger,
+	// Create server with OAuth2 enabled
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: dbPath,
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create HTTP request
@@ -255,17 +247,6 @@ func TestOAuth2ProtectedResourceMetadata(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_oauth2.db")
 
-	// Create OAuth2 provider
-	oauth2Provider, err := NewOAuth2Provider(dbPath, "http://localhost:8080")
-	if err != nil {
-		t.Fatalf("Failed to create OAuth2 provider: %v", err)
-	}
-	defer func() {
-		if err := oauth2Provider.Close(); err != nil {
-			t.Errorf("Failed to close OAuth2 provider: %v", err)
-		}
-	}()
-
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
@@ -274,10 +255,17 @@ func TestOAuth2ProtectedResourceMetadata(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create server
-	server := &Server{
-		oauth2Provider: oauth2Provider,
-		logger:         logger,
+	// Create server with OAuth2 enabled
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: dbPath,
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create HTTP request
@@ -351,17 +339,6 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_oauth2.db")
 
-	// Create OAuth2 provider
-	oauth2Provider, err := NewOAuth2Provider(dbPath, "http://localhost:8080")
-	if err != nil {
-		t.Fatalf("Failed to create OAuth2 provider: %v", err)
-	}
-	defer func() {
-		if err := oauth2Provider.Close(); err != nil {
-			t.Errorf("Failed to close OAuth2 provider: %v", err)
-		}
-	}()
-
 	// Create test logger
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
@@ -370,10 +347,17 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create server
-	server := &Server{
-		oauth2Provider: oauth2Provider,
-		logger:         logger,
+	// Create server with OAuth2 enabled
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: dbPath,
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	tests := []struct {

@@ -17,10 +17,15 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 		t.Fatalf("failed to create logger: %v", err)
 	}
 
-	s := &Server{
-		logger:     logger,
-		tokenCache: NewTokenCache(),
-		credd:      htcondor.NewInMemoryCredd(),
+	s, err := NewServer(Config{
+		Logger:       logger,
+		Credd:        htcondor.NewInMemoryCredd(),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 	s.creddAvailable.Store(true) // Mark credd as available for testing
 

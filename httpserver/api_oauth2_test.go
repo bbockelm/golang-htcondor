@@ -24,16 +24,17 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create a mock schedd
-	schedd := htcondor.NewSchedd("test-schedd", "localhost:9618")
-
 	t.Run("WithoutOAuth2Provider", func(t *testing.T) {
 		// Create server WITHOUT OAuth2 provider
-		server := &Server{
-			schedd:         schedd,
-			logger:         logger,
-			tokenCache:     NewTokenCache(),
-			oauth2Provider: nil, // No OAuth2 provider configured
+		server, err := NewServer(Config{
+			ScheddName:   "test-schedd",
+			ScheddAddr:   "localhost:9618",
+			Logger:       logger,
+			EnableMCP:    false,
+			OAuth2DBPath: t.TempDir() + "/sessions.db",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Test various /api endpoints
@@ -82,23 +83,17 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 	})
 
 	t.Run("WithOAuth2Provider", func(t *testing.T) {
-		// Create OAuth2 provider
-		oauth2Provider, err := NewOAuth2Provider(t.TempDir()+"/oauth2-test.db", "http://localhost:8080")
-		if err != nil {
-			t.Fatalf("Failed to create OAuth2 provider: %v", err)
-		}
-		defer func() {
-			if err := oauth2Provider.Close(); err != nil {
-				t.Errorf("Failed to close OAuth2 provider: %v", err)
-			}
-		}()
-
 		// Create server WITH OAuth2 provider
-		server := &Server{
-			schedd:         schedd,
-			logger:         logger,
-			tokenCache:     NewTokenCache(),
-			oauth2Provider: oauth2Provider,
+		server, err := NewServer(Config{
+			ScheddName:   "test-schedd",
+			ScheddAddr:   "localhost:9618",
+			Logger:       logger,
+			EnableMCP:    true,
+			OAuth2DBPath: t.TempDir() + "/oauth2-test.db",
+			OAuth2Issuer: "http://localhost:8080",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Test various /api endpoints
@@ -151,23 +146,17 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 	})
 
 	t.Run("WithValidToken", func(t *testing.T) {
-		// Create OAuth2 provider
-		oauth2Provider, err := NewOAuth2Provider(t.TempDir()+"/oauth2-test.db", "http://localhost:8080")
+		// Create server with OAuth2
+		server, err := NewServer(Config{
+			ScheddName:   "test-schedd",
+			ScheddAddr:   "localhost:9618",
+			Logger:       logger,
+			EnableMCP:    true,
+			OAuth2DBPath: t.TempDir() + "/oauth2-test.db",
+			OAuth2Issuer: "http://localhost:8080",
+		})
 		if err != nil {
-			t.Fatalf("Failed to create OAuth2 provider: %v", err)
-		}
-		defer func() {
-			if err := oauth2Provider.Close(); err != nil {
-				t.Errorf("Failed to close OAuth2 provider: %v", err)
-			}
-		}()
-
-		// Create server
-		server := &Server{
-			schedd:         schedd,
-			logger:         logger,
-			tokenCache:     NewTokenCache(),
-			oauth2Provider: oauth2Provider,
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Create a valid test token
@@ -196,23 +185,17 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 	})
 
 	t.Run("WithInvalidToken", func(t *testing.T) {
-		// Create OAuth2 provider
-		oauth2Provider, err := NewOAuth2Provider(t.TempDir()+"/oauth2-test.db", "http://localhost:8080")
+		// Create server with OAuth2
+		server, err := NewServer(Config{
+			ScheddName:   "test-schedd",
+			ScheddAddr:   "localhost:9618",
+			Logger:       logger,
+			EnableMCP:    true,
+			OAuth2DBPath: t.TempDir() + "/oauth2-test.db",
+			OAuth2Issuer: "http://localhost:8080",
+		})
 		if err != nil {
-			t.Fatalf("Failed to create OAuth2 provider: %v", err)
-		}
-		defer func() {
-			if err := oauth2Provider.Close(); err != nil {
-				t.Errorf("Failed to close OAuth2 provider: %v", err)
-			}
-		}()
-
-		// Create server
-		server := &Server{
-			schedd:         schedd,
-			logger:         logger,
-			tokenCache:     NewTokenCache(),
-			oauth2Provider: oauth2Provider,
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
@@ -260,10 +243,15 @@ func TestCollectorRoutesNoAuth(t *testing.T) {
 	collector := htcondor.NewCollector("localhost:9618")
 
 	// Create server with collector but no auth
-	server := &Server{
-		collector:  collector,
-		logger:     logger,
-		tokenCache: NewTokenCache(),
+	server, err := NewServer(Config{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "localhost:9618",
+		Collector:    collector,
+		Logger:       logger,
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/collector/ads", nil)

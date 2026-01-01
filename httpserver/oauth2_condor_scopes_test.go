@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -170,11 +171,17 @@ func TestGenerateHTCondorTokenWithCondorScopes(t *testing.T) {
 	}
 
 	// Create a test server
-	server := &Server{
-		signingKeyPath: keyPath,
-		trustDomain:    "test.htcondor.org",
-		uidDomain:      "test.htcondor.org",
-		logger:         logger,
+	server, err := NewServer(Config{
+		SigningKeyPath: keyPath,
+		TrustDomain:    "test.htcondor.org",
+		UIDDomain:      "test.htcondor.org",
+		Logger:         logger,
+		ScheddName:     "test-schedd",
+		ScheddAddr:     "127.0.0.1:9618",
+		OAuth2DBPath:   filepath.Join(t.TempDir(), "sessions.db"),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	tests := []struct {

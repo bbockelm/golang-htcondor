@@ -69,9 +69,15 @@ func TestParseUpdateCommand(t *testing.T) {
 }
 
 func TestHandleCollectorAdvertise_NoCollector(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: nil, // No collector configured
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    nil, // No collector configured
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", nil)
@@ -85,9 +91,15 @@ func TestHandleCollectorAdvertise_NoCollector(t *testing.T) {
 }
 
 func TestHandleCollectorAdvertise_MethodNotAllowed(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/collector/advertise", nil)
@@ -103,9 +115,15 @@ func TestHandleCollectorAdvertise_MethodNotAllowed(t *testing.T) {
 func TestHandleCollectorAdvertise_JSON_SingleAd(t *testing.T) {
 	// This test verifies the JSON parsing logic, but will fail to connect
 	// since there's no real collector
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create a test ad
@@ -147,9 +165,15 @@ func TestHandleCollectorAdvertise_JSON_SingleAd(t *testing.T) {
 }
 
 func TestHandleCollectorAdvertise_JSON_MissingAd(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	reqBody := AdvertiseRequest{
@@ -174,9 +198,15 @@ func TestHandleCollectorAdvertise_JSON_MissingAd(t *testing.T) {
 }
 
 func TestHandleCollectorAdvertise_PlainText(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// ClassAd in old format
@@ -208,9 +238,15 @@ TestAttr = 123
 }
 
 func TestHandleCollectorAdvertise_Multipart(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create multipart form
@@ -261,9 +297,15 @@ Name = "test-ad-2"
 }
 
 func TestHandleCollectorAdvertise_UnsupportedMediaType(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", strings.NewReader("data"))
@@ -278,9 +320,15 @@ func TestHandleCollectorAdvertise_UnsupportedMediaType(t *testing.T) {
 }
 
 func TestHandleCollectorAdvertise_InvalidCommand(t *testing.T) {
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	ad := classad.New()
@@ -314,8 +362,14 @@ func TestHandleCollectorAdvertise_InvalidCommand(t *testing.T) {
 }
 
 func TestParseAdvertiseMultipart_SizeLimit(t *testing.T) {
-	server := &Server{
-		logger: testLogger(t),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create a multipart form with a large file (> 1MB total)
@@ -350,9 +404,15 @@ func TestParseAdvertiseMultipart_SizeLimit(t *testing.T) {
 
 func TestHandleCollectorPath_Advertise(t *testing.T) {
 	// Test that the routing works correctly
-	server := &Server{
-		logger:    testLogger(t),
-		collector: htcondor.NewCollector("localhost:9618"),
+	server, err := NewServer(Config{
+		Logger:       testLogger(t),
+		Collector:    htcondor.NewCollector("localhost:9618"),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	ad := classad.New()
