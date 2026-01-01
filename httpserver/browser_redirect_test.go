@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/logging"
-	"golang.org/x/oauth2"
 )
 
 // TestIsBrowserRequest tests the browser detection logic
@@ -65,8 +64,14 @@ func TestIsBrowserRequest(t *testing.T) {
 // TestBrowserRedirectWithoutOAuth2 tests that browser requests without OAuth2 configured return error
 func TestBrowserRedirectWithoutOAuth2(t *testing.T) {
 	// Create a test server without OAuth2 configured
-	server := &Server{
-		oauth2Config: nil, // No OAuth2 provider
+	server, err := NewServer(Config{
+		EnableMCP:    false, // No OAuth2 provider
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/api/v1/jobs", nil)
@@ -91,9 +96,6 @@ func TestBrowserRedirectWithoutOAuth2(t *testing.T) {
 
 // TestBrowserRedirectWithOAuth2 tests that browser requests with OAuth2 configured redirect
 func TestBrowserRedirectWithOAuth2(t *testing.T) {
-	// Create a test OAuth2 state store
-	stateStore := NewOAuth2StateStore()
-
 	// Create a test logger
 	logConfig := &logging.Config{
 		OutputPath:        "stderr",
@@ -105,19 +107,21 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 	}
 
 	// Create a test server with OAuth2 configured
-	server := &Server{
-		oauth2Config: &oauth2.Config{
-			ClientID:     "test-client",
-			ClientSecret: "test-secret",
-			Endpoint: oauth2.Endpoint{
-				AuthURL:  "https://idp.example.com/authorize",
-				TokenURL: "https://idp.example.com/token",
-			},
-			RedirectURL: "https://server.example.com/mcp/oauth2/callback",
-			Scopes:      []string{"openid", "profile"},
-		},
-		oauth2StateStore: stateStore,
-		logger:           logger,
+	server, err := NewServer(Config{
+		Logger:             logger,
+		EnableMCP:          true,
+		OAuth2ClientID:     "test-client",
+		OAuth2ClientSecret: "test-secret",
+		OAuth2AuthURL:      "https://idp.example.com/authorize",
+		OAuth2TokenURL:     "https://idp.example.com/token",
+		OAuth2RedirectURL:  "https://server.example.com/mcp/oauth2/callback",
+		OAuth2Scopes:       []string{"openid", "profile"},
+		ScheddName:         "test-schedd",
+		ScheddAddr:         "127.0.0.1:9618",
+		OAuth2DBPath:       t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/api/v1/jobs?constraint=true", nil)
@@ -153,10 +157,19 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 
 // TestWelcomePageUnauthenticated tests the welcome page for unauthenticated users
 func TestWelcomePageUnauthenticated(t *testing.T) {
-	server := &Server{
-		oauth2Config: &oauth2.Config{
-			ClientID: "test-client",
-		},
+	server, err := NewServer(Config{
+		EnableMCP:          true,
+		OAuth2ClientID:     "test-client",
+		OAuth2ClientSecret: "test-secret",
+		OAuth2AuthURL:      "https://idp.example.com/authorize",
+		OAuth2TokenURL:     "https://idp.example.com/token",
+		OAuth2RedirectURL:  "https://server.example.com/mcp/oauth2/callback",
+		ScheddName:         "test-schedd",
+		ScheddAddr:         "127.0.0.1:9618",
+		OAuth2DBPath:       t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/", nil)
@@ -195,8 +208,16 @@ func TestWelcomePageUnauthenticated(t *testing.T) {
 
 // TestWelcomePageWithIDP tests the welcome page with IDP enabled
 func TestWelcomePageWithIDP(t *testing.T) {
-	server := &Server{
-		idpProvider: &IDPProvider{},
+	server, err := NewServer(Config{
+		EnableIDP:    true,
+		IDPDBPath:    t.TempDir() + "/idp-test.db",
+		IDPIssuer:    "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/", nil)
@@ -223,7 +244,14 @@ func TestWelcomePageWithIDP(t *testing.T) {
 
 // TestWelcomePageNotFound tests that non-root paths return 404
 func TestWelcomePageNotFound(t *testing.T) {
-	server := &Server{}
+	server, err := NewServer(Config{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/notfound", nil)
 	w := httptest.NewRecorder()

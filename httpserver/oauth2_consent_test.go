@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -54,16 +53,17 @@ func setupTestOAuth2Server(t *testing.T) (*Server, *OAuth2Provider, string, cont
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
-	// Create mock schedd
-	schedd := htcondor.NewSchedd("test-schedd", "localhost:9618")
-
 	// Create server with OAuth2 provider
-	server := &Server{
-		schedd:           schedd,
-		logger:           logger,
-		tokenCache:       NewTokenCache(),
-		oauth2Provider:   oauth2Provider,
-		oauth2StateStore: NewOAuth2StateStore(),
+	server, err := NewServer(Config{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "localhost:9618",
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: t.TempDir() + "/oauth2-test2.db", // Use different path to avoid conflict
+		OAuth2Issuer: "http://localhost:8080",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	return server, oauth2Provider, clientID, ctx

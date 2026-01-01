@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -20,11 +19,12 @@ func TestPingHandlerNoCollector(t *testing.T) {
 	}
 
 	// Create a server without collector but with schedd
-	server := &Server{
-		schedd:     htcondor.NewSchedd("test-schedd", "localhost:9618"),
-		collector:  nil, // No collector
-		logger:     logger,
-		tokenCache: NewTokenCache(),
+	cfg := newTestConfig(t)
+	cfg.Collector = nil
+	cfg.Logger = logger
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create request
@@ -54,11 +54,12 @@ func TestCollectorPingHandlerNoCollector(t *testing.T) {
 	}
 
 	// Create a server without collector
-	server := &Server{
-		schedd:     htcondor.NewSchedd("test-schedd", "localhost:9618"),
-		collector:  nil, // No collector
-		logger:     logger,
-		tokenCache: NewTokenCache(),
+	cfg := newTestConfig(t)
+	cfg.Collector = nil
+	cfg.Logger = logger
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create request
@@ -85,10 +86,11 @@ func TestScheddPingHandlerWrongMethod(t *testing.T) {
 	}
 
 	// Create a server
-	server := &Server{
-		schedd:     htcondor.NewSchedd("test-schedd", "localhost:9618"),
-		logger:     logger,
-		tokenCache: NewTokenCache(),
+	cfg := newTestConfig(t)
+	cfg.Logger = logger
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create POST request (should only accept GET)

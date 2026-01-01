@@ -6,11 +6,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/bbockelm/golang-htcondor/logging"
 )
+
+func newMultipartTestServer(t *testing.T) *Server {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	server, err := NewServer(Config{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	return server
+}
 
 // TestHandleJobInputMultipart_WrongMethod tests with wrong HTTP method
 func TestHandleJobInputMultipart_WrongMethod(t *testing.T) {
-	server := &Server{}
+	server := newMultipartTestServer(t)
 
 	methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
 
@@ -35,7 +56,7 @@ func TestHandleJobInputMultipart_WrongMethod(t *testing.T) {
 
 // TestHandleJobInputMultipart_NoAuth tests without authentication
 func TestHandleJobInputMultipart_NoAuth(t *testing.T) {
-	server := &Server{}
+	server := newMultipartTestServer(t)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -61,7 +82,7 @@ func TestHandleJobInputMultipart_NoAuth(t *testing.T) {
 
 // TestRouting_JobInputMultipart tests that the routing works for the new endpoint
 func TestRouting_JobInputMultipart(t *testing.T) {
-	server := &Server{}
+	server := newMultipartTestServer(t)
 
 	testCases := []struct {
 		name        string

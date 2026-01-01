@@ -24,9 +24,10 @@ func TestHandlerEmbedding(t *testing.T) {
 
 	// Create handler config
 	cfg := HandlerConfig{
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
 	}
 
 	// Create the handler
@@ -94,10 +95,11 @@ func TestServerStillWorks(t *testing.T) {
 
 	// Create server config
 	cfg := Config{
-		ListenAddr: "127.0.0.1:0", // Use dynamic port
-		ScheddName: "test-schedd",
-		ScheddAddr: "127.0.0.1:9618",
-		Logger:     logger,
+		ListenAddr:   "127.0.0.1:0", // Use dynamic port
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       logger,
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
 	}
 
 	// Create the server

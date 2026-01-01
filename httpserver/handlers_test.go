@@ -185,7 +185,10 @@ func TestLogoutEndpoint(t *testing.T) {
 			w := httptest.NewRecorder()
 
 			// Create a minimal server instance for testing
-			server := &Server{}
+			server, err := NewServer(newTestConfig(t))
+			if err != nil {
+				t.Fatalf("Failed to create server: %v", err)
+			}
 			server.handleLogout(w, req)
 
 			resp := w.Result()
@@ -271,9 +274,14 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Create a server instance with the session store
-	server := &Server{
-		sessionStore: store,
+	baseCfg := newTestConfig(t)
+	baseCfg.SessionTTL = 24 * time.Hour // Will create a new session store
+	server, err := NewServer(baseCfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
+	// Replace with our test session store
+	server.sessionStore = store
 	server.handleLogout(w, req)
 
 	resp := w.Result()
@@ -380,7 +388,10 @@ func TestHandleJobFile(t *testing.T) {
 			w := httptest.NewRecorder()
 
 			// Create a minimal server instance for testing
-			server := &Server{}
+			server, err := NewServer(newTestConfig(t))
+			if err != nil {
+				t.Fatalf("Failed to create server: %v", err)
+			}
 			server.handleJobFile(w, req, 123, 0, tt.filename)
 
 			resp := w.Result()
@@ -460,7 +471,10 @@ func TestDetectContentType(t *testing.T) {
 
 // TestSwaggerUI tests the Swagger UI handler
 func TestSwaggerUI(t *testing.T) {
-	server := &Server{}
+	server, err := NewServer(newTestConfig(t))
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/docs", nil)
 	w := httptest.NewRecorder()

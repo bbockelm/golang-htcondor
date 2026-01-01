@@ -5,25 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // TestHandleWhoAmI tests the whoami endpoint handler
 func TestHandleWhoAmI(t *testing.T) {
-	// Create a test logger
-	logger, err := logging.New(&logging.Config{
-		OutputPath: "stderr",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
-	}
-
 	t.Run("Authenticated with Bearer token", func(t *testing.T) {
 		// Create a server with token cache
-		s := &Server{
-			logger:     logger,
-			tokenCache: NewTokenCache(),
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Create a valid test JWT token
@@ -67,9 +57,9 @@ func TestHandleWhoAmI(t *testing.T) {
 	})
 
 	t.Run("Unauthenticated - no token", func(t *testing.T) {
-		s := &Server{
-			logger:     logger,
-			tokenCache: NewTokenCache(),
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Create request without token
@@ -109,9 +99,9 @@ func TestHandleWhoAmI(t *testing.T) {
 	})
 
 	t.Run("Method not allowed", func(t *testing.T) {
-		s := &Server{
-			logger:     logger,
-			tokenCache: NewTokenCache(),
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
 		}
 
 		// Create POST request (not allowed)
