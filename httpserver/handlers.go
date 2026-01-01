@@ -29,7 +29,7 @@ func isBrowserRequest(r *http.Request) bool {
 
 // requireAuthentication wraps the createAuthenticatedContext call and handles
 // browser redirects for unauthenticated requests
-func (s *Server) requireAuthentication(r *http.Request) (context.Context, bool, error) {
+func (s *Handler) requireAuthentication(r *http.Request) (context.Context, bool, error) {
 	ctx, err := s.createAuthenticatedContext(r)
 	if err != nil {
 		// Check if this is a browser request and OAuth2 SSO is configured
@@ -92,7 +92,7 @@ type JobListResponse struct {
 }
 
 // handleJobs handles /api/v1/jobs endpoint (GET for list, POST for submit, DELETE/PATCH for bulk operations)
-func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.handleListJobs(w, r)
@@ -110,7 +110,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 // handleListJobs handles GET /api/v1/jobs
 //
 //nolint:gocyclo // Complex function for handling job streaming with error cases
-func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -311,7 +311,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSubmitJob handles POST /api/v1/jobs
-func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -362,7 +362,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobByID handles /api/v1/jobs/{id} endpoint
-func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	// Extract job ID from path
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
 	parts := strings.Split(path, "/")
@@ -473,7 +473,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetJob handles GET /api/v1/jobs/{id}
-func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -526,7 +526,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, jobID stri
 }
 
 // handleDeleteJob handles DELETE /api/v1/jobs/{id}
-func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -593,7 +593,7 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID s
 }
 
 // handleEditJob handles PATCH /api/v1/jobs/{id}
-func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -703,7 +703,7 @@ func (s *Server) handleEditJob(w http.ResponseWriter, r *http.Request, jobID str
 }
 
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
-func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -769,7 +769,7 @@ func (s *Server) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBulkEditJobs handles PATCH /api/v1/jobs with constraint-based bulk editing
-func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -886,7 +886,7 @@ func (s *Server) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseBulkActionRequest parses constraint and reason from request body for bulk operations
-func (s *Server) parseBulkActionRequest(r *http.Request, actionName string) (constraint, reason string, err error) {
+func (s *Handler) parseBulkActionRequest(r *http.Request, actionName string) (constraint, reason string, err error) {
 	var req struct {
 		Constraint string `json:"constraint"`
 		Reason     string `json:"reason,omitempty"`
@@ -908,7 +908,7 @@ func (s *Server) parseBulkActionRequest(r *http.Request, actionName string) (con
 }
 
 // handleBulkActionResults checks results and writes appropriate response for bulk operations
-func (s *Server) handleBulkActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, constraint, actionName string) {
+func (s *Handler) handleBulkActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, constraint, actionName string) {
 	// Check results
 	if results.TotalJobs == 0 {
 		s.writeError(w, http.StatusNotFound, "No jobs matched the constraint")
@@ -935,7 +935,7 @@ func (s *Server) handleBulkActionResults(w http.ResponseWriter, results *htcondo
 type JobActionFunc func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error)
 
 // handleBulkJobAction is a generic handler for bulk job actions (hold, release, etc.)
-func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, actionName, actionVerb string, actionFunc JobActionFunc) {
+func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, actionName, actionVerb string, actionFunc JobActionFunc) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -970,17 +970,17 @@ func (s *Server) handleBulkJobAction(w http.ResponseWriter, r *http.Request, act
 }
 
 // handleBulkHoldJobs handles POST /api/v1/jobs/hold with constraint-based bulk hold
-func (s *Server) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleBulkHoldJobs(w http.ResponseWriter, r *http.Request) {
 	s.handleBulkJobAction(w, r, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleBulkReleaseJobs handles POST /api/v1/jobs/release with constraint-based bulk release
-func (s *Server) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) {
 	s.handleBulkJobAction(w, r, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
-func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodPut {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1052,7 +1052,7 @@ func (s *Server) handleJobInput(w http.ResponseWriter, r *http.Request, jobID st
 
 // handleJobInputMultipart handles POST /api/v1/jobs/{id}/input/multipart
 // Accepts multipart/form-data and converts it to a tarball for SpoolJobFilesFromTar
-func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1193,7 +1193,7 @@ func (s *Server) handleJobInputMultipart(w http.ResponseWriter, r *http.Request,
 }
 
 // handleJobOutput handles GET /api/v1/jobs/{id}/output
-func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1259,7 +1259,7 @@ func parseJobID(jobID string) (cluster, proc int, err error) {
 
 // streamFileFromTar extracts a specific file from a tar archive stream and writes it to the HTTP response
 // This uses io.Pipe to avoid buffering the entire tar archive in memory
-func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename string, w http.ResponseWriter, detectContentType bool) error {
+func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename string, w http.ResponseWriter, detectContentType bool) error {
 	// Create a pipe for streaming the tar archive
 	pipeReader, pipeWriter := io.Pipe()
 
@@ -1368,7 +1368,7 @@ func (s *Server) streamFileFromTar(ctx context.Context, constraint, filename str
 }
 
 // handleMetrics handles GET /metrics endpoint for Prometheus scraping
-func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1395,7 +1395,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealthz handles GET /healthz endpoint for health checks
-func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1408,7 +1408,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReadyz handles GET /readyz endpoint for readiness checks
-func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1424,7 +1424,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout handles POST /logout endpoint to clear session cookies
 // Also supports GET for browser-based logout
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1475,7 +1475,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseJobActionRequest parses job ID and optional reason for single job actions
-func (s *Server) parseJobActionRequest(r *http.Request, jobID, defaultAction string) (cluster, proc int, reason string, err error) {
+func (s *Handler) parseJobActionRequest(r *http.Request, jobID, defaultAction string) (cluster, proc int, reason string, err error) {
 	// Parse job ID
 	cluster, proc, err = parseJobID(jobID)
 	if err != nil {
@@ -1502,7 +1502,7 @@ func (s *Server) parseJobActionRequest(r *http.Request, jobID, defaultAction str
 }
 
 // handleJobActionResults checks results and writes response for single job actions
-func (s *Server) handleJobActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, jobID, actionName string) {
+func (s *Handler) handleJobActionResults(w http.ResponseWriter, results *htcondor.JobActionResults, jobID, actionName string) {
 	// Check if job was found
 	if results.NotFound > 0 {
 		s.writeError(w, http.StatusNotFound, "Job not found")
@@ -1545,7 +1545,7 @@ func (s *Server) handleJobActionResults(w http.ResponseWriter, results *htcondor
 }
 
 // handleSingleJobAction is a generic handler for single job actions (hold, release, etc.)
-func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, jobID, actionName, actionVerb string, actionFunc JobActionFunc) {
+func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, jobID, actionName, actionVerb string, actionFunc JobActionFunc) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1588,12 +1588,12 @@ func (s *Server) handleSingleJobAction(w http.ResponseWriter, r *http.Request, j
 }
 
 // handleJobHold handles POST /api/v1/jobs/{id}/hold
-func (s *Server) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
 	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.getSchedd().HoldJobs)
 }
 
 // handleJobRelease handles POST /api/v1/jobs/{id}/release
-func (s *Server) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Handler) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
 	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
@@ -1603,7 +1603,7 @@ type CollectorAdsResponse struct {
 }
 
 // handleCollectorAds handles /api/v1/collector/ads endpoint
-func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1755,7 +1755,7 @@ func (s *Server) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 // handleCollectorAdsByType handles /api/v1/collector/ads/{adType} endpoint
 //
 //nolint:gocyclo // Complex function for handling collector ad streaming with multiple ad types and error cases
-func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request, adType string) {
+func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request, adType string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1929,7 +1929,7 @@ func (s *Server) handleCollectorAdsByType(w http.ResponseWriter, r *http.Request
 }
 
 // handleCollectorAdByName handles /api/v1/collector/ads/{adType}/{name} endpoint
-func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request, adType, name string) {
+func (s *Handler) handleCollectorAdByName(w http.ResponseWriter, r *http.Request, adType, name string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2003,17 +2003,17 @@ func (s *Server) handleCollectorAdByName(w http.ResponseWriter, r *http.Request,
 }
 
 // handleJobStdout handles GET /api/v1/jobs/{cluster}.{proc}/stdout
-func (s *Server) handleJobStdout(w http.ResponseWriter, r *http.Request, cluster, proc int) {
+func (s *Handler) handleJobStdout(w http.ResponseWriter, r *http.Request, cluster, proc int) {
 	s.handleJobOutputFile(w, r, cluster, proc, "stdout", "Out")
 }
 
 // handleJobStderr handles GET /api/v1/jobs/{cluster}.{proc}/stderr
-func (s *Server) handleJobStderr(w http.ResponseWriter, r *http.Request, cluster, proc int) {
+func (s *Handler) handleJobStderr(w http.ResponseWriter, r *http.Request, cluster, proc int) {
 	s.handleJobOutputFile(w, r, cluster, proc, "stderr", "Err")
 }
 
 // handleJobFile handles GET /api/v1/jobs/{cluster}.{proc}/files/{filename}
-func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, proc int, filename string) {
+func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, proc int, filename string) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2058,7 +2058,7 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request, cluster, 
 }
 
 // handleJobOutputFile is a helper function to retrieve stdout or stderr from a job
-func (s *Server) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cluster, proc int, outputType, attributeName string) {
+func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cluster, proc int, outputType, attributeName string) {
 	ctx := r.Context()
 
 	// Query the job to get the output filename
@@ -2119,7 +2119,7 @@ type WhoAmIResponse struct {
 }
 
 // handleWhoAmI handles GET /api/v1/whoami endpoint
-func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2151,7 +2151,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCollectorPath handles /api/v1/collector/* paths with routing
-func (s *Server) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleCollectorPath(w http.ResponseWriter, r *http.Request) {
 	// Strip /api/v1/collector/ prefix
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/collector/")
 	parts := strings.Split(path, "/")
@@ -2199,7 +2199,7 @@ type PingResponse struct {
 }
 
 // handleCollectorPing handles GET /api/v1/collector/ping
-func (s *Server) handleCollectorPing(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleCollectorPing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2233,7 +2233,7 @@ func (s *Server) handleCollectorPing(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleScheddPing handles GET /api/v1/schedd/ping
-func (s *Server) handleScheddPing(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleScheddPing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2262,7 +2262,7 @@ func (s *Server) handleScheddPing(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePing handles GET /api/v1/ping to ping both collector and schedd
-func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handlePing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2317,7 +2317,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWelcome serves the welcome page at the root
-func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleWelcome(w http.ResponseWriter, r *http.Request) {
 	// Only serve on exact root path
 	if r.URL.Path != "/" {
 		s.writeError(w, http.StatusNotFound, "Not found")
@@ -2489,7 +2489,7 @@ type AdvertiseResponse struct {
 // - application/json: single ClassAd in request body
 // - multipart/form-data: multiple ClassAds as files (one ad per file)
 // - text/plain: ClassAd in old format
-func (s *Server) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2638,7 +2638,7 @@ func (s *Server) handleCollectorAdvertise(w http.ResponseWriter, r *http.Request
 
 // parseAdvertiseMultipart parses multipart form data containing ClassAds
 // Returns ads, withAck flag, command, and error
-func (s *Server) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
+func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
 	// Parse multipart form with 10MB limit for the HTTP form data itself
 	// (this is larger than the 1MB ClassAd content limit to account for multipart encoding overhead)
 	const maxMultipartFormSize = 10 * 1024 * 1024

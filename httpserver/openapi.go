@@ -2466,7 +2466,7 @@ const openAPISchema = `{
 }`
 
 // handleOpenAPISchema serves the OpenAPI schema
-func (s *Server) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2490,7 +2490,7 @@ func (s *Server) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSwaggerUI serves the Swagger UI
-func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -2542,7 +2542,7 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSwaggerOAuth2Redirect serves the OAuth2 redirect page for Swagger UI
-func (s *Server) handleSwaggerOAuth2Redirect(w http.ResponseWriter, _ *http.Request) {
+func (s *Handler) handleSwaggerOAuth2Redirect(w http.ResponseWriter, _ *http.Request) {
 	html := `<!doctype html>
 <html lang="en-US">
 <head>

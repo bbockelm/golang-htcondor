@@ -1,12 +1,9 @@
 package httpserver
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -17,24 +14,24 @@ import (
 )
 
 // handleIDPLogin handles the IDP login page
-func (s *Server) handleIDPLogin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleIDPLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		// Display login form
-		s.serveIDPLoginForm(w, r)
+		h.serveIDPLoginForm(w, r)
 		return
 	}
 
 	if r.Method == http.MethodPost {
 		// Handle login submission
-		s.handleIDPLoginSubmit(w, r)
+		h.handleIDPLoginSubmit(w, r)
 		return
 	}
 
-	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
 // serveIDPLoginForm serves the login form HTML
-func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 	// Get redirect_uri or return_url from query params to pass through
 	redirectURI := r.URL.Query().Get("redirect_uri")
 	if redirectURI == "" {
@@ -126,17 +123,17 @@ func (s *Server) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIDPLoginSubmit handles login form submission
-func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	// Rate limit login attempts by IP address
 	ip := r.RemoteAddr
-	if !s.idpLoginLimiter.Allow(ip) {
-		s.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "ip", ip)
-		s.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
+	if !h.idpLoginLimiter.Allow(ip) {
+		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "ip", ip)
+		h.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Failed to parse form")
+		h.writeError(w, http.StatusBadRequest, "Failed to parse form")
 		return
 	}
 
@@ -148,25 +145,25 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if username == "" || password == "" {
-		s.writeError(w, http.StatusBadRequest, "Username and password required")
+		h.writeError(w, http.StatusBadRequest, "Username and password required")
 		return
 	}
 
 	// Authenticate user
 	ctx := r.Context()
-	if err := s.idpProvider.storage.AuthenticateUser(ctx, username, password); err != nil {
-		s.logger.Warn(logging.DestinationHTTP, "IDP authentication failed", "username", username)
-		s.writeError(w, http.StatusUnauthorized, "Invalid credentials")
+	if err := h.idpProvider.storage.AuthenticateUser(ctx, username, password); err != nil {
+		h.logger.Warn(logging.DestinationHTTP, "IDP authentication failed", "username", username)
+		h.writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "IDP user authenticated", "username", username)
+	h.logger.Info(logging.DestinationHTTP, "IDP user authenticated", "username", username)
 
 	// Create session for authenticated user
-	sessionID, err := s.idpProvider.storage.CreateSession(ctx, username)
+	sessionID, err := h.idpProvider.storage.CreateSession(ctx, username)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create IDP session", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+		h.logger.Error(logging.DestinationHTTP, "Failed to create IDP session", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to create session")
 		return
 	}
 
@@ -201,7 +198,7 @@ func (s *Server) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIDPAuthorize handles OAuth2 authorization requests for IDP
-func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Check if user is authenticated via session cookie
@@ -215,10 +212,10 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Verify session
 	sessionID := cookie.Value
-	username, err := s.idpProvider.storage.GetSession(ctx, sessionID)
+	username, err := h.idpProvider.storage.GetSession(ctx, sessionID)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to get IDP session", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Internal server error")
+		h.logger.Error(logging.DestinationHTTP, "Failed to get IDP session", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
@@ -240,16 +237,16 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify user exists in DB (prevents using stale cookies after DB reset)
-	exists, err := s.idpProvider.storage.UserExists(ctx, username)
+	exists, err := h.idpProvider.storage.UserExists(ctx, username)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to check user existence", "username", username, "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to check user existence", "username", username, "error", err)
 		// Treat error as not authenticated
 		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
 		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
 	if !exists {
-		s.logger.Warn(logging.DestinationHTTP, "User from session cookie not found in DB", "username", username)
+		h.logger.Warn(logging.DestinationHTTP, "User from session cookie not found in DB", "username", username)
 		// Clear invalid cookie
 		http.SetCookie(w, &http.Cookie{
 			Name:     "idp_session",
@@ -267,10 +264,10 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new authorization request
-	ar, err := s.idpProvider.oauth2.NewAuthorizeRequest(ctx, r)
+	ar, err := h.idpProvider.oauth2.NewAuthorizeRequest(ctx, r)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
-		s.idpProvider.oauth2.WriteAuthorizeError(ctx, w, ar, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
+		h.idpProvider.oauth2.WriteAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
@@ -296,29 +293,29 @@ func (s *Server) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	// In a production system, you would redirect to a consent page here
 
 	// Create the authorization response
-	response, err := s.idpProvider.oauth2.NewAuthorizeResponse(ctx, ar, session)
+	response, err := h.idpProvider.oauth2.NewAuthorizeResponse(ctx, ar, session)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response", "error", err)
-		s.idpProvider.oauth2.WriteAuthorizeError(ctx, w, ar, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create authorize response", "error", err)
+		h.idpProvider.oauth2.WriteAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
 	// Write the response (redirects to client)
-	s.idpProvider.oauth2.WriteAuthorizeResponse(ctx, w, ar, response)
+	h.idpProvider.oauth2.WriteAuthorizeResponse(ctx, w, ar, response)
 }
 
 // handleIDPToken handles OAuth2 token requests for IDP
-func (s *Server) handleIDPToken(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Create a new session
 	session := DefaultIDPSession("")
 
 	// Create access request
-	ar, err := s.idpProvider.oauth2.NewAccessRequest(ctx, r, session)
+	ar, err := h.idpProvider.oauth2.NewAccessRequest(ctx, r, session)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access request", "error", err)
-		s.idpProvider.oauth2.WriteAccessError(ctx, w, ar, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access request", "error", err)
+		h.idpProvider.oauth2.WriteAccessError(ctx, w, ar, err)
 		return
 	}
 
@@ -326,21 +323,21 @@ func (s *Server) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 	// If this is an authorization code grant, session is populated from the stored auth code
 
 	// Create the access response
-	response, err := s.idpProvider.oauth2.NewAccessResponse(ctx, ar)
+	response, err := h.idpProvider.oauth2.NewAccessResponse(ctx, ar)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to create access response", "error", err)
-		s.idpProvider.oauth2.WriteAccessError(ctx, w, ar, err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access response", "error", err)
+		h.idpProvider.oauth2.WriteAccessError(ctx, w, ar, err)
 		return
 	}
 
 	// Write the response
-	s.idpProvider.oauth2.WriteAccessResponse(ctx, w, ar, response)
+	h.idpProvider.oauth2.WriteAccessResponse(ctx, w, ar, response)
 }
 
 // handleIDPMetadata handles OIDC discovery metadata for IDP
-func (s *Server) handleIDPMetadata(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleIDPMetadata(w http.ResponseWriter, _ *http.Request) {
 	// Get the issuer URL from the IDP provider config
-	issuer := s.idpProvider.config.AccessTokenIssuer
+	issuer := h.idpProvider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
 		"issuer":                 issuer,
@@ -385,39 +382,39 @@ func (s *Server) handleIDPMetadata(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(metadata); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode IDP metadata", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode IDP metadata", "error", err)
 	}
 }
 
 // handleIDPUserInfo handles userinfo endpoint for IDP
-func (s *Server) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Extract access token from Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		s.writeError(w, http.StatusUnauthorized, "Missing authorization header")
+		h.writeError(w, http.StatusUnauthorized, "Missing authorization header")
 		return
 	}
 
 	parts := strings.Split(authHeader, " ")
 	if len(parts) != 2 || parts[0] != "Bearer" {
-		s.writeError(w, http.StatusUnauthorized, "Invalid authorization header")
+		h.writeError(w, http.StatusUnauthorized, "Invalid authorization header")
 		return
 	}
 
 	token := parts[1]
 
 	// Validate the access token
-	tokenType, ar, err := s.idpProvider.oauth2.IntrospectToken(ctx, token, fosite.AccessToken, DefaultIDPSession(""))
+	tokenType, ar, err := h.idpProvider.oauth2.IntrospectToken(ctx, token, fosite.AccessToken, DefaultIDPSession(""))
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Token introspection failed", "error", err)
-		s.writeError(w, http.StatusUnauthorized, "Invalid token")
+		h.logger.Error(logging.DestinationHTTP, "Token introspection failed", "error", err)
+		h.writeError(w, http.StatusUnauthorized, "Invalid token")
 		return
 	}
 
 	if tokenType != fosite.AccessToken {
-		s.writeError(w, http.StatusUnauthorized, "Invalid token type")
+		h.writeError(w, http.StatusUnauthorized, "Invalid token type")
 		return
 	}
 
@@ -432,14 +429,14 @@ func (s *Server) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(userInfo); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode userinfo", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode userinfo", "error", err)
 	}
 }
 
 // handleIDPJWKS handles JWKS endpoint for IDP
-func (s *Server) handleIDPJWKS(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleIDPJWKS(w http.ResponseWriter, _ *http.Request) {
 	// Extract public key from the RSA private key
-	publicKey := &s.idpProvider.privateKey.PublicKey
+	publicKey := &h.idpProvider.privateKey.PublicKey
 
 	// Convert to JWK format (JSON Web Key)
 	// We use "idp-key-1" as the key ID
@@ -459,7 +456,7 @@ func (s *Server) handleIDPJWKS(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(jwks); err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to encode JWKS", "error", err)
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode JWKS", "error", err)
 	}
 }
 
@@ -480,92 +477,4 @@ func generateRandomPassword(length int) (string, error) {
 	return encoded[:length], nil
 }
 
-// initializeIDPUsers initializes default users if needed
-func (s *Server) initializeIDPUsers(ctx context.Context) error {
-	// Check if admin user exists
-	exists, err := s.idpProvider.storage.UserExists(ctx, "admin")
-	if err != nil {
-		return fmt.Errorf("failed to check if admin user exists: %w", err)
-	}
-
-	if !exists {
-		// Generate random password
-		password, err := generateRandomPassword(16)
-		if err != nil {
-			return fmt.Errorf("failed to generate admin password: %w", err)
-		}
-
-		// Create admin user with "admin" state
-		if err := s.idpProvider.storage.CreateUser(ctx, "admin", password, "admin"); err != nil {
-			return fmt.Errorf("failed to create admin user: %w", err)
-		}
-
-		// Print credentials to terminal
-		fmt.Printf("\n")
-		fmt.Printf("========================================\n")
-		fmt.Printf("IDP Admin Credentials\n")
-		fmt.Printf("========================================\n")
-		fmt.Printf("Username: admin\n")
-		fmt.Printf("Password: %s\n", password)
-		fmt.Printf("========================================\n")
-		fmt.Printf("\n")
-
-		s.logger.Info(logging.DestinationHTTP, "Created IDP admin user", "username", "admin")
-	}
-
-	return nil
-}
-
-// initializeIDPClient creates an auto-generated OAuth2 client for the server
-func (s *Server) initializeIDPClient(ctx context.Context, redirectURI string) error {
-	clientID := "htcondor-server"
-
-	// Check if client already exists
-	_, err := s.idpProvider.storage.GetClient(ctx, clientID)
-	if err == nil {
-		// Client already exists, update redirect URI if needed
-		// For simplicity, we'll just return
-		s.logger.Info(logging.DestinationHTTP, "IDP client already exists", "client_id", clientID)
-		return nil
-	}
-
-	if !errors.Is(err, fosite.ErrNotFound) {
-		return fmt.Errorf("failed to check for existing client: %w", err)
-	}
-
-	// Generate client secret
-	secret, err := generateRandomPassword(32)
-	if err != nil {
-		return fmt.Errorf("failed to generate client secret: %w", err)
-	}
-
-	// Create the client
-	client := &fosite.DefaultClient{
-		ID:     clientID,
-		Secret: []byte(secret),
-		RedirectURIs: []string{
-			redirectURI,
-		},
-		GrantTypes: []string{
-			"authorization_code",
-			"refresh_token",
-		},
-		ResponseTypes: []string{
-			"code",
-		},
-		Scopes: []string{
-			"openid",
-			"profile",
-			"email",
-		},
-		Public: false,
-	}
-
-	if err := s.idpProvider.storage.CreateClient(ctx, client); err != nil {
-		return fmt.Errorf("failed to create IDP client: %w", err)
-	}
-
-	s.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID, "redirect_uri", redirectURI)
-
-	return nil
-}
+// initializeIDPUsers and initializeIDPClient have been moved to handler.go

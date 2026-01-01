@@ -145,7 +145,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 	t.Logf("HTTP server listening on: %s", baseURL)
 
 	// Update OAuth2 issuer with actual address
-	server.GetOAuth2Provider().UpdateIssuer(baseURL)
+	server.Handler.GetOAuth2Provider().UpdateIssuer(baseURL)
 
 	// Wait for server to be ready
 	t.Logf("Waiting for server to be fully ready")
@@ -203,7 +203,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 
 // createDeviceFlowClient creates an OAuth2 client configured for device flow
 func createDeviceFlowClient(t *testing.T, server *Server, username string) (string, string) {
-	storage := server.GetOAuth2Provider().GetStorage()
+	storage := server.Handler.GetOAuth2Provider().GetStorage()
 
 	clientID := "device-test-client"
 	clientSecret := "device-test-secret"
