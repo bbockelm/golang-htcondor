@@ -185,6 +185,115 @@ func TestCreateInputSandboxTar_WithURLs(t *testing.T) {
 	}
 }
 
+// TestCreateInputSandboxTar_WithStdin tests that In attribute file is included
+func TestCreateInputSandboxTar_WithStdin(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create stdin file and other input files
+	createTestFile(t, filepath.Join(tempDir, "input.txt"), "regular input", 0644)
+	createTestFile(t, filepath.Join(tempDir, "stdin.txt"), "stdin data", 0644)
+
+	// Create job ad with In attribute
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", tempDir)
+	_ = jobAd.Set("In", "stdin.txt")
+	_ = jobAd.Set("TransferInput", "input.txt")
+	_ = jobAd.Set("TransferExecutable", false)
+
+	// Create input sandbox
+	var buf bytes.Buffer
+	err := CreateInputSandboxTar(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("CreateInputSandboxTar failed: %v", err)
+	}
+
+	// Verify tar contents
+	tarFiles := readTarContents(t, &buf)
+
+	if len(tarFiles) != 2 {
+		t.Errorf("Expected 2 files in tar, got %d", len(tarFiles))
+	}
+
+	// Check stdin file
+	if stdinContent, ok := tarFiles["stdin.txt"]; !ok {
+		t.Errorf("Expected stdin.txt in tar")
+	} else if stdinContent.Content != "stdin data" {
+		t.Errorf("Unexpected stdin.txt content: %s", stdinContent.Content)
+	}
+
+	// Check regular input
+	if inputContent, ok := tarFiles["input.txt"]; !ok {
+		t.Errorf("Expected input.txt in tar")
+	} else if inputContent.Content != "regular input" {
+		t.Errorf("Unexpected input.txt content: %s", inputContent.Content)
+	}
+}
+
+// TestCreateInputSandboxTar_WithStdinURL tests that URL stdin is skipped
+func TestCreateInputSandboxTar_WithStdinURL(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create regular input file
+	createTestFile(t, filepath.Join(tempDir, "input.txt"), "regular input", 0644)
+
+	// Create job ad with In as URL
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", tempDir)
+	_ = jobAd.Set("In", "https://example.com/stdin.txt")
+	_ = jobAd.Set("TransferInput", "input.txt")
+	_ = jobAd.Set("TransferExecutable", false)
+
+	// Create input sandbox
+	var buf bytes.Buffer
+	err := CreateInputSandboxTar(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("CreateInputSandboxTar failed: %v", err)
+	}
+
+	// Verify tar contents - should only have regular input, not URL stdin
+	tarFiles := readTarContents(t, &buf)
+
+	if len(tarFiles) != 1 {
+		t.Errorf("Expected 1 file in tar (URL stdin should be skipped), got %d", len(tarFiles))
+	}
+
+	if _, ok := tarFiles["input.txt"]; !ok {
+		t.Errorf("Expected input.txt in tar")
+	}
+}
+
+// TestCreateInputSandboxTar_WithoutStdin tests that missing In attribute is handled
+func TestCreateInputSandboxTar_WithoutStdin(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create input file
+	createTestFile(t, filepath.Join(tempDir, "input.txt"), "regular input", 0644)
+
+	// Create job ad without In attribute
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", tempDir)
+	_ = jobAd.Set("TransferInput", "input.txt")
+	_ = jobAd.Set("TransferExecutable", false)
+
+	// Create input sandbox
+	var buf bytes.Buffer
+	err := CreateInputSandboxTar(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("CreateInputSandboxTar failed: %v", err)
+	}
+
+	// Verify tar contents
+	tarFiles := readTarContents(t, &buf)
+
+	if len(tarFiles) != 1 {
+		t.Errorf("Expected 1 file in tar, got %d", len(tarFiles))
+	}
+
+	if _, ok := tarFiles["input.txt"]; !ok {
+		t.Errorf("Expected input.txt in tar")
+	}
+}
+
 // TestExtractOutputSandbox_Simple tests basic output sandbox extraction
 func TestExtractOutputSandbox_Simple(t *testing.T) {
 	// Create temporary output directory
@@ -321,6 +430,123 @@ func TestExtractOutputSandbox_WithURLRemaps(t *testing.T) {
 	// Verify upload.txt was not extracted (remapped to URL)
 	if _, err := os.Stat(filepath.Join(outputDir, "upload.txt")); err == nil {
 		t.Errorf("upload.txt should not have been extracted (remapped to URL)")
+	}
+}
+
+// TestExtractOutputSandbox_WithStdoutStderr tests extraction of _condor_stdout and _condor_stderr
+func TestExtractOutputSandbox_WithStdoutStderr(t *testing.T) {
+	outputDir := t.TempDir()
+
+	// Create tar with condor stdout/stderr files
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	addTarFile(t, tw, "_condor_stdout", "standard output content")
+	addTarFile(t, tw, "_condor_stderr", "standard error content")
+	addTarFile(t, tw, "output.txt", "regular output")
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	// Create job ad with Out and Err attributes
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Out", "job.out")
+	_ = jobAd.Set("Err", "job.err")
+	_ = jobAd.Set("TransferOutput", "")
+
+	// Extract output sandbox
+	err := ExtractOutputSandbox(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+
+	// Verify stdout was written to Out location
+	verifyFileContent(t, filepath.Join(outputDir, "job.out"), "standard output content")
+
+	// Verify stderr was written to Err location
+	verifyFileContent(t, filepath.Join(outputDir, "job.err"), "standard error content")
+
+	// Verify regular output file
+	verifyFileContent(t, filepath.Join(outputDir, "output.txt"), "regular output")
+
+	// Verify _condor_stdout and _condor_stderr were not created
+	if _, err := os.Stat(filepath.Join(outputDir, "_condor_stdout")); err == nil {
+		t.Errorf("_condor_stdout should not exist, should be remapped to Out")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "_condor_stderr")); err == nil {
+		t.Errorf("_condor_stderr should not exist, should be remapped to Err")
+	}
+}
+
+// TestExtractOutputSandbox_WithAbsoluteStdout tests absolute path for Out attribute
+func TestExtractOutputSandbox_WithAbsoluteStdout(t *testing.T) {
+	outputDir := t.TempDir()
+	altDir := t.TempDir()
+
+	// Create tar with condor stdout
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	addTarFile(t, tw, "_condor_stdout", "stdout content")
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	// Create job ad with absolute path for Out
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Out", filepath.Join(altDir, "stdout.txt"))
+	_ = jobAd.Set("TransferOutput", "")
+
+	// Extract output sandbox
+	err := ExtractOutputSandbox(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+
+	// Verify stdout was written to absolute path
+	verifyFileContent(t, filepath.Join(altDir, "stdout.txt"), "stdout content")
+}
+
+// TestExtractOutputSandbox_WithoutOutErr tests that _condor_stdout/_condor_stderr are skipped when Out/Err not set
+func TestExtractOutputSandbox_WithoutOutErr(t *testing.T) {
+	outputDir := t.TempDir()
+
+	// Create tar with condor stdout/stderr
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	addTarFile(t, tw, "_condor_stdout", "stdout content")
+	addTarFile(t, tw, "_condor_stderr", "stderr content")
+	addTarFile(t, tw, "output.txt", "regular output")
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	// Create job ad WITHOUT Out and Err attributes
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("TransferOutput", "")
+
+	// Extract output sandbox
+	err := ExtractOutputSandbox(context.Background(), jobAd, &buf)
+	if err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+
+	// Verify regular output was extracted
+	verifyFileContent(t, filepath.Join(outputDir, "output.txt"), "regular output")
+
+	// Verify _condor_stdout and _condor_stderr were NOT extracted
+	if _, err := os.Stat(filepath.Join(outputDir, "_condor_stdout")); err == nil {
+		t.Errorf("_condor_stdout should not be extracted when Out is not set")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "_condor_stderr")); err == nil {
+		t.Errorf("_condor_stderr should not be extracted when Err is not set")
 	}
 }
 
