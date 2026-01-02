@@ -20,6 +20,8 @@ RUN dnf update -y && \
     procps-ng \
     vim \
     sudo \
+    python3 \
+    python3-pip \
     && dnf clean all
 
 # Install Go
@@ -28,6 +30,12 @@ RUN ARCH=$(uname -m) && \
     wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz && \
     tar -C /usr/local -xzf go${GO_VERSION}.linux-${GOARCH}.tar.gz && \
     rm go${GO_VERSION}.linux-${GOARCH}.tar.gz
+
+# Install golangci-lint (v2.6.1 or later)
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v2.6.1
+
+# Install pre-commit (Python-based)
+RUN pip3 install --no-cache-dir pre-commit
 
 # Add HTCondor repository
 RUN dnf install -y 'dnf-command(config-manager)' && \
