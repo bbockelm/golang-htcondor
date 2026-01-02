@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"sync"
@@ -21,16 +22,21 @@ type OAuth2StateEntry struct {
 type OAuth2StateStore struct {
 	mu      sync.RWMutex
 	entries map[string]*OAuth2StateEntry
+	wg      sync.WaitGroup // Track cleanup goroutine
 }
 
 // NewOAuth2StateStore creates a new OAuth2 state store
+// Call Start() to begin the cleanup goroutine
 func NewOAuth2StateStore() *OAuth2StateStore {
-	store := &OAuth2StateStore{
+	return &OAuth2StateStore{
 		entries: make(map[string]*OAuth2StateEntry),
 	}
-	// Start cleanup goroutine
-	go store.cleanupExpired()
-	return store
+}
+
+// Start begins the cleanup goroutine
+func (s *OAuth2StateStore) Start(ctx context.Context) {
+	s.wg.Add(1)
+	go s.cleanupExpired(ctx)
 }
 
 // GenerateState generates a secure random state parameter
@@ -102,19 +108,31 @@ func (s *OAuth2StateStore) Remove(state string) {
 }
 
 // cleanupExpired periodically removes expired state entries
-func (s *OAuth2StateStore) cleanupExpired() {
+func (s *OAuth2StateStore) cleanupExpired(ctx context.Context) {
+	defer s.wg.Done()
+
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for state, entry := range s.entries {
-			// Remove entries older than 10 minutes
-			if now.Sub(entry.Timestamp) > 10*time.Minute {
-				delete(s.entries, state)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			now := time.Now()
+			for state, entry := range s.entries {
+				// Remove entries older than 10 minutes
+				if now.Sub(entry.Timestamp) > 10*time.Minute {
+					delete(s.entries, state)
+				}
 			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
+}
+
+// Wait waits for the cleanup goroutine to finish
+func (s *OAuth2StateStore) Wait() {
+	s.wg.Wait()
 }

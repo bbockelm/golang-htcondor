@@ -42,27 +42,27 @@ type Handler struct {
 	logger              *logging.Logger
 	metricsRegistry     *metricsd.Registry
 	prometheusExporter  *metricsd.PrometheusExporter
-	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
-	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
-	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
-	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
-	oauth2UserInfoURL   string            // User info endpoint for SSO
-	oauth2UsernameClaim string            // Claim name for username (default: "sub")
-	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
-	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup        string            // Group required for read access (empty = all users have read)
-	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
-	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
-	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
-	stopChan            chan struct{}     // Channel to signal shutdown of background goroutines
-	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
-	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
-	pingStopCh          chan struct{}     // Channel to signal ping goroutine to stop
-	token               string            // Token for daemon authentication
-	mux                 *http.ServeMux    // HTTP request multiplexer
+	tokenCache          *TokenCache        // Cache of validated tokens and their session caches (includes username)
+	sessionStore        *SessionStore      // HTTP session store for browser-based authentication
+	oauth2Provider      *OAuth2Provider    // OAuth2 provider for MCP endpoints
+	oauth2Config        *oauth2.Config     // OAuth2 client config for SSO
+	oauth2StateStore    *OAuth2StateStore  // State storage for OAuth2 SSO flow
+	oauth2UserInfoURL   string             // User info endpoint for SSO
+	oauth2UsernameClaim string             // Claim name for username (default: "sub")
+	oauth2GroupsClaim   string             // Claim name for group information (default: "groups")
+	mcpAccessGroup      string             // Group required for any MCP access (empty = all authenticated users)
+	mcpReadGroup        string             // Group required for read access (empty = all users have read)
+	mcpWriteGroup       string             // Group required for write access (empty = all users have write)
+	idpProvider         *IDPProvider       // Built-in IDP provider
+	idpLoginLimiter     *LoginRateLimiter  // Rate limiter for IDP login attempts
+	streamBufferSize    int                // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout  time.Duration      // Write timeout for streaming queries (default: 5s)
+	wg                  sync.WaitGroup     // WaitGroup to track background goroutines
+	pingInterval        time.Duration      // Interval for periodic daemon pings (0 = disabled)
+	token               string             // Token for daemon authentication
+	mux                 *http.ServeMux     // HTTP request multiplexer
+	ctx                 context.Context    // Context for background goroutines
+	cancelFunc          context.CancelFunc // Function to cancel background goroutines
 }
 
 // HandlerConfig holds handler configuration
@@ -175,7 +175,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
 		streamBufferSize:   streamBufferSize,
 		streamWriteTimeout: streamWriteTimeout,
-		stopChan:           make(chan struct{}),
 		token:              cfg.Token,
 	}
 
@@ -368,7 +367,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	if pingInterval > 0 {
 		h.pingInterval = pingInterval
-		h.pingStopCh = make(chan struct{})
 		h.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
 	}
 
@@ -411,6 +409,8 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Set up all HTTP routes
 	h.setupRoutes()
 
+	h.ctx, h.cancelFunc = context.WithCancel(ctx)
+
 	// Initialize IDP if enabled
 	if err := h.initializeIDP(ln, protocol); err != nil {
 		return err
@@ -418,6 +418,11 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	// Initialize OAuth2 provider with actual address
 	h.initializeOAuth2(ln, protocol)
+
+	// Start OAuth2 state store cleanup if it exists
+	if h.oauth2StateStore != nil {
+		h.oauth2StateStore.Start(ctx)
+	}
 
 	// Start schedd address updater if address was discovered from collector
 	if h.scheddDiscovered && h.collector != nil {
@@ -434,7 +439,6 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	// Start periodic ping goroutine if enabled
 	if h.pingInterval > 0 {
-		h.wg.Add(1)
 		go h.periodicPing(ctx)
 	}
 
@@ -447,10 +451,17 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 func (h *Handler) Stop(ctx context.Context) error {
 	h.logger.Info(logging.DestinationHTTP, "Stopping HTTP handler")
 
+	// Cancel the handler's context if it's not already done.
+	h.cancelFunc()
+
 	// Wait for background goroutines to finish (with timeout)
 	done := make(chan struct{})
 	go func() {
 		h.wg.Wait()
+		// Also wait for OAuth2 state store cleanup goroutine
+		if h.oauth2StateStore != nil {
+			h.oauth2StateStore.Wait()
+		}
 		close(done)
 	}()
 

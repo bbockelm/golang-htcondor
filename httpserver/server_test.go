@@ -118,6 +118,7 @@ func TestServerShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
+	s.ctx, s.cancelFunc = context.WithCancel(context.Background())
 
 	// Start a goroutine that simulates background work
 	s.wg.Add(1)
@@ -130,7 +131,7 @@ func TestServerShutdown(t *testing.T) {
 			select {
 			case <-ticker.C:
 				// Do nothing
-			case <-s.stopChan:
+			case <-s.ctx.Done():
 				return
 			}
 		}
@@ -144,7 +145,7 @@ func TestServerShutdown(t *testing.T) {
 	defer cancel()
 
 	// Signal shutdown
-	close(s.stopChan)
+	s.cancelFunc()
 
 	// Wait for goroutines
 	done := make(chan struct{})
