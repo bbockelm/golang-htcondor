@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
 // remap represents a path remapping from Source to Dest.
@@ -56,6 +57,12 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 		return fmt.Errorf("iwd is not a string in job ad")
 	}
 
+	userName, err := getSandboxUser(jobAd)
+	if err != nil {
+		return err
+	}
+	mgr := droppriv.DefaultManager()
+
 	// Create tar writer
 	tw := tar.NewWriter(w)
 	defer func() {
@@ -74,7 +81,7 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 			return fmt.Errorf("TransferExecutable is true but Cmd is missing")
 		}
 
-		if err := addFileToTar(tw, execPath, iwd); err != nil {
+		if err := addFileToTar(tw, execPath, iwd, userName, mgr); err != nil {
 			return fmt.Errorf("failed to add executable %s: %w", execPath, err)
 		}
 	}
@@ -84,7 +91,7 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 	if hasStdin && stdinPath != "" {
 		// Skip URLs for stdin
 		if !isURL(stdinPath) {
-			if err := addFileToTar(tw, stdinPath, iwd); err != nil {
+			if err := addFileToTar(tw, stdinPath, iwd, userName, mgr); err != nil {
 				return fmt.Errorf("failed to add stdin file %s: %w", stdinPath, err)
 			}
 		}
@@ -110,7 +117,7 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 			if isURL(filePath) {
 				continue
 			}
-			if err := addFileToTar(tw, filePath, iwd); err != nil {
+			if err := addFileToTar(tw, filePath, iwd, userName, mgr); err != nil {
 				return fmt.Errorf("failed to add file %s: %w", filePath, err)
 			}
 		}
@@ -122,7 +129,7 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 // addFileToTar adds a single file to the tar archive.
 // If filePath is relative, it's resolved relative to baseDir.
 // The file is added to the tar with a path relative to baseDir.
-func addFileToTar(tw *tar.Writer, filePath string, baseDir string) error {
+func addFileToTar(tw *tar.Writer, filePath string, baseDir string, userName string, mgr *droppriv.Manager) error {
 	// Resolve the full path
 	var fullPath string
 	if filepath.IsAbs(filePath) {
@@ -132,7 +139,7 @@ func addFileToTar(tw *tar.Writer, filePath string, baseDir string) error {
 	}
 
 	// Open the file
-	file, err := os.Open(fullPath) // #nosec G304 - file path comes from job ad, expected behavior
+	file, err := mgr.Open(userName, fullPath) // #nosec G304 - file path comes from job ad, expected behavior
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
@@ -212,6 +219,12 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 	if !ok {
 		return fmt.Errorf("iwd is not a string in job ad")
 	}
+
+	userName, err := getSandboxUser(jobAd)
+	if err != nil {
+		return err
+	}
+	mgr := droppriv.DefaultManager()
 
 	// Get TransferOutput list (optional - if empty, extract all files)
 	transferOutput, ok := classad.GetAs[string](jobAd, "TransferOutput")
@@ -296,7 +309,7 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 		}
 
 		// Extract the file
-		if err := extractFile(tr, destPath, header); err != nil {
+		if err := extractFile(mgr, userName, tr, destPath, header); err != nil {
 			return fmt.Errorf("failed to extract file %s to %s: %w", header.Name, destPath, err)
 		}
 	}
@@ -336,17 +349,17 @@ func getDestinationPath(tarPath string, iwd string, remaps []remap) string {
 }
 
 // extractFile writes a single file from the tar to the filesystem.
-func extractFile(tr *tar.Reader, destPath string, header *tar.Header) error {
+func extractFile(mgr *droppriv.Manager, userName string, tr *tar.Reader, destPath string, header *tar.Header) error {
 	// Create parent directories
 	destDir := filepath.Dir(destPath)
-	if err := os.MkdirAll(destDir, 0750); err != nil { // #nosec G301 - 0750 is secure
+	if err := mgr.MkdirAll(userName, destDir, 0750); err != nil { // #nosec G301 - 0750 is secure
 		return fmt.Errorf("failed to create directory %s: %w", destDir, err)
 	}
 
 	// Create the file
 	// Mask mode to 0777 to avoid potential overflow from int64 to uint32
-	fileMode := os.FileMode(header.Mode & 0777)                                      // #nosec G115 - mode masked to valid range
-	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fileMode) // #nosec G304 - destPath derived from job ad, expected
+	fileMode := os.FileMode(header.Mode & 0777)                                                 // #nosec G115 - mode masked to valid range
+	file, err := mgr.OpenFile(userName, destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fileMode) // #nosec G304 - destPath derived from job ad, expected
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -362,6 +375,18 @@ func extractFile(tr *tar.Reader, destPath string, header *tar.Header) error {
 	}
 
 	return nil
+}
+
+func getSandboxUser(jobAd *classad.ClassAd) (string, error) {
+	userName, ok := classad.GetAs[string](jobAd, "OsUser")
+	if !ok {
+		// Fallback to Owner if OsUser is not set
+		userName, ok = classad.GetAs[string](jobAd, "Owner")
+		if !ok {
+			return "", fmt.Errorf("job ad missing both OsUser and Owner attributes")
+		}
+	}
+	return strings.TrimSpace(userName), nil
 }
 
 // Helper functions for reading ClassAd attributes
