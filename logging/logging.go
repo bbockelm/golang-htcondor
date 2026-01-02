@@ -9,12 +9,14 @@
 package logging
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -82,7 +84,7 @@ type Logger struct {
 	logFile      atomic.Pointer[os.File]     // Atomic pointer to current log file (nil for stdout/stderr)
 	currentSize  atomic.Int64                // Current size of log file
 	rotating     atomic.Int32                // Flag to indicate rotation in progress (0 or 1)
-	stopMaint    chan struct{}               // Channel to stop maintenance goroutine
+	maintWg      sync.WaitGroup              // WaitGroup for maintenance goroutine
 	maintRunning atomic.Bool                 // Indicates if maintenance is running
 }
 
@@ -190,8 +192,7 @@ func New(config *Config) (*Logger, error) {
 	logger := slog.New(handler)
 
 	l := &Logger{
-		config:    config,
-		stopMaint: make(chan struct{}),
+		config: config,
 	}
 	l.logger.Store(logger)
 	l.logFile.Store(logFile)
@@ -545,6 +546,9 @@ func (l *Logger) PerformMaintenance() error {
 		return l.reopenLogFile()
 	}
 
+	// Update current size from actual file size
+	l.currentSize.Store(fileStat.Size())
+
 	// stat the file path
 	pathStat, err := os.Stat(logPath)
 	if err != nil {
@@ -562,6 +566,11 @@ func (l *Logger) PerformMaintenance() error {
 	if fileSys.Ino != pathSys.Ino || fileSys.Dev != pathSys.Dev {
 		// File was rotated externally, reopen
 		return l.reopenLogFile()
+	}
+
+	// After updating size, check if we need to rotate
+	if err := l.rotateLogIfNeeded(); err != nil {
+		return fmt.Errorf("failed to rotate during maintenance: %w", err)
 	}
 
 	// Touch the log file by updating its access and modification times
@@ -632,8 +641,9 @@ func (l *Logger) reopenLogFile() error {
 
 // StartMaintenance starts a goroutine that periodically performs maintenance
 // on the log file at the configured TouchLogInterval.
+// The goroutine will stop when the context is cancelled.
 // Returns an error if maintenance is already running.
-func (l *Logger) StartMaintenance() error {
+func (l *Logger) StartMaintenance(ctx context.Context) error {
 	if l.maintRunning.Load() {
 		return fmt.Errorf("maintenance already running")
 	}
@@ -643,11 +653,14 @@ func (l *Logger) StartMaintenance() error {
 	}
 
 	l.maintRunning.Store(true)
+	l.maintWg.Add(1)
 
 	go func() {
+		defer l.maintWg.Done()
+		defer l.maintRunning.Store(false)
+
 		ticker := time.NewTicker(time.Duration(l.config.TouchLogInterval) * time.Second)
 		defer ticker.Stop()
-		defer l.maintRunning.Store(false)
 
 		for {
 			select {
@@ -655,7 +668,7 @@ func (l *Logger) StartMaintenance() error {
 				if err := l.PerformMaintenance(); err != nil {
 					fmt.Fprintf(os.Stderr, "Log maintenance failed: %v\n", err)
 				}
-			case <-l.stopMaint:
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -665,40 +678,27 @@ func (l *Logger) StartMaintenance() error {
 }
 
 // StopMaintenance stops the maintenance goroutine if it's running.
+// It waits for the goroutine to finish before returning.
 func (l *Logger) StopMaintenance() {
 	if l.maintRunning.Load() {
-		close(l.stopMaint)
-		// Wait a bit for goroutine to finish
-		time.Sleep(100 * time.Millisecond)
+		l.maintWg.Wait()
 	}
 }
 
 // writeLog writes a log message and updates the size counter.
 // It's OK to go one line over the limit - rotation happens before the next write.
-func (l *Logger) writeLog(logFunc func()) {
+func (l *Logger) writeLog(logFunc func() int) {
 	// Check and perform rotation if needed (before write)
 	if err := l.rotateLogIfNeeded(); err != nil {
 		// If rotation fails, still try to log (but don't panic)
 		fmt.Fprintf(os.Stderr, "Log rotation failed: %v\n", err)
 	}
 
-	// Get current size before write
-	sizeBefore := l.currentSize.Load()
+	// Perform the log write and get bytes written
+	bytesWritten := logFunc()
 
-	// Perform the log write
-	logFunc()
-
-	// Update size after write (get actual file size)
-	logFile := l.logFile.Load()
-	if logFile != nil {
-		if stat, err := logFile.Stat(); err == nil {
-			l.currentSize.Store(stat.Size())
-		} else {
-			// If we can't stat, just add estimated size
-			sizeAfter := sizeBefore + 100 // Rough estimate per line
-			l.currentSize.Store(sizeAfter)
-		}
-	}
+	// Update size after write - use the actual bytes written
+	l.currentSize.Add(int64(bytesWritten))
 }
 
 // Error logs an error message
@@ -707,8 +707,14 @@ func (l *Logger) Error(dest Destination, msg string, args ...any) {
 		return
 	}
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
+		// Estimate bytes written
+		size := len(msg) + 50 // Base overhead
+		for _, arg := range args {
+			size += len(fmt.Sprint(arg))
+		}
 		logger.Error(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+		return size
 	})
 }
 
@@ -718,8 +724,13 @@ func (l *Logger) Warn(dest Destination, msg string, args ...any) {
 		return
 	}
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
+		size := len(msg) + 50
+		for _, arg := range args {
+			size += len(fmt.Sprint(arg))
+		}
 		logger.Warn(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+		return size
 	})
 }
 
@@ -729,8 +740,13 @@ func (l *Logger) Info(dest Destination, msg string, args ...any) {
 		return
 	}
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
+		size := len(msg) + 50
+		for _, arg := range args {
+			size += len(fmt.Sprint(arg))
+		}
 		logger.Info(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+		return size
 	})
 }
 
@@ -740,8 +756,13 @@ func (l *Logger) Debug(dest Destination, msg string, args ...any) {
 		return
 	}
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
+		size := len(msg) + 50
+		for _, arg := range args {
+			size += len(fmt.Sprint(arg))
+		}
 		logger.Debug(msg, append([]any{"destination", destinationString(dest)}, args...)...)
+		return size
 	})
 }
 
@@ -752,8 +773,9 @@ func (l *Logger) Errorf(dest Destination, format string, args ...any) {
 	}
 	msg := formatMessage(format, args...)
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
 		logger.Error(msg, "destination", destinationString(dest))
+		return len(msg) + 50
 	})
 }
 
@@ -764,8 +786,9 @@ func (l *Logger) Warnf(dest Destination, format string, args ...any) {
 	}
 	msg := formatMessage(format, args...)
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
 		logger.Warn(msg, "destination", destinationString(dest))
+		return len(msg) + 50
 	})
 }
 
@@ -776,8 +799,9 @@ func (l *Logger) Infof(dest Destination, format string, args ...any) {
 	}
 	msg := formatMessage(format, args...)
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
 		logger.Info(msg, "destination", destinationString(dest))
+		return len(msg) + 50
 	})
 }
 
@@ -788,8 +812,9 @@ func (l *Logger) Debugf(dest Destination, format string, args ...any) {
 	}
 	msg := formatMessage(format, args...)
 	logger := l.logger.Load()
-	l.writeLog(func() {
+	l.writeLog(func() int {
 		logger.Debug(msg, "destination", destinationString(dest))
+		return len(msg) + 50
 	})
 }
 

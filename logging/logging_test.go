@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -728,8 +729,12 @@ func TestStartMaintenance(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
+	// Create context for maintenance
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Start maintenance
-	if err := logger.StartMaintenance(); err != nil {
+	if err := logger.StartMaintenance(ctx); err != nil {
 		t.Fatalf("StartMaintenance failed: %v", err)
 	}
 
@@ -741,7 +746,10 @@ func TestStartMaintenance(t *testing.T) {
 	// Write a message
 	logger.Info(DestinationGeneral, "Test message")
 
-	// Stop maintenance
+	// Cancel context to stop maintenance
+	cancel()
+
+	// Stop maintenance (wait for goroutine)
 	logger.StopMaintenance()
 
 	// Verify maintenance stopped
