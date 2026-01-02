@@ -152,7 +152,7 @@ func New(config *Config) (*Logger, error) {
 		if !config.TruncateOnOpen {
 			stat, err := f.Stat()
 			if err != nil {
-				f.Close()
+				_ = f.Close() // Ignore error, we're already handling failure
 				return nil, err
 			}
 			currentSize = stat.Size()
@@ -486,6 +486,7 @@ func (l *Logger) rotateLogIfNeeded() error {
 	}
 
 	// Create new log file
+	//nolint:gosec // G304 - logPath is internal to logger, not user-controlled
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create new log file: %w", err)
@@ -587,6 +588,7 @@ func (l *Logger) reopenLogFile() error {
 	logPath := l.config.OutputPath
 
 	// Open new file
+	//nolint:gosec // G304 - logPath is internal to logger, not user-controlled
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to reopen log file: %w", err)
@@ -595,14 +597,14 @@ func (l *Logger) reopenLogFile() error {
 	// Get current file size
 	stat, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close() // Ignore error, we're already handling failure
 		return fmt.Errorf("failed to stat reopened log file: %w", err)
 	}
 
 	// Swap file handle using compare-and-swap
 	oldFile := l.logFile.Swap(f)
 	if oldFile != nil {
-		oldFile.Close()
+		_ = oldFile.Close() // Ignore error, old file is being replaced
 	}
 
 	// Reset size to current file size

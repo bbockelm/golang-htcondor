@@ -439,6 +439,7 @@ func TestLogRotation_TruncateOnOpen(t *testing.T) {
 	logger.Info(DestinationGeneral, "New message after truncate")
 
 	// Read the log file
+	//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
 	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("Failed to read log file: %v", err)
@@ -482,6 +483,7 @@ func TestLogRotation_NoTruncateOnOpen(t *testing.T) {
 	logger.Info(DestinationGeneral, "New message after opening")
 
 	// Read the log file
+	//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
 	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("Failed to read log file: %v", err)
