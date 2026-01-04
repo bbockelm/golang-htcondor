@@ -102,7 +102,7 @@ const (
 	// defaultSystemLogDir matches the OS-packaged HTCondor layout and avoids
 	// relying on the condor user's home directory (which may not exist).
 	defaultSystemLogDir   = "/var/log/condor"
-	defaultGenericLogFile = "htcondor.log"
+	defaultGenericLogFile = "DaemonLog"
 )
 
 func defaultLogPath(daemonName string) string {
@@ -149,7 +149,9 @@ func shouldFallbackToStdout(outputPath string) bool {
 		return false
 	}
 
-	if condorUID, ok := condorUID(); ok && uid == condorUID {
+	condorUIDVal, isCondorUser := condorUID()
+	if isCondorUser && uid == condorUIDVal {
+		// Current user is condor, can use condor-owned paths
 		return false
 	}
 
@@ -157,11 +159,20 @@ func shouldFallbackToStdout(outputPath string) bool {
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
+			// File doesn't exist, check parent directory
 			parentUID, parentErr := pathOwnerUID(filepath.Dir(outputPath))
 			if parentErr != nil {
+				// Can't determine parent ownership, assume we can't write
+				return true
+			}
+			// If parent is owned by current user, we can likely create the file
+			if parentUID == uid {
 				return false
 			}
-			ownerUID = parentUID
+			// If parent is owned by condor and we're condor user, we can write
+			// (already checked above, so if we're here, we're not condor user)
+			// Therefore, we should fall back to stdout
+			return true
 		case errors.Is(err, os.ErrPermission):
 			return true
 		default:
@@ -169,20 +180,24 @@ func shouldFallbackToStdout(outputPath string) bool {
 		}
 	}
 
+	// File exists, check if we own it or can write to it
 	if ownerUID == uid {
 		return false
 	}
 
-	if condorUID, ok := condorUID(); ok && ownerUID == condorUID {
-		return false
-	}
-
+	// File is owned by someone else - we should fall back to stdout
 	return true
 }
 
 func sanitizeOutputPath(outputPath string) string {
-	if outputPath == "" || outputPath == "stdout" || outputPath == "stderr" {
+	if outputPath == "" {
 		return outputPath
+	}
+
+	// Check for stdout/stderr (case-insensitive)
+	lowerPath := strings.ToLower(outputPath)
+	if lowerPath == "stdout" || lowerPath == "stderr" {
+		return lowerPath
 	}
 
 	if shouldFallbackToStdout(outputPath) {
@@ -239,19 +254,27 @@ func New(config *Config) (*Logger, error) {
 
 		f, err := os.OpenFile(config.OutputPath, flags, 0600)
 		if err != nil {
-			return nil, err
-		}
-		logFile = f
-		writer = f
-
-		// Get current file size for rotation tracking
-		if !config.TruncateOnOpen {
-			stat, err := f.Stat()
-			if err != nil {
-				_ = f.Close() // Ignore error, we're already handling failure
+			// If we can't open the log file (permission denied, etc.), fall back to stdout
+			// This can happen if the directory doesn't exist or we don't have write permission
+			if errors.Is(err, os.ErrPermission) || os.IsNotExist(err) || os.IsPermission(err) {
+				config.OutputPath = "stdout"
+				writer = os.Stdout
+			} else {
 				return nil, err
 			}
-			currentSize = stat.Size()
+		} else {
+			logFile = f
+			writer = f
+
+			// Get current file size for rotation tracking
+			if !config.TruncateOnOpen {
+				stat, err := f.Stat()
+				if err != nil {
+					_ = f.Close() // Ignore error, we're already handling failure
+					return nil, err
+				}
+				currentSize = stat.Size()
+			}
 		}
 	}
 
@@ -358,21 +381,27 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 
 	// Parse output path
 	// First try daemon-specific log path (e.g., HTTP_API_LOG)
-	// Then fall back to global LOG parameter
+	// Then construct from LOG directory + daemon log filename
 	outputPath := ""
 	daemonLogParam := strings.ToUpper(daemonName) + "_LOG"
 	if logPath, ok := cfg.Get(daemonLogParam); ok && logPath != "" {
 		outputPath = logPath
-	} else if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
-		outputPath = logPath
-	}
-
-	// Normalize paths that reference stdout or stderr in a directory structure
-	// (e.g., "stdout/SchedLog" should just be "stdout")
-	if strings.HasPrefix(outputPath, "stdout/") || strings.HasPrefix(outputPath, "stdout\\") {
-		outputPath = "stdout"
-	} else if strings.HasPrefix(outputPath, "stderr/") || strings.HasPrefix(outputPath, "stderr\\") {
-		outputPath = "stderr"
+	} else if logDir, ok := cfg.Get("LOG"); ok && logDir != "" {
+		// LOG is a directory, not a file path
+		// Construct full path: LOG directory + daemon-specific filename
+		lowerLogDir := strings.ToLower(logDir)
+		if lowerLogDir == "stdout" || lowerLogDir == "stderr" {
+			outputPath = lowerLogDir
+		} else {
+			// Construct log filename from daemon name
+			fileName := defaultGenericLogFile
+			if daemonName != "" {
+				normalized := strings.ToLower(daemonName)
+				normalized = strings.ReplaceAll(normalized, "_", "-")
+				fileName = normalized + ".log"
+			}
+			outputPath = filepath.Join(logDir, fileName)
+		}
 	}
 
 	if outputPath == "" {
@@ -455,10 +484,21 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 		return New(nil)
 	}
 
-	// Parse output path only
+	// Parse output path
+	// First try TOOL_LOG (for non-daemon tools)
+	// Then construct from LOG directory
 	outputPath := ""
-	if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
-		outputPath = logPath
+	if toolLog, ok := cfg.Get("TOOL_LOG"); ok && toolLog != "" {
+		outputPath = toolLog
+	} else if logDir, ok := cfg.Get("LOG"); ok && logDir != "" {
+		// LOG is a directory, not a file path
+		lowerLogDir := strings.ToLower(logDir)
+		if lowerLogDir == "stdout" || lowerLogDir == "stderr" {
+			outputPath = lowerLogDir
+		} else {
+			// Construct generic log path
+			outputPath = filepath.Join(logDir, defaultGenericLogFile)
+		}
 	}
 
 	if outputPath == "" {
