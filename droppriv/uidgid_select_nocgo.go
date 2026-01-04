@@ -7,7 +7,7 @@ package droppriv
 func selectBestStrategy() LookupStrategy {
 	strategies := []func() (LookupStrategy, error){
 		trySystemdUserDB, // Try systemd-userdbd first
-		trySSSDIfp,       // Try SSSD InfoPipe
+		tryNSSStrategy,   // Try NSS-based strategy (parses nsswitch.conf)
 		tryGoFallback,    // Go's user.Lookup (parses /etc/passwd without CGO)
 	}
 
