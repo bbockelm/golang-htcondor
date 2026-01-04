@@ -45,7 +45,7 @@ jobs:
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
           golang-htcondor:test-${{ matrix.tag }} \
-          go test -v ./...
+          /bin/sh -c "go install gotest.tools/gotestsum@latest && gotestsum -- -v ./..."
 
     - name: Run build in Docker
       run: |
@@ -84,7 +84,8 @@ jobs:
           golang-htcondor:integration-test \
           /bin/bash -c "
             # Run integration tests
-            go test -v -tags=integration -timeout=10m ./httpserver/
+            go install gotest.tools/gotestsum@latest
+            gotestsum -- -tags=integration -timeout=10m ./httpserver/
           "
 
   docker-verify-env:
