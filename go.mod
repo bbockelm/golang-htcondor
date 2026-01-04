@@ -5,8 +5,8 @@ go 1.24.0
 require (
 	github.com/PelicanPlatform/classad v0.0.4
 	github.com/bbockelm/cedar v0.0.20
+	github.com/bbockelm/gosssd v0.0.1
 	github.com/glebarez/sqlite v1.11.0
-	github.com/godbus/dbus/v5 v5.2.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/ory/fosite v0.47.0
