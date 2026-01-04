@@ -44,8 +44,8 @@ github.com/PelicanPlatform/classad v0.0.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyi
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2/go.mod h1:WaHUgvxTVq04UNunO+XhnAqY/wQc+bxr74GqbsZ/Jqw=
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
-github.com/bbockelm/cedar v0.0.20 h1:4uTSLSvZ5DrF+1gsyssKAJMaCqCxhDdb2rhcDeJ7guM=
-github.com/bbockelm/cedar v0.0.20/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
+github.com/bbockelm/cedar v0.0.22 h1:Lzfo8CjenKpvgXUO+DScrmql/qFZOr1SaHssNRkyfnM=
+github.com/bbockelm/cedar v0.0.22/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
 github.com/bbockelm/gosssd v0.0.1/go.mod h1:Hz8jIcIkQnFmA/ekP2ZWpnPqmyIxftPPFsi+Y3wqRL0=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
