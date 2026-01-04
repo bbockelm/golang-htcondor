@@ -139,13 +139,11 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 	}
 
 	// Determine command
-	cmd, err := getCommandForAdType(adType)
-	if err != nil {
-		return nil, err
-	}
+	cmd := getCommandForAdType(adType)
 
 	// Parse constraint expression if provided
 	var constraintExpr *classad.Expr
+	var err error
 	if constraint != "" {
 		constraintExpr, err = classad.ParseExpr(constraint)
 		if err != nil {
@@ -289,10 +287,7 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 	}
 
 	// Determine the command based on ad type
-	cmd, err := getCommandForAdType(adType)
-	if err != nil {
-		return nil, err
-	}
+	cmd := getCommandForAdType(adType)
 
 	// Get SecurityConfig from context, HTCondor config, or defaults
 	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
@@ -392,24 +387,25 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 }
 
 // getCommandForAdType maps ad type to HTCondor command
-func getCommandForAdType(adType string) (commands.CommandType, error) {
+func getCommandForAdType(adType string) commands.CommandType {
 	switch adType {
 	case "StartdAd", "Machine", "Startd":
-		return commands.QUERY_STARTD_ADS, nil
+		return commands.QUERY_STARTD_ADS
 	case "ScheddAd", "Schedd":
-		return commands.QUERY_SCHEDD_ADS, nil
+		return commands.QUERY_SCHEDD_ADS
 	case "MasterAd", "Master":
-		return commands.QUERY_MASTER_ADS, nil
+		return commands.QUERY_MASTER_ADS
 	case "SubmitterAd", "Submitter":
-		return commands.QUERY_SUBMITTOR_ADS, nil
+		return commands.QUERY_SUBMITTOR_ADS
 	case "LicenseAd", "License":
-		return commands.QUERY_LICENSE_ADS, nil
+		return commands.QUERY_LICENSE_ADS
 	case "CollectorAd", "Collector":
-		return commands.QUERY_COLLECTOR_ADS, nil
+		return commands.QUERY_COLLECTOR_ADS
 	case "NegotiatorAd", "Negotiator":
-		return commands.QUERY_NEGOTIATOR_ADS, nil
+		return commands.QUERY_NEGOTIATOR_ADS
 	default:
-		return 0, fmt.Errorf("unknown ad type: %s", adType)
+		// Unknown/custom ad type - use QUERY_GENERIC_ADS
+		return commands.QUERY_GENERIC_ADS
 	}
 }
 

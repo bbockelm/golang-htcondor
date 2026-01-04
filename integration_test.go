@@ -2,9 +2,13 @@ package htcondor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 )
 
 //
@@ -97,7 +101,7 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		ads, err := collector.QueryAds(ctx, "Startd", "")
+		ads, err := collector.QueryAds(ctx, "Machine", "")
 		if err != nil {
 			t.Fatalf("Failed to query startd: %v", err)
 		}
@@ -162,26 +166,97 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		}
 	})
 
-	// Test 5: Query non-existent daemon type (should return error)
-	t.Run("QueryNonExistentType", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Test 5: Advertise and query for custom/generic ad type (verifies QUERY_GENERIC_ADS is used)
+	t.Run("AdvertiseAndQueryCustomAdType", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		ads, err := collector.QueryAds(ctx, "NonExistentDaemon", "")
-		if err == nil {
-			t.Errorf("Expected error for non-existent daemon type, but query succeeded with %d ads", len(ads))
-			// Print the unexpected ad(s) for debugging
-			for i, ad := range ads {
-				t.Logf("Unexpected ad %d:", i)
-				if myType := ad.EvaluateAttr("MyType"); !myType.IsError() {
-					t.Logf("  MyType: %v", myType)
-				}
-				if name := ad.EvaluateAttr("Name"); !name.IsError() {
-					t.Logf("  Name: %v", name)
+		// Configure authentication by setting CONDOR_CONFIG to use harness config
+		// This allows cedar to generate tokens for authentication
+		cfg, err := harness.GetConfig()
+		if err != nil {
+			t.Fatalf("Failed to get config from harness: %v", err)
+		}
+
+		// Get LOCAL_DIR and use it to find condor_config
+		localDir, _ := cfg.Get("LOCAL_DIR")
+		configPath := filepath.Join(filepath.Dir(localDir), "condor_config")
+
+		// Set CONDOR_CONFIG environment variable
+		oldConfig := os.Getenv("CONDOR_CONFIG")
+		if err := os.Setenv("CONDOR_CONFIG", configPath); err != nil {
+			t.Fatalf("Failed to set CONDOR_CONFIG: %v", err)
+		}
+		defer func() {
+			if oldConfig != "" {
+				_ = os.Setenv("CONDOR_CONFIG", oldConfig)
+			} else {
+				_ = os.Unsetenv("CONDOR_CONFIG")
+			}
+		}()
+
+		// Reload global config to pick up the test harness configuration
+		ReloadDefaultConfig()
+		defer ReloadDefaultConfig() // Restore original config after test
+
+		// First, advertise a custom ad
+		customAd := classad.New()
+		if err := customAd.Set("MyType", "CustomServiceAd"); err != nil {
+			t.Fatalf("Failed to set MyType: %v", err)
+		}
+		if err := customAd.Set("Name", "test-custom-service"); err != nil {
+			t.Fatalf("Failed to set Name: %v", err)
+		}
+		if err := customAd.Set("CustomAttribute", "test-value"); err != nil {
+			t.Fatalf("Failed to set CustomAttribute: %v", err)
+		}
+
+		// Advertise the custom ad (uses UPDATE_AD_GENERIC command 58)
+		err = collector.Advertise(ctx, customAd, nil)
+		if err != nil {
+			t.Fatalf("Failed to advertise custom ad: %v", err)
+		}
+		t.Logf("Successfully advertised custom ad")
+
+		// Query immediately - generic ads should be available right away
+		// Give just a moment for the advertise to complete
+		time.Sleep(10 * time.Millisecond)
+
+		// Now query for the custom ad type - should use QUERY_GENERIC_ADS command (74)
+		// Query with a constraint to find our specific ad
+		ads, err := collector.QueryAds(ctx, "CustomServiceAd", `Name == "test-custom-service"`)
+		if err != nil {
+			t.Fatalf("Failed to query custom ad type: %v", err)
+		}
+
+		// We should find at least our advertised ad
+		if len(ads) == 0 {
+			t.Fatal("Expected to find at least one custom ad, got none")
+		}
+
+		t.Logf("Query for custom ad type succeeded with %d ads", len(ads))
+
+		// Verify we can find our advertised ad
+		foundOurAd := false
+		for _, ad := range ads {
+			if name := ad.EvaluateAttr("Name"); !name.IsError() {
+				if nameStr, err := name.StringValue(); err == nil && nameStr == "test-custom-service" {
+					foundOurAd = true
+					t.Logf("Found our advertised custom ad: %s", nameStr)
+
+					// Verify the custom attribute
+					if customAttr := ad.EvaluateAttr("CustomAttribute"); customAttr.IsError() {
+						t.Error("Custom ad missing CustomAttribute")
+					} else if val, err := customAttr.StringValue(); err != nil || val != "test-value" {
+						t.Errorf("Expected CustomAttribute='test-value', got '%s' (err=%v)", val, err)
+					}
+					break
 				}
 			}
-		} else {
-			t.Logf("Got expected error: %v", err)
+		}
+
+		if !foundOurAd {
+			t.Error("Did not find our advertised custom ad in query results")
 		}
 	})
 }
