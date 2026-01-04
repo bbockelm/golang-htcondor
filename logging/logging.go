@@ -105,12 +105,31 @@ const (
 	defaultGenericLogFile = "DaemonLog"
 )
 
+// daemonNameToCamelCase converts a daemon name from UPPER_CASE to CamelCaseLog.
+// For example: FOO_BAR -> FooBarLog, HTTP_API -> HttpApiLog, SCHEDD -> ScheddLog
+func daemonNameToCamelCase(daemonName string) string {
+	if daemonName == "" {
+		return defaultGenericLogFile
+	}
+
+	// Split by underscore
+	parts := strings.Split(daemonName, "_")
+
+	// Capitalize each part
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		}
+	}
+
+	// Join and append "Log"
+	return strings.Join(parts, "") + "Log"
+}
+
 func defaultLogPath(daemonName string) string {
 	fileName := defaultGenericLogFile
 	if daemonName != "" {
-		normalized := strings.ToLower(daemonName)
-		normalized = strings.ReplaceAll(normalized, "_", "-")
-		fileName = normalized + ".log"
+		fileName = daemonNameToCamelCase(daemonName)
 	}
 	return filepath.Join(defaultSystemLogDir, fileName)
 }
@@ -393,12 +412,10 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 		if lowerLogDir == "stdout" || lowerLogDir == "stderr" {
 			outputPath = lowerLogDir
 		} else {
-			// Construct log filename from daemon name
+			// Construct log filename from daemon name (e.g., FOO_BAR -> FooBarLog)
 			fileName := defaultGenericLogFile
 			if daemonName != "" {
-				normalized := strings.ToLower(daemonName)
-				normalized = strings.ReplaceAll(normalized, "_", "-")
-				fileName = normalized + ".log"
+				fileName = daemonNameToCamelCase(daemonName)
 			}
 			outputPath = filepath.Join(logDir, fileName)
 		}

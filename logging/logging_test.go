@@ -81,7 +81,7 @@ func TestParseDestination(t *testing.T) {
 }
 
 func TestDefaultLogPath(t *testing.T) {
-	expectedDaemon := filepath.Join(defaultSystemLogDir, "http-api.log")
+	expectedDaemon := filepath.Join(defaultSystemLogDir, "HttpApiLog")
 	if path := defaultLogPath("HTTP_API"); path != expectedDaemon {
 		t.Fatalf("defaultLogPath(HTTP_API) = %s, expected %s", path, expectedDaemon)
 	}
@@ -89,6 +89,27 @@ func TestDefaultLogPath(t *testing.T) {
 	expectedGeneric := filepath.Join(defaultSystemLogDir, "DaemonLog")
 	if path := defaultLogPath(""); path != expectedGeneric {
 		t.Fatalf("defaultLogPath(\"\") = %s, expected %s", path, expectedGeneric)
+	}
+}
+
+func TestDaemonNameToCamelCase(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", "DaemonLog"},
+		{"HTTP_API", "HttpApiLog"},
+		{"SCHEDD", "ScheddLog"},
+		{"FOO_BAR", "FooBarLog"},
+		{"A", "ALog"},
+		{"A_B_C", "ABCLog"},
+		{"HTTP_API_SERVER", "HttpApiServerLog"},
+	}
+
+	for _, tt := range tests {
+		if result := daemonNameToCamelCase(tt.input); result != tt.expected {
+			t.Errorf("daemonNameToCamelCase(%q) = %q, expected %q", tt.input, result, tt.expected)
+		}
 	}
 }
 
@@ -255,6 +276,84 @@ func TestFromConfig_OutputPath(t *testing.T) {
 
 			if logger.config.OutputPath != tt.expectedPath {
 				t.Errorf("FromConfig() output path = %v, expected %v", logger.config.OutputPath, tt.expectedPath)
+			}
+		})
+	}
+}
+
+func TestFromConfigWithDaemon_LogDirectory(t *testing.T) {
+	// Create a writable temporary directory for file path tests
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom", "path.log")
+	// Ensure custom path parent directory exists
+	if err := os.MkdirAll(filepath.Dir(customPath), 0750); err != nil {
+		t.Fatalf("Failed to create custom path directory: %v", err)
+	}
+
+	tests := []struct {
+		name               string
+		daemonName         string
+		configText         string
+		expectedOutputPath string
+	}{
+		{
+			name:               "CUSTOM_DAEMON with LOG directory, no CUSTOM_DAEMON_LOG",
+			daemonName:         "CUSTOM_DAEMON",
+			configText:         "LOG = " + tmpDir + "\n",
+			expectedOutputPath: filepath.Join(tmpDir, "CustomDaemonLog"),
+		},
+		{
+			name:               "MY_SERVICE with LOG directory, no MY_SERVICE_LOG",
+			daemonName:         "MY_SERVICE",
+			configText:         "LOG = " + tmpDir + "\n",
+			expectedOutputPath: filepath.Join(tmpDir, "MyServiceLog"),
+		},
+		{
+			name:               "FOO_BAR with LOG directory, no FOO_BAR_LOG",
+			daemonName:         "FOO_BAR",
+			configText:         "LOG = " + tmpDir + "\n",
+			expectedOutputPath: filepath.Join(tmpDir, "FooBarLog"),
+		},
+		{
+			name:               "CUSTOM_DAEMON_LOG takes precedence over LOG",
+			daemonName:         "CUSTOM_DAEMON",
+			configText:         "LOG = " + tmpDir + "\nCUSTOM_DAEMON_LOG = " + customPath + "\n",
+			expectedOutputPath: customPath,
+		},
+		{
+			name:               "LOG stdout with daemon",
+			daemonName:         "CUSTOM_DAEMON",
+			configText:         "LOG = stdout\n",
+			expectedOutputPath: "stdout",
+		},
+		{
+			name:               "LOG stderr with daemon",
+			daemonName:         "MY_SERVICE",
+			configText:         "LOG = stderr\n",
+			expectedOutputPath: "stderr",
+		},
+		{
+			name:               "LOG STDOUT (uppercase) with daemon",
+			daemonName:         "FOO_BAR",
+			configText:         "LOG = STDOUT\n",
+			expectedOutputPath: "stdout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.NewFromReader(strings.NewReader(tt.configText))
+			if err != nil {
+				t.Fatalf("Failed to create config: %v", err)
+			}
+
+			logger, err := FromConfigWithDaemon(tt.daemonName, cfg)
+			if err != nil {
+				t.Fatalf("FromConfigWithDaemon() error = %v", err)
+			}
+
+			if logger.config.OutputPath != tt.expectedOutputPath {
+				t.Errorf("OutputPath = %v, expected %v", logger.config.OutputPath, tt.expectedOutputPath)
 			}
 		})
 	}
