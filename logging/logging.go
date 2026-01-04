@@ -10,10 +10,13 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,7 +99,98 @@ const (
 	DefaultMaxNumLogs = 1
 	// DefaultTouchLogInterval is the default interval for touching log files (60 seconds)
 	DefaultTouchLogInterval = 60
+	// defaultSystemLogDir matches the OS-packaged HTCondor layout and avoids
+	// relying on the condor user's home directory (which may not exist).
+	defaultSystemLogDir   = "/var/log/condor"
+	defaultGenericLogFile = "htcondor.log"
 )
+
+func defaultLogPath(daemonName string) string {
+	fileName := defaultGenericLogFile
+	if daemonName != "" {
+		normalized := strings.ToLower(daemonName)
+		normalized = strings.ReplaceAll(normalized, "_", "-")
+		fileName = normalized + ".log"
+	}
+	return filepath.Join(defaultSystemLogDir, fileName)
+}
+
+func condorUID() (int, bool) {
+	u, err := user.Lookup("condor")
+	if err != nil {
+		return 0, false
+	}
+
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, false
+	}
+
+	return uid, true
+}
+
+func pathOwnerUID(path string) (int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat information unavailable for %s", path)
+	}
+
+	return int(stat.Uid), nil
+}
+
+func shouldFallbackToStdout(outputPath string) bool {
+	uid := os.Getuid()
+	if uid == 0 { // root can always use the path
+		return false
+	}
+
+	if condorUID, ok := condorUID(); ok && uid == condorUID {
+		return false
+	}
+
+	ownerUID, err := pathOwnerUID(outputPath)
+	if err != nil {
+		switch {
+		case os.IsNotExist(err):
+			parentUID, parentErr := pathOwnerUID(filepath.Dir(outputPath))
+			if parentErr != nil {
+				return false
+			}
+			ownerUID = parentUID
+		case errors.Is(err, os.ErrPermission):
+			return true
+		default:
+			return false
+		}
+	}
+
+	if ownerUID == uid {
+		return false
+	}
+
+	if condorUID, ok := condorUID(); ok && ownerUID == condorUID {
+		return false
+	}
+
+	return true
+}
+
+func sanitizeOutputPath(outputPath string) string {
+	if outputPath == "" || outputPath == "stdout" || outputPath == "stderr" {
+		return outputPath
+	}
+
+	if shouldFallbackToStdout(outputPath) {
+		return "stdout"
+	}
+
+	return outputPath
+}
 
 // New creates a new Logger with the given configuration
 func New(config *Config) (*Logger, error) {
@@ -121,6 +215,8 @@ func New(config *Config) (*Logger, error) {
 	if config.TouchLogInterval == 0 {
 		config.TouchLogInterval = DefaultTouchLogInterval
 	}
+
+	config.OutputPath = sanitizeOutputPath(config.OutputPath)
 
 	// Determine output writer
 	var writer io.Writer
@@ -159,29 +255,10 @@ func New(config *Config) (*Logger, error) {
 		}
 	}
 
-	// Find the most verbose level across all destinations to set slog level
-	// This ensures slog doesn't filter out messages we might want for specific destinations
-	minVerbosity := VerbosityWarn // Default
-	for _, level := range config.DestinationLevels {
-		if level > minVerbosity {
-			minVerbosity = level
-		}
-	}
-
-	// Convert our verbosity to slog level
-	var slogLevel slog.Level
-	switch minVerbosity {
-	case VerbosityError:
-		slogLevel = slog.LevelError
-	case VerbosityWarn:
-		slogLevel = slog.LevelWarn
-	case VerbosityInfo:
-		slogLevel = slog.LevelInfo
-	case VerbosityDebug:
-		slogLevel = slog.LevelDebug
-	default:
-		slogLevel = slog.LevelWarn
-	}
+	// Set slog handler to capture all log levels (Debug)
+	// Per-destination filtering happens in shouldLog() method
+	// This ensures slog doesn't filter out messages before we can apply destination-specific levels
+	slogLevel := slog.LevelDebug
 
 	// Create slog handler with options
 	opts := &slog.HandlerOptions{
@@ -282,7 +359,7 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 	// Parse output path
 	// First try daemon-specific log path (e.g., HTTP_API_LOG)
 	// Then fall back to global LOG parameter
-	outputPath := "stderr"
+	outputPath := ""
 	daemonLogParam := strings.ToUpper(daemonName) + "_LOG"
 	if logPath, ok := cfg.Get(daemonLogParam); ok && logPath != "" {
 		outputPath = logPath
@@ -297,6 +374,12 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 	} else if strings.HasPrefix(outputPath, "stderr/") || strings.HasPrefix(outputPath, "stderr\\") {
 		outputPath = "stderr"
 	}
+
+	if outputPath == "" {
+		outputPath = defaultLogPath(daemonName)
+	}
+
+	outputPath = sanitizeOutputPath(outputPath)
 
 	// Parse destination levels from <DAEMON>_DEBUG
 	destinationLevels := make(map[Destination]Verbosity)
@@ -373,10 +456,16 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 	}
 
 	// Parse output path only
-	outputPath := "stderr"
+	outputPath := ""
 	if logPath, ok := cfg.Get("LOG"); ok && logPath != "" {
 		outputPath = logPath
 	}
+
+	if outputPath == "" {
+		outputPath = defaultLogPath("")
+	}
+
+	outputPath = sanitizeOutputPath(outputPath)
 
 	return New(&Config{
 		OutputPath:        outputPath,
@@ -497,25 +586,9 @@ func (l *Logger) rotateLogIfNeeded() error {
 	l.currentSize.Store(0)
 
 	// Create new handler and logger with the new file
-	var slogLevel slog.Level
-	minVerbosity := VerbosityWarn
-	for _, level := range l.config.DestinationLevels {
-		if level > minVerbosity {
-			minVerbosity = level
-		}
-	}
-	switch minVerbosity {
-	case VerbosityError:
-		slogLevel = slog.LevelError
-	case VerbosityWarn:
-		slogLevel = slog.LevelWarn
-	case VerbosityInfo:
-		slogLevel = slog.LevelInfo
-	case VerbosityDebug:
-		slogLevel = slog.LevelDebug
-	default:
-		slogLevel = slog.LevelWarn
-	}
+	// Set slog handler to capture all log levels (Debug)
+	// Per-destination filtering happens in shouldLog() method
+	slogLevel := slog.LevelDebug
 
 	opts := &slog.HandlerOptions{
 		Level: slogLevel,
@@ -611,25 +684,9 @@ func (l *Logger) reopenLogFile() error {
 	l.currentSize.Store(stat.Size())
 
 	// Create new handler and logger with the new file
-	var slogLevel slog.Level
-	minVerbosity := VerbosityWarn
-	for _, level := range l.config.DestinationLevels {
-		if level > minVerbosity {
-			minVerbosity = level
-		}
-	}
-	switch minVerbosity {
-	case VerbosityError:
-		slogLevel = slog.LevelError
-	case VerbosityWarn:
-		slogLevel = slog.LevelWarn
-	case VerbosityInfo:
-		slogLevel = slog.LevelInfo
-	case VerbosityDebug:
-		slogLevel = slog.LevelDebug
-	default:
-		slogLevel = slog.LevelWarn
-	}
+	// Set slog handler to capture all log levels (Debug)
+	// Per-destination filtering happens in shouldLog() method
+	slogLevel := slog.LevelDebug
 
 	opts := &slog.HandlerOptions{
 		Level: slogLevel,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,6 +77,18 @@ func TestParseDestination(t *testing.T) {
 					tt.input, dst, ok, tt.expectedDst, tt.expectedOk)
 			}
 		})
+	}
+}
+
+func TestDefaultLogPath(t *testing.T) {
+	expectedDaemon := filepath.Join(defaultSystemLogDir, "http-api.log")
+	if path := defaultLogPath("HTTP_API"); path != expectedDaemon {
+		t.Fatalf("defaultLogPath(HTTP_API) = %s, expected %s", path, expectedDaemon)
+	}
+
+	expectedGeneric := filepath.Join(defaultSystemLogDir, "htcondor.log")
+	if path := defaultLogPath(""); path != expectedGeneric {
+		t.Fatalf("defaultLogPath(\"\") = %s, expected %s", path, expectedGeneric)
 	}
 }
 
@@ -193,6 +206,23 @@ HTTP_API_DEBUG = cedar:debug, invalid, http:info
 	}
 }
 
+func TestFromConfigWithDaemon_DefaultPathAndOwnership(t *testing.T) {
+	cfg, err := config.NewFromReader(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("Failed to create config: %v", err)
+	}
+
+	expectedPath := sanitizeOutputPath(defaultLogPath("HTTP_API"))
+	logger, err := FromConfigWithDaemon("HTTP_API", cfg)
+	if err != nil {
+		t.Fatalf("FromConfigWithDaemon() error = %v", err)
+	}
+
+	if logger.config.OutputPath != expectedPath {
+		t.Fatalf("OutputPath = %v, expected %v", logger.config.OutputPath, expectedPath)
+	}
+}
+
 func TestFromConfig_OutputPath(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -227,6 +257,21 @@ func TestFromConfig_OutputPath(t *testing.T) {
 				t.Errorf("FromConfig() output path = %v, expected %v", logger.config.OutputPath, tt.expectedPath)
 			}
 		})
+	}
+}
+
+func TestSanitizeOutputPath_FallsBackToStdoutWhenNotOwner(t *testing.T) {
+	uid := os.Getuid()
+	if uid == 0 {
+		t.Skip("running as root; ownership fallback does not apply")
+	}
+
+	if condorUID, ok := condorUID(); ok && condorUID == uid {
+		t.Skip("running as condor user; ownership fallback does not apply")
+	}
+
+	if path := sanitizeOutputPath("/etc/hosts"); path != "stdout" {
+		t.Fatalf("sanitizeOutputPath(/etc/hosts) = %s, expected stdout fallback", path)
 	}
 }
 
