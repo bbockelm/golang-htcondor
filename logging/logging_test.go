@@ -86,7 +86,7 @@ func TestDefaultLogPath(t *testing.T) {
 		t.Fatalf("defaultLogPath(HTTP_API) = %s, expected %s", path, expectedDaemon)
 	}
 
-	expectedGeneric := filepath.Join(defaultSystemLogDir, "htcondor.log")
+	expectedGeneric := filepath.Join(defaultSystemLogDir, "DaemonLog")
 	if path := defaultLogPath(""); path != expectedGeneric {
 		t.Fatalf("defaultLogPath(\"\") = %s, expected %s", path, expectedGeneric)
 	}
