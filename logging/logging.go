@@ -61,8 +61,15 @@ type Config struct {
 	// OutputPath is where logs are written ("stdout", "stderr", or file path)
 	OutputPath string
 	// DestinationLevels specifies verbosity level for each destination
-	// If a destination is not in the map, it defaults to VerbosityWarn
+	// If a destination is not in the map, DefaultLevel is used
 	DestinationLevels map[Destination]Verbosity
+	// DefaultLevel is the verbosity level for destinations not in DestinationLevels
+	// Default: VerbosityWarn
+	DefaultLevel Verbosity
+	// SkipGlobalInstall controls whether this logger is set as the global slog default
+	// When false (default), external libraries like Cedar will use this logger
+	// When true, only explicit Logger method calls will use this logger
+	SkipGlobalInstall bool
 	// MaxLogSize is the maximum size of the log file in bytes before rotation
 	// Default: 10 MB (10485760 bytes). Set to 0 to disable rotation.
 	MaxLogSize int64
@@ -226,12 +233,90 @@ func sanitizeOutputPath(outputPath string) string {
 	return outputPath
 }
 
+// filteringHandler wraps an slog.Handler and filters messages based on destination attributes
+type filteringHandler struct {
+	handler           slog.Handler
+	destinationLevels map[Destination]Verbosity
+	defaultLevel      Verbosity
+}
+
+// Enabled checks if a log level should be enabled based on destination filtering
+func (h *filteringHandler) Enabled(_ context.Context, _ slog.Level) bool {
+	// We need to see all levels to do per-destination filtering
+	return true
+}
+
+// Handle processes a log record with destination-based filtering
+func (h *filteringHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Extract destination from attributes
+	var dest Destination
+	found := false
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "destination" {
+			if destStr, ok := a.Value.Any().(string); ok {
+				if d, ok := parseDestination(destStr); ok {
+					dest = d
+					found = true
+					return false // Stop iteration
+				}
+			}
+		}
+		return true // Continue iteration
+	})
+
+	// Determine configured level for this destination
+	configuredLevel := h.defaultLevel
+	if found && h.destinationLevels != nil {
+		if level, ok := h.destinationLevels[dest]; ok {
+			configuredLevel = level
+		}
+	}
+
+	// Convert slog level to our Verbosity
+	var msgLevel Verbosity
+	switch {
+	case r.Level >= slog.LevelError:
+		msgLevel = VerbosityError
+	case r.Level >= slog.LevelWarn:
+		msgLevel = VerbosityWarn
+	case r.Level >= slog.LevelInfo:
+		msgLevel = VerbosityInfo
+	default:
+		msgLevel = VerbosityDebug
+	}
+
+	// Only pass through if message level is at or below configured level
+	if msgLevel <= configuredLevel {
+		return h.handler.Handle(ctx, r)
+	}
+	return nil
+}
+
+// WithAttrs returns a new handler with additional attributes
+func (h *filteringHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &filteringHandler{
+		handler:           h.handler.WithAttrs(attrs),
+		destinationLevels: h.destinationLevels,
+		defaultLevel:      h.defaultLevel,
+	}
+}
+
+// WithGroup returns a new handler with a group name
+func (h *filteringHandler) WithGroup(name string) slog.Handler {
+	return &filteringHandler{
+		handler:           h.handler.WithGroup(name),
+		destinationLevels: h.destinationLevels,
+		defaultLevel:      h.defaultLevel,
+	}
+}
+
 // New creates a new Logger with the given configuration
 func New(config *Config) (*Logger, error) {
 	if config == nil {
 		config = &Config{
 			OutputPath:        "stderr",
-			DestinationLevels: nil, // Will default to VerbosityWarn for all
+			DestinationLevels: nil,
+			DefaultLevel:      VerbosityWarn,
 			MaxLogSize:        DefaultMaxLogSize,
 			MaxNumLogs:        DefaultMaxNumLogs,
 			TruncateOnOpen:    false,
@@ -239,7 +324,9 @@ func New(config *Config) (*Logger, error) {
 		}
 	}
 
-	// Set defaults for rotation parameters if not specified
+	// Set defaults for parameters if not specified
+	// Note: DefaultLevel of 0 (VerbosityError) is valid, so we don't set a default here
+	// Users who want VerbosityWarn as default should explicitly set it
 	if config.MaxLogSize == 0 {
 		config.MaxLogSize = DefaultMaxLogSize
 	}
@@ -298,8 +385,8 @@ func New(config *Config) (*Logger, error) {
 	}
 
 	// Set slog handler to capture all log levels (Debug)
-	// Per-destination filtering happens in shouldLog() method
-	// This ensures slog doesn't filter out messages before we can apply destination-specific levels
+	// Use filteringHandler for per-destination filtering
+	// This ensures both our Logger methods and direct slog calls get filtered
 	slogLevel := slog.LevelDebug
 
 	// Create slog handler with options
@@ -307,8 +394,13 @@ func New(config *Config) (*Logger, error) {
 		Level: slogLevel,
 	}
 
-	handler := slog.NewTextHandler(writer, opts)
-	logger := slog.New(handler)
+	baseHandler := slog.NewTextHandler(writer, opts)
+	filtHandler := &filteringHandler{
+		handler:           baseHandler,
+		destinationLevels: config.DestinationLevels,
+		defaultLevel:      config.DefaultLevel,
+	}
+	logger := slog.New(filtHandler)
 
 	l := &Logger{
 		config: config,
@@ -316,6 +408,23 @@ func New(config *Config) (*Logger, error) {
 	l.logger.Store(logger)
 	l.logFile.Store(logFile)
 	l.currentSize.Store(currentSize)
+
+	// By default, set as global default so external dependencies (like Cedar) use our logger
+	// Skip if SkipGlobalInstall is true
+	if !config.SkipGlobalInstall {
+		// Use a filtering handler that accepts DEBUG level but filters based on destination
+		// This allows Cedar logs with destination=cedar to be filtered appropriately
+		globalOpts := &slog.HandlerOptions{
+			Level: slog.LevelDebug, // Accept all levels
+		}
+		globalBaseHandler := slog.NewTextHandler(writer, globalOpts)
+		globalFilteringHandler := &filteringHandler{
+			handler:           globalBaseHandler,
+			destinationLevels: config.DestinationLevels,
+			defaultLevel:      config.DefaultLevel,
+		}
+		slog.SetDefault(slog.New(globalFilteringHandler))
+	}
 
 	return l, nil
 }
@@ -532,8 +641,8 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 
 // shouldLog checks if a log should be written based on destination-specific verbosity level
 func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
-	// Get the configured level for this destination (default to warn)
-	configuredLevel := VerbosityWarn
+	// Get the configured level for this destination (use DefaultLevel if not configured)
+	configuredLevel := l.config.DefaultLevel
 	if l.config.DestinationLevels != nil {
 		if level, ok := l.config.DestinationLevels[dest]; ok {
 			configuredLevel = level
@@ -644,7 +753,7 @@ func (l *Logger) rotateLogIfNeeded() error {
 
 	// Create new handler and logger with the new file
 	// Set slog handler to capture all log levels (Debug)
-	// Per-destination filtering happens in shouldLog() method
+	// Per-destination filtering happens in filteringHandler
 	slogLevel := slog.LevelDebug
 
 	opts := &slog.HandlerOptions{
@@ -742,7 +851,7 @@ func (l *Logger) reopenLogFile() error {
 
 	// Create new handler and logger with the new file
 	// Set slog handler to capture all log levels (Debug)
-	// Per-destination filtering happens in shouldLog() method
+	// Per-destination filtering happens in filteringHandler
 	slogLevel := slog.LevelDebug
 
 	opts := &slog.HandlerOptions{
@@ -819,6 +928,7 @@ func (l *Logger) writeLog(logFunc func() int) {
 
 // Error logs an error message
 func (l *Logger) Error(dest Destination, msg string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
@@ -836,6 +946,7 @@ func (l *Logger) Error(dest Destination, msg string, args ...any) {
 
 // Warn logs a warning message
 func (l *Logger) Warn(dest Destination, msg string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
@@ -852,6 +963,7 @@ func (l *Logger) Warn(dest Destination, msg string, args ...any) {
 
 // Info logs an info message
 func (l *Logger) Info(dest Destination, msg string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
@@ -868,6 +980,7 @@ func (l *Logger) Info(dest Destination, msg string, args ...any) {
 
 // Debug logs a debug message
 func (l *Logger) Debug(dest Destination, msg string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
@@ -884,6 +997,7 @@ func (l *Logger) Debug(dest Destination, msg string, args ...any) {
 
 // Errorf logs an error message with Printf-style formatting
 func (l *Logger) Errorf(dest Destination, format string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityError) {
 		return
 	}
@@ -897,6 +1011,7 @@ func (l *Logger) Errorf(dest Destination, format string, args ...any) {
 
 // Warnf logs a warning message with Printf-style formatting
 func (l *Logger) Warnf(dest Destination, format string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityWarn) {
 		return
 	}
@@ -910,6 +1025,7 @@ func (l *Logger) Warnf(dest Destination, format string, args ...any) {
 
 // Infof logs an info message with Printf-style formatting
 func (l *Logger) Infof(dest Destination, format string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityInfo) {
 		return
 	}
@@ -923,6 +1039,7 @@ func (l *Logger) Infof(dest Destination, format string, args ...any) {
 
 // Debugf logs a debug message with Printf-style formatting
 func (l *Logger) Debugf(dest Destination, format string, args ...any) {
+	// Pre-filter based on destination level (lightweight check)
 	if !l.shouldLog(dest, VerbosityDebug) {
 		return
 	}
