@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -378,6 +379,7 @@ func TestShouldLog(t *testing.T) {
 	tests := []struct {
 		name           string
 		destLevels     map[Destination]Verbosity
+		defaultLevel   Verbosity
 		dest           Destination
 		msgLevel       Verbosity
 		expectedResult bool
@@ -387,6 +389,7 @@ func TestShouldLog(t *testing.T) {
 			destLevels: map[Destination]Verbosity{
 				DestinationCedar: VerbosityDebug,
 			},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationCedar,
 			msgLevel:       VerbosityDebug,
 			expectedResult: true,
@@ -396,6 +399,7 @@ func TestShouldLog(t *testing.T) {
 			destLevels: map[Destination]Verbosity{
 				DestinationCedar: VerbosityInfo,
 			},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationCedar,
 			msgLevel:       VerbosityDebug,
 			expectedResult: false,
@@ -405,6 +409,7 @@ func TestShouldLog(t *testing.T) {
 			destLevels: map[Destination]Verbosity{
 				DestinationHTTP: VerbosityInfo,
 			},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationHTTP,
 			msgLevel:       VerbosityInfo,
 			expectedResult: true,
@@ -414,6 +419,7 @@ func TestShouldLog(t *testing.T) {
 			destLevels: map[Destination]Verbosity{
 				DestinationHTTP: VerbosityInfo,
 			},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationHTTP,
 			msgLevel:       VerbosityWarn,
 			expectedResult: true,
@@ -423,13 +429,15 @@ func TestShouldLog(t *testing.T) {
 			destLevels: map[Destination]Verbosity{
 				DestinationHTTP: VerbosityError,
 			},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationHTTP,
 			msgLevel:       VerbosityError,
 			expectedResult: true,
 		},
 		{
-			name:           "default to warn when dest not configured",
+			name:           "uses default level when dest not configured",
 			destLevels:     map[Destination]Verbosity{},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationHTTP,
 			msgLevel:       VerbosityWarn,
 			expectedResult: true,
@@ -437,16 +445,26 @@ func TestShouldLog(t *testing.T) {
 		{
 			name:           "default blocks debug when dest not configured",
 			destLevels:     map[Destination]Verbosity{},
+			defaultLevel:   VerbosityWarn,
 			dest:           DestinationHTTP,
 			msgLevel:       VerbosityDebug,
 			expectedResult: false,
 		},
 		{
-			name:           "nil destLevels defaults to warn",
+			name:           "nil destLevels uses default level",
 			destLevels:     nil,
+			defaultLevel:   VerbosityInfo,
 			dest:           DestinationHTTP,
-			msgLevel:       VerbosityWarn,
+			msgLevel:       VerbosityInfo,
 			expectedResult: true,
+		},
+		{
+			name:           "default level of Error blocks Info",
+			destLevels:     nil,
+			defaultLevel:   VerbosityError,
+			dest:           DestinationHTTP,
+			msgLevel:       VerbosityInfo,
+			expectedResult: false,
 		},
 	}
 
@@ -455,6 +473,7 @@ func TestShouldLog(t *testing.T) {
 			logger := &Logger{
 				config: &Config{
 					DestinationLevels: tt.destLevels,
+					DefaultLevel:      tt.defaultLevel,
 				},
 			}
 
@@ -976,4 +995,220 @@ func TestAtomicRotation(t *testing.T) {
 	if _, err := os.Stat(logPath + ".old"); os.IsNotExist(err) {
 		t.Error("Expected .old log file to exist after rotation")
 	}
+}
+
+// TestFilteringHandlerWithDirectSlogCalls tests that the filteringHandler
+// properly filters direct slog calls (like those from Cedar) based on destination
+func TestFilteringHandlerWithDirectSlogCalls(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/test.log"
+
+	// Create logger with specific destination levels
+	logger, err := New(&Config{
+		OutputPath: logPath,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationCedar:  VerbosityWarn,  // Cedar should only see WARN and above
+			DestinationHTTP:   VerbosityInfo,  // HTTP should see INFO and above
+			DestinationSchedd: VerbosityDebug, // Schedd should see everything
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Test direct slog calls with different levels and destinations
+	// These should be filtered by the filteringHandler
+
+	// Cedar INFO should be filtered out (Cedar is WARN level)
+	logger.Info(DestinationCedar, "Cedar INFO - should be filtered")
+
+	// Cedar WARN should appear
+	logger.Warn(DestinationCedar, "Cedar WARN - should appear")
+
+	// HTTP DEBUG should be filtered out (HTTP is INFO level)
+	logger.Debug(DestinationHTTP, "HTTP DEBUG - should be filtered")
+
+	// HTTP INFO should appear
+	logger.Info(DestinationHTTP, "HTTP INFO - should appear")
+
+	// Schedd DEBUG should appear (Schedd is DEBUG level)
+	logger.Debug(DestinationSchedd, "Schedd DEBUG - should appear")
+
+	// Read log file
+	//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	logContent := string(content)
+
+	// Verify filtered messages don't appear
+	if strings.Contains(logContent, "Cedar INFO - should be filtered") {
+		t.Error("Cedar INFO message should have been filtered out")
+	}
+	if strings.Contains(logContent, "HTTP DEBUG - should be filtered") {
+		t.Error("HTTP DEBUG message should have been filtered out")
+	}
+
+	// Verify allowed messages appear
+	if !strings.Contains(logContent, "Cedar WARN - should appear") {
+		t.Error("Cedar WARN message should appear in log")
+	}
+	if !strings.Contains(logContent, "HTTP INFO - should appear") {
+		t.Error("HTTP INFO message should appear in log")
+	}
+	if !strings.Contains(logContent, "Schedd DEBUG - should appear") {
+		t.Error("Schedd DEBUG message should appear in log")
+	}
+}
+
+// TestDefaultLevel tests that the DefaultLevel setting works for unhandled destinations
+func TestDefaultLevel(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "test.log")
+
+	// Create logger with DefaultLevel=VerbosityError (only errors)
+	// Only configure HTTP destination explicitly, leave others to use default
+	cfg := &Config{
+		OutputPath: logPath,
+		DestinationLevels: map[Destination]Verbosity{
+			DestinationHTTP: VerbosityInfo, // HTTP allows INFO and above
+		},
+		DefaultLevel:      VerbosityError, // Default for unconfigured destinations: ERROR only
+		SkipGlobalInstall: true,           // Don't affect global logger
+	}
+
+	logger, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// HTTP (configured): INFO should appear
+	logger.Info(DestinationHTTP, "HTTP INFO - should appear")
+
+	// Schedd (not configured, uses DefaultLevel=Error): INFO should be filtered
+	logger.Info(DestinationSchedd, "Schedd INFO - should be filtered")
+
+	// Schedd (not configured, uses DefaultLevel=Error): ERROR should appear
+	logger.Error(DestinationSchedd, "Schedd ERROR - should appear")
+
+	// Cedar (not configured, uses DefaultLevel=Error): WARN should be filtered
+	logger.Warn(DestinationCedar, "Cedar WARN - should be filtered")
+
+	// Cedar (not configured, uses DefaultLevel=Error): ERROR should appear
+	logger.Error(DestinationCedar, "Cedar ERROR - should appear")
+
+	// Read log file
+	//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	logContent := string(content)
+
+	// Verify filtered messages (below default level)
+	if strings.Contains(logContent, "Schedd INFO - should be filtered") {
+		t.Error("Schedd INFO should be filtered (DefaultLevel=Error)")
+	}
+	if strings.Contains(logContent, "Cedar WARN - should be filtered") {
+		t.Error("Cedar WARN should be filtered (DefaultLevel=Error)")
+	}
+
+	// Verify allowed messages
+	if !strings.Contains(logContent, "HTTP INFO - should appear") {
+		t.Error("HTTP INFO should appear (explicitly configured)")
+	}
+	if !strings.Contains(logContent, "Schedd ERROR - should appear") {
+		t.Error("Schedd ERROR should appear (matches DefaultLevel)")
+	}
+	if !strings.Contains(logContent, "Cedar ERROR - should appear") {
+		t.Error("Cedar ERROR should appear (matches DefaultLevel)")
+	}
+}
+
+// TestSkipGlobalInstall tests that SkipGlobalInstall controls global slog installation
+func TestSkipGlobalInstall(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "test.log")
+
+	t.Run("SkipGlobalInstall=false (default, installs globally)", func(t *testing.T) {
+		// Create logger that installs globally (default behavior)
+		cfg := &Config{
+			OutputPath: logPath,
+			DestinationLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityWarn, // Cedar at WARN level
+			},
+			DefaultLevel: VerbosityInfo,
+			// SkipGlobalInstall defaults to false, so logger installs globally
+		}
+
+		_, err := New(cfg)
+		if err != nil {
+			t.Fatalf("Failed to create logger: %v", err)
+		}
+
+		// Direct slog call should use our logger
+		// This simulates what Cedar library does
+		ctx := context.Background()
+		slog.InfoContext(ctx, "Direct slog INFO", "destination", "cedar")
+
+		// Read log file
+		//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
+		content, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("Failed to read log file: %v", err)
+		}
+
+		logContent := string(content)
+
+		// Cedar INFO should be filtered (Cedar configured at WARN)
+		if strings.Contains(logContent, "Direct slog INFO") {
+			t.Error("Direct slog INFO to Cedar should be filtered (Cedar at WARN level)")
+		}
+	})
+
+	// Clear log file for next test
+	//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
+	if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Failed to clear log file: %v", err)
+	}
+
+	t.Run("SkipGlobalInstall=true (skips global install)", func(t *testing.T) {
+		// Create logger that does NOT install globally
+		cfg := &Config{
+			OutputPath: logPath,
+			DestinationLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityError, // Cedar at ERROR level
+			},
+			DefaultLevel:      VerbosityInfo,
+			SkipGlobalInstall: true, // Should NOT set global logger
+		}
+
+		_, err := New(cfg)
+		if err != nil {
+			t.Fatalf("Failed to create logger: %v", err)
+		}
+
+		// Direct slog calls should NOT use our logger (uses default slog)
+		// So they won't be written to our log file
+		ctx := context.Background()
+		slog.InfoContext(ctx, "Direct slog INFO", "destination", "cedar")
+
+		// Read log file
+		//nolint:gosec // G304 - logPath is test directory temp file, not user-controlled
+		content, err := os.ReadFile(logPath)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("Failed to read log file: %v", err)
+		}
+
+		logContent := string(content)
+
+		// Since SkipGlobalInstall=true, direct slog calls should NOT go to our file
+		// (They would go to stderr or wherever the default slog is configured)
+		if strings.Contains(logContent, "Direct slog INFO") {
+			t.Error("Direct slog call should NOT appear when SkipGlobalInstall=true")
+		}
+	})
 }
