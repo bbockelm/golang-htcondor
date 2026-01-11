@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // TestingT is an interface that matches the testing.T methods used by the test harness.
@@ -49,6 +50,10 @@ func SetupCondorHarness(t TestingT) *CondorTestHarness {
 // logging without duplicating harness logic.
 func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHarness {
 	t.Helper()
+
+	// Initialize logger with defaults to filter Cedar and other library logs
+	// This installs globally (SkipGlobalInstall defaults to false) so Cedar logs are filtered
+	_, _ = logging.New(nil)
 
 	// Check if condor_master is available
 	masterPath, err := exec.LookPath("condor_master")
