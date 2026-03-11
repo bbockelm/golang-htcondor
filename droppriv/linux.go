@@ -52,6 +52,7 @@ func runAsUser(target Identity, fn func() error) error {
 
 func captureThreadCredentials() (threadCredentials, error) {
 	var ruid, euid, suid int
+	//nolint:gosec // G103: unsafe.Pointer required for Linux syscall interface
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_GETRESUID,
 		uintptr(unsafe.Pointer(&ruid)),
 		uintptr(unsafe.Pointer(&euid)),
@@ -60,6 +61,7 @@ func captureThreadCredentials() (threadCredentials, error) {
 	}
 
 	var rgid, egid, sgid int
+	//nolint:gosec // G103: unsafe.Pointer required for Linux syscall interface
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_GETRESGID,
 		uintptr(unsafe.Pointer(&rgid)),
 		uintptr(unsafe.Pointer(&egid)),
