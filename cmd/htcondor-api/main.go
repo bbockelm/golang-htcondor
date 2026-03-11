@@ -542,7 +542,9 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 	// Load server-level instructions for MCP agents
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
-		log.Println("MCP instructions configured")
+		log.Printf("MCP instructions configured (%d bytes)", len(instructions))
+	} else {
+		log.Println("MCP_INSTRUCTIONS not configured; no agent-level instructions will be provided")
 	}
 
 	return config

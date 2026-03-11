@@ -369,6 +369,7 @@ func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interfac
 		},
 	}
 	if s.instructions != "" {
+		s.logger.Info(logging.DestinationMCP, "Including instructions in initialize response", "length", len(s.instructions))
 		result["instructions"] = s.instructions
 	}
 	return result

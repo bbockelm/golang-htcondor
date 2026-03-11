@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -804,13 +806,26 @@ func (h *Handler) performPeriodicPing() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// If we have a token, configure security
+	// If we have a static token, use it directly
 	if h.token != "" {
 		secConfig, err := ConfigureSecurityForToken(h.token)
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
 		} else {
 			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+		}
+	} else if h.signingKeyPath != "" && h.trustDomain != "" {
+		// Generate a short-lived token using the signing key
+		token, err := h.generatePingToken()
+		if err != nil {
+			h.logger.Warn(logging.DestinationHTTP, "Failed to generate token for periodic ping", "error", err)
+		} else {
+			secConfig, err := ConfigureSecurityForToken(token)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
+			} else {
+				ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+			}
 		}
 	}
 
@@ -831,6 +846,20 @@ func (h *Handler) performPeriodicPing() {
 	} else {
 		h.logger.Debug(logging.DestinationHTTP, "Periodic schedd ping succeeded")
 	}
+}
+
+// generatePingToken generates a short-lived IDTOKEN for periodic ping operations
+func (h *Handler) generatePingToken() (string, error) {
+	kid := filepath.Base(h.signingKeyPath)
+	subject := "htcondor-api@" + h.trustDomain
+	iat := time.Now().Unix()
+	exp := time.Now().Add(5 * time.Minute).Unix()
+
+	token, err := security.GenerateJWT(filepath.Dir(h.signingKeyPath), kid, subject, h.trustDomain, iat, exp, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate ping token: %w", err)
+	}
+	return token, nil
 }
 
 // initializeIDP initializes the IDP provider with actual listening address

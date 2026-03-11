@@ -54,6 +54,7 @@ const (
 	DestinationMetrics                      // Metrics collection logs
 	DestinationSecurity                     // Security/auth logs
 	DestinationCedar                        // Cedar protocol logs
+	DestinationMCP                          // MCP server logs
 )
 
 // Config holds logging configuration
@@ -475,6 +476,8 @@ func parseDestination(dest string) (Destination, bool) {
 		return DestinationSecurity, true
 	case "cedar":
 		return DestinationCedar, true
+	case "mcp":
+		return DestinationMCP, true
 	default:
 		return DestinationGeneral, false
 	}
@@ -670,6 +673,8 @@ func destinationString(dest Destination) string {
 		return "security"
 	case DestinationCedar:
 		return "cedar"
+	case DestinationMCP:
+		return "mcp"
 	default:
 		return "unknown"
 	}
