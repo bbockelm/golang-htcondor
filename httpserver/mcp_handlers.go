@@ -1160,17 +1160,48 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Parse registration request
-	var regReq struct {
-		RedirectURIs  []string `json:"redirect_uris"`
-		GrantTypes    []string `json:"grant_types"`
-		ResponseTypes []string `json:"response_types"`
-		Scopes        []string `json:"scope"`
-		ClientName    string   `json:"client_name"`
+	// RFC 7591 defines "scope" as a space-separated string, but some clients
+	// may send it as an array. We use json.RawMessage to handle both formats.
+	var rawReq struct {
+		RedirectURIs  []string        `json:"redirect_uris"`
+		GrantTypes    []string        `json:"grant_types"`
+		ResponseTypes []string        `json:"response_types"`
+		Scope         json.RawMessage `json:"scope"`
+		ClientName    string          `json:"client_name"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&regReq); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&rawReq); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid registration request")
 		return
+	}
+
+	// Parse scope field: accept both a space-separated string (RFC 7591) and an array
+	var regReq struct {
+		RedirectURIs  []string
+		GrantTypes    []string
+		ResponseTypes []string
+		Scopes        []string
+		ClientName    string
+	}
+	regReq.RedirectURIs = rawReq.RedirectURIs
+	regReq.GrantTypes = rawReq.GrantTypes
+	regReq.ResponseTypes = rawReq.ResponseTypes
+	regReq.ClientName = rawReq.ClientName
+
+	if len(rawReq.Scope) > 0 {
+		// Try as string first (RFC 7591 standard)
+		var scopeStr string
+		if err := json.Unmarshal(rawReq.Scope, &scopeStr); err == nil {
+			if scopeStr != "" {
+				regReq.Scopes = strings.Fields(scopeStr)
+			}
+		} else {
+			// Fall back to array format
+			if err := json.Unmarshal(rawReq.Scope, &regReq.Scopes); err != nil {
+				h.writeError(w, http.StatusBadRequest, "Invalid scope format: must be a space-separated string or array of strings")
+				return
+			}
+		}
 	}
 
 	// Validate redirect URIs
