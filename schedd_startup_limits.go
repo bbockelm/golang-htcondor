@@ -61,15 +61,15 @@ type StartupLimitResponse struct {
 
 // ClassAd attribute names for startup limits
 const (
-	AttrStartupLimitUUID           = "StartupLimitUuid"
+	AttrStartupLimitUUID           = "StartupLimitUUID"
 	AttrStartupLimitTag            = "StartupLimitTag"
 	AttrStartupLimitName           = "StartupLimitName"
-	AttrStartupLimitExpr           = "StartupLimitExpr"
-	AttrStartupLimitCostExpr       = "StartupLimitCostExpr"
+	AttrStartupLimitExpr           = "StartupLimitExpression"
+	AttrStartupLimitCostExpr       = "StartupLimitRateCost"
 	AttrStartupLimitRateCount      = "StartupLimitRateCount"
 	AttrStartupLimitRateWindow     = "StartupLimitRateWindow"
-	AttrStartupLimitBurst          = "StartupLimitBurst"
-	AttrStartupLimitMaxBurstCost   = "StartupLimitMaxBurstCost"
+	AttrStartupLimitBurst          = "StartupLimitRateBurst"
+	AttrStartupLimitMaxBurstCost   = "StartupLimitRateBurstMaxCost"
 	AttrStartupLimitExpiration     = "StartupLimitExpiration"
 	AttrStartupLimitStatus         = "StartupLimitStatus"
 	AttrStartupLimitError          = "StartupLimitError"
@@ -77,8 +77,8 @@ const (
 	AttrStartupLimitCostAllowed    = "StartupLimitCostAllowed"
 	AttrStartupLimitJobsSkipped    = "StartupLimitJobsSkipped"
 	AttrStartupLimitMatchesIgnored = "StartupLimitMatchesIgnored"
-	AttrStartupLimitLastIgnored    = "StartupLimitLastIgnored"
-	AttrStartupLimitIgnoredUsers   = "StartupLimitIgnoredUsers"
+	AttrStartupLimitLastIgnored    = "StartupLimitLastIgnoredTime"
+	AttrStartupLimitIgnoredUsers   = "StartupLimitIgnoredSources"
 )
 
 // CreateStartupLimit creates or updates a startup rate limit in the schedd

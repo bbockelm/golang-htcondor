@@ -100,8 +100,10 @@ func TestScheddStartupLimitsIntegration(t *testing.T) {
 		if limit.Name != "Test Basic Limit" {
 			t.Errorf("Expected Name='Test Basic Limit', got '%s'", limit.Name)
 		}
-		if limit.Expression != "Owner == \"testuser\"" {
-			t.Errorf("Expected Expression='Owner == \"testuser\"', got '%s'", limit.Expression)
+		// The server's ClassAd unparser may wrap expressions in parentheses
+		expectedExpr := `Owner == "testuser"`
+		if limit.Expression != expectedExpr && limit.Expression != "("+expectedExpr+")" {
+			t.Errorf("Expected Expression='%s' (with or without parens), got '%s'", expectedExpr, limit.Expression)
 		}
 		if limit.RateCount != 10 {
 			t.Errorf("Expected RateCount=10, got %d", limit.RateCount)
