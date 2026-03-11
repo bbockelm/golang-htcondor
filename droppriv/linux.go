@@ -52,7 +52,6 @@ func runAsUser(target Identity, fn func() error) error {
 
 func captureThreadCredentials() (threadCredentials, error) {
 	var ruid, euid, suid int
-	//nolint:gosec // G103 - unsafe.Pointer required for syscall interface
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_GETRESUID,
 		uintptr(unsafe.Pointer(&ruid)),
 		uintptr(unsafe.Pointer(&euid)),
@@ -61,7 +60,6 @@ func captureThreadCredentials() (threadCredentials, error) {
 	}
 
 	var rgid, egid, sgid int
-	//nolint:gosec // G103 - unsafe.Pointer required for syscall interface
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_GETRESGID,
 		uintptr(unsafe.Pointer(&rgid)),
 		uintptr(unsafe.Pointer(&egid)),
@@ -79,8 +77,8 @@ func captureThreadCredentials() (threadCredentials, error) {
 		rgid:  rgid,
 		egid:  egid,
 		sgid:  sgid,
-		fsuid: int(fsuid),
-		fsgid: int(fsgid),
+		fsuid: int(fsuid), //nolint:gosec // G115: UIDs are 32-bit on Linux
+		fsgid: int(fsgid), //nolint:gosec // G115: GIDs are 32-bit on Linux
 	}, nil
 }
 
@@ -157,14 +155,14 @@ func setResGID(rgid, egid, sgid int) error {
 }
 
 func setFSUID(uid int) error {
-	if _, _, errno := syscall.RawSyscall(syscall.SYS_SETFSUID, uintptr(uid), 0, 0); errno != 0 {
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_SETFSUID, uintptr(uid), 0, 0); errno != 0 { //nolint:gosec // G115: UIDs are 32-bit on Linux
 		return fmt.Errorf("setfsuid(%d) failed: %w", uid, errno)
 	}
 	return nil
 }
 
 func setFSGID(gid int) error {
-	if _, _, errno := syscall.RawSyscall(syscall.SYS_SETFSGID, uintptr(gid), 0, 0); errno != 0 {
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_SETFSGID, uintptr(gid), 0, 0); errno != 0 { //nolint:gosec // G115: GIDs are 32-bit on Linux
 		return fmt.Errorf("setfsgid(%d) failed: %w", gid, errno)
 	}
 	return nil
