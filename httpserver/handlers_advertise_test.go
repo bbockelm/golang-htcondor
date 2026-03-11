@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -80,7 +81,7 @@ func TestHandleCollectorAdvertise_NoCollector(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", nil)
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -102,7 +103,7 @@ func TestHandleCollectorAdvertise_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/collector/advertise", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/collector/advertise", nil)
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -141,7 +142,7 @@ func TestHandleCollectorAdvertise_JSON_SingleAd(t *testing.T) {
 		t.Fatalf("Failed to marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -186,7 +187,7 @@ func TestHandleCollectorAdvertise_JSON_MissingAd(t *testing.T) {
 		t.Fatalf("Failed to marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -216,7 +217,7 @@ Name = "test-ad"
 TestAttr = 123
 `
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", strings.NewReader(adText))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", strings.NewReader(adText))
 	req.Header.Set("Content-Type", "text/plain")
 	w := httptest.NewRecorder()
 
@@ -278,7 +279,7 @@ Name = "test-ad-2"
 		t.Fatalf("Failed to close writer: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", body)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 
@@ -308,7 +309,7 @@ func TestHandleCollectorAdvertise_UnsupportedMediaType(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", strings.NewReader("data"))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", strings.NewReader("data"))
 	req.Header.Set("Content-Type", "application/xml")
 	w := httptest.NewRecorder()
 
@@ -345,7 +346,7 @@ func TestHandleCollectorAdvertise_InvalidCommand(t *testing.T) {
 		t.Fatalf("Failed to marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -389,7 +390,7 @@ func TestParseAdvertiseMultipart_SizeLimit(t *testing.T) {
 		t.Fatalf("Failed to close writer: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", body)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	// This should fail due to size limit
@@ -427,7 +428,7 @@ func TestHandleCollectorPath_Advertise(t *testing.T) {
 		t.Fatalf("Failed to marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -111,7 +112,7 @@ func TestDynamicClientRegistrationScopes(t *testing.T) {
 			}
 
 			// Create HTTP request
-			req := httptest.NewRequest("POST", "/mcp/oauth2/register", bytes.NewReader(reqBody))
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/mcp/oauth2/register", bytes.NewReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
 
 			// Create response recorder
@@ -151,6 +152,101 @@ func TestDynamicClientRegistrationScopes(t *testing.T) {
 	}
 }
 
+// TestDynamicClientRegistrationScopeFormats tests that scope can be sent as a string (RFC 7591) or array
+func TestDynamicClientRegistrationScopeFormats(t *testing.T) {
+	// Create temporary directory for test database
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_oauth2.db")
+
+	logger, err := logging.New(&logging.Config{
+		OutputPath: "stdout",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: dbPath,
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		scopeValue     interface{} // string or []string
+		expectedStatus int
+		expectedScopes string
+	}{
+		{
+			name:           "Scope as space-separated string (RFC 7591)",
+			scopeValue:     "openid profile mcp:read",
+			expectedStatus: http.StatusCreated,
+			expectedScopes: "openid profile mcp:read",
+		},
+		{
+			name:           "Scope as array of strings",
+			scopeValue:     []string{"openid", "mcp:write"},
+			expectedStatus: http.StatusCreated,
+			expectedScopes: "openid mcp:write",
+		},
+		{
+			name:           "Scope omitted - use defaults",
+			scopeValue:     nil,
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:           "Scope as empty string",
+			scopeValue:     "",
+			expectedStatus: http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			regReq := map[string]interface{}{
+				"redirect_uris":  []string{"http://localhost:8080/callback"},
+				"grant_types":    []string{"authorization_code"},
+				"response_types": []string{"code"},
+				"client_name":    "Test Client",
+			}
+			if tt.scopeValue != nil {
+				regReq["scope"] = tt.scopeValue
+			}
+
+			reqBody, err := json.Marshal(regReq)
+			if err != nil {
+				t.Fatalf("Failed to marshal request: %v", err)
+			}
+
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/mcp/oauth2/register", bytes.NewReader(reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.handleOAuth2Register(rr, req)
+
+			if rr.Code != tt.expectedStatus {
+				t.Fatalf("Expected status %d, got %d. Body: %s",
+					tt.expectedStatus, rr.Code, rr.Body.String())
+			}
+
+			if rr.Code == http.StatusCreated && tt.expectedScopes != "" {
+				var resp map[string]interface{}
+				if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				if got := resp["scope"].(string); got != tt.expectedScopes {
+					t.Errorf("Expected scope %q, got %q", tt.expectedScopes, got)
+				}
+			}
+		})
+	}
+}
+
 // TestOAuth2MetadataScopes tests that the OAuth2 metadata includes all supported scopes
 func TestOAuth2MetadataScopes(t *testing.T) {
 	// Create temporary directory for test database
@@ -179,7 +275,7 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 	}
 
 	// Create HTTP request
-	req := httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/.well-known/oauth-authorization-server", nil)
 
 	// Create response recorder
 	rr := httptest.NewRecorder()
@@ -269,7 +365,7 @@ func TestOAuth2ProtectedResourceMetadata(t *testing.T) {
 	}
 
 	// Create HTTP request
-	req := httptest.NewRequest("GET", "/.well-known/oauth-protected-resource", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/.well-known/oauth-protected-resource", nil)
 
 	// Create response recorder
 	rr := httptest.NewRecorder()

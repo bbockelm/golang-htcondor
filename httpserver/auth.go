@@ -179,8 +179,8 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	// Create a new session cache for this token
 	sessionCache := security.NewSessionCache()
 
-	// Create context for cleanup goroutine
-	ctx, cancel := context.WithCancel(context.Background())
+	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
+	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
 		Token:         token,
@@ -197,7 +197,6 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	})
 
 	tc.entries[token] = entry
-	_ = ctx // Silence unused variable warning
 
 	return entry, nil
 }
@@ -226,8 +225,8 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 	// Create a new session cache for this token
 	sessionCache := security.NewSessionCache()
 
-	// Create context for cleanup goroutine
-	ctx, cancel := context.WithCancel(context.Background())
+	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
+	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
 		Token:         token,
@@ -244,7 +243,6 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 	})
 
 	tc.entries[token] = entry
-	_ = ctx // Silence unused variable warning
 
 	return entry, nil
 }

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,12 +33,12 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	token := createTestJWTToken(3600)
 
 	// Add first service credential (github)
-	addReq := serviceCredentialRequest{
+	addReq := serviceCredentialRequest{ //nolint:gosec // G101: test data
 		CredType:   "OAuth",
 		Credential: "github-oauth-token",
 	}
 	body, _ := json.Marshal(addReq)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/creds/service/github", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/creds/service/github", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)
@@ -47,7 +48,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	}
 
 	// List credentials - should show only one
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/creds/service", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/creds/service", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
 	s.handleServiceCredentialCollection(w, req)
@@ -65,12 +66,12 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	t.Logf("✓ List shows 1 credential: %s", listResp[0].Service)
 
 	// Add second service credential (gitlab)
-	addReq2 := serviceCredentialRequest{
+	addReq2 := serviceCredentialRequest{ //nolint:gosec // G101: test data
 		CredType:   "OAuth",
 		Credential: "gitlab-oauth-token",
 	}
 	body2, _ := json.Marshal(addReq2)
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/creds/service/gitlab", bytes.NewReader(body2))
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/creds/service/gitlab", bytes.NewReader(body2))
 	req.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)
@@ -81,7 +82,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	t.Logf("✓ Added second credential: gitlab")
 
 	// List credentials - should now show two
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/creds/service", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/creds/service", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
 	s.handleServiceCredentialCollection(w, req)
@@ -108,7 +109,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	t.Logf("✓ List shows 2 credentials: github and gitlab")
 
 	// Fetch first credential token
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/creds/service/github/credential", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/creds/service/github/credential", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)
@@ -127,7 +128,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	t.Logf("✓ Fetched github credential successfully")
 
 	// Fetch second credential token
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/creds/service/gitlab/credential", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/creds/service/gitlab/credential", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)

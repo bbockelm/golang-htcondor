@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,7 +51,7 @@ func TestIsBrowserRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/api/v1/jobs", nil)
+			req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
 			req.Header.Set("Accept", tt.acceptHeader)
 
 			result := isBrowserRequest(req)
@@ -74,7 +75,7 @@ func TestBrowserRedirectWithoutOAuth2(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
 	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 
@@ -107,7 +108,7 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 	}
 
 	// Create a test server with OAuth2 configured
-	server, err := NewServer(Config{
+	server, err := NewServer(Config{ //nolint:gosec // G101: test credentials
 		Logger:             logger,
 		EnableMCP:          true,
 		OAuth2ClientID:     "test-client",
@@ -124,7 +125,7 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/v1/jobs?constraint=true", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs?constraint=true", nil)
 	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 
@@ -157,7 +158,7 @@ func TestBrowserRedirectWithOAuth2(t *testing.T) {
 
 // TestWelcomePageUnauthenticated tests the welcome page for unauthenticated users
 func TestWelcomePageUnauthenticated(t *testing.T) {
-	server, err := NewServer(Config{
+	server, err := NewServer(Config{ //nolint:gosec // G101: test credentials
 		EnableMCP:          true,
 		OAuth2ClientID:     "test-client",
 		OAuth2ClientSecret: "test-secret",
@@ -172,7 +173,7 @@ func TestWelcomePageUnauthenticated(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	w := httptest.NewRecorder()
 
 	server.handleWelcome(w, req)
@@ -220,7 +221,7 @@ func TestWelcomePageWithIDP(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	w := httptest.NewRecorder()
 
 	server.handleWelcome(w, req)
@@ -253,7 +254,7 @@ func TestWelcomePageNotFound(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/notfound", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/notfound", nil)
 	w := httptest.NewRecorder()
 
 	server.handleWelcome(w, req)

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"html"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -37,6 +38,8 @@ func (h *Handler) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 	if redirectURI == "" {
 		redirectURI = r.URL.Query().Get("return_url")
 	}
+	// Escape for safe HTML embedding
+	redirectURI = html.EscapeString(redirectURI)
 
 	html := `<!DOCTYPE html>
 <html>
@@ -124,6 +127,9 @@ func (h *Handler) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 
 // handleIDPLoginSubmit handles login form submission
 func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	// Rate limit login attempts by IP address
 	ip := r.RemoteAddr
 	if !h.idpLoginLimiter.Allow(ip) {
@@ -192,7 +198,7 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 <head><title>Login Successful</title></head>
 <body>
     <h2>Login Successful</h2>
-    <p>You are now logged in as ` + username + `</p>
+    <p>You are now logged in as ` + html.EscapeString(username) + `</p>
 </body>
 </html>`))
 }

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func TestHandleWhoAmI(t *testing.T) {
 		token := createTestJWTToken(3600)
 
 		// Create request with Bearer token
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/whoami", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 
 		w := httptest.NewRecorder()
@@ -63,7 +64,7 @@ func TestHandleWhoAmI(t *testing.T) {
 		}
 
 		// Create request without token
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/whoami", nil)
 
 		w := httptest.NewRecorder()
 
@@ -105,7 +106,7 @@ func TestHandleWhoAmI(t *testing.T) {
 		}
 
 		// Create POST request (not allowed)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/whoami", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/whoami", nil)
 
 		w := httptest.NewRecorder()
 

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,7 @@ func TestHandleJobInputMultipart_WrongMethod(t *testing.T) {
 
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/api/v1/jobs/123.0/input/multipart", nil)
+			req := httptest.NewRequestWithContext(context.Background(), method, "/api/v1/jobs/123.0/input/multipart", nil)
 			w := httptest.NewRecorder()
 
 			server.handleJobInputMultipart(w, req, "123.0")
@@ -62,7 +63,7 @@ func TestHandleJobInputMultipart_NoAuth(t *testing.T) {
 	writer := multipart.NewWriter(body)
 	_ = writer.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/123.0/input/multipart", body)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/123.0/input/multipart", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	w := httptest.NewRecorder()
@@ -97,7 +98,7 @@ func TestRouting_JobInputMultipart(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, tc.path, nil)
 			w := httptest.NewRecorder()
 
 			// Test via handleJobByID which does routing

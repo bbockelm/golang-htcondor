@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +83,7 @@ func testHealthEndpoint(t *testing.T, handlerFunc func(http.ResponseWriter, *htt
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, path, nil)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, path, nil)
 			w := httptest.NewRecorder()
 
 			handlerFunc(w, req)
@@ -175,7 +176,7 @@ func TestLogoutEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "/logout", nil)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, "/logout", nil)
 
 			// Add cookies to request if provided
 			for _, cookie := range tt.cookies {
@@ -265,7 +266,7 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 	}
 
 	// Create a request with the session cookie
-	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/logout", nil)
 	req.AddCookie(&http.Cookie{
 		Name:  sessionCookieName,
 		Value: sessionID,
@@ -384,7 +385,7 @@ func TestHandleJobFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "/api/v1/jobs/123.0/files/"+tt.filename, nil)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, "/api/v1/jobs/123.0/files/"+tt.filename, nil)
 			w := httptest.NewRecorder()
 
 			// Create a minimal server instance for testing
@@ -476,7 +477,7 @@ func TestSwaggerUI(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/docs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/docs", nil)
 	w := httptest.NewRecorder()
 
 	server.handleSwaggerUI(w, req)

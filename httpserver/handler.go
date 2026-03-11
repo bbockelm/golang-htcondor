@@ -409,7 +409,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Set up all HTTP routes
 	h.setupRoutes()
 
-	h.ctx, h.cancelFunc = context.WithCancel(ctx)
+	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
 
 	// Initialize IDP if enabled
 	if err := h.initializeIDP(ln, protocol); err != nil {

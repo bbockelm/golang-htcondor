@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
@@ -180,7 +181,7 @@ func TestSessionCookie(t *testing.T) {
 	}
 
 	// Test getSessionCookie
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	req.AddCookie(&http.Cookie{
 		Name:  sessionCookieName,
 		Value: sessionID,
@@ -218,7 +219,7 @@ func TestGetSessionFromRequest(t *testing.T) {
 	}
 
 	// Test with valid session cookie
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	req.AddCookie(&http.Cookie{
 		Name:  sessionCookieName,
 		Value: sessionID,
@@ -233,7 +234,7 @@ func TestGetSessionFromRequest(t *testing.T) {
 	}
 
 	// Test with invalid session cookie
-	req = httptest.NewRequest("GET", "/", nil)
+	req = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	req.AddCookie(&http.Cookie{
 		Name:  sessionCookieName,
 		Value: "invalid-session-id",
@@ -245,7 +246,7 @@ func TestGetSessionFromRequest(t *testing.T) {
 	}
 
 	// Test with no session cookie
-	req = httptest.NewRequest("GET", "/", nil)
+	req = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	_, ok = server.getSessionFromRequest(req)
 	if ok {
 		t.Error("Should not get session when no cookie is present")

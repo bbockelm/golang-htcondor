@@ -350,6 +350,7 @@ func (c *CedarCredd) storeCredential(ctx context.Context, user string, mode int,
 
 	// Non-legacy mode: send credlen, cred bytes, classad
 	credLen := len(credential)
+	//nolint:gosec // G115: credential length is bounded by reasonable message sizes
 	if err := msg.PutInt32(ctx, int32(credLen)); err != nil {
 		return fmt.Errorf("failed to send credlen: %w", err)
 	}

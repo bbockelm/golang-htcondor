@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,7 +29,7 @@ func TestPingHandlerNoCollector(t *testing.T) {
 	}
 
 	// Create request
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/ping", nil)
 	w := httptest.NewRecorder()
 
 	// Call handler
@@ -63,7 +64,7 @@ func TestCollectorPingHandlerNoCollector(t *testing.T) {
 	}
 
 	// Create request
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/collector/ping", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/collector/ping", nil)
 	w := httptest.NewRecorder()
 
 	// Call handler
@@ -94,7 +95,7 @@ func TestScheddPingHandlerWrongMethod(t *testing.T) {
 	}
 
 	// Create POST request (should only accept GET)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/schedd/ping", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/schedd/ping", nil)
 	w := httptest.NewRecorder()
 
 	// Call handler

@@ -3,9 +3,12 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -479,6 +482,9 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	ctx := r.Context()
 
 	// Get state from query parameter for GET or form value for POST
@@ -525,10 +531,10 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		var scopesHTML strings.Builder
 		scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
 		for _, scope := range scopes {
-			scopesHTML.WriteString(fmt.Sprintf("                <li>\n"+
+			fmt.Fprintf(&scopesHTML, "                <li>\n"+
 				"                    <strong>%s</strong>\n"+
 				"                    <p>%s</p>\n"+
-				"                </li>\n", scope.Name, scope.Description))
+				"                </li>\n", scope.Name, scope.Description)
 		}
 		scopesHTML.WriteString("            </ul>")
 
@@ -792,6 +798,9 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	ctx := r.Context()
 
 	// Parse form data
@@ -950,7 +959,7 @@ func (h *Handler) replaceWithCondorToken(ctx context.Context, w http.ResponseWri
 func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	deviceCode := r.FormValue("device_code")
+	deviceCode := r.FormValue("device_code") //nolint:gosec // G120: body already limited by handleOAuth2Token caller
 	if deviceCode == "" {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code is required")
 		return
@@ -1287,15 +1296,14 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// generateRandomString generates a random string of specified length
+// generateRandomString generates a cryptographically random hex string.
+// The returned string is 2*length hex characters (length random bytes).
 func generateRandomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-		time.Sleep(time.Nanosecond) // Ensure different values
+	if _, err := cryptorand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
 	}
-	return string(b)
+	return hex.EncodeToString(b)
 }
 
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
@@ -1373,6 +1381,9 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	ctx := r.Context()
 
 	// Parse client credentials from request
@@ -1448,6 +1459,9 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
 		return
 	}
+
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	ctx := r.Context()
 
@@ -1698,10 +1712,10 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request
 	var scopesHTML strings.Builder
 	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
 	for _, scope := range scopes {
-		scopesHTML.WriteString(fmt.Sprintf("                <li>\n"+
+		fmt.Fprintf(&scopesHTML, "                <li>\n"+
 			"                    <strong>%s</strong>\n"+
 			"                    <p>%s</p>\n"+
-			"                </li>\n", scope.Name, scope.Description))
+			"                </li>\n", html.EscapeString(scope.Name), html.EscapeString(scope.Description))
 	}
 	scopesHTML.WriteString("            </ul>")
 
@@ -1879,7 +1893,7 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request
         </form>
     </div>
 </body>
-</html>`, username, userCode, client.GetID(), scopesHTML.String(), userCode)
+</html>`, html.EscapeString(username), html.EscapeString(userCode), html.EscapeString(client.GetID()), scopesHTML.String(), html.EscapeString(userCode))
 
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
@@ -1902,7 +1916,7 @@ func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
     <p class="error">%s</p>
     <a href="/mcp/oauth2/device/verify">Try again</a>
 </body>
-</html>`, message)
+</html>`, html.EscapeString(message))
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusBadRequest)
 	_, _ = w.Write([]byte(html))

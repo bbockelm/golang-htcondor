@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -56,7 +57,7 @@ func TestHandlerEmbedding(t *testing.T) {
 	})
 
 	// Test custom endpoint
-	req := httptest.NewRequest("GET", "/custom", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/custom", nil)
 	w := httptest.NewRecorder()
 	customMux.ServeHTTP(w, req)
 
@@ -69,7 +70,7 @@ func TestHandlerEmbedding(t *testing.T) {
 	}
 
 	// Test that HTCondor endpoints are accessible (health check endpoint)
-	req = httptest.NewRequest("GET", "/htcondor/healthz", nil)
+	req = httptest.NewRequestWithContext(context.Background(), "GET", "/htcondor/healthz", nil)
 	w = httptest.NewRecorder()
 	customMux.ServeHTTP(w, req)
 

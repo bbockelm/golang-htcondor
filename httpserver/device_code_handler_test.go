@@ -43,7 +43,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	}
 
 	// Create config
-	config := &fosite.Config{
+	config := &fosite.Config{ //nolint:gosec // G101: test issuer URL
 		AccessTokenIssuer: "http://localhost:8080",
 	}
 
@@ -210,7 +210,7 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	defer func() { _ = storage.Close() }()
 
 	// Create config and handler
-	config := &fosite.Config{
+	config := &fosite.Config{ //nolint:gosec // G101: test issuer URL
 		AccessTokenIssuer: "http://localhost:8080",
 	}
 	handler := NewDeviceCodeHandler(storage, config)

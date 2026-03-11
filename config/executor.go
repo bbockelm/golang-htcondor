@@ -198,6 +198,7 @@ func (c *Config) includeFile(path string, optional bool) error {
 // includeCommand executes a command and includes its output
 func (c *Config) includeCommand(command string) error {
 	// Execute the command
+	//nolint:gosec // G204: command comes from trusted config include_command directives
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", command)
 	output, err := cmd.Output()
 	if err != nil {

@@ -79,7 +79,7 @@ func TestOAuth2ConsentPage_GetConsentPage(t *testing.T) {
 
 	t.Run("GetConsentPage", func(t *testing.T) {
 		// Create a mock authorize request
-		authorizeReq := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/authorize", nil)
+		authorizeReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/authorize", nil)
 		authorizeReq.URL.RawQuery = url.Values{
 			"response_type": []string{"code"},
 			"client_id":     []string{clientID},
@@ -102,7 +102,7 @@ func TestOAuth2ConsentPage_GetConsentPage(t *testing.T) {
 		server.oauth2StateStore.StoreWithUsername(state, ar, "", username)
 
 		// Create consent page request
-		req := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/consent?state="+state, nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/consent?state="+state, nil)
 		w := httptest.NewRecorder()
 
 		// Handle the request
@@ -162,7 +162,7 @@ func TestOAuth2ConsentPage_ApproveConsent(t *testing.T) {
 
 	t.Run("ApproveConsent", func(t *testing.T) {
 		// Create a mock authorize request
-		authorizeReq := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/authorize", nil)
+		authorizeReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/authorize", nil)
 		authorizeReq.URL.RawQuery = url.Values{
 			"response_type": []string{"code"},
 			"client_id":     []string{clientID},
@@ -189,7 +189,7 @@ func TestOAuth2ConsentPage_ApproveConsent(t *testing.T) {
 			"state":  []string{state},
 			"action": []string{"approve"},
 		}
-		req := httptest.NewRequest(http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
 
@@ -233,7 +233,7 @@ func TestOAuth2ConsentPage_DenyConsent(t *testing.T) {
 
 	t.Run("DenyConsent", func(t *testing.T) {
 		// Create a mock authorize request
-		authorizeReq := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/authorize", nil)
+		authorizeReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/authorize", nil)
 		authorizeReq.URL.RawQuery = url.Values{
 			"response_type": []string{"code"},
 			"client_id":     []string{clientID},
@@ -260,7 +260,7 @@ func TestOAuth2ConsentPage_DenyConsent(t *testing.T) {
 			"state":  []string{state},
 			"action": []string{"deny"},
 		}
-		req := httptest.NewRequest(http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
 
@@ -301,7 +301,7 @@ func TestOAuth2ConsentPage_InvalidState(t *testing.T) {
 
 	t.Run("InvalidState", func(t *testing.T) {
 		// Create consent page request with invalid state
-		req := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/consent?state=invalid", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/consent?state=invalid", nil)
 		w := httptest.NewRecorder()
 
 		// Handle the request
@@ -331,7 +331,7 @@ func TestOAuth2ConsentPage_MissingState(t *testing.T) {
 
 	t.Run("MissingState", func(t *testing.T) {
 		// Create consent page request without state
-		req := httptest.NewRequest(http.MethodGet, "/mcp/oauth2/consent", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/consent", nil)
 		w := httptest.NewRecorder()
 
 		// Handle the request

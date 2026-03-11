@@ -86,7 +86,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	// ==============================================
 	// OAuth2 Client: Request authorization without user being logged in
 	authURL := "/idp/authorize?client_id=test-client&response_type=code&redirect_uri=" + url.QueryEscape(redirectURI) + "&scope=openid+profile+offline_access&state=test-state-12345678"
-	req := httptest.NewRequest("GET", authURL, nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", authURL, nil)
 	w := httptest.NewRecorder()
 	server.handleIDPAuthorize(w, req)
 
@@ -108,7 +108,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	loginForm.Set("password", "testpassword")
 	loginForm.Set("redirect_uri", authURL)
 
-	req = httptest.NewRequest("POST", "/idp/login", strings.NewReader(loginForm.Encode()))
+	req = httptest.NewRequestWithContext(context.Background(), "POST", "/idp/login", strings.NewReader(loginForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w = httptest.NewRecorder()
 	server.handleIDPLogin(w, req)
@@ -134,7 +134,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	// Test 3: User grants authorization to OAuth2 client
 	// ================================================
 	// User Action: Return to authorization endpoint with session cookie
-	req = httptest.NewRequest("GET", authURL, nil)
+	req = httptest.NewRequestWithContext(context.Background(), "GET", authURL, nil)
 	req.AddCookie(sessionCookie)
 	w = httptest.NewRecorder()
 	server.handleIDPAuthorize(w, req)
@@ -168,7 +168,7 @@ func TestIDPAuthorizationCodeFlow(t *testing.T) {
 	tokenForm.Set("redirect_uri", redirectURI)
 	tokenForm.Set("client_id", "test-client")
 
-	req = httptest.NewRequest("POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
+	req = httptest.NewRequestWithContext(context.Background(), "POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// Public client doesn't need authentication
 
@@ -280,7 +280,7 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	tokenForm.Set("grant_type", "refresh_token")
 	tokenForm.Set("refresh_token", "test-refresh-token") // This would be the actual token in real flow
 
-	req := httptest.NewRequest("POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("htcondor-server", "")
 
@@ -326,7 +326,7 @@ func TestIDPLoginForm(t *testing.T) {
 		}
 	}()
 
-	req := httptest.NewRequest("GET", "/idp/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/idp/login", nil)
 	w := httptest.NewRecorder()
 	server.handleIDPLogin(w, req)
 
@@ -374,7 +374,7 @@ func TestIDPMetadata(t *testing.T) {
 		}
 	}()
 
-	req := httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/.well-known/openid-configuration", nil)
 	w := httptest.NewRecorder()
 	server.handleIDPMetadata(w, req)
 

@@ -45,7 +45,7 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 
 		for _, endpoint := range endpoints {
 			t.Run(endpoint, func(t *testing.T) {
-				req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+				req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, nil)
 				w := httptest.NewRecorder()
 
 				// Handle the request based on endpoint
@@ -104,7 +104,7 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 
 		for _, endpoint := range endpoints {
 			t.Run(endpoint, func(t *testing.T) {
-				req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+				req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, nil)
 				w := httptest.NewRecorder()
 
 				// Handle the request based on endpoint
@@ -162,7 +162,7 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 		// Create a valid test token
 		token := createTestJWTToken(3600)
 
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 
@@ -198,7 +198,7 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 			t.Fatalf("Failed to create server: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs", nil)
 		req.Header.Set("Authorization", "Bearer invalid.token.here")
 		w := httptest.NewRecorder()
 
@@ -254,7 +254,7 @@ func TestCollectorRoutesNoAuth(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/collector/ads", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/collector/ads", nil)
 	w := httptest.NewRecorder()
 
 	// Use a context to avoid timeout issues with real collector

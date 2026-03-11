@@ -244,7 +244,7 @@ func TestDecodePageTokenErrors(t *testing.T) {
 			name:  "empty token",
 			token: "",
 		},
-		{
+		{ //nolint:gosec // G101: test data, not credentials
 			name:  "invalid base64",
 			token: "not-valid-base64!@#",
 		},
