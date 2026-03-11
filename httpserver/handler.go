@@ -53,6 +53,7 @@ type Handler struct {
 	mcpAccessGroup      string             // Group required for any MCP access (empty = all authenticated users)
 	mcpReadGroup        string             // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string             // Group required for write access (empty = all users have write)
+	mcpInstructions     string             // Server-level instructions provided to agents via MCP initialize
 	idpProvider         *IDPProvider       // Built-in IDP provider
 	idpLoginLimiter     *LoginRateLimiter  // Rate limiter for IDP login attempts
 	streamBufferSize    int                // Buffer size for streaming queries (default: 100)
@@ -94,6 +95,7 @@ type HandlerConfig struct {
 	MCPAccessGroup      string               // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup        string               // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string               // Group required for write operations (empty = all have write)
+	MCPInstructions     string               // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	EnableIDP           bool                 // Enable built-in IDP (always enabled in demo mode)
 	IDPDBPath           string               // Path to IDP SQLite database (default: "idp.db")
 	IDPIssuer           string               // IDP issuer URL (default: listen address)
@@ -263,6 +265,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpReadGroup = cfg.MCPReadGroup
 		h.mcpWriteGroup = cfg.MCPWriteGroup
+		h.mcpInstructions = cfg.MCPInstructions
 
 		if h.mcpAccessGroup != "" {
 			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_group", h.mcpAccessGroup)

@@ -182,6 +182,8 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// authentication and key exchange on every MCP request
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
 		Schedd:         h.schedd,
+		Credd:          h.credd,
+		Instructions:   h.mcpInstructions,
 		SigningKeyPath: h.signingKeyPath,
 		TrustDomain:    h.trustDomain,
 		UIDDomain:      h.uidDomain,

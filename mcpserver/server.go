@@ -18,6 +18,8 @@ import (
 type Server struct {
 	schedd             *htcondor.Schedd
 	collector          *htcondor.Collector
+	credd              htcondor.CreddClient
+	instructions       string // Server-level instructions surfaced to agents in the initialize response
 	signingKeyPath     string
 	trustDomain        string
 	uidDomain          string
@@ -39,19 +41,21 @@ type TokenInfo struct {
 
 // Config holds server configuration
 type Config struct {
-	ScheddName      string              // Schedd name
-	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	Schedd          *htcondor.Schedd    // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
-	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
-	TrustDomain     string              // Trust domain for token issuer (optional)
-	UIDDomain       string              // UID domain for generated token username (optional)
-	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
-	Collector       *htcondor.Collector // Collector for metrics and discovery (optional)
-	EnableMetrics   bool                // Enable metrics collection (default: true if Collector is set)
-	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
-	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
-	Stdin           io.Reader           // Input stream (default: os.Stdin)
-	Stdout          io.Writer           // Output stream (default: os.Stdout)
+	ScheddName      string               // Schedd name
+	ScheddAddr      string               // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	Schedd          *htcondor.Schedd     // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
+	SigningKeyPath  string               // Path to token signing key (optional, for token generation)
+	TrustDomain     string               // Trust domain for token issuer (optional)
+	UIDDomain       string               // UID domain for generated token username (optional)
+	HTTPBaseURL     string               // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
+	Collector       *htcondor.Collector  // Collector for metrics and discovery (optional)
+	Credd           htcondor.CreddClient // Optional credd client for credential management
+	Instructions    string               // Server-level instructions provided to all agents in the MCP initialize response
+	EnableMetrics   bool                 // Enable metrics collection (default: true if Collector is set)
+	MetricsCacheTTL time.Duration        // Metrics cache TTL (default: 10s)
+	Logger          *logging.Logger      // Logger instance (optional, creates default if nil)
+	Stdin           io.Reader            // Input stream (default: os.Stdin)
+	Stdout          io.Writer            // Output stream (default: os.Stdout)
 }
 
 // NewServer creates a new MCP server
@@ -108,6 +112,8 @@ func NewServer(cfg Config) (*Server, error) {
 	s := &Server{
 		schedd:          schedd,
 		collector:       cfg.Collector,
+		credd:           cfg.Credd,
+		instructions:    cfg.Instructions,
 		trustDomain:     cfg.TrustDomain,
 		uidDomain:       cfg.UIDDomain,
 		signingKeyPath:  cfg.SigningKeyPath,
@@ -351,7 +357,7 @@ func (s *Server) cleanupExpiredTokens() {
 
 // handleInitialize handles the initialize request
 func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interface{} {
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"protocolVersion": "2024-11-05",
 		"capabilities": map[string]interface{}{
 			"tools":     map[string]interface{}{},
@@ -362,4 +368,8 @@ func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interfac
 			"version": "0.1.0",
 		},
 	}
+	if s.instructions != "" {
+		result["instructions"] = s.instructions
+	}
+	return result
 }

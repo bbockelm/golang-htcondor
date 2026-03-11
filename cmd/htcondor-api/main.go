@@ -90,6 +90,7 @@ type mcpConfig struct {
 	mcpAccessGroup      string
 	mcpReadGroup        string
 	mcpWriteGroup       string
+	instructions        string
 }
 
 // fixConfigDefaults handles edge cases in HTCondor configuration defaults
@@ -538,6 +539,12 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 	// Load access control groups
 	loadAccessControlGroups(cfg, &config)
 
+	// Load server-level instructions for MCP agents
+	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
+		config.instructions = instructions
+		log.Println("MCP instructions configured")
+	}
+
 	return config
 }
 
@@ -767,6 +774,7 @@ func runNormalMode() error {
 		MCPAccessGroup:      mcpCfg.mcpAccessGroup,
 		MCPReadGroup:        mcpCfg.mcpReadGroup,
 		MCPWriteGroup:       mcpCfg.mcpWriteGroup,
+		MCPInstructions:     mcpCfg.instructions,
 		EnableIDP:           enableIDP,
 		IDPDBPath:           idpDBPath,
 		IDPIssuer:           idpIssuer,

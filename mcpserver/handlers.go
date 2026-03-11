@@ -472,6 +472,95 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 		},
 	}
 
+	// Add credential management tools if credd is available
+	if s.credd != nil {
+		tools = append(tools,
+			Tool{
+				Name:        "list_service_credentials",
+				Description: "List all OAuth service credentials stored in the credential daemon. Use this to check which services have credentials configured.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"token": map[string]interface{}{
+							"type":        "string",
+							"description": "Authentication token (optional)",
+						},
+					},
+				},
+			},
+			Tool{
+				Name:        "get_credential_status",
+				Description: "Check whether an OAuth credential exists for a given service and optional handle. Use this to verify credentials are bootstrapped before or after job submission.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"service": map[string]interface{}{
+							"type":        "string",
+							"description": "The OAuth service name (e.g., 'scitokens')",
+						},
+						"handle": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional handle to distinguish multiple credentials for the same service",
+						},
+						"token": map[string]interface{}{
+							"type":        "string",
+							"description": "Authentication token (optional)",
+						},
+					},
+					"required": []string{"service"},
+				},
+			},
+			Tool{
+				Name:        "store_service_credential",
+				Description: "Store an OAuth credential (e.g., a refresh token) for a service. This is used to bootstrap credentials required by jobs that need OAuthServicesNeeded. The credential is stored in the HTCondor credential daemon.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"service": map[string]interface{}{
+							"type":        "string",
+							"description": "The OAuth service name (e.g., 'scitokens')",
+						},
+						"handle": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional handle to distinguish multiple credentials for the same service",
+						},
+						"credential": map[string]interface{}{
+							"type":        "string",
+							"description": "The credential value (e.g., a refresh token). Can be plain text or base64-encoded.",
+						},
+						"token": map[string]interface{}{
+							"type":        "string",
+							"description": "Authentication token (optional)",
+						},
+					},
+					"required": []string{"service", "credential"},
+				},
+			},
+			Tool{
+				Name:        "delete_service_credential",
+				Description: "Delete an OAuth service credential from the credential daemon.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"service": map[string]interface{}{
+							"type":        "string",
+							"description": "The OAuth service name to delete",
+						},
+						"handle": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional handle identifying a specific credential for the service",
+						},
+						"token": map[string]interface{}{
+							"type":        "string",
+							"description": "Authentication token (optional)",
+						},
+					},
+					"required": []string{"service"},
+				},
+			},
+		)
+	}
+
 	return map[string]interface{}{
 		"tools": tools,
 	}
@@ -548,6 +637,14 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolUploadJobInput(ctx, request.Arguments)
 	case "get_job_output":
 		result, err = s.toolGetJobOutputFiles(ctx, request.Arguments)
+	case "list_service_credentials":
+		result, err = s.toolListServiceCredentials(ctx, request.Arguments)
+	case "get_credential_status":
+		result, err = s.toolGetCredentialStatus(ctx, request.Arguments)
+	case "store_service_credential":
+		result, err = s.toolStoreServiceCredential(ctx, request.Arguments)
+	case "delete_service_credential":
+		result, err = s.toolDeleteServiceCredential(ctx, request.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", request.Name)
 	}
@@ -651,12 +748,16 @@ Job Status Values:
 First job ID for status checks: %s`, jobIDs[0])
 	}
 
+	// Check for OAuthServicesNeeded by re-querying the submitted job.
+	// Job transforms may add this attribute after the job is committed.
+	oauthNote := s.checkOAuthServicesNeeded(ctx, clusterID)
+
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Successfully submitted job cluster %d with %d proc(s): %s%s",
-					clusterID, len(jobIDs), strings.Join(jobIDs, ", "), nextSteps),
+				"text": fmt.Sprintf("Successfully submitted job cluster %d with %d proc(s): %s%s%s",
+					clusterID, len(jobIDs), strings.Join(jobIDs, ", "), nextSteps, oauthNote),
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -1705,4 +1806,214 @@ func containsNullBytes(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// checkOAuthServicesNeeded queries the first proc of a submitted cluster to see if
+// a job transform added the OAuthServicesNeeded attribute. If found, it returns a
+// message instructing the user to bootstrap the required credentials.
+func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) string {
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", clusterID)
+	projection := []string{"OAuthServicesNeeded"}
+	opts := &htcondor.QueryOptions{
+		Limit:      1,
+		Projection: projection,
+		FetchOpts:  htcondor.FetchMyJobs,
+	}
+	ads, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	if err != nil || len(ads) == 0 {
+		return ""
+	}
+	services, ok := ads[0].EvaluateAttrString("OAuthServicesNeeded")
+	if !ok || services == "" {
+		return ""
+	}
+
+	hasCredd := s.credd != nil
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\n\nOAUTH CREDENTIALS REQUIRED:\nThe job requires OAuth credentials for: %s\n", services)
+	sb.WriteString("OAuth services added by server-side job transforms typically work with an empty credential.\n")
+	if hasCredd {
+		sb.WriteString("Use 'get_credential_status' to check if credentials exist for each service.\n")
+		sb.WriteString("If missing, use 'store_service_credential' with an empty string as the credential value.\n")
+		sb.WriteString("The job will remain held until the required credentials are available.")
+	} else {
+		sb.WriteString("Use the HTTP credential API to store the required credentials.\n")
+		sb.WriteString("The job will remain held until the required credentials are available.")
+	}
+	return sb.String()
+}
+
+// toolListServiceCredentials lists all OAuth service credentials
+func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
+	if s.credd == nil {
+		return nil, fmt.Errorf("credential service is not available")
+	}
+
+	creds, err := s.credd.ListServiceCreds(ctx, htcondor.CredTypeOAuth, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list service credentials: %w", err)
+	}
+
+	if len(creds) == 0 {
+		return map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": "No OAuth service credentials found.",
+				},
+			},
+		}, nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Found %d service credential(s):\n\n", len(creds))
+	for _, c := range creds {
+		status := "present"
+		if !c.Exists {
+			status = "missing"
+		}
+		entry := fmt.Sprintf("- Service: %s", c.Service)
+		if c.Handle != "" {
+			entry += fmt.Sprintf(", Handle: %s", c.Handle)
+		}
+		entry += fmt.Sprintf(" [%s]", status)
+		if c.UpdatedAt != nil {
+			entry += fmt.Sprintf(" (updated: %s)", c.UpdatedAt.Format(time.RFC3339))
+		}
+		sb.WriteString(entry + "\n")
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": sb.String(),
+			},
+		},
+	}, nil
+}
+
+// toolGetCredentialStatus checks whether an OAuth credential exists for a service
+func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	if s.credd == nil {
+		return nil, fmt.Errorf("credential service is not available")
+	}
+
+	service, ok := args["service"].(string)
+	if !ok || service == "" {
+		return nil, fmt.Errorf("service is required")
+	}
+	handle, _ := args["handle"].(string)
+
+	status, err := s.credd.GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, "")
+	if err != nil {
+		if errors.Is(err, htcondor.ErrCredentialNotFound) {
+			label := service
+			if handle != "" {
+				label += "/" + handle
+			}
+			return map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": fmt.Sprintf("No credential found for service '%s'. You may need to store one using store_service_credential.", label),
+					},
+				},
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to query credential status: %w", err)
+	}
+
+	label := service
+	if handle != "" {
+		label += "/" + handle
+	}
+	text := fmt.Sprintf("Credential for service '%s': exists=%v", label, status.Exists)
+	if status.UpdatedAt != nil {
+		text += fmt.Sprintf(", updated_at=%s", status.UpdatedAt.Format(time.RFC3339))
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": text,
+			},
+		},
+	}, nil
+}
+
+// toolStoreServiceCredential stores an OAuth credential for a service
+func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	if s.credd == nil {
+		return nil, fmt.Errorf("credential service is not available")
+	}
+
+	service, ok := args["service"].(string)
+	if !ok || service == "" {
+		return nil, fmt.Errorf("service is required")
+	}
+	credential, ok := args["credential"].(string)
+	if !ok || credential == "" {
+		return nil, fmt.Errorf("credential is required")
+	}
+	handle, _ := args["handle"].(string)
+
+	// Try base64 decode; fall back to raw bytes
+	credBytes, err := base64.StdEncoding.DecodeString(credential)
+	if err != nil {
+		credBytes = []byte(credential)
+	}
+
+	if err := s.credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
+		return nil, fmt.Errorf("failed to store credential: %w", err)
+	}
+
+	label := service
+	if handle != "" {
+		label += "/" + handle
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Successfully stored OAuth credential for service '%s'.", label),
+			},
+		},
+	}, nil
+}
+
+// toolDeleteServiceCredential removes an OAuth credential for a service
+func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	if s.credd == nil {
+		return nil, fmt.Errorf("credential service is not available")
+	}
+
+	service, ok := args["service"].(string)
+	if !ok || service == "" {
+		return nil, fmt.Errorf("service is required")
+	}
+	handle, _ := args["handle"].(string)
+
+	if err := s.credd.DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, ""); err != nil {
+		if errors.Is(err, htcondor.ErrCredentialNotFound) {
+			return nil, fmt.Errorf("credential not found for service '%s'", service)
+		}
+		return nil, fmt.Errorf("failed to delete credential: %w", err)
+	}
+
+	label := service
+	if handle != "" {
+		label += "/" + handle
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": fmt.Sprintf("Successfully deleted OAuth credential for service '%s'.", label),
+			},
+		},
+	}, nil
 }

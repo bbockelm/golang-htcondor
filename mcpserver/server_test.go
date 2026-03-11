@@ -64,6 +64,95 @@ func TestMCPServerInitialize(t *testing.T) {
 	}
 }
 
+// TestMCPServerInitializeWithInstructions verifies the instructions field appears in the initialize response
+func TestMCPServerInitializeWithInstructions(t *testing.T) {
+	stdin := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n")
+	stdout := &bytes.Buffer{}
+
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	server := &Server{
+		schedd:       htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		logger:       logger,
+		instructions: "Always submit jobs to the accounting group for physics.",
+		stdin:        stdin,
+		stdout:       stdout,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- server.Run(ctx)
+	}()
+
+	select {
+	case err := <-errChan:
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-ctx.Done():
+	}
+
+	response := stdout.String()
+
+	// Parse the JSON-RPC response and check the instructions field
+	var resp struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(response), &resp); err != nil {
+		t.Fatalf("Failed to parse response: %v\nResponse: %s", err, response)
+	}
+	if resp.Result.Instructions != "Always submit jobs to the accounting group for physics." {
+		t.Errorf("Expected instructions to be set, got: %q", resp.Result.Instructions)
+	}
+}
+
+// TestMCPServerInitializeWithoutInstructions verifies instructions is omitted when empty
+func TestMCPServerInitializeWithoutInstructions(t *testing.T) {
+	stdin := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n")
+	stdout := &bytes.Buffer{}
+
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	server := &Server{
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		logger: logger,
+		stdin:  stdin,
+		stdout: stdout,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- server.Run(ctx)
+	}()
+
+	select {
+	case err := <-errChan:
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-ctx.Done():
+	}
+
+	response := stdout.String()
+	if strings.Contains(response, "instructions") {
+		t.Errorf("Expected response to NOT contain 'instructions' when empty, got: %s", response)
+	}
+}
+
 // TestMCPServerListTools tests listing available tools
 func TestMCPServerListTools(t *testing.T) {
 	// Create a mock stdin/stdout

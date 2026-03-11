@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,6 +72,18 @@ func runNormalMode() error {
 		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHost)
 	}
 
+	// Discover credd for credential management
+	var credd htcondor.CreddClient
+	if creddAddr := discoverCreddAddress(cfg, logger); creddAddr != "" {
+		credd = htcondor.NewCedarCredd(creddAddr)
+		logger.Info(logging.DestinationGeneral, "Discovered credd", "address", creddAddr)
+	} else {
+		logger.Info(logging.DestinationGeneral, "Credd not found, credential tools will be disabled")
+	}
+
+	// Get AP-specific instructions for agents
+	mcpInstructions, _ := cfg.Get("MCP_INSTRUCTIONS")
+
 	// Create MCP server
 	server, err := mcpserver.NewServer(mcpserver.Config{
 		ScheddName:     scheddName,
@@ -78,6 +91,8 @@ func runNormalMode() error {
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
 		Collector:      collector,
+		Credd:          credd,
+		Instructions:   mcpInstructions,
 		Logger:         logger,
 		Stdin:          os.Stdin,
 		Stdout:         os.Stdout,
@@ -214,12 +229,24 @@ func runDemoMode() error {
 		logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", collectorHost)
 	}
 
+	// Discover credd for credential management
+	var credd htcondor.CreddClient
+	if creddAddr := discoverCreddAddress(cfg, logger); creddAddr != "" {
+		credd = htcondor.NewCedarCredd(creddAddr)
+		logger.Info(logging.DestinationGeneral, "Discovered credd for demo mode", "address", creddAddr)
+	}
+
 	// Create MCP server
+	// Read MCP instructions from config
+	mcpInstructionsDemo, _ := cfg.Get("MCP_INSTRUCTIONS")
+
 	server, err := mcpserver.NewServer(mcpserver.Config{
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
 		Collector:      collector,
+		Credd:          credd,
+		Instructions:   mcpInstructionsDemo,
 		Logger:         logger,
 		Stdin:          os.Stdin,
 		Stdout:         os.Stdout,
@@ -402,4 +429,24 @@ func isScheddReady(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// discoverCreddAddress attempts to find the credd address from the HTCondor config.
+// It reads the CREDD_ADDRESS_FILE if configured, and returns the address if found.
+func discoverCreddAddress(cfg *config.Config, logger *logging.Logger) string {
+	addressFile, ok := cfg.Get("CREDD_ADDRESS_FILE")
+	if !ok || addressFile == "" {
+		return ""
+	}
+	data, err := os.ReadFile(addressFile) //nolint:gosec // path comes from HTCondor config
+	if err != nil {
+		logger.Debug(logging.DestinationGeneral, "Could not read credd address file", "path", addressFile, "error", err)
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	address := strings.TrimSpace(lines[0])
+	if address == "" || strings.Contains(address, "(null)") {
+		return ""
+	}
+	return address
 }

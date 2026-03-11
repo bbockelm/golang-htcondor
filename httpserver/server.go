@@ -66,6 +66,7 @@ type Config struct {
 	MCPAccessGroup      string               // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup        string               // Group required for read operations (empty = all have read)
 	MCPWriteGroup       string               // Group required for write operations (empty = all have write)
+	MCPInstructions     string               // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	EnableIDP           bool                 // Enable built-in IDP (always enabled in demo mode)
 	IDPDBPath           string               // Path to IDP SQLite database (default: "idp.db")
 	IDPIssuer           string               // IDP issuer URL (default: listen address)
@@ -123,6 +124,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPAccessGroup:      cfg.MCPAccessGroup,
 		MCPReadGroup:        cfg.MCPReadGroup,
 		MCPWriteGroup:       cfg.MCPWriteGroup,
+		MCPInstructions:     cfg.MCPInstructions,
 		EnableIDP:           cfg.EnableIDP,
 		IDPDBPath:           cfg.IDPDBPath,
 		IDPIssuer:           cfg.IDPIssuer,
