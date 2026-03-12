@@ -370,6 +370,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	// 3. If OAuth2 SSO is configured and no userHeader, initiate SSO flow
 
 	username := ""
+	var userGroups []string
 
 	// Method 1: User header (demo mode)
 	if h.userHeader != "" {
@@ -385,6 +386,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 		// Check if user has a session
 		if session, ok := h.getSessionFromRequest(r); ok {
 			username = session.Username
+			userGroups = session.Groups
 			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 		}
 	}
@@ -436,7 +438,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Store authorize request and username for consent page
-	h.oauth2StateStore.StoreWithUsername(state, ar, "", username)
+	h.oauth2StateStore.StoreWithUsername(state, ar, "", username, userGroups)
 
 	// Redirect to consent page
 	consentURL := fmt.Sprintf("/mcp/oauth2/consent?state=%s", state)
@@ -503,8 +505,8 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the authorize request and username
-	ar, username, ok := h.oauth2StateStore.GetWithUsername(state)
+	// Retrieve the authorize request, username, and groups
+	ar, username, groups, ok := h.oauth2StateStore.GetWithUsername(state)
 	if !ok || ar == nil {
 		h.logger.Error(logging.DestinationHTTP, "Invalid or expired consent state", "state", state)
 		h.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
@@ -533,14 +535,16 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// User approved - create session and complete authorization
 			session := DefaultOpenIDConnectSession(username)
 
-			// Grant all requested scopes
+			// Grant scopes based on group membership
 			requestedScopes := ar.GetRequestedScopes()
-			for _, scope := range requestedScopes {
+			grantedScopes := h.getScopesForGroups(groups, requestedScopes)
+			for _, scope := range grantedScopes {
 				ar.GrantScope(scope)
 			}
 
 			h.logger.Info(logging.DestinationHTTP, "User approved consent",
-				"username", username, "client_id", ar.GetClient().GetID(), "scopes", requestedScopes)
+				"username", username, "client_id", ar.GetClient().GetID(),
+				"requested_scopes", requestedScopes, "granted_scopes", grantedScopes)
 
 			// Generate OAuth2 response
 			response, err := h.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)

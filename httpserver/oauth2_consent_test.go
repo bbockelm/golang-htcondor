@@ -395,3 +395,223 @@ func TestGetScopeDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestGetScopesForGroups(t *testing.T) {
+	requested := []string{"openid", "profile", "email", "mcp:read", "mcp:write"}
+
+	tests := []struct {
+		name           string
+		accessGroup    string
+		readGroup      string
+		writeGroup     string
+		userGroups     []string
+		expectedScopes []string
+	}{
+		{
+			name:           "no groups configured grants all",
+			userGroups:     []string{"anything"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		},
+		{
+			name:           "access group only - user in group",
+			accessGroup:    "ap40-login",
+			userGroups:     []string{"ap40-login", "other"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		},
+		{
+			name:           "access group only - user not in group",
+			accessGroup:    "ap40-login",
+			userGroups:     []string{"other"},
+			expectedScopes: []string{"openid", "profile", "email"},
+		},
+		{
+			name:           "specific read/write groups - user in both",
+			readGroup:      "readers",
+			writeGroup:     "writers",
+			userGroups:     []string{"readers", "writers"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		},
+		{
+			name:           "specific read/write groups - user in read only",
+			readGroup:      "readers",
+			writeGroup:     "writers",
+			userGroups:     []string{"readers"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read"},
+		},
+		{
+			name:           "specific write group overrides access group",
+			accessGroup:    "ap40-login",
+			writeGroup:     "admins",
+			userGroups:     []string{"ap40-login"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read"},
+		},
+		{
+			name:           "specific write group - user in both",
+			accessGroup:    "ap40-login",
+			writeGroup:     "admins",
+			userGroups:     []string{"ap40-login", "admins"},
+			expectedScopes: []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{
+				mcpAccessGroup: tt.accessGroup,
+				mcpReadGroup:   tt.readGroup,
+				mcpWriteGroup:  tt.writeGroup,
+			}
+			got := h.getScopesForGroups(tt.userGroups, requested)
+			if len(got) != len(tt.expectedScopes) {
+				t.Fatalf("Expected scopes %v, got %v", tt.expectedScopes, got)
+			}
+			for i, scope := range tt.expectedScopes {
+				if got[i] != scope {
+					t.Errorf("Expected scope[%d]=%s, got %s", i, scope, got[i])
+				}
+			}
+		})
+	}
+}
+
+func TestOAuth2ConsentPage_ScopeFiltering(t *testing.T) {
+	server, oauth2Provider, clientID, ctx := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
+
+	tests := []struct {
+		name           string
+		accessGroup    string
+		readGroup      string
+		writeGroup     string
+		userGroups     []string
+		expectedInURL  []string // Scope-related strings expected in the redirect URL
+		notExpectedURL []string // Scope-related strings NOT expected
+	}{
+		{
+			name:           "access group - user in group gets mcp scopes",
+			accessGroup:    "ap40-login",
+			userGroups:     []string{"ap40-login"},
+			expectedInURL:  []string{"code="},
+			notExpectedURL: []string{"error="},
+		},
+		{
+			name:           "access group - user not in group loses mcp scopes",
+			accessGroup:    "ap40-login",
+			userGroups:     []string{"other-group"},
+			expectedInURL:  []string{"code="},
+			notExpectedURL: []string{"error="},
+		},
+		{
+			name:           "no groups configured grants all",
+			userGroups:     []string{"anything"},
+			expectedInURL:  []string{"code="},
+			notExpectedURL: []string{"error="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Configure group settings on the server handler
+			server.mcpAccessGroup = tt.accessGroup
+			server.mcpReadGroup = tt.readGroup
+			server.mcpWriteGroup = tt.writeGroup
+
+			// Create a mock authorize request
+			authorizeReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/authorize", nil)
+			authorizeReq.URL.RawQuery = url.Values{
+				"response_type": []string{"code"},
+				"client_id":     []string{clientID},
+				"redirect_uri":  []string{"http://localhost:8080/callback"},
+				"scope":         []string{"openid mcp:read mcp:write"},
+				"state":         []string{"test-state"},
+			}.Encode()
+
+			ar, err := oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, authorizeReq)
+			if err != nil {
+				t.Fatalf("Failed to create authorize request: %v", err)
+			}
+
+			// Store the authorize request with username AND groups
+			state, err := server.oauth2StateStore.GenerateState()
+			if err != nil {
+				t.Fatalf("Failed to generate state: %v", err)
+			}
+			username := "testuser"
+			server.oauth2StateStore.StoreWithUsername(state, ar, "", username, tt.userGroups)
+
+			// Create approval request
+			form := url.Values{
+				"state":  []string{state},
+				"action": []string{"approve"},
+			}
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+
+			// Handle the request
+			server.handleOAuth2Consent(w, req)
+
+			resp := w.Result()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("Failed to close response body: %v", err)
+				}
+			}()
+
+			// Check for redirect with authorization code
+			if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusFound {
+				t.Errorf("Expected redirect status (303 or 302), got %d", resp.StatusCode)
+			}
+
+			location := resp.Header.Get("Location")
+			for _, expected := range tt.expectedInURL {
+				if !strings.Contains(location, expected) {
+					t.Errorf("Expected redirect URL to contain '%s', got %s", expected, location)
+				}
+			}
+			for _, notExpected := range tt.notExpectedURL {
+				if strings.Contains(location, notExpected) {
+					t.Errorf("Expected redirect URL NOT to contain '%s', got %s", notExpected, location)
+				}
+			}
+		})
+	}
+
+	// Reset
+	server.mcpAccessGroup = ""
+	server.mcpReadGroup = ""
+	server.mcpWriteGroup = ""
+}
+
+func TestOAuth2ConsentPage_SessionGroupsPassedToStateStore(t *testing.T) {
+	// Test that groups stored in a session are passed through to the consent flow
+	server, oauth2Provider, _, _ := setupTestOAuth2Server(t)
+	defer func() {
+		if err := oauth2Provider.Close(); err != nil {
+			t.Errorf("Failed to close OAuth2 provider: %v", err)
+		}
+	}()
+
+	// Create a session with groups
+	groups := []string{"ap40-login", "admin-group"}
+	sessionID, _, err := server.sessionStore.Create("testuser", groups)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Verify the session round-trips groups correctly
+	session := server.sessionStore.Get(sessionID)
+	if session == nil {
+		t.Fatal("Failed to retrieve session")
+	}
+	if len(session.Groups) != 2 {
+		t.Fatalf("Expected 2 groups, got %d: %v", len(session.Groups), session.Groups)
+	}
+	if session.Groups[0] != "ap40-login" || session.Groups[1] != "admin-group" {
+		t.Errorf("Expected groups [ap40-login admin-group], got %v", session.Groups)
+	}
+}

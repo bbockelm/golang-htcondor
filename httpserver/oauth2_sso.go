@@ -80,7 +80,12 @@ func (s *Handler) validateGroupAccess(userGroups []string) error {
 	return nil
 }
 
-// getScopesForGroups determines OAuth2 scopes based on group membership
+// getScopesForGroups determines OAuth2 scopes based on group membership.
+// For mcp:read and mcp:write scopes:
+//   - If a specific read/write group is configured, the user must be in that group.
+//   - Otherwise, if the general access group is configured and the user is in it
+//     (already verified by validateGroupAccess), grant the scope.
+//   - If no groups are configured at all, grant the scope to any authenticated user.
 func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []string) []string {
 	grantedScopes := []string{"openid"} // Always grant openid
 
@@ -91,13 +96,35 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			// Already added
 			continue
 		case "mcp:read":
-			// Grant only if read group is configured AND user is in it
-			if s.mcpReadGroup != "" && hasGroup(userGroups, s.mcpReadGroup) {
+			switch {
+			case s.mcpReadGroup != "":
+				// Specific read group configured — user must be in it
+				if hasGroup(userGroups, s.mcpReadGroup) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+			case s.mcpAccessGroup != "":
+				// No specific read group; fall back to access group (already validated)
+				if hasGroup(userGroups, s.mcpAccessGroup) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+			default:
+				// No groups configured — grant to any authenticated user
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			// Grant only if write group is configured AND user is in it
-			if s.mcpWriteGroup != "" && hasGroup(userGroups, s.mcpWriteGroup) {
+			switch {
+			case s.mcpWriteGroup != "":
+				// Specific write group configured — user must be in it
+				if hasGroup(userGroups, s.mcpWriteGroup) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+			case s.mcpAccessGroup != "":
+				// No specific write group; fall back to access group (already validated)
+				if hasGroup(userGroups, s.mcpAccessGroup) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+			default:
+				// No groups configured — grant to any authenticated user
 				grantedScopes = append(grantedScopes, scope)
 			}
 		default:
@@ -259,7 +286,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// For browser flow, create session and redirect back to original URL
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
-		sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject)
+		sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject, userGroups)
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
 				"error", err, "subject", userInfo.Subject)

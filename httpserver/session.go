@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -13,6 +14,7 @@ import (
 // SessionData represents the data stored in a session
 type SessionData struct {
 	Username  string    // Authenticated username
+	Groups    []string  // User groups from IDP (for scope filtering)
 	CreatedAt time.Time // When the session was created
 	ExpiresAt time.Time // When the session expires
 	Token     string    // HTCondor token for this session (optional)
@@ -53,6 +55,7 @@ func (s *SessionStore) createTable() error {
 		created_at TIMESTAMP NOT NULL,
 		expires_at TIMESTAMP NOT NULL,
 		token TEXT,
+		groups_json TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -60,8 +63,16 @@ func (s *SessionStore) createTable() error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_username ON http_sessions(username);
 	`
 
-	_, err := s.db.ExecContext(context.Background(), schema)
-	return err
+	ctx := context.Background()
+	_, err := s.db.ExecContext(ctx, schema)
+	if err != nil {
+		return err
+	}
+
+	// Migrate existing tables: add groups_json column if it doesn't exist
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN groups_json TEXT`)
+
+	return nil
 }
 
 // generateSessionID generates a cryptographically secure random session ID
@@ -73,8 +84,8 @@ func generateSessionID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// Create creates a new session for the given username
-func (s *SessionStore) Create(username string) (string, *SessionData, error) {
+// Create creates a new session for the given username and groups
+func (s *SessionStore) Create(username string, groups ...[]string) (string, *SessionData, error) {
 	sessionID, err := generateSessionID()
 	if err != nil {
 		return "", nil, err
@@ -86,13 +97,26 @@ func (s *SessionStore) Create(username string) (string, *SessionData, error) {
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
+	if len(groups) > 0 {
+		session.Groups = groups[0]
+	}
+
+	// Serialize groups as JSON
+	var groupsJSON sql.NullString
+	if len(session.Groups) > 0 {
+		data, err := json.Marshal(session.Groups)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to serialize groups: %w", err)
+		}
+		groupsJSON = sql.NullString{String: string(data), Valid: true}
+	}
 
 	// Store session in database
 	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, token)
-		 VALUES (?, ?, ?, ?, ?)`,
-		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, session.Token)
+		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, token, groups_json)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, session.Token, groupsJSON)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
 	}
@@ -107,12 +131,13 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	var session SessionData
 	var token sql.NullString
+	var groupsJSON sql.NullString
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT username, created_at, expires_at, token
+		`SELECT username, created_at, expires_at, token, groups_json
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
-		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token)
+		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token, &groupsJSON)
 
 	if err != nil {
 		// Session not found or expired
@@ -121,6 +146,10 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	if token.Valid {
 		session.Token = token.String
+	}
+
+	if groupsJSON.Valid && groupsJSON.String != "" {
+		_ = json.Unmarshal([]byte(groupsJSON.String), &session.Groups)
 	}
 
 	return &session
