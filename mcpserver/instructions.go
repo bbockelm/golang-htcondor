@@ -45,7 +45,7 @@ func defaultInstructions(scheddName string) string {
 
 	// Submit file basics
 	b.WriteString("## Submit file basics\n\n")
-	b.WriteString("A minimal submit file looks like:\n\n")
+	b.WriteString("A minimal submit file that uploads a custom script:\n\n")
 	b.WriteString("  executable = my_script.sh\n")
 	b.WriteString("  log        = job.log\n")
 	b.WriteString("  output     = output.txt\n")
@@ -55,6 +55,23 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  request_disk   = 1024\n")
 	b.WriteString("  queue 1\n\n")
 	b.WriteString("The \"queue\" line determines how many job processes to create.\n\n")
+
+	// transfer_executable guidance
+	b.WriteString("## transfer_executable\n\n")
+	b.WriteString("By default, HTCondor transfers the executable to the remote machine. " +
+		"If the executable is a standard system command (e.g., /bin/bash, /usr/bin/python3, " +
+		"/usr/bin/env), set transfer_executable = false so HTCondor uses the command " +
+		"already installed on the execute node and you do not need to upload it.\n\n")
+	b.WriteString("Example using bash as the executable (no upload needed):\n\n")
+	b.WriteString("  executable = /bin/bash\n")
+	b.WriteString("  transfer_executable = false\n")
+	b.WriteString("  arguments  = -c \"echo Hello World\"\n")
+	b.WriteString("  log        = job.log\n")
+	b.WriteString("  output     = output.txt\n")
+	b.WriteString("  error      = error.txt\n")
+	b.WriteString("  queue 1\n\n")
+	b.WriteString("When transfer_executable = false AND no transfer_input_files are specified, " +
+		"the job does not need input spooling and will go directly to Idle.\n\n")
 
 	// ClassAd essentials
 	b.WriteString("## Key job attributes (ClassAd)\n\n")

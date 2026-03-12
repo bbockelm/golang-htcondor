@@ -715,9 +715,12 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
-1. The job is currently HELD (JobStatus=5) waiting for input files to be uploaded.
-2. Upload input files (executable script, data files) using the HTTP PUT endpoint for job input.
-3. After uploading, the job will be automatically released and transition to IDLE (JobStatus=1).
+1. The job is currently HELD (JobStatus=5) waiting for input spooling.
+2. You MUST call upload_job_input to complete the spooling step, even if the
+   only file to upload is the executable (and there are no other input files).
+   DO NOT use release_job — the job cannot run until spooling is complete.
+   Releasing without spooling will cause the job to fail immediately.
+3. After a successful upload_job_input, the job is automatically released to IDLE (JobStatus=1).
 4. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
 5. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
 
