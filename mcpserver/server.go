@@ -113,7 +113,7 @@ func NewServer(cfg Config) (*Server, error) {
 		schedd:          schedd,
 		collector:       cfg.Collector,
 		credd:           cfg.Credd,
-		instructions:    cfg.Instructions,
+		instructions:    buildInstructions(schedd.Name(), cfg.Instructions),
 		trustDomain:     cfg.TrustDomain,
 		uidDomain:       cfg.UIDDomain,
 		signingKeyPath:  cfg.SigningKeyPath,

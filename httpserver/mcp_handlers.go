@@ -710,13 +710,22 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
             %s
         </div>
 
-        <form method="POST" action="/mcp/oauth2/consent">
+        <form method="POST" action="/mcp/oauth2/consent" id="consentForm">
             <input type="hidden" name="state" value="%s">
             <div class="actions">
-                <button type="submit" name="action" value="approve" class="approve">Authorize</button>
-                <button type="submit" name="action" value="deny" class="deny">Deny</button>
+                <button type="submit" name="action" value="approve" class="approve" id="approveBtn">Authorize</button>
+                <button type="submit" name="action" value="deny" class="deny" id="denyBtn">Deny</button>
             </div>
         </form>
+        <script>
+            document.getElementById('consentForm').addEventListener('submit', function() {
+                var btns = this.querySelectorAll('button[type=submit]');
+                for (var i = 0; i < btns.length; i++) {
+                    btns[i].disabled = true;
+                }
+                document.getElementById('approveBtn').textContent = 'Authorizing...';
+            });
+        </script>
 
         <div class="warning">
             <strong>⚠️ Security Notice:</strong> Only authorize applications you trust.

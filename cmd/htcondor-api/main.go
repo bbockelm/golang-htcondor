@@ -386,7 +386,7 @@ func loadOAuth2Issuer(cfg *config.Config, listenAddrFromConfig string) string {
 }
 
 // loadOAuth2ClientSecret loads OAuth2 client secret from file
-func loadOAuth2ClientSecret(cfg *config.Config) string {
+func loadOAuth2ClientSecret(cfg *config.Config, logger *logging.Logger) string {
 	secretFile, ok := cfg.Get("HTTP_API_OAUTH2_CLIENT_SECRET_FILE")
 	if !ok || secretFile == "" {
 		return ""
@@ -395,28 +395,28 @@ func loadOAuth2ClientSecret(cfg *config.Config) string {
 	// #nosec G304 -- Reading OAuth2 client secret from configured file path
 	secretData, err := os.ReadFile(secretFile)
 	if err != nil {
-		log.Printf("Warning: failed to read OAuth2 client secret file '%s': %v", secretFile, err)
+		logger.Warn(logging.DestinationHTTP, "Failed to read OAuth2 client secret file", "path", secretFile, "error", err)
 		return ""
 	}
 
-	log.Printf("OAuth2 client secret loaded from file: %s", secretFile)
+	logger.Info(logging.DestinationHTTP, "OAuth2 client secret loaded from file", "path", secretFile)
 	return strings.TrimSpace(string(secretData))
 }
 
 // loadOAuth2Endpoints loads OAuth2 auth, token, and userinfo URLs via OIDC discovery or explicit config
-func loadOAuth2Endpoints(cfg *config.Config) (authURL, tokenURL, userInfoURL string) {
+func loadOAuth2Endpoints(cfg *config.Config, logger *logging.Logger) (authURL, tokenURL, userInfoURL string) {
 	// Check for OIDC discovery first
 	if idpURL, ok := cfg.Get("HTTP_API_OAUTH2_IDP"); ok && idpURL != "" {
-		log.Printf("Attempting OIDC discovery from: %s", idpURL)
+		logger.Info(logging.DestinationHTTP, "Attempting OIDC discovery", "url", idpURL)
 		auth, token, userInfo, err := discoverOIDCEndpoints(idpURL)
 		if err == nil {
-			log.Printf("OIDC discovery successful - Auth URL: %s, Token URL: %s", auth, token)
+			logger.Info(logging.DestinationHTTP, "OIDC discovery successful", "authURL", auth, "tokenURL", token)
 			if userInfo != "" {
-				log.Printf("OIDC discovery found UserInfo URL: %s", userInfo)
+				logger.Info(logging.DestinationHTTP, "OIDC discovery found UserInfo URL", "url", userInfo)
 			}
 			return auth, token, userInfo
 		}
-		log.Printf("Warning: OIDC discovery failed: %v", err)
+		logger.Warn(logging.DestinationHTTP, "OIDC discovery failed", "error", err)
 	}
 
 	// Fall back to explicit URLs
@@ -434,14 +434,14 @@ func loadOAuth2Endpoints(cfg *config.Config) (authURL, tokenURL, userInfoURL str
 }
 
 // loadOAuth2RedirectURL loads or derives OAuth2 redirect URL
-func loadOAuth2RedirectURL(cfg *config.Config, issuer string) string {
+func loadOAuth2RedirectURL(cfg *config.Config, issuer string, logger *logging.Logger) string {
 	if redirectURL, ok := cfg.Get("HTTP_API_OAUTH2_REDIRECT_URL"); ok && redirectURL != "" {
 		return redirectURL
 	}
 
 	if issuer != "" {
 		url := issuer + "/mcp/oauth2/callback"
-		log.Printf("OAuth2 redirect URL derived from issuer: %s", url)
+		logger.Info(logging.DestinationHTTP, "OAuth2 redirect URL derived from issuer", "url", url)
 		return url
 	}
 
@@ -450,12 +450,12 @@ func loadOAuth2RedirectURL(cfg *config.Config, issuer string) string {
 
 // loadOAuth2Scopes loads OAuth2 scopes from config
 // Format: HTTP_API_OAUTH2_SCOPES = openid profile email org.cilogon.userinfo
-func loadOAuth2Scopes(cfg *config.Config) []string {
+func loadOAuth2Scopes(cfg *config.Config, logger *logging.Logger) []string {
 	if scopesStr, ok := cfg.Get("HTTP_API_OAUTH2_SCOPES"); ok && scopesStr != "" {
 		// Split by whitespace
 		scopes := strings.Fields(scopesStr)
 		if len(scopes) > 0 {
-			log.Printf("OAuth2 scopes from config: %v", scopes)
+			logger.Info(logging.DestinationHTTP, "OAuth2 scopes from config", "scopes", scopes)
 			return scopes
 		}
 	}
@@ -463,29 +463,29 @@ func loadOAuth2Scopes(cfg *config.Config) []string {
 }
 
 // loadAccessControlGroups loads MCP access control group settings
-func loadAccessControlGroups(cfg *config.Config, config *mcpConfig) {
+func loadAccessControlGroups(cfg *config.Config, config *mcpConfig, logger *logging.Logger) {
 	if accessGroup, ok := cfg.Get("HTTP_API_MCP_ACCESS_GROUP"); ok && accessGroup != "" {
 		config.mcpAccessGroup = accessGroup
-		log.Printf("MCP access group: %s", accessGroup)
+		logger.Info(logging.DestinationHTTP, "MCP access group", "group", accessGroup)
 	}
 	if readGroup, ok := cfg.Get("HTTP_API_MCP_READ_GROUP"); ok && readGroup != "" {
 		config.mcpReadGroup = readGroup
-		log.Printf("MCP read group: %s", readGroup)
+		logger.Info(logging.DestinationHTTP, "MCP read group", "group", readGroup)
 	}
 	if writeGroup, ok := cfg.Get("HTTP_API_MCP_WRITE_GROUP"); ok && writeGroup != "" {
 		config.mcpWriteGroup = writeGroup
-		log.Printf("MCP write group: %s", writeGroup)
+		logger.Info(logging.DestinationHTTP, "MCP write group", "group", writeGroup)
 	}
 }
 
 // loadMCPConfig loads MCP configuration from HTCondor config
-func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
+func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logging.Logger) mcpConfig {
 	config := mcpConfig{}
 
 	// Check if MCP should be enabled from config
 	if mcpEnable, ok := cfg.Get("HTTP_API_ENABLE_MCP"); ok && mcpEnable == "true" {
 		config.enabled = true
-		log.Println("MCP endpoints enabled via configuration")
+		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
 	}
 
 	if !config.enabled {
@@ -494,11 +494,11 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 
 	// Load OAuth2 database path
 	config.oauth2DBPath = loadOAuth2DBPath(cfg)
-	log.Printf("OAuth2 database path: %s", config.oauth2DBPath)
+	logger.Info(logging.DestinationHTTP, "OAuth2 database path", "path", config.oauth2DBPath)
 
 	// Load OAuth2 issuer
 	config.oauth2Issuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
-	log.Printf("OAuth2 issuer: %s", config.oauth2Issuer)
+	logger.Info(logging.DestinationHTTP, "OAuth2 issuer", "issuer", config.oauth2Issuer)
 
 	// Load OAuth2 client ID
 	if clientID, ok := cfg.Get("HTTP_API_OAUTH2_CLIENT_ID"); ok && clientID != "" {
@@ -506,45 +506,45 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string) mcpConfig {
 	}
 
 	// Load OAuth2 client secret
-	config.oauth2ClientSecret = loadOAuth2ClientSecret(cfg)
+	config.oauth2ClientSecret = loadOAuth2ClientSecret(cfg, logger)
 
 	// Load OAuth2 endpoints (auth, token, and userinfo URLs)
 	// This will auto-discover from IDP if configured, or use explicit URLs
-	config.oauth2AuthURL, config.oauth2TokenURL, config.oauth2UserInfoURL = loadOAuth2Endpoints(cfg)
+	config.oauth2AuthURL, config.oauth2TokenURL, config.oauth2UserInfoURL = loadOAuth2Endpoints(cfg, logger)
 
 	// Load OAuth2 redirect URL
-	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer)
+	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer, logger)
 
 	// Log the user info URL if set
 	if config.oauth2UserInfoURL != "" {
-		log.Printf("OAuth2 user info URL: %s", config.oauth2UserInfoURL)
+		logger.Info(logging.DestinationHTTP, "OAuth2 user info URL", "url", config.oauth2UserInfoURL)
 	}
 
 	// Load OAuth2 scopes
-	config.oauth2Scopes = loadOAuth2Scopes(cfg)
+	config.oauth2Scopes = loadOAuth2Scopes(cfg, logger)
 
 	// Load groups claim name (default: "groups")
 	config.oauth2GroupsClaim = "groups"
 	if groupsClaim, ok := cfg.Get("HTTP_API_OAUTH2_GROUPS_CLAIM"); ok && groupsClaim != "" {
 		config.oauth2GroupsClaim = groupsClaim
 	}
-	log.Printf("OAuth2 groups claim name: %s", config.oauth2GroupsClaim)
+	logger.Info(logging.DestinationHTTP, "OAuth2 groups claim", "claim", config.oauth2GroupsClaim)
 
 	// Load username claim name (default: "sub")
 	if usernameClaim, ok := cfg.Get("HTTP_API_OAUTH2_USERNAME_CLAIM"); ok && usernameClaim != "" {
 		config.oauth2UsernameClaim = usernameClaim
-		log.Printf("OAuth2 username claim name: %s", usernameClaim)
+		logger.Info(logging.DestinationHTTP, "OAuth2 username claim", "claim", usernameClaim)
 	}
 
 	// Load access control groups
-	loadAccessControlGroups(cfg, &config)
+	loadAccessControlGroups(cfg, &config, logger)
 
 	// Load server-level instructions for MCP agents
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
-		log.Printf("MCP instructions configured (%d bytes)", len(instructions))
+		logger.Info(logging.DestinationMCP, "MCP instructions configured", "length", len(instructions))
 	} else {
-		log.Println("MCP_INSTRUCTIONS not configured; no agent-level instructions will be provided")
+		logger.Info(logging.DestinationMCP, "MCP_INSTRUCTIONS not configured")
 	}
 
 	return config
@@ -707,7 +707,7 @@ func runNormalMode() error {
 	}
 
 	// Load MCP configuration
-	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig)
+	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig, logger)
 
 	// Check if IDP should be enabled
 	enableIDP := false
