@@ -513,231 +513,14 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		// Display consent form
-		client := ar.GetClient()
-		requestedScopes := ar.GetRequestedScopes()
-
-		// Build scopes list with descriptions
-		type scopeInfo struct {
-			Name        string
-			Description string
-		}
-		var scopes []scopeInfo
-		for _, scope := range requestedScopes {
-			scopes = append(scopes, scopeInfo{
-				Name:        scope,
-				Description: getScopeDescription(scope),
-			})
-		}
-
-		// Generate HTML for scopes list
-		var scopesHTML strings.Builder
-		scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
-		for _, scope := range scopes {
-			fmt.Fprintf(&scopesHTML, "                <li>\n"+
-				"                    <strong>%s</strong>\n"+
-				"                    <p>%s</p>\n"+
-				"                </li>\n", scope.Name, scope.Description)
-		}
-		scopesHTML.WriteString("            </ul>")
-
-		html := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <title>Authorize Application</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-            max-width: 600px;
-            width: 100%%;
-            padding: 40px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        .user-info {
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 30px;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 6px;
-        }
-        .user-info strong {
-            color: #333;
-        }
-        .client-info {
-            margin-bottom: 30px;
-            padding: 20px;
-            background: #f0f4ff;
-            border-left: 4px solid #667eea;
-            border-radius: 6px;
-        }
-        .client-info h2 {
-            font-size: 16px;
-            color: #667eea;
-            margin-bottom: 10px;
-        }
-        .client-info p {
-            color: #555;
-            font-size: 14px;
-            line-height: 1.6;
-        }
-        .permissions {
-            margin-bottom: 30px;
-        }
-        .permissions h2 {
-            font-size: 18px;
-            color: #333;
-            margin-bottom: 15px;
-        }
-        .scopes-list {
-            list-style: none;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        .scopes-list li {
-            padding: 16px 20px;
-            border-bottom: 1px solid #e0e0e0;
-        }
-        .scopes-list li:last-child {
-            border-bottom: none;
-        }
-        .scopes-list li strong {
-            display: block;
-            color: #667eea;
-            font-size: 14px;
-            margin-bottom: 4px;
-            font-weight: 600;
-        }
-        .scopes-list li p {
-            color: #666;
-            font-size: 13px;
-            line-height: 1.5;
-            margin: 0;
-        }
-        .actions {
-            display: flex;
-            gap: 15px;
-            margin-top: 30px;
-        }
-        button {
-            flex: 1;
-            padding: 14px 24px;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        button.approve {
-            background: #667eea;
-            color: white;
-        }
-        button.approve:hover {
-            background: #5568d3;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        }
-        button.deny {
-            background: #e0e0e0;
-            color: #666;
-        }
-        button.deny:hover {
-            background: #d0d0d0;
-            color: #333;
-        }
-        .warning {
-            margin-top: 20px;
-            padding: 15px;
-            background: #fff3cd;
-            border-left: 4px solid #ffc107;
-            border-radius: 6px;
-            font-size: 13px;
-            color: #856404;
-            line-height: 1.5;
-        }
-        @media (max-width: 600px) {
-            .container {
-                padding: 30px 20px;
-            }
-            h1 {
-                font-size: 24px;
-            }
-            .actions {
-                flex-direction: column;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Authorize Application</h1>
-        <div class="user-info">
-            Logged in as <strong>%s</strong>
-        </div>
-
-        <div class="client-info">
-            <h2>Application Information</h2>
-            <p><strong>Client ID:</strong> %s</p>
-        </div>
-
-        <div class="permissions">
-            <h2>Requested Permissions</h2>
-            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
-                This application is requesting access to:
-            </p>
-            %s
-        </div>
-
-        <form method="POST" action="/mcp/oauth2/consent" id="consentForm">
-            <input type="hidden" name="state" value="%s">
-            <div class="actions">
-                <button type="submit" name="action" value="approve" class="approve" id="approveBtn">Authorize</button>
-                <button type="submit" name="action" value="deny" class="deny" id="denyBtn">Deny</button>
-            </div>
-        </form>
-        <script>
-            document.getElementById('consentForm').addEventListener('submit', function() {
-                var btns = this.querySelectorAll('button[type=submit]');
-                for (var i = 0; i < btns.length; i++) {
-                    btns[i].disabled = true;
-                }
-                document.getElementById('approveBtn').textContent = 'Authorizing...';
-            });
-        </script>
-
-        <div class="warning">
-            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust.
-            This will allow the application to perform actions on your behalf with the permissions listed above.
-        </div>
-    </div>
-</body>
-</html>`, username, client.GetID(), scopesHTML.String(), state)
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(html))
+		h.renderConsentPage(w, consentPageParams{
+			Title:           "Authorize Application",
+			Username:        username,
+			ClientID:        ar.GetClient().GetID(),
+			RequestedScopes: ar.GetRequestedScopes(),
+			FormAction:      "/mcp/oauth2/consent",
+			HiddenFields:    map[string]string{"state": state},
+		})
 		return
 	}
 
@@ -1554,24 +1337,53 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 <html>
 <head>
     <title>Device Authorization</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
-        h1 { color: #333; }
-        form { margin-top: 20px; }
-        input[type="text"] { font-size: 18px; padding: 10px; width: 100%; margin: 10px 0; text-transform: uppercase; }
-        button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; cursor: pointer; font-size: 16px; width: 100%; margin: 5px 0; }
-        button:hover { opacity: 0.8; }
-        .error { color: red; margin: 10px 0; }
-        .success { color: green; margin: 10px 0; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+        h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
+        p { color: #666; font-size: 14px; margin-bottom: 20px; line-height: 1.6; }
+        input[type="text"] {
+            font-size: 24px; padding: 14px; width: 100%; margin: 10px 0 20px;
+            text-transform: uppercase; text-align: center; letter-spacing: 4px;
+            border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace;
+            color: #667eea; font-weight: bold;
+        }
+        input[type="text"]:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2); }
+        button {
+            background: #667eea; color: white; padding: 14px 28px; border: none;
+            border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer;
+            width: 100%; transition: all 0.2s ease;
+        }
+        button:hover { background: #5568d3; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
+        @media (max-width: 600px) { .container { padding: 30px 20px; } h1 { font-size: 24px; } }
     </style>
 </head>
 <body>
-    <h1>Device Authorization</h1>
-    <p>Enter the code displayed on your device:</p>
-    <form method="GET" action="/mcp/oauth2/device/verify">
-        <input type="text" name="user_code" placeholder="Enter code" required pattern="[A-Z0-9-]+" />
-        <button type="submit">Continue</button>
-    </form>
+    <div class="container">
+        <h1>Device Authorization</h1>
+        <p>Enter the code displayed on your device:</p>
+        <form method="GET" action="/mcp/oauth2/device/verify">
+            <input type="text" name="user_code" placeholder="XXXX-XXXX" required pattern="[A-Za-z0-9-]+" />
+            <button type="submit">Continue</button>
+        </form>
+    </div>
 </body>
 </html>`
 		w.Header().Set("Content-Type", "text/html")
@@ -1643,25 +1455,10 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			h.logger.Info(logging.DestinationHTTP, "Device code approved", "user_code", userCode, "username", username, "client_id", request.GetClient().GetID())
 
 			// Return success page
-			html := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Authorization Complete</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; text-align: center; }
-        h1 { color: #4CAF50; }
-        p { font-size: 18px; margin: 20px 0; }
-    </style>
-</head>
-<body>
-    <h1>Authorization Complete</h1>
-    <p>You have successfully authorized the device.</p>
-    <p>You can close this window now.</p>
-</body>
-</html>`
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(html))
+			h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
+				"&#10003; Authorization Complete",
+				"You have successfully authorized the device.",
+				"You can close this window now.")
 		case "deny":
 			// Deny the device code
 			if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
@@ -1673,25 +1470,10 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
 
 			// Return denial page
-			html := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Authorization Denied</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; text-align: center; }
-        h1 { color: #f44336; }
-        p { font-size: 18px; margin: 20px 0; }
-    </style>
-</head>
-<body>
-    <h1>✗ Authorization Denied</h1>
-    <p>You have denied authorization for this device.</p>
-    <p>You can close this window now.</p>
-</body>
-</html>`
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(html))
+			h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
+				"&#10007; Authorization Denied",
+				"You have denied authorization for this device.",
+				"You can close this window now.")
 		default:
 			h.writeHTMLError(w, "Invalid action")
 		}
@@ -1701,39 +1483,52 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
-// renderDeviceConsentPage renders the consent page for device code flow
-func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
-	client := request.GetClient()
-	requestedScopes := request.GetRequestedScopes()
+// consentPageParams defines the parameters for rendering a consent page.
+type consentPageParams struct {
+	Title           string            // Page title (e.g., "Authorize Application" or "Authorize Device")
+	Username        string            // Authenticated username
+	ClientID        string            // OAuth2 client ID
+	RequestedScopes []string          // Scopes being requested
+	FormAction      string            // Form POST target URL
+	HiddenFields    map[string]string // Hidden form fields (e.g., "state" or "user_code")
+	DeviceCode      string            // If non-empty, show device code verification section
+}
 
-	// Build scopes list with descriptions
-	type scopeInfo struct {
-		Name        string
-		Description string
-	}
-	var scopes []scopeInfo
-	for _, scope := range requestedScopes {
-		scopes = append(scopes, scopeInfo{
-			Name:        scope,
-			Description: getScopeDescription(scope),
-		})
-	}
-
-	// Generate HTML for scopes list
+// renderConsentPage renders a unified OAuth2 consent page for both authorization code and device flows.
+func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) {
+	// Build scopes list HTML
 	var scopesHTML strings.Builder
 	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
-	for _, scope := range scopes {
+	for _, scope := range p.RequestedScopes {
 		fmt.Fprintf(&scopesHTML, "                <li>\n"+
 			"                    <strong>%s</strong>\n"+
 			"                    <p>%s</p>\n"+
-			"                </li>\n", html.EscapeString(scope.Name), html.EscapeString(scope.Description))
+			"                </li>\n", html.EscapeString(scope), html.EscapeString(getScopeDescription(scope)))
 	}
 	scopesHTML.WriteString("            </ul>")
 
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	// Build device code section if applicable
+	var deviceCodeSection string
+	if p.DeviceCode != "" {
+		deviceCodeSection = fmt.Sprintf(`
+        <div class="client-info">
+            <h2>Device Code</h2>
+            <p class="device-code">%s</p>
+            <p style="margin-top: 10px; font-size: 12px;">Verify this code matches the one shown on your device.</p>
+        </div>`, html.EscapeString(p.DeviceCode))
+	}
+
+	// Build hidden fields
+	var hiddenFieldsHTML strings.Builder
+	for name, value := range p.HiddenFields {
+		fmt.Fprintf(&hiddenFieldsHTML, "            <input type=\"hidden\" name=\"%s\" value=\"%s\">\n",
+			html.EscapeString(name), html.EscapeString(value))
+	}
+
+	pageHTML := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
-    <title>Authorize Device</title>
+    <title>%s</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * {
@@ -1841,27 +1636,38 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request
             flex: 1;
             padding: 14px 28px;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s ease;
         }
-        .btn-approve {
+        button.approve {
             background: #667eea;
             color: white;
         }
-        .btn-approve:hover {
+        button.approve:hover {
             background: #5568d3;
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
         }
-        .btn-deny {
-            background: #f0f0f0;
+        button.deny {
+            background: #e0e0e0;
             color: #666;
         }
-        .btn-deny:hover {
-            background: #e0e0e0;
+        button.deny:hover {
+            background: #d0d0d0;
+            color: #333;
+        }
+        .warning {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #856404;
+            line-height: 1.5;
         }
         @media (max-width: 600px) {
             .container {
@@ -1871,66 +1677,144 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request
                 font-size: 24px;
             }
             .actions {
-                flex-direction: column-reverse;
+                flex-direction: column;
             }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Authorize Device</h1>
+        <h1>%s</h1>
         <div class="user-info">
-            Logged in as: <strong>%s</strong>
+            Logged in as <strong>%s</strong>
         </div>
-        <div class="client-info">
-            <h2>Device Code</h2>
-            <p class="device-code">%s</p>
-            <p style="margin-top: 10px; font-size: 12px;">Verify this code matches the one shown on your device.</p>
-        </div>
+        %s
         <div class="client-info">
             <h2>Application</h2>
-            <p><strong>%s</strong> wants to access your account on your device.</p>
+            <p><strong>Client ID:</strong> %s</p>
         </div>
+
         <div class="permissions">
-            <h2>This application will be able to:</h2>
+            <h2>Requested Permissions</h2>
+            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                This application is requesting access to:
+            </p>
             %s
         </div>
-        <form method="POST" action="/mcp/oauth2/device/verify">
-            <input type="hidden" name="user_code" value="%s">
+
+        <form method="POST" action="%s" id="consentForm">
+%s            <input type="hidden" name="action" value="" id="actionInput">
             <div class="actions">
-                <button type="submit" name="action" value="deny" class="btn-deny">Deny</button>
-                <button type="submit" name="action" value="approve" class="btn-approve">Approve</button>
+                <button type="submit" value="approve" class="approve" id="approveBtn">Authorize</button>
+                <button type="submit" value="deny" class="deny" id="denyBtn">Deny</button>
             </div>
         </form>
+        <script>
+            var btns = document.querySelectorAll('#consentForm button[type=submit]');
+            for (var i = 0; i < btns.length; i++) {
+                btns[i].addEventListener('click', function() {
+                    document.getElementById('actionInput').value = this.value;
+                    for (var j = 0; j < btns.length; j++) {
+                        btns[j].disabled = true;
+                    }
+                    document.getElementById('approveBtn').textContent = 'Authorizing...';
+                    document.getElementById('consentForm').submit();
+                });
+            }
+        </script>
+
+        <div class="warning">
+            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust.
+            This will allow the application to perform actions on your behalf with the permissions listed above.
+        </div>
     </div>
 </body>
-</html>`, html.EscapeString(username), html.EscapeString(userCode), html.EscapeString(client.GetID()), scopesHTML.String(), html.EscapeString(userCode))
+</html>`,
+		html.EscapeString(p.Title),
+		html.EscapeString(p.Title),
+		html.EscapeString(p.Username),
+		deviceCodeSection,
+		html.EscapeString(p.ClientID),
+		scopesHTML.String(),
+		html.EscapeString(p.FormAction),
+		hiddenFieldsHTML.String(),
+	)
 
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(html))
+	_, _ = w.Write([]byte(pageHTML))
 }
 
-// writeHTMLError writes an HTML error page
-func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
-	html := fmt.Sprintf(`<!DOCTYPE html>
+// renderDeviceConsentPage renders the consent page for device code flow
+func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
+	h.renderConsentPage(w, consentPageParams{
+		Title:           "Authorize Device",
+		Username:        username,
+		ClientID:        request.GetClient().GetID(),
+		RequestedScopes: request.GetRequestedScopes(),
+		FormAction:      "/mcp/oauth2/device/verify",
+		HiddenFields:    map[string]string{"user_code": userCode},
+		DeviceCode:      userCode,
+	})
+}
+
+// renderResultPage renders a styled result page (success, denied, error).
+func (h *Handler) renderResultPage(w http.ResponseWriter, statusCode int, title, accentColor, heading, message, submessage string) {
+	pageHTML := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
-    <title>Error</title>
+    <title>%s</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
-        .error { color: red; font-size: 18px; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 500px;
+            width: 100%%;
+            padding: 40px;
+            text-align: center;
+        }
+        h1 { color: %s; margin-bottom: 20px; font-size: 28px; }
+        p { color: #555; font-size: 16px; margin: 10px 0; line-height: 1.6; }
+        .sub { color: #999; font-size: 14px; margin-top: 20px; }
     </style>
 </head>
 <body>
-    <h1>Error</h1>
-    <p class="error">%s</p>
-    <a href="/mcp/oauth2/device/verify">Try again</a>
+    <div class="container">
+        <h1>%s</h1>
+        <p>%s</p>
+        <p class="sub">%s</p>
+    </div>
 </body>
-</html>`, html.EscapeString(message))
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusBadRequest)
-	_, _ = w.Write([]byte(html))
+</html>`,
+		html.EscapeString(title),
+		accentColor,
+		heading,
+		html.EscapeString(message),
+		html.EscapeString(submessage),
+	)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write([]byte(pageHTML))
+}
+
+// writeHTMLError writes a styled HTML error page
+func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
+	h.renderResultPage(w, http.StatusBadRequest, "Error", "#f44336",
+		"Error",
+		message,
+		"")
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
