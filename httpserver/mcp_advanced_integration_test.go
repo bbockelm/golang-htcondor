@@ -329,9 +329,9 @@ func TestMCPGroupMembership(t *testing.T) {
 			groups:       []string{},
 			accessGroup:  "", // No access group required
 			expectAccess: true,
-			expectRead:   false,
-			expectWrite:  false,
-			description:  "User without groups can access if no access group is required, but gets no scopes",
+			expectRead:   true,
+			expectWrite:  true,
+			description:  "User without groups can access if no access group is required; no group config means all scopes granted",
 		},
 		{
 			name:         "User with only access group",
@@ -394,8 +394,8 @@ func TestMCPGroupMembership(t *testing.T) {
 			readGroup:    "mcp-read",
 			expectAccess: true,
 			expectRead:   true,
-			expectWrite:  false,
-			description:  "Group matching should be case-insensitive",
+			expectWrite:  true,
+			description:  "Group matching should be case-insensitive; no writeGroup means fallback to accessGroup",
 		},
 	}
 
