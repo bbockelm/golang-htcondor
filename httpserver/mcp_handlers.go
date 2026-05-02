@@ -793,6 +793,17 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Set per-token expiries on the session before generating tokens. This custom
+	// device-code flow bypasses fosite's NewAccessRequest/NewAccessResponse pipeline,
+	// which is the only place fosite would otherwise call SetExpiresAt for us. If we
+	// skip this, the stored session has zero-valued ExpiresAt entries, which means
+	// (a) access tokens fall back to GetRequestedAt + AccessTokenLifespan — and the
+	// device code's RequestedAt can be up to ~10 minutes old, eating into the
+	// access-token lifetime — and (b) refresh tokens get an "unlimited lifetime" path
+	// in fosite's HMAC strategy, ignoring the configured RefreshTokenLifespan
+	// entirely. See PelicanPlatform/pelican#3389 for the same bug class.
+	setStandardTokenExpiries(ctx, h.oauth2Provider.config, request.GetSession())
+
 	// Generate tokens using fosite
 	strategy := h.oauth2Provider.GetStrategy()
 	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
@@ -877,6 +888,12 @@ func (h *Handler) handleDeviceCodeCondorToken(ctx context.Context, w http.Respon
 	h.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for device code flow",
 		"username", username,
 		"scopes", grantedScopes)
+
+	// Set per-token expiries on the session before generating the refresh token
+	// (see comment in handleDeviceCodeTokenRequest). The access token here is the
+	// HTCondor IDTOKEN, which has its own JWT-level expiry, but the refresh token
+	// still flows through fosite's HMAC strategy and needs the session expiry set.
+	setStandardTokenExpiries(ctx, h.oauth2Provider.config, request.GetSession())
 
 	// Generate refresh token using fosite
 	strategy := h.oauth2Provider.GetStrategy()

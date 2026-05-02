@@ -23,9 +23,33 @@ type OAuth2Provider struct {
 	strategy *compose.CommonStrategy
 }
 
-// NewOAuth2Provider creates a new OAuth2 provider with SQLite storage
-func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
-	storage, err := NewOAuth2Storage(dbPath)
+// OAuth2ProviderOptions configures lifespans and other tunables for the OAuth2 provider.
+// Lifespans must be > 0; callers are expected to validate or default before constructing.
+type OAuth2ProviderOptions struct {
+	DBPath               string
+	Issuer               string
+	AccessTokenLifespan  time.Duration
+	RefreshTokenLifespan time.Duration
+}
+
+// NewOAuth2Provider creates a new OAuth2 provider with SQLite storage.
+// Both AccessTokenLifespan and RefreshTokenLifespan in opts must be > 0; otherwise an
+// error is returned. This is intentional: silent fallback to fosite's defaults (1h
+// access, 30d refresh) has bitten downstream projects when callers forget to pass them
+// through, so callers must opt in explicitly.
+func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
+	if opts.AccessTokenLifespan <= 0 {
+		return nil, fmt.Errorf("OAuth2 provider: AccessTokenLifespan must be > 0")
+	}
+	if opts.RefreshTokenLifespan <= 0 {
+		return nil, fmt.Errorf("OAuth2 provider: RefreshTokenLifespan must be > 0")
+	}
+	if opts.RefreshTokenLifespan < opts.AccessTokenLifespan {
+		return nil, fmt.Errorf("OAuth2 provider: RefreshTokenLifespan (%s) must be >= AccessTokenLifespan (%s); shorter refresh tokens make refresh grants fail before access tokens expire",
+			opts.RefreshTokenLifespan, opts.AccessTokenLifespan)
+	}
+
+	storage, err := NewOAuth2Storage(opts.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
@@ -67,12 +91,12 @@ func NewOAuth2Provider(dbPath string, issuer string) (*OAuth2Provider, error) {
 	}
 
 	config := &fosite.Config{
-		AccessTokenLifespan:      time.Hour,
-		RefreshTokenLifespan:     time.Hour * 24 * 7,
+		AccessTokenLifespan:      opts.AccessTokenLifespan,
+		RefreshTokenLifespan:     opts.RefreshTokenLifespan,
 		AuthorizeCodeLifespan:    time.Minute * 10,
-		IDTokenLifespan:          time.Hour,
-		TokenURL:                 issuer + "/mcp/oauth2/token",
-		AccessTokenIssuer:        issuer,
+		IDTokenLifespan:          opts.AccessTokenLifespan,
+		TokenURL:                 opts.Issuer + "/mcp/oauth2/token",
+		AccessTokenIssuer:        opts.Issuer,
 		ScopeStrategy:            fosite.HierarchicScopeStrategy,
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
 	}
@@ -165,6 +189,24 @@ func DefaultOpenIDConnectSession(username string) *openid.DefaultSession {
 		Headers: &jwt.Headers{},
 		Subject: username,
 	}
+}
+
+// setStandardTokenExpiries populates Session.ExpiresAt for AccessToken and RefreshToken
+// using the configured lifespans, mirroring what fosite's standard authorize-code and
+// refresh-grant pipelines do internally. Custom flows that build a fosite.AccessRequest
+// and call GenerateAccessToken / GenerateRefreshToken directly (device code grant, RFC
+// 8693 token exchange, etc.) bypass that pipeline and must call this before generating
+// tokens — otherwise the session is persisted with zero-valued expiries, which makes
+// the HMAC strategy treat refresh tokens as having unlimited lifetime and access tokens
+// as expiring relative to the (potentially old) RequestedAt timestamp instead of now.
+// See PelicanPlatform/pelican#3389.
+func setStandardTokenExpiries(ctx context.Context, cfg *fosite.Config, session fosite.Session) {
+	if session == nil {
+		return
+	}
+	now := time.Now().UTC()
+	session.SetExpiresAt(fosite.AccessToken, now.Add(cfg.GetAccessTokenLifespan(ctx)).Round(time.Second))
+	session.SetExpiresAt(fosite.RefreshToken, now.Add(cfg.GetRefreshTokenLifespan(ctx)).Round(time.Second))
 }
 
 // IntrospectToken validates an access token and returns the session

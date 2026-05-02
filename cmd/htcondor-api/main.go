@@ -91,6 +91,10 @@ type mcpConfig struct {
 	mcpReadGroup        string
 	mcpWriteGroup       string
 	instructions        string
+	// Token lifespans for the embedded MCP issuer. Zero means "use the package
+	// default" (1h access, 30d refresh).
+	oauth2AccessTokenLifespan  time.Duration
+	oauth2RefreshTokenLifespan time.Duration
 }
 
 // fixConfigDefaults handles edge cases in HTCondor configuration defaults
@@ -462,6 +466,62 @@ func loadOAuth2Scopes(cfg *config.Config, logger *logging.Logger) []string {
 	return nil // Will use defaults
 }
 
+// durationUnits are the suffixes accepted by Go's time.ParseDuration. We require
+// the configured value to end in one of these explicitly: a bare number like "300"
+// is forbidden because some config layers (and unfortunately some users' mental
+// models) silently treat it as nanoseconds, which would set a 300ns token lifetime
+// — short enough that the token is effectively expired before it leaves the server.
+// Forcing a unit means a typo fails loudly rather than silently producing a server
+// that re-authenticates every microsecond.
+var durationUnits = []string{"ns", "us", "µs", "ms", "s", "m", "h"}
+
+// validateDurationHasUnit returns an error if s is not a valid Go duration string
+// with an explicit unit suffix. It does not validate the numeric portion — that is
+// time.ParseDuration's job — only that *some* unit is present.
+func validateDurationHasUnit(s string) error {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return fmt.Errorf("empty value")
+	}
+	for _, u := range durationUnits {
+		if strings.HasSuffix(trimmed, u) {
+			return nil
+		}
+	}
+	return fmt.Errorf("missing time unit; use a Go duration like \"1h\", \"30m\", \"168h\" (valid units: %s)",
+		strings.Join(durationUnits, ", "))
+}
+
+// loadTokenLifespan parses a duration from cfg and returns it, or 0 if the key is
+// unset (which signals "use the package default" downstream). If the key is set
+// but the value is malformed — including the unit-less case — startup fails via
+// log.Fatalf rather than falling back to a default, because a token lifespan
+// silently reverting to a default that the operator did not choose is exactly the
+// "horribly confusing" failure mode this validation exists to prevent.
+func loadTokenLifespan(cfg *config.Config, key string, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid token lifespan: refusing to start",
+			"key", key, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", key, raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse token lifespan: refusing to start",
+			"key", key, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", key, raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "Token lifespan must be > 0: refusing to start",
+			"key", key, "value", raw)
+		log.Fatalf("invalid %s=%q: must be > 0", key, raw)
+	}
+	return d
+}
+
 // loadAccessControlGroups loads MCP access control group settings
 func loadAccessControlGroups(cfg *config.Config, config *mcpConfig, logger *logging.Logger) {
 	if accessGroup, ok := cfg.Get("HTTP_API_MCP_ACCESS_GROUP"); ok && accessGroup != "" {
@@ -538,6 +598,16 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 
 	// Load access control groups
 	loadAccessControlGroups(cfg, &config, logger)
+
+	// Load token lifespans (zero means "use the httpserver-package default")
+	config.oauth2AccessTokenLifespan = loadTokenLifespan(cfg, "HTTP_API_OAUTH2_ACCESS_TOKEN_LIFESPAN", logger)
+	if config.oauth2AccessTokenLifespan > 0 {
+		logger.Info(logging.DestinationHTTP, "OAuth2 access token lifespan", "duration", config.oauth2AccessTokenLifespan)
+	}
+	config.oauth2RefreshTokenLifespan = loadTokenLifespan(cfg, "HTTP_API_OAUTH2_REFRESH_TOKEN_LIFESPAN", logger)
+	if config.oauth2RefreshTokenLifespan > 0 {
+		logger.Info(logging.DestinationHTTP, "OAuth2 refresh token lifespan", "duration", config.oauth2RefreshTokenLifespan)
+	}
 
 	// Load server-level instructions for MCP agents
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
@@ -719,6 +789,7 @@ func runNormalMode() error {
 	// Load IDP configuration
 	idpDBPath := ""
 	idpIssuer := ""
+	var idpAccessLifespan, idpRefreshLifespan time.Duration
 	if enableIDP {
 		// Load IDP database path - default to same DB as OAuth2
 		if dbPath, ok := cfg.Get("HTTP_API_IDP_DB_PATH"); ok && dbPath != "" {
@@ -736,6 +807,9 @@ func runNormalMode() error {
 			idpIssuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
 		}
 		log.Printf("IDP issuer: %s", idpIssuer)
+
+		idpAccessLifespan = loadTokenLifespan(cfg, "HTTP_API_IDP_ACCESS_TOKEN_LIFESPAN", logger)
+		idpRefreshLifespan = loadTokenLifespan(cfg, "HTTP_API_IDP_REFRESH_TOKEN_LIFESPAN", logger)
 	}
 
 	// Compute HTTP base URL for MCP file download links
@@ -745,42 +819,46 @@ func runNormalMode() error {
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:          listenAddrFromConfig,
-		ScheddName:          scheddNameValue,
-		ScheddAddr:          scheddAddrValue,
-		UserHeader:          userHeaderFromConfig,
-		SigningKeyPath:      signingKeyPath,
-		HTTPBaseURL:         httpBaseURL,
-		TLSCertFile:         tlsCertFile,
-		TLSKeyFile:          tlsKeyFile,
-		TLSCACertFile:       tlsCACertFile,
-		TrustDomain:         trustDomain,
-		UIDDomain:           uidDomain,
-		ReadTimeout:         readTimeout,
-		WriteTimeout:        writeTimeout,
-		IdleTimeout:         idleTimeout,
-		Collector:           collector,
-		Logger:              logger,
-		EnableMCP:           mcpCfg.enabled,
-		OAuth2DBPath:        mcpCfg.oauth2DBPath,
-		OAuth2Issuer:        mcpCfg.oauth2Issuer,
-		OAuth2ClientID:      mcpCfg.oauth2ClientID,
-		OAuth2ClientSecret:  mcpCfg.oauth2ClientSecret,
-		OAuth2AuthURL:       mcpCfg.oauth2AuthURL,
-		OAuth2TokenURL:      mcpCfg.oauth2TokenURL,
-		OAuth2RedirectURL:   mcpCfg.oauth2RedirectURL,
-		OAuth2UserInfoURL:   mcpCfg.oauth2UserInfoURL,
-		OAuth2Scopes:        mcpCfg.oauth2Scopes,
-		OAuth2UsernameClaim: mcpCfg.oauth2UsernameClaim,
-		OAuth2GroupsClaim:   mcpCfg.oauth2GroupsClaim,
-		MCPAccessGroup:      mcpCfg.mcpAccessGroup,
-		MCPReadGroup:        mcpCfg.mcpReadGroup,
-		MCPWriteGroup:       mcpCfg.mcpWriteGroup,
-		MCPInstructions:     mcpCfg.instructions,
-		EnableIDP:           enableIDP,
-		IDPDBPath:           idpDBPath,
-		IDPIssuer:           idpIssuer,
-		HTCondorConfig:      cfg,
+		ListenAddr:                 listenAddrFromConfig,
+		ScheddName:                 scheddNameValue,
+		ScheddAddr:                 scheddAddrValue,
+		UserHeader:                 userHeaderFromConfig,
+		SigningKeyPath:             signingKeyPath,
+		HTTPBaseURL:                httpBaseURL,
+		TLSCertFile:                tlsCertFile,
+		TLSKeyFile:                 tlsKeyFile,
+		TLSCACertFile:              tlsCACertFile,
+		TrustDomain:                trustDomain,
+		UIDDomain:                  uidDomain,
+		ReadTimeout:                readTimeout,
+		WriteTimeout:               writeTimeout,
+		IdleTimeout:                idleTimeout,
+		Collector:                  collector,
+		Logger:                     logger,
+		EnableMCP:                  mcpCfg.enabled,
+		OAuth2DBPath:               mcpCfg.oauth2DBPath,
+		OAuth2Issuer:               mcpCfg.oauth2Issuer,
+		OAuth2ClientID:             mcpCfg.oauth2ClientID,
+		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
+		OAuth2AuthURL:              mcpCfg.oauth2AuthURL,
+		OAuth2TokenURL:             mcpCfg.oauth2TokenURL,
+		OAuth2RedirectURL:          mcpCfg.oauth2RedirectURL,
+		OAuth2UserInfoURL:          mcpCfg.oauth2UserInfoURL,
+		OAuth2Scopes:               mcpCfg.oauth2Scopes,
+		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
+		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
+		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
+		OAuth2RefreshTokenLifespan: mcpCfg.oauth2RefreshTokenLifespan,
+		MCPAccessGroup:             mcpCfg.mcpAccessGroup,
+		MCPReadGroup:               mcpCfg.mcpReadGroup,
+		MCPWriteGroup:              mcpCfg.mcpWriteGroup,
+		MCPInstructions:            mcpCfg.instructions,
+		EnableIDP:                  enableIDP,
+		IDPDBPath:                  idpDBPath,
+		IDPIssuer:                  idpIssuer,
+		IDPAccessTokenLifespan:     idpAccessLifespan,
+		IDPRefreshTokenLifespan:    idpRefreshLifespan,
+		HTCondorConfig:             cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

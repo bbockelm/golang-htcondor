@@ -33,50 +33,58 @@ type Server struct {
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr          string               // Address to listen on (e.g., ":8080")
-	ScheddName          string               // Schedd name
-	ScheddAddr          string               // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader          string               // HTTP header to extract username from (optional)
-	SigningKeyPath      string               // Path to token signing key (optional, for token generation)
-	TrustDomain         string               // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain           string               // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL         string               // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCertFile         string               // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile          string               // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile       string               // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout         time.Duration        // HTTP read timeout (default: 30s)
-	WriteTimeout        time.Duration        // HTTP write timeout (default: 30s)
-	IdleTimeout         time.Duration        // HTTP idle timeout (default: 120s)
-	Collector           *htcondor.Collector  // Collector for metrics (optional)
-	EnableMetrics       bool                 // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL     time.Duration        // Metrics cache TTL (default: 10s)
-	Logger              *logging.Logger      // Logger instance (optional, creates default if nil)
-	EnableMCP           bool                 // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath        string               // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
-	OAuth2Issuer        string               // OAuth2 issuer URL (default: listen address)
-	OAuth2ClientID      string               // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret  string               // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL       string               // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL      string               // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL   string               // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL   string               // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes        []string             // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim string               // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim   string               // Claim name for groups in user info (default: "groups")
-	MCPAccessGroup      string               // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup        string               // Group required for read operations (empty = all have read)
-	MCPWriteGroup       string               // Group required for write operations (empty = all have write)
-	MCPInstructions     string               // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	EnableIDP           bool                 // Enable built-in IDP (always enabled in demo mode)
-	IDPDBPath           string               // Path to IDP SQLite database (default: "idp.db")
-	IDPIssuer           string               // IDP issuer URL (default: listen address)
-	SessionTTL          time.Duration        // HTTP session TTL (default: 24h)
-	HTCondorConfig      *config.Config       // HTCondor configuration (optional, used for LOCAL_DIR default)
-	PingInterval        time.Duration        // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
-	StreamBufferSize    int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout  time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token               string               // Token for daemon authentication (optional)
-	Credd               htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	ListenAddr          string              // Address to listen on (e.g., ":8080")
+	ScheddName          string              // Schedd name
+	ScheddAddr          string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader          string              // HTTP header to extract username from (optional)
+	SigningKeyPath      string              // Path to token signing key (optional, for token generation)
+	TrustDomain         string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL         string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout         time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout        time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout         time.Duration       // HTTP idle timeout (default: 120s)
+	Collector           *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics       bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
+	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
+	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
+	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
+	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL       string              // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL      string              // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL   string              // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL   string              // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes        []string            // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim string              // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim   string              // Claim name for groups in user info (default: "groups")
+	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
+	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
+	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
+	OAuth2AccessTokenLifespan  time.Duration
+	OAuth2RefreshTokenLifespan time.Duration
+	MCPAccessGroup             string // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup               string // Group required for read operations (empty = all have read)
+	MCPWriteGroup              string // Group required for write operations (empty = all have write)
+	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
+	IDPDBPath                  string // Path to IDP SQLite database (default: "idp.db")
+	IDPIssuer                  string // IDP issuer URL (default: listen address)
+	// IDPAccessTokenLifespan / IDPRefreshTokenLifespan: see OAuth2*Lifespan above.
+	IDPAccessTokenLifespan  time.Duration
+	IDPRefreshTokenLifespan time.Duration
+	SessionTTL              time.Duration        // HTTP session TTL (default: 24h)
+	HTCondorConfig          *config.Config       // HTCondor configuration (optional, used for LOCAL_DIR default)
+	PingInterval            time.Duration        // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
+	StreamBufferSize        int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token                   string               // Token for daemon authentication (optional)
+	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 }
 
 // NewServer creates a new HTTP API server
@@ -97,44 +105,48 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Convert Config to HandlerConfig
 	handlerCfg := HandlerConfig{
-		ScheddName:          cfg.ScheddName,
-		ScheddAddr:          cfg.ScheddAddr,
-		UserHeader:          cfg.UserHeader,
-		SigningKeyPath:      cfg.SigningKeyPath,
-		TrustDomain:         cfg.TrustDomain,
-		UIDDomain:           cfg.UIDDomain,
-		HTTPBaseURL:         cfg.HTTPBaseURL,
-		TLSCACertFile:       cfg.TLSCACertFile,
-		Collector:           cfg.Collector,
-		EnableMetrics:       cfg.EnableMetrics,
-		MetricsCacheTTL:     cfg.MetricsCacheTTL,
-		Logger:              cfg.Logger,
-		EnableMCP:           cfg.EnableMCP,
-		OAuth2DBPath:        cfg.OAuth2DBPath,
-		OAuth2Issuer:        cfg.OAuth2Issuer,
-		OAuth2ClientID:      cfg.OAuth2ClientID,
-		OAuth2ClientSecret:  cfg.OAuth2ClientSecret,
-		OAuth2AuthURL:       cfg.OAuth2AuthURL,
-		OAuth2TokenURL:      cfg.OAuth2TokenURL,
-		OAuth2RedirectURL:   cfg.OAuth2RedirectURL,
-		OAuth2UserInfoURL:   cfg.OAuth2UserInfoURL,
-		OAuth2Scopes:        cfg.OAuth2Scopes,
-		OAuth2UsernameClaim: cfg.OAuth2UsernameClaim,
-		OAuth2GroupsClaim:   cfg.OAuth2GroupsClaim,
-		MCPAccessGroup:      cfg.MCPAccessGroup,
-		MCPReadGroup:        cfg.MCPReadGroup,
-		MCPWriteGroup:       cfg.MCPWriteGroup,
-		MCPInstructions:     cfg.MCPInstructions,
-		EnableIDP:           cfg.EnableIDP,
-		IDPDBPath:           cfg.IDPDBPath,
-		IDPIssuer:           cfg.IDPIssuer,
-		SessionTTL:          cfg.SessionTTL,
-		HTCondorConfig:      cfg.HTCondorConfig,
-		PingInterval:        cfg.PingInterval,
-		StreamBufferSize:    cfg.StreamBufferSize,
-		StreamWriteTimeout:  cfg.StreamWriteTimeout,
-		Token:               cfg.Token,
-		Credd:               cfg.Credd,
+		ScheddName:                 cfg.ScheddName,
+		ScheddAddr:                 cfg.ScheddAddr,
+		UserHeader:                 cfg.UserHeader,
+		SigningKeyPath:             cfg.SigningKeyPath,
+		TrustDomain:                cfg.TrustDomain,
+		UIDDomain:                  cfg.UIDDomain,
+		HTTPBaseURL:                cfg.HTTPBaseURL,
+		TLSCACertFile:              cfg.TLSCACertFile,
+		Collector:                  cfg.Collector,
+		EnableMetrics:              cfg.EnableMetrics,
+		MetricsCacheTTL:            cfg.MetricsCacheTTL,
+		Logger:                     cfg.Logger,
+		EnableMCP:                  cfg.EnableMCP,
+		OAuth2DBPath:               cfg.OAuth2DBPath,
+		OAuth2Issuer:               cfg.OAuth2Issuer,
+		OAuth2ClientID:             cfg.OAuth2ClientID,
+		OAuth2ClientSecret:         cfg.OAuth2ClientSecret,
+		OAuth2AuthURL:              cfg.OAuth2AuthURL,
+		OAuth2TokenURL:             cfg.OAuth2TokenURL,
+		OAuth2RedirectURL:          cfg.OAuth2RedirectURL,
+		OAuth2UserInfoURL:          cfg.OAuth2UserInfoURL,
+		OAuth2Scopes:               cfg.OAuth2Scopes,
+		OAuth2UsernameClaim:        cfg.OAuth2UsernameClaim,
+		OAuth2GroupsClaim:          cfg.OAuth2GroupsClaim,
+		OAuth2AccessTokenLifespan:  cfg.OAuth2AccessTokenLifespan,
+		OAuth2RefreshTokenLifespan: cfg.OAuth2RefreshTokenLifespan,
+		MCPAccessGroup:             cfg.MCPAccessGroup,
+		MCPReadGroup:               cfg.MCPReadGroup,
+		MCPWriteGroup:              cfg.MCPWriteGroup,
+		MCPInstructions:            cfg.MCPInstructions,
+		EnableIDP:                  cfg.EnableIDP,
+		IDPDBPath:                  cfg.IDPDBPath,
+		IDPIssuer:                  cfg.IDPIssuer,
+		IDPAccessTokenLifespan:     cfg.IDPAccessTokenLifespan,
+		IDPRefreshTokenLifespan:    cfg.IDPRefreshTokenLifespan,
+		SessionTTL:                 cfg.SessionTTL,
+		HTCondorConfig:             cfg.HTCondorConfig,
+		PingInterval:               cfg.PingInterval,
+		StreamBufferSize:           cfg.StreamBufferSize,
+		StreamWriteTimeout:         cfg.StreamWriteTimeout,
+		Token:                      cfg.Token,
+		Credd:                      cfg.Credd,
 	}
 
 	// Create the handler

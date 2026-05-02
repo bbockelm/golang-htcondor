@@ -385,7 +385,7 @@ func (s *OAuth2Storage) createTokenSession(ctx context.Context, table string, si
 		return err
 	}
 
-	expiresAt := time.Now().Add(1 * time.Hour) // Default expiration
+	expiresAt := tokenSessionExpiresAt(table, request.GetSession())
 
 	query, err := buildInsertQuery(table)
 	if err != nil {
@@ -406,6 +406,32 @@ func (s *OAuth2Storage) createTokenSession(ctx context.Context, table string, si
 	)
 
 	return err
+}
+
+// tokenSessionExpiresAt returns the value to store in the row's expires_at column.
+// It picks the appropriate fosite.TokenType based on the table name and falls back
+// to a 1-hour conservative default only if the session has no expiry recorded for
+// that token type. The fallback should never trigger in practice — fosite's pipeline
+// (and the setStandardTokenExpiries helper used by custom flows) sets these — but
+// keeping it small avoids accidentally giving long lifetimes to malformed sessions.
+func tokenSessionExpiresAt(table string, session fosite.Session) time.Time {
+	if session != nil {
+		var t fosite.TokenType
+		switch table {
+		case "oauth2_refresh_tokens", "idp_refresh_tokens":
+			t = fosite.RefreshToken
+		case "oauth2_access_tokens", "idp_access_tokens":
+			t = fosite.AccessToken
+		case "oauth2_authorization_codes", "idp_authorization_codes":
+			t = fosite.AuthorizeCode
+		default:
+			t = fosite.AccessToken
+		}
+		if exp := session.GetExpiresAt(t); !exp.IsZero() {
+			return exp
+		}
+	}
+	return time.Now().Add(time.Hour)
 }
 
 //nolint:dupl // Similar to IDPStorage but uses different query builders

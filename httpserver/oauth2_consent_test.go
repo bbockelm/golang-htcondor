@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/ory/fosite"
@@ -26,7 +27,12 @@ func setupTestOAuth2Server(t *testing.T) (*Server, *OAuth2Provider, string, cont
 	}
 
 	// Create OAuth2 provider
-	oauth2Provider, err := NewOAuth2Provider(t.TempDir()+"/oauth2-test.db", "http://localhost:8080")
+	oauth2Provider, err := NewOAuth2Provider(OAuth2ProviderOptions{
+		DBPath:               t.TempDir() + "/oauth2-test.db",
+		Issuer:               "http://localhost:8080",
+		AccessTokenLifespan:  time.Hour,
+		RefreshTokenLifespan: 7 * 24 * time.Hour,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create OAuth2 provider: %v", err)
 	}

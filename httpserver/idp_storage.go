@@ -536,7 +536,7 @@ func (s *IDPStorage) createTokenSession(ctx context.Context, table string, signa
 		return err
 	}
 
-	expiresAt := time.Now().Add(1 * time.Hour) // Default expiration
+	expiresAt := tokenSessionExpiresAt(table, request.GetSession())
 
 	query, err := buildIDPInsertQuery(table)
 	if err != nil {

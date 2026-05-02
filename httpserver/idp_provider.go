@@ -24,9 +24,30 @@ type IDPProvider struct {
 	privateKey *rsa.PrivateKey
 }
 
-// NewIDPProvider creates a new IDP provider with SQLite storage
-func NewIDPProvider(dbPath string, issuer string) (*IDPProvider, error) {
-	storage, err := NewIDPStorage(dbPath)
+// IDPProviderOptions configures lifespans and other tunables for the IDP provider.
+type IDPProviderOptions struct {
+	DBPath               string
+	Issuer               string
+	AccessTokenLifespan  time.Duration
+	RefreshTokenLifespan time.Duration
+}
+
+// NewIDPProvider creates a new IDP provider with SQLite storage.
+// Both AccessTokenLifespan and RefreshTokenLifespan in opts must be > 0; otherwise an
+// error is returned. See OAuth2ProviderOptions for the rationale.
+func NewIDPProvider(opts IDPProviderOptions) (*IDPProvider, error) {
+	if opts.AccessTokenLifespan <= 0 {
+		return nil, fmt.Errorf("IDP provider: AccessTokenLifespan must be > 0")
+	}
+	if opts.RefreshTokenLifespan <= 0 {
+		return nil, fmt.Errorf("IDP provider: RefreshTokenLifespan must be > 0")
+	}
+	if opts.RefreshTokenLifespan < opts.AccessTokenLifespan {
+		return nil, fmt.Errorf("IDP provider: RefreshTokenLifespan (%s) must be >= AccessTokenLifespan (%s); shorter refresh tokens make refresh grants fail before access tokens expire",
+			opts.RefreshTokenLifespan, opts.AccessTokenLifespan)
+	}
+
+	storage, err := NewIDPStorage(opts.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
@@ -68,12 +89,12 @@ func NewIDPProvider(dbPath string, issuer string) (*IDPProvider, error) {
 	}
 
 	config := &fosite.Config{
-		AccessTokenLifespan:      time.Hour,
-		RefreshTokenLifespan:     time.Hour * 24 * 7,
+		AccessTokenLifespan:      opts.AccessTokenLifespan,
+		RefreshTokenLifespan:     opts.RefreshTokenLifespan,
 		AuthorizeCodeLifespan:    time.Minute * 10,
-		IDTokenLifespan:          time.Hour,
-		TokenURL:                 issuer + "/idp/token",
-		AccessTokenIssuer:        issuer,
+		IDTokenLifespan:          opts.AccessTokenLifespan,
+		TokenURL:                 opts.Issuer + "/idp/token",
+		AccessTokenIssuer:        opts.Issuer,
 		ScopeStrategy:            fosite.HierarchicScopeStrategy,
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
 	}
