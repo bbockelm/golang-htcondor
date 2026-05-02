@@ -1407,19 +1407,35 @@ func (s *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleReadyz handles GET /readyz endpoint for readiness checks
+// handleReadyz handles GET /readyz endpoint for readiness checks. The status
+// reflects the most recent collector / schedd ping outcomes recorded by the
+// pingHealth tracker. HTTP status code follows the worst per-daemon status:
+//
+//	ok / disabled  -> 200
+//	warning        -> 200 (still serving, but operators should look)
+//	unknown        -> 503 (haven't pinged yet — server may still be warming up)
+//	down           -> 503
+//
+// Returning 200 for "warning" rather than 503 is a deliberate choice: a stale
+// collector ping shouldn't pull the MCP out of load-balancer rotation when
+// the actual user-facing schedd connections might still work. The body
+// always carries the structured snapshot so callers (or kubectl get pods)
+// can see exactly which daemon is in trouble.
 func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	// Readiness check returns OK if the server is ready to accept traffic
-	// Currently just checks if the server is running, but could be extended
-	// to check schedd connectivity or other dependencies
-	s.writeJSON(w, http.StatusOK, map[string]string{
-		"status": "ready",
-	})
+	snap := s.pingHealth.snapshot()
+
+	statusCode := http.StatusOK
+	switch snap.Status {
+	case "down", "unknown":
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	s.writeJSON(w, statusCode, snap)
 }
 
 // handleLogout handles POST /logout endpoint to clear session cookies

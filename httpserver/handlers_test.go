@@ -114,12 +114,63 @@ func testHealthEndpoint(t *testing.T, handlerFunc func(http.ResponseWriter, *htt
 
 // TestHealthzEndpoint verifies the /healthz endpoint returns OK
 func TestHealthzEndpoint(t *testing.T) {
-	testHealthEndpoint(t, (&Server{}).handleHealthz, "/healthz", "ok")
+	// /healthz is a pure liveness probe — it doesn't read any handler state,
+	// so a zero-value Handler suffices. (Note: Server embeds *Handler, so
+	// the previous `(&Server{}).handleHealthz` form invoked the method on a
+	// nil Handler pointer; calling through a real Handler is more honest.)
+	h := &Handler{}
+	testHealthEndpoint(t, h.handleHealthz, "/healthz", "ok")
 }
 
-// TestReadyzEndpoint verifies the /readyz endpoint returns ready status
+// TestReadyzEndpoint verifies the /readyz endpoint reports the per-daemon
+// snapshot. With no pingHealth wired up, the snapshot's nil-receiver path
+// returns overall "ok" — i.e., we don't fail readiness just because the
+// periodic-ping subsystem isn't initialized.
 func TestReadyzEndpoint(t *testing.T) {
-	testHealthEndpoint(t, (&Server{}).handleReadyz, "/readyz", "ready")
+	h := &Handler{}
+	testReadyzSnapshot(t, h.handleReadyz, "ok")
+}
+
+// testReadyzSnapshot is the new readyz-shaped variant of testHealthEndpoint.
+// /readyz no longer returns a {"status": "ready"} envelope; it returns a
+// healthSnapshot. We assert on the .Status field rather than on a string
+// equality with the old "ready" sentinel.
+func testReadyzSnapshot(t *testing.T, handlerFunc func(http.ResponseWriter, *http.Request), wantStatus string) {
+	t.Helper()
+	tests := []struct {
+		name           string
+		method         string
+		wantStatusCode int
+	}{
+		{"GET /readyz returns snapshot", http.MethodGet, http.StatusOK},
+		{"POST /readyz returns Method Not Allowed", http.MethodPost, http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, "/readyz", nil)
+			w := httptest.NewRecorder()
+
+			handlerFunc(w, req)
+
+			resp := w.Result()
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != tt.wantStatusCode {
+				t.Errorf("status = %v, want %v", resp.StatusCode, tt.wantStatusCode)
+			}
+			if tt.method != http.MethodGet {
+				return
+			}
+			var snap healthSnapshot
+			if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if snap.Status != wantStatus {
+				t.Errorf("Status = %q, want %q", snap.Status, wantStatus)
+			}
+		})
+	}
 }
 
 // TestLogoutEndpoint verifies the /logout endpoint clears session cookies

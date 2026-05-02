@@ -36,6 +36,16 @@ func NewCollector(address string) *Collector {
 	}
 }
 
+// Address returns the address the collector is configured against. Useful
+// for logging and diagnostics; never returns the empty string for a Collector
+// constructed via NewCollector.
+func (c *Collector) Address() string {
+	if c == nil {
+		return ""
+	}
+	return c.address
+}
+
 // QueryAds queries the collector for daemon advertisements
 // adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)

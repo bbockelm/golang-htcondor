@@ -62,6 +62,7 @@ type Handler struct {
 	streamWriteTimeout  time.Duration      // Write timeout for streaming queries (default: 5s)
 	wg                  sync.WaitGroup     // WaitGroup to track background goroutines
 	pingInterval        time.Duration      // Interval for periodic daemon pings (0 = disabled)
+	pingHealth          *pingHealth        // Recent ping outcomes per daemon, drives /readyz
 	token               string             // Token for daemon authentication
 	mux                 *http.ServeMux     // HTTP request multiplexer
 	ctx                 context.Context    // Context for background goroutines
@@ -417,6 +418,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	if pingInterval > 0 {
 		h.pingInterval = pingInterval
+		h.pingHealth = newPingHealth(pingInterval)
 		h.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
 	}
 
@@ -695,32 +697,66 @@ func (h *Handler) GetSchedd() *htcondor.Schedd {
 	return h.schedd
 }
 
-// UpdateSchedd updates the schedd instance with a new address (thread-safe)
+// UpdateSchedd updates the schedd instance with a new address (thread-safe).
+// On change, logs both addresses and — when both addresses are shared-port —
+// the old and new sock= IDs so it's obvious whether a schedd restart drove
+// the update (sock= changed) versus a network-level address shift (host:port
+// changed but sock= stable).
 func (h *Handler) UpdateSchedd(newAddress string) {
 	h.scheddMu.Lock()
 	defer h.scheddMu.Unlock()
 
-	// Only update if the address has changed
-	if h.schedd.Address() != newAddress {
-		h.logger.Info(logging.DestinationSchedd, "Updating schedd address",
-			"old_address", h.schedd.Address(),
-			"new_address", newAddress)
-		h.schedd = htcondor.NewSchedd(h.scheddName, newAddress)
+	old := h.schedd.Address()
+	if old == newAddress {
+		return
 	}
+
+	fields := []any{
+		"old_address", old,
+		"new_address", newAddress,
+		"schedd_name", h.scheddName,
+	}
+	oldInfo := scheddSharedPortInfo(old)
+	newInfo := scheddSharedPortInfo(newAddress)
+	if oldInfo.IsSharedPort && newInfo.IsSharedPort {
+		fields = append(fields,
+			"old_sock_id", oldInfo.SharedPortID,
+			"new_sock_id", newInfo.SharedPortID,
+			"sock_id_changed", oldInfo.SharedPortID != newInfo.SharedPortID,
+		)
+	}
+	h.logger.Info(logging.DestinationSchedd, "Updating schedd address", fields...)
+	h.schedd = htcondor.NewSchedd(h.scheddName, newAddress)
 }
 
+// scheddAddressUpdateInterval bounds the maximum staleness of the cached
+// schedd address. Schedds advertise to the collector roughly every 5 minutes
+// in HTCondor's defaults, and a schedd that just restarted publishes a new
+// sock= as soon as it comes up; refreshing more frequently than the schedd
+// re-advertises is wasted work, but anything significantly slower than the
+// schedd's advertise cycle means we'll keep using a stale sock= until the
+// next refresh tick. 60 seconds is well under the schedd's advertise period
+// and well under the user's "should never be cached for more than ~5 min"
+// expectation, with comfortable headroom for missed ticks. The sole reason
+// this exists as a named constant is so the comment lives next to the
+// number.
+const scheddAddressUpdateInterval = 60 * time.Second
+
 // startScheddAddressUpdater starts a background goroutine that periodically
-// checks for schedd address updates from the collector
+// checks for schedd address updates from the collector. The cadence is fixed
+// at scheddAddressUpdateInterval; ad-hoc refreshes triggered by ping
+// failures (see refreshScheddAddressNow) handle the case where the schedd
+// has just restarted and we don't want to wait a full tick.
 func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(scheddAddressUpdateInterval)
 		defer ticker.Stop()
 
 		h.logger.Info(logging.DestinationSchedd, "Started schedd address updater",
-			"interval", "60s",
+			"interval", scheddAddressUpdateInterval.String(),
 			"schedd_name", h.scheddName)
 
 		for {
@@ -731,7 +767,8 @@ func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 				if err != nil {
 					h.logger.Warn(logging.DestinationSchedd, "Failed to discover schedd address",
 						"error", err,
-						"schedd_name", h.scheddName)
+						"schedd_name", h.scheddName,
+						"current_address", h.getSchedd().Address())
 					continue
 				}
 
@@ -846,10 +883,23 @@ func (h *Handler) periodicPing(ctx context.Context) {
 	}
 }
 
-// performPeriodicPing performs a single ping to collector and schedd
+// performPeriodicPing performs a single ping to collector and schedd, updates
+// the pingHealth tracker so /readyz can report current state, and emits a
+// diagnostic-rich log line on failure (auth-method config for collector
+// failures, stale-sock hint for schedd failures). When a schedd ping fails
+// with a TCP RST on a shared-port address, this also kicks off an immediate
+// schedd-address refresh from the collector rather than waiting for the
+// 60-second updater tick — that's the failure mode where the cached sock=
+// has just gone stale and the next ping should use a fresh address.
 func (h *Handler) performPeriodicPing() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// secConfigForLog tracks the SecurityConfig actually attached to ctx so we
+	// can log the AuthMethods/TrustDomain on failure. If we never managed to
+	// build one (no token + no signing key), it stays nil and we still log
+	// the failure but with a "client_auth_methods" of "<nil>".
+	var secConfigForLog *security.SecurityConfig
 
 	// If we have a static token, use it directly
 	if h.token != "" {
@@ -858,6 +908,7 @@ func (h *Handler) performPeriodicPing() {
 			h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
 		} else {
 			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+			secConfigForLog = secConfig
 		}
 	} else if h.signingKeyPath != "" && h.trustDomain != "" {
 		// Generate a short-lived token using the signing key
@@ -870,27 +921,102 @@ func (h *Handler) performPeriodicPing() {
 				h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
 			} else {
 				ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+				secConfigForLog = secConfig
 			}
 		}
 	}
 
 	// Ping collector if configured
 	if h.collector != nil {
+		h.pingHealth.markCollectorEnabled()
 		_, err := h.collector.Ping(ctx)
 		if err != nil {
-			h.logger.Warn(logging.DestinationHTTP, "Periodic collector ping failed", "error", err)
+			diag := classifyConnectionError(h.collectorAddress(), err)
+			fields := []any{
+				"error", err,
+				"error_class", diag.Class,
+			}
+			if diag.Hint != "" {
+				fields = append(fields, "hint", diag.Hint)
+			}
+			// On no-compatible-auth, surface what *we* asked for. Cedar's
+			// own logs already cover the server's offered methods.
+			if diag.Class == connErrorNoCompatibleAuth {
+				fields = append(fields, summarizeAuthMethods(secConfigForLog)...)
+			}
+			h.logger.Warn(logging.DestinationHTTP, "Periodic collector ping failed", fields...)
+			h.pingHealth.recordCollectorFailure(err, diag.Class)
 		} else {
 			h.logger.Debug(logging.DestinationHTTP, "Periodic collector ping succeeded")
+			h.pingHealth.recordCollectorSuccess()
 		}
 	}
 
 	// Ping schedd
+	h.pingHealth.markScheddEnabled()
+	scheddAddr := h.getSchedd().Address()
 	_, err := h.getSchedd().Ping(ctx)
 	if err != nil {
-		h.logger.Warn(logging.DestinationHTTP, "Periodic schedd ping failed", "error", err)
+		diag := classifyConnectionError(scheddAddr, err)
+		fields := []any{
+			"error", err,
+			"error_class", diag.Class,
+			"schedd_address", scheddAddr,
+		}
+		if diag.SharedPort != "" {
+			fields = append(fields, "shared_port_id", diag.SharedPort)
+		}
+		if diag.Hint != "" {
+			fields = append(fields, "hint", diag.Hint)
+		}
+		if diag.Class == connErrorNoCompatibleAuth {
+			fields = append(fields, summarizeAuthMethods(secConfigForLog)...)
+		}
+		h.logger.Warn(logging.DestinationHTTP, "Periodic schedd ping failed", fields...)
+		h.pingHealth.recordScheddFailure(err, diag.Class)
+
+		// Stale-sock recovery: the schedd just restarted and our cached
+		// address points at a dead sock. Don't wait for the 60s address
+		// updater — refresh now so the next ping has a chance.
+		if diag.Class == connErrorStaleSock && h.collector != nil && h.scheddName != "" {
+			h.refreshScheddAddressNow("stale-sock detected on ping")
+		}
 	} else {
 		h.logger.Debug(logging.DestinationHTTP, "Periodic schedd ping succeeded")
+		h.pingHealth.recordScheddSuccess()
 	}
+}
+
+// collectorAddress returns the collector's address for diagnostic logging,
+// or an empty string if the collector isn't configured. Reaching into the
+// collector field directly avoids exporting the address purely for logging.
+func (h *Handler) collectorAddress() string {
+	if h.collector == nil {
+		return ""
+	}
+	return h.collector.Address()
+}
+
+// refreshScheddAddressNow triggers an out-of-band schedd address refresh
+// from the collector. Called when a ping failure suggests the cached address
+// is stale (e.g., shared-port sock= ID no longer routes to a live process).
+// reason is logged so it's clear why the refresh happened off-tick.
+func (h *Handler) refreshScheddAddressNow(reason string) {
+	if h.collector == nil || h.scheddName == "" {
+		return
+	}
+	h.logger.Info(logging.DestinationSchedd, "Forcing schedd address refresh",
+		"reason", reason,
+		"schedd_name", h.scheddName,
+		"current_address", h.getSchedd().Address())
+	newAddr, err := discoverSchedd(h.collector, h.scheddName, 5*time.Second, h.logger)
+	if err != nil {
+		h.logger.Warn(logging.DestinationSchedd, "Forced schedd address refresh failed",
+			"error", err,
+			"schedd_name", h.scheddName)
+		return
+	}
+	h.UpdateSchedd(newAddr)
 }
 
 // generatePingToken generates a short-lived IDTOKEN for periodic ping operations

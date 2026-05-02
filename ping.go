@@ -2,8 +2,12 @@ package htcondor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"syscall"
 
+	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 )
@@ -165,7 +169,7 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 	// Establish connection and authenticate
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", s.address, err)
+		return nil, wrapScheddConnectError(s.address, err)
 	}
 	defer func() {
 		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
@@ -199,6 +203,54 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 	}
 
 	return result, nil
+}
+
+// wrapScheddConnectError takes the raw error from client.ConnectAndAuthenticate
+// against a schedd address and produces a wrapped error whose message helps an
+// operator distinguish "schedd is down" from "schedd has restarted and our
+// cached sock= is stale". Both manifest as connection failures, but the
+// remedies are different:
+//
+//   - schedd down: there's nothing the client can do — wait for it to come back
+//   - stale sock: the client should re-query the collector for a fresh address
+//
+// The shared-port daemon answers the TCP SYN (so the connect itself succeeds)
+// but RSTs the connection when it can't route the sock= to a live process,
+// so the surface error from cedar is "connection reset by peer" partway
+// through the handshake. We detect that combination and prepend a hint.
+//
+// The original error is always preserved via %w so callers can errors.Is /
+// errors.As against it.
+func wrapScheddConnectError(addr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Default: keep the existing wording so log scrapers don't break.
+	wrapped := fmt.Errorf("failed to connect and authenticate to schedd at %s: %w", addr, err)
+
+	info := addresses.ParseHTCondorAddress(addr)
+	if !info.IsSharedPort {
+		return wrapped
+	}
+	if !looksLikeConnReset(err) {
+		return wrapped
+	}
+	return fmt.Errorf(
+		"failed to connect and authenticate to schedd at %s: %w (TCP reset on shared-port address with sock=%s; the daemon likely restarted and the cached sock ID is stale — re-query the collector for the current schedd address)",
+		addr, err, info.SharedPortID)
+}
+
+// looksLikeConnReset returns true if err is, or wraps, a connection reset
+// (ECONNRESET). Cedar wraps multiple times, so we fall back to substring
+// matching when errors.Is can't see through to the syscall error.
+func looksLikeConnReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	return strings.Contains(err.Error(), "connection reset by peer")
 }
 
 // permissionName converts a permission level constant to a human-readable name
