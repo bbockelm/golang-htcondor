@@ -17,6 +17,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/bbockelm/golang-htcondor/version"
 )
 
 // isBrowserRequest checks if the request is from a browser
@@ -340,9 +341,19 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
+			s.logger.Warn(logging.DestinationHTTP, "Job submission auth failed",
+				"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+				"error", err)
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		// Surface submission failures explicitly. Without this the only
+		// trace was the generic 500 in the access log; the Web UI would
+		// then show "500 Internal Server Error" with no detail because
+		// the error string was only ever in the response body.
+		s.logger.Error(logging.DestinationHTTP, "Job submission failed",
+			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job submission failed: %v", err))
 		return
 	}
@@ -420,11 +431,33 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleJobStderr(w, r, cluster, proc)
 			return
+		case "log":
+			// GET /api/v1/jobs/{id}/log
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobLog(w, r, cluster, proc)
+			return
+		case "match-analysis":
+			// GET /api/v1/jobs/{id}/match-analysis — explicit-fetch
+			// only; the front end gates this behind a button.
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobMatchAnalysis(w, r, cluster, proc)
+			return
 		case "hold":
 			s.handleJobHold(w, r, jobID)
 			return
 		case "release":
 			s.handleJobRelease(w, r, jobID)
+			return
+		case "ssh":
+			s.handleJobSSH(w, r)
 			return
 		}
 	}
@@ -444,6 +477,13 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	// Check for /input/multipart path
 	if len(parts) == 3 && parts[1] == "input" && parts[2] == "multipart" {
 		s.handleJobInputMultipart(w, r, jobID)
+		return
+	}
+
+	// POST /api/v1/jobs/{id}/output/share — mint a short-lived signed URL
+	// for downloading the job's sandbox without an authenticated session.
+	if len(parts) == 3 && parts[1] == "output" && parts[2] == "share" {
+		s.handleJobOutputShare(w, r, jobID)
 		return
 	}
 
@@ -495,14 +535,19 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
-	// Query for the specific job with extended projection including hold reason
-	// We need hold reason info for clients that check job status details
-	projection := append(htcondor.DefaultJobProjection(),
-		"HoldReason", "HoldReasonCode", "HoldReasonSubCode",
-		"RemoteHost", "RemoteSlotID", "StartdAddr")
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: projection,
-	})
+	// Single-record GET returns the full ClassAd. The default
+	// projection is fine for the listing view, but detail pages need
+	// everything — QDate, CompletionDate, JobBatchName, HoldReason*,
+	// environment, resource requests, etc.
+	//
+	// Important: leave Projection nil here. createJobQueryAd skips
+	// emitting the Projection attribute on the request ClassAd when
+	// opts.Projection is empty *or* the literal ["*"], which the
+	// schedd interprets as "send the whole ad back". Passing ["*"]
+	// directly used to send Projection="*" on the wire — the schedd
+	// then looked for an attribute named "*" and returned only
+	// ServerTime, breaking the detail page.
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1427,7 +1472,27 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// pingHealth.snapshot is nil-safe; if periodic ping was never enabled
+	// (h.pingHealth left nil) it returns the "all disabled / overall ok"
+	// view, which is what an operator should see on a server that doesn't
+	// run periodic pings.
 	snap := s.pingHealth.snapshot()
+
+	// Decorate the schedd entry with how long the cached address has been
+	// in use and how long since the collector last confirmed it. These
+	// answer the "is the schedd address possibly stale?" question without
+	// the operator having to grep logs for the last "Updating schedd
+	// address" line. Skipped when the schedd entry is "disabled" because in
+	// that case there's no meaningful schedd state to attach age to.
+	if snap.Schedd.Status != "disabled" {
+		sinceSet, sinceConfirmed := s.scheddAddrAges()
+		if sinceSet > 0 {
+			snap.Schedd.AddressAge = sinceSet.Truncate(time.Second).String()
+		}
+		if sinceConfirmed > 0 {
+			snap.Schedd.AddressLastConfirmedAge = sinceConfirmed.Truncate(time.Second).String()
+		}
+	}
 
 	statusCode := http.StatusOK
 	switch snap.Status {
@@ -2035,8 +2100,6 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 		return
 	}
 
-	ctx := r.Context()
-
 	// Validate filename
 	if filename == "" {
 		s.writeError(w, http.StatusBadRequest, "Filename is required")
@@ -2056,12 +2119,27 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 	// Build constraint for specific job
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 
+	// Now authenticate. We deliberately defer this until after the
+	// pure-input validation above so unauthenticated callers still
+	// get the more useful 400 for bad input. requireAuthentication
+	// stashes a per-user SecurityConfig in the returned context so
+	// the schedd RPC handshake below picks the right token issuer.
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
 	// Set timeout for the sandbox download
 	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Stream the file from the tar archive without buffering in memory
-	err := s.streamFileFromTar(sandboxCtx, constraint, filename, w, true)
+	err = s.streamFileFromTar(sandboxCtx, constraint, filename, w, true)
 	if err != nil {
 		if strings.Contains(err.Error(), "file not found") {
 			s.writeError(w, http.StatusNotFound, fmt.Sprintf("File '%s' not found in job sandbox", filename))
@@ -2075,7 +2153,21 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 
 // handleJobOutputFile is a helper function to retrieve stdout or stderr from a job
 func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cluster, proc int, outputType, attributeName string) {
-	ctx := r.Context()
+	// Authenticate the caller and stash a per-user SecurityConfig in
+	// the context so the schedd RPCs below pick it up. Without this
+	// step the schedd query and the sandbox download fall back to the
+	// hardcoded {SSL,TOKEN,FS} defaults, whose tokens carry no
+	// iss/kid that matches the demo's TrustDomain — handshake fails
+	// with "no compatible authentication methods found".
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Query the job to get the output filename
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
@@ -2164,6 +2256,37 @@ func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+// VersionResponse represents a build-info response.
+type VersionResponse struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+}
+
+// handleVersion handles GET /api/v1/version. Returns the embedded build
+// information for the running binary. Requires authentication.
+func (s *Handler) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	_, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	info := version.Get()
+	s.writeJSON(w, http.StatusOK, VersionResponse{
+		Version: info.Version,
+		Commit:  info.Commit,
+	})
 }
 
 // handleCollectorPath handles /api/v1/collector/* paths with routing

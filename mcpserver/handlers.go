@@ -20,6 +20,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/matchanalyzer"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -89,6 +90,24 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 						"description": "Authentication token (optional)",
 					},
 				},
+			},
+		},
+		{
+			Name:        "analyze_job_match",
+			Description: "Explain why a job is or isn't matching slots in the pool. Decomposes the job's Requirements expression into independently-evaluable predicates, evaluates each against every slot in the collector's view, and reports per-predicate match counts plus the predicate most responsible for narrowing the match set. Useful for diagnosing 'job stuck idle' situations: if no slot fully matches, the response includes a 'narrowing_predicate_index' pointing at the predicate to investigate. The collector query is cached for ~30s, but the first call can be heavy for large pools.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+					},
+					"token": map[string]interface{}{
+						"type":        "string",
+						"description": "Authentication token (optional)",
+					},
+				},
+				"required": []string{"job_id"},
 			},
 		},
 		{
@@ -611,6 +630,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolQueryJobs(ctx, request.Arguments)
 	case "get_job":
 		result, err = s.toolGetJob(ctx, request.Arguments)
+	case "analyze_job_match":
+		result, err = s.toolAnalyzeJobMatch(ctx, request.Arguments)
 	case "remove_job":
 		result, err = s.toolRemoveJob(ctx, request.Arguments)
 	case "remove_jobs":
@@ -918,6 +939,105 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 				"type": "text",
 				"text": fmt.Sprintf("Job %s:\n%s", jobID, string(jobJSON)),
 			},
+		},
+	}, nil
+}
+
+// matchAnalysisProvider lazily allocates the slot provider used by the
+// analyze_job_match tool. Returns nil if no collector is configured — the
+// caller surfaces that as a "tool not available" error rather than crashing.
+//
+// The provider's slot cache is process-wide so an agent that runs the
+// analysis tool a few times in quick succession (a common debugging
+// pattern) only triggers one collector query within the cache window.
+func (s *Server) matchAnalysisProvider() *matchanalyzer.CollectorSlotProvider {
+	s.matchAnalysisOnce.Do(func() {
+		if s.collector == nil {
+			return
+		}
+		s.matchAnalysisSlots = matchanalyzer.NewCollectorSlotProvider(
+			s.collector,
+			matchanalyzer.WithSlotCacheTTL(30*time.Second),
+		)
+	})
+	return s.matchAnalysisSlots
+}
+
+// toolAnalyzeJobMatch implements the analyze_job_match MCP tool.
+//
+// Output shape: a "text" content block containing the human-readable
+// rendering (so agents that don't parse structured data still get
+// something useful) plus a "data" key in the tool response carrying the
+// full JSON Result for agents that want to drive their own UI off it.
+func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	jobID, ok := args["job_id"].(string)
+	if !ok || jobID == "" {
+		return nil, fmt.Errorf("job_id is required")
+	}
+	cluster, proc, err := parseJobID(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid job_id: %w", err)
+	}
+
+	provider := s.matchAnalysisProvider()
+	if provider == nil {
+		// No collector wired — the analyzer has nothing to query against.
+		// Fail explicitly rather than silently returning an empty result;
+		// the user invoking the tool needs to know the AP isn't set up
+		// for this analysis.
+		return nil, fmt.Errorf("analyze_job_match requires a configured collector on this MCP server")
+	}
+
+	// Pull the job ad. Only Requirements + identifying triple are needed
+	// — the analyzer doesn't read other attributes off the job.
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
+		Limit:      1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query job: %w", err)
+	}
+	if len(jobAds) == 0 {
+		return nil, fmt.Errorf("job %s not found", jobID)
+	}
+
+	// 30s analysis timeout — same rationale as the HTTP handler. Keeps
+	// a misconfigured collector or oversized pool from wedging the agent.
+	analysisCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	a := matchanalyzer.New(provider)
+	res, err := a.Analyze(analysisCtx, jobAds[0])
+	if err != nil {
+		return nil, fmt.Errorf("analyze: %w", err)
+	}
+
+	requirementsText := ""
+	if reqExpr, ok := jobAds[0].Lookup("Requirements"); ok && reqExpr != nil {
+		requirementsText = reqExpr.String()
+	}
+
+	textBlock := matchanalyzer.RenderText(res)
+	if requirementsText != "" {
+		textBlock = fmt.Sprintf("Job %s\nRequirements: %s\n\n%s", jobID, requirementsText, textBlock)
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": textBlock,
+			},
+		},
+		// Include the structured data alongside the text. Agents that
+		// know about it can drive their own visualization; agents that
+		// don't simply ignore the extra field.
+		"data": map[string]interface{}{
+			"job_id":       jobID,
+			"requirements": requirementsText,
+			"result":       res,
+			"slot_cache":   provider.CacheStatus(),
 		},
 	}, nil
 }

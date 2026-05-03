@@ -3,6 +3,7 @@ package httpserver
 import (
 	"net/http"
 
+	"github.com/bbockelm/golang-htcondor/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -23,8 +24,14 @@ func (h *Handler) setupRoutes() {
 		})
 	}
 
-	// Welcome page at root
-	mux.HandleFunc("/", h.handleWelcome)
+	// Root handler: serve the embedded SPA when the frontend is compiled in,
+	// otherwise fall back to the legacy welcome page.
+	if webui.IsEmbedded() {
+		spa := webui.NewSPAHandler()
+		mux.Handle("/", spa)
+	} else {
+		mux.HandleFunc("/", h.handleWelcome)
+	}
 
 	// Login endpoint
 	mux.HandleFunc("/login", h.handleLogin)
@@ -51,6 +58,46 @@ func (h *Handler) setupRoutes() {
 
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
+
+	// Web UI session endpoints (browser-session aware; cookie-only)
+	mux.Handle("/api/v1/auth/me", cors(http.HandlerFunc(h.handleAuthMe)))
+	mux.Handle("/api/v1/auth/logout", cors(http.HandlerFunc(h.handleAuthLogout)))
+
+	// Web UI dashboard summary
+	mux.Handle("/api/v1/dashboard", cors(http.HandlerFunc(h.handleDashboard)))
+
+	// Public sandbox download via short-lived signed URL. No session
+	// required — the token in ?t=... is the authorization.
+	mux.Handle("/api/v1/share/output", cors(http.HandlerFunc(h.handleSharedOutput)))
+
+	// Admin endpoints (gated on WebUIAdminGroup membership). The
+	// gating is enforced inside each handler via requireAdmin so we
+	// can return appropriate status codes (503 when the admin UI is
+	// not configured, 403 when the user lacks the group, 401 when
+	// no session is present).
+	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
+	mux.Handle("/api/v1/admin/oauth2/clients/", cors(http.HandlerFunc(h.handleAdminDeleteClient)))
+	mux.Handle("/api/v1/admin/oauth2/tokens", cors(http.HandlerFunc(h.handleAdminListTokens)))
+	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
+
+	// Build/version info endpoint (authenticated)
+	mux.Handle("/api/v1/version", cors(http.HandlerFunc(h.handleVersion)))
+
+	// JupyterLab tunnel endpoints. Catch-all under /jupyter/ so the inner
+	// dispatcher (handleJupyterPath) can route on the verb segment. Note:
+	// no CORS wrapper — the proxy serves user-facing assets that often
+	// embed in an iframe and don't want extra CORS headers from us.
+	mux.HandleFunc("/api/v1/jupyter/", h.handleJupyterPath)
+
+	// Interactive batch jobs (terminal sessions backed by a vanilla-universe
+	// watchdog the SSH bridge heartbeats over the existing ssh.Client).
+	// POST creates a session, GET lists the caller's sessions.
+	mux.Handle("/api/v1/interactive/terminal", cors(http.HandlerFunc(h.handleInteractiveTerminal)))
+
+	// Batch-submission templates: built-in + global + user-saved.
+	// Catch-all so handleTemplates can split on the trailing /{id}.
+	mux.Handle("/api/v1/templates", cors(http.HandlerFunc(h.handleTemplates)))
+	mux.Handle("/api/v1/templates/", cors(http.HandlerFunc(h.handleTemplates)))
 
 	// Collector endpoints
 	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths

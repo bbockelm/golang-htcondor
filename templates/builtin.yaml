@@ -1,0 +1,51 @@
+# Built-in batch-submission templates shipped with htcondor-api.
+#
+# Each template:
+#   id          — stable identifier; the API uses this for /templates/{id}
+#   name        — human-readable name shown in the picker
+#   description — one-line hint shown next to the name
+#   columns     — variable names referenced via $(name) in contents.
+#                 The submit page presents these as the table headers.
+#   contents    — submit-file body WITHOUT a `queue` line. The submit
+#                 endpoint appends `queue <cols> from ((...))` based on
+#                 the rows the user fills in.
+#
+# Add new built-ins by appending entries below; the embedded loader is
+# strict-fielded, so misspelt keys will fail loudly rather than silently.
+
+templates:
+  - id: hello-world
+    name: Hello World
+    description: One echo per row, with $(name) substituted in.
+    columns:
+      - name
+    contents: |
+      executable = /bin/bash
+      transfer_executable = false
+      arguments  = "-c 'echo Hello, $(name)!'"
+      output     = hello-$(ProcId).out
+      error      = hello-$(ProcId).err
+      log        = hello.log
+      request_cpus   = 1
+      request_memory = 128
+      request_disk   = 256
+      should_transfer_files = YES
+      when_to_transfer_output = ON_EXIT
+
+  - id: sleep
+    name: Sleep
+    description: Sleep for $(seconds) seconds. Useful for testing the queue.
+    columns:
+      - seconds
+    contents: |
+      executable = /bin/sleep
+      transfer_executable = false
+      arguments  = $(seconds)
+      output     = sleep-$(ProcId).out
+      error      = sleep-$(ProcId).err
+      log        = sleep.log
+      request_cpus   = 1
+      request_memory = 64
+      request_disk   = 64
+      should_transfer_files = YES
+      when_to_transfer_output = ON_EXIT

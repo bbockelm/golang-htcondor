@@ -11,6 +11,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 )
 
@@ -31,6 +32,13 @@ type Server struct {
 	stdout             io.Writer
 	validatedTokens    map[string]TokenInfo // Cache of validated tokens
 	tokenMutex         sync.RWMutex
+	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
+	// CollectorSlotProvider used by the analyze_job_match tool. Same
+	// motivation as the httpserver Handler equivalent: keep the slot
+	// cache alive across calls so a debug session that re-runs analysis
+	// only triggers one collector query per cache window.
+	matchAnalysisOnce  sync.Once
+	matchAnalysisSlots *matchanalyzer.CollectorSlotProvider
 }
 
 // TokenInfo stores information about a validated token

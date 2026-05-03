@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -65,12 +67,36 @@ const (
 
 // ParseSubmitFile parses a submit file from a reader
 func ParseSubmitFile(r io.Reader) (*SubmitFile, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read submit file: %w", err)
+	}
+
+	// Pre-pass: rewrite any `queue VARS from ((<inline rows>))` blocks
+	// into `queue VARS from <tempfile>`. The Go grammar (parser.y)
+	// only knows the from-file and in-list forms, but the table-style
+	// submit page generates the inline-paren form because that's what
+	// HTCondor's own condor_submit accepts. We materialize the rows
+	// to a temp file, let the existing parser handle the rewritten
+	// form, then delete the temp file on the way out — fileIterator
+	// slurps the file fully during ParseSubmitFile so it's safe to
+	// remove immediately afterward.
+	expanded, tempFiles, err := expandInlineQueueBlocks(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse submit file: %w", err)
+	}
+	defer func() {
+		for _, p := range tempFiles {
+			_ = os.Remove(p)
+		}
+	}()
+
 	// We need to parse the submit file in two passes:
 	// 1. Parse to get the queue statement
 	// 2. Execute assignments to build the config
 
 	// First pass: parse to get statements including queue
-	lexer := config.NewLexer(r)
+	lexer := config.NewLexer(strings.NewReader(expanded))
 	stmts, err := config.Parse(lexer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse submit file: %w", err)
@@ -126,6 +152,150 @@ func ParseSubmitFile(r io.Reader) (*SubmitFile, error) {
 	return sf, nil
 }
 
+// inlineQueueBlockOpen matches the opening line of an inline queue
+// block: `queue VAR(, VAR2)* from ((`. The pattern is intentionally
+// loose about whitespace (operators sometimes write `queue x from((`)
+// and case-insensitive about `queue` / `from` (HTCondor itself is).
+var inlineQueueBlockOpen = regexp.MustCompile(`(?i)^\s*(queue\b[^\n]*?\bfrom)\s*\(\(\s*(.*)$`)
+
+// expandInlineQueueBlocks finds `queue ... from ((<rows>))` blocks in
+// the input and rewrites them to `queue ... from <tempfile>`, with
+// the row text written to a fresh temp file. Returns the rewritten
+// input and the paths of any temp files the caller must remove on
+// the way out.
+//
+// Notes:
+//
+//   - The opening `((` and closing `))` may share their line with row
+//     content. We honor both:
+//
+//     queue x from ((    val1
+//     val2
+//     val3))             # all three rows are queued
+//
+//   - Comment lines (#-prefixed) and blank lines inside the block are
+//     dropped to match what fileIterator does when it reads the file.
+//
+//   - Multiple inline blocks in the same submit file are fine; each
+//     gets its own temp file.
+//
+//   - Unterminated blocks return a clear error pointing at the open
+//     line.
+func expandInlineQueueBlocks(in string) (string, []string, error) {
+	lines := strings.Split(in, "\n")
+	var out []string
+	var temps []string
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		m := inlineQueueBlockOpen.FindStringSubmatch(line)
+		if m == nil {
+			out = append(out, line)
+			continue
+		}
+
+		queuePrefix := strings.TrimSpace(m[1]) // "queue VARS from"
+		afterOpen := m[2]                      // anything after `((` on the same line
+
+		var rows []string
+		// Same-line close: `... from ((row1)) ...trailing`. trailing
+		// is currently discarded, but we accept the close.
+		if idx := strings.Index(afterOpen, "))"); idx >= 0 {
+			head := strings.TrimSpace(afterOpen[:idx])
+			if head != "" {
+				rows = append(rows, head)
+			}
+		} else {
+			// Same-line content (before first newline) is one row.
+			if h := strings.TrimSpace(afterOpen); h != "" {
+				rows = append(rows, h)
+			}
+			// Consume subsequent lines until `))`.
+			openLine := i + 1 // 1-indexed for the error message
+			closed := false
+			for i++; i < len(lines); i++ {
+				ln := lines[i]
+				if idx := strings.Index(ln, "))"); idx >= 0 {
+					if h := strings.TrimSpace(ln[:idx]); h != "" {
+						rows = append(rows, h)
+					}
+					closed = true
+					break
+				}
+				rows = append(rows, ln)
+			}
+			if !closed {
+				return "", nil, fmt.Errorf(
+					"failed to parse submit file: unterminated 'queue ... from ((' opened at line %d (no closing '))' found)",
+					openLine)
+			}
+		}
+
+		// Strip blanks and comments — fileIterator does the same when
+		// it reads a real on-disk queue file, so the inline form
+		// behaves identically.
+		var keep []string
+		for _, r := range rows {
+			r = strings.TrimSpace(r)
+			if r == "" || strings.HasPrefix(r, "#") {
+				continue
+			}
+			keep = append(keep, r)
+		}
+
+		if len(keep) == 0 {
+			return "", nil, fmt.Errorf(
+				"failed to parse submit file: 'queue ... from ((...))' at line %d has no rows",
+				i+1)
+		}
+
+		tmp, err := os.CreateTemp("", "htcondor-api-queue-*.txt")
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to create temp file for inline queue block: %w", err)
+		}
+		body := strings.Join(keep, "\n") + "\n"
+		if _, werr := tmp.WriteString(body); werr != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return "", nil, fmt.Errorf("write temp queue file: %w", werr)
+		}
+		if cerr := tmp.Close(); cerr != nil {
+			_ = os.Remove(tmp.Name())
+			return "", nil, fmt.Errorf("close temp queue file: %w", cerr)
+		}
+		temps = append(temps, tmp.Name())
+		// Wrap the temp path in double quotes — the parser's grammar
+		// for `queue ... from <path>` only accepts an IDENT (no
+		// slashes, dots, etc.) or a STRING. Tempfile paths almost
+		// always contain `/` and `-`, neither of which lex as part of
+		// an IDENT.
+		out = append(out, fmt.Sprintf(`%s %s`, queuePrefix, quoteSubmitFilePath(tmp.Name())))
+	}
+	return strings.Join(out, "\n"), temps, nil
+}
+
+// quoteSubmitFilePath wraps a filesystem path in double quotes for
+// inclusion in a submit-file token slot that accepts STRING. Backslash
+// and double-quote inside the path get escaped; tempfile paths from
+// os.CreateTemp on common platforms never contain either, but we
+// defend against them so the helper is reusable.
+func quoteSubmitFilePath(p string) string {
+	var sb strings.Builder
+	sb.Grow(len(p) + 2)
+	sb.WriteByte('"')
+	for _, r := range p {
+		switch r {
+		case '\\', '"':
+			sb.WriteByte('\\')
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	sb.WriteByte('"')
+	return sb.String()
+}
+
 // parseUniverse converts universe string to integer constant
 func parseUniverse(univ string) int {
 	univ = strings.ToLower(strings.TrimSpace(univ))
@@ -166,6 +336,14 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 	// Set job status (1 = idle)
 	_ = ad.Set("JobStatus", 1)
+
+	// QDate: Unix epoch seconds at the moment of submission. HTCondor's
+	// own condor_submit sets this on the client side before SendJobAttributes,
+	// and downstream tooling (the web UI's "Submitted" column, condor_q
+	// formatting, history records) expects it to be present. Without
+	// QDate the schedd doesn't backfill, so the field stays undefined
+	// and clients render nothing.
+	_ = ad.Set("QDate", time.Now().Unix())
 
 	// Apply live macro substitutions using a macro context
 	// This implements HTCondor's "live" macros that change per-job

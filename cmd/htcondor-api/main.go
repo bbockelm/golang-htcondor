@@ -342,6 +342,58 @@ func loadOAuth2DBPath(cfg *config.Config) string {
 	return "/var/lib/condor/oauth2.db"
 }
 
+// loadJupyterWorkDir resolves the per-instance scratch directory used to
+// stage the embedded helper binary and token files for Jupyter submissions.
+// Empty string lets the handler pick a default under os.TempDir().
+//
+// The helper binary itself is embedded into the api binary via package
+// httpserver/jupyterhelperbin (when built with -tags embed_jupyter_helper),
+// so there is no separate path-discovery step.
+func loadJupyterWorkDir(cfg *config.Config) string {
+	if p, ok := cfg.Get("HTTP_API_JUPYTER_WORK_DIR"); ok && p != "" {
+		return p
+	}
+	return ""
+}
+
+// loadTemplateGlobalPath resolves the YAML file (if any) the operator
+// has populated with shared batch-submission templates. Empty disables.
+func loadTemplateGlobalPath(cfg *config.Config) string {
+	if p, ok := cfg.Get("HTTP_API_TEMPLATE_GLOBAL_PATH"); ok && p != "" {
+		return p
+	}
+	return ""
+}
+
+// loadTemplateUserStoreDBPath resolves the SQLite database file used
+// to persist user-saved templates (the Save-as-template button on
+// /submit). The schema is owner-scoped — every row carries the
+// authenticated username, and queries always filter by it — so the
+// same database file is safe to share across multiple users in a
+// single replica. Postgres support (for multi-replica Kubernetes
+// deployments) is a contained change to the templates package.
+//
+// Defaults to <LOCAL_DIR>/user-templates.db when LOCAL_DIR is set,
+// otherwise <TempDir>/htcondor-api-user-templates.db so the feature
+// works out of the box without explicit config.
+func loadTemplateUserStoreDBPath(cfg *config.Config) string {
+	if p, ok := cfg.Get("HTTP_API_TEMPLATE_USER_STORE_DB_PATH"); ok && p != "" {
+		return p
+	}
+	// Honor the previous, JSON-era env var as a fallback so an
+	// operator who set HTTP_API_TEMPLATE_USER_STORE_PATH=... doesn't
+	// silently lose their config. The path is opened as SQLite either
+	// way; at worst they end up with both a leftover .json file and a
+	// new .db sibling.
+	if p, ok := cfg.Get("HTTP_API_TEMPLATE_USER_STORE_PATH"); ok && p != "" {
+		return p
+	}
+	if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
+		return filepath.Join(localDir, "user-templates.db")
+	}
+	return filepath.Join(os.TempDir(), "htcondor-api-user-templates.db")
+}
+
 // loadHTTPBaseURL constructs the HTTP base URL for the API server.
 // It uses HTTP_API_BASE_URL if configured, otherwise constructs from:
 // - Protocol: https if TLS is enabled, http otherwise
@@ -361,21 +413,44 @@ func loadHTTPBaseURL(cfg *config.Config, listenAddr string, useTLS bool) string 
 		defaultPort = "443"
 	}
 
-	// Use FULL_HOSTNAME if available, otherwise use listen address
-	hostname := listenAddr
+	// Pick a hostname:
+	//   1. FULL_HOSTNAME from config (production deployments)
+	//   2. The host portion of listenAddr (if it has one)
+	//   3. localhost (last resort — handles ":8080"-style addrs in demo mode
+	//      and prevents URLs like "https://:8080/" that browsers reject)
+	hostname := ""
 	if fullHostname, ok := cfg.Get("FULL_HOSTNAME"); ok && fullHostname != "" {
 		hostname = fullHostname
 	}
 
-	// Extract port from listen address if it's just a port (e.g., ":8080")
-	// and append it to hostname if non-standard
-	if strings.HasPrefix(listenAddr, ":") {
-		port := strings.TrimPrefix(listenAddr, ":")
-		if port != defaultPort && port != "" {
-			hostname = hostname + ":" + port
+	// Split listenAddr into host + port (handles "host:port", ":port", and
+	// IPv6 "[::1]:port"). net.SplitHostPort fails on bare ":port" without
+	// a leading colon-aware fallback, so we prefix when needed.
+	listen := listenAddr
+	if strings.HasPrefix(listen, ":") {
+		listen = "0.0.0.0" + listen
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		// Fall back to the original string; ugly but at least returns
+		// something rather than panicking.
+		return protocol + "://" + listenAddr
+	}
+	if hostname == "" {
+		// Treat the wildcard / unspecified-listen forms as localhost when
+		// constructing externally-visible URLs; otherwise use whatever
+		// host the operator pinned the listener to.
+		switch host {
+		case "", "0.0.0.0", "::", "[::]":
+			hostname = "localhost"
+		default:
+			hostname = host
 		}
 	}
 
+	if port != "" && port != defaultPort {
+		hostname = hostname + ":" + port
+	}
 	return protocol + "://" + hostname
 }
 
@@ -753,6 +828,9 @@ func runNormalMode() error {
 		signingKeyPath, _ = cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE")
 	}
 
+	// Web UI admin group (empty disables admin pages — see PR (c)).
+	webuiAdminGroup, _ := cfg.Get("HTTP_API_WEBUI_ADMIN_GROUP")
+
 	// Create logger with reasonable defaults for unprivileged operation
 	logger, err := createLogger(cfg)
 	if err != nil {
@@ -853,11 +931,15 @@ func runNormalMode() error {
 		MCPReadGroup:               mcpCfg.mcpReadGroup,
 		MCPWriteGroup:              mcpCfg.mcpWriteGroup,
 		MCPInstructions:            mcpCfg.instructions,
+		WebUIAdminGroup:            webuiAdminGroup,
 		EnableIDP:                  enableIDP,
 		IDPDBPath:                  idpDBPath,
 		IDPIssuer:                  idpIssuer,
 		IDPAccessTokenLifespan:     idpAccessLifespan,
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
+		JupyterWorkDir:             loadJupyterWorkDir(cfg),
+		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
+		TemplateUserStoreDBPath:    loadTemplateUserStoreDBPath(cfg),
 		HTCondorConfig:             cfg,
 	})
 	if err != nil {
@@ -992,14 +1074,21 @@ func runDemoMode() error {
 	uidDomain := ""
 	trustDomain := ""
 
-	// Load domains from config first (needed for token generation)
+	// Load domains from config first (needed for token generation).
+	// Both should be set by writeMiniCondorConfig — if they're empty
+	// here, JWT minting will produce tokens the schedd rejects with
+	// "no compatible authentication methods found", so log loudly.
 	if domain, ok := cfg.Get("UID_DOMAIN"); ok && domain != "" {
 		uidDomain = domain
 		log.Printf("Using UID_DOMAIN: %s", uidDomain)
+	} else {
+		log.Println("WARNING: UID_DOMAIN is empty — session-user tokens will be rejected by daemons")
 	}
 	if domain, ok := cfg.Get("TRUST_DOMAIN"); ok && domain != "" {
 		trustDomain = domain
 		log.Printf("Using TRUST_DOMAIN: %s", trustDomain)
+	} else {
+		log.Println("WARNING: TRUST_DOMAIN is empty — JWTs will have empty `iss` and be rejected")
 	}
 
 	// Generate a token for the server to use for self-operations (like ping)
@@ -1017,6 +1106,11 @@ func runDemoMode() error {
 	// In demo mode, we always want to enable token generation for IDP/session support
 	signingKeyPath := filepath.Join(tempDir, "passwords.d", "POOL")
 	log.Printf("Will use HTCondor-generated signing key at: %s", signingKeyPath)
+	if info, err := os.Stat(signingKeyPath); err != nil {
+		log.Printf("WARNING: signing key not yet present at %s (%v) — JWTs will fail to sign until condor_master writes it", signingKeyPath, err)
+	} else {
+		log.Printf("Signing key present (%d bytes, mode %s)", info.Size(), info.Mode())
+	}
 
 	if *userHeader != "" {
 		log.Printf("User header mode enabled: %s", *userHeader)
@@ -1029,12 +1123,17 @@ func runDemoMode() error {
 	// OAuth2 database path for MCP (shared with IDP)
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
-	// Generate CA and server certificate for demo mode to enable HTTPS
+	// Generate CA and server certificate for demo mode to enable HTTPS.
+	// We collect every hostname the server might be reached at so the
+	// cert covers in-process callbacks (the OAuth2 SSO flow has the
+	// server POST to its own /idp/token, and that hits httpBaseURL —
+	// which can be FULL_HOSTNAME on macOS).
 	caPath := filepath.Join(tempDir, "ca.crt")
 	certPath := filepath.Join(tempDir, "server.crt")
 	keyPath := filepath.Join(tempDir, "server.key")
-	log.Println("Generating CA and server certificate for demo mode...")
-	if err := generateCAAndCert(caPath, certPath, keyPath); err != nil {
+	hostnames := demoCertHostnames(cfg, *listenAddr)
+	log.Printf("Generating CA and server certificate for demo mode (SANs: %v)...", hostnames)
+	if err := generateCAAndCert(caPath, certPath, keyPath, hostnames); err != nil {
 		log.Printf("Warning: failed to generate certificates: %v", err)
 		log.Println("Falling back to HTTP (cookie Secure flag will be disabled)")
 		certPath = ""
@@ -1049,41 +1148,44 @@ func runDemoMode() error {
 	}
 
 	// Compute HTTP base URL - in demo mode, use the listen address directly
-	// since we don't have FULL_HOSTNAME configured
-	protocol := "http"
-	if useTLS {
-		protocol = "https"
-	}
+	// since we don't have FULL_HOSTNAME configured. loadHTTPBaseURL
+	// substitutes "localhost" when listenAddr is in ":port" form.
 	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
 	log.Printf("HTTP base URL: %s", httpBaseURL)
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:         *listenAddr,
-		UserHeader:         *userHeader,
-		SigningKeyPath:     signingKeyPath,
-		TrustDomain:        trustDomain,
-		UIDDomain:          uidDomain,
-		HTTPBaseURL:        httpBaseURL,
-		TLSCertFile:        certPath,
-		TLSKeyFile:         keyPath,
-		TLSCACertFile:      caPath,
-		Collector:          collector,
-		Logger:             logger,
-		Token:              serverToken,                    // Token for daemon authentication
-		EnableMCP:          true,                           // Enable MCP in demo mode
-		OAuth2DBPath:       oauth2DBPath,                   // OAuth2 database path
-		OAuth2Issuer:       protocol + "://" + *listenAddr, // OAuth2 issuer URL
-		OAuth2ClientID:     "demo-client",                  // Demo client ID
-		OAuth2ClientSecret: "demo-secret",                  // Demo client secret
-		OAuth2AuthURL:      protocol + "://" + *listenAddr + "/mcp/oauth2/authorize",
-		OAuth2TokenURL:     protocol + "://" + *listenAddr + "/mcp/oauth2/token",
-		OAuth2RedirectURL:  protocol + "://" + *listenAddr + "/mcp/oauth2/callback",
-		OAuth2Scopes:       []string{"openid", "profile", "email"}, // Default scopes for demo
-		EnableIDP:          true,                                   // Enable built-in IDP in demo mode
-		IDPDBPath:          oauth2DBPath,                           // IDP uses same database as OAuth2
-		IDPIssuer:          protocol + "://" + *listenAddr,         // IDP issuer URL
-		HTCondorConfig:     cfg,
+		ListenAddr:     *listenAddr,
+		UserHeader:     *userHeader,
+		SigningKeyPath: signingKeyPath,
+		TrustDomain:    trustDomain,
+		UIDDomain:      uidDomain,
+		HTTPBaseURL:    httpBaseURL,
+		TLSCertFile:    certPath,
+		TLSKeyFile:     keyPath,
+		TLSCACertFile:  caPath,
+		Collector:      collector,
+		Logger:         logger,
+		Token:          serverToken, // Token for daemon authentication
+		EnableMCP:      true,        // Enable MCP in demo mode
+		OAuth2DBPath:   oauth2DBPath,
+		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
+		// addr gets a real host (localhost) instead of producing
+		// browser-invalid URLs like "https://:8080/".
+		OAuth2Issuer:            httpBaseURL,
+		OAuth2ClientID:          "demo-client",
+		OAuth2ClientSecret:      "demo-secret",
+		OAuth2AuthURL:           httpBaseURL + "/mcp/oauth2/authorize",
+		OAuth2TokenURL:          httpBaseURL + "/mcp/oauth2/token",
+		OAuth2RedirectURL:       httpBaseURL + "/mcp/oauth2/callback",
+		OAuth2Scopes:            []string{"openid", "profile", "email"},
+		EnableIDP:               true,
+		IDPDBPath:               oauth2DBPath, // IDP shares the OAuth2 db
+		IDPIssuer:               httpBaseURL,
+		JupyterWorkDir:          loadJupyterWorkDir(cfg),
+		TemplateGlobalPath:      loadTemplateGlobalPath(cfg),
+		TemplateUserStoreDBPath: loadTemplateUserStoreDBPath(cfg),
+		HTCondorConfig:          cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -1226,6 +1328,15 @@ SHARED_PORT_MAX_WORKERS = 1000
 BIND_ALL_INTERFACES = FALSE
 NETWORK_INTERFACE = 127.0.0.1
 
+# Pin TRUST_DOMAIN / UID_DOMAIN to stable, machine-independent values.
+# Without these HTCondor derives TRUST_DOMAIN from the host's FQDN
+# (e.g. macOS gives you something.local), and the API server's parsed
+# config — read before condor_master starts — sees an empty value.
+# That mismatch makes generatePingToken() mint JWTs with iss="" that
+# the collector rejects with "no compatible authentication methods".
+TRUST_DOMAIN = htcondor-api-demo
+UID_DOMAIN = htcondor-api-demo
+
 # Collector configuration
 COLLECTOR_ADDRESS_FILE = $(LOG)/.collector_address
 
@@ -1367,7 +1478,52 @@ func readAddressFile(path string) (string, error) {
 }
 
 // generateCAAndCert generates a CA and a server certificate signed by that CA
-func generateCAAndCert(caPath, certPath, keyPath string) error {
+// demoCertHostnames collects all the names the demo cert needs to cover.
+// In addition to the obvious localhost / loopback IPs it includes
+// FULL_HOSTNAME from HTCondor config (set after condor_master starts) and
+// the OS hostname — both upper- and lower-case forms, since macOS
+// sometimes reports the hostname uppercased ("F4HP7QL65F-2.local") even
+// though Go's TLS verification matches case-insensitively, having both
+// is harmless and unsurprising in tcpdump output.
+func demoCertHostnames(cfg *config.Config, listenAddr string) []string {
+	candidates := []string{"localhost"}
+
+	if hn, err := os.Hostname(); err == nil && hn != "" {
+		candidates = append(candidates, hn, strings.ToLower(hn))
+	}
+	if full, ok := cfg.Get("FULL_HOSTNAME"); ok && full != "" {
+		candidates = append(candidates, full, strings.ToLower(full))
+	}
+	// If listenAddr has an explicit host (e.g. "myhost:8080"), include
+	// that too — the operator chose it deliberately.
+	listen := listenAddr
+	if strings.HasPrefix(listen, ":") {
+		listen = "0.0.0.0" + listen
+	}
+	if host, _, err := net.SplitHostPort(listen); err == nil {
+		switch host {
+		case "", "0.0.0.0", "::", "[::]":
+			// nothing meaningful to add
+		default:
+			candidates = append(candidates, host, strings.ToLower(host))
+		}
+	}
+
+	// Dedupe while preserving order so the cert's Subject Alternative
+	// Names list is stable across runs (helps when comparing logs).
+	seen := make(map[string]bool, len(candidates))
+	out := make([]string, 0, len(candidates))
+	for _, h := range candidates {
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out
+}
+
+func generateCAAndCert(caPath, certPath, keyPath string, hostnames []string) error {
 	// 1. Generate CA
 	caPrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -1416,17 +1572,22 @@ func generateCAAndCert(caPath, certPath, keyPath string) error {
 		return fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
+	dnsNames := hostnames
+	if len(dnsNames) == 0 {
+		dnsNames = []string{"localhost"}
+	}
+	commonName := dnsNames[0]
 	serverTemplate := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: "localhost",
+			CommonName: commonName,
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
+		DNSNames:              dnsNames,
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 

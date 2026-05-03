@@ -5,10 +5,103 @@ help: ## Display this help message
 	@echo "golang-htcondor - Makefile targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -X github.com/bbockelm/golang-htcondor/version.Version=$(VERSION) \
+           -X github.com/bbockelm/golang-htcondor/version.Commit=$(COMMIT)
+
 .PHONY: build
-build: ## Build all packages
-	@echo "Building packages..."
-	go build -v ./...
+build: build-jupyter-helper ## Build all packages with embedded version info + embedded JupyterLab helper
+	@echo "Building packages (version=$(VERSION) commit=$(COMMIT)) with -tags embed_jupyter_helper..."
+	go build -v -tags embed_jupyter_helper -ldflags "$(LDFLAGS)" ./...
+
+# --- Frontend (Web UI) ---
+#
+# The Next.js app lives under frontend/ and is built into a static export
+# (frontend/out). For production we copy that into httpserver/webui/dist
+# and rebuild the Go binary with -tags embed_frontend so the SPA is
+# embedded into the binary.
+
+FRONTEND_DIR := frontend
+WEBUI_DIST   := httpserver/webui/dist
+
+.PHONY: frontend-install
+frontend-install: ## Install frontend npm dependencies
+	cd $(FRONTEND_DIR) && npm install
+
+.PHONY: dev-frontend
+dev-frontend: ## Run Next.js dev server (proxies /api to Go on :8080)
+	cd $(FRONTEND_DIR) && npm run dev
+
+# --- JupyterLab tunnel helper ----------------------------------------------
+#
+# The helper runs *inside* the JupyterLab job sandbox. We always cross-build a
+# linux/<host arch> binary for Docker-universe jobs (the standard Linux pool
+# case). When the host running `make build` is itself macOS, we also build a
+# darwin/<host arch> helper, because on macOS the API server falls back to
+# vanilla universe + on-the-fly conda — and the execute node is also macOS,
+# so it needs a darwin-native helper.
+#
+# Both binaries land in httpserver/jupyterhelperbin/dist/ where embed.go
+# (gated on the embed_jupyter_helper tag) picks them up.
+JUPYTER_HELPER_GOARCH        := $(shell go env GOARCH)
+JUPYTER_HELPER_GOOS_HOST     := $(shell go env GOOS)
+JUPYTER_HELPER_BIN           := bin/htcondor-jupyter-helper
+JUPYTER_HELPER_DARWIN_BIN    := bin/htcondor-jupyter-helper-darwin
+# Where the api binary's embed.FS will pick up the cross-compiled helper.
+# Must stay in sync with httpserver/jupyterhelperbin/embed.go's //go:embed.
+JUPYTER_HELPER_EMBED_DIR     := httpserver/jupyterhelperbin/dist
+
+.PHONY: build-jupyter-helper
+build-jupyter-helper: ## Cross-compile the JupyterLab tunnel helper for linux/<host arch> (and darwin too if the host is macOS)
+	@echo "Building $(JUPYTER_HELPER_BIN) for linux/$(JUPYTER_HELPER_GOARCH)..."
+	@mkdir -p bin $(JUPYTER_HELPER_EMBED_DIR)
+	GOOS=linux GOARCH=$(JUPYTER_HELPER_GOARCH) CGO_ENABLED=0 go build \
+		-ldflags "$(LDFLAGS)" \
+		-o $(JUPYTER_HELPER_BIN) \
+		./cmd/htcondor-jupyter-helper
+	cp $(JUPYTER_HELPER_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper
+	@echo "Built $(JUPYTER_HELPER_BIN) (embed-staged)"
+	@if [ "$(JUPYTER_HELPER_GOOS_HOST)" = "darwin" ]; then \
+		echo "Host is darwin — also building $(JUPYTER_HELPER_DARWIN_BIN) for darwin/$(JUPYTER_HELPER_GOARCH)..."; \
+		GOOS=darwin GOARCH=$(JUPYTER_HELPER_GOARCH) CGO_ENABLED=0 go build \
+			-ldflags "$(LDFLAGS)" \
+			-o $(JUPYTER_HELPER_DARWIN_BIN) \
+			./cmd/htcondor-jupyter-helper; \
+		cp $(JUPYTER_HELPER_DARWIN_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-darwin; \
+		echo "Built $(JUPYTER_HELPER_DARWIN_BIN) (embed-staged)"; \
+	fi
+
+.PHONY: build-frontend
+build-frontend: ## Build Next.js static export into frontend/out
+	cd $(FRONTEND_DIR) && NODE_ENV=production npm run build
+
+.PHONY: build-prod
+build-prod: build-frontend build-jupyter-helper ## Build htcondor-api with embedded frontend + embedded JupyterLab helper
+	@echo "Staging frontend export into $(WEBUI_DIST)..."
+	rm -rf $(WEBUI_DIST)
+	cp -r $(FRONTEND_DIR)/out $(WEBUI_DIST)
+	@echo "Building htcondor-api with -tags embed_frontend,embed_jupyter_helper..."
+	mkdir -p bin
+	CGO_ENABLED=0 go build -tags "embed_frontend embed_jupyter_helper" -ldflags "$(LDFLAGS)" -o bin/htcondor-api ./cmd/htcondor-api
+	@echo "Built bin/htcondor-api"
+
+.PHONY: clean-frontend
+clean-frontend: ## Remove frontend build artifacts
+	rm -rf $(FRONTEND_DIR)/out $(FRONTEND_DIR)/.next $(WEBUI_DIST)/*
+	@touch $(WEBUI_DIST)/.keep
+
+.PHONY: clean-jupyter-helper
+clean-jupyter-helper: ## Remove staged JupyterLab helper artifacts
+	rm -f $(JUPYTER_HELPER_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper
+	@touch $(JUPYTER_HELPER_EMBED_DIR)/.keep
+
+DEMO_LISTEN ?= :8080
+
+.PHONY: demo
+demo: build-prod ## Run htcondor-api in demo mode (rebuilds with embedded UI first)
+	@echo "Starting demo server on $(DEMO_LISTEN)..."
+	bin/htcondor-api -demo -listen $(DEMO_LISTEN)
 
 .PHONY: test
 test: ## Run all tests
@@ -64,9 +157,10 @@ verify: ## Verify dependencies
 	go mod verify
 
 .PHONY: clean
-clean: ## Clean build artifacts and coverage files
+clean: clean-frontend ## Clean build artifacts and coverage files
 	@echo "Cleaning..."
 	rm -f coverage.out coverage.html
+	rm -rf bin
 	find . -name "*.test" -delete
 	find examples -type f -executable -delete
 

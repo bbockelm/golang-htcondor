@@ -24,6 +24,14 @@ RUN dnf update -y && \
     python3-pip \
     && dnf clean all
 
+# Install Node.js 20 (required to build the embedded Web UI under frontend/).
+# Pinned to the LTS series via NodeSource; matches Makefile's build-frontend
+# target.
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && \
+    dnf install -y nodejs && \
+    dnf clean all && \
+    node --version && npm --version
+
 # Install Go
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ]; then GOARCH="arm64"; else GOARCH="amd64"; fi && \

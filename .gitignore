@@ -43,6 +43,23 @@ cmd/htcondor-api/tmp/
 /htcondor-api
 /htcondor-mcp
 
+# Build output (Makefile `build-prod` writes here)
+/bin/
+
+# Go cache directories (when GOCACHE/GOTMPDIR point at the repo)
+/.gocache/
+/.gotmp/
+
+# Web UI build artifacts. The Next.js export is staged into
+# httpserver/webui/dist before the embed_frontend build; only the
+# .keep placeholder is tracked so go:embed always finds something.
+/httpserver/webui/dist/*
+!/httpserver/webui/dist/.keep
+
+# Runtime log files (job.log etc. from running jobs/demos in the repo)
+/job.log
+/test*.log
+
 # Test databases
 oauth2.db
 oauth2.db-*

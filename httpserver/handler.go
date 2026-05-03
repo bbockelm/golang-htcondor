@@ -2,10 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -17,8 +19,11 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/templates"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
@@ -27,46 +32,94 @@ import (
 
 // Handler represents the HTTP API handler that can be embedded in any HTTP server
 type Handler struct {
-	schedd              *htcondor.Schedd
-	scheddMu            sync.RWMutex // Protects schedd instance for thread-safe updates
-	scheddName          string       // Schedd name for discovery
-	scheddDiscovered    bool         // Whether schedd address was discovered from collector
-	collector           *htcondor.Collector
-	credd               htcondor.CreddClient
-	creddAvailable      atomic.Bool // Whether credd is available (nil credd = not available)
-	creddDiscovered     bool        // Whether credd address was discovered (and needs periodic updates)
-	userHeader          string
-	signingKeyPath      string
-	trustDomain         string
-	uidDomain           string
-	httpBaseURL         string // Base URL for HTTP API (for generating MCP file download links)
-	tlsCACertFile       string
-	logger              *logging.Logger
-	metricsRegistry     *metricsd.Registry
-	prometheusExporter  *metricsd.PrometheusExporter
-	tokenCache          *TokenCache        // Cache of validated tokens and their session caches (includes username)
-	sessionStore        *SessionStore      // HTTP session store for browser-based authentication
-	oauth2Provider      *OAuth2Provider    // OAuth2 provider for MCP endpoints
-	oauth2Config        *oauth2.Config     // OAuth2 client config for SSO
-	oauth2StateStore    *OAuth2StateStore  // State storage for OAuth2 SSO flow
-	oauth2UserInfoURL   string             // User info endpoint for SSO
-	oauth2UsernameClaim string             // Claim name for username (default: "sub")
-	oauth2GroupsClaim   string             // Claim name for group information (default: "groups")
-	mcpAccessGroup      string             // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup        string             // Group required for read access (empty = all users have read)
-	mcpWriteGroup       string             // Group required for write access (empty = all users have write)
-	mcpInstructions     string             // Server-level instructions provided to agents via MCP initialize
-	idpProvider         *IDPProvider       // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter  // Rate limiter for IDP login attempts
-	streamBufferSize    int                // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout  time.Duration      // Write timeout for streaming queries (default: 5s)
-	wg                  sync.WaitGroup     // WaitGroup to track background goroutines
-	pingInterval        time.Duration      // Interval for periodic daemon pings (0 = disabled)
-	pingHealth          *pingHealth        // Recent ping outcomes per daemon, drives /readyz
-	token               string             // Token for daemon authentication
-	mux                 *http.ServeMux     // HTTP request multiplexer
-	ctx                 context.Context    // Context for background goroutines
-	cancelFunc          context.CancelFunc // Function to cancel background goroutines
+	schedd           *htcondor.Schedd
+	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
+	scheddName       string       // Schedd name for discovery
+	scheddDiscovered bool         // Whether schedd address was discovered from collector
+	// scheddAddrSetAt is the timestamp at which h.schedd was last replaced
+	// with a new address (initial discovery, manual UpdateSchedd, or an
+	// updater tick that found a different address). It does NOT update on
+	// ticks where the collector returned the same address.
+	scheddAddrSetAt time.Time
+	// scheddAddrLastConfirmedAt is the timestamp of the last successful
+	// collector query for this schedd's address — regardless of whether the
+	// address changed. This is the right "freshness" signal to log and
+	// surface on /readyz: a long gap means the collector is unreachable
+	// or has been failing, even if the cached address looks stable.
+	scheddAddrLastConfirmedAt time.Time
+	collector                 *htcondor.Collector
+	credd                     htcondor.CreddClient
+	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
+	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
+	userHeader                string
+	signingKeyPath            string
+	trustDomain               string
+	uidDomain                 string
+	httpBaseURL               string // Base URL for HTTP API (for generating MCP file download links)
+	tlsCACertFile             string
+	logger                    *logging.Logger
+	metricsRegistry           *metricsd.Registry
+	prometheusExporter        *metricsd.PrometheusExporter
+	tokenCache                *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	sessionStore              *SessionStore     // HTTP session store for browser-based authentication
+	oauth2Provider            *OAuth2Provider   // OAuth2 provider for MCP endpoints
+	oauth2Config              *oauth2.Config    // OAuth2 client config for SSO
+	oauth2StateStore          *OAuth2StateStore // State storage for OAuth2 SSO flow
+	oauth2UserInfoURL         string            // User info endpoint for SSO
+	oauth2UsernameClaim       string            // Claim name for username (default: "sub")
+	oauth2GroupsClaim         string            // Claim name for group information (default: "groups")
+	mcpAccessGroup            string            // Group required for any MCP access (empty = all authenticated users)
+	mcpReadGroup              string            // Group required for read access (empty = all users have read)
+	mcpWriteGroup             string            // Group required for write access (empty = all users have write)
+	mcpInstructions           string            // Server-level instructions provided to agents via MCP initialize
+	webuiAdminGroup           string            // Group required for Web UI admin pages (empty = no admin UI)
+	shareSecret               []byte            // Random 32-byte HMAC key for short-lived signed URLs
+	logBuffer                 *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
+	idpProvider               *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter           *LoginRateLimiter // Rate limiter for IDP login attempts
+	streamBufferSize          int               // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout        time.Duration     // Write timeout for streaming queries (default: 5s)
+	wg                        sync.WaitGroup    // WaitGroup to track background goroutines
+	pingInterval              time.Duration     // Interval for periodic daemon pings (0 = disabled)
+	pingHealth                *pingHealth       // Recent ping outcomes per daemon, drives /readyz
+	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
+	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
+	// Lazily initialized so a Handler with no collector configured pays
+	// nothing for the analyzer subsystem. The provider holds a slot ad
+	// cache (~30s TTL) shared across all match-analysis calls.
+	matchAnalysisOnce  sync.Once
+	matchAnalysisSlots *matchanalyzer.CollectorSlotProvider
+	token              string             // Token for daemon authentication
+	mux                *http.ServeMux     // HTTP request multiplexer
+	ctx                context.Context    // Context for background goroutines
+	cancelFunc         context.CancelFunc // Function to cancel background goroutines
+
+	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
+	// Created lazily on first /api/v1/jupyter use so older deployments that
+	// don't enable Jupyter pay no startup cost.
+	jupyterRegistry   *jupytertunnel.Registry
+	jupyterRegistryMu sync.Mutex
+
+	// jupyterHelperPath is the on-disk path of the htcondor-jupyter-helper
+	// binary the submit handler ships to JupyterLab workers via
+	// transfer_input_files. Populated lazily on first /jupyter use by
+	// materializing the embedded bytes from package jupyterhelperbin into
+	// jupyterWorkDir; empty if the binary wasn't built with
+	// -tags embed_jupyter_helper.
+	jupyterHelperPath   string
+	jupyterHelperPathMu sync.Mutex
+
+	// jupyterWorkDir is where the materialized helper binary plus
+	// per-instance scratch artifacts (token files, launch scripts) are
+	// staged. Files persist for the lifetime of the job since HTCondor
+	// reads transfer_input_files at job-startup time. Defaults to
+	// <TempDir>/htcondor-api-jupyter when not configured.
+	jupyterWorkDir string
+
+	// templateLibrary serves the batch-submission template catalog
+	// (built-in + global YAML + user-saved JSON). nil = the
+	// /api/v1/templates endpoint returns 503.
+	templateLibrary *templates.Library
 }
 
 // HandlerConfig holds handler configuration
@@ -106,6 +159,7 @@ type HandlerConfig struct {
 	MCPReadGroup               string // Group required for read operations (empty = all have read)
 	MCPWriteGroup              string // Group required for write operations (empty = all have write)
 	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
 	IDPDBPath                  string // Path to IDP SQLite database (default: "idp.db")
 	IDPIssuer                  string // IDP issuer URL (default: listen address)
@@ -120,6 +174,27 @@ type HandlerConfig struct {
 	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token                   string               // Token for daemon authentication (optional)
 	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+
+	// JupyterWorkDir is where the embedded helper binary (materialized
+	// from package jupyterhelperbin) and per-instance scratch artifacts
+	// (token files) are staged. Files persist for the lifetime of the
+	// job since HTCondor reads transfer_input_files at job-startup time.
+	// Defaults to <os.TempDir>/htcondor-api-jupyter.
+	JupyterWorkDir string
+
+	// TemplateGlobalPath is an optional YAML file with operator-curated
+	// batch-submission templates. Empty disables. Built-in templates
+	// always ship.
+	TemplateGlobalPath string
+
+	// TemplateUserStoreDBPath is the SQLite file backing user-saved
+	// templates from the Save-as-template button on /submit. User
+	// templates are scoped to their owner — never shared with other
+	// users — so the table is keyed on (owner, id). When empty, Save
+	// returns an error but the catalog still serves built-ins and
+	// globals. Postgres support is a one-line driver swap when this
+	// graduates to multi-replica deployments.
+	TemplateUserStoreDBPath string
 }
 
 // NewHandler creates a new HTTP API handler that can be embedded in any HTTP server
@@ -175,24 +250,54 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		streamWriteTimeout = 5 * time.Second
 	}
 
+	// Treat the initial schedd address (whether passed in or discovered) as
+	// "just set / just confirmed" so the age fields don't read as huge negative
+	// or zero on the very first /readyz call. If the address was discovered
+	// from the collector this is also literally true; if it came from
+	// configuration it's the closest meaningful baseline we have.
+	now := time.Now()
 	h := &Handler{
-		schedd:             schedd,
-		scheddName:         cfg.ScheddName,
-		scheddDiscovered:   scheddDiscovered,
-		collector:          cfg.Collector,
-		credd:              cfg.Credd,
-		trustDomain:        cfg.TrustDomain,
-		uidDomain:          cfg.UIDDomain,
-		httpBaseURL:        cfg.HTTPBaseURL,
-		userHeader:         cfg.UserHeader,
-		signingKeyPath:     cfg.SigningKeyPath,
-		tlsCACertFile:      cfg.TLSCACertFile,
-		logger:             logger,
-		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
-		streamBufferSize:   streamBufferSize,
-		streamWriteTimeout: streamWriteTimeout,
-		token:              cfg.Token,
+		schedd:                    schedd,
+		scheddName:                cfg.ScheddName,
+		scheddDiscovered:          scheddDiscovered,
+		scheddAddrSetAt:           now,
+		scheddAddrLastConfirmedAt: now,
+		collector:                 cfg.Collector,
+		credd:                     cfg.Credd,
+		trustDomain:               cfg.TrustDomain,
+		uidDomain:                 cfg.UIDDomain,
+		httpBaseURL:               cfg.HTTPBaseURL,
+		userHeader:                cfg.UserHeader,
+		jupyterWorkDir:            cfg.JupyterWorkDir,
+		templateLibrary:           buildTemplateLibrary(cfg, logger),
+		signingKeyPath:            cfg.SigningKeyPath,
+		tlsCACertFile:             cfg.TLSCACertFile,
+		logger:                    logger,
+		tokenCache:                NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		streamBufferSize:          streamBufferSize,
+		streamWriteTimeout:        streamWriteTimeout,
+		webuiAdminGroup:           cfg.WebUIAdminGroup,
+		token:                     cfg.Token,
 	}
+
+	if h.webuiAdminGroup != "" {
+		logger.Info(logging.DestinationHTTP, "Web UI admin group configured", "admin_group", h.webuiAdminGroup)
+	}
+
+	// Random per-process HMAC key for short-lived shared download URLs.
+	// We generate fresh on each start: signed URLs are intentionally
+	// short-lived and don't need to survive a restart.
+	h.shareSecret = make([]byte, 32)
+	if _, err := rand.Read(h.shareSecret); err != nil {
+		return nil, fmt.Errorf("failed to generate share secret: %w", err)
+	}
+
+	// In-memory log buffer for the admin UI's "recent logs" panel.
+	// 5000 entries at info+ keeps a few hours of typical activity in
+	// memory and remains well under a megabyte. The on-disk log file
+	// remains the durable source of truth.
+	h.logBuffer = logging.NewBuffer(5000, slog.LevelInfo)
+	logging.AttachBuffer(logger, h.logBuffer)
 
 	// Discover credd if not provided
 	if h.credd == nil {
@@ -698,15 +803,21 @@ func (h *Handler) GetSchedd() *htcondor.Schedd {
 }
 
 // UpdateSchedd updates the schedd instance with a new address (thread-safe).
-// On change, logs both addresses and — when both addresses are shared-port —
-// the old and new sock= IDs so it's obvious whether a schedd restart drove
-// the update (sock= changed) versus a network-level address shift (host:port
-// changed but sock= stable).
+// On change, logs both addresses, the age of the previous address, and —
+// when both addresses are shared-port — the old and new sock= IDs so it's
+// obvious whether a schedd restart drove the update (sock= changed) versus
+// a network-level address shift (host:port changed but sock= stable).
+//
+// Always sets scheddAddrLastConfirmedAt to now: the caller has just talked
+// to the collector successfully, regardless of whether the address differs
+// from the cached value.
 func (h *Handler) UpdateSchedd(newAddress string) {
 	h.scheddMu.Lock()
 	defer h.scheddMu.Unlock()
 
+	now := time.Now()
 	old := h.schedd.Address()
+	h.scheddAddrLastConfirmedAt = now
 	if old == newAddress {
 		return
 	}
@@ -715,6 +826,7 @@ func (h *Handler) UpdateSchedd(newAddress string) {
 		"old_address", old,
 		"new_address", newAddress,
 		"schedd_name", h.scheddName,
+		"previous_address_age", now.Sub(h.scheddAddrSetAt).String(),
 	}
 	oldInfo := scheddSharedPortInfo(old)
 	newInfo := scheddSharedPortInfo(newAddress)
@@ -727,6 +839,25 @@ func (h *Handler) UpdateSchedd(newAddress string) {
 	}
 	h.logger.Info(logging.DestinationSchedd, "Updating schedd address", fields...)
 	h.schedd = htcondor.NewSchedd(h.scheddName, newAddress)
+	h.scheddAddrSetAt = now
+}
+
+// scheddAddrAges returns (sinceSet, sinceConfirmed) for the cached schedd
+// address. sinceSet is how long the current address value has been in use;
+// sinceConfirmed is how long since the collector last vouched for it (which
+// may be much shorter — confirmation ticks happen even when the address
+// doesn't change). Both are intended for log fields and /readyz output.
+func (h *Handler) scheddAddrAges() (sinceSet, sinceConfirmed time.Duration) {
+	h.scheddMu.RLock()
+	defer h.scheddMu.RUnlock()
+	now := time.Now()
+	if !h.scheddAddrSetAt.IsZero() {
+		sinceSet = now.Sub(h.scheddAddrSetAt)
+	}
+	if !h.scheddAddrLastConfirmedAt.IsZero() {
+		sinceConfirmed = now.Sub(h.scheddAddrLastConfirmedAt)
+	}
+	return
 }
 
 // scheddAddressUpdateInterval bounds the maximum staleness of the cached
@@ -958,10 +1089,13 @@ func (h *Handler) performPeriodicPing() {
 	_, err := h.getSchedd().Ping(ctx)
 	if err != nil {
 		diag := classifyConnectionError(scheddAddr, err)
+		sinceSet, sinceConfirmed := h.scheddAddrAges()
 		fields := []any{
 			"error", err,
 			"error_class", diag.Class,
 			"schedd_address", scheddAddr,
+			"address_age", sinceSet.Truncate(time.Second).String(),
+			"address_last_confirmed_ago", sinceConfirmed.Truncate(time.Second).String(),
 		}
 		if diag.SharedPort != "" {
 			fields = append(fields, "shared_port_id", diag.SharedPort)

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -33,36 +34,41 @@ type Server struct {
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr          string              // Address to listen on (e.g., ":8080")
-	ScheddName          string              // Schedd name
-	ScheddAddr          string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader          string              // HTTP header to extract username from (optional)
-	SigningKeyPath      string              // Path to token signing key (optional, for token generation)
-	TrustDomain         string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL         string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout         time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout        time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout         time.Duration       // HTTP idle timeout (default: 120s)
-	Collector           *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics       bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
-	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
-	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
-	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
-	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL       string              // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL      string              // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL   string              // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL   string              // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes        []string            // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim string              // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim   string              // Claim name for groups in user info (default: "groups")
+	ListenAddr      string              // Address to listen on (e.g., ":8080")
+	ScheddName      string              // Schedd name
+	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader      string              // HTTP header to extract username from (optional)
+	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
+	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCertFile     string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile      string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile   string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout     time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout    time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout     time.Duration       // HTTP idle timeout (default: 120s)
+	Collector       *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
+	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
+	JupyterWorkDir  string              // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
+
+	// Batch-submission template paths.
+	TemplateGlobalPath      string   // Optional YAML file with operator-curated templates
+	TemplateUserStoreDBPath string   // SQLite file backing user-saved templates (owner-scoped); upgrade to Postgres for multi-replica
+	EnableMCP               bool     // Enable MCP endpoints with OAuth2 (default: false)
+	OAuth2DBPath            string   // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
+	OAuth2Issuer            string   // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID          string   // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret      string   // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL           string   // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL          string   // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL       string   // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL       string   // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -72,6 +78,7 @@ type Config struct {
 	MCPReadGroup               string // Group required for read operations (empty = all have read)
 	MCPWriteGroup              string // Group required for write operations (empty = all have write)
 	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
 	IDPDBPath                  string // Path to IDP SQLite database (default: "idp.db")
 	IDPIssuer                  string // IDP issuer URL (default: listen address)
@@ -119,6 +126,9 @@ func NewServer(cfg Config) (*Server, error) {
 		Logger:                     cfg.Logger,
 		EnableMCP:                  cfg.EnableMCP,
 		OAuth2DBPath:               cfg.OAuth2DBPath,
+		JupyterWorkDir:             cfg.JupyterWorkDir,
+		TemplateGlobalPath:         cfg.TemplateGlobalPath,
+		TemplateUserStoreDBPath:    cfg.TemplateUserStoreDBPath,
 		OAuth2Issuer:               cfg.OAuth2Issuer,
 		OAuth2ClientID:             cfg.OAuth2ClientID,
 		OAuth2ClientSecret:         cfg.OAuth2ClientSecret,
@@ -135,6 +145,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPReadGroup:               cfg.MCPReadGroup,
 		MCPWriteGroup:              cfg.MCPWriteGroup,
 		MCPInstructions:            cfg.MCPInstructions,
+		WebUIAdminGroup:            cfg.WebUIAdminGroup,
 		EnableIDP:                  cfg.EnableIDP,
 		IDPDBPath:                  cfg.IDPDBPath,
 		IDPIssuer:                  cfg.IDPIssuer,
@@ -164,6 +175,18 @@ func NewServer(cfg Config) (*Server, error) {
 			ReadTimeout:  readTimeout,
 			WriteTimeout: writeTimeout,
 			IdleTimeout:  idleTimeout,
+			// Disable HTTP/2 (otherwise auto-negotiated via ALPN on
+			// HTTPS). Our JupyterLab reverse proxy uses
+			// httputil.ReverseProxy's WebSocket-upgrade path, which
+			// requires Hijack() on the response writer. HTTP/2's
+			// response writer does not implement Hijacker — bytes
+			// stop flowing on the response side after the upgrade,
+			// JupyterLab's WS handler accepts the connection but the
+			// browser never sees the 101, retries, and Jupyter logs
+			// "Replacing stale connection ... 400 GET .../channels".
+			// Forcing HTTP/1.1 for all TLS sessions keeps Hijack
+			// available and is fine for our scale.
+			TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 		},
 		logger: handler.logger,
 	}
@@ -321,6 +344,18 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Hijack passes through to the underlying ResponseWriter so that WebSocket
+// upgrades (and any other hijack-based protocol) work behind this wrapper.
+// Without this, gorilla/websocket's Upgrade() returns
+// "websocket: response does not implement http.Hijacker" → 500.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
+}
+
 // accessLogMiddleware logs HTTP requests in access log style
 func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +475,13 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 				username = username + "@" + s.uidDomain
 			}
 			kid := filepath.Base(s.signingKeyPath)
-			s.logger.Debug(logging.DestinationSecurity, "Generating token for session user", "username", username, "issuer", issuer, "key", kid)
+			// Logged at Info so demo failures surface the iss/kid the
+			// schedd will see, without needing the operator to flip on
+			// debug logging first. The "trust domain mismatch" class of
+			// errors is otherwise opaque from the server log alone.
+			s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
+				"subject", username, "issuer", issuer, "kid", kid,
+				"signing_key_path", s.signingKeyPath)
 			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
 			if err != nil {
 				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)

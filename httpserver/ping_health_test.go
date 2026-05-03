@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -160,6 +162,25 @@ func TestPingHealthNilReceiver(t *testing.T) {
 	p.markCollectorEnabled()
 	p.recordCollectorSuccess()
 	p.recordScheddFailure(errors.New("x"), connErrorOther)
+}
+
+// TestDaemonHealthStatusJSONOmitsEmptyAddressAge guards the JSON contract
+// for /readyz: AddressAge fields are populated only for daemons whose
+// address we discover (schedd today; potentially others later). Verifying
+// they're omitted when empty keeps the collector entry from accumulating
+// confusing zero-valued fields once we wire it up similarly.
+func TestDaemonHealthStatusJSONOmitsEmptyAddressAge(t *testing.T) {
+	d := daemonHealthStatus{Status: "ok"}
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(b); strings.Contains(got, "address_age") {
+		t.Errorf("AddressAge should be omitted when empty, got: %s", got)
+	}
+	if got := string(b); strings.Contains(got, "address_last_confirmed_age") {
+		t.Errorf("AddressLastConfirmedAge should be omitted when empty, got: %s", got)
+	}
 }
 
 func TestWorseStatus(t *testing.T) {

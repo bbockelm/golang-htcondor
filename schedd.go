@@ -444,8 +444,14 @@ func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
 	}
 	ad.InsertExpr("Requirements", constraintExpr)
 
-	// Set projection if provided
-	if opts != nil && len(opts.Projection) > 0 {
+	// Set projection if provided. The wire format is comma-separated
+	// attribute names; an unset Projection on the request ad means the
+	// schedd returns the entire ClassAd. We treat the documented
+	// "all attributes" convention — Projection == ["*"] — the same as
+	// "unset", because passing "*" through literally would have the
+	// schedd hunt for an attribute named "*" and return only ServerTime.
+	if opts != nil && len(opts.Projection) > 0 &&
+		!(len(opts.Projection) == 1 && opts.Projection[0] == "*") {
 		projectionStr := strings.Join(opts.Projection, ",")
 		_ = ad.Set("Projection", projectionStr)
 	}

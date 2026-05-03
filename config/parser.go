@@ -183,11 +183,28 @@ type parser struct {
 	lexer  *Lexer
 	result []Statement
 	errors []error
+	// lastTok keeps the most-recently-lexed token so Error() can
+	// surface the file location of the failing token instead of just
+	// echoing goyacc's content-free "syntax error" string. yacc calls
+	// Error() *after* it has already consumed the offending token, so
+	// we have to remember it here ourselves. nil before the first
+	// Lex() call.
+	lastTok *TokenInfo
+}
+
+func init() {
+	// Ask goyacc for the verbose form of its error messages. By
+	// default the generated parser falls back to the literal string
+	// "syntax error" for every error path, which is useless for
+	// debugging. Verbose mode produces "syntax error: unexpected
+	// <Tok>, expecting <Tok2>" — much more actionable.
+	yyErrorVerbose = true
 }
 
 // Lex is required by the goyacc-generated parser
 func (p *parser) Lex(lval *yySymType) int {
 	tok := p.lexer.NextToken()
+	p.lastTok = tok
 
 	// Set the string value for tokens that have literal values
 	switch tok.Token {
@@ -198,9 +215,24 @@ func (p *parser) Lex(lval *yySymType) int {
 	return int(tok.Token)
 }
 
-// Error is required by the goyacc-generated parser
+// Error is required by the goyacc-generated parser. We prepend the
+// file position of the most-recently-lexed token so users get
+// "parse error at line 12, col 7: ..." rather than a bare
+// "syntax error".
 func (p *parser) Error(s string) {
-	p.errors = append(p.errors, fmt.Errorf("parse error: %s", s))
+	if p.lastTok == nil {
+		// No token consumed yet: still better than nothing.
+		p.errors = append(p.errors, fmt.Errorf("parse error: %s", s))
+		return
+	}
+	line, col, lit := p.lastTok.Line, p.lastTok.Col, p.lastTok.Lit
+	if lit != "" {
+		p.errors = append(p.errors,
+			fmt.Errorf("parse error at line %d, col %d (near %q): %s", line, col, lit, s))
+		return
+	}
+	p.errors = append(p.errors,
+		fmt.Errorf("parse error at line %d, col %d: %s", line, col, s))
 }
 
 // Parse parses the input and returns the list of statements

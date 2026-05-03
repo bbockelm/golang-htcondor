@@ -143,6 +143,20 @@ const openAPISchema = `{
           }
         }
       },
+      "VersionResponse": {
+        "type": "object",
+        "required": ["version", "commit"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Version string derived from the most recent git tag (output of 'git describe --tags --always --dirty'). Defaults to 'dev' if not set at build time."
+          },
+          "commit": {
+            "type": "string",
+            "description": "Short git SHA of the commit the binary was built from. Defaults to 'unknown' if not set at build time."
+          }
+        }
+      },
       "AdvertiseRequest": {
         "type": "object",
         "properties": {
@@ -1156,6 +1170,57 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/ssh": {
+      "get": {
+        "summary": "Open an interactive SSH session inside a running job",
+        "description": "Equivalent to condor_ssh_to_job, but exposed as a WebSocket so the resulting terminal can be driven from a browser. The HTTP request must be a WebSocket upgrade (Upgrade: websocket). Authentication happens before the upgrade — a 401 response means re-authenticate.\n\nWebSocket framing:\n  * Binary frames carry raw stdio bytes in either direction (client→server is keystrokes, server→client is terminal output with stdout+stderr merged).\n  * Text frames carry small JSON control messages: {\"type\":\"resize\",\"cols\":N,\"rows\":M}, {\"type\":\"signal\",\"name\":\"INT\"}, {\"type\":\"close\"}.\n  * On exit the server emits a final {\"type\":\"exit\",\"code\":N,\"reason\":\"...\"} text frame and closes with a normal-closure frame.",
+        "operationId": "openJobSSH",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "cols",
+            "in": "query",
+            "required": false,
+            "description": "Initial terminal width in columns. Default 80. The client should send a resize control frame as soon as the WebSocket is open.",
+            "schema": {"type": "integer", "default": 80, "minimum": 1, "maximum": 1000}
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "description": "Initial terminal height in rows. Default 24.",
+            "schema": {"type": "integer", "default": 24, "minimum": 1, "maximum": 1000}
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching protocols — the connection has been upgraded to a WebSocket carrying the SSH session."
+          },
+          "400": {
+            "description": "Invalid job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "502": {
+            "description": "The schedd or starter refused the connection, or the SSH handshake failed. The error message describes which step failed.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "503": {
+            "description": "Schedd is not configured on this server.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/jobs/{jobId}/hold": {
       "post": {
         "summary": "Hold a job",
@@ -1994,6 +2059,115 @@ const openAPISchema = `{
               }
             }
           }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "summary": "Get server build information",
+        "description": "Returns the version and git commit SHA embedded in the running binary at build time. Requires authentication.",
+        "operationId": "getVersion",
+        "responses": {
+          "200": {
+            "description": "Build information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionResponse"
+                },
+                "example": {
+                  "version": "v0.1.0-3-g7240eb5",
+                  "commit": "7240eb5"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jupyter/instances": {
+      "post": {
+        "summary": "Launch a JupyterLab instance in the pool",
+        "description": "Submits a Docker-universe HTCondor job that runs JupyterLab inside a per-job Unix domain socket and connects back to this server via an outbound websocket reverse tunnel. Returns immediately with the instance id and cluster id; clients should subscribe to /jupyter/instances/{id}/events to learn when the tunnel is up, then iframe /jupyter/instances/{id}/proxy/.",
+        "operationId": "createJupyterInstance",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image":     {"type": "string", "description": "Docker image. Default quay.io/jupyter/scipy-notebook:latest"},
+                  "cpus":      {"type": "integer", "description": "CPU cores requested. Default 2", "minimum": 1, "maximum": 64},
+                  "memory_mb": {"type": "integer", "description": "Memory in MiB. Default 4096", "minimum": 256},
+                  "disk_mb":   {"type": "integer", "description": "Scratch disk in MiB. Default 4096", "minimum": 256}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Job submitted; tunnel is not yet connected.",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "required": ["instance_id", "cluster_id", "proxy_path"],
+              "properties": {
+                "instance_id": {"type": "string", "description": "32-char hex id; use this for /events and /proxy"},
+                "cluster_id":  {"type": "string"},
+                "proxy_path":  {"type": "string", "description": "Path to iframe once the tunnel reports ready"}
+              }
+            }}}
+          },
+          "400": {"description": "Invalid request body", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Schedd refused submit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "JupyterLab feature is not configured (no helper binary)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/jupyter/instances/{id}/events": {
+      "get": {
+        "summary": "Subscribe to JupyterLab instance lifecycle events (SSE)",
+        "description": "text/event-stream of JSON-encoded events. Event names: 'created', 'tunnel-connected', 'closed'. The browser should mount the iframe on receiving 'tunnel-connected'.",
+        "operationId": "streamJupyterEvents",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Event stream open. Each event is a JSON object {kind, at, meta?}.",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+          },
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such instance (or caller is not its owner)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/jupyter/instances/{id}/proxy/{rest}": {
+      "get": {
+        "summary": "Reverse-proxy into a running JupyterLab instance",
+        "description": "Owner-only HTTP reverse proxy through the established yamux tunnel. WebSocket upgrades pass through transparently for kernel comms. Path beyond /proxy/ is rewritten to the upstream Jupyter base URL.",
+        "operationId": "proxyJupyter",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "rest", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Path inside the Jupyter app"}
+        ],
+        "responses": {
+          "200": {"description": "Proxied response from JupyterLab"},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such instance (or caller is not its owner)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Tunnel not connected (helper has not phoned home yet)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

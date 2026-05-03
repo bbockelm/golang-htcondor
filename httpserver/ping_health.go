@@ -120,6 +120,16 @@ type daemonHealthStatus struct {
 	LastError     string `json:"last_error,omitempty"`      // human-readable error text from the most recent failure
 	LastErrorAt   string `json:"last_error_at,omitempty"`   // RFC3339 timestamp of the most recent failure
 	LastErrorKind string `json:"last_error_kind,omitempty"` // connErrorClass string; helps operators triage
+
+	// AddressAge is how long the current address has been in use ("12m3s").
+	// AddressLastConfirmedAge is how long since a successful collector query
+	// vouched for the address (may be much shorter when the address itself
+	// is stable). Only populated for daemons whose addresses we discover
+	// from the collector — i.e., schedd, not collector itself. Intended to
+	// catch the failure mode where the address looks stable but is actually
+	// stale because the collector queries have been failing for a while.
+	AddressAge              string `json:"address_age,omitempty"`
+	AddressLastConfirmedAge string `json:"address_last_confirmed_age,omitempty"`
 }
 
 // healthSnapshot is the combined view returned to /readyz.

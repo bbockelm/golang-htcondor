@@ -1891,8 +1891,9 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 		if err := json.Unmarshal(mcpRequest.Params, &params); err == nil {
 			// Read-only tools
 			readOnlyTools := map[string]bool{
-				"query_jobs": true,
-				"get_job":    true,
+				"query_jobs":        true,
+				"get_job":           true,
+				"analyze_job_match": true,
 			}
 			if readOnlyTools[params.Name] {
 				return false

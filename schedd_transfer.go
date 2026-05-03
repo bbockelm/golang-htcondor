@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/cedar/stream"
 )
 
@@ -623,30 +623,34 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 		//nolint:gosec // ClusterId and ProcId are bounded by HTCondor to int32 range
 		jobIDs[i] = procID{cluster: int32(clusterInt), proc: int32(procInt)}
 
-		// Get TransferInput - this contains the comma-separated list of input files
-		transferInputStr, ok := ad.EvaluateAttrString("TransferInput")
-
-		transferInputStr = strings.Trim(transferInputStr, "\"") // Remove quotes if present
-
-		if !ok || transferInputStr == "" || strings.EqualFold(transferInputStr, "UNDEFINED") {
-			return fmt.Errorf("job ad %d (job %d.%d) missing TransferInput attribute", i, clusterInt, procInt)
+		// Build the per-job file list. Reuse the same logic as the Tar
+		// spool path: TransferInput supplies the explicit inputs, and
+		// the executable's basename is added when transfer_executable is
+		// true (the default). This lets minimal jobs — those whose only
+		// transferable file is the executable itself — spool successfully.
+		fileSet := getInputFilesFromJobAd(ad)
+		if len(fileSet) == 0 {
+			return fmt.Errorf("job ad %d (job %d.%d): no files to spool (TransferInput is empty and TransferExecutable is false or Cmd is unset)", i, clusterInt, procInt)
 		}
-
-		// Parse the file list
-		fileLists[i] = parseFileList(transferInputStr)
-		if len(fileLists[i]) == 0 {
-			return fmt.Errorf("job ad %d (job %d.%d): parsed file list is empty", i, clusterInt, procInt)
+		fileLists[i] = make([]string, 0, len(fileSet))
+		for f := range fileSet {
+			fileLists[i] = append(fileLists[i], f)
 		}
+		// Sort so the wire order is deterministic across goroutine /
+		// map-iteration randomness — easier to reason about in logs and
+		// tests.
+		sort.Strings(fileLists[i])
 	}
 
-	// Prepare security config
-	secConfig := &security.SecurityConfig{
-		Command:        commands.SPOOL_JOB_FILES_WITH_PERMS,
-		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
-		Authentication: security.SecurityOptional,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
-		Integrity:      security.SecurityOptional,
+	// Prepare security config — pull from context so an HTTP-handler
+	// caller's bearer/JWT (set via WithSecurityConfig) is reused, not
+	// silently dropped. Sibling paths (NewQmgmtConnection, the receive
+	// path at the top of this file) do the same; spooling without it
+	// makes the schedd reject the auth handshake with "no compatible
+	// tokens available".
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	if err != nil {
+		return fmt.Errorf("failed to build security config: %w", err)
 	}
 
 	// Connect to schedd and authenticate using cedar client
@@ -1031,14 +1035,11 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 		return err
 	}
 
-	// Prepare security config
-	secConfig := &security.SecurityConfig{
-		Command:        commands.SPOOL_JOB_FILES_WITH_PERMS,
-		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
-		Authentication: security.SecurityOptional,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
-		Integrity:      security.SecurityOptional,
+	// Prepare security config from context (see SpoolJobFilesFromFS for
+	// the same rationale).
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	if err != nil {
+		return fmt.Errorf("failed to build security config: %w", err)
 	}
 
 	// Connect to schedd and authenticate using cedar client
