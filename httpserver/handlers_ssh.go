@@ -20,6 +20,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,7 +55,7 @@ type wsControlMsg struct {
 var sshUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
+	CheckOrigin: func(_ *http.Request) bool {
 		return true
 	},
 }
@@ -240,6 +241,8 @@ func initialPtyDimsFromQuery(q map[string][]string) (cols, rows int) {
 
 // bridgeSSHToWebSocket runs until either side closes. It owns sshClient and
 // session and will close both on return.
+//
+//nolint:gocyclo // single linear protocol loop; splitting fragments the lifecycle
 func bridgeSSHToWebSocket(
 	ctx context.Context,
 	s *Handler,
@@ -456,10 +459,12 @@ func translateWaitErr(err error) (int, string) {
 	if err == nil {
 		return 0, ""
 	}
-	if ee, ok := err.(*ssh.ExitError); ok {
+	var ee *ssh.ExitError
+	if errors.As(err, &ee) {
 		return ee.ExitStatus(), ee.Signal()
 	}
-	if _, ok := err.(*ssh.ExitMissingError); ok {
+	var em *ssh.ExitMissingError
+	if errors.As(err, &em) {
 		return 0, "no-exit-status"
 	}
 	return -1, err.Error()

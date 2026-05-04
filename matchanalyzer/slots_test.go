@@ -213,6 +213,96 @@ func TestNormalizeAttrs(t *testing.T) {
 	}
 }
 
+// TestCollectorSlotProviderProjectionTracksTheRequest pins the property
+// the user asked about directly: when the analyzer requests attribute X,
+// the cache must (a) record X in its projection set and (b) not satisfy
+// a later request for Y from the cached entry unless Y is also in the
+// recorded projection. Regression here would silently serve up
+// projection-stripped slot ads for attributes the cache never asked
+// the collector for — exactly the failure mode behind the
+// `(TARGET.Arch isnt undefined)` complaint.
+func TestCollectorSlotProviderProjectionTracksTheRequest(t *testing.T) {
+	q := &fakeQuerier{}
+	p := NewCollectorSlotProvider(q, WithSlotCacheTTL(time.Hour))
+
+	// Simulate "first analysis: predicates only ref Memory and Cpus".
+	if _, err := p.Slots(context.Background(), []string{"Memory", "Cpus", "Name"}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	first := q.lastCall(t)
+	if !sliceContains(first.projection, "Memory") || !sliceContains(first.projection, "Cpus") {
+		t.Fatalf("first call projection should include Memory+Cpus, got %v", first.projection)
+	}
+	if sliceContains(first.projection, "Arch") {
+		t.Fatalf("first call projection unexpectedly includes Arch: %v", first.projection)
+	}
+
+	// CacheStatus must reflect the projection actually requested.
+	cs := p.CacheStatus()
+	if sliceContains(cs.Projection, "Arch") {
+		t.Errorf("CacheStatus projection unexpectedly includes Arch: %v", cs.Projection)
+	}
+	if !sliceContains(cs.Projection, "Memory") {
+		t.Errorf("CacheStatus projection missing Memory: %v", cs.Projection)
+	}
+
+	// "Second analysis: also references Arch (e.g., (TARGET.Arch isnt
+	// undefined))". The cache MUST NOT return the stripped first-call
+	// ads — Arch isn't in the cached projection, so a re-fetch is
+	// required so the collector includes Arch this time.
+	calls := q.callCount()
+	if _, err := p.Slots(context.Background(), []string{"Arch", "Memory", "Name"}); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if q.callCount() == calls {
+		t.Fatalf("expected re-fetch when new request adds Arch, but cache hit (calls stayed at %d)", calls)
+	}
+	second := q.lastCall(t)
+	if !sliceContains(second.projection, "Arch") {
+		t.Fatalf("re-fetch projection must include Arch, got %v", second.projection)
+	}
+	// Union should preserve the previous attrs too — without that, a
+	// third request for {Memory} would re-fetch needlessly.
+	if !sliceContains(second.projection, "Memory") || !sliceContains(second.projection, "Cpus") {
+		t.Errorf("re-fetch projection should union with prior attrs, got %v", second.projection)
+	}
+
+	// And the cache state must now reflect the new union.
+	cs = p.CacheStatus()
+	if !sliceContains(cs.Projection, "Arch") {
+		t.Errorf("after re-fetch, CacheStatus projection should include Arch, got %v", cs.Projection)
+	}
+}
+
+// TestAnalyzeRequestsArchForIsntUndefined is the end-to-end version of
+// the user's hypothesis: given the predicate `(TARGET.Arch isnt
+// undefined)`, the projection actually sent to the SlotProvider must
+// include Arch. This test goes through Decompose → Analyze → provider
+// (rather than directly testing collectSlotAttrRefs) so a regression in
+// any layer between the AST walk and the provider call is caught.
+func TestAnalyzeRequestsArchForIsntUndefined(t *testing.T) {
+	provider := &StaticSlotProvider{Ads: nil}
+	job, err := classad.Parse(`[ Requirements = (TARGET.Arch isnt undefined) ]`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := New(provider).Analyze(context.Background(), job); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if !sliceContains(provider.LastRequestedAttrs, "Arch") {
+		t.Errorf("projection sent to provider missing Arch (got %v) — would cause the user's bug", provider.LastRequestedAttrs)
+	}
+}
+
+func sliceContains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func mustParse(t *testing.T, s string) *classad.ClassAd {
 	t.Helper()
 	ad, err := classad.Parse(s)

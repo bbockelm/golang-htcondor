@@ -373,6 +373,8 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobByID handles /api/v1/jobs/{id} endpoint
+//
+//nolint:gocyclo // dispatches GET/PUT/DELETE plus several action sub-paths; splitting hides routing
 func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	// Extract job ID from path
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")

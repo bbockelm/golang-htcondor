@@ -142,74 +142,44 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 
 	matchedAllOthers := make([]int, len(preds)) // per-predicate counter
 
-	// distrCollectors[predIdx][attrName] → counter object for that attribute
+	boundExprs := bindPredicates(jobAd, preds)
+
+	// Distributions are computed per *post-bind slot-side attribute*,
+	// not per ReferencedSlotAttr (which is conservative and includes
+	// bare refs that resolve to the job side). Without this filter, a
+	// predicate like `TARGET.Memory >= RequestMemory` would emit a
+	// histogram for RequestMemory showing "absent on every slot" — true
+	// but useless, since RequestMemory lives on the job, not the slot.
+	resolvedSlotAttrs := make([][]string, len(preds))
 	distrCollectors := make([]map[string]*attrDistCollector, len(preds))
 	for i := range preds {
-		distrCollectors[i] = make(map[string]*attrDistCollector, len(preds[i].ReferencedSlotAttrs))
-		for _, attr := range preds[i].ReferencedSlotAttrs {
+		resolvedSlotAttrs[i] = boundSlotAttrs(boundExprs[i])
+		distrCollectors[i] = make(map[string]*attrDistCollector, len(resolvedSlotAttrs[i]))
+		for _, attr := range resolvedSlotAttrs[i] {
 			distrCollectors[i][attr] = newAttrDistCollector()
 		}
 	}
 
-	for _, slot := range slots {
-		results := evalPredicatesAgainstSlot(jobAd, slot, preds)
+	// perSlotPerPred[predIdx][slotIdx] = outcome. Stored in
+	// predicate-major order because computeResourceSuggestion takes a
+	// slice of outcomes for ONE predicate across all slots — the
+	// memory layout matches that access pattern. Capacity is bounded
+	// by len(slots) * len(preds), which for typical pools (<10k slots,
+	// <20 preds) fits comfortably.
+	perSlotPerPred := make([][]predOutcome, len(preds))
+	for i := range perSlotPerPred {
+		perSlotPerPred[i] = make([]predOutcome, 0, len(slots))
+	}
 
-		fullMatch := true
-		for _, r := range results {
-			if r != predTrue {
-				fullMatch = false
-				break
-			}
-		}
-		if fullMatch {
+	for _, slot := range slots {
+		results := evalPredicatesAgainstSlot(jobAd, slot, boundExprs)
+		if isFullMatch(results) {
 			res.FullMatches++
 		}
-
 		for i, r := range results {
-			pr := &res.Predicates[i]
-			switch r {
-			case predTrue:
-				pr.Matched++
-				if a.sampleHostsCap < 0 || len(pr.SampleMatchedHosts) < a.sampleHostsCap {
-					if name := slotIdentity(slot); name != "" {
-						pr.SampleMatchedHosts = append(pr.SampleMatchedHosts, name)
-					}
-				}
-			case predFalse:
-				pr.NotMatched++
-			case predUndefined:
-				pr.Undefined++
-			case predError:
-				pr.ErrorOut++
-			}
-
-			if r != predTrue {
-				// "would match if this predicate were removed?" requires
-				// every other predicate to be true on this slot.
-				othersAllTrue := true
-				for j, rr := range results {
-					if j == i {
-						continue
-					}
-					if rr != predTrue {
-						othersAllTrue = false
-						break
-					}
-				}
-				if othersAllTrue {
-					matchedAllOthers[i]++
-				}
-			}
-
-			// Attribute distributions: count this slot's value of each
-			// referenced attribute, regardless of predicate outcome. The
-			// distribution is over the entire slot pool, which is what
-			// makes it useful for the user — they get to see "of all the
-			// slots in the pool, here's how Arch is distributed".
-			for _, attr := range preds[i].ReferencedSlotAttrs {
-				distrCollectors[i][attr].observe(slot.EvaluateAttr(attr))
-			}
+			perSlotPerPred[i] = append(perSlotPerPred[i], r)
 		}
+		a.processSlotResults(slot, results, res, matchedAllOthers, distrCollectors, resolvedSlotAttrs)
 	}
 
 	// Pick the narrowing predicate: highest matchedAllOthers value, with
@@ -221,17 +191,151 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 		res.NarrowingPredicateIndex = maxIdx
 	}
 
+	// Surface the per-predicate narrowing score on the result so the UI
+	// can sort by it without recomputing. Score 0 = predicate is a
+	// no-op for matching given the rest; the widget hides those by
+	// default behind a "show more" gate.
+	for i := range res.Predicates {
+		res.Predicates[i].NarrowingScore = matchedAllOthers[i]
+	}
+
 	// Materialize the attribute distributions on the result.
 	for i := range res.Predicates {
 		// Stable order over attribute names so output is deterministic.
-		attrNames := preds[i].ReferencedSlotAttrs
-		for _, attr := range attrNames {
+		for _, attr := range resolvedSlotAttrs[i] {
 			d := distrCollectors[i][attr].finalize(attr, a.distinctValuesCap)
 			res.Predicates[i].AttributeDistributions = append(res.Predicates[i].AttributeDistributions, d)
 		}
 	}
 
+	// Compute resource suggestions for narrowing predicates that match
+	// the resource-request shape (TARGET.X op MY.Request*). Done after
+	// the main loop so we can use the captured per-slot results to
+	// figure out which slot values are unlocked by which Request*
+	// reductions. Skipping for non-narrowing predicates (score 0)
+	// avoids surfacing suggestions that wouldn't actually help.
+	for i, p := range preds {
+		if matchedAllOthers[i] == 0 {
+			continue
+		}
+		comp := detectResourceComparison(boundExprs[i])
+		if comp == nil {
+			continue
+		}
+		_ = p // kept for future per-predicate metadata if needed
+		res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comp, jobAd, slots, perSlotPerPred[i])
+	}
+
 	return res, nil
+}
+
+// isFullMatch returns true iff every predicate evaluated to predTrue
+// for one slot. Pulled out as a tiny helper so the slot-loop body can
+// stay short — the main Analyze function was tipping over the
+// cyclomatic-complexity threshold.
+func isFullMatch(results []predOutcome) bool {
+	for _, r := range results {
+		if r != predTrue {
+			return false
+		}
+	}
+	return true
+}
+
+// processSlotResults folds one slot's per-predicate outcomes into the
+// running result. It mutates res, matchedAllOthers, and the distribution
+// collectors. Pulled out of Analyze to keep the cyclomatic complexity
+// of Analyze itself manageable.
+//
+// The per-predicate work breaks into three independent pieces:
+//   - bucket the outcome (matched / not_matched / undefined / error)
+//     and capture an example slot in matched or not-matched samples
+//   - update matchedAllOthers (the narrowing-score input) when this
+//     predicate fails but every OTHER predicate passes
+//   - record this slot's value of every resolved slot-side attribute
+//     in the per-attribute distribution collector
+func (a *Analyzer) processSlotResults(
+	slot *classad.ClassAd,
+	results []predOutcome,
+	res *Result,
+	matchedAllOthers []int,
+	distrCollectors []map[string]*attrDistCollector,
+	resolvedSlotAttrs [][]string,
+) {
+	slotName := slotIdentity(slot)
+	for i, r := range results {
+		pr := &res.Predicates[i]
+		a.bucketOutcome(pr, r, slotName)
+		if r != predTrue && othersAllTrue(results, i) {
+			matchedAllOthers[i]++
+		}
+		for _, attr := range resolvedSlotAttrs[i] {
+			distrCollectors[i][attr].observe(slot, attr, slotName)
+		}
+	}
+}
+
+// bucketOutcome routes a single (predicate, slot) outcome into the
+// right counter and sample-list on PredicateResult. Caps both sample
+// lists at sampleHostsCap; matched and not-matched samples are
+// independent so the operator gets up to sampleHostsCap of each.
+//
+// Undefined and error outcomes are treated as "non-matches" for sample
+// purposes — they're still slots that didn't match, and the operator
+// looking at the non-match dropdown wants to see them too.
+func (a *Analyzer) bucketOutcome(pr *PredicateResult, r predOutcome, slotName string) {
+	switch r {
+	case predTrue:
+		pr.Matched++
+		if a.shouldCaptureSample(len(pr.SampleMatchedHosts), slotName) {
+			pr.SampleMatchedHosts = append(pr.SampleMatchedHosts, slotName)
+		}
+	case predFalse:
+		pr.NotMatched++
+		if a.shouldCaptureSample(len(pr.SampleNotMatchedHosts), slotName) {
+			pr.SampleNotMatchedHosts = append(pr.SampleNotMatchedHosts, slotName)
+		}
+	case predUndefined:
+		pr.Undefined++
+		if a.shouldCaptureSample(len(pr.SampleNotMatchedHosts), slotName) {
+			pr.SampleNotMatchedHosts = append(pr.SampleNotMatchedHosts, slotName)
+		}
+	case predError:
+		pr.ErrorOut++
+		if a.shouldCaptureSample(len(pr.SampleNotMatchedHosts), slotName) {
+			pr.SampleNotMatchedHosts = append(pr.SampleNotMatchedHosts, slotName)
+		}
+	}
+}
+
+// shouldCaptureSample returns true iff we have room in the per-bucket
+// sample list (or the cap is disabled) AND the slot has a usable
+// identity to record. Centralizing the check keeps the four switch
+// arms in bucketOutcome readable.
+func (a *Analyzer) shouldCaptureSample(currentLen int, slotName string) bool {
+	if slotName == "" {
+		return false
+	}
+	if a.sampleHostsCap < 0 {
+		return true
+	}
+	return currentLen < a.sampleHostsCap
+}
+
+// othersAllTrue reports whether every predicate other than the one at
+// idx evaluated to predTrue for this slot. That's the precondition for
+// "removing predicate idx would gain a match" — the narrowing-score
+// computation.
+func othersAllTrue(results []predOutcome, idx int) bool {
+	for j, r := range results {
+		if j == idx {
+			continue
+		}
+		if r != predTrue {
+			return false
+		}
+	}
+	return true
 }
 
 // predOutcome represents the four possible outcomes of evaluating one
@@ -246,22 +350,28 @@ const (
 	predError
 )
 
-// evalPredicatesAgainstSlot evaluates every predicate against the given
-// slot ad and returns one outcome per predicate. The job ad and slot ad
-// are wired up via classad.MatchClassAd so TARGET. references in the
-// predicate resolve to the slot.
+// evalPredicatesAgainstSlot evaluates every (already-bound) predicate
+// expression against the given slot ad and returns one outcome per
+// predicate. The expressions are expected to have come through
+// bindBareReferences so every AttributeReference is explicitly scoped
+// (MY. for job-side, TARGET. for slot-side).
 //
-// A subtle point: MatchClassAd.NewMatchClassAd calls SetTarget on both
-// ads, which mutates them. We don't want analysis to leak state into the
-// caller's job ad, so the caller is expected to pass a job ad it's
-// comfortable having TARGET set on (typically a single-use copy from a
-// query). For the slot ad, we re-set TARGET on every iteration anyway.
-func evalPredicatesAgainstSlot(jobAd, slotAd *classad.ClassAd, preds []Predicate) []predOutcome {
+// We wire the two ads via classad.MatchClassAd and evaluate against the
+// **job** ad, not the slot. That mirrors HTCondor's matching semantics
+// for a job's Requirements: MY = job, TARGET = slot. Evaluating against
+// the slot would invert this and produce TARGET.x = jobAd.x, which is
+// not what an operator reading the predicate expects.
+//
+// MatchClassAd.NewMatchClassAd calls SetTarget on both ads, which
+// mutates them. The caller is expected to pass a job ad it's comfortable
+// having TARGET set on (typically a single-use copy from a query); for
+// the slot ad we re-set TARGET on every iteration anyway.
+func evalPredicatesAgainstSlot(jobAd, slotAd *classad.ClassAd, boundExprs []ast.Expr) []predOutcome {
 	classad.NewMatchClassAd(jobAd, slotAd)
 
-	results := make([]predOutcome, len(preds))
-	for i, p := range preds {
-		results[i] = classifyPredicateValue(slotAd.EvaluateExpr(p.Expr))
+	results := make([]predOutcome, len(boundExprs))
+	for i, expr := range boundExprs {
+		results[i] = classifyPredicateValue(jobAd.EvaluateExpr(expr))
 	}
 	return results
 }
@@ -357,25 +467,69 @@ func slotIdentity(slot *classad.ClassAd) string {
 // across the slot pool. Stored separately from the public
 // AttributeDistribution type so we can use a map for O(1) inserts and
 // finalize to a sorted slice at the end.
+//
+// The collector intentionally distinguishes "absent" (the ad has no
+// such attribute) from "undefined" (the attribute is there but
+// evaluates to undefined). Operators reading the analysis often want
+// to know which is which — "Arch isn't published on N slots" is a
+// different conversation from "Arch is bound to a missing attr on N
+// slots".
+//
+// Each bucket also records ONE example slot name so the UI can
+// "click through to a representative slot" for any value/value-bucket
+// in the histogram. We keep only the first one we see — capturing
+// every match would balloon memory on large pools without adding
+// information beyond the count.
 type attrDistCollector struct {
-	values    map[string]int
-	undefined int
-	errOut    int
+	values        map[string]int
+	valueExample  map[string]string
+	absent        int
+	absentExample string
+	undefined     int
+	undefExample  string
+	errOut        int
+	errOutExample string
 }
 
 func newAttrDistCollector() *attrDistCollector {
-	return &attrDistCollector{values: map[string]int{}}
+	return &attrDistCollector{
+		values:       map[string]int{},
+		valueExample: map[string]string{},
+	}
 }
 
-// observe records one slot's value of the attribute being tracked.
-func (c *attrDistCollector) observe(v classad.Value) {
+// observe records one slot's view of the attribute being tracked.
+// Distinguishes absent-from-ad from value-undefined by using the
+// classad library's Lookup (structural presence check) on top of
+// EvaluateAttr (value resolution). slotName is the human-readable slot
+// identifier (Name attribute, or Machine fallback) used as the
+// example-slot label; pass "" if the slot has no usable identity.
+func (c *attrDistCollector) observe(ad *classad.ClassAd, attr, slotName string) {
+	if _, ok := ad.Lookup(attr); !ok {
+		c.absent++
+		if c.absentExample == "" {
+			c.absentExample = slotName
+		}
+		return
+	}
+	v := ad.EvaluateAttr(attr)
 	switch {
 	case v.IsUndefined():
 		c.undefined++
+		if c.undefExample == "" {
+			c.undefExample = slotName
+		}
 	case v.IsError():
 		c.errOut++
+		if c.errOutExample == "" {
+			c.errOutExample = slotName
+		}
 	default:
-		c.values[valueDisplay(v)]++
+		s := valueDisplay(v)
+		c.values[s]++
+		if _, seen := c.valueExample[s]; !seen {
+			c.valueExample[s] = slotName
+		}
 	}
 }
 
@@ -384,9 +538,13 @@ func (c *attrDistCollector) observe(v classad.Value) {
 // stability. Anything past topN is folded into a single "(other: N)" entry.
 func (c *attrDistCollector) finalize(attr string, topN int) AttributeDistribution {
 	out := AttributeDistribution{
-		Attribute: attr,
-		Undefined: c.undefined,
-		ErrorOut:  c.errOut,
+		Attribute:        attr,
+		Absent:           c.absent,
+		AbsentExample:    c.absentExample,
+		Undefined:        c.undefined,
+		UndefinedExample: c.undefExample,
+		ErrorOut:         c.errOut,
+		ErrorExample:     c.errOutExample,
 	}
 
 	type kv struct {
@@ -407,19 +565,30 @@ func (c *attrDistCollector) finalize(attr string, topN int) AttributeDistributio
 	if topN <= 0 || len(pairs) <= topN {
 		out.Values = make([]ValueCount, 0, len(pairs))
 		for _, p := range pairs {
-			out.Values = append(out.Values, ValueCount{Value: p.k, Count: p.v})
+			out.Values = append(out.Values, ValueCount{
+				Value:   p.k,
+				Count:   p.v,
+				Example: c.valueExample[p.k],
+			})
 		}
 		return out
 	}
 
 	out.Values = make([]ValueCount, 0, topN+1)
 	for _, p := range pairs[:topN] {
-		out.Values = append(out.Values, ValueCount{Value: p.k, Count: p.v})
+		out.Values = append(out.Values, ValueCount{
+			Value:   p.k,
+			Count:   p.v,
+			Example: c.valueExample[p.k],
+		})
 	}
 	otherCount := 0
 	for _, p := range pairs[topN:] {
 		otherCount += p.v
 	}
+	// "(other: N distinct)" rolls up the long tail. We don't pick a
+	// single example here because no one example fairly represents
+	// many distinct values — leave Example empty rather than mislead.
 	out.Values = append(out.Values, ValueCount{
 		Value: fmt.Sprintf("(other: %d distinct)", len(pairs)-topN),
 		Count: otherCount,

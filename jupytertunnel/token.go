@@ -71,6 +71,7 @@ func mintToken(secret []byte, id [tokenInstanceIDLen]byte, ttl time.Duration) (s
 
 	buf := make([]byte, tokenLen)
 	copy(buf[:tokenInstanceIDLen], id[:])
+	//nolint:gosec // Unix() fits in uint64 for any expires time we'd ever produce.
 	binary.BigEndian.PutUint64(buf[tokenExpiresOff:tokenExpiresOff+tokenExpiresLen], uint64(expires.Unix()))
 	copy(buf[tokenNonceOff:tokenNonceOff+tokenNonceLen], nonce[:])
 
@@ -102,6 +103,7 @@ func parseAndVerify(secret []byte, encoded string, now time.Time) (signedToken, 
 		return signedToken{}, ErrTokenInvalid
 	}
 
+	//nolint:gosec // Round-trip of the value we wrote in newToken; range matches.
 	expiresUnix := int64(binary.BigEndian.Uint64(buf[tokenExpiresOff : tokenExpiresOff+tokenExpiresLen]))
 	expires := time.Unix(expiresUnix, 0)
 	if !now.Before(expires) {

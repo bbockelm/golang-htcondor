@@ -113,6 +113,29 @@ func (p *pingHealth) recordScheddFailure(err error, cls connErrorClass) {
 	p.scheddLastErrCls = cls
 }
 
+// collectorLastSuccess returns the timestamp of the most recent
+// successful collector ping. Zero time if none has succeeded yet.
+// Used by the periodic ping logger to include "how long since
+// things last worked" in failure log lines.
+func (p *pingHealth) collectorLastSuccess() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.collectorLastOK
+}
+
+// scheddLastSuccess is the schedd counterpart of collectorLastSuccess.
+func (p *pingHealth) scheddLastSuccess() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.scheddLastOK
+}
+
 // daemonHealthStatus is the per-daemon view returned to /readyz.
 type daemonHealthStatus struct {
 	Status        string `json:"status"`                    // "ok" | "warning" | "down" | "disabled" | "unknown"

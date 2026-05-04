@@ -35,13 +35,29 @@ func TestGetInputFilesFromJobAd(t *testing.T) {
 			want: []string{"interactive-watchdog.sh"},
 		},
 		{
-			name: "transfer_input_files plus executable",
+			// Cmd is a relative path, so the basename is included
+			// alongside TransferInput entries.
+			name: "transfer_input_files plus relative executable",
 			setup: func(ad *classad.ClassAd) {
-				_ = ad.Set("Cmd", "/usr/bin/jupyter")
+				_ = ad.Set("Cmd", "jupyter-launch.sh")
 				_ = ad.Set("TransferInput", "htcondor-jupyter-helper,jupyter-token")
 				_ = ad.Set("TransferExecutable", true)
 			},
-			want: []string{"htcondor-jupyter-helper", "jupyter", "jupyter-token"},
+			want: []string{"htcondor-jupyter-helper", "jupyter-launch.sh", "jupyter-token"},
+		},
+		{
+			// Absolute Cmd refers to a worker-side system binary
+			// (e.g. /bin/echo), not anything the caller could provide
+			// through their input FS. Even with TransferExecutable=true,
+			// it must not be added to the spool list — otherwise the
+			// FS lookup fails with "file does not exist".
+			name: "absolute executable is excluded even when TransferExecutable=true",
+			setup: func(ad *classad.ClassAd) {
+				_ = ad.Set("Cmd", "/bin/echo")
+				_ = ad.Set("TransferInput", "input1.txt,input2.dat")
+				_ = ad.Set("TransferExecutable", true)
+			},
+			want: []string{"input1.txt", "input2.dat"},
 		},
 		{
 			name: "transfer_executable=false, only TransferInput",
@@ -67,7 +83,7 @@ func TestGetInputFilesFromJobAd(t *testing.T) {
 			// set. Real submit files always set Cmd, but the helper
 			// shouldn't panic if it isn't.
 			name: "transfer_executable=true but no Cmd",
-			setup: func(ad *classad.ClassAd) {
+			setup: func(_ *classad.ClassAd) {
 				// nothing
 			},
 			want: nil,

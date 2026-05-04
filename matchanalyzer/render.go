@@ -53,13 +53,24 @@ func RenderText(r *Result) string {
 		fmt.Fprintf(&b, "      matched=%d  not_matched=%d  undefined=%d  error=%d\n",
 			pr.Matched, pr.NotMatched, pr.Undefined, pr.ErrorOut)
 		if len(pr.SampleMatchedHosts) > 0 {
-			fmt.Fprintf(&b, "      sample matches: %s\n", strings.Join(pr.SampleMatchedHosts, ", "))
+			fmt.Fprintf(&b, "      sample matches:     %s\n", strings.Join(pr.SampleMatchedHosts, ", "))
+		}
+		if len(pr.SampleNotMatchedHosts) > 0 {
+			fmt.Fprintf(&b, "      sample non-matches: %s\n", strings.Join(pr.SampleNotMatchedHosts, ", "))
 		}
 		for _, dist := range pr.AttributeDistributions {
 			fmt.Fprintf(&b, "      %s:", dist.Attribute)
 			parts := make([]string, 0, len(dist.Values))
 			for _, v := range dist.Values {
 				parts = append(parts, fmt.Sprintf(" %s → %d", v.Value, v.Count))
+			}
+			// "absent" (attribute not in ad) and "undefined" (attribute
+			// in ad but resolves to undefined) are reported separately
+			// so the operator can tell which slots are publishing what
+			// — "Arch absent on 12 slots" vs "Arch defined but undefined
+			// on 12 slots" are different problems.
+			if dist.Absent > 0 {
+				parts = append(parts, fmt.Sprintf(" absent → %d", dist.Absent))
 			}
 			if dist.Undefined > 0 {
 				parts = append(parts, fmt.Sprintf(" undefined → %d", dist.Undefined))

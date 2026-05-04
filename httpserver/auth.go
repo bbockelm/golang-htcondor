@@ -71,6 +71,49 @@ func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *s
 	return secConfig, nil
 }
 
+// ConfigureSecurityForCollectorPing builds a SecurityConfig used solely
+// by the periodic collector ping. The collector ping is read-only —
+// we just need *some* mutually agreeable handshake — so this offers
+// both TOKEN and SSL. That's useful when the daemon's token does not
+// match the collector's IssuerKeys (an issuer rotation, a misconfigured
+// TrustDomain, etc.): SSL keeps /readyz green via a path that has
+// nothing to do with JWT signing. The schedd path — which DOES need
+// the token's identity for authz — keeps using TOKEN only.
+//
+// SSL is always offered (even with no client cert/key on disk) because
+// many collectors permit anonymous SSL: the client only verifies the
+// server's cert and connects as ANONYMOUS@…, which is enough for a
+// read-only ping. Cedar's SSL auth handles empty CertFile/KeyFile as
+// "no client cert presented" and empty CAFile as "use the system trust
+// store" — see cedar/security/ssl_auth.go and cmd/ssl-test/main.go.
+//
+// `token` may be empty; in that case only SSL is offered.
+func ConfigureSecurityForCollectorPing(token string) (*security.SecurityConfig, error) {
+	methods := []security.AuthMethod{security.AuthSSL}
+	if token != "" {
+		// TOKEN first so cedar prefers it when both work — token
+		// auth gives us a real identity in the schedd's logs vs.
+		// the anonymous-SSL session.
+		methods = []security.AuthMethod{security.AuthToken, security.AuthSSL}
+	}
+
+	// Best-effort credential lookup. Empty values are fine: cedar
+	// treats them as "no client cert" / "system trust store".
+	certFile, keyFile, caFile, _ := htcondor.LookupSSLClientCredentials()
+
+	return &security.SecurityConfig{
+		AuthMethods:    methods,
+		Authentication: security.SecurityRequired,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		Token:          token,
+		CertFile:       certFile,
+		KeyFile:        keyFile,
+		CAFile:         caFile,
+	}, nil
+}
+
 // GetSecurityConfigFromToken retrieves the token from context and creates a SecurityConfig
 // This is a convenience function for HTTP handlers to convert context token to SecurityConfig
 func GetSecurityConfigFromToken(ctx context.Context) (*security.SecurityConfig, error) {

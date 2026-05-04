@@ -19,6 +19,7 @@ import { useRouter } from 'next/navigation';
 import {
   api,
   ApiError,
+  displayJobStatus,
   type JupyterInstanceSummary,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
@@ -365,6 +366,30 @@ export default function JupyterDetailClient() {
         <MatchAnalysisPanel
           jobID={jobIDForPoll}
           title="Why hasn't this session started?"
+          // jobStatus drives the widget's "Run" button gate (only
+          // 'idle'/'held' enabled). jobQDate drives the "wait a
+          // minute" banner for fresh jobs. Both come from the
+          // backing job ad polled in jobQuery — when it's not loaded
+          // yet (cold start), pass undefined so the widget falls
+          // back to its "allow but no banner" default rather than
+          // misreporting "running".
+          jobStatus={
+            jobQuery.data
+              ? displayJobStatus({
+                  status: jobQuery.data.JobStatus as
+                    | number
+                    | string
+                    | null
+                    | undefined,
+                  holdReasonCode: jobQuery.data.HoldReasonCode as
+                    | number
+                    | string
+                    | null
+                    | undefined,
+                }).key
+              : undefined
+          }
+          jobQDate={numAttr(jobQuery.data?.QDate)}
           helperText={
             status === 'held'
               ? 'The hold reason is shown above. The analysis below explains which slots could in principle match the requirements once the hold is released.'
@@ -432,6 +457,20 @@ function str(v: unknown): string | undefined {
   if (typeof v === 'string') return v;
   if (v == null) return undefined;
   return String(v);
+}
+
+// numAttr coerces a ClassAd attribute value to a number. ClassAd
+// numerics often arrive as strings on the wire; lib/api decodes them
+// permissively, so callers see either type. Returns undefined when
+// the value isn't numeric — the match-analysis panel uses that to
+// suppress the young-job banner rather than misreport.
+function numAttr(v: unknown): number | undefined {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
 }
 
 function Header({

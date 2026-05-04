@@ -44,7 +44,7 @@ import (
 var jupyterUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
-	CheckOrigin: func(r *http.Request) bool {
+	CheckOrigin: func(_ *http.Request) bool {
 		// The tunnel endpoint is bearer-token authenticated; CSRF is not
 		// the relevant threat. We accept any origin so workers behind
 		// proxies don't get rejected by Origin checks.
@@ -487,7 +487,7 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, payload)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, payload)
 			flusher.Flush()
 			if ev.Kind == jupytertunnel.EventClosed {
 				return

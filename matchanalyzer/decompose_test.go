@@ -142,6 +142,26 @@ func TestCollectSlotAttrRefs(t *testing.T) {
 			expr: `"static string" == "another"`,
 			want: nil,
 		},
+		{
+			// Pin the user's reported case: a predicate of the form
+			// `TARGET.X isnt undefined` must surface X in the slot
+			// attribute set so the projection request includes it.
+			// Without this, the collector returns slot ads stripped
+			// of X, every TARGET.X resolves to absent → undefined,
+			// and the predicate reports "not matched" for slots that
+			// actually publish X. Subtle bug, classic symptom.
+			name: "isnt undefined surfaces the attribute",
+			expr: `(TARGET.Arch isnt undefined)`,
+			want: []string{"Arch"},
+		},
+		{
+			// `is undefined` (positive form) must do the same — the
+			// undefined literal lives on the right side of either
+			// op, and the AttributeReference lives on the left.
+			name: "is undefined surfaces the attribute",
+			expr: `(TARGET.GPUCount is undefined)`,
+			want: []string{"GPUCount"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

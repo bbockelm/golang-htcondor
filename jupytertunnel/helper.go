@@ -116,9 +116,14 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	ws, resp, err := dialer.DialContext(dialCtx, cfg.UpstreamURL, header)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("helper: dial upstream: %w (status %s)", err, resp.Status)
+			status := resp.Status
+			_ = resp.Body.Close()
+			return fmt.Errorf("helper: dial upstream: %w (status %s)", err, status)
 		}
 		return fmt.Errorf("helper: dial upstream: %w", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 	logf("helper: connected to %s", cfg.UpstreamURL)
 
@@ -129,7 +134,7 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 		_ = ws.Close()
 		return fmt.Errorf("helper: yamux server: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	// On context cancel, slam the session shut so Accept returns.
 	go func() {
@@ -185,13 +190,16 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 }
 
 func handleStream(stream net.Conn, socketPath string, logf func(string, ...any)) {
-	defer stream.Close()
-	upstream, err := net.Dial("unix", socketPath)
+	defer func() { _ = stream.Close() }()
+	// Local UDS dial — no useful context lifetime to enforce, but the
+	// linter prefers DialContext, so use it with Background.
+	d := &net.Dialer{}
+	upstream, err := d.DialContext(context.Background(), "unix", socketPath)
 	if err != nil {
 		logf("helper: dial UDS %s: %v", socketPath, err)
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	// Copy bytes both ways. The first goroutine to finish (one side closes
 	// the connection) propagates a half-close to the other and we return.

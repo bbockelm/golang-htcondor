@@ -26,6 +26,13 @@ linters:
     - bodyclose     # Checks HTTP response body is closed
     - noctx         # Finds sending http request without context.Context
 
+  # The Next.js frontend lives under ./frontend and pulls a few stray
+  # .go files into node_modules (e.g. flatted's reference Go
+  # implementation). Those aren't ours and shouldn't be linted.
+  exclusions:
+    paths:
+      - frontend
+
 issues:
 
   max-issues-per-linter: 0

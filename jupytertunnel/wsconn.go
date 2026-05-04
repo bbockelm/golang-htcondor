@@ -4,13 +4,13 @@
 //
 // Topology:
 //
-//   browser ─HTTPS─▶ web app ─yamux stream─┐
-//                                          │
-//                          (one persistent ws, opened by the helper outward)
-//                                          │
-//                                          ▼
-//                       worker ─UDS─▶ jupyter lab
-//                       (helper)
+//	browser ─HTTPS─▶ web app ─yamux stream─┐
+//	                                       │
+//	                       (one persistent ws, opened by the helper outward)
+//	                                       │
+//	                                       ▼
+//	                    worker ─UDS─▶ jupyter lab
+//	                    (helper)
 //
 // The helper inside the job opens a single websocket back to the web app and
 // wraps it with hashicorp/yamux. The web app multiplexes browser HTTP
@@ -18,7 +18,6 @@
 // accepts each stream and proxies its bytes to a Unix domain socket where
 // JupyterLab is listening. The UDS scopes the service so other users on the
 // worker host cannot reach it; the websocket is bearer-token authenticated.
-
 package jupytertunnel
 
 import (

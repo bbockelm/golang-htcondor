@@ -9,17 +9,20 @@
 //
 //   - Header line:
 //
-//       NNN (cluster.proc.subproc) <date> <time> <description>\n
+//     NNN (cluster.proc.subproc) <date> <time> <description>\n
 //
 //     where:
-//       * NNN is a 3-digit event-type number (ULogEventNumber, see
-//         the C++ enum). We recognize the well-known ones by name
-//         and pass through any number we don't know.
-//       * <date> is either MM/DD (legacy; year inferred from the
-//         file's mtime — or "now" if we don't have one) or
-//         YYYY-MM-DD (HTCondor 8.9+).
-//       * <time> is HH:MM:SS, optionally with .uuuuuu microseconds
-//         and an optional ±hh:mm offset.
+//
+//   - NNN is a 3-digit event-type number (ULogEventNumber, see
+//     the C++ enum). We recognize the well-known ones by name
+//     and pass through any number we don't know.
+//
+//   - <date> is either MM/DD (legacy; year inferred from the
+//     file's mtime — or "now" if we don't have one) or
+//     YYYY-MM-DD (HTCondor 8.9+).
+//
+//   - <time> is HH:MM:SS, optionally with .uuuuuu microseconds
+//     and an optional ±hh:mm offset.
 //
 //   - Body lines until a line containing only "..." (the canonical
 //     event terminator). Body lines are kept verbatim in Body. We
@@ -33,7 +36,6 @@
 // promoted into top-level struct fields by extractWellKnown. The
 // generic Attributes map and verbatim Body remain on every event so
 // callers can fall back to raw display for anything we missed.
-
 package userlog
 
 import (
@@ -56,6 +58,8 @@ import (
 // EventNumber populated.
 type EventKind string
 
+// EventKind values cover every ULogEventNumber the parser recognizes.
+// Unknown numeric event codes surface as KindUnknown.
 const (
 	KindSubmit             EventKind = "Submit"
 	KindExecute            EventKind = "Execute"

@@ -100,15 +100,6 @@ type Handler struct {
 	jupyterRegistry   *jupytertunnel.Registry
 	jupyterRegistryMu sync.Mutex
 
-	// jupyterHelperPath is the on-disk path of the htcondor-jupyter-helper
-	// binary the submit handler ships to JupyterLab workers via
-	// transfer_input_files. Populated lazily on first /jupyter use by
-	// materializing the embedded bytes from package jupyterhelperbin into
-	// jupyterWorkDir; empty if the binary wasn't built with
-	// -tags embed_jupyter_helper.
-	jupyterHelperPath   string
-	jupyterHelperPathMu sync.Mutex
-
 	// jupyterWorkDir is where the materialized helper binary plus
 	// per-instance scratch artifacts (token files, launch scripts) are
 	// staged. Files persist for the lifetime of the job since HTCondor
@@ -1057,15 +1048,40 @@ func (h *Handler) performPeriodicPing() {
 		}
 	}
 
-	// Ping collector if configured
+	// Ping collector if configured. The collector ping is read-only
+	// — we don't need the token's identity, just any handshake the
+	// server accepts — so we override the SecurityConfig on a
+	// per-call ctx with one that also offers SSL when local SSL
+	// credentials are configured. This keeps /readyz green when the
+	// daemon's token doesn't match the collector's IssuerKeys
+	// (issuer rotation, TrustDomain misconfig, …) but the host has
+	// SSL credentials the collector trusts.
 	if h.collector != nil {
 		h.pingHealth.markCollectorEnabled()
-		_, err := h.collector.Ping(ctx)
+
+		collectorCtx := ctx
+		collectorSecForLog := secConfigForLog
+		if pingSec, perr := ConfigureSecurityForCollectorPing(h.token); perr == nil {
+			collectorCtx = htcondor.WithSecurityConfig(ctx, pingSec)
+			collectorSecForLog = pingSec
+		}
+
+		_, err := h.collector.Ping(collectorCtx)
 		if err != nil {
 			diag := classifyConnectionError(h.collectorAddress(), err)
 			fields := []any{
 				"error", err,
 				"error_class", diag.Class,
+			}
+			// Surface "when did this last work?" — the operator's
+			// first question on every paging incident.
+			if last := h.pingHealth.collectorLastSuccess(); !last.IsZero() {
+				fields = append(fields,
+					"last_success_at", last.UTC().Format(time.RFC3339),
+					"last_success_ago", time.Since(last).Truncate(time.Second).String(),
+				)
+			} else {
+				fields = append(fields, "last_success_at", "never")
 			}
 			if diag.Hint != "" {
 				fields = append(fields, "hint", diag.Hint)
@@ -1073,7 +1089,7 @@ func (h *Handler) performPeriodicPing() {
 			// On no-compatible-auth, surface what *we* asked for. Cedar's
 			// own logs already cover the server's offered methods.
 			if diag.Class == connErrorNoCompatibleAuth {
-				fields = append(fields, summarizeAuthMethods(secConfigForLog)...)
+				fields = append(fields, summarizeAuthMethods(collectorSecForLog)...)
 			}
 			h.logger.Warn(logging.DestinationHTTP, "Periodic collector ping failed", fields...)
 			h.pingHealth.recordCollectorFailure(err, diag.Class)
@@ -1096,6 +1112,14 @@ func (h *Handler) performPeriodicPing() {
 			"schedd_address", scheddAddr,
 			"address_age", sinceSet.Truncate(time.Second).String(),
 			"address_last_confirmed_ago", sinceConfirmed.Truncate(time.Second).String(),
+		}
+		if last := h.pingHealth.scheddLastSuccess(); !last.IsZero() {
+			fields = append(fields,
+				"last_success_at", last.UTC().Format(time.RFC3339),
+				"last_success_ago", time.Since(last).Truncate(time.Second).String(),
+			)
+		} else {
+			fields = append(fields, "last_success_at", "never")
 		}
 		if diag.SharedPort != "" {
 			fields = append(fields, "shared_port_id", diag.SharedPort)

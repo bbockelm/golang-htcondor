@@ -148,18 +148,91 @@ type PredicateResult struct {
 	Undefined  int `json:"undefined"`
 	ErrorOut   int `json:"error"`
 
-	// SampleMatchedHosts is a small set of slots that satisfied this
-	// predicate in isolation. Populated up to a configurable cap; useful
-	// for spot-checking that a predicate is doing what the user thinks it
-	// is doing.
-	SampleMatchedHosts []string `json:"sample_matched_hosts,omitempty"`
+	// SampleMatchedHosts / SampleNotMatchedHosts are small sets of slots
+	// that satisfied / failed this predicate in isolation. Populated up
+	// to a configurable cap. The matched samples answer "what does a
+	// passing slot look like?", the not-matched samples answer "where
+	// can I look to see why this is failing?" — both are useful and the
+	// widget exposes them as separate dropdowns.
+	SampleMatchedHosts    []string `json:"sample_matched_hosts,omitempty"`
+	SampleNotMatchedHosts []string `json:"sample_not_matched_hosts,omitempty"`
+
+	// NarrowingScore is the count of slots that fail THIS predicate but
+	// pass every other predicate. Equivalently: the number of additional
+	// matches you'd gain by removing this predicate. The widget sorts
+	// predicates by this value descending so the operator sees the
+	// most-impactful predicates first; predicates with score 0 are
+	// effectively no-ops for matching and get hidden behind a
+	// "show more" gate by default.
+	NarrowingScore int `json:"narrowing_score"`
 
 	// AttributeDistributions is a per-slot-attribute histogram of values,
 	// computed for each slot attribute this predicate references. The
 	// purpose is the canonical -better-analyze output: "Arch was Linux for
 	// 943 slots and OSX for 0". Each entry covers one attribute the
 	// predicate referenced.
+	//
+	// Only attributes that bind-resolve to the slot side (TARGET.x) are
+	// included. Bare references that resolve to the job (e.g., MY.RequestMemory)
+	// are excluded — reporting "RequestMemory absent on every slot" is
+	// noise, not signal, since the value lives on the job ad and the
+	// operator can read it directly there.
 	AttributeDistributions []AttributeDistribution `json:"attribute_distributions,omitempty"`
+
+	// ResourceSuggestion, when non-nil, replaces the generic
+	// "removing this predicate would gain N matches" hint with a
+	// concrete actionable recommendation: lower the job's Request*
+	// attribute to a specific value to unlock more slots.
+	//
+	// Only populated for narrowing predicates (NarrowingScore > 0)
+	// whose shape matches `TARGET.X op MY.Request*` with a
+	// numeric-comparison operator. Other narrowing predicates (e.g.,
+	// `TARGET.Arch == "Linux"`) have nil here and the UI falls back
+	// to the generic hint.
+	ResourceSuggestion *ResourceSuggestion `json:"resource_suggestion,omitempty"`
+}
+
+// ResourceSuggestion describes how to relax a Request* attribute to
+// unlock more slots. Designed for direct operator consumption: the
+// widget reads it and renders "lowering RequestMemory from 8192 to
+// 4096 would unlock 12 more slots" without needing to interpret the
+// AST shape itself.
+type ResourceSuggestion struct {
+	// JobAttribute is the Request* attribute name (e.g., "RequestMemory").
+	JobAttribute string `json:"job_attribute"`
+
+	// SlotAttribute is the matching slot-side attribute name (e.g.,
+	// "Memory") that the predicate compared against.
+	SlotAttribute string `json:"slot_attribute"`
+
+	// CurrentValue is the job's current value for JobAttribute,
+	// rendered in display form (e.g., "8192"). Empty if the value
+	// couldn't be resolved (rare; usually means the job ad lacks
+	// the attribute and the predicate would be undefined anyway).
+	CurrentValue string `json:"current_value,omitempty"`
+
+	// Operator is the comparison operator from the predicate (">=",
+	// "==", etc.). Surfaced so the UI can phrase the suggestion in
+	// the right direction ("lower" for >=, "match" for ==).
+	Operator string `json:"operator"`
+
+	// Options is a list of concrete suggested values, ordered by
+	// closest-to-current first. Each option says "if you set
+	// JobAttribute to NewValue, you'd unlock AdditionalMatches more
+	// slots". Capped to a small number to keep the suggestion
+	// scannable; the chosen options span useful tiers (e.g., the
+	// next-most-common slot value below the current request, the
+	// median, the minimum).
+	Options []ResourceSuggestionOption `json:"options"`
+}
+
+// ResourceSuggestionOption is one tier in the suggestion. Three to
+// five options is the sweet spot — enough to show tradeoffs (small
+// reduction → small unlock vs large reduction → large unlock) without
+// overwhelming the widget.
+type ResourceSuggestionOption struct {
+	NewValue          string `json:"new_value"`
+	AdditionalMatches int    `json:"additional_matches"`
 }
 
 // AttributeDistribution is a value histogram for one slot attribute.
@@ -171,14 +244,40 @@ type AttributeDistribution struct {
 	// Capped to a small number for display; remainder folded into "Other".
 	Values []ValueCount `json:"values"`
 
-	// Undefined / ErrorOut count slots where the attribute was undefined
-	// or evaluated to an error (e.g., not present in the ad).
+	// Absent counts slots whose ad does not include this attribute at
+	// all (slot.Lookup returns not-found). This is the "missing from
+	// the ad" diagnostic — most useful for `X isnt undefined` style
+	// predicates where the operator wants to know whether the slot is
+	// publishing the attribute they expect.
+	Absent int `json:"absent,omitempty"`
+
+	// Undefined counts slots whose ad DOES include the attribute, but
+	// its value evaluates to undefined (e.g., `Arch = NotPublished`).
+	// Distinct from Absent: this is the "looks defined but isn't"
+	// case that often confuses operators reading raw ads.
 	Undefined int `json:"undefined,omitempty"`
-	ErrorOut  int `json:"error,omitempty"`
+
+	// ErrorOut counts slots where evaluating the attribute produced a
+	// type error (rare in well-formed ads, common with malformed
+	// expressions referencing the wrong types).
+	ErrorOut int `json:"error,omitempty"`
+
+	// {Absent,Undefined,Error}Example: name of one slot in each bucket.
+	// Same purpose as ValueCount.Example — lets the operator pivot
+	// from the diagnostic to a representative slot for inspection.
+	AbsentExample    string `json:"absent_example,omitempty"`
+	UndefinedExample string `json:"undefined_example,omitempty"`
+	ErrorExample     string `json:"error_example,omitempty"`
 }
 
 // ValueCount is one entry in an AttributeDistribution.
 type ValueCount struct {
 	Value string `json:"value"`
 	Count int    `json:"count"`
+	// Example is the name of one slot that has this value for the
+	// attribute. Lets the operator click through from the histogram
+	// directly to a representative slot — "you said 50 slots have
+	// Memory=2048; tell me which ones". Empty if no slot identity is
+	// available (e.g., slot ad lacks Name and Machine).
+	Example string `json:"example,omitempty"`
 }

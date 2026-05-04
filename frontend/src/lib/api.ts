@@ -323,15 +323,45 @@ export interface MatchAnalysisPredicate {
   // Go field name is `error` (json: "error"); we use error_count in TS
   // so we don't shadow the global Error constructor.
   error: number;
+  // narrowing_score: how many slots this predicate (alone) is keeping
+  // out of the match set — i.e., the additional matches the operator
+  // would gain by removing this predicate. The widget sorts by this
+  // descending so the highest-impact predicates appear first.
+  narrowing_score: number;
   sample_matched_hosts?: string[];
+  sample_not_matched_hosts?: string[];
   attribute_distributions?: MatchAnalysisAttributeDistribution[];
+  // resource_suggestion is populated for narrowing predicates of the
+  // form `TARGET.X op MY.Request*` — the analyzer turns the raw
+  // expression into a concrete "lower RequestMemory to 4096 to unlock
+  // 12 slots" hint that operators can act on directly.
+  resource_suggestion?: MatchAnalysisResourceSuggestion;
+}
+
+export interface MatchAnalysisResourceSuggestion {
+  job_attribute: string;   // e.g., "RequestMemory"
+  slot_attribute: string;  // e.g., "Memory"
+  current_value?: string;  // e.g., "8192" — current value of job_attribute
+  operator: string;        // e.g., ">="
+  options: { new_value: string; additional_matches: number }[];
 }
 
 export interface MatchAnalysisAttributeDistribution {
   attribute: string;
-  values: { value: string; count: number }[];
+  values: { value: string; count: number; example?: string }[];
+  // absent: slot ad doesn't contain this attribute at all (Lookup miss).
+  // undefined: ad has the attribute but the value resolves to undefined.
+  // Distinguishing them helps operators understand "but I see it in the
+  // ad!" surprises — `Arch = NotPublished` looks defined structurally
+  // but evaluates to undefined.
+  absent?: number;
   undefined?: number;
   error?: number;
+  // *_example: name of one slot in each non-value bucket, for
+  // click-through to a representative slot.
+  absent_example?: string;
+  undefined_example?: string;
+  error_example?: string;
 }
 
 export interface AdminClient {

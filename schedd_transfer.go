@@ -1170,8 +1170,12 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	}
 
 	// Also include the executable if TransferExecutable is true (the default)
-	// This is needed because the Cmd attribute contains the executable path
-	// and it must be spooled along with TransferInput
+	// AND Cmd is a relative path. Absolute paths refer to the worker's
+	// filesystem (e.g. "/bin/echo"), not the caller's input FS, so we'd
+	// have nothing meaningful to spool — and the caller's FS lookup of the
+	// basename would fail with "file does not exist". This matches
+	// condor_submit's actual behavior, which only writes TransferExecutable
+	// to the ad when the user explicitly sets transfer_executable.
 	transferExe := true // default is true
 	if expr, ok := ad.Lookup("TransferExecutable"); ok {
 		val := expr.Eval(nil)
@@ -1182,10 +1186,8 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	if transferExe {
 		if expr, ok := ad.Lookup("Cmd"); ok {
 			val := expr.Eval(nil)
-			if cmd, err := val.StringValue(); err == nil && cmd != "" {
-				// Extract just the filename from the path
-				exeFilename := path.Base(cmd)
-				inputFileSet[exeFilename] = true
+			if cmd, err := val.StringValue(); err == nil && cmd != "" && !path.IsAbs(cmd) {
+				inputFileSet[path.Base(cmd)] = true
 			}
 		}
 	}

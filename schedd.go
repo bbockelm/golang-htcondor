@@ -451,7 +451,7 @@ func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
 	// "unset", because passing "*" through literally would have the
 	// schedd hunt for an attribute named "*" and return only ServerTime.
 	if opts != nil && len(opts.Projection) > 0 &&
-		!(len(opts.Projection) == 1 && opts.Projection[0] == "*") {
+		(len(opts.Projection) != 1 || opts.Projection[0] != "*") {
 		projectionStr := strings.Join(opts.Projection, ",")
 		_ = ad.Set("Projection", projectionStr)
 	}

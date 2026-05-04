@@ -18,23 +18,23 @@ import (
 // Returns 503 when WebUIAdminGroup is unset — the admin UI is opt-in via
 // configuration; treating "no group configured" as 403 would be more
 // confusing than helpful.
-func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (*SessionData, bool) {
+func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.webuiAdminGroup == "" {
 		s.writeError(w, http.StatusServiceUnavailable,
 			"Admin UI is disabled. Set HTTP_API_WEBUI_ADMIN_GROUP to enable.")
-		return nil, false
+		return false
 	}
 	session, ok := s.getSessionFromRequest(r)
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
-		return nil, false
+		return false
 	}
 	if !hasGroup(session.Groups, s.webuiAdminGroup) {
 		s.writeError(w, http.StatusForbidden,
 			fmt.Sprintf("Admin access requires membership in group %q", s.webuiAdminGroup))
-		return nil, false
+		return false
 	}
-	return session, true
+	return true
 }
 
 // AdminClient is the SPA-facing shape for an OAuth2 client. We mirror
@@ -72,7 +72,7 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	if s.oauth2Provider == nil {
@@ -120,7 +120,7 @@ func (s *Handler) handleAdminDeleteClient(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	clientID := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/oauth2/clients/")
@@ -145,8 +145,9 @@ func (s *Handler) handleAdminDeleteClient(w http.ResponseWriter, r *http.Request
 		"oauth2_pkce_requests",
 		"oauth2_device_codes",
 	} {
+		// gosec G202: table is from a fixed allowlist above, not user input.
 		if _, err := db.ExecContext(r.Context(),
-			"DELETE FROM "+table+" WHERE client_id = ?", clientID); err != nil {
+			"DELETE FROM "+table+" WHERE client_id = ?", clientID); err != nil { //nolint:gosec
 			s.logger.Warn(logging.DestinationHTTP, "Failed to clean up tokens for client",
 				"table", table, "client_id", clientID, "error", err)
 		}
@@ -180,7 +181,7 @@ func (s *Handler) handleAdminListTokens(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	if s.oauth2Provider == nil {
@@ -234,6 +235,9 @@ func queryTokenTable(
 	r *http.Request, db *sql.DB, table, kind, clientFilter string,
 	activeOnly bool, limit int, logger *logging.Logger,
 ) []AdminToken {
+	// gosec G202: table is selected by the caller from a fixed allowlist
+	// (oauth2_access_tokens / oauth2_refresh_tokens), not from user input.
+	//nolint:gosec
 	q := "SELECT signature, client_id, subject, scopes, active, requested_at, expires_at FROM " + table
 	args := []any{}
 	conds := []string{}
@@ -304,7 +308,7 @@ func (s *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if !s.requireAdmin(w, r) {
 		return
 	}
 

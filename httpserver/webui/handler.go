@@ -17,7 +17,7 @@ import (
 func NewSPAHandler() http.Handler {
 	fsys, _ := DistFS()
 	if fsys == nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "Frontend not embedded in this build", http.StatusNotFound)
 		})
 	}
@@ -85,11 +85,12 @@ func resolveDynamicRoute(fsys fs.FS, urlPath string) string {
 		literalDir := strings.Join(append(resolved, seg), "/")
 		wildcardDir := strings.Join(append(resolved, "_"), "/")
 
-		if dirExists(fsys, literalDir) {
+		switch {
+		case dirExists(fsys, literalDir):
 			resolved = append(resolved, seg)
-		} else if dirExists(fsys, wildcardDir) {
+		case dirExists(fsys, wildcardDir):
 			resolved = append(resolved, "_")
-		} else {
+		default:
 			return ""
 		}
 	}

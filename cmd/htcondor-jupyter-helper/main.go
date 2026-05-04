@@ -1,17 +1,17 @@
-// htcondor-jupyter-helper is the worker-side counterpart of the JupyterLab
-// reverse-tunnel feature in golang-htcondor. It runs *inside* the HTCondor
-// job sandbox (Docker universe) and:
+// Command htcondor-jupyter-helper is the worker-side counterpart of the
+// JupyterLab reverse-tunnel feature in golang-htcondor. It runs *inside*
+// the HTCondor job sandbox (Docker universe) and:
 //
-//   1. Reads a one-shot bearer token from a file (then unlink()'s the file
-//      so subsequent processes in the sandbox cannot read it).
-//   2. Optionally daemonizes (double-fork via re-exec) so it can be invoked
-//      as a PreCmd that returns immediately while the actual tunnel keeps
-//      running in the background.
-//   3. Dials the web app's tunnel endpoint over a websocket, presenting
-//      the bearer token in an Authorization header.
-//   4. Wraps the websocket with hashicorp/yamux as the *server* side and
-//      accepts streams. Each stream is forwarded to a local Unix domain
-//      socket where JupyterLab is listening.
+//  1. Reads a one-shot bearer token from a file (then unlink()'s the file
+//     so subsequent processes in the sandbox cannot read it).
+//  2. Optionally daemonizes (double-fork via re-exec) so it can be invoked
+//     as a PreCmd that returns immediately while the actual tunnel keeps
+//     running in the background.
+//  3. Dials the web app's tunnel endpoint over a websocket, presenting
+//     the bearer token in an Authorization header.
+//  4. Wraps the websocket with hashicorp/yamux as the *server* side and
+//     accepts streams. Each stream is forwarded to a local Unix domain
+//     socket where JupyterLab is listening.
 //
 // Daemonization design: when invoked with --daemonize and the magic env var
 // _HTCONDOR_JUPYTER_DAEMON_STAGE2 is *not* set, we are in stage 1. Stage 1
@@ -20,7 +20,6 @@
 // log file in the sandbox, sets a new session leader (Setsid: true), and
 // exits 0. Stage 2 reads the token from env, unsets the env var, and runs
 // the tunnel in the foreground until killed.
-
 package main
 
 import (
@@ -45,7 +44,8 @@ import (
 )
 
 const (
-	envDaemonStage2   = "_HTCONDOR_JUPYTER_DAEMON_STAGE2"
+	envDaemonStage2 = "_HTCONDOR_JUPYTER_DAEMON_STAGE2"
+	//nolint:gosec // env var name, not a literal credential
 	envDaemonToken    = "_HTCONDOR_JUPYTER_TOKEN"
 	envDaemonCABundle = "_HTCONDOR_JUPYTER_CA_BUNDLE_B64"
 )
@@ -210,17 +210,18 @@ func runStage1(upstream, tokenFile, socketPath, logFile string, insecure bool, c
 	if logFile == "" {
 		logFile = filepath.Join(filepath.Dir(socketPath), "jupyter-helper.log")
 	}
-	logFD, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	logFD, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // logFile is operator-controlled
 	if err != nil {
 		log.Fatalf("open log file %s: %v", logFile, err)
 	}
-	defer logFD.Close()
+	defer func() { _ = logFD.Close() }()
 
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		log.Fatalf("open /dev/null: %v", err)
+		_ = logFD.Close()
+		log.Fatalf("open /dev/null: %v", err) //nolint:gocritic // logFD already closed above
 	}
-	defer devNull.Close()
+	defer func() { _ = devNull.Close() }()
 
 	env := append(os.Environ(),
 		envDaemonStage2+"=1",
@@ -273,7 +274,7 @@ func verifyUpstreamTLS(upstream string, caBytes []byte, insecure bool) error {
 	}
 	host := u.Host
 	if !strings.Contains(host, ":") {
-		host = host + ":443"
+		host += ":443"
 	}
 
 	var pool *x509.CertPool
@@ -288,8 +289,10 @@ func verifyUpstreamTLS(upstream string, caBytes []byte, insecure bool) error {
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         strings.Split(host, ":")[0],
 	}
-	d := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := tls.DialWithDialer(d, "tcp", host, cfg)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dialCancel()
+	d := &tls.Dialer{NetDialer: &net.Dialer{}, Config: cfg}
+	conn, err := d.DialContext(dialCtx, "tcp", host)
 	if err != nil {
 		return err
 	}
@@ -330,7 +333,8 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 	if len(caBytes) > 0 {
 		rootCAs = x509.NewCertPool()
 		if !rootCAs.AppendCertsFromPEM(caBytes) {
-			log.Fatalf("CA bundle contains no usable PEM certificates")
+			cancel()
+			log.Fatalf("CA bundle contains no usable PEM certificates") //nolint:gocritic // cancel() called above
 		}
 		log.Printf("trusting %d-byte CA bundle from stage 1", len(caBytes))
 	}

@@ -329,8 +329,8 @@ func (s *Schedd) OpenJobShell(ctx context.Context, clusterID, procID int, opts *
 // returns one of the transient "retry_is_sensible" errors documented at
 // schedd.cpp:18241/18224. Other failures (e.g. permission, malformed reply)
 // short-circuit immediately.
-func getJobConnectInfoWithBackoff(ctx context.Context, s *Schedd, clusterID, procID int, max time.Duration) (*JobConnectInfo, error) {
-	deadline := time.Now().Add(max)
+func getJobConnectInfoWithBackoff(ctx context.Context, s *Schedd, clusterID, procID int, maxWait time.Duration) (*JobConnectInfo, error) {
+	deadline := time.Now().Add(maxWait)
 	var lastErr error
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -539,7 +539,7 @@ func decodeCondorBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(stripped)
 }
 
-// jobIDFromString parses "cluster.proc" into a (cluster, proc) pair.
+// ParseJobID parses "cluster.proc" into a (cluster, proc) pair.
 // Used by httpserver routes; lives here so it has a single owner.
 func ParseJobID(s string) (int, int, error) {
 	dot := strings.IndexByte(s, '.')

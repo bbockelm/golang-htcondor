@@ -123,11 +123,11 @@ type Event struct {
 // already fired. Cap is the per-subscriber channel buffer; events past the
 // buffer are silently dropped for that subscriber. The caller must call the
 // returned cancel function to unsubscribe; otherwise the channel leaks.
-func (i *Instance) Subscribe(cap int) (<-chan Event, func()) {
-	if cap <= 0 {
-		cap = 16
+func (i *Instance) Subscribe(bufSize int) (<-chan Event, func()) {
+	if bufSize <= 0 {
+		bufSize = 16
 	}
-	ch := make(chan Event, cap)
+	ch := make(chan Event, bufSize)
 
 	i.subscribersMu.Lock()
 	if i.subscribers == nil {

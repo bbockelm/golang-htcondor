@@ -45,6 +45,33 @@ func getDefaultConfig() *config.Config {
 	return cfg
 }
 
+// LookupSSLClientCredentials reads the AUTH_SSL_CLIENT_CERTFILE,
+// AUTH_SSL_CLIENT_KEYFILE, and AUTH_SSL_CLIENT_CAFILE settings from the
+// global HTCondor configuration. Returns ok=true only when both cert
+// and key paths are configured (CA may legitimately be empty when the
+// system trust store is used).
+//
+// Intended for callers that want to add SSL as a secondary auth method
+// to a hand-built SecurityConfig without going through the full
+// GetSecurityConfig path (which only loads SSL credentials when the
+// configured AuthenticationMethods list already names SSL).
+func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
+	cfg := getDefaultConfig()
+	if cfg == nil {
+		return "", "", "", false
+	}
+	if v, found := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); found {
+		certFile = v
+	}
+	if v, found := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); found {
+		keyFile = v
+	}
+	if v, found := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); found {
+		caFile = v
+	}
+	return certFile, keyFile, caFile, certFile != "" && keyFile != ""
+}
+
 // ReloadDefaultConfig reloads the global default HTCondor configuration.
 // This is useful when configuration files change and need to be re-read.
 // If loading fails, the global config is set to nil.

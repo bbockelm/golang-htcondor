@@ -7,21 +7,21 @@
 // Sources, in order of precedence at the API layer:
 //
 //  1. User templates    — saved via POST /api/v1/templates; persisted
-//                         to a SQL database keyed on (owner, id) so
-//                         two users can have a template with the same
-//                         id and never see each other's library.
+//     to a SQL database keyed on (owner, id) so
+//     two users can have a template with the same
+//     id and never see each other's library.
 //  2. Global templates  — loaded once from a YAML file path the
-//                         operator points at via config.
+//     operator points at via config.
 //  3. Built-in templates — embedded in the binary (this package's
-//                         builtin.yaml). Always available.
+//     builtin.yaml). Always available.
 //
 // The Library merges all three and exposes them through a single
 // thread-safe API. Built-in and global templates are read-only; user
 // templates can be created and deleted, scoped to the calling user.
-
 package templates
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
@@ -46,6 +46,7 @@ var builtinYAML []byte
 // reject Save and Delete.
 type Source string
 
+// Source values: where a Template came from.
 const (
 	SourceBuiltin Source = "builtin"
 	SourceGlobal  Source = "global"
@@ -169,7 +170,7 @@ func loadBuiltin() ([]Template, error) {
 }
 
 func loadYAMLFile(path string) ([]Template, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled config
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +382,8 @@ func newSQLUserTemplateStore(path string) (*sqlUserTemplateStore, error) {
 }
 
 func (s *sqlUserTemplateStore) createTables() error {
-	_, err := s.db.Exec(`
+	ctx := context.Background()
+	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS templates_user (
 			owner       TEXT      NOT NULL,
 			id          TEXT      NOT NULL,
@@ -400,7 +402,7 @@ func (s *sqlUserTemplateStore) createTables() error {
 	// Index on owner alone for fast LoadAll-by-user queries. The
 	// (owner, id) primary key already covers point lookups, but the
 	// index helps when scanning all rows for a single owner.
-	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS templates_user_owner ON templates_user(owner);`)
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS templates_user_owner ON templates_user(owner);`)
 	if err != nil {
 		return fmt.Errorf("create index: %w", err)
 	}
@@ -415,7 +417,7 @@ func (s *sqlUserTemplateStore) Close() error {
 }
 
 func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(context.Background(), `
 		SELECT id, name, description, columns_csv, contents
 		  FROM templates_user
 		 WHERE owner = ?
@@ -423,7 +425,7 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Template
 	for rows.Next() {
@@ -443,7 +445,7 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 func (s *sqlUserTemplateStore) Get(id, owner string) (Template, bool, error) {
 	var t Template
 	var colsCSV string
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(context.Background(), `
 		SELECT id, name, description, columns_csv, contents
 		  FROM templates_user
 		 WHERE owner = ? AND id = ?`, owner, id).
@@ -465,7 +467,7 @@ func (s *sqlUserTemplateStore) Save(t Template) error {
 	cols := packColumns(t.Columns)
 	// UPSERT: SQLite (>=3.24) and Postgres both speak ON CONFLICT.
 	// glebarez/sqlite tracks a recent SQLite version so we're fine.
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO templates_user
 			(owner, id, name, description, columns_csv, contents, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -480,7 +482,7 @@ func (s *sqlUserTemplateStore) Save(t Template) error {
 }
 
 func (s *sqlUserTemplateStore) Delete(id, owner string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM templates_user WHERE owner = ? AND id = ?`, owner, id)
+	res, err := s.db.ExecContext(context.Background(), `DELETE FROM templates_user WHERE owner = ? AND id = ?`, owner, id)
 	if err != nil {
 		return false, err
 	}

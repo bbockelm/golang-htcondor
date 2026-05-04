@@ -40,11 +40,12 @@ func TestEndToEnd(t *testing.T) {
 
 	tmp := t.TempDir()
 	sockPath := filepath.Join(tmp, "u.sock")
-	listener, err := net.Listen("unix", sockPath)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	udsServer := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +74,7 @@ func TestEndToEnd(t *testing.T) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { _ = udsServer.Serve(listener) }()
-	defer udsServer.Close()
+	defer func() { _ = udsServer.Close() }()
 
 	// --- Step 2: registry + webapp-side test server -------------------------
 
@@ -163,14 +164,31 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("helper never registered")
 	}
 
+	ctx := context.Background()
+	doGet := func(u string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		return http.DefaultClient.Do(req)
+	}
+	doPost := func(u, ct string, body io.Reader) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", ct)
+		return http.DefaultClient.Do(req)
+	}
+
 	// (a) Simple round-trip.
 	{
-		resp, err := http.Get(srv.URL + "/proxy/" + instID + "/echo")
+		resp, err := doGet(srv.URL + "/proxy/" + instID + "/echo")
 		if err != nil {
 			t.Fatalf("GET /echo: %v", err)
 		}
-		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		if resp.StatusCode != 200 {
 			t.Fatalf("echo: status %d, body %q", resp.StatusCode, body)
 		}
@@ -183,13 +201,13 @@ func TestEndToEnd(t *testing.T) {
 
 	// (b) POST with body.
 	{
-		resp, err := http.Post(srv.URL+"/proxy/"+instID+"/echo",
+		resp, err := doPost(srv.URL+"/proxy/"+instID+"/echo",
 			"text/plain", strings.NewReader("hello, jupyter"))
 		if err != nil {
 			t.Fatalf("POST /echo: %v", err)
 		}
-		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		if resp.StatusCode != 200 || !strings.Contains(string(body), `body="hello, jupyter"`) {
 			t.Errorf("echo POST: status=%d body=%s", resp.StatusCode, body)
 		}
@@ -197,12 +215,12 @@ func TestEndToEnd(t *testing.T) {
 
 	// (c) Big response (multi-frame, exercises yamux flow control).
 	{
-		resp, err := http.Get(srv.URL + "/proxy/" + instID + "/big")
+		resp, err := doGet(srv.URL + "/proxy/" + instID + "/big")
 		if err != nil {
 			t.Fatalf("GET /big: %v", err)
 		}
-		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		if resp.StatusCode != 200 {
 			t.Fatalf("big: status %d", resp.StatusCode)
 		}
@@ -220,13 +238,13 @@ func TestEndToEnd(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				resp, err := http.Get(srv.URL + "/proxy/" + instID + "/echo")
+				resp, err := doGet(srv.URL + "/proxy/" + instID + "/echo")
 				if err != nil {
 					errs <- err
 					return
 				}
-				defer resp.Body.Close()
 				_, _ = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
 				if resp.StatusCode != 200 {
 					errs <- fmt.Errorf("worker %d: status %d", i, resp.StatusCode)
 				}
@@ -288,11 +306,12 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 
 	tmp := t.TempDir()
 	sockPath := filepath.Join(tmp, "u.sock")
-	listener, err := net.Listen("unix", sockPath)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	udsUpgrader := websocket.Upgrader{
 		// Helper dials with arbitrary host; accept anything.
@@ -316,7 +335,7 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer ws.Close()
+			defer func() { _ = ws.Close() }()
 			// Echo a single text frame back.
 			mt, msg, err := ws.ReadMessage()
 			if err != nil {
@@ -327,7 +346,7 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { _ = udsServer.Serve(listener) }()
-	defer udsServer.Close()
+	defer func() { _ = udsServer.Close() }()
 
 	// --- Step 2: registry + webapp-side test server -------------------
 
@@ -427,10 +446,14 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 		status := -1
 		if resp != nil {
 			status = resp.StatusCode
+			_ = resp.Body.Close()
 		}
 		t.Fatalf("websocket dial through proxy failed: %v (resp status %d)", err, status)
 	}
-	defer wsClient.Close()
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	defer func() { _ = wsClient.Close() }()
 
 	// Echo round-trip.
 	const want = "hello via proxy"
@@ -485,14 +508,20 @@ func TestTokenSingleUse(t *testing.T) {
 	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
 
 	// First redemption should succeed.
-	dialOnce := func() (*http.Response, error) {
+	dialOnce := func() error {
 		u, _ := url.Parse(wsURL)
 		hdr := http.Header{}
 		hdr.Set("Authorization", "Bearer "+tok)
-		_, resp, err := websocket.DefaultDialer.Dial(u.String(), hdr)
-		return resp, err
+		ws, resp, err := websocket.DefaultDialer.Dial(u.String(), hdr)
+		if ws != nil {
+			_ = ws.Close()
+		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return err
 	}
-	if _, err := dialOnce(); err != nil && !errors.Is(err, websocket.ErrBadHandshake) {
+	if err := dialOnce(); err != nil && !errors.Is(err, websocket.ErrBadHandshake) {
 		// websocket.ErrBadHandshake covers "instance already closed" race;
 		// either way the first attempt did burn the nonce.
 		t.Logf("first dial returned: %v", err)
