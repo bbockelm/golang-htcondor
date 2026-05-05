@@ -87,8 +87,14 @@ func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *s
 // "no client cert presented" and empty CAFile as "use the system trust
 // store" — see cedar/security/ssl_auth.go and cmd/ssl-test/main.go.
 //
+// serverName is used by cedar's SSL handshake for hostname/SAN
+// verification. Without it, cedar falls back to the literal string
+// "unknown" and verification fails ("certificate is valid for
+// host.example.com, ..., not unknown"). Pass the bare hostname of the
+// collector address — see hostFromCondorAddress in handler.go.
+//
 // `token` may be empty; in that case only SSL is offered.
-func ConfigureSecurityForCollectorPing(token string) (*security.SecurityConfig, error) {
+func ConfigureSecurityForCollectorPing(token, serverName string) (*security.SecurityConfig, error) {
 	methods := []security.AuthMethod{security.AuthSSL}
 	if token != "" {
 		// TOKEN first so cedar prefers it when both work — token
@@ -111,6 +117,7 @@ func ConfigureSecurityForCollectorPing(token string) (*security.SecurityConfig, 
 		CertFile:       certFile,
 		KeyFile:        keyFile,
 		CAFile:         caFile,
+		ServerName:     serverName,
 	}, nil
 }
 

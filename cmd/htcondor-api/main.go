@@ -28,6 +28,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/sharedport"
 )
 
 var (
@@ -950,16 +951,69 @@ func runNormalMode() error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start server in goroutine
+	// Daemon mode: when launched by condor_master, attach the master
+	// keepalive loop and (optionally) accept HTTP/HTTPS connections
+	// forwarded by condor_shared_port instead of binding our own TCP
+	// port. The ctx is plumbed all the way through so SIGTERM tears
+	// down keepalive cleanly along with the HTTP server.
+	hookCtx, hookCancel := context.WithCancel(context.Background())
+	defer hookCancel()
+	var hooks *daemonHooks
+	var spListener *sharedport.Listener
+	if runUnderCondorMaster() {
+		hooks, err = startDaemonHooks(hookCtx, logger)
+		if err != nil {
+			logger.Warn(logging.DestinationGeneral,
+				"condor_master detected but hook setup failed; running standalone",
+				"error", err)
+		}
+		spListener, err = resolveSharedPortListener(cfg, logger)
+		if err != nil {
+			return fmt.Errorf("shared-port listener: %w", err)
+		}
+	}
+
+	// Start server in goroutine. Three flavors:
+	//   - shared_port forwarding: serve on the UDS-backed listener
+	//   - TLS: traditional HTTPS bind
+	//   - plain HTTP bind
 	errChan := make(chan error, 1)
 	go func() {
-		// Check if TLS is enabled
-		if tlsCertFile != "" && tlsKeyFile != "" {
+		switch {
+		case spListener != nil:
+			scheme := "http"
+			if tlsCertFile != "" && tlsKeyFile != "" {
+				// In shared-port mode, TLS termination at the daemon
+				// requires the http.Server to have its TLSConfig pre-
+				// populated. Today the regular Start/StartTLS handle
+				// that internally; the cleanest way to surface that
+				// limitation is to refuse to start TLS over shared_port
+				// rather than silently fall back to HTTP.
+				errChan <- fmt.Errorf("shared-port forwarding with TLS is not yet supported; use plain HTTP for the forwarded connections")
+				return
+			}
+			errChan <- server.ServeListener(spListener, scheme)
+		case tlsCertFile != "" && tlsKeyFile != "":
 			errChan <- server.StartTLS(tlsCertFile, tlsKeyFile)
-		} else {
+		default:
 			errChan <- server.Start()
 		}
 	}()
+
+	// Once the listener is up, tell the master we're ready and start
+	// the keepalive loop. We delay both until *after* the goroutine
+	// kicked off above has had a chance to bind, on the theory that
+	// "ready" is meaningful only when we can actually answer requests.
+	if hooks != nil {
+		go func() {
+			// Tiny delay to let the listener bind before we claim ready.
+			// The master's idle timer is on the order of minutes, so
+			// being a few hundred ms late here is harmless.
+			time.Sleep(200 * time.Millisecond)
+			hooks.SignalReady(hookCtx)
+			hooks.StartKeepAlive(hookCtx)
+		}()
+	}
 
 	// Wait for shutdown signal or error
 	select {
@@ -967,8 +1021,16 @@ func runNormalMode() error {
 		logger.Info(logging.DestinationGeneral, "Received shutdown signal", "signal", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		hooks.Stop()
+		if spListener != nil {
+			_ = spListener.Close()
+		}
 		return server.Shutdown(ctx)
 	case err := <-errChan:
+		hooks.Stop()
+		if spListener != nil {
+			_ = spListener.Close()
+		}
 		return err
 	}
 }

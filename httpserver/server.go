@@ -271,6 +271,50 @@ func (s *Server) Start() error {
 	return s.httpServer.Serve(ln)
 }
 
+// ServeListener runs the API server on a caller-supplied net.Listener.
+// scheme controls which protocol the request URLs are advertised under
+// ("http" or "https") — use "https" if the caller has configured
+// httpServer.TLSConfig, "http" otherwise.
+//
+// This is the entry point used when condor_master spawns us as a
+// managed daemon and we accept forwarded connections from
+// condor_shared_port via a sharedport.Listener instead of binding our
+// own TCP port. The handler bootstrap (issuer URL, OAuth2 setup) is
+// the same as Start/StartTLS; the only difference is the kind of
+// listener we hand to http.Server.Serve.
+func (s *Server) ServeListener(ln net.Listener, scheme string) error {
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q (want http or https)", scheme)
+	}
+	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server on shared listener",
+		"scheme", scheme, "addr", ln.Addr().String())
+
+	s.listener = ln
+	s.handlerCtx, s.cancelFunc = context.WithCancel(context.Background())
+
+	if err := s.Handler.Start(s.handlerCtx, ln, scheme); err != nil {
+		return err
+	}
+
+	s.logger.Info(logging.DestinationHTTP, "Listening on shared listener", "address", ln.Addr().String())
+	fmt.Printf("Server started on %s://%s\n", scheme, ln.Addr().String())
+
+	// httpServer.Serve and ServeTLS differ only in the TLS handshake
+	// that wraps each accepted conn. When the caller supplies TLSConfig
+	// directly on httpServer (or a tls.Listener), Serve handles either.
+	// For shared_port we always pass a plain net.Listener: shared_port
+	// hands us already-accepted TCP fds, so http.Server.Serve speaks
+	// HTTP/1.1 directly. TLS termination, if any, lives inside
+	// http.Server's TLSConfig.
+	if scheme == "https" && s.httpServer.TLSConfig != nil {
+		// ServeTLS wraps accepts in tls.Server. We pass empty cert/key
+		// so it uses TLSConfig.GetCertificate / Certificates already
+		// configured.
+		return s.httpServer.ServeTLS(ln, "", "")
+	}
+	return s.httpServer.Serve(ln)
+}
+
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)

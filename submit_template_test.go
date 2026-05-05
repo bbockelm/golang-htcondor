@@ -170,7 +170,7 @@ func buildBatchSubmitFile(tpl templates.Template, rows [][]string) string {
 	var sb strings.Builder
 	sb.WriteString(body)
 	sb.WriteString("\nqueue ")
-	sb.WriteString(strings.Join(tpl.Columns, ", "))
+	sb.WriteString(strings.Join(templates.ColumnNames(tpl.Columns), ", "))
 	sb.WriteString(" from ((\n")
 	for _, r := range rows {
 		sb.WriteString("  ")

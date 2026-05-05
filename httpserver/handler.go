@@ -1059,16 +1059,19 @@ func (h *Handler) performPeriodicPing() {
 	if h.collector != nil {
 		h.pingHealth.markCollectorEnabled()
 
+		collectorAddr := h.collectorAddress()
+		collectorHost := hostFromCondorAddress(collectorAddr)
+
 		collectorCtx := ctx
 		collectorSecForLog := secConfigForLog
-		if pingSec, perr := ConfigureSecurityForCollectorPing(h.token); perr == nil {
+		if pingSec, perr := ConfigureSecurityForCollectorPing(h.token, collectorHost); perr == nil {
 			collectorCtx = htcondor.WithSecurityConfig(ctx, pingSec)
 			collectorSecForLog = pingSec
 		}
 
 		_, err := h.collector.Ping(collectorCtx)
 		if err != nil {
-			diag := classifyConnectionError(h.collectorAddress(), err)
+			diag := classifyConnectionError(collectorAddr, err)
 			fields := []any{
 				"error", err,
 				"error_class", diag.Class,
@@ -1153,6 +1156,31 @@ func (h *Handler) collectorAddress() string {
 		return ""
 	}
 	return h.collector.Address()
+}
+
+// hostFromCondorAddress extracts the hostname from an HTCondor address.
+// Accepts:
+//   - sinful: "<host:port?addrs=...>"
+//   - bare host:port
+//   - bare host
+//
+// Returns the empty string for an empty input. The result is suitable
+// for use as TLS ServerName for SSL hostname verification — when the
+// address is a bare IP, Go's tls verifier will check IP SANs instead
+// of DNS names, which is what we want.
+func hostFromCondorAddress(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	s := strings.TrimPrefix(addr, "<")
+	s = strings.TrimSuffix(s, ">")
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[:i]
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host
+	}
+	return s
 }
 
 // refreshScheddAddressNow triggers an out-of-band schedd address refresh

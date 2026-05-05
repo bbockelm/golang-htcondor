@@ -179,11 +179,18 @@ export function MatchAnalysisPanel({
             problem" result on a 12-second-old job is expected. */}
         {jobIsFresh ? (
           <div className="text-[11px] text-amber-800 border border-amber-200 bg-amber-50 rounded px-2 py-1.5">
-            This job is only {jobAgeSec}s old. Some startup latency
-            (collector advertise cycle, schedd negotiator pass, image
-            pull) is normal — please give it at least a minute before
-            running the analysis. Running it now is fine but may not
-            yet reflect the steady-state matching picture.
+            {/* "0s old" reads awkwardly the moment after submit;
+                phrase the very-young case as "just submitted" and only
+                quote the seconds once there's a meaningful number. */}
+            {jobAgeSec !== undefined && jobAgeSec <= 1
+              ? 'This job was just submitted.'
+              : `This job is only ${jobAgeSec}s old.`}
+            {' '}
+            Some startup latency (collector advertise cycle, schedd
+            negotiator pass, image pull) is normal — please give it at
+            least a minute before running the analysis. Running it now
+            is fine but may not yet reflect the steady-state matching
+            picture.
           </div>
         ) : null}
 

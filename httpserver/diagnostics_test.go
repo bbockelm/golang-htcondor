@@ -143,11 +143,18 @@ func TestSummarizeAuthMethods(t *testing.T) {
 	})
 
 	t.Run("populated config", func(t *testing.T) {
+		// tokenSentinel is the marker value the test expects NEVER to
+		// appear in summarizeAuthMethods's output. Pulled into a const
+		// rather than a struct literal field so gosec G101 doesn't see
+		// a `Token: "..."` pattern that looks like a hardcoded
+		// credential — this isn't a credential, it's the bait the test
+		// uses to verify the redaction guarantee.
+		const tokenSentinel = "TOKEN-LEAK-CANARY-NOT-A-REAL-TOKEN" //nolint:gosec // marker, not a credential
 		cfg := &security.SecurityConfig{
 			AuthMethods: []security.AuthMethod{security.AuthSSL, security.AuthToken},
 			TrustDomain: "test.example.org",
 			TokenFile:   "/etc/condor/tokens/server.token",
-			Token:       "redacted",
+			Token:       tokenSentinel,
 		}
 		fields := summarizeAuthMethods(cfg)
 		// Convert to map for easier assertion
@@ -164,7 +171,7 @@ func TestSummarizeAuthMethods(t *testing.T) {
 		// Critical: the actual Token bytes must NEVER appear in the summary.
 		// Only the boolean "present" flag should be there.
 		for _, v := range fields {
-			if s, ok := v.(string); ok && s == "redacted" {
+			if s, ok := v.(string); ok && s == tokenSentinel {
 				t.Errorf("Token contents leaked into summary fields: %v", fields)
 			}
 		}

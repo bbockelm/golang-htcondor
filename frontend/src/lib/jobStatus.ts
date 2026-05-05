@@ -92,6 +92,34 @@ export function interpretJobStatus(inp: InterpretInputs): Status {
 }
 
 /**
+ * visualStatus is the "what color is the pill?" projection of a Status,
+ * remapping job-kind-specific cases so the green/Ready presentation is
+ * used consistently when the session is actually usable by the user.
+ *
+ * For interactive terminal sessions, JobStatus=2 with
+ * JobCurrentStartExecutingDate set (= our 'executing' Status) means
+ * the executable is up and the SSH bridge can attach immediately —
+ * indistinguishable from "ready" from the user's POV. We don't have
+ * a separate readiness signal to wait for (no helper protocol like
+ * Jupyter has), and "Executing" / amber is misleading: nothing more
+ * is going to happen before the user can use it.
+ *
+ * For Jupyter we DON'T remap here — the detail page and list both
+ * arrive at 'ready' via useJupyterReadyProbe, after JupyterLab has
+ * confirmed it's serving. Until then 'launching' (amber) is honest.
+ *
+ * Pass the literal kind ('terminal' | 'jupyter') at the render site
+ * where you know which one it is. Callers who don't have a kind
+ * (e.g. the generic /jobs list) can omit it and get the raw Status.
+ */
+export function visualStatus(status: Status, kind?: 'jupyter' | 'terminal'): Status {
+  if (kind === 'terminal' && status === 'executing') {
+    return 'ready';
+  }
+  return status;
+}
+
+/**
  * Short label suitable for status pills and table cells. The detail
  * page can override the banner text with type-specific phrasing.
  */

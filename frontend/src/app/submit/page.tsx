@@ -18,23 +18,50 @@ import { useRouter } from 'next/navigation';
 import {
   api,
   ApiError,
+  MAX_TEMPLATE_INPUT_FILE_BYTES,
   type Template,
+  type TemplateColumn,
+  type TemplateInputFile,
 } from '@/lib/api';
 import { Dropzone, type DroppedFile } from '@/components/Dropzone';
+import {
+  ResourceRequestPanel,
+  DEFAULT_RESOURCE_REQUEST,
+  type ResourceRequest,
+} from '@/components/ResourceRequest';
+import {
+  applyResourcesToBody,
+  bodyHasCoreResourceRequests,
+  bodyHasResourceRequests,
+  readResourcesFromBody,
+} from '@/lib/submitFile';
 
 type TemplateMode = 'library' | 'custom';
 
 interface CustomDraft {
   name: string;
   description: string;
-  columnsCSV: string;
+  columns: TemplateColumn[];
   contents: string;
+  // Default attachments saved with the template. The shape mirrors
+  // TemplateInputFile but we keep size around for the UI ("3 KB,
+  // shell-script") since base64-decoding to learn the size every
+  // render is wasteful.
+  inputFiles: DraftInputFile[];
+}
+
+// DraftInputFile carries both the encoded payload (for save / submit)
+// and the underlying File handle so we can show a per-file size /
+// remove control without round-tripping through base64.
+interface DraftInputFile extends TemplateInputFile {
+  id: string;     // stable React key
+  size: number;   // bytes (raw, before base64)
 }
 
 const STARTER_DRAFT: CustomDraft = {
   name: '',
   description: '',
-  columnsCSV: 'name',
+  columns: [{ name: 'name' }],
   contents: `# Submit-file body. Reference table columns as $(name).
 # Do NOT include a queue line — the table section adds it for you.
 
@@ -47,6 +74,7 @@ log        = hello.log
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 `,
+  inputFiles: [],
 };
 
 export default function SubmitPage() {
@@ -76,22 +104,36 @@ export default function SubmitPage() {
   // synthesized from the custom draft.
   const active = useMemo<{
     name: string;
-    columns: string[];
+    columns: TemplateColumn[];
     contents: string;
+    // Template's own default input files (vs. the per-batch files
+    // the user drops below in section 3). Kept separate so the
+    // submission step can label them in error messages and the user
+    // can see why a file is in the upload list.
+    templateInputFiles: TemplateInputFile[];
   }>(() => {
     if (mode === 'library' && selected) {
       return {
         name: selected.name,
         columns: selected.columns,
         contents: selected.contents,
+        templateInputFiles: selected.input_files ?? [],
       };
     }
     return {
       name: draft.name || '(new template)',
-      columns: parseColumnsCSV(draft.columnsCSV),
+      columns: draft.columns,
       contents: draft.contents,
+      templateInputFiles: draft.inputFiles,
     };
   }, [mode, selected, draft]);
+
+  // Column-name list cached for the table re-shape effect's dep array
+  // (we want to react to add/remove/rename, not description tweaks).
+  const columnNames = useMemo(
+    () => active.columns.map((c) => c.name).join(''),
+    [active.columns],
+  );
 
   // --- Table section state ------------------------------------------
   const [rows, setRows] = useState<string[][]>([['']]);
@@ -99,25 +141,63 @@ export default function SubmitPage() {
   // Re-shape rows whenever the active template's columns change.
   useEffect(() => {
     setRows((prev) => reshapeRows(prev, active.columns));
-  }, [active.columns]);
+    // active.columns identity changes whenever description changes
+    // too; we only care about names. columnNames is a stable hash.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnNames]);
 
   // --- Inputs section state -----------------------------------------
   const [files, setFiles] = useState<DroppedFile[]>([]);
 
+  // --- Resources section state --------------------------------------
+  // Whether the user has chosen to override what the template provides
+  // (or fill in resources when the template is silent). When the
+  // template already sets request_cpus/memory/disk we default to NOT
+  // overriding — the template is the source of truth.
+  const templateHasCoreResources = useMemo(
+    () => bodyHasCoreResourceRequests(active.contents),
+    [active.contents],
+  );
+  const [overrideResources, setOverrideResources] = useState(false);
+  const [resources, setResources] = useState<ResourceRequest>(
+    DEFAULT_RESOURCE_REQUEST,
+  );
+
+  // When the active template changes, prime resources from whatever it
+  // declared (so the form is a faithful starting point if the user
+  // *does* choose to override) and reset the override flag based on
+  // whether the template already covers the core triple.
+  useEffect(() => {
+    setResources(readResourcesFromBody(active.contents));
+    setOverrideResources(!templateHasCoreResources);
+  }, [active.contents, templateHasCoreResources]);
+
   // --- Submit -------------------------------------------------------
   const submit = useMutation({
     mutationFn: async () => {
-      const body = buildSubmitFile(active.contents, active.columns, rows);
+      // If the user filled in (or kept) the resources widget, those
+      // values overwrite whatever the template body had. If the
+      // template already provides resources and the user opted not to
+      // override, leave the body alone.
+      const effectiveContents = overrideResources
+        ? applyResourcesToBody(active.contents, resources)
+        : active.contents;
+      const body = buildSubmitFile(
+        effectiveContents,
+        active.columns.map((c) => c.name),
+        rows,
+      );
       const submitted = await api.jobs.submit(body);
-      if (submitted.job_ids.length > 0 && files.length > 0) {
-        await api.jobs.uploadInputs(
-          submitted.job_ids[0],
-          files.map((f) => ({
-            name: f.name,
-            file: f.file,
-            executable: f.executable,
-          })),
-        );
+
+      // Merge the template's default attachments with the per-batch
+      // files the user dropped. Per-batch files win if a name
+      // collides — that's the user's most-recent intent.
+      const merged = await mergeTemplateAndUserFiles(
+        active.templateInputFiles,
+        files,
+      );
+      if (submitted.job_ids.length > 0 && merged.length > 0) {
+        await api.jobs.uploadInputs(submitted.job_ids[0], merged);
       }
       return submitted;
     },
@@ -134,8 +214,12 @@ export default function SubmitPage() {
       api.templates.save({
         name: draft.name,
         description: draft.description,
-        columns: parseColumnsCSV(draft.columnsCSV),
+        columns: draft.columns,
         contents: draft.contents,
+        input_files: draft.inputFiles.map(({ name, content }) => ({
+          name,
+          content,
+        })),
       }),
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
@@ -182,6 +266,15 @@ export default function SubmitPage() {
       />
 
       <InputsSection files={files} setFiles={setFiles} disabled={submit.isPending} />
+
+      <ResourcesSection
+        templateHasResources={bodyHasResourceRequests(active.contents)}
+        templateHasCoreResources={templateHasCoreResources}
+        override={overrideResources}
+        setOverride={setOverrideResources}
+        resources={resources}
+        setResources={setResources}
+      />
 
       {submit.isError && (
         <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -299,14 +392,28 @@ function TemplateSection({
                     ) : (
                       selected.columns.map((c) => (
                         <code
-                          key={c}
+                          key={c.name}
+                          title={c.description ?? undefined}
                           className="ml-1 rounded bg-white border border-gray-200 px-1 py-0.5"
                         >
-                          {c}
+                          {c.name}
                         </code>
                       ))
                     )}
                   </div>
+                  {selected.input_files && selected.input_files.length > 0 && (
+                    <div className="text-gray-600">
+                      Default input files:{' '}
+                      {selected.input_files.map((f) => (
+                        <code
+                          key={f.name}
+                          className="ml-1 rounded bg-white border border-gray-200 px-1 py-0.5"
+                        >
+                          {f.name}
+                        </code>
+                      ))}
+                    </div>
+                  )}
                   <details className="pt-1">
                     <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
                       Show submit-file body
@@ -326,6 +433,7 @@ function TemplateSection({
           setDraft={setDraft}
           onSave={onSave}
           saveState={saveState}
+          templates={templates}
         />
       )}
     </SectionCard>
@@ -337,15 +445,75 @@ function CustomDraftEditor({
   setDraft,
   onSave,
   saveState,
+  templates,
 }: {
   draft: CustomDraft;
   setDraft: (d: CustomDraft) => void;
   onSave: () => void;
   saveState: { isPending: boolean; error: unknown };
+  templates: Template[];
 }) {
   const canSave = draft.name.trim() !== '' && draft.contents.trim() !== '';
+
+  // Embedded resources widget. Toggling it on patches the body with
+  // the structured request_* lines so the saved template carries them
+  // through the YAML round-trip. Reading from the body keeps the
+  // widget in sync if the user edits the textarea directly.
+  const [includeResources, setIncludeResources] = useState(() =>
+    bodyHasResourceRequests(draft.contents),
+  );
+  const resources = useMemo(
+    () => readResourcesFromBody(draft.contents),
+    [draft.contents],
+  );
+
+  const setResourceFields = (next: ResourceRequest) => {
+    setDraft({ ...draft, contents: applyResourcesToBody(draft.contents, next) });
+  };
+
+  const toggleResources = (on: boolean) => {
+    setIncludeResources(on);
+    if (on && !bodyHasResourceRequests(draft.contents)) {
+      // Seed with defaults so the user has something concrete to tweak.
+      setDraft({
+        ...draft,
+        contents: applyResourcesToBody(draft.contents, DEFAULT_RESOURCE_REQUEST),
+      });
+    }
+  };
+
+  // Clone-from-existing replaces the draft wholesale with a copy of
+  // an existing template (built-in / global / user). Caller picks
+  // from the same select as the library mode would offer; the
+  // resulting draft's name gets a "(clone)" suffix so the user
+  // doesn't accidentally clobber the original on Save (which keys on
+  // (owner, id) and would refuse for read-only sources anyway).
+  const cloneFrom = async (id: string) => {
+    const tpl = templates.find((t) => t.id === id);
+    if (!tpl) return;
+    const cloned: DraftInputFile[] = (tpl.input_files ?? []).map((f) => ({
+      id: makeFileId(),
+      name: f.name,
+      content: f.content,
+      size: base64DecodedSize(f.content),
+    }));
+    setDraft({
+      name: `${tpl.name} (clone)`,
+      description: tpl.description ?? '',
+      columns: tpl.columns.map((c) => ({ ...c })),
+      contents: tpl.contents,
+      inputFiles: cloned,
+    });
+  };
+
   return (
     <div className="space-y-3 mt-3">
+      {/* Clone-from-existing — appears at the top so it's the first
+          thing users see when they switch to "Write new template". */}
+      {templates.length > 0 && (
+        <CloneFromPicker templates={templates} onClone={cloneFrom} />
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Name">
           <input
@@ -356,25 +524,24 @@ function CustomDraftEditor({
             className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
           />
         </Field>
-        <Field label="Columns (comma-separated)">
+        <Field label="Description (optional)">
           <input
             type="text"
-            value={draft.columnsCSV}
-            onChange={(e) => setDraft({ ...draft, columnsCSV: e.target.value })}
-            placeholder="name, seconds"
-            className="w-full rounded border border-gray-300 px-3 py-1.5 font-mono text-sm"
+            value={draft.description}
+            onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+            placeholder="One-line description"
+            className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
           />
         </Field>
       </div>
-      <Field label="Description (optional)">
-        <input
-          type="text"
-          value={draft.description}
-          onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-          placeholder="One-line description"
-          className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+
+      <Field label="Columns">
+        <ColumnEditor
+          columns={draft.columns}
+          setColumns={(cols) => setDraft({ ...draft, columns: cols })}
         />
       </Field>
+
       <Field label="Submit-file body">
         <textarea
           value={draft.contents}
@@ -387,6 +554,36 @@ function CustomDraftEditor({
           a <code>queue</code> line — the table section synthesizes one.
         </p>
       </Field>
+
+      <Field label="Default input files (optional)">
+        <TemplateInputFilesEditor
+          files={draft.inputFiles}
+          setFiles={(fs) => setDraft({ ...draft, inputFiles: fs })}
+        />
+      </Field>
+
+      <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={includeResources}
+            onChange={(e) => toggleResources(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          Bake resource requests into this template
+        </label>
+        {includeResources && (
+          <ResourceRequestPanel value={resources} onChange={setResourceFields} />
+        )}
+        {!includeResources && bodyHasResourceRequests(draft.contents) && (
+          <p className="text-xs text-amber-700">
+            The textarea still has request_* lines from a previous edit.
+            Toggle this on to manage them via the widget, or remove them
+            by hand.
+          </p>
+        )}
+      </div>
+
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -410,6 +607,350 @@ function CustomDraftEditor({
   );
 }
 
+// CloneFromPicker is a small one-shot select that triggers cloneFrom
+// on change. Sticky-empty (resets to the placeholder option) so the
+// user can clone twice in a row without a manual reset.
+function CloneFromPicker({
+  templates,
+  onClone,
+}: {
+  templates: Template[];
+  onClone: (id: string) => void;
+}) {
+  return (
+    <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs flex items-center gap-2">
+      <span className="text-gray-600 shrink-0">Start from a copy of:</span>
+      <select
+        defaultValue=""
+        onChange={(e) => {
+          const v = e.target.value;
+          if (!v) return;
+          onClone(v);
+          e.target.value = '';
+        }}
+        className="flex-1 min-w-0 rounded border border-gray-300 bg-white px-2 py-1"
+      >
+        <option value="" disabled>
+          (pick a template to clone…)
+        </option>
+        {groupBySource(templates).map((group) => (
+          <optgroup key={group.label} label={group.label}>
+            {group.items.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// ColumnEditor renders one row per column with a name input, an
+// optional description (rendered as the table-header help text), and
+// a remove button. A trailing row with a "+" button appends a new
+// column. Names are validated against the same HTCondor-macro regex
+// the server uses; bad names get a red border and tooltip but don't
+// block typing.
+function ColumnEditor({
+  columns,
+  setColumns,
+}: {
+  columns: TemplateColumn[];
+  setColumns: (cols: TemplateColumn[]) => void;
+}) {
+  const [pendingName, setPendingName] = useState('');
+  const [pendingDesc, setPendingDesc] = useState('');
+
+  const addPending = () => {
+    const name = pendingName.trim();
+    if (!name) return;
+    if (columns.some((c) => c.name === name)) return; // dedupe silently
+    setColumns([
+      ...columns,
+      { name, description: pendingDesc.trim() || undefined },
+    ]);
+    setPendingName('');
+    setPendingDesc('');
+  };
+
+  return (
+    <div className="space-y-1">
+      {columns.length === 0 && (
+        <p className="text-xs text-gray-500">
+          No columns yet — add one below to bind a $(name) reference in the
+          submit body.
+        </p>
+      )}
+      {columns.map((col, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <input
+            type="text"
+            value={col.name}
+            onChange={(e) => {
+              const next = columns.map((c, j) =>
+                j === i ? { ...c, name: e.target.value } : c,
+              );
+              setColumns(next);
+            }}
+            placeholder="column_name"
+            className={`w-40 rounded border px-2 py-1 font-mono text-sm ${
+              isValidColumnName(col.name)
+                ? 'border-gray-300'
+                : 'border-red-300'
+            }`}
+            title={
+              isValidColumnName(col.name)
+                ? undefined
+                : 'Must match [A-Za-z_][A-Za-z0-9_]*'
+            }
+          />
+          <input
+            type="text"
+            value={col.description ?? ''}
+            onChange={(e) => {
+              const next = columns.map((c, j) =>
+                j === i ? { ...c, description: e.target.value } : c,
+              );
+              setColumns(next);
+            }}
+            placeholder="description (optional, shown as help text)"
+            className="flex-1 min-w-0 rounded border border-gray-300 px-2 py-1 text-sm"
+          />
+          <button
+            type="button"
+            onClick={() => setColumns(columns.filter((_, j) => j !== i))}
+            className="text-xs text-gray-400 hover:text-red-600"
+            title="Remove column"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+
+      {/* Add-row, mirrors the per-column row visually. Press Enter in
+          the name field to add — saves a click on the most common
+          flow. */}
+      <div className="flex items-center gap-2 pt-1">
+        <input
+          type="text"
+          value={pendingName}
+          onChange={(e) => setPendingName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addPending();
+            }
+          }}
+          placeholder="new column name"
+          className="w-40 rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+        />
+        <input
+          type="text"
+          value={pendingDesc}
+          onChange={(e) => setPendingDesc(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addPending();
+            }
+          }}
+          placeholder="description (optional)"
+          className="flex-1 min-w-0 rounded border border-gray-300 px-2 py-1 text-sm"
+        />
+        <button
+          type="button"
+          onClick={addPending}
+          disabled={pendingName.trim() === ''}
+          className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          title="Add column"
+        >
+          + Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// TemplateInputFilesEditor handles the "default attachments shipped
+// with this template" list. Files are read into base64 immediately
+// so the saved template carries them verbatim; per-file 1 MiB cap
+// is enforced client-side (server enforces the same).
+function TemplateInputFilesEditor({
+  files,
+  setFiles,
+}: {
+  files: DraftInputFile[];
+  setFiles: (files: DraftInputFile[]) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+
+  const addFiles = async (incoming: FileList | File[]) => {
+    setError(null);
+    const list = Array.from(incoming);
+    const next: DraftInputFile[] = [];
+    const seen = new Set(files.map((f) => f.name));
+    for (const file of list) {
+      if (file.size > MAX_TEMPLATE_INPUT_FILE_BYTES) {
+        setError(
+          `${file.name} is ${humanSize(file.size)}; the per-file cap is ${humanSize(MAX_TEMPLATE_INPUT_FILE_BYTES)}.`,
+        );
+        continue;
+      }
+      let name = file.name;
+      let i = 1;
+      while (seen.has(name)) {
+        const dot = file.name.lastIndexOf('.');
+        name =
+          dot > 0
+            ? `${file.name.slice(0, dot)} (${i})${file.name.slice(dot)}`
+            : `${file.name} (${i})`;
+        i++;
+      }
+      seen.add(name);
+      const buf = await file.arrayBuffer();
+      next.push({
+        id: makeFileId(),
+        name,
+        content: arrayBufferToBase64(buf),
+        size: file.size,
+      });
+    }
+    setFiles([...files, ...next]);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-3 text-xs">
+        <label className="cursor-pointer text-gray-700">
+          <span className="rounded border border-gray-300 bg-white px-2 py-1 hover:bg-gray-100">
+            Attach files…
+          </span>
+          <input
+            type="file"
+            multiple
+            className="sr-only"
+            onChange={(e) => {
+              if (e.target.files?.length) {
+                addFiles(e.target.files).catch((err) =>
+                  setError(err instanceof Error ? err.message : String(err)),
+                );
+              }
+              e.target.value = '';
+            }}
+          />
+        </label>
+        <span className="ml-2 text-gray-500">
+          Up to {humanSize(MAX_TEMPLATE_INPUT_FILE_BYTES)} per file. These ship
+          with the template — the submit page sends them alongside any
+          per-batch files dropped below.
+        </span>
+      </div>
+
+      {error && <p className="text-xs text-red-700">{error}</p>}
+
+      {files.length > 0 && (
+        <ul className="rounded border border-gray-200 bg-white divide-y divide-gray-100 text-sm">
+          {files.map((f) => (
+            <li key={f.id} className="flex items-center gap-2 px-3 py-2">
+              <input
+                value={f.name}
+                onChange={(e) =>
+                  setFiles(
+                    files.map((x) =>
+                      x.id === f.id ? { ...x, name: e.target.value } : x,
+                    ),
+                  )
+                }
+                className="flex-1 min-w-0 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs hover:border-gray-200 focus:border-gray-300 focus:outline-none"
+              />
+              <span className="text-xs text-gray-400 shrink-0">
+                {humanSize(f.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFiles(files.filter((x) => x.id !== f.id))}
+                className="text-xs text-red-600 hover:text-red-800 shrink-0"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function isValidColumnName(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function makeFileId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  // chunk to avoid hitting the argument-count limit for large files
+  // (apply() with > ~100k args is unreliable across browsers).
+  const CHUNK = 0x8000;
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+function base64DecodedSize(b64: string): number {
+  // Length without trailing '=' padding × 3/4 is the byte count.
+  const padding = (b64.endsWith('==') && 2) || (b64.endsWith('=') && 1) || 0;
+  return Math.floor((b64.length * 3) / 4) - padding;
+}
+
+function base64ToFile(b64: string, name: string): File {
+  // Reverse of arrayBufferToBase64 with chunking.
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new File([bytes], name);
+}
+
+// mergeTemplateAndUserFiles turns the template's default attachments
+// (base64 + name) into File objects, then merges with the user's
+// per-batch drops. When a name collides, the user's drop wins —
+// most-recent intent.
+async function mergeTemplateAndUserFiles(
+  templateFiles: TemplateInputFile[],
+  userFiles: DroppedFile[],
+): Promise<{ name: string; file: File; executable: boolean }[]> {
+  const userByName = new Map(userFiles.map((f) => [f.name, f]));
+  const out: { name: string; file: File; executable: boolean }[] = [];
+  for (const tf of templateFiles) {
+    if (userByName.has(tf.name)) continue; // user override wins
+    out.push({
+      name: tf.name,
+      file: base64ToFile(tf.content, tf.name),
+      // Heuristic: shell scripts attached via templates almost
+      // always need exec bit. Users who want different behavior can
+      // add the file as a per-batch upload (which round-trips
+      // through Dropzone where they can toggle the checkbox).
+      executable: /\.(sh|py|pl|rb)$/i.test(tf.name) || tf.name === 'run',
+    });
+  }
+  for (const uf of userFiles) {
+    out.push({ name: uf.name, file: uf.file, executable: uf.executable });
+  }
+  return out;
+}
+
 // ----------------------------------------------------------------------
 // Table section: one row per job. Column headers come from the active
 // template; the user fills cells.
@@ -420,10 +961,11 @@ function TableSection({
   rows,
   setRows,
 }: {
-  columns: string[];
+  columns: TemplateColumn[];
   rows: string[][];
   setRows: (r: string[][]) => void;
 }) {
+  const columnNames = columns.map((c) => c.name);
   return (
     <SectionCard
       title="2. Table"
@@ -439,7 +981,7 @@ function TableSection({
         </div>
       ) : (
         <div className="space-y-2">
-          <CSVImporter columns={columns} setRows={setRows} />
+          <CSVImporter columns={columnNames} setRows={setRows} />
           <div className="overflow-x-auto rounded border border-gray-200 bg-white">
             <table className="min-w-full text-sm border-collapse">
               <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
@@ -449,10 +991,24 @@ function TableSection({
                   </th>
                   {columns.map((c) => (
                     <th
-                      key={c}
+                      key={c.name}
                       className="px-2 py-1 font-mono border-b border-l border-gray-200"
+                      // Description (when set on the template) becomes
+                      // the column header's tooltip — that's the
+                      // user-facing payoff of the description field.
+                      title={c.description ?? undefined}
                     >
-                      {c}
+                      <span className="inline-flex items-center gap-1">
+                        {c.name}
+                        {c.description && (
+                          <span
+                            className="cursor-help text-[10px] font-normal normal-case text-gray-400"
+                            aria-hidden
+                          >
+                            ⓘ
+                          </span>
+                        )}
+                      </span>
                     </th>
                   ))}
                   <th className="px-2 py-1 w-1 border-b border-l border-gray-200" />
@@ -768,6 +1324,57 @@ function InputsSection({
 }
 
 // ----------------------------------------------------------------------
+// Resources section: Step 4. Optional when the template already provides
+// the core request_cpus / request_memory / request_disk triple — the
+// user can opt to override; otherwise required so the schedd has
+// resource requests to plan the match against.
+// ----------------------------------------------------------------------
+
+function ResourcesSection({
+  templateHasResources,
+  templateHasCoreResources,
+  override,
+  setOverride,
+  resources,
+  setResources,
+}: {
+  templateHasResources: boolean;
+  templateHasCoreResources: boolean;
+  override: boolean;
+  setOverride: (v: boolean) => void;
+  resources: ResourceRequest;
+  setResources: (r: ResourceRequest) => void;
+}) {
+  const subtitle = templateHasCoreResources
+    ? 'The template already declares request_cpus, request_memory, and request_disk. Skip this step to use what it provides, or override.'
+    : 'The template does not declare resource requests. Pick CPU, memory, disk (and GPU if needed) — these get appended to the submit-file body.';
+  return (
+    <SectionCard title="4. Resources" subtitle={subtitle}>
+      {templateHasCoreResources && (
+        <label className="mb-3 flex items-center gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={override}
+            onChange={(e) => setOverride(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          Override the template&apos;s resource requests
+        </label>
+      )}
+      {override ? (
+        <ResourceRequestPanel value={resources} onChange={setResources} />
+      ) : (
+        <p className="text-xs text-gray-500">
+          {templateHasResources
+            ? 'Using the values from the template body.'
+            : 'No resource requests will be sent. The schedd will fall back to its pool-wide defaults.'}
+        </p>
+      )}
+    </SectionCard>
+  );
+}
+
+// ----------------------------------------------------------------------
 // Shared visual primitives.
 // ----------------------------------------------------------------------
 
@@ -850,14 +1457,7 @@ function SourceBadge({ source }: { source: Template['source'] }) {
 // Pure helpers.
 // ----------------------------------------------------------------------
 
-function parseColumnsCSV(s: string): string[] {
-  return s
-    .split(',')
-    .map((c) => c.trim())
-    .filter((c) => c.length > 0);
-}
-
-function reshapeRows(prev: string[][], cols: string[]): string[][] {
+function reshapeRows(prev: string[][], cols: TemplateColumn[]): string[][] {
   if (cols.length === 0) {
     return prev.length === 0 ? [[]] : prev.map(() => []);
   }

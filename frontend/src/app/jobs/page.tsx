@@ -33,20 +33,60 @@ const PROJECTION =
   'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,Iwd';
 
 export default function JobsPage() {
+  // Admin browser sessions can opt into a pool-wide view; non-admin
+  // sessions can't (the server enforces it). We default admins to
+  // "show only mine" too — admin views are explicit, not surprising.
+  const { data: session } = useQuery({
+    queryKey: ['session'],
+    queryFn: api.auth.me,
+  });
+  const isAdmin = !!session?.is_admin;
+
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const ownedByMe = scope === 'mine';
+
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['jobs', 'mine'],
+    queryKey: ['jobs', scope],
     queryFn: () =>
-      api.jobs.list({ projection: PROJECTION, limit: 1000, owned_by_me: true }),
+      api.jobs.list({ projection: PROJECTION, limit: 1000, owned_by_me: ownedByMe }),
     refetchInterval: 15_000,
   });
 
   return (
     <div className="space-y-4">
       <div className="flex items-baseline gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold text-gray-900">My Batches</h1>
+        <h1 className="text-2xl font-bold text-gray-900">
+          {ownedByMe ? 'My Batches' : 'All Batches'}
+        </h1>
         <span className="text-sm text-gray-500">
           One row per batch. Click a row to see the jobs in it.
         </span>
+        {isAdmin && (
+          <div className="flex items-center gap-1 rounded border border-gray-300 bg-white p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setScope('mine')}
+              className={`rounded px-2 py-0.5 ${
+                ownedByMe
+                  ? 'bg-gray-200 text-gray-900'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              Mine
+            </button>
+            <button
+              type="button"
+              onClick={() => setScope('all')}
+              className={`rounded px-2 py-0.5 ${
+                !ownedByMe
+                  ? 'bg-gray-200 text-gray-900'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              Everyone
+            </button>
+          </div>
+        )}
         <Link
           href="/submit"
           className="ml-auto rounded bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"

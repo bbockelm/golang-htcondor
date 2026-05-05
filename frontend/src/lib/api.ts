@@ -149,6 +149,24 @@ export interface ShareOutputResponse {
   owner: string;
 }
 
+// TemplateColumn is one variable on a template. `description` is
+// optional and surfaces as help text on the batch-table column
+// header. The Go side accepts a bare string or this object shape on
+// input; the API always returns the object form.
+export interface TemplateColumn {
+  name: string;
+  description?: string;
+}
+
+// TemplateInputFile is an optional default attachment that ships
+// with a template. `content` is base64-encoded bytes (encoding/json's
+// default for Go's []byte). The submit page merges these with any
+// per-batch files the user drops; the per-file ceiling is 1 MiB.
+export interface TemplateInputFile {
+  name: string;
+  content: string; // base64
+}
+
 // Template is one entry in the batch-submission template library.
 // `source` indicates whether it's read-only (built-in / global) or
 // user-saved (and therefore deletable).
@@ -156,9 +174,10 @@ export interface Template {
   id: string;
   name: string;
   description?: string;
-  columns: string[];
+  columns: TemplateColumn[];
   contents: string;
   source: 'builtin' | 'global' | 'user';
+  input_files?: TemplateInputFile[];
 }
 
 export interface TemplateSaveRequest {
@@ -166,9 +185,15 @@ export interface TemplateSaveRequest {
   id?: string;
   name: string;
   description?: string;
-  columns: string[];
+  columns: TemplateColumn[];
   contents: string;
+  input_files?: TemplateInputFile[];
 }
+
+// MAX_TEMPLATE_INPUT_FILE_BYTES mirrors templates.MaxInputFileBytes
+// on the Go side. The save UI rejects oversized files client-side
+// before encoding to base64; the server enforces the same cap.
+export const MAX_TEMPLATE_INPUT_FILE_BYTES = 1 << 20; // 1 MiB
 
 export interface JupyterCreateRequest {
   // All optional; the server fills sensible defaults.
@@ -176,6 +201,15 @@ export interface JupyterCreateRequest {
   cpus?: number;
   memory_mb?: number;
   disk_mb?: number;
+  // GPU fields are passed through verbatim to request_gpus and the
+  // gpus_minimum_* / cuda_version / require_gpus submit lines. Omit
+  // (or pass 0 for gpus) to skip the GPU section entirely.
+  gpus?: number;
+  gpus_minimum_capability?: string;
+  gpus_minimum_memory?: number;
+  gpus_minimum_runtime?: string;
+  cuda_version?: string;
+  require_gpus?: string;
 }
 
 export interface JupyterCreateResponse {
@@ -213,6 +247,13 @@ export interface InteractiveTerminalCreateRequest {
   cpus?: number;
   memory_mb?: number;
   disk_mb?: number;
+  // GPU fields. See JupyterCreateRequest for semantics.
+  gpus?: number;
+  gpus_minimum_capability?: string;
+  gpus_minimum_memory?: number;
+  gpus_minimum_runtime?: string;
+  cuda_version?: string;
+  require_gpus?: string;
 }
 
 export interface InteractiveTerminalCreateResponse {
@@ -407,7 +448,17 @@ export const api = {
       fetchJSON(`${BASE}/auth/logout`, { method: 'POST' }),
   },
 
-  dashboard: (): Promise<DashboardStats> => fetchJSON(`${BASE}/dashboard`),
+  // owned_by_me: server defaults to true. Admin sessions may pass
+  // false for a pool-wide count; the server enforces the boundary
+  // for non-admin sessions.
+  dashboard: (params?: { owned_by_me?: boolean }): Promise<DashboardStats> => {
+    const qs = new URLSearchParams();
+    if (params?.owned_by_me !== undefined) {
+      qs.set('owned_by_me', String(params.owned_by_me));
+    }
+    const q = qs.toString();
+    return fetchJSON(`${BASE}/dashboard${q ? '?' + q : ''}`);
+  },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
 

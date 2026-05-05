@@ -12,7 +12,7 @@
 //   - The launcher invalidated the list, so the query above gets a
 //     fresh result. SSE replays "created" and we wait for connect.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
@@ -29,6 +29,7 @@ import {
   statusPillStyle,
   type Status,
 } from '@/lib/jobStatus';
+import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 
 // Status interpretation lives in lib/jobStatus.ts so list + detail
@@ -101,14 +102,15 @@ export default function JupyterDetailClient() {
   // jupyterReady = "we've successfully reached jupyter-lab through the
   // proxy". Helper-connected just means the websocket tunnel is up;
   // jupyter-lab inside the sandbox might still be doing its own
-  // startup (creating the UDS, loading extensions, etc.). Mounting the
-  // iframe before jupyter-lab is listening produces a blank iframe
-  // that doesn't auto-retry — the user has to hit Reload manually.
-  // Probing the proxy URL until it responds gives us the right signal.
-  const [jupyterReady, setJupyterReady] = useState(false);
-  // Remember the last instance we readied for — a brand new instance
-  // (after End session → Launch new) should re-probe from scratch.
-  const readyForRef = useRef<string | null>(null);
+  // startup (creating the UDS, loading extensions, etc.). The probe
+  // hook hits /api/status until JupyterLab returns 200, then flips
+  // ready. Shared with the interactive list so detail and list
+  // agree on what "Ready" means.
+  const jupyterReady = useJupyterReadyProbe({
+    proxyPath: data?.proxy_path,
+    instanceID: data?.instance_id,
+    helperConnected: data?.connected === true,
+  });
 
   useEffect(() => {
     if (error) {
@@ -143,73 +145,6 @@ export default function JupyterDetailClient() {
       }),
     );
   }, [data, error, jobQuery.data, jupyterReady]);
-
-  // Probe loop: GET <proxy>/api/status until it returns 200. That's
-  // jupyter_server's little JSON status endpoint — implemented at the
-  // ServerApp level (not a lab extension), so a 200 means the HTTP
-  // server is fully up AND its routing is wired AND it can serve real
-  // requests, not just "the process is alive enough to reject HEAD".
-  //
-  // We deliberately don't probe `proxy_path` itself with HEAD: Tornado
-  // returns 405 on HEAD for handlers that only define `get()`, which
-  // happens BEFORE the rest of the app finishes initializing — that's
-  // how we ended up mounting the iframe too early in the previous
-  // version. /api/status is GET-only and returns a real payload only
-  // when the server is serving for real.
-  useEffect(() => {
-    if (!data?.connected || !data.proxy_path) return;
-    if (readyForRef.current === data.instance_id && jupyterReady) return;
-    if (readyForRef.current !== data.instance_id) {
-      readyForRef.current = data.instance_id;
-      setJupyterReady(false);
-    }
-
-    let cancelled = false;
-    // Strip a trailing slash so we don't end up with "//api/status".
-    const base = data.proxy_path.replace(/\/$/, '');
-    const statusURL = `${base}/api/status`;
-    const probe = async () => {
-      // 60-iteration cap (~60s with 1s sleeps) so a permanently broken
-      // jupyter doesn't keep us probing forever — past that we just
-      // mount the iframe and let the user see whatever Jupyter is
-      // serving (or click Reload).
-      for (let i = 0; i < 60; i++) {
-        if (cancelled) return;
-        try {
-          const res = await fetch(statusURL, {
-            credentials: 'include',
-            method: 'GET',
-            cache: 'no-store',
-          });
-          // 200 = jupyter_server is fully up. 4xx other than 401 means
-          // the route exists but the request was malformed somehow —
-          // unexpected, but it still proves jupyter is responding, so
-          // mount the iframe and let the user investigate. 5xx and
-          // throws (connection refused, mid-flight reset) keep us in
-          // the retry loop.
-          if (res.status === 200) {
-            if (!cancelled) setJupyterReady(true);
-            return;
-          }
-          if (res.status >= 400 && res.status < 500 && res.status !== 401) {
-            if (!cancelled) setJupyterReady(true);
-            return;
-          }
-        } catch {
-          // Network error — connection refused / abort mid-flight.
-          // Jupyter isn't listening yet; retry.
-        }
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      // Timed out probing. Mount anyway so the user can see what's
-      // happening; the "End session" button stays available.
-      if (!cancelled) setJupyterReady(true);
-    };
-    probe();
-    return () => {
-      cancelled = true;
-    };
-  }, [data?.connected, data?.proxy_path, data?.instance_id, jupyterReady]);
 
   useEffect(() => {
     if (!data) return;
@@ -366,6 +301,11 @@ export default function JupyterDetailClient() {
         <MatchAnalysisPanel
           jobID={jobIDForPoll}
           title="Why hasn't this session started?"
+          // Start collapsed: most session-startup waits resolve on
+          // their own within a minute, so don't pre-expand a heavy
+          // diagnostic that most users don't need. The summary still
+          // shows the title so curious users can click to drill in.
+          defaultOpen={false}
           // jobStatus drives the widget's "Run" button gate (only
           // 'idle'/'held' enabled). jobQDate drives the "wait a
           // minute" banner for fresh jobs. Both come from the

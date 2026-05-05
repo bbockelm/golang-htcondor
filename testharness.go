@@ -531,3 +531,17 @@ func (h *CondorTestHarness) GetSpoolDir() string {
 func (h *CondorTestHarness) GetLogDir() string {
 	return h.logDir
 }
+
+// GetLockDir returns the lock directory path for this harness — useful
+// for tests that read the shared_port_ad file the shared_port daemon
+// drops there to discover its dynamically-assigned port.
+func (h *CondorTestHarness) GetLockDir() string {
+	return h.lockDir
+}
+
+// GetConfigFile returns the path of the on-disk condor_config file the
+// harness wrote. Tests that spawn extra processes pointed at the same
+// HTCondor instance need this so they can set CONDOR_CONFIG.
+func (h *CondorTestHarness) GetConfigFile() string {
+	return h.configFile
+}

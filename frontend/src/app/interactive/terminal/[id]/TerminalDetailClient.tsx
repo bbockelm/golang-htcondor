@@ -28,6 +28,7 @@ import {
   interpretJobStatus,
   statusLabel,
   statusPillStyle,
+  visualStatus,
   type Status,
 } from '@/lib/jobStatus';
 
@@ -109,7 +110,12 @@ export default function TerminalDetailClient() {
         <h1 className="text-2xl font-bold text-gray-900">Terminal</h1>
         <span className="text-xs text-gray-500 font-mono">{id}</span>
         <div className="ml-auto flex items-center gap-3">
-          <StatusPill status={status} />
+          {/* visualStatus remaps 'executing' → 'ready' for the pill
+              presentation: a running terminal IS usable (the SSH
+              bridge attaches immediately), so a yellow "Executing"
+              pill misrepresents the state. The condition checks
+              elsewhere on this page still use the raw status. */}
+          <StatusPill status={visualStatus(status, 'terminal')} />
           {/* "End session" is reachable as long as the job exists and
               isn't already gone/completed/removed. Calls condor_rm and
               navigates back. */}

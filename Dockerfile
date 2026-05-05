@@ -54,8 +54,13 @@ RUN dnf install -y 'dnf-command(config-manager)' && \
     dnf install -y htcondor-release-current.el9.noarch.rpm && \
     dnf clean all
 
-# Install HTCondor
-RUN dnf install -y condor && \
+# Install HTCondor.
+#
+# Requires >= 25.7.2 for SHARED_PORT_HTTP_FORWARDING_ID — the
+# integration test in sharedport_integration_test.go skips the HTTP
+# forwarding portion gracefully on older builds, but rebuilding the
+# container after a base-image bump should give us at least 25.7.2.
+RUN dnf install -y 'condor >= 25.7.2' && \
     dnf clean all
 
 # Create workspace directory

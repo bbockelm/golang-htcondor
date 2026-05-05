@@ -17,6 +17,23 @@ import (
 //
 // Returns 503 when WebUIAdminGroup is unset — the admin UI is opt-in via
 // configuration; treating "no group configured" as 403 would be more
+// isWebUIAdmin reports whether the browser session attached to r belongs
+// to the configured admin group. Returns false for any path that
+// doesn't have a session (bearer-token API callers, no group
+// configured, no cookie). Use this for soft policy decisions like
+// "should this query default to all-jobs?" — for hard authorization
+// gates use requireAdmin which writes a 401/403/503 directly.
+func (s *Handler) isWebUIAdmin(r *http.Request) bool {
+	if s.webuiAdminGroup == "" {
+		return false
+	}
+	session, ok := s.getSessionFromRequest(r)
+	if !ok {
+		return false
+	}
+	return hasGroup(session.Groups, s.webuiAdminGroup)
+}
+
 // confusing than helpful.
 func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.webuiAdminGroup == "" {

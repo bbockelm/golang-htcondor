@@ -3,6 +3,7 @@ package httpserver
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -119,11 +120,28 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
 
+	// Admins may opt into a pool-wide view via ?owned_by_me=false.
+	// Non-admins (and the default for everyone) get the my-jobs view.
+	// Security boundary lives in handleListJobs; we mirror the same
+	// rule here so the dashboard counts match what /api/v1/jobs would
+	// return for the same caller.
+	ownedByMe := true
+	if v := r.URL.Query().Get("owned_by_me"); v != "" {
+		if parsed, perr := strconv.ParseBool(v); perr == nil {
+			ownedByMe = parsed
+		}
+	}
+	if !ownedByMe && !s.isWebUIAdmin(r) {
+		ownedByMe = true
+	}
+
 	opts := &htcondor.QueryOptions{
 		Limit:      -1,
 		Projection: []string{"JobStatus"},
-		FetchOpts:  htcondor.FetchMyJobs,
-		Owner:      owner,
+	}
+	if ownedByMe {
+		opts.FetchOpts = htcondor.FetchMyJobs
+		opts.Owner = owner
 	}
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,

@@ -51,10 +51,17 @@ func TestEndToEnd(t *testing.T) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/echo":
+				// gosec G705 (XSS) flags this because untrusted
+				// fields from the request flow into the response
+				// body. Test fixture: this server is reachable only
+				// over an in-process UDS, never from a browser, and
+				// the Content-Type is text/plain so no script
+				// execution context exists. The echo behavior is
+				// the entire point of the test.
 				w.Header().Set("Content-Type", "text/plain")
 				w.WriteHeader(http.StatusOK)
 				body, _ := io.ReadAll(r.Body)
-				_, _ = fmt.Fprintf(w, "uds-saw method=%s path=%s body=%q",
+				_, _ = fmt.Fprintf(w, "uds-saw method=%s path=%s body=%q", //nolint:gosec
 					r.Method, r.URL.Path, string(body))
 			case "/big":
 				// 1 MiB response to exercise multi-frame yamux paths.

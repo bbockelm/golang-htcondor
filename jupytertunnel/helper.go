@@ -185,16 +185,22 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 			return fmt.Errorf("helper: accept stream: %w", err)
 		}
 		lastActivity.Store(time.Now().UnixNano())
-		go handleStream(stream, cfg.SocketPath, logf)
+		// Pass the request-scoped context so the UDS dial inherits the
+		// helper's lifetime (gosec G118): cancelling ctx — which
+		// happens when the parent stops the tunnel — must also abort
+		// in-flight stream-handler dials.
+		go handleStream(ctx, stream, cfg.SocketPath, logf)
 	}
 }
 
-func handleStream(stream net.Conn, socketPath string, logf func(string, ...any)) {
+func handleStream(ctx context.Context, stream net.Conn, socketPath string, logf func(string, ...any)) {
 	defer func() { _ = stream.Close() }()
 	// Local UDS dial — no useful context lifetime to enforce, but the
-	// linter prefers DialContext, so use it with Background.
+	// linter prefers DialContext. We thread the parent's ctx through
+	// so a tunnel shutdown cancels in-flight dials, even though
+	// localhost UDS dials usually return instantly.
 	d := &net.Dialer{}
-	upstream, err := d.DialContext(context.Background(), "unix", socketPath)
+	upstream, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		logf("helper: dial UDS %s: %v", socketPath, err)
 		return

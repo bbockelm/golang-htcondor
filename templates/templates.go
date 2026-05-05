@@ -25,7 +25,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +36,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"gopkg.in/yaml.v3"
@@ -55,14 +58,150 @@ const (
 
 // Template is one entry in the library. Owner is only meaningful for
 // SourceUser entries; built-in / global templates leave it blank.
+//
+// Columns are HTCondor macro names (substituted via $(name) in the
+// submit-file body); the optional Description on each one is shown
+// as help text on the batch-table column header. InputFiles are an
+// optional default attachment set — the submit page merges them with
+// any per-batch files the user drops, capped at MaxInputFileBytes
+// each (see validateTemplate).
 type Template struct {
-	ID          string   `json:"id"           yaml:"id"`
-	Name        string   `json:"name"         yaml:"name"`
-	Description string   `json:"description"  yaml:"description"`
-	Columns     []string `json:"columns"      yaml:"columns"`
-	Contents    string   `json:"contents"     yaml:"contents"`
-	Source      Source   `json:"source"       yaml:"-"`
-	Owner       string   `json:"owner,omitempty" yaml:"-"` // user templates only
+	ID          string      `json:"id"                   yaml:"id"`
+	Name        string      `json:"name"                 yaml:"name"`
+	Description string      `json:"description"          yaml:"description"`
+	Columns     []Column    `json:"columns"              yaml:"columns"`
+	Contents    string      `json:"contents"             yaml:"contents"`
+	InputFiles  []InputFile `json:"input_files,omitempty" yaml:"input_files,omitempty"`
+	Source      Source      `json:"source"               yaml:"-"`
+	Owner       string      `json:"owner,omitempty"      yaml:"-"` // user templates only
+}
+
+// Column is one variable on a template. Description is optional and
+// surfaces as the column header's help text in the batch table.
+type Column struct {
+	Name        string `json:"name"                  yaml:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// UnmarshalYAML accepts either a bare string (legacy: "name") or a full
+// {name, description} map. Built-in templates that don't need help
+// text stay terse.
+func (c *Column) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		c.Name = node.Value
+		return nil
+	}
+	type rawColumn struct {
+		Name        string `yaml:"name"`
+		Description string `yaml:"description"`
+	}
+	var raw rawColumn
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	c.Name = raw.Name
+	c.Description = raw.Description
+	return nil
+}
+
+// UnmarshalJSON mirrors UnmarshalYAML for the API: accept either a
+// bare string or a {name, description} object. Older clients that
+// still POST `["foo", "bar"]` keep working.
+func (c *Column) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		return json.Unmarshal(b, &c.Name)
+	}
+	type rawColumn struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	var raw rawColumn
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	c.Name = raw.Name
+	c.Description = raw.Description
+	return nil
+}
+
+// ColumnNames returns just the macro names, in order. Useful for code
+// paths that don't care about descriptions (e.g., the submit-file
+// emitter, which only needs to write `queue a, b, c from ...`).
+func ColumnNames(cols []Column) []string {
+	out := make([]string, len(cols))
+	for i, c := range cols {
+		out[i] = c.Name
+	}
+	return out
+}
+
+// MaxInputFileBytes caps a single InputFile's content size. Templates
+// are stored verbatim (in YAML or in the user-store DB) so we want
+// each file small — anything larger belongs in transfer_input_files
+// pointing at object storage. The 1 MiB ceiling matches the per-file
+// limit the operator agreed on; total-per-template is loosely capped
+// in validateTemplate.
+const MaxInputFileBytes = 1 << 20 // 1 MiB
+
+// MaxTotalInputFileBytes caps the sum of all InputFile contents on a
+// single template. Sized at 5× the per-file ceiling so a small set of
+// scripts + a config blob fits comfortably while keeping each row in
+// the user-store DB reasonable.
+const MaxTotalInputFileBytes = 5 * MaxInputFileBytes
+
+// InputFile is an optional default attachment that ships with the
+// template. The submit page hands these to /api/v1/jobs/{id}/input
+// alongside any per-batch files the user drops.
+//
+// JSON encoding: Content is base64 (Go's encoding/json default for
+// []byte). YAML encoding uses two distinct keys (`content` for plain
+// UTF-8 text — typical for scripts — or `content_b64` for opaque
+// binary), see (un)marshal methods below.
+type InputFile struct {
+	Name    string `json:"name"`
+	Content []byte `json:"content"`
+}
+
+// UnmarshalYAML accepts either `content: "..."` (plain text — the
+// common case for shell scripts) or `content_b64: "..."` (base64 for
+// arbitrary bytes). Exactly one should be set.
+func (f *InputFile) UnmarshalYAML(node *yaml.Node) error {
+	type rawFile struct {
+		Name          string `yaml:"name"`
+		Content       string `yaml:"content"`
+		ContentBase64 string `yaml:"content_b64"`
+	}
+	var raw rawFile
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	f.Name = raw.Name
+	if raw.ContentBase64 != "" {
+		b, err := base64.StdEncoding.DecodeString(raw.ContentBase64)
+		if err != nil {
+			return fmt.Errorf("input file %q: decode content_b64: %w", raw.Name, err)
+		}
+		f.Content = b
+	} else {
+		f.Content = []byte(raw.Content)
+	}
+	return nil
+}
+
+// MarshalYAML chooses `content:` for valid UTF-8 (so a built-in or
+// operator-curated template stays human-readable) and falls back to
+// `content_b64:` for opaque binary.
+func (f InputFile) MarshalYAML() (any, error) {
+	if utf8.Valid(f.Content) {
+		return struct {
+			Name    string `yaml:"name"`
+			Content string `yaml:"content"`
+		}{f.Name, string(f.Content)}, nil
+	}
+	return struct {
+		Name          string `yaml:"name"`
+		ContentBase64 string `yaml:"content_b64"`
+	}{f.Name, base64.StdEncoding.EncodeToString(f.Content)}, nil
 }
 
 // fileShape is the YAML shape used by both builtin.yaml and the
@@ -203,9 +342,42 @@ func validateTemplate(t *Template) error {
 		return fmt.Errorf("id %q must match %s", t.ID, idPattern)
 	}
 	for _, c := range t.Columns {
-		if !columnPattern.MatchString(c) {
-			return fmt.Errorf("column %q is not a valid HTCondor macro name", c)
+		if !columnPattern.MatchString(c.Name) {
+			return fmt.Errorf("column %q is not a valid HTCondor macro name", c.Name)
 		}
+	}
+	// Per-file and total caps on input files. We surface the offending
+	// name so the operator can find it in a large template.
+	var totalBytes int
+	seenNames := make(map[string]bool, len(t.InputFiles))
+	for i, f := range t.InputFiles {
+		if f.Name == "" {
+			return fmt.Errorf("input_files[%d]: name is required", i)
+		}
+		if seenNames[f.Name] {
+			return fmt.Errorf("input_files: duplicate name %q", f.Name)
+		}
+		seenNames[f.Name] = true
+		// Reject path components — these names are written into the
+		// job sandbox by /input multipart, which already rejects path
+		// traversal, but enforce it earlier so the template can't
+		// even be saved with a bad name.
+		if strings.ContainsAny(f.Name, "/\\") || f.Name == "." || f.Name == ".." {
+			// Quote the literal "." and ".." so the message ends with a
+			// closing-quote rather than punctuation — keeps revive's
+			// error-strings rule happy without losing the specifics
+			// the user needs to fix the bad name.
+			return fmt.Errorf("input file %q: name must not contain path separators and must not be %q or %q", f.Name, ".", "..")
+		}
+		if len(f.Content) > MaxInputFileBytes {
+			return fmt.Errorf("input file %q: %d bytes exceeds the %d-byte per-file cap",
+				f.Name, len(f.Content), MaxInputFileBytes)
+		}
+		totalBytes += len(f.Content)
+	}
+	if totalBytes > MaxTotalInputFileBytes {
+		return fmt.Errorf("input files: %d bytes total exceeds the %d-byte template cap",
+			totalBytes, MaxTotalInputFileBytes)
 	}
 	return nil
 }
@@ -338,20 +510,25 @@ func (l *Library) Delete(id, owner string) (bool, error) {
 // users may both have a "my-pipeline" without collision):
 //
 //   CREATE TABLE templates_user (
-//       owner       TEXT      NOT NULL,
-//       id          TEXT      NOT NULL,
-//       name        TEXT      NOT NULL,
-//       description TEXT      NOT NULL DEFAULT '',
-//       columns_csv TEXT      NOT NULL DEFAULT '',
-//       contents    TEXT      NOT NULL,
-//       created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-//       updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+//       owner        TEXT      NOT NULL,
+//       id           TEXT      NOT NULL,
+//       name         TEXT      NOT NULL,
+//       description  TEXT      NOT NULL DEFAULT '',
+//       columns_csv  TEXT      NOT NULL DEFAULT '',
+//       columns_json TEXT      NOT NULL DEFAULT '',  -- {name, description}[]
+//       contents     TEXT      NOT NULL,
+//       input_files  BLOB      NOT NULL DEFAULT X'', -- gob/JSON of []InputFile
+//       created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+//       updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 //       PRIMARY KEY (owner, id)
 //   );
 //
-// columns_csv is a packed comma-separated string. We could normalize
-// to a side table (template_columns) but the read path always wants
-// the whole list at once, so the join would be pure overhead.
+// columns_csv kept for back-compat with rows written before the
+// schema grew the json column; new writes populate columns_json
+// (which has descriptions) and leave columns_csv as the legacy
+// names-only fallback. Reads prefer columns_json when present.
+// input_files is a JSON-encoded array of {name, content} (with
+// content base64-encoded by encoding/json's []byte default).
 // ----------------------------------------------------------------------
 
 type sqlUserTemplateStore struct {
@@ -399,12 +576,58 @@ func (s *sqlUserTemplateStore) createTables() error {
 	if err != nil {
 		return fmt.Errorf("create templates_user: %w", err)
 	}
+	// Lazy migration: add columns_json and input_files when missing.
+	// SQLite's ALTER TABLE only supports ADD COLUMN; that's all we
+	// need. Both columns default to empty so old rows read as a
+	// template with no descriptions and no input files.
+	if err := s.addColumnIfMissing(ctx, "templates_user", "columns_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "templates_user", "input_files", "BLOB NOT NULL DEFAULT X''"); err != nil {
+		return err
+	}
 	// Index on owner alone for fast LoadAll-by-user queries. The
 	// (owner, id) primary key already covers point lookups, but the
 	// index helps when scanning all rows for a single owner.
 	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS templates_user_owner ON templates_user(owner);`)
 	if err != nil {
 		return fmt.Errorf("create index: %w", err)
+	}
+	return nil
+}
+
+// addColumnIfMissing is the manual migration helper. SQLite's PRAGMA
+// table_info returns one row per column; we look for the target name
+// and run ALTER TABLE only when it's not there. Idempotent — second
+// startup is a no-op.
+func (s *sqlUserTemplateStore) addColumnIfMissing(ctx context.Context, table, column, decl string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s);", table))
+	if err != nil {
+		return fmt.Errorf("table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("table_info(%s) iter: %w", table, err)
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, column, decl))
+	if err != nil {
+		return fmt.Errorf("alter %s add %s: %w", table, column, err)
 	}
 	return nil
 }
@@ -418,7 +641,7 @@ func (s *sqlUserTemplateStore) Close() error {
 
 func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 	rows, err := s.db.QueryContext(context.Background(), `
-		SELECT id, name, description, columns_csv, contents
+		SELECT id, name, description, columns_csv, columns_json, contents, input_files
 		  FROM templates_user
 		 WHERE owner = ?
 		 ORDER BY name`, owner)
@@ -430,13 +653,19 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 	var out []Template
 	for rows.Next() {
 		var t Template
-		var colsCSV string
-		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &t.Contents); err != nil {
+		var colsCSV, colsJSON string
+		var inputFilesBlob []byte
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob); err != nil {
 			return nil, err
 		}
 		t.Owner = owner
 		t.Source = SourceUser
-		t.Columns = unpackColumns(colsCSV)
+		t.Columns = decodeColumns(colsJSON, colsCSV)
+		files, ferr := decodeInputFiles(inputFilesBlob)
+		if ferr != nil {
+			return nil, fmt.Errorf("decode input_files for %s/%s: %w", owner, t.ID, ferr)
+		}
+		t.InputFiles = files
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -444,12 +673,13 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 
 func (s *sqlUserTemplateStore) Get(id, owner string) (Template, bool, error) {
 	var t Template
-	var colsCSV string
+	var colsCSV, colsJSON string
+	var inputFilesBlob []byte
 	err := s.db.QueryRowContext(context.Background(), `
-		SELECT id, name, description, columns_csv, contents
+		SELECT id, name, description, columns_csv, columns_json, contents, input_files
 		  FROM templates_user
 		 WHERE owner = ? AND id = ?`, owner, id).
-		Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &t.Contents)
+		Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Template{}, false, nil
 	}
@@ -458,26 +688,41 @@ func (s *sqlUserTemplateStore) Get(id, owner string) (Template, bool, error) {
 	}
 	t.Owner = owner
 	t.Source = SourceUser
-	t.Columns = unpackColumns(colsCSV)
+	t.Columns = decodeColumns(colsJSON, colsCSV)
+	files, ferr := decodeInputFiles(inputFilesBlob)
+	if ferr != nil {
+		return Template{}, false, fmt.Errorf("decode input_files for %s/%s: %w", owner, id, ferr)
+	}
+	t.InputFiles = files
 	return t, true, nil
 }
 
 func (s *sqlUserTemplateStore) Save(t Template) error {
 	now := time.Now().UTC()
-	cols := packColumns(t.Columns)
+	colsCSV := packColumnNames(t.Columns) // legacy, names-only
+	colsJSON, err := json.Marshal(t.Columns)
+	if err != nil {
+		return fmt.Errorf("marshal columns: %w", err)
+	}
+	inputFilesBlob, err := encodeInputFiles(t.InputFiles)
+	if err != nil {
+		return fmt.Errorf("encode input_files: %w", err)
+	}
 	// UPSERT: SQLite (>=3.24) and Postgres both speak ON CONFLICT.
 	// glebarez/sqlite tracks a recent SQLite version so we're fine.
-	_, err := s.db.ExecContext(context.Background(), `
+	_, err = s.db.ExecContext(context.Background(), `
 		INSERT INTO templates_user
-			(owner, id, name, description, columns_csv, contents, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			(owner, id, name, description, columns_csv, columns_json, contents, input_files, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(owner, id) DO UPDATE SET
-			name        = excluded.name,
-			description = excluded.description,
-			columns_csv = excluded.columns_csv,
-			contents    = excluded.contents,
-			updated_at  = excluded.updated_at`,
-		t.Owner, t.ID, t.Name, t.Description, cols, t.Contents, now, now)
+			name         = excluded.name,
+			description  = excluded.description,
+			columns_csv  = excluded.columns_csv,
+			columns_json = excluded.columns_json,
+			contents     = excluded.contents,
+			input_files  = excluded.input_files,
+			updated_at   = excluded.updated_at`,
+		t.Owner, t.ID, t.Name, t.Description, colsCSV, string(colsJSON), t.Contents, inputFilesBlob, now, now)
 	return err
 }
 
@@ -493,23 +738,76 @@ func (s *sqlUserTemplateStore) Delete(id, owner string) (bool, error) {
 	return n > 0, nil
 }
 
-// packColumns / unpackColumns serialize the columns slice into a
-// single TEXT cell. We use \x1f (ASCII Unit Separator) as the field
-// separator; HTCondor macro names are constrained to [A-Za-z0-9_],
-// so a non-printable byte is unambiguous and one byte cheaper than
-// JSON-encoding.
+// packColumnNames / unpackColumnNames serialize a list of column
+// macro names (no descriptions) into the legacy `columns_csv` TEXT
+// cell. We keep writing this column for back-compat with any reader
+// that doesn't know about columns_json yet. \x1f (ASCII Unit
+// Separator) is the field separator; HTCondor macro names are
+// constrained to [A-Za-z0-9_], so a non-printable byte is
+// unambiguous and one byte cheaper than JSON-encoding.
 const colSep = "\x1f"
 
-func packColumns(cols []string) string {
+func packColumnNames(cols []Column) string {
 	if len(cols) == 0 {
 		return ""
 	}
-	return strings.Join(cols, colSep)
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	return strings.Join(names, colSep)
 }
 
-func unpackColumns(packed string) []string {
+func unpackColumnNames(packed string) []Column {
 	if packed == "" {
 		return nil
 	}
-	return strings.Split(packed, colSep)
+	parts := strings.Split(packed, colSep)
+	out := make([]Column, len(parts))
+	for i, p := range parts {
+		out[i] = Column{Name: p}
+	}
+	return out
+}
+
+// decodeColumns prefers the JSON-encoded columns_json cell (which
+// preserves descriptions) and falls back to the legacy CSV when
+// columns_json is empty (rows written before the schema migration).
+func decodeColumns(jsonCell, csvCell string) []Column {
+	if jsonCell != "" {
+		var out []Column
+		if err := json.Unmarshal([]byte(jsonCell), &out); err == nil {
+			return out
+		}
+		// Malformed JSON shouldn't happen — we wrote it ourselves —
+		// but if it does, fall through to the CSV fallback rather
+		// than silently dropping the column list.
+	}
+	return unpackColumnNames(csvCell)
+}
+
+// encodeInputFiles / decodeInputFiles handle the BLOB column. We use
+// JSON (with []byte → base64 via encoding/json's default) so the
+// column stays human-debuggable with sqlite3 CLI. Empty slice is
+// stored as a zero-length blob, not the string "[]" — saves a few
+// bytes per row when no input files are attached (the common case).
+func encodeInputFiles(files []InputFile) ([]byte, error) {
+	if len(files) == 0 {
+		// Return a zero-length, non-nil slice — the SQLite driver
+		// otherwise sends NULL, which trips the NOT NULL constraint
+		// on the column. Decode treats len==0 as "no files".
+		return []byte{}, nil
+	}
+	return json.Marshal(files)
+}
+
+func decodeInputFiles(blob []byte) ([]InputFile, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	var out []InputFile
+	if err := json.Unmarshal(blob, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

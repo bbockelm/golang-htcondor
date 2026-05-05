@@ -336,7 +336,10 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 			cancel()
 			log.Fatalf("CA bundle contains no usable PEM certificates") //nolint:gocritic // cancel() called above
 		}
-		log.Printf("trusting %d-byte CA bundle from stage 1", len(caBytes))
+		// gosec G706 false positive: we log the byte count, not the
+		// CA contents — len(caBytes) is an integer and can't carry
+		// injection.
+		log.Printf("trusting %d-byte CA bundle from stage 1", len(caBytes)) //nolint:gosec
 	}
 
 	cfg := jupytertunnel.HelperConfig{

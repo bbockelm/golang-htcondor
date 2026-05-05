@@ -124,6 +124,49 @@ func dirExists(fsys fs.FS, name string) bool {
 	return stat.IsDir()
 }
 
+// serveFile is the single chokepoint for handing a path to
+// http.ServeFileFS. The embed.FS we serve from already rejects
+// "../" segments, but gosec G703 flags any user-controlled string
+// that flows into a file-serving function regardless. Validate
+// explicitly here so the security guarantee is local to this
+// function rather than implicit in the FS implementation: only
+// names that pass path.Clean unchanged AND contain no "..", "//",
+// or leading "/" are served. Anything else gets a 404.
+//
+// In practice the callers (NewSPAHandler, resolveDynamicRoute)
+// produce only safe names — they're built from the embed manifest
+// after a fileExists check. The validation here is defense in
+// depth.
 func serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
+	if !isSafeEmbeddedPath(name) {
+		http.NotFound(w, r)
+		return
+	}
 	http.ServeFileFS(w, r, fsys, name)
+}
+
+// isSafeEmbeddedPath reports whether name is safe to pass to
+// http.ServeFileFS over an embed.FS rooted at the package's dist
+// directory. The rules: relative path, no ".." segments, no
+// double-slashes, no NUL bytes. A nonzero name is required.
+func isSafeEmbeddedPath(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.HasPrefix(name, "/") {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	if strings.Contains(name, "//") {
+		return false
+	}
+	if strings.ContainsRune(name, 0) {
+		return false
+	}
+	if path.Clean(name) != name {
+		return false
+	}
+	return true
 }

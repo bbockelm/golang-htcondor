@@ -196,9 +196,14 @@ func TestLogoutEndpoint(t *testing.T) {
 		{
 			name:   "POST /logout with cookies clears them",
 			method: http.MethodPost,
-			cookies: []*http.Cookie{
-				{Name: "session_id", Value: "test-session-123"},
-				{Name: "auth_token", Value: "test-token-456"},
+			// Test fixtures: gosec G124 (insecure cookie attributes)
+			// is irrelevant here — these cookies represent what a
+			// browser sends on a request, not what we set on a
+			// response. The Secure / HttpOnly / SameSite bits aren't
+			// part of the wire format from client → server.
+			cookies: []*http.Cookie{ //nolint:gosec
+				{Name: "session_id", Value: "test-session-123"}, //nolint:gosec
+				{Name: "auth_token", Value: "test-token-456"},   //nolint:gosec
 			},
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "success",
@@ -316,9 +321,12 @@ func TestLogoutEndpointWithSessionStore(t *testing.T) {
 		t.Errorf("Session username = %v, want testuser", sessionBefore.Username)
 	}
 
-	// Create a request with the session cookie
+	// Create a request with the session cookie. gosec G124 doesn't
+	// apply to client-side AddCookie calls — the Secure / HttpOnly /
+	// SameSite attributes are irrelevant on the wire from client to
+	// server.
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/logout", nil)
-	req.AddCookie(&http.Cookie{
+	req.AddCookie(&http.Cookie{ //nolint:gosec
 		Name:  sessionCookieName,
 		Value: sessionID,
 	})

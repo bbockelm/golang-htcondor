@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,6 +27,52 @@ func isBrowserRequest(r *http.Request) bool {
 	accept := r.Header.Get("Accept")
 	// Check if Accept header includes text/html
 	return strings.Contains(accept, "text/html")
+}
+
+// isSafeLocalRedirect reports whether u is safe to pass to
+// http.Redirect for a post-login or post-logout bounce.
+//
+// "Safe" here means: the user-controlled URL can't take the browser
+// off-site to an attacker-controlled destination. We only accept
+// relative paths rooted at "/" — that guarantees same-origin and
+// avoids the gosec G710 open-redirect failure mode (e.g.
+// `?redirect=https://evil.example/`).
+//
+// A trailing-slash path like "/jobs/" is OK; a scheme-relative
+// "//evil.example" is NOT (browsers treat it as absolute) and is
+// rejected. Empty input is rejected so callers fall through to a
+// hard-coded default.
+func isSafeLocalRedirect(u string) bool {
+	if u == "" {
+		return false
+	}
+	// Must start with a single "/" — anything else is either an
+	// absolute URL (with scheme), a scheme-relative URL ("//..."),
+	// or a relative path that could break out via "../".
+	if !strings.HasPrefix(u, "/") {
+		return false
+	}
+	// "//host/path" is scheme-relative and treated as absolute by
+	// browsers — explicitly reject.
+	if strings.HasPrefix(u, "//") {
+		return false
+	}
+	// Reject backslash to defeat browsers (mostly older ones) that
+	// normalize `\` to `/` after the scheme.
+	if strings.Contains(u, "\\") {
+		return false
+	}
+	// Final belt-and-braces parse: any URL that ended up with a
+	// non-empty Host is not local. url.Parse handles edge cases like
+	// percent-encoded slashes that the prefix checks above can miss.
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+	if parsed.Host != "" || parsed.Scheme != "" {
+		return false
+	}
+	return true
 }
 
 // requireAuthentication wraps the createAuthenticatedContext call and handles
@@ -161,14 +208,22 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Get page token
 	pageToken := r.URL.Query().Get("page_token")
 
-	// Parse owned_by_me parameter (defaults to true)
-	// When true, only returns jobs owned by the authenticated user
-	ownedByMe := true // default to true for security
+	// Parse owned_by_me parameter (defaults to true).
+	// Server-side enforcement: a browser session that isn't in the
+	// admin group cannot escape the my-jobs filter — overriding any
+	// client param. Bearer-token API callers (no session cookie)
+	// are trusted; the schedd's own ACLs are the backstop there.
+	ownedByMe := true
 	if ownedByMeStr := r.URL.Query().Get("owned_by_me"); ownedByMeStr != "" {
 		ownedByMe, err = strconv.ParseBool(ownedByMeStr)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid owned_by_me parameter: %v", err))
 			return
+		}
+	}
+	if !ownedByMe {
+		if _, hasSession := s.getSessionFromRequest(r); hasSession && !s.isWebUIAdmin(r) {
+			ownedByMe = true
 		}
 	}
 
@@ -1143,8 +1198,13 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Parse multipart form with a size limit (100MB)
-	err = r.ParseMultipartForm(100 * 1024 * 1024) // 100MB limit
+	// Bound the request body before parsing so a hostile client can't
+	// stream gigabytes through ParseMultipartForm. MaxBytesReader caps
+	// the total request size; ParseMultipartForm's argument is the
+	// in-memory threshold above which parts spill to temp files.
+	const maxInputBytes = 100 * 1024 * 1024 // 100 MiB
+	r.Body = http.MaxBytesReader(w, r.Body, maxInputBytes)
+	err = r.ParseMultipartForm(maxInputBytes)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
 		return
@@ -1535,7 +1595,14 @@ func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		if cookie.Name == sessionCookieName {
 			continue
 		}
-		http.SetCookie(w, &http.Cookie{
+		// gosec G124 flags this because Secure is dynamic — set to
+		// true only on TLS connections. We can't make it
+		// unconditionally true: in demo / dev mode the server runs
+		// over plain HTTP and a Secure cookie would be silently
+		// dropped by the browser, breaking logout. HttpOnly +
+		// SameSite=Lax are unconditional, and Secure is set whenever
+		// TLS is in play, which is the right behavior.
+		http.SetCookie(w, &http.Cookie{ //nolint:gosec
 			Name:     cookie.Name,
 			Value:    "",
 			Path:     "/",
@@ -2778,11 +2845,16 @@ func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Reques
 }
 
 // parseAdvertiseMultipart parses multipart form data containing ClassAds
-// Returns ads, withAck flag, command, and error
+// Returns ads, withAck flag, command, and error.
+//
+// Bounds the request body via http.MaxBytesReader before parsing so a
+// hostile client can't stream gigabytes through ParseMultipartForm.
+// The argument to ParseMultipartForm is the in-memory threshold; the
+// MaxBytesReader cap is the absolute body-size ceiling. We use the
+// same value for both: 10 MiB is the documented ceiling.
 func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
-	// Parse multipart form with 10MB limit for the HTTP form data itself
-	// (this is larger than the 1MB ClassAd content limit to account for multipart encoding overhead)
 	const maxMultipartFormSize = 10 * 1024 * 1024
+	r.Body = http.MaxBytesReader(nil, r.Body, maxMultipartFormSize)
 	err := r.ParseMultipartForm(maxMultipartFormSize)
 	if err != nil {
 		return nil, false, "", fmt.Errorf("failed to parse multipart form: %w", err)

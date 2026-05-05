@@ -31,8 +31,15 @@ import {
   interpretJobStatus,
   statusLabel,
   statusPillStyle,
+  visualStatus,
   type Status,
 } from '@/lib/jobStatus';
+import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
+import {
+  ResourceRequestPanel,
+  DEFAULT_RESOURCE_REQUEST,
+  type ResourceRequest,
+} from '@/components/ResourceRequest';
 
 const DEFAULT_JUPYTER_IMAGE = 'quay.io/jupyter/scipy-notebook:latest';
 
@@ -68,18 +75,22 @@ function JupyterSection() {
   });
 
   const [image, setImage] = useState(DEFAULT_JUPYTER_IMAGE);
-  const [cpus, setCpus] = useState(2);
-  const [memMB, setMemMB] = useState(4096);
-  const [diskMB, setDiskMB] = useState(4096);
+  // Jupyter defaults to 2 CPU / 4 GB / 4 GB (matches the server-side
+  // applyDefaults) so the form opens preconfigured for a notebook
+  // instead of a 1-cpu watchdog.
+  const [resources, setResources] = useState<ResourceRequest>({
+    ...DEFAULT_RESOURCE_REQUEST,
+    cpus: 2,
+    memoryMB: 4096,
+    diskMB: 4096,
+  });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const submit = useMutation({
     mutationFn: () =>
       api.jupyter.create({
         image,
-        cpus,
-        memory_mb: memMB,
-        disk_mb: diskMB,
+        ...resourceRequestToApi(resources),
       }),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
@@ -127,14 +138,7 @@ function JupyterSection() {
             conda env instead).
           </p>
         </Field>
-        <ResourceTriple
-          cpus={cpus}
-          setCpus={setCpus}
-          memMB={memMB}
-          setMemMB={setMemMB}
-          diskMB={diskMB}
-          setDiskMB={setDiskMB}
-        />
+        <ResourceRequestPanel value={resources} onChange={setResources} />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -163,44 +167,64 @@ function JupyterTable({ instances }: { instances: JupyterInstanceSummary[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {instances.map((inst) => {
-            const status = jupyterRowStatus(inst);
-            return (
-              <tr key={inst.instance_id} className="hover:bg-gray-50">
-                <td className="px-3 py-2 font-mono text-xs">
-                  <Link
-                    href={`/interactive/jupyter/${inst.instance_id}`}
-                    className="text-brand-700 hover:underline"
-                  >
-                    {inst.instance_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-2 font-mono text-xs text-gray-700">
-                  {inst.cluster_id ? `${inst.cluster_id}.0` : '—'}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs text-gray-700 max-w-xs truncate">
-                  {inst.image ?? '—'}
-                </td>
-                <td className="px-3 py-2">
-                  <SharedStatusPill status={status} />
-                </td>
-                <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
-                  {new Date(inst.created_at).toLocaleString()}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  <Link
-                    href={`/interactive/jupyter/${inst.instance_id}`}
-                    className="text-xs text-gray-500 hover:text-gray-700"
-                  >
-                    Open ↗
-                  </Link>
-                </td>
-              </tr>
-            );
-          })}
+          {instances.map((inst) => (
+            <JupyterRow key={inst.instance_id} inst={inst} />
+          ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+// JupyterRow is its own component so each row can host its own probe
+// state via useJupyterReadyProbe. The probe runs once the helper is
+// connected and flips this row's pill from "Launching" (amber) to
+// "Ready" (green) the same way the detail page does — without that,
+// the list and detail page disagreed on what "ready" means.
+function JupyterRow({ inst }: { inst: JupyterInstanceSummary }) {
+  const labReady = useJupyterReadyProbe({
+    proxyPath: inst.proxy_path,
+    instanceID: inst.instance_id,
+    helperConnected: inst.connected === true,
+  });
+  // Compute the underlying job status, then upgrade to 'ready' iff the
+  // probe confirms JupyterLab is serving. This mirrors the detail
+  // page's logic exactly so the two views land on the same state.
+  let status = jupyterRowStatus(inst);
+  if (status === 'launching' && labReady) {
+    status = 'ready';
+  }
+  return (
+    <tr className="hover:bg-gray-50">
+      <td className="px-3 py-2 font-mono text-xs">
+        <Link
+          href={`/interactive/jupyter/${inst.instance_id}`}
+          className="text-brand-700 hover:underline"
+        >
+          {inst.instance_id}
+        </Link>
+      </td>
+      <td className="px-3 py-2 font-mono text-xs text-gray-700">
+        {inst.cluster_id ? `${inst.cluster_id}.0` : '—'}
+      </td>
+      <td className="px-3 py-2 font-mono text-xs text-gray-700 max-w-xs truncate">
+        {inst.image ?? '—'}
+      </td>
+      <td className="px-3 py-2">
+        <SharedStatusPill status={status} />
+      </td>
+      <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
+        {new Date(inst.created_at).toLocaleString()}
+      </td>
+      <td className="px-3 py-2 text-right">
+        <Link
+          href={`/interactive/jupyter/${inst.instance_id}`}
+          className="text-xs text-gray-500 hover:text-gray-700"
+        >
+          Open ↗
+        </Link>
+      </td>
+    </tr>
   );
 }
 
@@ -239,18 +263,12 @@ function TerminalSection() {
     refetchInterval: 5_000,
   });
 
-  const [cpus, setCpus] = useState(1);
-  const [memMB, setMemMB] = useState(1024);
-  const [diskMB, setDiskMB] = useState(1024);
+  const [resources, setResources] = useState<ResourceRequest>(DEFAULT_RESOURCE_REQUEST);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const submit = useMutation({
     mutationFn: () =>
-      api.interactive.createTerminal({
-        cpus,
-        memory_mb: memMB,
-        disk_mb: diskMB,
-      }),
+      api.interactive.createTerminal(resourceRequestToApi(resources)),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
       invalidateInteractiveLists(queryClient);
@@ -290,14 +308,7 @@ function TerminalSection() {
 
       <div className="rounded border border-gray-200 bg-white p-4 space-y-4 mt-3">
         <div className="text-sm font-medium text-gray-700">Launch new</div>
-        <ResourceTriple
-          cpus={cpus}
-          setCpus={setCpus}
-          memMB={memMB}
-          setMemMB={setMemMB}
-          diskMB={diskMB}
-          setDiskMB={setDiskMB}
-        />
+        <ResourceRequestPanel value={resources} onChange={setResources} />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -309,6 +320,36 @@ function TerminalSection() {
       </div>
     </SectionCard>
   );
+}
+
+// resourceRequestToApi flattens a ResourceRequest into the optional-
+// field shape both interactive endpoints accept. GPU-related fields are
+// omitted when the user requested 0 GPUs so the JSON stays tidy.
+function resourceRequestToApi(r: ResourceRequest): {
+  cpus: number;
+  memory_mb: number;
+  disk_mb: number;
+  gpus?: number;
+  gpus_minimum_capability?: string;
+  gpus_minimum_memory?: number;
+  gpus_minimum_runtime?: string;
+  cuda_version?: string;
+  require_gpus?: string;
+} {
+  const out: ReturnType<typeof resourceRequestToApi> = {
+    cpus: r.cpus,
+    memory_mb: r.memoryMB,
+    disk_mb: r.diskMB,
+  };
+  if (r.gpus > 0) {
+    out.gpus = r.gpus;
+    if (r.gpuMinCapability) out.gpus_minimum_capability = r.gpuMinCapability;
+    if (r.gpuMinMemoryMB > 0) out.gpus_minimum_memory = r.gpuMinMemoryMB;
+    if (r.gpuMinRuntime) out.gpus_minimum_runtime = r.gpuMinRuntime;
+    if (r.cudaVersion) out.cuda_version = r.cudaVersion;
+    if (r.requireGpus) out.require_gpus = r.requireGpus;
+  }
+  return out;
 }
 
 // terminalRowStatus turns an InteractiveTerminalSummary into the
@@ -365,7 +406,14 @@ function TerminalTable({
                 </Link>
               </td>
               <td className="px-3 py-2">
-                <SharedStatusPill status={terminalRowStatus(t)} />
+                {/* visualStatus remaps terminal 'executing' → 'ready'
+                    so the pill is green/Ready once the SSH bridge can
+                    actually attach (= the executable is running).
+                    Without this, the list reports a yellow
+                    "Executing" pill even though the session is fully
+                    usable — inconsistent with how Jupyter's flow
+                    surfaces "Ready" once usable. */}
+                <SharedStatusPill status={visualStatus(terminalRowStatus(t), 'terminal')} />
               </td>
               <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
                 {t.submitted_at
@@ -422,55 +470,6 @@ function SectionCard({
       </div>
       {children}
     </section>
-  );
-}
-
-function ResourceTriple({
-  cpus,
-  setCpus,
-  memMB,
-  setMemMB,
-  diskMB,
-  setDiskMB,
-}: {
-  cpus: number;
-  setCpus: (n: number) => void;
-  memMB: number;
-  setMemMB: (n: number) => void;
-  diskMB: number;
-  setDiskMB: (n: number) => void;
-}) {
-  return (
-    <div className="grid grid-cols-3 gap-4">
-      <Field label="CPUs">
-        <input
-          type="number"
-          min={1}
-          max={64}
-          value={cpus}
-          onChange={(e) => setCpus(parseInt(e.target.value || '1', 10))}
-          className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
-        />
-      </Field>
-      <Field label="Memory (MiB)">
-        <input
-          type="number"
-          min={256}
-          value={memMB}
-          onChange={(e) => setMemMB(parseInt(e.target.value || '256', 10))}
-          className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
-        />
-      </Field>
-      <Field label="Disk (MiB)">
-        <input
-          type="number"
-          min={256}
-          value={diskMB}
-          onChange={(e) => setDiskMB(parseInt(e.target.value || '256', 10))}
-          className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
-        />
-      </Field>
-    </div>
   );
 }
 

@@ -255,6 +255,131 @@ export function decodeEnvironment(raw: string | undefined): EnvVar[] | null {
   return out;
 }
 
+// --- Resource request helpers --------------------------------------------
+//
+// Map ResourceRequest <-> submit-file body so the same widget can drive
+// both a structured-state form (interactive page) and a freeform body
+// editor (submit page step 4 + template authoring).
+
+import {
+  DEFAULT_RESOURCE_REQUEST,
+  type ResourceRequest,
+} from '@/components/ResourceRequest';
+
+const RESOURCE_KEYS = [
+  'request_cpus',
+  'request_memory',
+  'request_disk',
+  'request_gpus',
+  'gpus_minimum_memory',
+  'gpus_minimum_capability',
+  'gpus_minimum_runtime',
+  'cuda_version',
+  'require_gpus',
+] as const;
+
+/** Returns true when the body sets *any* of the structured resource keys. */
+export function bodyHasResourceRequests(text: string): boolean {
+  return RESOURCE_KEYS.some((k) => getAttribute(text, k) !== undefined);
+}
+
+/** Returns true when the body sets the core CPU/memory/disk triple. */
+export function bodyHasCoreResourceRequests(text: string): boolean {
+  return (
+    getAttribute(text, 'request_cpus') !== undefined &&
+    getAttribute(text, 'request_memory') !== undefined &&
+    getAttribute(text, 'request_disk') !== undefined
+  );
+}
+
+/**
+ * Read whatever resource-request lines are present in the body. Missing
+ * fields fall back to DEFAULT_RESOURCE_REQUEST. Memory/disk values are
+ * accepted as bare integers — HTCondor's units suffix syntax (`4G` etc.)
+ * is left as-is in the body and ignored here; consumers that want
+ * structured editing should use bare integers.
+ */
+export function readResourcesFromBody(text: string): ResourceRequest {
+  return {
+    cpus: parseIntOr(getAttribute(text, 'request_cpus'), DEFAULT_RESOURCE_REQUEST.cpus),
+    memoryMB: parseIntOr(
+      getAttribute(text, 'request_memory'),
+      DEFAULT_RESOURCE_REQUEST.memoryMB,
+    ),
+    diskMB: parseIntOr(
+      getAttribute(text, 'request_disk'),
+      DEFAULT_RESOURCE_REQUEST.diskMB,
+    ),
+    gpus: parseIntOr(getAttribute(text, 'request_gpus'), DEFAULT_RESOURCE_REQUEST.gpus),
+    gpuMinCapability:
+      getAttribute(text, 'gpus_minimum_capability') ??
+      DEFAULT_RESOURCE_REQUEST.gpuMinCapability,
+    gpuMinMemoryMB: parseIntOr(
+      getAttribute(text, 'gpus_minimum_memory'),
+      DEFAULT_RESOURCE_REQUEST.gpuMinMemoryMB,
+    ),
+    gpuMinRuntime:
+      getAttribute(text, 'gpus_minimum_runtime') ??
+      DEFAULT_RESOURCE_REQUEST.gpuMinRuntime,
+    cudaVersion:
+      getAttribute(text, 'cuda_version') ?? DEFAULT_RESOURCE_REQUEST.cudaVersion,
+    requireGpus:
+      getAttribute(text, 'require_gpus') ?? DEFAULT_RESOURCE_REQUEST.requireGpus,
+  };
+}
+
+/**
+ * Apply a ResourceRequest to the body, replacing existing resource lines
+ * and inserting missing ones. Setting `gpus = 0` removes every GPU
+ * subfield so the body doesn't accumulate dead lines as the user toggles
+ * the GPU section.
+ */
+export function applyResourcesToBody(
+  text: string,
+  r: ResourceRequest,
+): string {
+  let next = text;
+  next = setAttribute(next, 'request_cpus', String(r.cpus));
+  next = setAttribute(next, 'request_memory', String(r.memoryMB));
+  next = setAttribute(next, 'request_disk', String(r.diskMB));
+
+  if (r.gpus > 0) {
+    next = setAttribute(next, 'request_gpus', String(r.gpus));
+    next = applyOrRemove(next, 'gpus_minimum_capability', r.gpuMinCapability);
+    next = applyOrRemove(
+      next,
+      'gpus_minimum_memory',
+      r.gpuMinMemoryMB > 0 ? String(r.gpuMinMemoryMB) : '',
+    );
+    next = applyOrRemove(next, 'gpus_minimum_runtime', r.gpuMinRuntime);
+    next = applyOrRemove(next, 'cuda_version', r.cudaVersion);
+    next = applyOrRemove(next, 'require_gpus', r.requireGpus);
+  } else {
+    for (const k of [
+      'request_gpus',
+      'gpus_minimum_memory',
+      'gpus_minimum_capability',
+      'gpus_minimum_runtime',
+      'cuda_version',
+      'require_gpus',
+    ]) {
+      next = removeAttribute(next, k);
+    }
+  }
+  return next;
+}
+
+function applyOrRemove(text: string, key: string, value: string): string {
+  if (value.trim() === '') return removeAttribute(text, key);
+  return setAttribute(text, key, value);
+}
+
+function parseIntOr(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
 /**
  * Parse a CSV string. First non-empty row is treated as the header.
  * Returns null if the file is empty / only blanks.

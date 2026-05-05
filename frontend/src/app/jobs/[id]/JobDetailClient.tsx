@@ -202,13 +202,16 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
       {/* Match analysis is most useful for Idle (1) and Held (5) jobs —
           it answers "why isn't this running?". We expose the panel
-          for every status (so the operator can read about it) but the
-          Run button itself is gated by the widget on display.key —
-          'idle' and 'held' enabled, everything else disabled.
-          jobQDate drives the "wait a minute" banner for fresh jobs. */}
+          for every status (so the operator can read about it) but
+          start collapsed regardless of state: the page already has
+          plenty going on, and the operator opting in by clicking the
+          summary is a clearer signal of intent than auto-expanding.
+          The widget itself further gates the Run button on
+          display.key (only 'idle'/'held' enabled). jobQDate drives
+          the "wait a minute" banner for fresh jobs. */}
       <MatchAnalysisPanel
         jobID={jobID}
-        defaultOpen={status === 1 || status === 5}
+        defaultOpen={false}
         jobStatus={display.key}
         jobQDate={qdate}
         helperText={

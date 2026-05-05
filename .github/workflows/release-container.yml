@@ -47,6 +47,9 @@ jobs:
           tags: |
             # On push to main branch, tag as 'devel'
             type=raw,value=devel,enable={{is_default_branch}}
+            # On push to main branch, also tag with a sortable timestamp
+            # so flux ImagePolicy can pick the newest build per commit.
+            type=raw,value=main-{{date 'YYYYMMDDHHmmss' tz='UTC'}},enable={{is_default_branch}}
             # On tag push, use the tag name
             type=ref,event=tag
             # On tag push, also tag as 'latest'

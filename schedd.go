@@ -199,8 +199,20 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	go func() {
 		defer close(ch)
 
-		// Determine command
+		// Determine command. When the caller asked to filter to "my
+		// jobs", upgrade to QUERY_JOB_ADS_WITH_AUTH so the schedd
+		// derives the owner from the authenticated cedar identity
+		// rather than trusting the client-supplied `Me` attribute on
+		// the request ad. Without this, a non-authenticated query
+		// against modern condor schedds with a literal-expression
+		// `MyJobs` causes the schedd to drop the filter entirely
+		// (see condor_schedd.V6/schedd.cpp:3474 — empty owner →
+		// my_jobs_expr = NULL → all jobs). Mirrors the conditional
+		// in dc_schedd.cpp's CondorQ::fetchQueueFromHostAndProcessV2.
 		cmd := commands.QUERY_JOB_ADS
+		if effectiveOpts != nil && effectiveOpts.FetchOpts&FetchMyJobs != 0 {
+			cmd = commands.QUERY_JOB_ADS_WITH_AUTH
+		}
 
 		// Get security config
 		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)

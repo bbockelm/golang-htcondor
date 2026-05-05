@@ -180,9 +180,12 @@ func TestSessionCookie(t *testing.T) {
 		t.Errorf("Expected SameSite=Lax, got %v", cookie.SameSite)
 	}
 
-	// Test getSessionCookie
+	// Test getSessionCookie. gosec G124 doesn't apply to client-side
+	// AddCookie calls — Secure / HttpOnly / SameSite are response-side
+	// attributes; on a request from client → server they aren't on the
+	// wire.
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.AddCookie(&http.Cookie{
+	req.AddCookie(&http.Cookie{ //nolint:gosec
 		Name:  sessionCookieName,
 		Value: sessionID,
 	})
@@ -218,9 +221,10 @@ func TestGetSessionFromRequest(t *testing.T) {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	// Test with valid session cookie
+	// Test with valid session cookie. (See comment in TestSessionStore
+	// about why these client-side cookies don't need security attrs.)
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.AddCookie(&http.Cookie{
+	req.AddCookie(&http.Cookie{ //nolint:gosec
 		Name:  sessionCookieName,
 		Value: sessionID,
 	})
@@ -233,9 +237,9 @@ func TestGetSessionFromRequest(t *testing.T) {
 		t.Errorf("Expected username '%s', got '%s'", session.Username, retrievedSession.Username)
 	}
 
-	// Test with invalid session cookie
+	// Test with invalid session cookie.
 	req = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.AddCookie(&http.Cookie{
+	req.AddCookie(&http.Cookie{ //nolint:gosec
 		Name:  sessionCookieName,
 		Value: "invalid-session-id",
 	})

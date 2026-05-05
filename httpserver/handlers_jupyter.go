@@ -508,6 +508,16 @@ type JupyterCreateRequest struct {
 	MemoryMB int `json:"memory_mb"`
 	// DiskMB is the requested scratch disk in mebibytes. Default 4096.
 	DiskMB int `json:"disk_mb"`
+
+	// GPU fields. Mirrored verbatim into request_gpus and the
+	// gpus_minimum_* / cuda_version / require_gpus submit lines.
+	// Gpus == 0 disables the entire GPU section in the submit file.
+	Gpus                  int    `json:"gpus,omitempty"`
+	GpusMinimumCapability string `json:"gpus_minimum_capability,omitempty"`
+	GpusMinimumMemory     int    `json:"gpus_minimum_memory,omitempty"`
+	GpusMinimumRuntime    string `json:"gpus_minimum_runtime,omitempty"`
+	CudaVersion           string `json:"cuda_version,omitempty"`
+	RequireGpus           string `json:"require_gpus,omitempty"`
 }
 
 // JupyterCreateResponse is the JSON returned by POST /jupyter/instances.
@@ -654,15 +664,21 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	}
 
 	submitFile := buildJupyterSubmitFile(jupyterSubmitArgs{
-		InstanceID:         instID,
-		Image:              req.Image,
-		Cpus:               req.Cpus,
-		MemoryMB:           req.MemoryMB,
-		DiskMB:             req.DiskMB,
-		Universe:           universe,
-		HelperGOOS:         helperGOOS,
-		HelperGOARCH:       runtimeGOARCH(),
-		TransferInputFiles: transferInputFiles,
+		InstanceID:            instID,
+		Image:                 req.Image,
+		Cpus:                  req.Cpus,
+		MemoryMB:              req.MemoryMB,
+		DiskMB:                req.DiskMB,
+		Universe:              universe,
+		HelperGOOS:            helperGOOS,
+		HelperGOARCH:          runtimeGOARCH(),
+		TransferInputFiles:    transferInputFiles,
+		Gpus:                  req.Gpus,
+		GpusMinimumCapability: req.GpusMinimumCapability,
+		GpusMinimumMemory:     req.GpusMinimumMemory,
+		GpusMinimumRuntime:    req.GpusMinimumRuntime,
+		CudaVersion:           req.CudaVersion,
+		RequireGpus:           req.RequireGpus,
 	})
 
 	// Remote-submit + spool from an in-memory fs.FS. No on-disk state
@@ -753,6 +769,9 @@ func (req *JupyterCreateRequest) validate() error {
 	if req.DiskMB < 256 || req.DiskMB > 1024*1024 {
 		return fmt.Errorf("disk_mb must be between 256 and %d, got %d", 1024*1024, req.DiskMB)
 	}
+	if req.Gpus < 0 || req.Gpus > 16 {
+		return fmt.Errorf("gpus must be between 0 and 16, got %d", req.Gpus)
+	}
 	// Light validation of image: no whitespace, no newlines (we paste it
 	// verbatim into the submit file).
 	if strings.ContainsAny(req.Image, " \t\r\n") {
@@ -795,6 +814,14 @@ type jupyterSubmitArgs struct {
 	Universe     string // "docker" or "vanilla"
 	HelperGOOS   string // "linux" or "darwin"; drives the requirements expr
 	HelperGOARCH string // GOARCH; drives the Arch== requirement
+
+	// GPU fields. Gpus == 0 omits the GPU section entirely.
+	Gpus                  int
+	GpusMinimumCapability string
+	GpusMinimumMemory     int
+	GpusMinimumRuntime    string
+	CudaVersion           string
+	RequireGpus           string
 
 	// TransferInputFiles is the list of files (in addition to the
 	// executable) the schedd should ship from the spool to the worker.
@@ -843,9 +870,11 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 	}
 	fmt.Fprintf(&sb, "transfer_input_files = %s\n\n", strings.Join(inputs, ", "))
 
-	fmt.Fprintf(&sb, "request_cpus = %d\n", a.Cpus)
-	fmt.Fprintf(&sb, "request_memory = %d\n", a.MemoryMB)
-	fmt.Fprintf(&sb, "request_disk = %d\n\n", a.DiskMB)
+	sb.WriteString(resourceRequestLines(
+		a.Cpus, a.MemoryMB, a.DiskMB,
+		a.Gpus, a.GpusMinimumCapability, a.GpusMinimumMemory,
+		a.GpusMinimumRuntime, a.CudaVersion, a.RequireGpus,
+	))
 
 	fmt.Fprintf(&sb, "requirements = %s\n\n", jupyterRequirementsExpr(a.HelperGOOS, a.HelperGOARCH))
 

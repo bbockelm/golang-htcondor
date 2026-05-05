@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
@@ -212,7 +213,7 @@ func TestBuildJupyterTunnelURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "http://"+tc.host+"/", nil)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+tc.host+"/", nil)
 			r.Host = tc.host
 			if tc.tls {
 				// httptest.NewRequest doesn't set TLS automatically; fake it.

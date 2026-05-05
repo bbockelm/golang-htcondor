@@ -65,6 +65,16 @@ type InteractiveCreateTerminalRequest struct {
 	Cpus     int `json:"cpus,omitempty"`
 	MemoryMB int `json:"memory_mb,omitempty"`
 	DiskMB   int `json:"disk_mb,omitempty"`
+
+	// GPU fields. Mirrored verbatim into request_gpus and the
+	// gpus_minimum_* / cuda_version / require_gpus submit lines.
+	// Gpus == 0 disables the entire GPU section in the submit file.
+	Gpus                  int    `json:"gpus,omitempty"`
+	GpusMinimumCapability string `json:"gpus_minimum_capability,omitempty"`
+	GpusMinimumMemory     int    `json:"gpus_minimum_memory,omitempty"`
+	GpusMinimumRuntime    string `json:"gpus_minimum_runtime,omitempty"`
+	CudaVersion           string `json:"cuda_version,omitempty"`
+	RequireGpus           string `json:"require_gpus,omitempty"`
 }
 
 func (req *InteractiveCreateTerminalRequest) applyDefaults() {
@@ -88,6 +98,9 @@ func (req *InteractiveCreateTerminalRequest) validate() error {
 	}
 	if req.DiskMB < 256 || req.DiskMB > 1024*1024 {
 		return fmt.Errorf("disk_mb must be between 256 and %d, got %d", 1024*1024, req.DiskMB)
+	}
+	if req.Gpus < 0 || req.Gpus > 16 {
+		return fmt.Errorf("gpus must be between 0 and 16, got %d", req.Gpus)
 	}
 	return nil
 }
@@ -184,11 +197,17 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 	batchName := interactiveTerminalBatchPrefix + instanceID
 
 	submitFile := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
-		InstanceID: instanceID,
-		BatchName:  batchName,
-		Cpus:       req.Cpus,
-		MemoryMB:   req.MemoryMB,
-		DiskMB:     req.DiskMB,
+		InstanceID:            instanceID,
+		BatchName:             batchName,
+		Cpus:                  req.Cpus,
+		MemoryMB:              req.MemoryMB,
+		DiskMB:                req.DiskMB,
+		Gpus:                  req.Gpus,
+		GpusMinimumCapability: req.GpusMinimumCapability,
+		GpusMinimumMemory:     req.GpusMinimumMemory,
+		GpusMinimumRuntime:    req.GpusMinimumRuntime,
+		CudaVersion:           req.CudaVersion,
+		RequireGpus:           req.RequireGpus,
 	})
 
 	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, submitFile)
@@ -235,11 +254,52 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 }
 
 type interactiveTerminalSubmitArgs struct {
-	InstanceID string
-	BatchName  string
-	Cpus       int
-	MemoryMB   int
-	DiskMB     int
+	InstanceID            string
+	BatchName             string
+	Cpus                  int
+	MemoryMB              int
+	DiskMB                int
+	Gpus                  int
+	GpusMinimumCapability string
+	GpusMinimumMemory     int
+	GpusMinimumRuntime    string
+	CudaVersion           string
+	RequireGpus           string
+}
+
+// resourceRequestLines emits the request_cpus / request_memory /
+// request_disk plus optional request_gpus + gpus_minimum_* / cuda_version
+// / require_gpus lines. Shared between the terminal and Jupyter submit
+// generators so they speak the same vocabulary.
+func resourceRequestLines(
+	cpus, memoryMB, diskMB int,
+	gpus int, gpusMinCapability string, gpusMinMemoryMB int,
+	gpusMinRuntime, cudaVersion, requireGpus string,
+) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "request_cpus = %d\n", cpus)
+	fmt.Fprintf(&sb, "request_memory = %d\n", memoryMB)
+	fmt.Fprintf(&sb, "request_disk = %d\n", diskMB)
+	if gpus > 0 {
+		fmt.Fprintf(&sb, "request_gpus = %d\n", gpus)
+		if gpusMinCapability != "" {
+			fmt.Fprintf(&sb, "gpus_minimum_capability = %s\n", gpusMinCapability)
+		}
+		if gpusMinMemoryMB > 0 {
+			fmt.Fprintf(&sb, "gpus_minimum_memory = %d\n", gpusMinMemoryMB)
+		}
+		if gpusMinRuntime != "" {
+			fmt.Fprintf(&sb, "gpus_minimum_runtime = %s\n", gpusMinRuntime)
+		}
+		if cudaVersion != "" {
+			fmt.Fprintf(&sb, "cuda_version = %s\n", cudaVersion)
+		}
+		if requireGpus != "" {
+			fmt.Fprintf(&sb, "require_gpus = %s\n", requireGpus)
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string {
@@ -253,14 +313,24 @@ func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string 
 	fmt.Fprintf(&sb, "should_transfer_files = YES\n")
 	fmt.Fprintf(&sb, "when_to_transfer_output = ON_EXIT\n\n")
 
-	fmt.Fprintf(&sb, "request_cpus = %d\n", a.Cpus)
-	fmt.Fprintf(&sb, "request_memory = %d\n", a.MemoryMB)
-	fmt.Fprintf(&sb, "request_disk = %d\n\n", a.DiskMB)
+	sb.WriteString(resourceRequestLines(
+		a.Cpus, a.MemoryMB, a.DiskMB,
+		a.Gpus, a.GpusMinimumCapability, a.GpusMinimumMemory,
+		a.GpusMinimumRuntime, a.CudaVersion, a.RequireGpus,
+	))
 
 	// JobBatchName lets handleJobSSH identify this as an interactive job
 	// at attach time (see ssh-bridge heartbeat plumbing). The prefix is
 	// also used to enumerate active terminals for the SPA.
-	fmt.Fprintf(&sb, "job_batch_name = %s\n\n", a.BatchName)
+	//
+	// The submit-file key is `batch_name` (no `job_` prefix). Our
+	// in-process submit parser at submit.go's setExtendedJobExprs only
+	// recognises that exact spelling and maps it to the JobBatchName
+	// ad attribute; emitting `job_batch_name` here was silently
+	// no-oping, leaving JobBatchName unset and making
+	// handleInteractiveListTerminals's prefix filter skip every job
+	// the user submitted ("No active terminal sessions" in the SPA).
+	fmt.Fprintf(&sb, "batch_name = %s\n\n", a.BatchName)
 
 	fmt.Fprintf(&sb, "log    = interactive.log\n")
 	fmt.Fprintf(&sb, "output = interactive.out\n")
@@ -390,8 +460,14 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 		s.writeError(w, http.StatusUnauthorized, "no authenticated user")
 		return
 	}
-	bareOwner := strings.SplitN(owner, "@", 2)[0]
-
+	// FetchMyJobs feeds opts.Owner into the schedd's MyJobs constraint
+	// as `Owner == Me`. The schedd stores the job's Owner attribute with
+	// whatever string the negotiation surfaced (typically the full
+	// `user@TRUST_DOMAIN` form on this codepath), so passing the raw,
+	// unstripped identity is what produces a match. An earlier version
+	// stripped `@TRUST_DOMAIN` here and silently matched zero rows;
+	// keep this in sync with the dashboard handler, which is the
+	// canonical example.
 	opts := &htcondor.QueryOptions{
 		Limit: 500,
 		Projection: []string{
@@ -400,7 +476,7 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 			"JobCurrentStartExecutingDate",
 		},
 		FetchOpts: htcondor.FetchMyJobs,
-		Owner:     bareOwner,
+		Owner:     owner,
 	}
 	ads, _, err := s.getSchedd().QueryWithOptions(ctx, "true", opts)
 	if err != nil {

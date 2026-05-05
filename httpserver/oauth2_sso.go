@@ -355,9 +355,13 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 func (s *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Check if already authenticated
 	if _, ok := s.getSessionFromRequest(r); ok {
-		// Already authenticated, redirect to return_to or root
+		// Already authenticated, redirect to return_to or root.
+		// Validate return_to is a same-origin path to defeat open
+		// redirect attacks (gosec G710): a malicious link of the
+		// form `/login?return_to=https://evil.example/` should NOT
+		// be allowed to bounce a logged-in user off-site.
 		returnURL := r.URL.Query().Get("return_to")
-		if returnURL == "" {
+		if !isSafeLocalRedirect(returnURL) {
 			returnURL = "/"
 		}
 		http.Redirect(w, r, returnURL, http.StatusFound)

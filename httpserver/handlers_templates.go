@@ -127,15 +127,28 @@ func (s *Handler) handleGetTemplate(w http.ResponseWriter, r *http.Request, id s
 
 // templateSaveRequest is what the frontend POSTs. We intentionally
 // reject the `source` field — the server always stamps it.
+//
+// Columns accept either a bare string ("foo") or {name, description}
+// — both forms are decoded by templates.Column.UnmarshalJSON, so the
+// REST shape is forgiving for older clients.
+//
+// InputFiles are optional; encoding/json handles `[]byte` as base64,
+// which matches what the SPA's FileReader.readAsArrayBuffer + btoa
+// pipeline produces.
 type templateSaveRequest struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Columns     []string `json:"columns"`
-	Contents    string   `json:"contents"`
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Columns     []templates.Column    `json:"columns"`
+	Contents    string                `json:"contents"`
+	InputFiles  []templates.InputFile `json:"input_files,omitempty"`
 }
 
 func (s *Handler) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
+	// Bound the request body so a hostile client can't OOM the server
+	// by streaming a giant JSON. Per-file 1 MiB × 5 + envelope slack.
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024*1024)
+
 	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
@@ -157,13 +170,15 @@ func (s *Handler) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
 		Description: strings.TrimSpace(req.Description),
 		Columns:     req.Columns,
 		Contents:    req.Contents,
+		InputFiles:  req.InputFiles,
 	}, username)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	s.logger.Info(logging.DestinationHTTP, "template saved",
-		"id", saved.ID, "owner", username)
+		"id", saved.ID, "owner", username,
+		"input_files", len(saved.InputFiles))
 	s.writeJSON(w, http.StatusCreated, saved)
 }
 
