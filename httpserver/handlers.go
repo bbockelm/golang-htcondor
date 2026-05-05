@@ -1202,9 +1202,12 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// stream gigabytes through ParseMultipartForm. MaxBytesReader caps
 	// the total request size; ParseMultipartForm's argument is the
 	// in-memory threshold above which parts spill to temp files.
+	// gosec G120 still flags the ParseMultipartForm call because its
+	// taint tracker doesn't see through MaxBytesReader's wrapping;
+	// the cap above is the real defense.
 	const maxInputBytes = 100 * 1024 * 1024 // 100 MiB
 	r.Body = http.MaxBytesReader(w, r.Body, maxInputBytes)
-	err = r.ParseMultipartForm(maxInputBytes)
+	err = r.ParseMultipartForm(maxInputBytes) //nolint:gosec // body bounded by MaxBytesReader above
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
 		return
@@ -2855,7 +2858,9 @@ func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Reques
 func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
 	const maxMultipartFormSize = 10 * 1024 * 1024
 	r.Body = http.MaxBytesReader(nil, r.Body, maxMultipartFormSize)
-	err := r.ParseMultipartForm(maxMultipartFormSize)
+	// gosec G120: body is bounded by MaxBytesReader above; the
+	// taint tracker doesn't see through the wrapping.
+	err := r.ParseMultipartForm(maxMultipartFormSize) //nolint:gosec
 	if err != nil {
 		return nil, false, "", fmt.Errorf("failed to parse multipart form: %w", err)
 	}

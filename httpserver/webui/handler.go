@@ -142,7 +142,12 @@ func serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) 
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFileFS(w, r, fsys, name)
+	// gosec G703: name is validated by isSafeEmbeddedPath above; the
+	// taint tracker doesn't follow the check across the function
+	// boundary. The validation rejects "..", absolute paths, NULs,
+	// and anything path.Clean would alter — embed.FS rejects them
+	// all anyway, so this is defense in depth.
+	http.ServeFileFS(w, r, fsys, name) //nolint:gosec
 }
 
 // isSafeEmbeddedPath reports whether name is safe to pass to

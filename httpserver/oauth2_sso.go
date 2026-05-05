@@ -359,12 +359,14 @@ func (s *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Validate return_to is a same-origin path to defeat open
 		// redirect attacks (gosec G710): a malicious link of the
 		// form `/login?return_to=https://evil.example/` should NOT
-		// be allowed to bounce a logged-in user off-site.
+		// be allowed to bounce a logged-in user off-site. gosec's
+		// taint tracker still flags the http.Redirect because it
+		// can't follow the validation; the check is real.
 		returnURL := r.URL.Query().Get("return_to")
 		if !isSafeLocalRedirect(returnURL) {
 			returnURL = "/"
 		}
-		http.Redirect(w, r, returnURL, http.StatusFound)
+		http.Redirect(w, r, returnURL, http.StatusFound) //nolint:gosec // validated by isSafeLocalRedirect
 		return
 	}
 

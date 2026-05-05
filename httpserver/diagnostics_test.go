@@ -150,7 +150,11 @@ func TestSummarizeAuthMethods(t *testing.T) {
 		// credential — this isn't a credential, it's the bait the test
 		// uses to verify the redaction guarantee.
 		const tokenSentinel = "TOKEN-LEAK-CANARY-NOT-A-REAL-TOKEN" //nolint:gosec // marker, not a credential
-		cfg := &security.SecurityConfig{
+		// gosec G101 also flags the struct-literal `Token: ...` line
+		// itself; the const above isn't enough to dodge it on newer
+		// gosec releases. Suppress at the literal too — same
+		// rationale: this is a test sentinel, not a real secret.
+		cfg := &security.SecurityConfig{ //nolint:gosec
 			AuthMethods: []security.AuthMethod{security.AuthSSL, security.AuthToken},
 			TrustDomain: "test.example.org",
 			TokenFile:   "/etc/condor/tokens/server.token",

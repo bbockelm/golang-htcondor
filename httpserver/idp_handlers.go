@@ -187,9 +187,12 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	// Redirect back to authorization endpoint or provided redirect_uri.
 	// Only follow same-origin relative paths so a malicious link with
 	// `?redirect_uri=https://evil.example/` can't bounce a logged-in
-	// user off-site (gosec G710 — open redirect).
+	// user off-site (gosec G710 — open redirect). gosec's taint
+	// tracker still flags the http.Redirect call because it can't
+	// follow the validation through isSafeLocalRedirect; the check
+	// is real, the suppression is for the false positive.
 	if redirectURI != "" && isSafeLocalRedirect(redirectURI) {
-		http.Redirect(w, r, redirectURI, http.StatusFound)
+		http.Redirect(w, r, redirectURI, http.StatusFound) //nolint:gosec // validated by isSafeLocalRedirect
 		return
 	}
 
