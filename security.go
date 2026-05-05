@@ -45,6 +45,18 @@ func getDefaultConfig() *config.Config {
 	return cfg
 }
 
+// GetDefaultConfig returns the global default HTCondor configuration,
+// loading it from CONDOR_CONFIG on first access. Returns nil if no
+// config is reachable (which happens in unit tests and any process
+// that runs outside an HTCondor install).
+//
+// Exposed so callers in other packages (notably httpserver) can build
+// SecurityConfigs that respect SEC_CLIENT_AUTHENTICATION_METHODS,
+// AUTH_SSL_CLIENT_CERTFILE, etc., without re-implementing the loader.
+func GetDefaultConfig() *config.Config {
+	return getDefaultConfig()
+}
+
 // LookupSSLClientCredentials reads the AUTH_SSL_CLIENT_CERTFILE,
 // AUTH_SSL_CLIENT_KEYFILE, and AUTH_SSL_CLIENT_CAFILE settings from the
 // global HTCondor configuration. Returns ok=true only when both cert
@@ -245,13 +257,27 @@ func getSecurityMethods(cfg *config.Config, context, feature string) string {
 	return ""
 }
 
-// getDefaultAuthMethods returns platform-appropriate default authentication methods
+// getDefaultAuthMethods returns the fallback authentication-methods
+// list used when neither SEC_CLIENT_AUTHENTICATION_METHODS nor
+// SEC_DEFAULT_AUTHENTICATION_METHODS appears in the on-disk
+// configuration. The string mirrors HTCondor's own built-in default
+// (verifiable via `condor_config_val -v SEC_DEFAULT_AUTHENTICATION_METHODS`
+// on a host with no method overrides — the "<Default>" source line
+// shows this same list).
+//
+// Earlier versions returned just "FS,IDTOKENS". That bit a production
+// pool whose CONDOR_CONFIG files set no SEC_*_AUTHENTICATION_METHODS:
+// our client offered TOKEN only (FS gets filtered out at the wire
+// boundary because remote FS auth doesn't apply), the server's
+// IDTOKENS were filtered by `iss`/`kid` mismatch, and the handshake
+// failed with "no compatible authentication methods found" even
+// though SSL was available on both sides.
 func getDefaultAuthMethods() string {
-	// Unix/Linux/macOS default: FS, IDTOKENS, KERBEROS
-	// Windows default: NTSSPI, IDTOKENS, KERBEROS
-	// We'll use Unix default since this is primarily targeting Unix systems
-	// Note: HTCondor also includes FS_REMOTE by default, but cedar maps it to FS
-	return "FS,IDTOKENS"
+	// Unix/Linux/macOS default. The order matters: cedar's
+	// negotiation walks the list and tries each method in turn, so
+	// FS goes first (cheap when applicable) and SSL last (more
+	// expensive but the broadest fallback).
+	return "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL"
 }
 
 // mapSecurityLevel converts HTCondor security level string to cedar SecurityLevel

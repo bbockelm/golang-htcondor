@@ -60,28 +60,35 @@ type Handler struct {
 	logger                    *logging.Logger
 	metricsRegistry           *metricsd.Registry
 	prometheusExporter        *metricsd.PrometheusExporter
-	tokenCache                *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	sessionStore              *SessionStore     // HTTP session store for browser-based authentication
-	oauth2Provider            *OAuth2Provider   // OAuth2 provider for MCP endpoints
-	oauth2Config              *oauth2.Config    // OAuth2 client config for SSO
-	oauth2StateStore          *OAuth2StateStore // State storage for OAuth2 SSO flow
-	oauth2UserInfoURL         string            // User info endpoint for SSO
-	oauth2UsernameClaim       string            // Claim name for username (default: "sub")
-	oauth2GroupsClaim         string            // Claim name for group information (default: "groups")
-	mcpAccessGroup            string            // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup              string            // Group required for read access (empty = all users have read)
-	mcpWriteGroup             string            // Group required for write access (empty = all users have write)
-	mcpInstructions           string            // Server-level instructions provided to agents via MCP initialize
-	webuiAdminGroup           string            // Group required for Web UI admin pages (empty = no admin UI)
-	shareSecret               []byte            // Random 32-byte HMAC key for short-lived signed URLs
-	logBuffer                 *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
-	idpProvider               *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter           *LoginRateLimiter // Rate limiter for IDP login attempts
-	streamBufferSize          int               // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout        time.Duration     // Write timeout for streaming queries (default: 5s)
-	wg                        sync.WaitGroup    // WaitGroup to track background goroutines
-	pingInterval              time.Duration     // Interval for periodic daemon pings (0 = disabled)
-	pingHealth                *pingHealth       // Recent ping outcomes per daemon, drives /readyz
+	// httpMetrics holds the prometheus/client_golang registry plus the
+	// HTTP request counters / duration histogram / in-flight gauge
+	// recorded by the recordingMiddleware wrapper installed in
+	// setupRoutes. Always non-nil after NewHandler; the metricsdAdapter
+	// surfaces the legacy pool/process collectors through this same
+	// registry when they're enabled.
+	httpMetricsState    *httpMetrics
+	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
+	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
+	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
+	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
+	oauth2UserInfoURL   string            // User info endpoint for SSO
+	oauth2UsernameClaim string            // Claim name for username (default: "sub")
+	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
+	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
+	mcpReadGroup        string            // Group required for read access (empty = all users have read)
+	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
+	mcpInstructions     string            // Server-level instructions provided to agents via MCP initialize
+	webuiAdminGroup     string            // Group required for Web UI admin pages (empty = no admin UI)
+	shareSecret         []byte            // Random 32-byte HMAC key for short-lived signed URLs
+	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
+	idpProvider         *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
+	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
+	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
+	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
+	pingHealth          *pingHealth       // Recent ping outcomes per daemon, drives /readyz
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
 	// Lazily initialized so a Handler with no collector configured pays
@@ -289,6 +296,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// remains the durable source of truth.
 	h.logBuffer = logging.NewBuffer(5000, slog.LevelInfo)
 	logging.AttachBuffer(logger, h.logBuffer)
+
+	// HTTP request observability. We set this up unconditionally —
+	// the /metrics endpoint always serves at least the runtime + HTTP
+	// request metrics, even if the legacy metricsdRegistry path is
+	// disabled (no Collector configured). The metricsdAdapter is
+	// registered later, after metricsRegistry is built.
+	h.httpMetricsState = newHTTPMetrics()
 
 	// Discover credd if not provided
 	if h.credd == nil {
@@ -504,6 +518,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.metricsRegistry = registry
 		h.prometheusExporter = metricsd.NewPrometheusExporter(registry)
 
+		// Bridge the metricsd collectors into the
+		// prometheus/client_golang registry so /metrics serves both
+		// the new HTTP request metrics and the legacy pool/process
+		// stats from a single endpoint.
+		h.httpMetricsState.registry.MustRegister(newMetricsdAdapter(registry))
+
 		h.logger.Info(logging.DestinationMetrics, "Metrics endpoint enabled", "path", "/metrics")
 	}
 
@@ -543,8 +563,18 @@ func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _
 	}
 }
 
-// ServeHTTP implements http.Handler interface
+// ServeHTTP implements http.Handler interface.
+//
+// Every request flows through the metrics middleware first so the
+// HTTP request counters / duration histogram / in-flight gauge cover
+// every route uniformly — not just the ones we remembered to wrap
+// in setupRoutes. The middleware short-circuits /metrics itself to
+// avoid Prometheus scrapes self-instrumenting.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.httpMetricsState != nil {
+		h.httpMetricsState.middleware(h.mux).ServeHTTP(w, r)
+		return
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -572,8 +602,15 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 		h.oauth2StateStore.Start(ctx)
 	}
 
-	// Start schedd address updater if address was discovered from collector
-	if h.scheddDiscovered && h.collector != nil {
+	// Start schedd address updater whenever we have a collector to query
+	// and a schedd name to query for. Even when the operator passed an
+	// explicit ScheddAddr, periodically confirming the address against
+	// the collector (a) keeps `address_last_confirmed_age` honest in the
+	// /readyz output and (b) surfaces a warning when collector and
+	// config diverge. The updater respects scheddDiscovered for the
+	// auto-swap decision: if the address was operator-pinned, we
+	// confirm but never override.
+	if h.collector != nil && h.scheddName != "" {
 		h.startScheddAddressUpdater(ctx)
 	}
 
@@ -805,11 +842,51 @@ func (h *Handler) GetSchedd() *htcondor.Schedd {
 func (h *Handler) UpdateSchedd(newAddress string) {
 	h.scheddMu.Lock()
 	defer h.scheddMu.Unlock()
+	h.applyScheddConfirmationLocked(newAddress, true)
+}
 
+// confirmScheddAddress records that the collector vouched for the schedd
+// at the given address. When the cached address was originally discovered
+// from the collector (scheddDiscovered=true) and the new address differs,
+// the schedd handle is replaced — same behavior as UpdateSchedd. When the
+// operator pinned ScheddAddr explicitly (scheddDiscovered=false), we honor
+// that intent: the address stays as configured, but we log a warning if
+// the collector now advertises something different so the operator can
+// see the divergence.
+//
+// Either way, scheddAddrLastConfirmedAt advances — the collector
+// successfully reported on this schedd, which is the property /readyz's
+// "address_last_confirmed_age" tracks.
+func (h *Handler) confirmScheddAddress(newAddress string) {
+	h.scheddMu.Lock()
+	defer h.scheddMu.Unlock()
+	h.applyScheddConfirmationLocked(newAddress, h.scheddDiscovered)
+}
+
+// applyScheddConfirmationLocked is the shared body of UpdateSchedd /
+// confirmScheddAddress. Caller must hold scheddMu.
+//
+// allowSwap controls whether a divergence between cached and collector-
+// reported addresses replaces the cached schedd. When false, divergence
+// is logged but the cached schedd is kept; the collector's report still
+// counts as a confirmation for the freshness timestamp.
+func (h *Handler) applyScheddConfirmationLocked(newAddress string, allowSwap bool) {
 	now := time.Now()
 	old := h.schedd.Address()
 	h.scheddAddrLastConfirmedAt = now
 	if old == newAddress {
+		return
+	}
+
+	if !allowSwap {
+		// Operator-pinned address. Surface the divergence so it's
+		// visible in logs / log buffer, but don't override.
+		h.logger.Warn(logging.DestinationSchedd,
+			"Collector reports a different schedd address; keeping operator-configured value",
+			"configured_address", old,
+			"collector_address", newAddress,
+			"schedd_name", h.scheddName,
+		)
 		return
 	}
 
@@ -869,6 +946,14 @@ const scheddAddressUpdateInterval = 60 * time.Second
 // at scheddAddressUpdateInterval; ad-hoc refreshes triggered by ping
 // failures (see refreshScheddAddressNow) handle the case where the schedd
 // has just restarted and we don't want to wait a full tick.
+//
+// On every successful collector query, scheddAddrLastConfirmedAt advances
+// — that's the freshness signal /readyz reports as
+// "address_last_confirmed_age". Whether the cached address gets *replaced*
+// when the collector reports something new depends on h.scheddDiscovered:
+// if the address was discovered initially we trust the collector
+// authoritatively; if the operator pinned ScheddAddr in config we keep
+// the configured value and log a warning on divergence.
 func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 	h.wg.Add(1)
 	go func() {
@@ -879,7 +964,9 @@ func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 
 		h.logger.Info(logging.DestinationSchedd, "Started schedd address updater",
 			"interval", scheddAddressUpdateInterval.String(),
-			"schedd_name", h.scheddName)
+			"schedd_name", h.scheddName,
+			"address_pinned", !h.scheddDiscovered,
+		)
 
 		for {
 			select {
@@ -894,8 +981,11 @@ func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 					continue
 				}
 
-				// Update schedd if address changed
-				h.UpdateSchedd(newAddr)
+				// Touch the confirmation timestamp regardless of
+				// whether the address differs. Swap the cached schedd
+				// only when the address came from collector discovery
+				// initially; operator-pinned ScheddAddr stays put.
+				h.confirmScheddAddress(newAddr)
 
 			case <-ctx.Done():
 				h.logger.Info(logging.DestinationSchedd, "Stopping schedd address updater")

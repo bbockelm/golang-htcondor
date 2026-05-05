@@ -147,10 +147,11 @@ func (h *Handler) setupRoutes() {
 		h.logger.Info(logging.DestinationHTTP, "IDP endpoints enabled", "path_prefix", "/idp")
 	}
 
-	// Metrics endpoint (if enabled)
-	if h.prometheusExporter != nil {
-		mux.HandleFunc("/metrics", h.handleMetrics)
-	}
+	// Metrics endpoint. Always registered: even without a
+	// metricsdRegistry (no Collector configured), httpMetricsState
+	// exposes the HTTP request counters and Go-runtime/process
+	// collectors that prometheus/client_golang ships with by default.
+	mux.HandleFunc("/metrics", h.handleMetrics)
 
 	// Health and readiness endpoints for Kubernetes
 	mux.HandleFunc("/healthz", h.handleHealthz)

@@ -202,6 +202,72 @@ MASTER_DEBUG = D_FULLDEBUG D_COMMAND
 		return hasAlive && hasReady
 	}, 60*time.Second, 1*time.Second,
 		"MasterLog never showed both DC_CHILDALIVE and DC_SET_READY")
+
+	// --- Step 6: verify the inherited session is actually being used --
+	//
+	// When DC_CHILDALIVE rides on the inherited family session, the
+	// master logs the child's authenticated identity as
+	// `condor@child`. If we were instead doing a fresh handshake, the
+	// identity would be the daemon process owner (e.g.
+	// `vscode@<host>`). The check below is the regression test for
+	// the SecurityNever / inherited-session-preferred path in
+	// master.go's secConfigForMasterCommand: a future change that
+	// breaks session import or skips the cache lookup will land us
+	// back on the fresh-handshake fallback, and this assertion will
+	// catch it.
+	logBytes, err := os.ReadFile(masterLog) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatalf("read MasterLog for identity check: %v", err)
+	}
+	logStr := string(logBytes)
+	// Pull out the lines that handle DC_CHILDALIVE and inspect the
+	// "from <identity> <addr>" portion for "condor@child".
+	resumedSeen := false
+	freshSeen := false
+	for _, line := range strings.Split(logStr, "\n") {
+		if !strings.Contains(line, "DC_CHILDALIVE") && !strings.Contains(line, "60008") {
+			continue
+		}
+		if !strings.Contains(line, "from ") {
+			continue
+		}
+		switch {
+		case strings.Contains(line, "from condor@child"):
+			resumedSeen = true
+		case strings.Contains(line, "from "):
+			// Anything other than condor@child means we did a fresh
+			// handshake. Capture it so the failure message can show
+			// which identity actually arrived.
+			freshSeen = true
+		}
+	}
+	if !resumedSeen {
+		t.Errorf("DC_CHILDALIVE never used the inherited session "+
+			"(expected master log entries `from condor@child`); "+
+			"freshHandshakeSeen=%v", freshSeen)
+		// Tail a slice of MasterLog to make the failure debuggable.
+		tailMasterLog(t, logStr)
+	} else {
+		t.Logf("✅ Inherited session used for DC_CHILDALIVE (condor@child seen in MasterLog)")
+	}
+}
+
+// tailMasterLog emits the last few DC_CHILDALIVE-related lines so a
+// test failure shows what identity the master saw rather than the
+// (huge) full log dump.
+func tailMasterLog(t *testing.T, log string) {
+	t.Helper()
+	t.Logf("--- MasterLog DC_CHILDALIVE lines ---")
+	count := 0
+	const max = 6
+	lines := strings.Split(log, "\n")
+	for i := len(lines) - 1; i >= 0 && count < max; i-- {
+		if strings.Contains(lines[i], "DC_CHILDALIVE") || strings.Contains(lines[i], "60008") {
+			t.Logf("%s", lines[i])
+			count++
+		}
+	}
+	t.Logf("--- end ---")
 }
 
 // assertEventually is a require.Eventually-shaped helper that returns

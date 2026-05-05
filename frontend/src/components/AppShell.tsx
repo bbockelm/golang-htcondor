@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect } from 'react';
 import { api } from '@/lib/api';
 import { Sidebar } from './Sidebar';
+import { Footer } from './Footer';
 
 // Pages that render without an authenticated session. The dashboard ('/')
 // is included so unauthenticated visitors see a "Sign In" prompt instead
@@ -43,9 +44,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen">
       <Sidebar userName={session?.username} isAdmin={session?.is_admin} />
-      <main className="flex-1 min-w-0 overflow-auto px-4 py-6 lg:px-8 lg:py-8">
-        {children}
-      </main>
+      {/* Right column: scrollable main + sticky-bottom footer. The
+          flex-col + flex-1 on main pushes the footer to the bottom of
+          short pages while keeping it scroll-along on long pages. */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-auto">
+        <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">
+          {children}
+        </main>
+        <Footer />
+      </div>
     </div>
   );
 }

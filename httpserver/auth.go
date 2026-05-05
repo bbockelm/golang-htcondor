@@ -42,33 +42,103 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 // ConfigureSecurityForTokenWithCacheAndFallback configures security settings with optional session cache
 // and optional FS authentication fallback. If allowFSFallback is true, FS authentication will be added
 // as a fallback method (used for user-header mode where tokens are generated but not validated by schedd).
-// If allowFSFallback is false, only TOKEN authentication is used (for session-based authentication with
-// properly signed and validated tokens).
+//
+// Authentication methods come from SEC_CLIENT_AUTHENTICATION_METHODS / SEC_DEFAULT_AUTHENTICATION_METHODS
+// in the loaded HTCondor configuration. This was previously a hardcoded
+// `[TOKEN]` list, which broke any pool that expects SSL alongside
+// IDTOKENS — the client offered only TOKEN, the server's tokens were
+// filtered out by `iss`/`kid` mismatch, and the handshake failed with
+// "no compatible authentication methods found" even when SSL would
+// have worked. We now start from whatever the operator configured and
+// guarantee TOKEN is in the list (since the entire point of this
+// function is to authenticate with `token`); the caller's optional
+// `allowFSFallback` adds FS too, idempotently.
 func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token provided")
 	}
 
-	// Determine authentication methods
-	authMethods := []security.AuthMethod{security.AuthToken}
-	if allowFSFallback {
-		// Add FS as fallback for user-header mode (tokens generated but not validated)
-		authMethods = append(authMethods, security.AuthFS)
+	// Start from the configured client-side security parameters when a
+	// CONDOR_CONFIG is loadable. Falling back to a sensible default keeps
+	// unit tests and tools that run outside an HTCondor install working.
+	secConfig := buildBaseClientSecurityConfig()
+
+	// Ensure TOKEN is offered. Cedar treats AuthToken and AuthIDTokens
+	// as the same wire identity ("IDTOKENS" maps to AuthToken in
+	// mapAuthMethods), so either entry counts.
+	if !containsAuthMethod(secConfig.AuthMethods, security.AuthToken) &&
+		!containsAuthMethod(secConfig.AuthMethods, security.AuthIDTokens) {
+		// Prepend so cedar prefers TOKEN when both work — the token
+		// gives us a real identity in the schedd's logs.
+		secConfig.AuthMethods = append([]security.AuthMethod{security.AuthToken}, secConfig.AuthMethods...)
+	}
+	if allowFSFallback && !containsAuthMethod(secConfig.AuthMethods, security.AuthFS) {
+		secConfig.AuthMethods = append(secConfig.AuthMethods, security.AuthFS)
 	}
 
-	// Create a security configuration for TOKEN authentication
-	// The token content is stored in Token field (cedar supports both JWT content and file paths)
-	secConfig := &security.SecurityConfig{
-		AuthMethods:    authMethods,
+	secConfig.Token = token
+	secConfig.SessionCache = sessionCache // nil → cedar uses the global cache
+
+	// Authentication should always be REQUIRED for a token-bearing
+	// client connection: we have a credential, we expect the peer to
+	// authenticate us. Crypto/Encryption/Integrity defaults stay as
+	// loaded from the config; only fix them up if the config didn't.
+	if secConfig.Authentication == "" {
+		secConfig.Authentication = security.SecurityRequired
+	}
+	if len(secConfig.CryptoMethods) == 0 {
+		secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
+	}
+	if secConfig.Encryption == "" {
+		secConfig.Encryption = security.SecurityOptional
+	}
+	if secConfig.Integrity == "" {
+		secConfig.Integrity = security.SecurityOptional
+	}
+
+	return secConfig, nil
+}
+
+// buildBaseClientSecurityConfig pulls the client-side security
+// parameters out of the loaded HTCondor configuration (auth methods,
+// crypto methods, security levels, SSL credentials when configured).
+// Returns a populated default config when no CONDOR_CONFIG is reachable
+// — this keeps the unit-test and the standalone-binary paths working.
+//
+// Pulled out of ConfigureSecurityForTokenWithCacheAndFallback so the
+// "default vs config-driven" split is testable without dragging the
+// token-stamping logic into every test fixture.
+func buildBaseClientSecurityConfig() *security.SecurityConfig {
+	if cfg := htcondor.GetDefaultConfig(); cfg != nil {
+		// command=0 is fine here: GetSecurityConfig only uses command
+		// to populate the Command field on the returned struct, and
+		// the caller of this helper sets Command when it dispatches a
+		// specific RPC.
+		if base, err := htcondor.GetSecurityConfig(cfg, 0, "CLIENT"); err == nil && base != nil {
+			return base
+		}
+	}
+	// No HTCondor config available — return a permissive default that
+	// at least offers SSL alongside TOKEN/FS, matching what most pools
+	// configure. The caller will overlay the actual token onto this.
+	return &security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
 		Authentication: security.SecurityRequired,
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,
 		Integrity:      security.SecurityOptional,
-		Token:          token,
-		SessionCache:   sessionCache, // Use provided cache or nil for global
 	}
+}
 
-	return secConfig, nil
+// containsAuthMethod reports whether `m` is in `list`. Tiny helper so
+// the dedupe logic above stays linear and obvious.
+func containsAuthMethod(list []security.AuthMethod, m security.AuthMethod) bool {
+	for _, x := range list {
+		if x == m {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfigureSecurityForCollectorPing builds a SecurityConfig used solely

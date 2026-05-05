@@ -25,7 +25,7 @@ export function Sidebar({ userName, isAdmin }: SidebarProps) {
   const pathname = usePathname();
 
   return (
-    <aside className="w-60 shrink-0 border-r bg-navy-950 text-gray-100 flex flex-col">
+    <aside className="w-60 shrink-0 border-r bg-ink-950 text-gray-100 flex flex-col">
       <div className="px-4 py-5 border-b border-white/10">
         <div className="text-base font-semibold">HTCondor</div>
         <div className="text-xs text-gray-400">Access Point</div>

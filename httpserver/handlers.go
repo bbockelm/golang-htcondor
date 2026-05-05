@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // isBrowserRequest checks if the request is from a browser
@@ -1477,31 +1478,41 @@ func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename st
 	return nil
 }
 
-// handleMetrics handles GET /metrics endpoint for Prometheus scraping
+// handleMetrics handles GET /metrics endpoint for Prometheus scraping.
+//
+// Serves from the prometheus/client_golang registry — both the HTTP
+// request observability metrics (always present) and, when the legacy
+// metricsd path is enabled, the pool/process collectors bridged in via
+// metricsdAdapter. promhttp.HandlerFor handles the OpenMetrics
+// content-negotiation, escaping, and gzip dance for us, so we don't
+// have to maintain that bookkeeping in our own exporter.
 func (s *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-
-	if s.prometheusExporter == nil {
+	if s.httpMetricsState == nil {
 		s.writeError(w, http.StatusNotImplemented, "Metrics not enabled")
 		return
 	}
+	promhttp.HandlerFor(
+		s.httpMetricsState.registry,
+		promhttp.HandlerOpts{
+			ErrorLog:      promhttpErrorLogger{logger: s.logger},
+			ErrorHandling: promhttp.ContinueOnError,
+		},
+	).ServeHTTP(w, r)
+}
 
-	ctx := r.Context()
-	metricsText, err := s.prometheusExporter.Export(ctx)
-	if err != nil {
-		s.logger.Error(logging.DestinationMetrics, "Error exporting metrics", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to export metrics")
-		return
-	}
+// promhttpErrorLogger adapts our structured logger to the promhttp
+// error-log interface so collector errors land in the same destination
+// as the rest of the metrics-system logs.
+type promhttpErrorLogger struct {
+	logger *logging.Logger
+}
 
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(metricsText)); err != nil {
-		s.logger.Error(logging.DestinationMetrics, "Error writing metrics response", "error", err)
-	}
+func (p promhttpErrorLogger) Println(v ...any) {
+	p.logger.Error(logging.DestinationMetrics, fmt.Sprint(v...))
 }
 
 // handleHealthz handles GET /healthz endpoint for health checks

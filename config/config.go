@@ -186,6 +186,16 @@ func (c *Config) initBuiltins() {
 		c.values[pd.Name] = defaultVal
 	}
 
+	// Apply hand-curated overrides from param_overrides.go. These
+	// patch entries whose generated defaults have drifted from
+	// HTCondor's actual built-in defaults — see param_overrides.go for
+	// the rationale on each one. Applied AFTER paramDefaults so they
+	// win, BEFORE any CONDOR_CONFIG file load so user values still win
+	// over them.
+	for _, po := range paramOverrides {
+		c.values[po.Name] = po.Default
+	}
+
 	// Time constants (these override param defaults)
 	c.Set("SECOND", "1")
 	c.Set("MINUTE", "60")

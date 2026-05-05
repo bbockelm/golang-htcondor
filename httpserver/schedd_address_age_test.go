@@ -76,3 +76,79 @@ func TestUpdateScheddAddrAgeTracking(t *testing.T) {
 		t.Errorf("address change should reset lastConfirmed, got %s", sinceConfirmed)
 	}
 }
+
+// TestConfirmScheddAddressOperatorPinned exercises the failure mode that
+// drove the "address_last_confirmed_age=45m" report on a deployed pod:
+// the operator passed an explicit ScheddAddr (so scheddDiscovered=false),
+// the address-updater wasn't running, and the timestamp was frozen at
+// startup. The fix runs the updater unconditionally; on each tick it
+// calls confirmScheddAddress, which must (a) advance the freshness
+// timestamp, and (b) NOT replace the operator-pinned address even when
+// the collector reports something different.
+func TestConfirmScheddAddressOperatorPinned(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+
+	const pinned = "<127.0.0.1:9618?sock=pinned>"
+	const collectorReports = "<127.0.0.1:9618?sock=different>"
+
+	now := time.Now()
+	h := &Handler{
+		schedd:                    htcondor.NewSchedd("test", pinned),
+		scheddName:                "test",
+		scheddDiscovered:          false, // operator-pinned via ScheddAddr
+		scheddAddrSetAt:           now.Add(-30 * time.Minute),
+		scheddAddrLastConfirmedAt: now.Add(-30 * time.Minute),
+		logger:                    logger,
+	}
+
+	// Collector says a different address. confirmScheddAddress must
+	// keep the configured value but advance the freshness timestamp.
+	h.confirmScheddAddress(collectorReports)
+
+	if got := h.GetSchedd().Address(); got != pinned {
+		t.Errorf("address swapped despite scheddDiscovered=false: got %q, want %q", got, pinned)
+	}
+	_, sinceConfirmed := h.scheddAddrAges()
+	if sinceConfirmed > time.Second {
+		t.Errorf("confirm should reset lastConfirmed even when not swapping, got %s", sinceConfirmed)
+	}
+}
+
+// TestConfirmScheddAddressDiscovered checks the converse: when the
+// address came from collector discovery initially, confirm DOES swap
+// to the new address — same authoritative-collector behavior the
+// updater had before the refactor.
+func TestConfirmScheddAddressDiscovered(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+
+	const initial = "<127.0.0.1:9618?sock=v1>"
+	const updated = "<127.0.0.1:9618?sock=v2>"
+
+	now := time.Now()
+	h := &Handler{
+		schedd:                    htcondor.NewSchedd("test", initial),
+		scheddName:                "test",
+		scheddDiscovered:          true,
+		scheddAddrSetAt:           now.Add(-30 * time.Minute),
+		scheddAddrLastConfirmedAt: now.Add(-30 * time.Minute),
+		logger:                    logger,
+	}
+
+	h.confirmScheddAddress(updated)
+	if got := h.GetSchedd().Address(); got != updated {
+		t.Errorf("address not swapped: got %q, want %q", got, updated)
+	}
+	sinceSet, sinceConfirmed := h.scheddAddrAges()
+	if sinceSet > time.Second {
+		t.Errorf("address change should reset setAt, got %s", sinceSet)
+	}
+	if sinceConfirmed > time.Second {
+		t.Errorf("address change should reset lastConfirmed, got %s", sinceConfirmed)
+	}
+}

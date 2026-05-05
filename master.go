@@ -12,6 +12,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/security"
 )
 
 // DC command identifiers used by the master for daemon lifecycle signaling.
@@ -85,6 +86,16 @@ func NewMaster(address string) *Master {
 // MasterFromEnv builds a Master using HTCondor's CONDOR_INHERIT metadata.
 // It expects the CONDOR_INHERIT environment variable to contain the parent PID
 // followed by the master's command sinful string (e.g., "1234 <127.0.0.1:9618>").
+//
+// As a side effect, this also primes the global cedar SessionCache by
+// touching it once: GetSessionCache() lazily imports inherited sessions
+// from CONDOR_PRIVATE_INHERIT, and we want that import to happen at
+// daemon startup rather than the first time we send DC_CHILDALIVE.
+// Without the priming, a transient init race could cause our first
+// keepalive to do a fresh handshake when an inherited family session
+// was available all along — the master would then log
+// `vscode@<host>` for that one DC_CHILDALIVE instead of `condor@child`,
+// which is benign but makes audit logs noisier.
 func MasterFromEnv() (*Master, error) {
 	inherit := os.Getenv("CONDOR_INHERIT")
 	if inherit == "" {
@@ -95,6 +106,11 @@ func MasterFromEnv() (*Master, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Force-import the inherited session cache. The cedar package
+	// guards this with sync.Once, so calling it again later is a
+	// no-op — we just want the import to happen here, deterministically.
+	_ = security.GetSessionCache()
 
 	return &Master{
 		address:    address,
@@ -289,12 +305,51 @@ func parseCondorInherit(value string) (int, string, error) {
 // cedarMasterSender implements the child->master control plane over CEDAR.
 type cedarMasterSender struct{}
 
-func (s *cedarMasterSender) sendKeepAlive(ctx context.Context, req keepAliveRequest) error {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, DCChildAlive, "DAEMON", req.Address)
-	if err != nil {
-		return fmt.Errorf("failed to create security config: %w", err)
+// hasInheritedSessionForCommand reports whether the global cedar
+// session cache has an entry that resumes for the given (peer, command)
+// pair. We use this to choose between SecurityNever (force resume,
+// fail if no cached session) and SecurityRequired (full handshake) —
+// the resumed path is what condor_master expects from a managed
+// daemon, and it's the only way the master logs the child's
+// authenticated identity as `condor@child` rather than the daemon
+// process owner.
+func hasInheritedSessionForCommand(peerAddr string, command int) bool {
+	cache := security.GetSessionCache()
+	if cache == nil {
+		return false
 	}
-	secConfig.Authentication = "REQUIRED"
+	cmdStr := strconv.Itoa(command)
+	_, ok := cache.LookupByCommand("", peerAddr, cmdStr)
+	return ok
+}
+
+// secConfigForMasterCommand builds the SecurityConfig for a child→
+// master command. When an inherited session is cached for this peer
+// and command, we set Authentication=NEVER to *demand* session
+// resumption — the cedar Authenticator will then refuse to fall back
+// to a full handshake on the same stream (which would advertise our
+// own identity instead of the parent's). Without a cached session we
+// drop back to the historical Authentication=REQUIRED path, which
+// matches what callers got before this file learned about inherited
+// sessions.
+func secConfigForMasterCommand(ctx context.Context, command int, peerAddr string) (*security.SecurityConfig, error) {
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, "DAEMON", peerAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create security config: %w", err)
+	}
+	if hasInheritedSessionForCommand(peerAddr, command) {
+		secConfig.Authentication = security.SecurityNever
+	} else {
+		secConfig.Authentication = security.SecurityRequired
+	}
+	return secConfig, nil
+}
+
+func (s *cedarMasterSender) sendKeepAlive(ctx context.Context, req keepAliveRequest) error {
+	secConfig, err := secConfigForMasterCommand(ctx, DCChildAlive, req.Address)
+	if err != nil {
+		return err
+	}
 
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, req.Address, secConfig)
 	if err != nil {
@@ -320,11 +375,10 @@ func (s *cedarMasterSender) sendKeepAlive(ctx context.Context, req keepAliveRequ
 }
 
 func (s *cedarMasterSender) sendReady(ctx context.Context, req readyRequest) error {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, DCSetReady, "DAEMON", req.Address)
+	secConfig, err := secConfigForMasterCommand(ctx, DCSetReady, req.Address)
 	if err != nil {
-		return fmt.Errorf("failed to create security config: %w", err)
+		return err
 	}
-	secConfig.Authentication = "REQUIRED"
 
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, req.Address, secConfig)
 	if err != nil {

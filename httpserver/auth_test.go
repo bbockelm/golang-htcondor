@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -304,6 +305,61 @@ func TestConfigureSecurityForTokenWithCache(t *testing.T) {
 		_, err := ConfigureSecurityForTokenWithCache("", nil)
 		if err == nil {
 			t.Error("Expected error for empty token")
+		}
+	})
+}
+
+// TestConfigureSecurityForTokenAuthMethods locks in the bug fix for
+// the production match-analysis failure: client offered only [TOKEN]
+// against a server that wanted [SSL,TOKEN]. The fix is to base
+// AuthMethods on the loaded HTCondor configuration (or a permissive
+// default when no CONDOR_CONFIG is reachable) rather than hardcoding
+// [TOKEN]. This test exercises the no-config-available path, which is
+// what every unit-test process hits — so the regression-catching
+// assertion is "AuthSSL appears alongside AuthToken" without needing
+// to stand up a CONDOR_CONFIG fixture.
+func TestConfigureSecurityForTokenAuthMethods(t *testing.T) {
+	token := createTestJWTToken(3600)
+
+	t.Run("DefaultBaseIncludesSSLAndToken", func(t *testing.T) {
+		cfg, err := ConfigureSecurityForTokenWithCacheAndFallback(token, nil, false)
+		if err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		hasSSL := false
+		hasToken := false
+		for _, m := range cfg.AuthMethods {
+			switch m {
+			case security.AuthSSL:
+				hasSSL = true
+			case security.AuthToken, security.AuthIDTokens:
+				// Cedar wire-format spells both as "TOKEN"; either
+				// counts as a token method for the purpose of "the
+				// daemon's bearer token will be presented".
+				hasToken = true
+			}
+		}
+		if !hasSSL {
+			t.Errorf("expected SSL in AuthMethods (so collector queries can negotiate via SSL when token kid mismatches), got %v", cfg.AuthMethods)
+		}
+		if !hasToken {
+			t.Errorf("expected TOKEN/IDTOKENS in AuthMethods, got %v", cfg.AuthMethods)
+		}
+	})
+
+	t.Run("AllowFSFallbackAddsFSWithoutDuplicating", func(t *testing.T) {
+		cfg, err := ConfigureSecurityForTokenWithCacheAndFallback(token, nil, true)
+		if err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		fsCount := 0
+		for _, m := range cfg.AuthMethods {
+			if m == security.AuthFS {
+				fsCount++
+			}
+		}
+		if fsCount != 1 {
+			t.Errorf("expected exactly one AuthFS entry (idempotent), got %d in %v", fsCount, cfg.AuthMethods)
 		}
 	})
 }
