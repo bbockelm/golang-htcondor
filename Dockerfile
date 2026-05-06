@@ -2,7 +2,7 @@
 FROM rockylinux:9
 
 # Set environment variables
-ENV GO_VERSION=1.24.0 \
+ENV GO_VERSION=1.25.7 \
     GOPATH=/go \
     PATH=/usr/local/go/bin:/go/bin:$PATH \
     CONDOR_CONFIG=/etc/condor/condor_config

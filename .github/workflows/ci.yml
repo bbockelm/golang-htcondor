@@ -12,7 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
+        # Track the minimum Go version named in go.mod (currently 1.25).
+        # Add new minor versions here when go.mod's `go` directive moves
+        # forward; keep at least one version to exercise the matrix.
+        go-version: ['1.25']
 
     steps:
     - name: Checkout code
@@ -68,7 +71,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: '1.25'
         cache: true
 
     - name: Run golangci-lint
@@ -87,7 +90,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: '1.25'
         cache: true
 
     - name: Build
