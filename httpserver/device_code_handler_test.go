@@ -17,12 +17,8 @@ func TestDeviceCodeHandler(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_device.db")
 
-	// Create storage
-	storage, err := NewOAuth2Storage(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() { _ = storage.Close() }()
+	// Create storage against the unified app DB.
+	storage := NewOAuth2Storage(newTestDB(t, dbPath))
 
 	// Create test client
 	clientID := "test-device-client"
@@ -187,12 +183,8 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_device_invalidation.db")
 
-	// Create storage
-	storage, err := NewOAuth2Storage(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() { _ = storage.Close() }()
+	// Create storage against the unified app DB.
+	storage := NewOAuth2Storage(newTestDB(t, dbPath))
 
 	// Create test client
 	clientSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
@@ -207,7 +199,6 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	if err := storage.CreateClient(ctx, client); err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
-	defer func() { _ = storage.Close() }()
 
 	// Create config and handler
 	config := &fosite.Config{ //nolint:gosec // G101: test issuer URL

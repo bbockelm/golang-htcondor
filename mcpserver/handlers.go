@@ -18,7 +18,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/matchanalyzer"
 	"github.com/golang-jwt/jwt/v5"
@@ -596,17 +595,18 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		return nil, fmt.Errorf("invalid tool call params: %w", err)
 	}
 
-	// Create context with security config if token provided
+	// Create context with security config if token provided. We use
+	// the shared NewClientSecurityConfig builder so the AuthMethods
+	// list comes from SEC_CLIENT_AUTHENTICATION_METHODS / the
+	// configured fallback — locking this to TOKEN-only (the previous
+	// behavior) broke pools whose collector also offers SSL but not
+	// our token's iss/kid.
 	token, _ := request.Arguments["token"].(string)
 	var username string
 	if token != "" {
-		secConfig := &security.SecurityConfig{
-			AuthMethods:    []security.AuthMethod{security.AuthToken},
-			Authentication: security.SecurityRequired,
-			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-			Encryption:     security.SecurityOptional,
-			Integrity:      security.SecurityOptional,
-			Token:          token,
+		secConfig, err := htcondor.NewClientSecurityConfig(ctx, token, "", 0, "CLIENT", nil)
+		if err != nil {
+			return nil, fmt.Errorf("build security config: %w", err)
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 

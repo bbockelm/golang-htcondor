@@ -32,9 +32,31 @@ func TestGetSecurityConfig_Defaults(t *testing.T) {
 		t.Errorf("Expected Integrity=SecurityOptional, got %v", secConfig.Integrity)
 	}
 
-	// Check default auth methods (FS, IDTOKENS)
-	if len(secConfig.AuthMethods) != 2 {
-		t.Errorf("Expected 2 default auth methods, got %d", len(secConfig.AuthMethods))
+	// Check default auth methods. The list comes from the
+	// param_overrides.go correction of the auto-generated paramDefaults
+	// (see config/param_overrides.go) and matches HTCondor's actual
+	// built-in default — FS, IDTOKENS, KERBEROS, SCITOKENS, SSL — not
+	// the older FS,IDTOKENS pair. The expanded set is what fixes the
+	// production "no compatible authentication methods found" failure
+	// when the operator hasn't overridden SEC_*_AUTHENTICATION_METHODS.
+	wantMethods := []security.AuthMethod{
+		security.AuthFS,
+		security.AuthIDTokens,
+		security.AuthKerberos,
+		security.AuthSciTokens,
+		security.AuthSSL,
+	}
+	if len(secConfig.AuthMethods) != len(wantMethods) {
+		t.Errorf("Expected %d default auth methods (FS,IDTOKENS,KERBEROS,SCITOKENS,SSL), got %d: %v",
+			len(wantMethods), len(secConfig.AuthMethods), secConfig.AuthMethods)
+	}
+	for i, want := range wantMethods {
+		if i >= len(secConfig.AuthMethods) {
+			break
+		}
+		if secConfig.AuthMethods[i] != want {
+			t.Errorf("AuthMethods[%d] = %v, want %v", i, secConfig.AuthMethods[i], want)
+		}
 	}
 
 	// Check default crypto method (AES)
@@ -381,4 +403,107 @@ SEC_DEFAULT_AUTHENTICATION = REQUIRED
 	if secConfig.Encryption != security.SecurityRequired {
 		t.Errorf("Expected Encryption=SecurityRequired from READ context, got %v", secConfig.Encryption)
 	}
+}
+
+// TestNewClientSecurityConfig locks in the contract every site that
+// migrated off a hand-built SecurityConfig literal now relies on.
+//
+//   - AuthMethods comes from the loaded HTCondor configuration (so SSL,
+//     Kerberos, etc. are offered when the operator configures them).
+//   - When a token is supplied, TOKEN/IDTOKENS is guaranteed to be in
+//     the method list (prepended if absent so cedar prefers token auth
+//     over anonymous SSL — token gives a real identity in logs).
+//   - When no token is supplied, the method list is left as configured
+//     (no TOKEN injection); useful for SSL-only or anonymous paths.
+//   - The supplied SessionCache, peer name, and command flow through.
+//
+// The test deliberately doesn't dispatch any RPC — failures here would
+// be wire-level negotiation regressions, not condor handshake bugs.
+//
+//nolint:gocyclo // table-driven subtests; splitting hides the contract.
+func TestNewClientSecurityConfig(t *testing.T) {
+	t.Run("WithToken_PrependsTokenWhenMissing", func(t *testing.T) {
+		// Force a config that omits TOKEN entirely so we can observe the
+		// prepend behavior. The loaded HTCondor config in the dev
+		// container does include TOKEN, so we can't rely on the global
+		// default for this assertion.
+		cfg, err := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = SSL,KERBEROS\n"))
+		if err != nil {
+			t.Fatalf("config: %v", err)
+		}
+		// Override the global default for this test to exercise the
+		// prepend path without rebuilding the whole NewClientSecurityConfig
+		// call (which uses getDefaultConfig internally).
+		prev := globalDefaultConfig.Load()
+		globalDefaultConfig.Store(cfg)
+		t.Cleanup(func() { globalDefaultConfig.Store(prev) })
+
+		got, err := NewClientSecurityConfig(t.Context(), "tok", "<127.0.0.1:9618>", 0, "CLIENT", nil)
+		if err != nil {
+			t.Fatalf("NewClientSecurityConfig: %v", err)
+		}
+		if len(got.AuthMethods) == 0 || got.AuthMethods[0] != security.AuthToken {
+			t.Errorf("expected AuthMethods[0] == AuthToken, got %v", got.AuthMethods)
+		}
+		if got.Token != "tok" {
+			t.Errorf("Token = %q, want %q", got.Token, "tok")
+		}
+	})
+
+	t.Run("WithToken_DoesNotDuplicateWhenIDTokensPresent", func(t *testing.T) {
+		// AuthIDTokens already covers TOKEN at the wire; we shouldn't
+		// prepend a second TOKEN entry.
+		cfg, err := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = IDTOKENS,SSL\n"))
+		if err != nil {
+			t.Fatalf("config: %v", err)
+		}
+		prev := globalDefaultConfig.Load()
+		globalDefaultConfig.Store(cfg)
+		t.Cleanup(func() { globalDefaultConfig.Store(prev) })
+
+		got, err := NewClientSecurityConfig(t.Context(), "tok", "<127.0.0.1:9618>", 0, "CLIENT", nil)
+		if err != nil {
+			t.Fatalf("NewClientSecurityConfig: %v", err)
+		}
+		count := 0
+		for _, m := range got.AuthMethods {
+			if m == security.AuthToken || m == security.AuthIDTokens {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one TOKEN/IDTOKENS entry; got %d in %v", count, got.AuthMethods)
+		}
+	})
+
+	t.Run("EmptyToken_DoesNotInjectToken", func(t *testing.T) {
+		cfg, err := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = SSL\n"))
+		if err != nil {
+			t.Fatalf("config: %v", err)
+		}
+		prev := globalDefaultConfig.Load()
+		globalDefaultConfig.Store(cfg)
+		t.Cleanup(func() { globalDefaultConfig.Store(prev) })
+
+		got, err := NewClientSecurityConfig(t.Context(), "", "<127.0.0.1:9618>", 0, "CLIENT", nil)
+		if err != nil {
+			t.Fatalf("NewClientSecurityConfig: %v", err)
+		}
+		for _, m := range got.AuthMethods {
+			if m == security.AuthToken {
+				t.Errorf("AuthMethods unexpectedly includes AuthToken when token is empty: %v", got.AuthMethods)
+			}
+		}
+		if got.Token != "" {
+			t.Errorf("Token = %q, want empty", got.Token)
+		}
+	})
+
+	t.Run("DefaultsContext_FallsBackToCLIENT", func(t *testing.T) {
+		// Empty secContext should be treated as CLIENT.
+		_, err := NewClientSecurityConfig(t.Context(), "tok", "<127.0.0.1:9618>", 0, "", nil)
+		if err != nil {
+			t.Errorf("expected empty context to default to CLIENT, got error: %v", err)
+		}
+	})
 }

@@ -45,6 +45,101 @@ func getDefaultConfig() *config.Config {
 	return cfg
 }
 
+// NewClientSecurityConfig builds a SecurityConfig for a client→daemon
+// connection, starting from the configured SEC_<context>_AUTHENTICATION_METHODS
+// (or SEC_DEFAULT_*) in the loaded HTCondor configuration and overlaying
+// the supplied token, peer name, and session cache. This is the
+// preferred constructor for any daemon-side path that needs to talk to
+// another condor daemon — call sites that hand-build a SecurityConfig
+// literal will lock themselves into a specific auth-method list and
+// silently override what the operator configured.
+//
+// Method-list construction:
+//
+//   - Starts from GetSecurityConfigOrDefault, which reads
+//     SEC_<context>_AUTHENTICATION_METHODS (falling back to
+//     SEC_DEFAULT_*, then to a sensible compiled-in fallback that
+//     includes SSL alongside TOKEN/FS).
+//   - When a non-empty token is supplied, guarantees TOKEN appears in
+//     the method list — prepended if absent — so the supplied token is
+//     actually offered to the peer. AuthIDTokens already counts as
+//     TOKEN at the wire level, so we don't duplicate.
+//
+// Field overlays:
+//
+//   - Token: set when token != "".
+//   - SessionCache: set when sessionCache != nil; otherwise cedar uses
+//     its global cache.
+//   - PeerName: GetSecurityConfigOrDefault populates this from the
+//     argument, used for session-cache lookups and SSL hostname
+//     verification.
+//
+// Other security parameters (CryptoMethods, Authentication/Encryption/
+// Integrity levels, SSL credentials when SSL is configured) come from
+// GetSecurityConfig — same code path that condor_config_val sees.
+//
+// command is the cedar/commands constant for the RPC the caller is
+// about to dispatch. Used for session-cache lookups via LookupByCommand;
+// stored on the resulting SecurityConfig.
+//
+// secContext should be one of "CLIENT", "READ", "WRITE",
+// "ADMINISTRATOR", "DAEMON", "NEGOTIATOR" — the same context strings
+// HTCondor uses for SEC_<context>_* knob lookup. Empty defaults to
+// "CLIENT".
+func NewClientSecurityConfig(
+	ctx context.Context,
+	token string,
+	peerName string,
+	command int,
+	secContext string,
+	sessionCache *security.SessionCache,
+) (*security.SecurityConfig, error) {
+	if secContext == "" {
+		secContext = "CLIENT"
+	}
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, secContext, peerName)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		// Ensure TOKEN is in the method list so the token is actually
+		// offered. Either AuthToken or AuthIDTokens counts — cedar's
+		// negotiation spells both as "TOKEN" at the wire.
+		hasToken := false
+		for _, m := range secConfig.AuthMethods {
+			if m == security.AuthToken || m == security.AuthIDTokens {
+				hasToken = true
+				break
+			}
+		}
+		if !hasToken {
+			// Prepend so cedar prefers TOKEN when both work: the
+			// token gives us a real identity vs. an anonymous SSL
+			// session.
+			secConfig.AuthMethods = append([]security.AuthMethod{security.AuthToken}, secConfig.AuthMethods...)
+		}
+		secConfig.Token = token
+	}
+	if sessionCache != nil {
+		secConfig.SessionCache = sessionCache
+	}
+	return secConfig, nil
+}
+
+// hasAuthMethod reports whether m is in list. Small helper so callers
+// that need to overlay additional methods on top of NewClientSecurityConfig's
+// configured-base list can do so idempotently — e.g. file_transfer
+// adding AuthNone for anonymous transfers, or the keepalive path
+// adding AuthFS as an in-process fallback.
+func hasAuthMethod(list []security.AuthMethod, m security.AuthMethod) bool {
+	for _, x := range list {
+		if x == m {
+			return true
+		}
+	}
+	return false
+}
+
 // GetDefaultConfig returns the global default HTCondor configuration,
 // loading it from CONDOR_CONFIG on first access. Returns nil if no
 // config is reachable (which happens in unit tests and any process

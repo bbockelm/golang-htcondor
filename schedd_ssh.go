@@ -180,16 +180,27 @@ func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context) (net.Conn, *
 	cache.Store(entry)
 	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", startSSHDCommand), claim.SecSessionID())
 
-	secConfig := &security.SecurityConfig{
-		Command:        startSSHDCommand,
-		PeerName:       info.StarterAddr,
-		SessionCache:   cache,
-		AuthMethods:    []security.AuthMethod{security.AuthToken, security.AuthSSL},
-		Authentication: security.SecurityRequired,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityRequired,
-		Integrity:      security.SecurityRequired,
+	// Build the SecurityConfig from the configured CLIENT auth methods
+	// (so SSL/Kerberos/etc. are offered when configured) but keep the
+	// AES pin and the REQUIRED encryption/integrity levels — those
+	// matter for the session-resume happy path where ExportSecSessionInfo
+	// emits a legacy CryptoMethods preferred order that cedar would
+	// otherwise misinterpret. Auth methods only kick in if the resume
+	// fails and ClientHandshake falls back to fresh authentication;
+	// in that fallback path we want the same configured methods every
+	// other client uses.
+	//
+	// Token is empty here: the schedd-minted ClaimID seeded in `cache`
+	// IS the credential, and we want NewClientSecurityConfig to leave
+	// AuthMethods alone rather than prepending TOKEN.
+	secConfig, err := NewClientSecurityConfig(ctx, "", info.StarterAddr, startSSHDCommand, "CLIENT", cache)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build starter security config: %w", err)
 	}
+	secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
+	secConfig.Authentication = security.SecurityRequired
+	secConfig.Encryption = security.SecurityRequired
+	secConfig.Integrity = security.SecurityRequired
 
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, info.StarterAddr, secConfig)
 	if err != nil {

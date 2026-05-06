@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/matchanalyzer"
@@ -58,8 +59,15 @@ type Handler struct {
 	httpBaseURL               string // Base URL for HTTP API (for generating MCP file download links)
 	tlsCACertFile             string
 	logger                    *logging.Logger
-	metricsRegistry           *metricsd.Registry
-	prometheusExporter        *metricsd.PrometheusExporter
+	// db is the single SQLite file shared by OAuth2/MCP storage, the
+	// embedded IDP, browser sessions, and user-saved templates. Opened
+	// at the top of NewHandler and migrated via appdb.Migrate; closed
+	// in Stop. nil only on the unusual path where the operator has
+	// disabled every feature that needs persistence (no MCP, no IDP,
+	// no templates, no sessions) — in practice always non-nil.
+	db                 *sql.DB
+	metricsRegistry    *metricsd.Registry
+	prometheusExporter *metricsd.PrometheusExporter
 	// httpMetrics holds the prometheus/client_golang registry plus the
 	// HTTP request counters / duration histogram / in-flight gauge
 	// recorded by the recordingMiddleware wrapper installed in
@@ -122,30 +130,42 @@ type Handler struct {
 
 // HandlerConfig holds handler configuration
 type HandlerConfig struct {
-	ScheddName          string              // Schedd name
-	ScheddAddr          string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader          string              // HTTP header to extract username from (optional)
-	SigningKeyPath      string              // Path to token signing key (optional, for token generation)
-	TrustDomain         string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain           string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL         string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	Collector           *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics       bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL     time.Duration       // Metrics cache TTL (default: 10s)
-	Logger              *logging.Logger     // Logger instance (optional, creates default if nil)
-	EnableMCP           bool                // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath        string              // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
-	OAuth2Issuer        string              // OAuth2 issuer URL (default: listen address)
-	OAuth2ClientID      string              // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret  string              // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL       string              // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL      string              // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL   string              // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL   string              // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes        []string            // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim string              // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim   string              // Claim name for groups in user info (default: "groups")
+	ScheddName      string              // Schedd name
+	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader      string              // HTTP header to extract username from (optional)
+	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
+	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCACertFile   string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	Collector       *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
+	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
+	EnableMCP       bool                // Enable MCP endpoints with OAuth2 (default: false)
+
+	// DBPath is the unified SQLite database file backing OAuth2/MCP
+	// storage, the embedded IDP, browser sessions, and user-saved
+	// batch-submission templates. Defaults to LOCAL_DIR/htcondor-api.db
+	// (or /var/lib/condor/htcondor-api.db when LOCAL_DIR is unset).
+	// Configure via HTTP_API_DB_PATH; HTTP_API_OAUTH2_DB_PATH is
+	// honored as a back-compat fallback.
+	DBPath string
+
+	// OAuth2DBPath is the legacy per-subsystem path. Deprecated;
+	// callers should set DBPath instead. When DBPath is empty and
+	// OAuth2DBPath is set, OAuth2DBPath is used as DBPath.
+	OAuth2DBPath        string
+	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL      string   // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL   string   // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL   string   // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes        []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim string   // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim   string   // Claim name for groups in user info (default: "groups")
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -159,8 +179,11 @@ type HandlerConfig struct {
 	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
-	IDPDBPath                  string // Path to IDP SQLite database (default: "idp.db")
-	IDPIssuer                  string // IDP issuer URL (default: listen address)
+	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
+	// Retained as an unused field so existing callers keep compiling
+	// during the transition.
+	IDPDBPath string //nolint:unused // kept for back-compat; ignored by NewHandler.
+	IDPIssuer string // IDP issuer URL (default: listen address)
 	// IDPAccessTokenLifespan / IDPRefreshTokenLifespan: see OAuth2*Lifespan above. Zero
 	// uses the same defaults (1h / 30d).
 	IDPAccessTokenLifespan  time.Duration
@@ -185,14 +208,10 @@ type HandlerConfig struct {
 	// always ship.
 	TemplateGlobalPath string
 
-	// TemplateUserStoreDBPath is the SQLite file backing user-saved
-	// templates from the Save-as-template button on /submit. User
-	// templates are scoped to their owner — never shared with other
-	// users — so the table is keyed on (owner, id). When empty, Save
-	// returns an error but the catalog still serves built-ins and
-	// globals. Postgres support is a one-line driver swap when this
-	// graduates to multi-replica deployments.
-	TemplateUserStoreDBPath string
+	// TemplateUserStoreDBPath is deprecated; the templates store now
+	// shares the unified DBPath. Retained so existing callers
+	// keep compiling; ignored by NewHandler.
+	TemplateUserStoreDBPath string //nolint:unused // kept for back-compat; ignored by NewHandler.
 }
 
 // NewHandler creates a new HTTP API handler that can be embedded in any HTTP server
@@ -267,15 +286,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		httpBaseURL:               cfg.HTTPBaseURL,
 		userHeader:                cfg.UserHeader,
 		jupyterWorkDir:            cfg.JupyterWorkDir,
-		templateLibrary:           buildTemplateLibrary(cfg, logger),
-		signingKeyPath:            cfg.SigningKeyPath,
-		tlsCACertFile:             cfg.TLSCACertFile,
-		logger:                    logger,
-		tokenCache:                NewTokenCache(), // Initialize token cache (includes username for rate limiting)
-		streamBufferSize:          streamBufferSize,
-		streamWriteTimeout:        streamWriteTimeout,
-		webuiAdminGroup:           cfg.WebUIAdminGroup,
-		token:                     cfg.Token,
+		// templateLibrary is filled in after the unified DB is open;
+		// see below. Leaving it nil here makes it obvious that the
+		// catalog isn't available until the post-DB path runs.
+		signingKeyPath:     cfg.SigningKeyPath,
+		tlsCACertFile:      cfg.TLSCACertFile,
+		logger:             logger,
+		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		streamBufferSize:   streamBufferSize,
+		streamWriteTimeout: streamWriteTimeout,
+		webuiAdminGroup:    cfg.WebUIAdminGroup,
+		token:              cfg.Token,
 	}
 
 	if h.webuiAdminGroup != "" {
@@ -323,13 +344,37 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.creddDiscovered = false // Explicitly provided, no need for updates
 	}
 
+	// Open the unified application database. Same SQLite file is
+	// shared by OAuth2/MCP storage (when EnableMCP), the embedded IDP
+	// (when EnableIDP), browser sessions, and user-saved templates.
+	// Falls back through the legacy OAuth2DBPath name so existing
+	// deployments don't have to retitle their config knob, and
+	// finally to LOCAL_DIR/htcondor-api.db.
+	dbPath := cfg.DBPath
+	if dbPath == "" {
+		dbPath = cfg.OAuth2DBPath
+	}
+	if dbPath == "" {
+		dbPath = getDefaultDBPath(cfg.HTCondorConfig, "htcondor-api.db")
+	}
+	appDB, err := appdb.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open application database: %w", err)
+	}
+	if err := appdb.Migrate(context.Background(), appDB); err != nil {
+		_ = appDB.Close()
+		return nil, fmt.Errorf("failed to migrate application database: %w", err)
+	}
+	h.db = appDB
+	logger.Info(logging.DestinationHTTP, "Unified application database opened", "path", dbPath)
+
+	// Build the template library now that the DB is open. The
+	// built-in catalog is always available; the user-saved store
+	// rides on the same DB connection (no separate file).
+	h.templateLibrary = buildTemplateLibrary(cfg, logger, h.db)
+
 	// Setup OAuth2 provider if MCP is enabled
 	if cfg.EnableMCP {
-		oauth2DBPath := cfg.OAuth2DBPath
-		if oauth2DBPath == "" {
-			oauth2DBPath = getDefaultDBPath(cfg.HTCondorConfig, "oauth2.db")
-		}
-
 		oauth2Issuer := cfg.OAuth2Issuer
 		if oauth2Issuer == "" {
 			oauth2Issuer = "http://localhost:8080"
@@ -345,7 +390,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 
 		oauth2Provider, err := NewOAuth2Provider(OAuth2ProviderOptions{
-			DBPath:               oauth2DBPath,
+			DB:                   h.db,
 			Issuer:               oauth2Issuer,
 			AccessTokenLifespan:  oauth2AccessLifespan,
 			RefreshTokenLifespan: oauth2RefreshLifespan,
@@ -417,45 +462,21 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		if h.mcpWriteGroup != "" {
 			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", h.mcpWriteGroup)
 		}
-
-		// Initialize session store with shared database connection
-		sessionStore, err := NewSessionStore(h.oauth2Provider.GetStorage().GetDB(), sessionTTL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create session store: %w", err)
-		}
-		h.sessionStore = sessionStore
-		logger.Info(logging.DestinationHTTP, "Session store enabled with database persistence", "ttl", sessionTTL)
-	} else {
-		// OAuth2 not enabled, create standalone database for sessions
-		sessionDBPath := cfg.OAuth2DBPath
-		if sessionDBPath == "" {
-			sessionDBPath = getDefaultDBPath(cfg.HTCondorConfig, "sessions.db")
-		} else {
-			sessionDBPath += ".sessions"
-		}
-
-		// Open database for sessions
-		sessionDB, err := sql.Open("sqlite", sessionDBPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open session database: %w", err)
-		}
-
-		sessionStore, err := NewSessionStore(sessionDB, sessionTTL)
-		if err != nil {
-			_ = sessionDB.Close()
-			return nil, fmt.Errorf("failed to create session store: %w", err)
-		}
-		h.sessionStore = sessionStore
-		logger.Info(logging.DestinationHTTP, "Session store enabled with standalone database", "path", sessionDBPath, "ttl", sessionTTL)
 	}
+
+	// Initialize the browser-session store against the unified DB.
+	// The http_sessions table lives in the same SQLite file as the
+	// OAuth2 / IDP / templates tables — no separate file, no
+	// MCP-vs-standalone branching.
+	sessionStore, err := NewSessionStore(h.db, sessionTTL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session store: %w", err)
+	}
+	h.sessionStore = sessionStore
+	logger.Info(logging.DestinationHTTP, "Session store enabled", "ttl", sessionTTL)
 
 	// Setup IDP provider if enabled (can work independently of MCP)
 	if cfg.EnableIDP {
-		idpDBPath := cfg.IDPDBPath
-		if idpDBPath == "" {
-			idpDBPath = getDefaultDBPath(cfg.HTCondorConfig, "idp.db")
-		}
-
 		idpIssuer := cfg.IDPIssuer
 		if idpIssuer == "" {
 			idpIssuer = "http://localhost:8080"
@@ -471,7 +492,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 
 		idpProvider, err := NewIDPProvider(IDPProviderOptions{
-			DBPath:               idpDBPath,
+			DB:                   h.db,
 			Issuer:               idpIssuer,
 			AccessTokenLifespan:  idpAccessLifespan,
 			RefreshTokenLifespan: idpRefreshLifespan,
@@ -669,6 +690,22 @@ func (h *Handler) Stop(ctx context.Context) error {
 	if h.idpProvider != nil {
 		if err := h.idpProvider.Close(); err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to close IDP provider", "error", err)
+		}
+	}
+
+	// Close the unified application database last — every component
+	// that holds a reference must finish releasing handles before
+	// this point. The OAuth2/IDP provider Close() methods are now
+	// no-ops; the templates store's Close also short-circuits when
+	// it doesn't own the DB.
+	if h.templateLibrary != nil {
+		if err := h.templateLibrary.Close(); err != nil {
+			h.logger.Warn(logging.DestinationHTTP, "Failed to close template library", "error", err)
+		}
+	}
+	if h.db != nil {
+		if err := h.db.Close(); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to close application database", "error", err)
 		}
 	}
 

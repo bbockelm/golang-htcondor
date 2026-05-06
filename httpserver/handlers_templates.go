@@ -14,6 +14,7 @@
 package httpserver
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,21 +25,18 @@ import (
 	"github.com/bbockelm/golang-htcondor/templates"
 )
 
-// buildTemplateLibrary constructs the merged template catalog from the
-// HandlerConfig. Always returns a non-nil library: a missing global
-// YAML or unwritable user store path is logged but doesn't disable the
-// built-in catalog. Returns nil only on a fatal error parsing the
-// embedded built-in YAML, which is a programming bug we want to crash
-// loudly on.
-func buildTemplateLibrary(cfg HandlerConfig, logger *logging.Logger) *templates.Library {
+// buildTemplateLibrary constructs the merged template catalog. The
+// user-saved store rides on the unified application DB (db arg) so it
+// stays in sync with the OAuth2/IDP/sessions tables — same file,
+// same goose-managed schema. Returns nil only on a fatal error
+// parsing the embedded built-in YAML, which is a programming bug we
+// want to surface (the /api/v1/templates handler returns 503).
+func buildTemplateLibrary(cfg HandlerConfig, logger *logging.Logger, db *sql.DB) *templates.Library {
 	lib, err := templates.NewLibrary(templates.LibraryConfig{
-		GlobalPath:      cfg.TemplateGlobalPath,
-		UserStoreDBPath: cfg.TemplateUserStoreDBPath,
+		GlobalPath:  cfg.TemplateGlobalPath,
+		UserStoreDB: db,
 	})
 	if err != nil {
-		// Built-in load failure is fatal-ish; we log and return nil so
-		// /api/v1/templates returns 503 with a clear message rather
-		// than panicking the whole server.
 		if logger != nil {
 			logger.Error(logging.DestinationHTTP, "templates: failed to build library", "error", err)
 		}

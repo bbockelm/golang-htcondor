@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -332,15 +333,23 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 	return config.AuthorizationEndpoint, config.TokenEndpoint, config.UserinfoEndpoint, nil
 }
 
-// loadOAuth2DBPath loads OAuth2 database path from config
-func loadOAuth2DBPath(cfg *config.Config) string {
+// loadDBPath resolves the unified application database path. Prefers
+// HTTP_API_DB_PATH (the new canonical name). Falls back to
+// HTTP_API_OAUTH2_DB_PATH so deployments configured before the
+// per-subsystem databases were unified keep working without rewriting
+// their config. Default is LOCAL_DIR/htcondor-api.db, with the
+// historical /var/lib/condor location as a final fallback.
+func loadDBPath(cfg *config.Config) string {
+	if dbPath, ok := cfg.Get("HTTP_API_DB_PATH"); ok && dbPath != "" {
+		return dbPath
+	}
 	if dbPath, ok := cfg.Get("HTTP_API_OAUTH2_DB_PATH"); ok && dbPath != "" {
 		return dbPath
 	}
 	if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
-		return filepath.Join(localDir, "oauth2.db")
+		return filepath.Join(localDir, "htcondor-api.db")
 	}
-	return "/var/lib/condor/oauth2.db"
+	return "/var/lib/condor/htcondor-api.db"
 }
 
 // loadJupyterWorkDir resolves the per-instance scratch directory used to
@@ -366,34 +375,8 @@ func loadTemplateGlobalPath(cfg *config.Config) string {
 	return ""
 }
 
-// loadTemplateUserStoreDBPath resolves the SQLite database file used
-// to persist user-saved templates (the Save-as-template button on
-// /submit). The schema is owner-scoped — every row carries the
-// authenticated username, and queries always filter by it — so the
-// same database file is safe to share across multiple users in a
-// single replica. Postgres support (for multi-replica Kubernetes
-// deployments) is a contained change to the templates package.
-//
-// Defaults to <LOCAL_DIR>/user-templates.db when LOCAL_DIR is set,
-// otherwise <TempDir>/htcondor-api-user-templates.db so the feature
-// works out of the box without explicit config.
-func loadTemplateUserStoreDBPath(cfg *config.Config) string {
-	if p, ok := cfg.Get("HTTP_API_TEMPLATE_USER_STORE_DB_PATH"); ok && p != "" {
-		return p
-	}
-	// Honor the previous, JSON-era env var as a fallback so an
-	// operator who set HTTP_API_TEMPLATE_USER_STORE_PATH=... doesn't
-	// silently lose their config. The path is opened as SQLite either
-	// way; at worst they end up with both a leftover .json file and a
-	// new .db sibling.
-	if p, ok := cfg.Get("HTTP_API_TEMPLATE_USER_STORE_PATH"); ok && p != "" {
-		return p
-	}
-	if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
-		return filepath.Join(localDir, "user-templates.db")
-	}
-	return filepath.Join(os.TempDir(), "htcondor-api-user-templates.db")
-}
+// (User-templates DB path resolution was removed: the templates store
+// now shares the unified application database resolved by loadDBPath.)
 
 // loadHTTPBaseURL constructs the HTTP base URL for the API server.
 // It uses HTTP_API_BASE_URL if configured, otherwise constructs from:
@@ -628,9 +611,12 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		return config
 	}
 
-	// Load OAuth2 database path
-	config.oauth2DBPath = loadOAuth2DBPath(cfg)
-	logger.Info(logging.DestinationHTTP, "OAuth2 database path", "path", config.oauth2DBPath)
+	// Resolve the unified application database path. Same value is
+	// passed via Config.DBPath; the OAuth2DBPath alias is kept on the
+	// Config struct purely for back-compat with deployments that set
+	// HTTP_API_OAUTH2_DB_PATH.
+	config.oauth2DBPath = loadDBPath(cfg)
+	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
 	// Load OAuth2 issuer
 	config.oauth2Issuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
@@ -866,19 +852,11 @@ func runNormalMode() error {
 	}
 
 	// Load IDP configuration
-	idpDBPath := ""
+	// IDP shares the unified application database now; its own
+	// HTTP_API_IDP_DB_PATH knob is no longer consulted.
 	idpIssuer := ""
 	var idpAccessLifespan, idpRefreshLifespan time.Duration
 	if enableIDP {
-		// Load IDP database path - default to same DB as OAuth2
-		if dbPath, ok := cfg.Get("HTTP_API_IDP_DB_PATH"); ok && dbPath != "" {
-			idpDBPath = dbPath
-		} else {
-			// Use the same database path as OAuth2 by default
-			idpDBPath = loadOAuth2DBPath(cfg)
-		}
-		log.Printf("IDP database path: %s", idpDBPath)
-
 		// Load IDP issuer
 		if issuer, ok := cfg.Get("HTTP_API_IDP_ISSUER"); ok && issuer != "" {
 			idpIssuer = issuer
@@ -898,23 +876,25 @@ func runNormalMode() error {
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:                 listenAddrFromConfig,
-		ScheddName:                 scheddNameValue,
-		ScheddAddr:                 scheddAddrValue,
-		UserHeader:                 userHeaderFromConfig,
-		SigningKeyPath:             signingKeyPath,
-		HTTPBaseURL:                httpBaseURL,
-		TLSCertFile:                tlsCertFile,
-		TLSKeyFile:                 tlsKeyFile,
-		TLSCACertFile:              tlsCACertFile,
-		TrustDomain:                trustDomain,
-		UIDDomain:                  uidDomain,
-		ReadTimeout:                readTimeout,
-		WriteTimeout:               writeTimeout,
-		IdleTimeout:                idleTimeout,
-		Collector:                  collector,
-		Logger:                     logger,
-		EnableMCP:                  mcpCfg.enabled,
+		ListenAddr:     listenAddrFromConfig,
+		ScheddName:     scheddNameValue,
+		ScheddAddr:     scheddAddrValue,
+		UserHeader:     userHeaderFromConfig,
+		SigningKeyPath: signingKeyPath,
+		HTTPBaseURL:    httpBaseURL,
+		TLSCertFile:    tlsCertFile,
+		TLSKeyFile:     tlsKeyFile,
+		TLSCACertFile:  tlsCACertFile,
+		TrustDomain:    trustDomain,
+		UIDDomain:      uidDomain,
+		ReadTimeout:    readTimeout,
+		WriteTimeout:   writeTimeout,
+		IdleTimeout:    idleTimeout,
+		Collector:      collector,
+		Logger:         logger,
+		EnableMCP:      mcpCfg.enabled,
+		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
+		DBPath:                     mcpCfg.oauth2DBPath,
 		OAuth2DBPath:               mcpCfg.oauth2DBPath,
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
@@ -934,13 +914,11 @@ func runNormalMode() error {
 		MCPInstructions:            mcpCfg.instructions,
 		WebUIAdminGroup:            webuiAdminGroup,
 		EnableIDP:                  enableIDP,
-		IDPDBPath:                  idpDBPath,
 		IDPIssuer:                  idpIssuer,
 		IDPAccessTokenLifespan:     idpAccessLifespan,
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
-		TemplateUserStoreDBPath:    loadTemplateUserStoreDBPath(cfg),
 		HTCondorConfig:             cfg,
 	})
 	if err != nil {
@@ -1182,8 +1160,9 @@ func runDemoMode() error {
 	collector := htcondor.NewCollector(collectorAddr)
 	logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", collectorAddr)
 
-	// OAuth2 database path for MCP (shared with IDP)
-	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
+	// Unified application database path. Demo mode keeps it under
+	// the temp dir alongside the rest of the demo state.
+	appDBPath := filepath.Join(tempDir, "htcondor-api.db")
 
 	// Generate CA and server certificate for demo mode to enable HTTPS.
 	// We collect every hostname the server might be reached at so the
@@ -1230,38 +1209,44 @@ func runDemoMode() error {
 		Logger:         logger,
 		Token:          serverToken, // Token for daemon authentication
 		EnableMCP:      true,        // Enable MCP in demo mode
-		OAuth2DBPath:   oauth2DBPath,
+		DBPath:         appDBPath,
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
-		OAuth2Issuer:            httpBaseURL,
-		OAuth2ClientID:          "demo-client",
-		OAuth2ClientSecret:      "demo-secret",
-		OAuth2AuthURL:           httpBaseURL + "/mcp/oauth2/authorize",
-		OAuth2TokenURL:          httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:       httpBaseURL + "/mcp/oauth2/callback",
-		OAuth2Scopes:            []string{"openid", "profile", "email"},
-		EnableIDP:               true,
-		IDPDBPath:               oauth2DBPath, // IDP shares the OAuth2 db
-		IDPIssuer:               httpBaseURL,
-		JupyterWorkDir:          loadJupyterWorkDir(cfg),
-		TemplateGlobalPath:      loadTemplateGlobalPath(cfg),
-		TemplateUserStoreDBPath: loadTemplateUserStoreDBPath(cfg),
-		HTCondorConfig:          cfg,
+		OAuth2Issuer:       httpBaseURL,
+		OAuth2ClientID:     "demo-client",
+		OAuth2ClientSecret: "demo-secret",
+		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
+		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
+		OAuth2RedirectURL:  httpBaseURL + "/mcp/oauth2/callback",
+		OAuth2Scopes:       []string{"openid", "profile", "email"},
+		EnableIDP:          true,
+		IDPIssuer:          httpBaseURL,
+		JupyterWorkDir:     loadJupyterWorkDir(cfg),
+		TemplateGlobalPath: loadTemplateGlobalPath(cfg),
+		HTCondorConfig:     cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 
-	// Start server in goroutine
+	// Start server in goroutine. We log the error here as well as
+	// returning it through errChan because previously a startup
+	// failure on some shells (notably make-driven runs) appeared to
+	// swallow the log.Fatalf line, leaving the operator with only a
+	// "make: *** [demo] Error 1" and no clue what failed.
 	errChan := make(chan error, 1)
 	go func() {
-		// Start with TLS if certificates are available
+		var err error
 		if certPath != "" && keyPath != "" {
-			errChan <- server.StartTLS(certPath, keyPath)
+			err = server.StartTLS(certPath, keyPath)
 		} else {
-			errChan <- server.Start()
+			err = server.Start()
 		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "demo: server start failed: %v\n", err)
+		}
+		errChan <- err
 	}()
 
 	// Wait for shutdown

@@ -26,9 +26,9 @@ func setupTestOAuth2Server(t *testing.T) (*Server, *OAuth2Provider, string, cont
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create OAuth2 provider
+	// Create OAuth2 provider against a freshly-migrated app DB.
 	oauth2Provider, err := NewOAuth2Provider(OAuth2ProviderOptions{
-		DBPath:               t.TempDir() + "/oauth2-test.db",
+		DB:                   newTestDB(t, t.TempDir()+"/oauth2-test.db"),
 		Issuer:               "http://localhost:8080",
 		AccessTokenLifespan:  time.Hour,
 		RefreshTokenLifespan: 7 * 24 * time.Hour,

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
 	"encoding/pem"
 	"fmt"
 	"time"
@@ -24,9 +25,11 @@ type IDPProvider struct {
 	privateKey *rsa.PrivateKey
 }
 
-// IDPProviderOptions configures lifespans and other tunables for the IDP provider.
+// IDPProviderOptions configures lifespans and other tunables for the
+// IDP provider. DB is the unified application database (see appdb);
+// the provider does not own its lifecycle.
 type IDPProviderOptions struct {
-	DBPath               string
+	DB                   *sql.DB
 	Issuer               string
 	AccessTokenLifespan  time.Duration
 	RefreshTokenLifespan time.Duration
@@ -47,10 +50,10 @@ func NewIDPProvider(opts IDPProviderOptions) (*IDPProvider, error) {
 			opts.RefreshTokenLifespan, opts.AccessTokenLifespan)
 	}
 
-	storage, err := NewIDPStorage(opts.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create storage: %w", err)
+	if opts.DB == nil {
+		return nil, fmt.Errorf("IDP provider: DB is required")
 	}
+	storage := NewIDPStorage(opts.DB)
 
 	// Try to load existing RSA key from database
 	ctx := context.Background()
@@ -149,9 +152,11 @@ func NewIDPProvider(opts IDPProviderOptions) (*IDPProvider, error) {
 	}, nil
 }
 
-// Close closes the IDP provider and its storage
+// Close is now a no-op: the IDP provider does not own the underlying
+// *sql.DB anymore. The Handler that opened the unified app DB is
+// responsible for closing it on shutdown.
 func (p *IDPProvider) Close() error {
-	return p.storage.Close()
+	return nil
 }
 
 // GetProvider returns the underlying fosite OAuth2Provider

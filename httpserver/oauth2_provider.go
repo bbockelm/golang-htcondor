@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
 	"encoding/pem"
 	"fmt"
 	"time"
@@ -23,10 +24,13 @@ type OAuth2Provider struct {
 	strategy *compose.CommonStrategy
 }
 
-// OAuth2ProviderOptions configures lifespans and other tunables for the OAuth2 provider.
-// Lifespans must be > 0; callers are expected to validate or default before constructing.
+// OAuth2ProviderOptions configures lifespans and other tunables for
+// the OAuth2 provider. Lifespans must be > 0; callers are expected to
+// validate or default before constructing. DB is the unified
+// application database (see appdb); the provider does not own its
+// lifecycle.
 type OAuth2ProviderOptions struct {
-	DBPath               string
+	DB                   *sql.DB
 	Issuer               string
 	AccessTokenLifespan  time.Duration
 	RefreshTokenLifespan time.Duration
@@ -49,10 +53,10 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 			opts.RefreshTokenLifespan, opts.AccessTokenLifespan)
 	}
 
-	storage, err := NewOAuth2Storage(opts.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create storage: %w", err)
+	if opts.DB == nil {
+		return nil, fmt.Errorf("OAuth2 provider: DB is required")
 	}
+	storage := NewOAuth2Storage(opts.DB)
 
 	// Try to load existing RSA key from database
 	ctx := context.Background()
@@ -150,9 +154,12 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 	}, nil
 }
 
-// Close closes the OAuth2 provider and its storage
+// Close is now a no-op: the OAuth2 provider does not own the
+// underlying *sql.DB anymore. The Handler that opened the unified
+// app DB is responsible for closing it on shutdown. Method retained
+// so callers that defer p.Close() during refactors don't break.
 func (p *OAuth2Provider) Close() error {
-	return p.storage.Close()
+	return nil
 }
 
 // GetProvider returns the underlying fosite OAuth2Provider

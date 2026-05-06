@@ -226,8 +226,19 @@ type LibraryConfig struct {
 	// templates. Empty string disables.
 	GlobalPath string
 
-	// UserStoreDBPath is the SQLite file backing user-saved
-	// templates. Required for Save/Delete to succeed.
+	// UserStoreDB is an externally-managed SQLite *sql.DB whose
+	// templates_user table has been set up by the caller (typically
+	// the unified appdb migrations on the htcondor-api side). When
+	// non-nil, Save/Delete work against this DB and the library does
+	// NOT take ownership — closing the Library is a no-op for the DB.
+	//
+	// Mutually exclusive with UserStoreDBPath. UserStoreDB wins.
+	UserStoreDB *sql.DB
+
+	// UserStoreDBPath is the legacy stand-alone-file path. Used by
+	// tests and by older deployments that haven't migrated to the
+	// unified app database. The library opens the file itself, runs
+	// its own DDL on first use, and closes it on Close().
 	//
 	// Migration to Postgres is a contained change: implement the
 	// userTemplateStore interface against a Postgres connection
@@ -272,7 +283,10 @@ func NewLibrary(cfg LibraryConfig) (*Library, error) {
 		lib.global = g
 	}
 
-	if cfg.UserStoreDBPath != "" {
+	switch {
+	case cfg.UserStoreDB != nil:
+		lib.store = newSQLUserTemplateStoreFromDB(cfg.UserStoreDB)
+	case cfg.UserStoreDBPath != "":
 		store, err := newSQLUserTemplateStore(cfg.UserStoreDBPath)
 		if err != nil {
 			return nil, fmt.Errorf("templates: open user store %s: %w", cfg.UserStoreDBPath, err)
@@ -531,10 +545,20 @@ func (l *Library) Delete(id, owner string) (bool, error) {
 // content base64-encoded by encoding/json's []byte default).
 // ----------------------------------------------------------------------
 
+// ownsDB tracks whether this store is responsible for closing the
+// underlying *sql.DB. True when the store opened the file itself
+// (legacy LibraryConfig.UserStoreDBPath path); false when an external
+// caller injected an already-open DB (LibraryConfig.UserStoreDB).
 type sqlUserTemplateStore struct {
-	db *sql.DB
+	db     *sql.DB
+	ownsDB bool
 }
 
+// newSQLUserTemplateStore opens its own SQLite file, creates the
+// templates_user table if missing, and returns a store. Used by the
+// stand-alone path (tests, the legacy UserStoreDBPath config field).
+// Production wires the table through appdb migrations and uses
+// newSQLUserTemplateStoreFromDB instead.
 func newSQLUserTemplateStore(path string) (*sqlUserTemplateStore, error) {
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -550,12 +574,19 @@ func newSQLUserTemplateStore(path string) (*sqlUserTemplateStore, error) {
 	// be queued behind any in-flight write.
 	db.SetMaxOpenConns(1)
 
-	s := &sqlUserTemplateStore{db: db}
+	s := &sqlUserTemplateStore{db: db, ownsDB: true}
 	if err := s.createTables(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// newSQLUserTemplateStoreFromDB wraps an externally-managed DB whose
+// templates_user schema is already set up (typically by appdb's goose
+// migrations). The store will not close db on Close().
+func newSQLUserTemplateStoreFromDB(db *sql.DB) *sqlUserTemplateStore {
+	return &sqlUserTemplateStore{db: db, ownsDB: false}
 }
 
 func (s *sqlUserTemplateStore) createTables() error {
@@ -633,7 +664,7 @@ func (s *sqlUserTemplateStore) addColumnIfMissing(ctx context.Context, table, co
 }
 
 func (s *sqlUserTemplateStore) Close() error {
-	if s.db == nil {
+	if s.db == nil || !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()

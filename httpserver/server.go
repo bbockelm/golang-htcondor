@@ -55,20 +55,25 @@ type Config struct {
 	JupyterWorkDir  string              // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
 
 	// Batch-submission template paths.
-	TemplateGlobalPath      string   // Optional YAML file with operator-curated templates
-	TemplateUserStoreDBPath string   // SQLite file backing user-saved templates (owner-scoped); upgrade to Postgres for multi-replica
-	EnableMCP               bool     // Enable MCP endpoints with OAuth2 (default: false)
-	OAuth2DBPath            string   // Path to OAuth2 SQLite database (default: LOCAL_DIR/oauth2.db or /var/lib/condor/oauth2.db). Can be configured via HTTP_API_OAUTH2_DB_PATH
-	OAuth2Issuer            string   // OAuth2 issuer URL (default: listen address)
-	OAuth2ClientID          string   // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret      string   // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL           string   // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL          string   // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL       string   // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL       string   // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+	TemplateGlobalPath string // Optional YAML file with operator-curated templates
+	// TemplateUserStoreDBPath is deprecated; the templates store
+	// shares the unified DBPath. Kept so existing callers compile.
+	TemplateUserStoreDBPath string //nolint:unused // back-compat; ignored.
+	EnableMCP               bool   // Enable MCP endpoints with OAuth2 (default: false)
+	// DBPath is the unified SQLite database file. See HandlerConfig.DBPath.
+	DBPath string
+	// OAuth2DBPath is the legacy name for DBPath; kept for back-compat.
+	OAuth2DBPath        string
+	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
+	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL      string   // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL   string   // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL   string   // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes        []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim string   // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim   string   // Claim name for groups in user info (default: "groups")
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -80,8 +85,9 @@ type Config struct {
 	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
-	IDPDBPath                  string // Path to IDP SQLite database (default: "idp.db")
-	IDPIssuer                  string // IDP issuer URL (default: listen address)
+	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
+	IDPDBPath string //nolint:unused // back-compat; ignored.
+	IDPIssuer string // IDP issuer URL (default: listen address)
 	// IDPAccessTokenLifespan / IDPRefreshTokenLifespan: see OAuth2*Lifespan above.
 	IDPAccessTokenLifespan  time.Duration
 	IDPRefreshTokenLifespan time.Duration
@@ -125,10 +131,10 @@ func NewServer(cfg Config) (*Server, error) {
 		MetricsCacheTTL:            cfg.MetricsCacheTTL,
 		Logger:                     cfg.Logger,
 		EnableMCP:                  cfg.EnableMCP,
+		DBPath:                     cfg.DBPath,
 		OAuth2DBPath:               cfg.OAuth2DBPath,
 		JupyterWorkDir:             cfg.JupyterWorkDir,
 		TemplateGlobalPath:         cfg.TemplateGlobalPath,
-		TemplateUserStoreDBPath:    cfg.TemplateUserStoreDBPath,
 		OAuth2Issuer:               cfg.OAuth2Issuer,
 		OAuth2ClientID:             cfg.OAuth2ClientID,
 		OAuth2ClientSecret:         cfg.OAuth2ClientSecret,
@@ -147,7 +153,6 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:            cfg.MCPInstructions,
 		WebUIAdminGroup:            cfg.WebUIAdminGroup,
 		EnableIDP:                  cfg.EnableIDP,
-		IDPDBPath:                  cfg.IDPDBPath,
 		IDPIssuer:                  cfg.IDPIssuer,
 		IDPAccessTokenLifespan:     cfg.IDPAccessTokenLifespan,
 		IDPRefreshTokenLifespan:    cfg.IDPRefreshTokenLifespan,

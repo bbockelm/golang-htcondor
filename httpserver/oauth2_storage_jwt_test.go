@@ -19,11 +19,7 @@ func TestJWTAssertionStorage(t *testing.T) {
 	defer func() { _ = os.Remove(tmpfile.Name()) }()
 	_ = tmpfile.Close()
 
-	storage, err := NewOAuth2Storage(tmpfile.Name())
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() { _ = storage.Close() }()
+	storage := NewOAuth2Storage(newTestDB(t, tmpfile.Name()))
 
 	ctx := context.Background()
 	jti := "test-jti-12345"
@@ -83,11 +79,7 @@ func TestJWTAssertionConcurrency(t *testing.T) {
 	defer func() { _ = os.Remove(tmpfile.Name()) }()
 	_ = tmpfile.Close()
 
-	storage, err := NewOAuth2Storage(tmpfile.Name())
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() { _ = storage.Close() }()
+	storage := NewOAuth2Storage(newTestDB(t, tmpfile.Name()))
 
 	ctx := context.Background()
 	jti := "concurrent-jti"

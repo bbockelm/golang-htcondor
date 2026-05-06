@@ -45,7 +45,7 @@ func TestOAuth2ProviderLifespansAreHonored(t *testing.T) {
 	}
 
 	provider, err := NewOAuth2Provider(OAuth2ProviderOptions{
-		DBPath:               filepath.Join(t.TempDir(), "lifespan.db"),
+		DB:                   newTestDB(t, filepath.Join(t.TempDir(), "lifespan.db")),
 		Issuer:               "http://localhost:8080",
 		AccessTokenLifespan:  wantAccess,
 		RefreshTokenLifespan: wantRefresh,
@@ -86,7 +86,7 @@ func TestIDPProviderLifespansAreHonored(t *testing.T) {
 	)
 
 	provider, err := NewIDPProvider(IDPProviderOptions{
-		DBPath:               filepath.Join(t.TempDir(), "idp-lifespan.db"),
+		DB:                   newTestDB(t, filepath.Join(t.TempDir(), "idp-lifespan.db")),
 		Issuer:               "http://localhost:8080",
 		AccessTokenLifespan:  wantAccess,
 		RefreshTokenLifespan: wantRefresh,
@@ -110,24 +110,23 @@ func TestIDPProviderLifespansAreHonored(t *testing.T) {
 // zero-valued lifespans rather than silently substituting a default, which is the
 // behavior that masked the original bug in pelican.
 func TestOAuth2ProviderRejectsMissingLifespans(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "rejected.db")
-
+	// Lifespan validation happens before DB access in the constructor;
+	// a nil DB exercises the right error paths without touching disk.
 	cases := []struct {
 		name string
 		opts OAuth2ProviderOptions
 	}{
 		{
 			name: "zero access lifespan",
-			opts: OAuth2ProviderOptions{DBPath: dbPath, Issuer: "http://x", RefreshTokenLifespan: time.Hour},
+			opts: OAuth2ProviderOptions{Issuer: "http://x", RefreshTokenLifespan: time.Hour},
 		},
 		{
 			name: "zero refresh lifespan",
-			opts: OAuth2ProviderOptions{DBPath: dbPath, Issuer: "http://x", AccessTokenLifespan: time.Hour},
+			opts: OAuth2ProviderOptions{Issuer: "http://x", AccessTokenLifespan: time.Hour},
 		},
 		{
 			name: "refresh shorter than access",
 			opts: OAuth2ProviderOptions{
-				DBPath:               dbPath,
 				Issuer:               "http://x",
 				AccessTokenLifespan:  2 * time.Hour,
 				RefreshTokenLifespan: time.Hour,
@@ -219,7 +218,7 @@ func TestDeviceCodeFlowSetsRefreshExpiryFromConfig(t *testing.T) {
 	)
 
 	provider, err := NewOAuth2Provider(OAuth2ProviderOptions{
-		DBPath:               filepath.Join(t.TempDir(), "device.db"),
+		DB:                   newTestDB(t, filepath.Join(t.TempDir(), "device.db")),
 		Issuer:               "http://localhost:8080",
 		AccessTokenLifespan:  wantAccess,
 		RefreshTokenLifespan: wantRefresh,

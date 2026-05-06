@@ -121,14 +121,23 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 	item.FileSize = stat.Size()
 	item.FileMode = uint32(stat.Mode().Perm())
 
-	// 2. Prepare security config
+	// 2. Prepare security config from the configured CLIENT methods.
+	// File transfers carry their own transfer-key credential (issued
+	// by the schedd in advance), so Authentication is OPTIONAL: any
+	// mutually-supported method works, including AuthNone for pools
+	// that allow anonymous transfers.
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	secConfig := &security.SecurityConfig{
-		Command:        commands.FILETRANS_UPLOAD,
-		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
-		Authentication: security.SecurityOptional,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
+	secConfig, err := NewClientSecurityConfig(ctx, "", addr, int(commands.FILETRANS_UPLOAD), "CLIENT", nil)
+	if err != nil {
+		return fmt.Errorf("failed to build security config: %w", err)
+	}
+	if !hasAuthMethod(secConfig.AuthMethods, security.AuthNone) {
+		secConfig.AuthMethods = append(secConfig.AuthMethods, security.AuthNone)
+	}
+	secConfig.Authentication = security.SecurityOptional
+	secConfig.Encryption = security.SecurityOptional
+	if len(secConfig.CryptoMethods) == 0 {
+		secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
 	}
 
 	// 3. Connect to schedd and authenticate using cedar client
@@ -221,14 +230,22 @@ func (ftc *FileTransferClient) UploadFile(ctx context.Context, item FileTransfer
 //
 // TODO: Still missing Daemon.StartCommand() - currently must manually send command code.
 func (ftc *FileTransferClient) DownloadFile(ctx context.Context, remotePath string, localPath string) error {
-	// 1. Prepare security config
+	// 1. Prepare security config from the configured CLIENT methods.
+	// Same rationale as UploadFile: the transfer-key is the actual
+	// credential; we offer AuthNone too so the connection itself can
+	// be anonymous on pools that allow it.
 	addr := fmt.Sprintf("%s:%d", ftc.daemonAddr, ftc.daemonPort)
-	secConfig := &security.SecurityConfig{
-		Command:        commands.FILETRANS_DOWNLOAD,
-		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
-		Authentication: security.SecurityOptional,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
+	secConfig, err := NewClientSecurityConfig(ctx, "", addr, int(commands.FILETRANS_DOWNLOAD), "CLIENT", nil)
+	if err != nil {
+		return fmt.Errorf("failed to build security config: %w", err)
+	}
+	if !hasAuthMethod(secConfig.AuthMethods, security.AuthNone) {
+		secConfig.AuthMethods = append(secConfig.AuthMethods, security.AuthNone)
+	}
+	secConfig.Authentication = security.SecurityOptional
+	secConfig.Encryption = security.SecurityOptional
+	if len(secConfig.CryptoMethods) == 0 {
+		secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
 	}
 
 	// 2. Connect to schedd and authenticate using cedar client

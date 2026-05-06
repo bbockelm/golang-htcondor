@@ -14,171 +14,24 @@ import (
 	"github.com/ory/fosite/handler/openid"
 )
 
-// OAuth2Storage implements fosite storage interfaces using SQLite
+// OAuth2Storage implements fosite storage interfaces using the unified
+// application database. The schema is owned by appdb's migrations —
+// this struct is purely a thin set of query helpers around an already-
+// migrated *sql.DB.
 type OAuth2Storage struct {
 	db *sql.DB
 }
 
-// NewOAuth2Storage creates a new OAuth2 storage backed by SQLite
-func NewOAuth2Storage(dbPath string) (*OAuth2Storage, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	storage := &OAuth2Storage{db: db}
-	if err := storage.createTables(); err != nil {
-		_ = db.Close() // Ignore error on cleanup
-		return nil, fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	return storage, nil
+// NewOAuth2Storage wraps an already-opened DB in the OAuth2 storage
+// helpers. Schema creation is no longer this struct's responsibility —
+// see httpserver/appdb. The caller retains ownership of the DB
+// (don't call Close() here on shutdown).
+func NewOAuth2Storage(db *sql.DB) *OAuth2Storage {
+	return &OAuth2Storage{db: db}
 }
 
-// createTables creates the necessary database tables
-func (s *OAuth2Storage) createTables() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS oauth2_clients (
-		id TEXT PRIMARY KEY,
-		client_secret TEXT NOT NULL,
-		redirect_uris TEXT NOT NULL,
-		grant_types TEXT NOT NULL,
-		response_types TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		public INTEGER NOT NULL DEFAULT 0,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_access_tokens (
-		signature TEXT PRIMARY KEY,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT NOT NULL,
-		subject TEXT NOT NULL,
-		active INTEGER NOT NULL DEFAULT 1,
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_refresh_tokens (
-		signature TEXT PRIMARY KEY,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT NOT NULL,
-		subject TEXT NOT NULL,
-		active INTEGER NOT NULL DEFAULT 1,
-		expires_at TIMESTAMP,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_authorization_codes (
-		signature TEXT PRIMARY KEY,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT NOT NULL,
-		subject TEXT NOT NULL,
-		active INTEGER NOT NULL DEFAULT 1,
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_pkce_requests (
-		signature TEXT PRIMARY KEY,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT NOT NULL,
-		subject TEXT NOT NULL,
-		active INTEGER NOT NULL DEFAULT 1,
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_rsa_keys (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		private_key_pem TEXT NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_hmac_secrets (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		secret BLOB NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_oidc_sessions (
-		signature TEXT PRIMARY KEY,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT NOT NULL,
-		subject TEXT NOT NULL,
-		active INTEGER NOT NULL DEFAULT 1,
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_jwt_assertions (
-		jti TEXT PRIMARY KEY,
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS oauth2_device_codes (
-		device_code TEXT PRIMARY KEY,
-		user_code TEXT NOT NULL UNIQUE,
-		request_id TEXT NOT NULL,
-		requested_at TIMESTAMP NOT NULL,
-		client_id TEXT NOT NULL,
-		scopes TEXT NOT NULL,
-		granted_scopes TEXT NOT NULL,
-		form_data TEXT NOT NULL,
-		session_data TEXT,
-		subject TEXT,
-		status TEXT NOT NULL DEFAULT 'pending',
-		expires_at TIMESTAMP NOT NULL,
-		last_polled_at TIMESTAMP,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON oauth2_access_tokens(client_id);
-	CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth2_refresh_tokens(client_id);
-	CREATE INDEX IF NOT EXISTS idx_authorization_codes_client ON oauth2_authorization_codes(client_id);
-	CREATE INDEX IF NOT EXISTS idx_oidc_sessions_client ON oauth2_oidc_sessions(client_id);
-	CREATE INDEX IF NOT EXISTS idx_jwt_assertions_expires ON oauth2_jwt_assertions(expires_at);
-	CREATE INDEX IF NOT EXISTS idx_device_codes_user_code ON oauth2_device_codes(user_code);
-	CREATE INDEX IF NOT EXISTS idx_device_codes_expires ON oauth2_device_codes(expires_at);
-	`
-
-	_, err := s.db.ExecContext(context.Background(), schema)
-	return err
-}
-
-// Close closes the database connection
-func (s *OAuth2Storage) Close() error {
-	return s.db.Close()
-}
-
-// GetDB returns the underlying database connection
-// This allows sharing the database connection with other components like SessionStore
+// GetDB returns the underlying database connection. Kept on the
+// struct because tests and the SessionStore wiring still reach for it.
 func (s *OAuth2Storage) GetDB() *sql.DB {
 	return s.db
 }

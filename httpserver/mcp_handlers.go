@@ -83,15 +83,15 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 
 		h.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
 
-		// Create security config with the HTCondor token
-		// HTCondor will validate the token and enforce authorization
-		secConfig := &security.SecurityConfig{
-			AuthMethods:    []security.AuthMethod{security.AuthToken},
-			Authentication: security.SecurityRequired,
-			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-			Encryption:     security.SecurityOptional,
-			Integrity:      security.SecurityOptional,
-			Token:          htcToken,
+		// Build a SecurityConfig from the configured CLIENT methods
+		// (so SSL is offered alongside TOKEN when the pool's auth
+		// methods include it). HTCondor still validates the token
+		// itself; we just don't lock the wire to TOKEN-only.
+		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+			return
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
@@ -144,16 +144,17 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Create security config with the generated token
-			secConfig := &security.SecurityConfig{
-				AuthMethods:    []security.AuthMethod{security.AuthToken},
-				Authentication: security.SecurityRequired,
-				CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-				Encryption:     security.SecurityOptional,
-				Integrity:      security.SecurityOptional,
-				Token:          htcToken,
-				SecurityTag:    username,
+			// Build a SecurityConfig from the configured CLIENT
+			// methods, then overlay the generated token and the
+			// per-user SecurityTag (so cedar's session cache keys
+			// the resumed session by user, not just by peer addr).
+			secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+				return
 			}
+			secConfig.SecurityTag = username
 			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 		}
 

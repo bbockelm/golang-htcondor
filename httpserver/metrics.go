@@ -336,8 +336,10 @@ func newMetricsdAdapter(reg *metricsd.Registry) *metricsdAdapter {
 
 // Describe is a no-op; we use the unchecked-collector path so
 // prometheus client_golang accepts metrics that change shape between
-// collects. Cost: a small startup safety check is bypassed.
-func (a *metricsdAdapter) Describe(ch chan<- *prometheus.Desc) {}
+// collects. Cost: a small startup safety check is bypassed. The
+// channel parameter is unused but required by the prometheus.Collector
+// interface.
+func (a *metricsdAdapter) Describe(_ chan<- *prometheus.Desc) {}
 
 func (a *metricsdAdapter) Collect(ch chan<- prometheus.Metric) {
 	// metricsd's Collect doesn't accept a context-with-deadline; the

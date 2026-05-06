@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,7 +71,17 @@ func TestRecordingMiddleware(t *testing.T) {
 		"/api/v1/dashboard",
 		"/api/v1/jobs/3.0",
 	} {
-		resp, err := http.Get(srv.URL + path)
+		// Use NewRequestWithContext + DefaultClient.Do rather than
+		// http.Get — the noctx linter flags context-less HTTP calls
+		// because a misbehaving handler could hang the test forever.
+		// The test's own deadline / `go test -timeout` is the real
+		// bound, but explicitly threading a context makes that intent
+		// visible and satisfies the linter.
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest %s: %v", path, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
