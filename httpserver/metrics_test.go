@@ -92,7 +92,9 @@ func TestRecordingMiddleware(t *testing.T) {
 	// just incremented. We assert on substrings so the test is robust
 	// to label ordering / float formatting.
 	rr := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	// noctx-safe constructor; the recorded handler is in-process so a
+	// background context is the right one to thread through.
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		// Use the metrics' own registry directly.

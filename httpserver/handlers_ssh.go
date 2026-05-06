@@ -183,7 +183,18 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	// All systems go: upgrade.
 	wsConn, err := sshUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		// Upgrader already wrote an HTTP error response.
+		// gorilla/websocket already wrote an HTTP error response —
+		// usually 400 (handshake) or 426 (upgrade required), but
+		// 500 "Internal Server Error" if the response writer doesn't
+		// implement http.Hijacker. Log every case here so the cause
+		// surfaces in operator-visible logs without anyone having to
+		// pull a network capture: a 500 from this site means a
+		// middleware in the chain dropped the Hijacker interface
+		// (see hijacker_test.go for the regression coverage).
+		s.logger.Error(logging.DestinationHTTP, "WebSocket upgrade failed",
+			"user", username,
+			"cluster", cluster, "proc", proc,
+			"error", err)
 		_ = session.Close()
 		_ = sshClient.Close()
 		return

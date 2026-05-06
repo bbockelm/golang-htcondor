@@ -1,7 +1,10 @@
 package httpserver
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -165,12 +168,20 @@ func (m *httpMetrics) middleware(next http.Handler) http.Handler {
 // the status code the handler wrote. Falls back to 200 when no
 // WriteHeader was called (the http stdlib's implicit behavior).
 //
-// We deliberately don't try to wrap Hijack/Flush/Push: the SSH and
-// Jupyter websocket handlers need to upgrade the connection and rely
-// on the underlying ResponseWriter implementing http.Hijacker. By
-// embedding instead of forwarding, those interfaces survive — at the
-// cost of not recording bytes-written. That's fine for now; we don't
-// have a metric for response size.
+// Hijack/Flush/Push interfaces: Go's method-set rules do NOT promote
+// these methods through an embedded http.ResponseWriter interface
+// (the embedded interface only contributes its own three methods —
+// Header / Write / WriteHeader — to the wrapper's static method set,
+// regardless of what concrete type the embedded interface holds at
+// runtime). An earlier version of this struct embedded
+// http.ResponseWriter and assumed the interfaces would "pass through"
+// — they don't. The result was every WebSocket upgrade through this
+// middleware getting a 500: gorilla/websocket's Upgrade does
+// `w.(http.Hijacker)` and the assertion fails.
+//
+// We forward Hijack explicitly. Unwrap is also exposed so any caller
+// going through http.NewResponseController (Go 1.20+) reaches the
+// underlying writer for Flush/Push/etc.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -185,13 +196,33 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-// Hijack passes through to the underlying ResponseWriter so the SSH /
-// Jupyter websocket upgrade still works through the metrics wrapper.
-// We mark the request as "200" since by the time a Hijacker is called
-// the upgrade has already succeeded (101 Switching Protocols would be
-// more accurate but the histograms then misrepresent live websocket
-// duration anyway).
+// Unwrap returns the wrapped writer for callers using
+// http.NewResponseController (Go 1.20+). This covers Flush/Push/etc.
+// without each one needing an explicit forwarding method here.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// Hijack forwards to the underlying ResponseWriter when it implements
+// http.Hijacker. Required for the SSH-to-job and JupyterLab WebSocket
+// handlers — gorilla/websocket asserts Hijacker on the response writer
+// before upgrading the connection. Without this method on the
+// recorder, the assertion fails and the upgrade returns 500
+// "Internal Server Error" (the http.Error default body).
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := s.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("statusRecorder: underlying ResponseWriter (%T) does not implement http.Hijacker", s.ResponseWriter)
+	}
+	return hj.Hijack()
+}
+
+// Compile-time assertion that *statusRecorder implements http.Hijacker.
+// This is the second time we've shipped a response-writer wrapper that
+// embedded http.ResponseWriter without forwarding Hijack, broken every
+// WebSocket upgrade through it, and only noticed when the SSH-to-job
+// or Jupyter terminal returned a baffling 500. The line below makes
+// any future "let's just embed the interface" refactor fail to
+// compile rather than silently regress.
+var _ http.Hijacker = (*statusRecorder)(nil)
 
 // classifyRoute maps an incoming URL path to a low-cardinality template
 // suitable as a Prometheus label. Without this, every job ID, batch

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -319,6 +320,101 @@ func TestListenerHandlesGarbage(t *testing.T) {
 		t.Fatalf("Accept after garbage: %v", err)
 	}
 	_ = conn.Close()
+}
+
+// TestListenerCloseWaitsForHandlers is the regression test for the
+// CI panic:
+//
+//	panic: Log in goroutine after TestListenerHandlesGarbage has completed:
+//	sharedport: unexpected CEDAR frame length 1869881441
+//
+// The handler goroutine that processed a malformed handshake was
+// still running — about to call l.logf — when the test that drove
+// the handshake had already returned. Any consumer that wires logf
+// to t.Logf (every test in this file) would then trip Go's "log
+// after test completed" panic.
+//
+// The fix is for Close() to wait for in-flight handler goroutines
+// before returning. To prove that synchronously without racing the
+// test against accept-vs-Close timing, we make the handler's logf
+// block on a channel: the test waits until logf has been entered
+// (so we know a handler is in flight), then asserts Close blocks
+// while logf is still running, then releases logf and asserts
+// Close returns promptly.
+//
+// Without the WaitGroup wait in Close, step 3 fails — Close returns
+// while the handler is still parked in logf.
+func TestListenerCloseWaitsForHandlers(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "ep.sock")
+
+	logfEntered := make(chan struct{})
+	releaseLogf := make(chan struct{})
+	var logCalls atomic.Int64
+	var logfOnce sync.Once
+
+	l, err := Listen(socket, Options{
+		// Custom logf that blocks until the test releases it. The
+		// handler reaches logf on its final-error path; by parking
+		// here we guarantee the handler is in flight when the test
+		// observes `logfEntered`.
+		Logf: func(_ string, _ ...any) {
+			logfOnce.Do(func() { close(logfEntered) })
+			<-releaseLogf
+			logCalls.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	// Drive a garbage handshake to spawn the handler.
+	var junkDialer net.Dialer
+	junk, err := junkDialer.DialContext(context.Background(), "unix", socket)
+	if err != nil {
+		t.Fatalf("dial junk: %v", err)
+	}
+	_, _ = junk.Write([]byte("not a CEDAR frame"))
+	_ = junk.Close()
+
+	// Wait for the handler to enter logf (and park there). After
+	// this, we know exactly one handler is in flight.
+	select {
+	case <-logfEntered:
+	case <-time.After(2 * time.Second):
+		close(releaseLogf) // unblock so Close can clean up
+		t.Fatal("handler never reached logf")
+	}
+
+	// Spawn Close in a background goroutine and confirm it does
+	// NOT return while the handler is still parked. Without the
+	// WaitGroup wait, Close would return immediately here.
+	closeDone := make(chan struct{})
+	go func() {
+		_ = l.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+		close(releaseLogf)
+		t.Fatal("Close returned before the handler finished — Close " +
+			"is not waiting on the handlers WaitGroup. This is the " +
+			"regression that caused the CI panic \"Log in goroutine " +
+			"after Test... has completed\".")
+	case <-time.After(50 * time.Millisecond):
+		// Good — Close is blocked on Wait().
+	}
+
+	// Release the handler. Close should now return promptly.
+	close(releaseLogf)
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close didn't return after handler was released")
+	}
+	if logCalls.Load() == 0 {
+		t.Fatal("handler completed without ever incrementing logCalls; test setup bug")
+	}
 }
 
 func acceptWithTimeout(l *Listener, d time.Duration) (net.Conn, error) {

@@ -405,6 +405,14 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hj.Hijack()
 }
 
+// Compile-time assertion that *responseWriter implements http.Hijacker.
+// Mirrors the same pin we keep on *statusRecorder in metrics.go — every
+// response-writer wrapper that sits in front of the SSH or Jupyter
+// WebSocket upgraders MUST implement Hijacker, and we want a future
+// refactor that removes the Hijack method to fail at compile time
+// rather than at runtime via a 500.
+var _ http.Hijacker = (*responseWriter)(nil)
+
 // accessLogMiddleware logs HTTP requests in access log style
 func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

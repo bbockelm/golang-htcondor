@@ -48,6 +48,14 @@ type Listener struct {
 	// goroutine and Accept callers don't race on assignment.
 	closeErr atomic.Pointer[error]
 
+	// handlers tracks the per-connection handler goroutines spawned by
+	// acceptLoop so Close can wait for them to finish before
+	// returning. Without this, a malformed-handshake handler that's
+	// just about to call l.logf could race with the consumer's test
+	// teardown — Go's testing.T panics if t.Logf is called after the
+	// test completes ("Log in goroutine after Test... has completed").
+	handlers sync.WaitGroup
+
 	timeout time.Duration
 	logf    LogFunc
 }
@@ -134,12 +142,17 @@ func (l *Listener) acceptLoop() {
 			_ = l.Close()
 			return
 		}
+		// Track the handler so Close can drain in-flight goroutines
+		// before returning. Add must happen on the parent goroutine —
+		// adding inside `handle` would race with Close's Wait.
+		l.handlers.Add(1)
 		go l.handle(c)
 	}
 }
 
 // handle runs the fd-pass handshake on a single UDS connection.
 func (l *Listener) handle(c *net.UnixConn) {
+	defer l.handlers.Done()
 	defer func() { _ = c.Close() }()
 
 	// Bound the entire handshake. Local UDS handshakes finish in
@@ -248,13 +261,30 @@ func (l *Listener) terminalErr() error {
 }
 
 // Close stops accepting new fd-pass handshakes, unlinks the UDS file,
-// and unblocks any pending Accept calls. Safe to call multiple times.
+// unblocks any pending Accept calls, and waits for in-flight handler
+// goroutines to finish before returning. Safe to call multiple times.
+//
+// The wait-for-handlers part exists because each handler may call
+// l.logf as it returns (on a malformed handshake from a peer,
+// typically). Tests that wire `Logf: t.Logf` would otherwise see a
+// goroutine still emitting log lines after the test exited — Go's
+// testing.T panics on that with
+// "Log in goroutine after Test... has completed".
+//
+// In production this is also the right thing: a graceful shutdown
+// shouldn't leak goroutines that might still touch a logger the
+// caller's about to tear down.
 func (l *Listener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.closed)
 		_ = l.uln.Close()
 		_ = os.Remove(l.socketPath)
 	})
+	// Wait outside the Once: it's idempotent (Wait on a
+	// drained WaitGroup is a no-op) and we want every Close caller —
+	// including the second concurrent one racing the first through
+	// the Once — to block until handlers really are done.
+	l.handlers.Wait()
 	return nil
 }
 
