@@ -39,15 +39,22 @@ func TestGetSecurityConfig_Defaults(t *testing.T) {
 	// the older FS,IDTOKENS pair. The expanded set is what fixes the
 	// production "no compatible authentication methods found" failure
 	// when the operator hasn't overridden SEC_*_AUTHENTICATION_METHODS.
+	//
+	// Note that IDTOKENS in the *config language* maps to cedar's
+	// AuthToken (which serializes on the wire as "TOKEN") — that's
+	// the wire-name every HTCondor schedd / collector recognizes. See
+	// the doc comment on mapAuthMethods for the full rationale; this
+	// used to expect security.AuthIDTokens here, which made the
+	// schedd's SECMAN drop our offer.
 	wantMethods := []security.AuthMethod{
 		security.AuthFS,
-		security.AuthIDTokens,
+		security.AuthToken,
 		security.AuthKerberos,
 		security.AuthSciTokens,
 		security.AuthSSL,
 	}
 	if len(secConfig.AuthMethods) != len(wantMethods) {
-		t.Errorf("Expected %d default auth methods (FS,IDTOKENS,KERBEROS,SCITOKENS,SSL), got %d: %v",
+		t.Errorf("Expected %d default auth methods (FS,IDTOKENS→TOKEN,KERBEROS,SCITOKENS,SSL), got %d: %v",
 			len(wantMethods), len(secConfig.AuthMethods), secConfig.AuthMethods)
 	}
 	for i, want := range wantMethods {
@@ -451,8 +458,9 @@ func TestNewClientSecurityConfig(t *testing.T) {
 	})
 
 	t.Run("WithToken_DoesNotDuplicateWhenIDTokensPresent", func(t *testing.T) {
-		// AuthIDTokens already covers TOKEN at the wire; we shouldn't
-		// prepend a second TOKEN entry.
+		// IDTOKENS in the *config language* maps to cedar's AuthToken
+		// (see mapAuthMethods); we shouldn't prepend a second TOKEN
+		// entry when the configured method list already named it.
 		cfg, err := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = IDTOKENS,SSL\n"))
 		if err != nil {
 			t.Fatalf("config: %v", err)
@@ -467,12 +475,12 @@ func TestNewClientSecurityConfig(t *testing.T) {
 		}
 		count := 0
 		for _, m := range got.AuthMethods {
-			if m == security.AuthToken || m == security.AuthIDTokens {
+			if m == security.AuthToken {
 				count++
 			}
 		}
 		if count != 1 {
-			t.Errorf("expected exactly one TOKEN/IDTOKENS entry; got %d in %v", count, got.AuthMethods)
+			t.Errorf("expected exactly one TOKEN entry; got %d in %v", count, got.AuthMethods)
 		}
 	})
 

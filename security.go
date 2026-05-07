@@ -102,12 +102,16 @@ func NewClientSecurityConfig(
 		return nil, err
 	}
 	if token != "" {
-		// Ensure TOKEN is in the method list so the token is actually
-		// offered. Either AuthToken or AuthIDTokens counts — cedar's
-		// negotiation spells both as "TOKEN" at the wire.
+		// Ensure cedar's AuthToken is in the method list so the
+		// supplied token actually goes on the wire as "TOKEN" — the
+		// only token-style spelling every HTCondor schedd / collector
+		// recognizes. mapAuthMethods folds the IDTOKENS config string
+		// into AuthToken too, so an operator with
+		// SEC_*_AUTHENTICATION_METHODS = IDTOKENS,SSL is already
+		// covered here.
 		hasToken := false
 		for _, m := range secConfig.AuthMethods {
-			if m == security.AuthToken || m == security.AuthIDTokens {
+			if m == security.AuthToken {
 				hasToken = true
 				break
 			}
@@ -281,9 +285,12 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		}
 	}
 
-	// Get token file/directory if token authentication is enabled
+	// Get token file/directory if token authentication is enabled.
+	// AuthIDTokens isn't checked here — mapAuthMethods folds the
+	// IDTOKENS config string into AuthToken so cedar serializes it
+	// on the wire as "TOKEN".
 	for _, method := range secConfig.AuthMethods {
-		if method == security.AuthToken || method == security.AuthIDTokens || method == security.AuthSciTokens {
+		if method == security.AuthToken || method == security.AuthSciTokens {
 			if tokenDir, ok := cfg.Get("SEC_TOKEN_DIRECTORY"); ok {
 				secConfig.TokenDir = tokenDir
 			}
@@ -391,7 +398,22 @@ func mapSecurityLevel(level string) security.SecurityLevel {
 	}
 }
 
-// mapAuthMethods converts comma-separated HTCondor auth methods to cedar AuthMethod slice
+// mapAuthMethods converts comma-separated HTCondor auth methods to
+// cedar AuthMethod slice.
+//
+// Note on IDTOKENS vs TOKEN: in HTCondor's *config language* IDTOKENS
+// is the modern name for the same authentication mechanism whose
+// *wire-protocol name* is TOKEN. We want both config strings to
+// produce cedar's AuthToken, which serializes on the wire as "TOKEN"
+// — that's what every HTCondor schedd / collector recognizes. Mapping
+// IDTOKENS to cedar's AuthIDTokens (which serializes as the literal
+// "IDTOKENS") makes the schedd's SECMAN drop the offer and fall
+// through to whatever is left, typically SSL — see
+// cedar/security/auth.go where AuthIDTokens has the comment
+// `IDTokens not defined in HTCondor's condor_auth.h, map to
+// SciTokens for compatibility`. The C++ HTCondor client always
+// sends "TOKEN" regardless of what's in the config; this matches
+// that behavior.
 func mapAuthMethods(methods string) []security.AuthMethod {
 	if methods == "" {
 		return []security.AuthMethod{}
@@ -412,12 +434,13 @@ func mapAuthMethods(methods string) []security.AuthMethod {
 		case "FS_REMOTE":
 			// Cedar doesn't have FS_REMOTE as separate method, map to FS
 			result = append(result, security.AuthFS)
-		case "IDTOKENS":
-			result = append(result, security.AuthIDTokens)
+		case "IDTOKENS", "TOKEN":
+			// Both config-language spellings collapse to cedar's
+			// AuthToken so cedar serializes as "TOKEN" on the wire.
+			// See doc comment above for the full rationale.
+			result = append(result, security.AuthToken)
 		case "SCITOKENS":
 			result = append(result, security.AuthSciTokens)
-		case "TOKEN":
-			result = append(result, security.AuthToken)
 		case "NTSSPI":
 			// NTSSPI not in cedar's current auth methods (Windows-specific)
 			// Skip for now
