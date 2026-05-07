@@ -243,15 +243,51 @@ func parseURL(urlStr string) (*url.URL, error) {
 
 // initializeOAuth2 initializes the OAuth2 provider with actual listening address (delegates to Handler)
 
-// getDefaultDBPath returns a default database path using LOCAL_DIR from HTCondor config
+// getDefaultDBPath returns a default database path using LOCAL_DIR
+// from HTCondor config — but skips LOCAL_DIR when it's set to a path
+// we know isn't writable.
+//
+// Specifically: cmd/htcondor-api's fixConfigDefaults forces
+// LOCAL_DIR=/usr when the `condor` user doesn't exist (a common
+// containerised deployment), to satisfy other HTCondor knobs that
+// derive `/usr/etc`, `/usr/lib`, etc. from LOCAL_DIR. /usr is
+// system-owned and never writable by an unprivileged daemon, so a
+// DB path of `/usr/<filename>` produces SQLite's misleading
+// "out of memory (14)" on first write. We detect that case (and the
+// adjacent system roots) and fall through to a writable default.
 func getDefaultDBPath(cfg *config.Config, filename string) string {
 	if cfg != nil {
 		if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
-			return filepath.Join(localDir, filename)
+			if !isReadOnlySystemPath(localDir) {
+				return filepath.Join(localDir, filename)
+			}
 		}
 	}
-	// Fallback to standard HTCondor location
+	// Fallback to standard HTCondor location.
 	return filepath.Join("/var/lib/condor", filename)
+}
+
+// isReadOnlySystemPath reports whether path is one of the well-known
+// non-writable system roots. Used to short-circuit DB-path defaults
+// that would otherwise inherit a misconfigured LOCAL_DIR.
+//
+// We deliberately don't try to write-probe here: the caller does that
+// at open time, and short-circuiting the default lets the error
+// message say "LOCAL_DIR=/usr is not a writable home for the DB"
+// rather than the more confusing post-hoc permission error.
+func isReadOnlySystemPath(p string) bool {
+	clean := filepath.Clean(p)
+	switch clean {
+	case "/", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc":
+		return true
+	}
+	// A path under /usr/{bin,lib,...} is also system-owned. We
+	// don't enumerate them — anything starting with /usr/ except
+	// /usr/local/* counts.
+	if strings.HasPrefix(clean, "/usr/") && !strings.HasPrefix(clean, "/usr/local/") {
+		return true
+	}
+	return false
 }
 
 // Start starts the HTTP server
