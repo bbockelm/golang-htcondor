@@ -199,9 +199,9 @@ func TestLoadMasterKEKFromFileMissingFileNeverCreates(t *testing.T) {
 }
 
 // TestLoadMasterKEKFromFileRejectsLoosePerms guards against an
-// operator mistake: a KEK file that's group- or world-readable
-// effectively isn't a secret. We want a hard fail, not a warning,
-// so the misconfiguration is caught at startup.
+// operator mistake: a world-readable KEK file effectively isn't a
+// secret. We want a hard fail, not a warning, so the misconfiguration
+// is caught at startup.
 func TestLoadMasterKEKFromFileRejectsLoosePerms(t *testing.T) {
 	if os.Getuid() == 0 {
 		// Root can read any file; the Stat check is best-effort
@@ -219,6 +219,29 @@ func TestLoadMasterKEKFromFileRejectsLoosePerms(t *testing.T) {
 	}
 	if _, err := LoadMasterKEKFromFile(path); err == nil {
 		t.Errorf("LoadMasterKEKFromFile accepted a 0644 KEK file; should refuse")
+	}
+}
+
+// TestLoadMasterKEKFromFileAcceptsGroupRead pins the policy that
+// group-read alone is acceptable. Kubelet applies fsGroup to Secret
+// volume mounts and forces group-read on every file (defaultMode
+// 0400 ends up as 0440). Rejecting that mode would force every
+// operator into init-container workarounds, with no real security
+// gain since the "group" there is the pod's own fsgroup.
+func TestLoadMasterKEKFromFileAcceptsGroupRead(t *testing.T) {
+	if os.Getuid() == 0 {
+		// Root can read any file; perm enforcement isn't meaningful.
+		t.Skip("running as root; perm enforcement not meaningful")
+	}
+	path := filepath.Join(t.TempDir(), "group-read")
+	// 0o440 is the mode kubelet+fsGroup produces for Secret mounts and
+	// is exactly what this test asserts the loader accepts. Suppress
+	// gosec G306: the loose-by-policy mode is the fixture, not a leak.
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'k'}, MasterKEKBytes), 0o440); err != nil { //nolint:gosec // intentional 0440; test fixture for kubelet+fsGroup case
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadMasterKEKFromFile(path); err != nil {
+		t.Errorf("LoadMasterKEKFromFile rejected a 0440 KEK file: %v; should accept (kubelet+fsGroup case)", err)
 	}
 }
 

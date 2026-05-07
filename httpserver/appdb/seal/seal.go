@@ -97,10 +97,13 @@ const hkdfInfo = "htcondor-api/db-kek/v1"
 // in the hex form are tolerated — `openssl rand -hex 32 > kek` is the
 // recommended generation recipe.
 //
-// Refuses to read a file with mode bits set for group or other
-// (`stat --printf=%a kek` should be `600` or `400`). This is a hard
-// error rather than a warning: a leaked KEK is equivalent to a
-// leaked DB.
+// Refuses to read a file with any world (other) bits set. Group bits
+// are tolerated because kubelet applies `fsGroup` to Secret/ConfigMap
+// volume mounts and forces group-read (turning a 0400 file into 0440);
+// the "group" in that mount is the pod's own fsgroup, not a multi-tenant
+// boundary. World-readable, however, is always wrong: it means anyone
+// on the host (or in another container sharing the namespace) can read
+// the KEK, which is equivalent to a leaked DB.
 //
 // This function NEVER creates the file. If the path doesn't exist
 // the call returns an explicit error including the openssl recipe
@@ -125,8 +128,8 @@ func LoadMasterKEKFromFile(path string) ([]byte, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("kek file %s: is a directory", path)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("kek file %s has world/group permissions (mode %#o); must be 0600 or 0400", path, perm)
+	if perm := info.Mode().Perm(); perm&0o007 != 0 {
+		return nil, fmt.Errorf("kek file %s is world-accessible (mode %#o); must have no other-bits set (typical: 0600, 0400, or 0440 for kubelet+fsGroup mounts)", path, perm)
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled
 	if err != nil {
