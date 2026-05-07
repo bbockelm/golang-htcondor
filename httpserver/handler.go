@@ -357,13 +357,29 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if dbPath == "" {
 		dbPath = getDefaultDBPath(cfg.HTCondorConfig, "htcondor-api.db")
 	}
+	// Log BEFORE Open so any subsequent silent hang or kill is at
+	// least localized to the database step in the operator's logs —
+	// the previous behavior emitted no marker between
+	// "Discovered credd" and "Unified application database opened",
+	// which made a stuck migration look identical to a stuck
+	// post-credd RPC.
+	logger.Info(logging.DestinationHTTP, "Opening application database", "path", dbPath)
 	appDB, err := appdb.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open application database: %w", err)
 	}
-	if err := appdb.Migrate(context.Background(), appDB); err != nil {
+	// Bound the migration step. If goose is stuck on a contested
+	// SQLite lock (a previous, dying instance still holds it; an
+	// out-of-band tool has the file open) or some other pathology,
+	// we want a clear error rather than the kubelet silently
+	// SIGKILL-ing us when the startup probe expires. 30 s is well
+	// above the cost of every migration we ship today.
+	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer migrateCancel()
+	logger.Info(logging.DestinationHTTP, "Applying database migrations")
+	if err := appdb.Migrate(migrateCtx, appDB); err != nil {
 		_ = appDB.Close()
-		return nil, fmt.Errorf("failed to migrate application database: %w", err)
+		return nil, fmt.Errorf("failed to migrate application database (path=%s): %w", dbPath, err)
 	}
 	h.db = appDB
 	logger.Info(logging.DestinationHTTP, "Unified application database opened", "path", dbPath)

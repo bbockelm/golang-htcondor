@@ -40,23 +40,40 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 }
 
 // ConfigureSecurityForTokenWithCacheAndFallback configures security settings with optional session cache
-// and optional FS authentication fallback. If allowFSFallback is true, FS authentication will be added
-// as a fallback method (used for user-header mode where tokens are generated but not validated by schedd).
+// and optional FS authentication fallback.
 //
-// Authentication methods come from SEC_CLIENT_AUTHENTICATION_METHODS / SEC_DEFAULT_AUTHENTICATION_METHODS
-// in the loaded HTCondor configuration. This was previously a hardcoded
-// `[TOKEN]` list, which broke any pool that expects SSL alongside
-// IDTOKENS — the client offered only TOKEN, the server's tokens were
-// filtered out by `iss`/`kid` mismatch, and the handshake failed with
-// "no compatible authentication methods found" even when SSL would
-// have worked.
+// allowFSFallback semantics:
+//
+//   - true  (user-header mode): the token is generated locally per
+//     request and not signed with anything the schedd recognises, so
+//     we APPEND FS as a fallback for use against a same-host schedd
+//     where the OS-user identity is acceptable.
+//
+//   - false (session/JWT mode): the token IS signed by us with the
+//     pool's signing key, the schedd validates it, and its `sub`
+//     claim is the user we want recorded as the job Owner. We
+//     therefore REMOVE FS from the offered methods, so the schedd
+//     can't pick it during negotiation. (Cedar's negotiation walks
+//     the server's preference order and selects the first method
+//     also offered by the client; HTCondor's default lists FS
+//     first, so leaving FS in the client's list lets FS win on a
+//     same-host schedd, and the schedd then records the OS user
+//     instead of the token's identity. We saw this in
+//     session_integration_test.go: jobs submitted via session
+//     cookie were owned by `vscode` — the test runner's UID — not
+//     by the JWT subject `testuser@trust.domain`.)
+//
+// Authentication methods otherwise come from SEC_CLIENT_AUTHENTICATION_METHODS
+// / SEC_DEFAULT_AUTHENTICATION_METHODS in the loaded HTCondor
+// configuration. This was previously a hardcoded `[TOKEN]` list,
+// which broke any pool that expects SSL alongside IDTOKENS.
 //
 // Implementation: delegates to htcondor.NewClientSecurityConfig for
-// the configured-methods-aware base, then overlays this caller's
-// optional FS-fallback knob. Other call sites (file_transfer,
-// schedd_ssh, mcpserver) use NewClientSecurityConfig directly; the
-// httpserver-only allowFSFallback branch lives here so we don't drag
-// it into the root package's API.
+// the configured-methods-aware base, then applies the FS rule above.
+// Other call sites (file_transfer, schedd_ssh, mcpserver) use
+// NewClientSecurityConfig directly; the httpserver-only
+// allowFSFallback knob lives here so we don't drag it into the root
+// package's API.
 func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token provided")
@@ -71,11 +88,18 @@ func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *s
 		return nil, err
 	}
 
-	if allowFSFallback && !containsAuthMethod(secConfig.AuthMethods, security.AuthFS) {
-		// User-header mode appends FS so an unsigned generated token
-		// can still authenticate locally. Idempotent: don't duplicate
-		// when FS is already in the configured list.
-		secConfig.AuthMethods = append(secConfig.AuthMethods, security.AuthFS)
+	if allowFSFallback {
+		if !containsAuthMethod(secConfig.AuthMethods, security.AuthFS) {
+			// User-header mode appends FS so an unsigned generated
+			// token can still authenticate locally. Idempotent: don't
+			// duplicate when FS is already in the configured list.
+			secConfig.AuthMethods = append(secConfig.AuthMethods, security.AuthFS)
+		}
+	} else {
+		// Session/JWT mode: strip FS so the schedd can't pick it and
+		// authenticate us as the OS user instead of the JWT subject.
+		// See the doc comment above for the full incident reference.
+		secConfig.AuthMethods = stripAuthMethod(secConfig.AuthMethods, security.AuthFS)
 	}
 
 	// Authentication should always be REQUIRED for a token-bearing
@@ -107,6 +131,21 @@ func containsAuthMethod(list []security.AuthMethod, m security.AuthMethod) bool 
 		}
 	}
 	return false
+}
+
+// stripAuthMethod returns list with all occurrences of m removed,
+// preserving order. Used by ConfigureSecurityForTokenWithCacheAndFallback
+// in session/JWT mode to drop FS so a same-host schedd can't negotiate
+// it and authenticate the connection as the OS user instead of the JWT
+// subject.
+func stripAuthMethod(list []security.AuthMethod, m security.AuthMethod) []security.AuthMethod {
+	out := make([]security.AuthMethod, 0, len(list))
+	for _, x := range list {
+		if x != m {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // ConfigureSecurityForCollectorPing builds a SecurityConfig used solely

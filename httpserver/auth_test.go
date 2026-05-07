@@ -362,4 +362,22 @@ func TestConfigureSecurityForTokenAuthMethods(t *testing.T) {
 			t.Errorf("expected exactly one AuthFS entry (idempotent), got %d in %v", fsCount, cfg.AuthMethods)
 		}
 	})
+
+	// Regression: jobs submitted via session cookie were getting Owner
+	// = OS user (vscode) instead of the JWT subject (testuser), because
+	// HTCondor's default SEC_CLIENT_AUTHENTICATION_METHODS lists FS
+	// before TOKEN, the schedd is same-host, and cedar's negotiation
+	// walks the server's preference order. With FS in the offered list
+	// the schedd picks FS and identifies us via SO_PEERCRED.
+	t.Run("SessionModeStripsFS", func(t *testing.T) {
+		cfg, err := ConfigureSecurityForTokenWithCacheAndFallback(token, nil, false)
+		if err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		for _, m := range cfg.AuthMethods {
+			if m == security.AuthFS {
+				t.Errorf("session/JWT mode must strip FS so a same-host schedd can't negotiate it; got %v", cfg.AuthMethods)
+			}
+		}
+	})
 }
