@@ -11,13 +11,19 @@ import (
 	"time"
 )
 
-// SessionData represents the data stored in a session
+// SessionData represents the data stored in a session.
+//
+// Note: this struct used to carry a Token field that was reserved for
+// per-session HTCondor token storage. The column was never written
+// to and the field is gone — the schema migration in
+// 0002_envelope_encryption.sql drops `http_sessions.token` to remove
+// the unused secret-shaped column. Per-user tokens, when needed,
+// flow through the OAuth2 / IDP storage tables instead.
 type SessionData struct {
 	Username  string    // Authenticated username
 	Groups    []string  // User groups from IDP (for scope filtering)
 	CreatedAt time.Time // When the session was created
 	ExpiresAt time.Time // When the session expires
-	Token     string    // HTCondor token for this session (optional)
 }
 
 // SessionStore manages HTTP sessions with SQLite persistence
@@ -46,7 +52,13 @@ func NewSessionStore(db *sql.DB, ttl time.Duration) (*SessionStore, error) {
 	return store, nil
 }
 
-// createTable creates the sessions table in the database
+// createTable creates the sessions table in the database. This is
+// a fallback for callers who construct a SessionStore against a DB
+// that hasn't been put through goose migrations (e.g., a test
+// fixture using sql.Open directly). In production the unified
+// migration in 0001_init.sql + 0002_envelope_encryption.sql is
+// authoritative; this CREATE TABLE IF NOT EXISTS just keeps the
+// out-of-band test path working.
 func (s *SessionStore) createTable() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS http_sessions (
@@ -54,7 +66,6 @@ func (s *SessionStore) createTable() error {
 		username TEXT NOT NULL,
 		created_at TIMESTAMP NOT NULL,
 		expires_at TIMESTAMP NOT NULL,
-		token TEXT,
 		groups_json TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
@@ -111,12 +122,14 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 		groupsJSON = sql.NullString{String: string(data), Valid: true}
 	}
 
-	// Store session in database
+	// Store session in database. The `token` column was dropped in
+	// migration 0002 — the field was reserved but never populated,
+	// and an unused secret-shaped column on disk was a footgun.
 	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, token, groups_json)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, session.Token, groupsJSON)
+		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
 	}
@@ -130,22 +143,17 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 	ctx := context.Background()
 
 	var session SessionData
-	var token sql.NullString
 	var groupsJSON sql.NullString
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT username, created_at, expires_at, token, groups_json
+		`SELECT username, created_at, expires_at, groups_json
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
-		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &token, &groupsJSON)
+		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON)
 
 	if err != nil {
 		// Session not found or expired
 		return nil
-	}
-
-	if token.Valid {
-		session.Token = token.String
 	}
 
 	if groupsJSON.Valid && groupsJSON.String != "" {

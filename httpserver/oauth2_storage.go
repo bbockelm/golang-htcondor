@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/handler/openid"
@@ -18,22 +19,79 @@ import (
 // application database. The schema is owned by appdb's migrations —
 // this struct is purely a thin set of query helpers around an already-
 // migrated *sql.DB.
+//
+// The optional `sealer` field is the application's envelope-encryption
+// gate. When non-nil, SaveRSAKey / SaveHMACSecret store ciphertext +
+// wrapped DEK; LoadRSAKey / LoadHMACSecret transparently decrypt rows
+// whose DEK column is populated. When nil, the storage falls back to
+// the pre-encryption plaintext behavior — back-compat for deployments
+// that haven't configured a KEK yet.
 type OAuth2Storage struct {
-	db *sql.DB
+	db     *sql.DB
+	sealer *seal.Sealer
 }
 
 // NewOAuth2Storage wraps an already-opened DB in the OAuth2 storage
 // helpers. Schema creation is no longer this struct's responsibility —
 // see httpserver/appdb. The caller retains ownership of the DB
 // (don't call Close() here on shutdown).
+//
+// The returned storage starts in plaintext mode; call SetSealer if a
+// KEK has been loaded.
 func NewOAuth2Storage(db *sql.DB) *OAuth2Storage {
 	return &OAuth2Storage{db: db}
+}
+
+// SetSealer enables envelope encryption for the long-lived secret
+// columns (RSA private key, HMAC secret). Calling with nil restores
+// plaintext mode. Callers should set this once at startup, before
+// SaveRSAKey / SaveHMACSecret have a chance to fire — the
+// startup-backfill path in NewHandler does exactly that.
+func (s *OAuth2Storage) SetSealer(sealer *seal.Sealer) {
+	s.sealer = sealer
 }
 
 // GetDB returns the underlying database connection. Kept on the
 // struct because tests and the SessionStore wiring still reach for it.
 func (s *OAuth2Storage) GetDB() *sql.DB {
 	return s.db
+}
+
+// scrubbedFormData returns the persisted-on-disk form for an OAuth2
+// request. The fosite request carries the entire URL-form body the
+// client submitted; that includes the plaintext `client_secret` for
+// `client_secret_post` auth and the PKCE `code_verifier` for the
+// authz-code exchange. Neither is needed after the response goes out
+// — fosite has already validated them — so we strip them before
+// JSON-marshaling. Storing `client_secret` next to a bcrypt-hashed
+// copy in oauth2_clients defeats the hashing; storing `code_verifier`
+// past the redemption is a replay-attack hazard if the row outlives
+// the auth-code TTL.
+//
+// Other fields (grant_type, redirect_uri, scope, …) are kept verbatim
+// because some fosite handlers re-read them on token-introspection or
+// refresh paths.
+func scrubbedFormData(form url.Values) []byte {
+	if len(form) == 0 {
+		return []byte("{}")
+	}
+	cleaned := make(url.Values, len(form))
+	for k, v := range form {
+		switch k {
+		case "client_secret", "code_verifier":
+			// Drop entirely — never stored on disk.
+			continue
+		}
+		cleaned[k] = v
+	}
+	out, err := json.Marshal(cleaned)
+	if err != nil {
+		// json.Marshal of url.Values can't actually fail, but keep
+		// the error path explicit so a future refactor doesn't
+		// silently lose data.
+		return []byte("{}")
+	}
+	return out
 }
 
 // validTableNames is a whitelist of allowed table names
@@ -229,10 +287,9 @@ func (s *OAuth2Storage) createTokenSession(ctx context.Context, table string, si
 	if err != nil {
 		return err
 	}
-	formData, err := json.Marshal(request.GetRequestForm())
-	if err != nil {
-		return err
-	}
+	// Strip plaintext client_secret + PKCE code_verifier before
+	// persisting the form. See scrubbedFormData for the rationale.
+	formData := scrubbedFormData(request.GetRequestForm())
 	sessionData, err := json.Marshal(request.GetSession())
 	if err != nil {
 		return err
@@ -385,42 +442,103 @@ func (s *OAuth2Storage) RevokeAccessToken(ctx context.Context, requestID string)
 	return err
 }
 
-// SaveRSAKey stores the RSA private key in PEM format
+// SaveRSAKey stores the RSA private key. When a sealer is set the
+// PEM bytes are encrypted under a fresh per-row DEK (itself wrapped
+// by the DB-instance KEK); when no sealer is configured the PEM is
+// written verbatim — same on-disk shape as the pre-KEK schema, kept
+// for back-compat with deployments that haven't enabled encryption.
 func (s *OAuth2Storage) SaveRSAKey(ctx context.Context, privateKeyPEM string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO oauth2_rsa_keys (id, private_key_pem) VALUES (1, ?)`, privateKeyPEM)
+	if s.sealer != nil {
+		data, dek, err := s.sealer.Seal([]byte(privateKeyPEM))
+		if err != nil {
+			return fmt.Errorf("seal RSA key: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO oauth2_rsa_keys (id, private_key_pem, private_key_pem_dek) VALUES (1, ?, ?)`,
+			data, dek)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO oauth2_rsa_keys (id, private_key_pem, private_key_pem_dek) VALUES (1, ?, NULL)`,
+		privateKeyPEM)
 	return err
 }
 
-// LoadRSAKey loads the RSA private key in PEM format
+// LoadRSAKey loads the RSA private key. Falls back to plaintext when
+// the row's DEK column is NULL — that's the pre-encryption format and
+// the format used when no KEK is configured. When a DEK is present
+// but no sealer is configured (KEK was removed without rotating
+// data), returns an explicit error rather than handing back ciphertext
+// or silently regenerating the key.
 func (s *OAuth2Storage) LoadRSAKey(ctx context.Context) (string, error) {
-	var privateKeyPEM string
-	err := s.db.QueryRowContext(ctx, `SELECT private_key_pem FROM oauth2_rsa_keys WHERE id = 1`).Scan(&privateKeyPEM)
-	if err == sql.ErrNoRows {
+	var data []byte
+	var dek []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT private_key_pem, private_key_pem_dek FROM oauth2_rsa_keys WHERE id = 1`).
+		Scan(&data, &dek)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No key stored yet
 	}
 	if err != nil {
 		return "", err
 	}
-	return privateKeyPEM, nil
+	if len(dek) > 0 {
+		if s.sealer == nil {
+			return "", errors.New("oauth2 RSA key is sealed but no KEK is configured (HTTP_API_KEK_FILE)")
+		}
+		plain, err := s.sealer.Open(data, dek)
+		if err != nil {
+			return "", fmt.Errorf("unseal RSA key: %w", err)
+		}
+		return string(plain), nil
+	}
+	return string(data), nil
 }
 
-// SaveHMACSecret stores the HMAC secret
+// SaveHMACSecret stores the HMAC secret. See SaveRSAKey for the
+// encryption-vs-plaintext branching.
 func (s *OAuth2Storage) SaveHMACSecret(ctx context.Context, secret []byte) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO oauth2_hmac_secrets (id, secret) VALUES (1, ?)`, secret)
+	if s.sealer != nil {
+		data, dek, err := s.sealer.Seal(secret)
+		if err != nil {
+			return fmt.Errorf("seal HMAC secret: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO oauth2_hmac_secrets (id, secret, secret_dek) VALUES (1, ?, ?)`,
+			data, dek)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO oauth2_hmac_secrets (id, secret, secret_dek) VALUES (1, ?, NULL)`,
+		secret)
 	return err
 }
 
-// LoadHMACSecret loads the HMAC secret
+// LoadHMACSecret loads the HMAC secret. See LoadRSAKey for the
+// encryption-vs-plaintext branching.
 func (s *OAuth2Storage) LoadHMACSecret(ctx context.Context) ([]byte, error) {
-	var secret []byte
-	err := s.db.QueryRowContext(ctx, `SELECT secret FROM oauth2_hmac_secrets WHERE id = 1`).Scan(&secret)
-	if err == sql.ErrNoRows {
+	var data []byte
+	var dek []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT secret, secret_dek FROM oauth2_hmac_secrets WHERE id = 1`).
+		Scan(&data, &dek)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // No secret stored yet
 	}
 	if err != nil {
 		return nil, err
 	}
-	return secret, nil
+	if len(dek) > 0 {
+		if s.sealer == nil {
+			return nil, errors.New("oauth2 HMAC secret is sealed but no KEK is configured (HTTP_API_KEK_FILE)")
+		}
+		plain, err := s.sealer.Open(data, dek)
+		if err != nil {
+			return nil, fmt.Errorf("unseal HMAC secret: %w", err)
+		}
+		return plain, nil
+	}
+	return data, nil
 }
 
 // ClientAssertionJWTValid implements fosite.ClientAssertionJWTValid interface
@@ -488,10 +606,9 @@ func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode 
 	if err != nil {
 		return err
 	}
-	formData, err := json.Marshal(request.GetRequestForm())
-	if err != nil {
-		return err
-	}
+	// Strip plaintext client_secret + PKCE code_verifier before
+	// persisting the form. See scrubbedFormData for the rationale.
+	formData := scrubbedFormData(request.GetRequestForm())
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id,

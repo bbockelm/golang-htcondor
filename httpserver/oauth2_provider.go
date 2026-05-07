@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 	"github.com/ory/fosite/handler/openid"
@@ -34,6 +35,11 @@ type OAuth2ProviderOptions struct {
 	Issuer               string
 	AccessTokenLifespan  time.Duration
 	RefreshTokenLifespan time.Duration
+	// Sealer envelope-encrypts long-lived secrets in the DB (the
+	// issuer's RSA private key, fosite's HMAC GlobalSecret). When
+	// non-nil, the storage adapter pulls/pushes ciphertext + wrapped
+	// DEK on the corresponding load/save calls. Nil = plaintext.
+	Sealer *seal.Sealer
 }
 
 // NewOAuth2Provider creates a new OAuth2 provider with SQLite storage.
@@ -57,6 +63,10 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 		return nil, fmt.Errorf("OAuth2 provider: DB is required")
 	}
 	storage := NewOAuth2Storage(opts.DB)
+	// Set the sealer BEFORE the first Load/SaveRSAKey call below;
+	// otherwise the RSA key persists in plaintext on first start
+	// even when a KEK is configured, defeating the whole point.
+	storage.SetSealer(opts.Sealer)
 
 	// Try to load existing RSA key from database
 	ctx := context.Background()

@@ -20,6 +20,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver/appdb"
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/matchanalyzer"
@@ -65,7 +66,15 @@ type Handler struct {
 	// in Stop. nil only on the unusual path where the operator has
 	// disabled every feature that needs persistence (no MCP, no IDP,
 	// no templates, no sessions) — in practice always non-nil.
-	db                 *sql.DB
+	db *sql.DB
+
+	// sealer envelope-encrypts long-lived secrets (RSA / HMAC) in
+	// the unified DB. Non-nil only when the operator configured
+	// HTTP_API_KEK_FILE; nil disables encryption and the storage
+	// helpers fall back to plaintext mode (back-compat with the
+	// pre-KEK schema). Set once in NewHandler after migration; the
+	// underlying AES-GCM is goroutine-safe.
+	sealer             *seal.Sealer
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	// httpMetrics holds the prometheus/client_golang registry plus the
@@ -148,13 +157,31 @@ type HandlerConfig struct {
 	// storage, the embedded IDP, browser sessions, and user-saved
 	// batch-submission templates. Defaults to LOCAL_DIR/htcondor-api.db
 	// (or /var/lib/condor/htcondor-api.db when LOCAL_DIR is unset).
-	// Configure via HTTP_API_DB_PATH; HTTP_API_OAUTH2_DB_PATH is
-	// honored as a back-compat fallback.
+	// Configure via HTTP_API_DB_PATH.
 	DBPath string
 
-	// OAuth2DBPath is the legacy per-subsystem path. Deprecated;
-	// callers should set DBPath instead. When DBPath is empty and
-	// OAuth2DBPath is set, OAuth2DBPath is used as DBPath.
+	// KEKFilePath is the path to a file holding the master Key
+	// Encryption Key used to envelope-encrypt long-lived secrets in
+	// the application database (the OAuth2 / IDP issuer's RSA
+	// signing key, fosite's HMAC GlobalSecret). Configured via
+	// HTTP_API_KEK_FILE — the FILE PATH lives in HTCondor config,
+	// the KEY BYTES never do (HTCondor treats config values as
+	// public).
+	//
+	// Empty disables encryption: secrets are stored in plaintext as
+	// before. When set, the file must contain exactly 32 raw bytes
+	// or a 32-byte hex string and must be 0600/0400. See
+	// httpserver/appdb/seal for the design.
+	KEKFilePath string
+
+	// OAuth2DBPath is a deprecated alias for DBPath kept so existing
+	// in-process embedders (and the test suite) keep compiling without
+	// a wholesale rename. NewHandler honors it only when DBPath is
+	// empty. The cmd-line wrapper does NOT bridge HTTP_API_OAUTH2_DB_PATH
+	// into this field — pointing the unified DB at a pre-unification
+	// oauth.db is a guaranteed crash-loop (the legacy schema conflicts
+	// with goose 0001_init.sql), and the wrapper logs a deprecation
+	// warning instead. New code should set DBPath.
 	OAuth2DBPath        string
 	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
 	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
@@ -347,9 +374,22 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Open the unified application database. Same SQLite file is
 	// shared by OAuth2/MCP storage (when EnableMCP), the embedded IDP
 	// (when EnableIDP), browser sessions, and user-saved templates.
-	// Falls back through the legacy OAuth2DBPath name so existing
-	// deployments don't have to retitle their config knob, and
-	// finally to LOCAL_DIR/htcondor-api.db.
+	//
+	// Resolution order:
+	//   1. cfg.DBPath          — canonical, set by the cmd-line wrapper
+	//                            from HTTP_API_DB_PATH.
+	//   2. cfg.OAuth2DBPath    — in-process compat for embedders that
+	//                            still pre-set the legacy alias. The
+	//                            cmd-line wrapper does NOT propagate
+	//                            HTTP_API_OAUTH2_DB_PATH into this
+	//                            field; loadDBPath ignores the env
+	//                            knob and emits a deprecation warning.
+	//                            That's the user-facing protection
+	//                            against the "silent reuse of an
+	//                            incompatible legacy oauth.db ⇒
+	//                            crash-loop on goose 0001_init.sql"
+	//                            failure mode we hit in production.
+	//   3. LOCAL_DIR/htcondor-api.db (final fallback).
 	dbPath := cfg.DBPath
 	if dbPath == "" {
 		dbPath = cfg.OAuth2DBPath
@@ -384,6 +424,30 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.db = appDB
 	logger.Info(logging.DestinationHTTP, "Unified application database opened", "path", dbPath)
 
+	// Construct the envelope-encryption sealer if a KEK file is
+	// configured. setupSealer reads the master KEK from disk, derives
+	// the DB-instance key via HKDF + a salt persisted in kek_metadata,
+	// then walks the sealable rows and encrypts any plaintext that
+	// pre-dates the encryption switch. Idempotent: rows that already
+	// have a non-null DEK are left alone.
+	//
+	// When KEKFilePath is empty the sealer stays nil and the storage
+	// helpers fall back to plaintext (back-compat).
+	sealCtx, sealCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sealer, migrated, err := setupSealer(sealCtx, h.db, cfg.KEKFilePath, logger)
+	sealCancel()
+	if err != nil {
+		_ = appDB.Close()
+		return nil, fmt.Errorf("KEK setup: %w", err)
+	}
+	if sealer != nil {
+		h.sealer = sealer
+		logger.Info(logging.DestinationHTTP, "Envelope encryption enabled",
+			"kek_file", cfg.KEKFilePath,
+			"rows_migrated", migrated,
+		)
+	}
+
 	// Build the template library now that the DB is open. The
 	// built-in catalog is always available; the user-saved store
 	// rides on the same DB connection (no separate file).
@@ -410,6 +474,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			Issuer:               oauth2Issuer,
 			AccessTokenLifespan:  oauth2AccessLifespan,
 			RefreshTokenLifespan: oauth2RefreshLifespan,
+			Sealer:               h.sealer,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)
@@ -512,6 +577,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			Issuer:               idpIssuer,
 			AccessTokenLifespan:  idpAccessLifespan,
 			RefreshTokenLifespan: idpRefreshLifespan,
+			Sealer:               h.sealer,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create IDP provider: %w", err)

@@ -62,6 +62,9 @@ type Config struct {
 	EnableMCP               bool   // Enable MCP endpoints with OAuth2 (default: false)
 	// DBPath is the unified SQLite database file. See HandlerConfig.DBPath.
 	DBPath string
+	// KEKFilePath enables envelope encryption for long-lived secrets
+	// in the DB. See HandlerConfig.KEKFilePath.
+	KEKFilePath string
 	// OAuth2DBPath is the legacy name for DBPath; kept for back-compat.
 	OAuth2DBPath        string
 	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
@@ -132,6 +135,7 @@ func NewServer(cfg Config) (*Server, error) {
 		Logger:                     cfg.Logger,
 		EnableMCP:                  cfg.EnableMCP,
 		DBPath:                     cfg.DBPath,
+		KEKFilePath:                cfg.KEKFilePath,
 		OAuth2DBPath:               cfg.OAuth2DBPath,
 		JupyterWorkDir:             cfg.JupyterWorkDir,
 		TemplateGlobalPath:         cfg.TemplateGlobalPath,
@@ -512,10 +516,10 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 	// Try to get username from session cookie
 	if sessionData, ok := s.getSessionFromRequest(r); ok {
 		username := sessionData.Username
-		// If session has a cached token, use it
-		if sessionData.Token != "" {
-			return sessionData.Token, nil
-		}
+		// SessionData no longer carries a per-session HTCondor token —
+		// the http_sessions.token column was dropped in migration
+		// 0002 (it was reserved but never written). Tokens are
+		// generated below from the signing key on each call.
 
 		// Generate a token for the session username if signing key is available
 		if s.signingKeyPath != "" {

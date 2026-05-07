@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"os"
 	"os/user"
@@ -1054,6 +1055,52 @@ func (l *Logger) Debugf(dest Destination, format string, args ...any) {
 		logger.Debug(msg, "destination", destinationString(dest))
 		return len(msg) + 50
 	})
+}
+
+// RedirectStdLog routes the Go standard library's "log" package
+// (log.Print, log.Fatal, log.Fatalf, …) through this Logger as INFO
+// records on the General destination. Use this in a binary's main()
+// after constructing the Logger, so any fatal error from an
+// init/startup path reaches the same stream operators are reading
+// instead of going to stderr where it may not be captured (e.g. a
+// container running under condor_master with HTTP_API_LOG pointed
+// at a file and kubectl logs reading the file, not stderr).
+//
+// Specifically: stdlib log.Fatalf calls Output() then os.Exit(1).
+// Without redirection, the Output() call writes to stderr — invisible
+// in deployments that route kubectl logs through a file. With
+// redirection, the message lands in the slog stream first, then
+// os.Exit(1) still ends the process. So an init failure shows up as
+// a structured log line just before the exit.
+//
+// Goroutine-safe; safe to call once at startup. Calling again
+// replaces the redirect. Pass through stdlib's standard import via
+// "log" — we deliberately avoid importing "log" at the top of this
+// file to keep the API surface small; stdlibLog is set in init().
+func (l *Logger) RedirectStdLog() {
+	stdlog.SetOutput(&stdlibLogWriter{logger: l})
+	// Strip the stdlib log's flags — the slog handler stamps its own
+	// timestamp + level, and a stdlib "2026/05/07 12:00:00" prefix
+	// would just be noise inside the slog message field.
+	stdlog.SetFlags(0)
+}
+
+// stdlibLogWriter adapts stdlib log writes into Logger.Info on the
+// General destination. We log at Info rather than Error because
+// stdlib log doesn't carry a level — surfacing every legacy log line
+// as ERROR would be misleading.
+type stdlibLogWriter struct {
+	logger *Logger
+}
+
+func (w *stdlibLogWriter) Write(p []byte) (int, error) {
+	// stdlib log appends "\n"; trim so the slog message field doesn't
+	// carry it forward into the rendered text.
+	msg := strings.TrimRight(string(p), "\n")
+	if msg != "" {
+		w.logger.Info(DestinationGeneral, msg)
+	}
+	return len(p), nil
 }
 
 // formatMessage is a helper to format Printf-style messages

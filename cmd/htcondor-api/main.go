@@ -333,17 +333,73 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 	return config.AuthorizationEndpoint, config.TokenEndpoint, config.UserinfoEndpoint, nil
 }
 
-// loadDBPath resolves the unified application database path. Prefers
-// HTTP_API_DB_PATH (the new canonical name). Falls back to
-// HTTP_API_OAUTH2_DB_PATH so deployments configured before the
-// per-subsystem databases were unified keep working without rewriting
-// their config. Default is LOCAL_DIR/htcondor-api.db, with the
-// historical /var/lib/condor location as a final fallback.
-func loadDBPath(cfg *config.Config) string {
-	if dbPath, ok := cfg.Get("HTTP_API_DB_PATH"); ok && dbPath != "" {
-		return dbPath
+// loadKEKFilePath returns the path of the master KEK file from
+// HTCondor configuration, or "" when no KEK is configured.
+//
+// Only the FILE PATH lives in HTCondor config — HTCondor treats
+// configuration values as public information (any user on the
+// machine can dump them via condor_config_val), so the KEY BYTES
+// must come from a file the operator has separately permission-locked
+// (mode 0600 / 0400). Empty path = encryption disabled, secrets
+// stored in plaintext (back-compat with the pre-KEK schema).
+//
+// The KEK file is never auto-created. The operator generates it
+// out-of-band (`openssl rand -hex 32 > /etc/secrets/kek && chmod 0600 ...`)
+// and mounts it via whatever secrets mechanism their deployment
+// uses (k8s Secret, sealed-secret, vault csi). Auto-generating a
+// missing file would be unsafe in containerised deployments — a
+// fresh KEK on an emptyDir path would silently change every
+// restart, and every encrypted row in the DB would become
+// un-openable. seal.LoadMasterKEKFromFile enforces this at the
+// load layer.
+//
+// We don't validate the file content here — that happens later,
+// inside seal.LoadMasterKEKFromFile, which checks length,
+// permissions, and parses raw-or-hex content. Surfacing those
+// errors at the server-construction layer keeps this function
+// side-effect free.
+func loadKEKFilePath(cfg *config.Config, logger *logging.Logger) string {
+	path, ok := cfg.Get("HTTP_API_KEK_FILE")
+	if !ok || path == "" {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"HTTP_API_KEK_FILE is not configured; long-lived secrets (RSA signing keys, HMAC GlobalSecrets) will be stored in the application DB in plaintext. To enable envelope encryption, generate a 32-byte key OUT-OF-BAND (e.g. `openssl rand -hex 32 > /path/to/kek && chmod 0600 /path/to/kek`), stage the file via your secrets mechanism on a path that survives restarts, and set HTTP_API_KEK_FILE to point at it. The server will never create or auto-generate this file.",
+			)
+		}
+		return ""
 	}
-	if dbPath, ok := cfg.Get("HTTP_API_OAUTH2_DB_PATH"); ok && dbPath != "" {
+	return path
+}
+
+// loadDBPath resolves the unified application database path.
+//
+// Only HTTP_API_DB_PATH is honored. The legacy HTTP_API_OAUTH2_DB_PATH
+// is intentionally NOT a silent fallback: pre-unification oauth.db
+// files have a schema (oauth2_clients, oauth2_access_tokens, …) that
+// conflicts with the unified 0001_init.sql migration on its first
+// CREATE TABLE, producing a guaranteed crash-loop. We saw exactly this
+// on a deployed pod whose HTTP_API_OAUTH2_DB_PATH was being silently
+// reused. Operators who still set the legacy knob get a clear
+// deprecation warning telling them it's ignored — those who want to
+// preserve their old data can rename the file to htcondor-api.db (or
+// set HTTP_API_DB_PATH explicitly) before bringing the new binary up;
+// the migration will still fail on schema conflicts there, but the
+// failure mode is now operator-initiated rather than surprise-on-deploy.
+//
+// Default is LOCAL_DIR/htcondor-api.db, with the historical
+// /var/lib/condor location as a final fallback.
+func loadDBPath(cfg *config.Config, logger *logging.Logger) string {
+	dbPath, hasDBPath := cfg.Get("HTTP_API_DB_PATH")
+	legacy, hasLegacy := cfg.Get("HTTP_API_OAUTH2_DB_PATH")
+
+	if hasLegacy && legacy != "" && (!hasDBPath || dbPath == "") && logger != nil {
+		logger.Warn(logging.DestinationHTTP,
+			"HTTP_API_OAUTH2_DB_PATH is deprecated and ignored; the unified application DB is HTTP_API_DB_PATH (default LOCAL_DIR/htcondor-api.db). The legacy oauth.db has a schema that conflicts with the unified migration, so it cannot be reused as-is — rename the file or set HTTP_API_DB_PATH explicitly to opt in to a manual migration.",
+			"legacy_path", legacy,
+		)
+	}
+
+	if hasDBPath && dbPath != "" {
 		return dbPath
 	}
 	if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
@@ -611,11 +667,12 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		return config
 	}
 
-	// Resolve the unified application database path. Same value is
-	// passed via Config.DBPath; the OAuth2DBPath alias is kept on the
-	// Config struct purely for back-compat with deployments that set
-	// HTTP_API_OAUTH2_DB_PATH.
-	config.oauth2DBPath = loadDBPath(cfg)
+	// Resolve the unified application database path. The
+	// OAuth2DBPath alias on the Config struct is no longer a silent
+	// fallback (see loadDBPath); a deprecation warning is logged here
+	// when the legacy HTTP_API_OAUTH2_DB_PATH is set without
+	// HTTP_API_DB_PATH.
+	config.oauth2DBPath = loadDBPath(cfg, logger)
 	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
 	// Load OAuth2 issuer
@@ -792,8 +849,26 @@ func setupCollector(cfg *config.Config, logger *logging.Logger) *htcondor.Collec
 	return nil
 }
 
-// runNormalMode runs the server using existing HTCondor configuration
-func runNormalMode() error {
+// runNormalMode runs the server using existing HTCondor configuration.
+//
+// Named-return + deferred slog write: any error returned from this
+// function gets logged through the structured logger before main()'s
+// log.Fatalf prints it to stderr. That matters in deployment shapes
+// where stderr isn't captured by the operator's log reader (e.g.
+// running under condor_master with HTTP_API_LOG pointed at a file —
+// kubectl logs sees the slog stream but not stdlib stderr, so an
+// init failure used to vanish into the void). The defer is a no-op
+// when logger is nil (createLogger itself failed) — main() still
+// reports that case via log.Fatalf to stderr.
+func runNormalMode() (rerr error) {
+	var logger *logging.Logger
+	defer func() {
+		if rerr == nil || logger == nil {
+			return
+		}
+		logger.Error(logging.DestinationGeneral, "Server failed to start", "error", rerr.Error())
+	}()
+
 	// Load configuration
 	cfg := loadConfigWithDefaults()
 
@@ -818,11 +893,21 @@ func runNormalMode() error {
 	// Web UI admin group (empty disables admin pages — see PR (c)).
 	webuiAdminGroup, _ := cfg.Get("HTTP_API_WEBUI_ADMIN_GROUP")
 
-	// Create logger with reasonable defaults for unprivileged operation
-	logger, err := createLogger(cfg)
+	// Create logger with reasonable defaults for unprivileged operation.
+	// Assigning to the OUTER `logger` (declared at the top of the
+	// function) is intentional — the deferred error-logger reads the
+	// same variable. If this fails, the defer is a no-op and main's
+	// log.Fatalf still surfaces the message to stderr.
+	var err error
+	logger, err = createLogger(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	// Tee stdlib log into the structured logger so any log.Fatalf /
+	// log.Println from elsewhere (or from a third-party library)
+	// reaches the same stream the rest of the operator's tooling
+	// reads. Same motivation as the deferred error-logger above.
+	logger.RedirectStdLog()
 
 	// Create collector
 	collector := setupCollector(cfg, logger)
@@ -895,6 +980,7 @@ func runNormalMode() error {
 		EnableMCP:      mcpCfg.enabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,
+		KEKFilePath:                loadKEKFilePath(cfg, logger),
 		OAuth2DBPath:               mcpCfg.oauth2DBPath,
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,

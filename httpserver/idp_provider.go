@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 	"github.com/ory/fosite/handler/openid"
@@ -33,6 +34,9 @@ type IDPProviderOptions struct {
 	Issuer               string
 	AccessTokenLifespan  time.Duration
 	RefreshTokenLifespan time.Duration
+	// Sealer envelope-encrypts the IDP's RSA private key + HMAC
+	// GlobalSecret. See OAuth2ProviderOptions.Sealer.
+	Sealer *seal.Sealer
 }
 
 // NewIDPProvider creates a new IDP provider with SQLite storage.
@@ -54,6 +58,9 @@ func NewIDPProvider(opts IDPProviderOptions) (*IDPProvider, error) {
 		return nil, fmt.Errorf("IDP provider: DB is required")
 	}
 	storage := NewIDPStorage(opts.DB)
+	// See the corresponding line in NewOAuth2Provider — must run
+	// before LoadRSAKey / SaveRSAKey below.
+	storage.SetSealer(opts.Sealer)
 
 	// Try to load existing RSA key from database
 	ctx := context.Background()

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -19,8 +20,11 @@ import (
 // IDPStorage implements fosite storage interfaces using the unified
 // application database. The IDP's tables (idp_*) live alongside the
 // OAuth2/MCP tables in the same SQLite file managed by appdb.
+//
+// See OAuth2Storage for the sealer field's role.
 type IDPStorage struct {
-	db *sql.DB
+	db     *sql.DB
+	sealer *seal.Sealer
 }
 
 // NewIDPStorage wraps an already-opened, already-migrated DB. Schema
@@ -28,6 +32,12 @@ type IDPStorage struct {
 // helpers. The caller retains DB ownership.
 func NewIDPStorage(db *sql.DB) *IDPStorage {
 	return &IDPStorage{db: db}
+}
+
+// SetSealer enables envelope encryption for the long-lived secret
+// columns (RSA private key, HMAC secret). See OAuth2Storage.SetSealer.
+func (s *IDPStorage) SetSealer(sealer *seal.Sealer) {
+	s.sealer = sealer
 }
 
 // User management methods
@@ -340,10 +350,9 @@ func (s *IDPStorage) createTokenSession(ctx context.Context, table string, signa
 	if err != nil {
 		return err
 	}
-	formData, err := json.Marshal(request.GetRequestForm())
-	if err != nil {
-		return err
-	}
+	// Strip plaintext client_secret + PKCE code_verifier before
+	// persisting. See scrubbedFormData in oauth2_storage.go.
+	formData := scrubbedFormData(request.GetRequestForm())
 	sessionData, err := json.Marshal(request.GetSession())
 	if err != nil {
 		return err
@@ -464,42 +473,93 @@ func (s *IDPStorage) RevokeAccessToken(ctx context.Context, requestID string) er
 	return err
 }
 
-// SaveRSAKey stores the RSA private key in PEM format
+// SaveRSAKey stores the RSA private key. Mirrors OAuth2Storage's
+// implementation — see SaveRSAKey there for the encryption rationale.
 func (s *IDPStorage) SaveRSAKey(ctx context.Context, privateKeyPEM string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO idp_rsa_keys (id, private_key_pem) VALUES (1, ?)`, privateKeyPEM)
+	if s.sealer != nil {
+		data, dek, err := s.sealer.Seal([]byte(privateKeyPEM))
+		if err != nil {
+			return fmt.Errorf("seal RSA key: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO idp_rsa_keys (id, private_key_pem, private_key_pem_dek) VALUES (1, ?, ?)`,
+			data, dek)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO idp_rsa_keys (id, private_key_pem, private_key_pem_dek) VALUES (1, ?, NULL)`,
+		privateKeyPEM)
 	return err
 }
 
-// LoadRSAKey loads the RSA private key in PEM format
+// LoadRSAKey loads the RSA private key. See OAuth2Storage.LoadRSAKey.
 func (s *IDPStorage) LoadRSAKey(ctx context.Context) (string, error) {
-	var privateKeyPEM string
-	err := s.db.QueryRowContext(ctx, `SELECT private_key_pem FROM idp_rsa_keys WHERE id = 1`).Scan(&privateKeyPEM)
-	if err == sql.ErrNoRows {
+	var data []byte
+	var dek []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT private_key_pem, private_key_pem_dek FROM idp_rsa_keys WHERE id = 1`).
+		Scan(&data, &dek)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No key stored yet
 	}
 	if err != nil {
 		return "", err
 	}
-	return privateKeyPEM, nil
+	if len(dek) > 0 {
+		if s.sealer == nil {
+			return "", errors.New("idp RSA key is sealed but no KEK is configured (HTTP_API_KEK_FILE)")
+		}
+		plain, err := s.sealer.Open(data, dek)
+		if err != nil {
+			return "", fmt.Errorf("unseal RSA key: %w", err)
+		}
+		return string(plain), nil
+	}
+	return string(data), nil
 }
 
-// SaveHMACSecret stores the HMAC secret
+// SaveHMACSecret stores the HMAC secret. See OAuth2Storage.SaveHMACSecret.
 func (s *IDPStorage) SaveHMACSecret(ctx context.Context, secret []byte) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO idp_hmac_secrets (id, secret) VALUES (1, ?)`, secret)
+	if s.sealer != nil {
+		data, dek, err := s.sealer.Seal(secret)
+		if err != nil {
+			return fmt.Errorf("seal HMAC secret: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO idp_hmac_secrets (id, secret, secret_dek) VALUES (1, ?, ?)`,
+			data, dek)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO idp_hmac_secrets (id, secret, secret_dek) VALUES (1, ?, NULL)`,
+		secret)
 	return err
 }
 
-// LoadHMACSecret loads the HMAC secret
+// LoadHMACSecret loads the HMAC secret. See OAuth2Storage.LoadHMACSecret.
 func (s *IDPStorage) LoadHMACSecret(ctx context.Context) ([]byte, error) {
-	var secret []byte
-	err := s.db.QueryRowContext(ctx, `SELECT secret FROM idp_hmac_secrets WHERE id = 1`).Scan(&secret)
-	if err == sql.ErrNoRows {
+	var data []byte
+	var dek []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT secret, secret_dek FROM idp_hmac_secrets WHERE id = 1`).
+		Scan(&data, &dek)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // No secret stored yet
 	}
 	if err != nil {
 		return nil, err
 	}
-	return secret, nil
+	if len(dek) > 0 {
+		if s.sealer == nil {
+			return nil, errors.New("idp HMAC secret is sealed but no KEK is configured (HTTP_API_KEK_FILE)")
+		}
+		plain, err := s.sealer.Open(data, dek)
+		if err != nil {
+			return nil, fmt.Errorf("unseal HMAC secret: %w", err)
+		}
+		return plain, nil
+	}
+	return data, nil
 }
 
 // ClientAssertionJWTValid implements fosite.ClientAssertionJWTValid interface
