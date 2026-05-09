@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -1385,7 +1384,13 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 				inventory = append(inventory, fmt.Sprintf("%s=%s(%d)", fieldName, fh.Filename, fh.Size))
 			}
 		}
-		log.Printf("spool upload for job %s: %d file(s) received: %v", jobID, len(inventory), inventory)
+		// Use the structured logger so the user-supplied jobID and
+		// filenames go through slog's value formatting (which escapes
+		// CR/LF / control chars), defeating the log-injection
+		// path-of-least-resistance that gosec flags on log.Printf
+		// with tainted data.
+		s.logger.Info(logging.DestinationHTTP, "spool upload received",
+			"job_id", jobID, "file_count", len(inventory), "files", inventory)
 	}
 
 	// Create a pipe for streaming tar conversion

@@ -30,7 +30,7 @@ func authTestHandler(t *testing.T) *Handler {
 // any other request shape.
 func requestWithBearer(t *testing.T, token string) *http.Request {
 	t.Helper()
-	r := httptest.NewRequest("GET", "/anywhere", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/anywhere", nil)
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}

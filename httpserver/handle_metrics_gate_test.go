@@ -32,7 +32,7 @@ func metricsGateHandler(t *testing.T, public bool) *Handler {
 func TestMetricsGateAllowsPublic(t *testing.T) {
 	h := metricsGateHandler(t, true)
 	w := httptest.NewRecorder()
-	h.handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
+	h.handleMetrics(w, httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil))
 	if w.Code != http.StatusOK {
 		t.Errorf("public /metrics returned %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -44,7 +44,7 @@ func TestMetricsGateAllowsPublic(t *testing.T) {
 func TestMetricsGateRejectsUnauthenticated(t *testing.T) {
 	h := metricsGateHandler(t, false)
 	w := httptest.NewRecorder()
-	h.handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
+	h.handleMetrics(w, httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("unauthenticated /metrics returned %d, want 401; body=%s", w.Code, w.Body.String())
 	}
@@ -56,7 +56,7 @@ func TestMetricsGateRejectsUnauthenticated(t *testing.T) {
 func TestMetricsGateRejectsBogusKey(t *testing.T) {
 	h := metricsGateHandler(t, false)
 	bogus := apikey.Prefix + "ffffffffffff-ffffffffffffffffffffffffffffffff"
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	r.Header.Set("Authorization", "Bearer "+bogus)
 	w := httptest.NewRecorder()
 	h.handleMetrics(w, r)
@@ -81,7 +81,7 @@ func TestMetricsGateRejectsKeyWithoutScope(t *testing.T) {
 		[]string{"some-other-scope"}, nil); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	r.Header.Set("Authorization", "Bearer "+minted.Full)
 	w := httptest.NewRecorder()
 	h.handleMetrics(w, r)
@@ -102,7 +102,7 @@ func TestMetricsGateAcceptsValidKey(t *testing.T) {
 		[]string{"metrics"}, nil); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	r.Header.Set("Authorization", "Bearer "+minted.Full)
 	w := httptest.NewRecorder()
 	h.handleMetrics(w, r)
