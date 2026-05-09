@@ -38,18 +38,20 @@ import (
 	"github.com/bbockelm/golang-htcondor/httpserver/jupyterhelperbin"
 )
 
-// jupyterUpgrader is shared by tunnel-side requests. Buffers are sized for
-// modest yamux frames; large file transfers will be split across many small
-// reads/writes which is fine.
-var jupyterUpgrader = websocket.Upgrader{
-	ReadBufferSize:  32 * 1024,
-	WriteBufferSize: 32 * 1024,
-	CheckOrigin: func(_ *http.Request) bool {
-		// The tunnel endpoint is bearer-token authenticated; CSRF is not
-		// the relevant threat. We accept any origin so workers behind
-		// proxies don't get rejected by Origin checks.
-		return true
-	},
+// jupyterUpgrader returns the websocket.Upgrader for the
+// helper-side tunnel endpoint. The helper is bearer-token
+// authenticated (the bearer token is the actual security boundary)
+// and isn't a browser, so it sends no Origin header — the shared
+// origin check accepts that case. Browser-originated connections
+// from a third-party site WILL be rejected by the origin check,
+// which is the correct behavior even though CSRF isn't the primary
+// concern here.
+func (s *Handler) jupyterUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  32 * 1024,
+		WriteBufferSize: 32 * 1024,
+		CheckOrigin:     s.checkWebSocketOrigin,
+	}
 }
 
 // materializeJupyterHelper used to write the embedded helper to disk; it
@@ -681,6 +683,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		GpusMinimumRuntime:    req.GpusMinimumRuntime,
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
+		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
 	// Remote-submit + spool from an in-memory fs.FS. No on-disk state
@@ -779,6 +782,13 @@ func (req *JupyterCreateRequest) validate() error {
 	if strings.ContainsAny(req.Image, " \t\r\n") {
 		return fmt.Errorf("image contains whitespace")
 	}
+	// GPU submit strings need the same character whitelist applied
+	// to the InteractiveCreateTerminalRequest path — both flow
+	// into resourceRequestLines and would otherwise let a request
+	// inject extra submit directives via embedded newlines.
+	if err := validateGPUSubmitFields(req.GpusMinimumCapability, req.GpusMinimumRuntime, req.CudaVersion, req.RequireGpus); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -824,6 +834,11 @@ type jupyterSubmitArgs struct {
 	GpusMinimumRuntime    string
 	CudaVersion           string
 	RequireGpus           string
+
+	// ExtraSubmitLines is operator-supplied submit-file content
+	// merged in just before the `queue` directive. Same source as
+	// the interactive-terminal builder: Handler.interactiveExtraSubmit.
+	ExtraSubmitLines string
 
 	// TransferInputFiles is the list of files (in addition to the
 	// executable) the schedd should ship from the spool to the worker.
@@ -883,6 +898,11 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 	fmt.Fprintf(&sb, "log    = jupyter.log\n")
 	fmt.Fprintf(&sb, "output = jupyter.out\n")
 	fmt.Fprintf(&sb, "error  = jupyter.err\n")
+
+	// Operator-supplied extras splice in just before `queue`. See
+	// appendExtraSubmitLines + Handler.interactiveExtraSubmit.
+	appendExtraSubmitLines(&sb, a.ExtraSubmitLines)
+
 	fmt.Fprintf(&sb, "queue\n")
 	return sb.String()
 }
@@ -1145,7 +1165,8 @@ func (s *Handler) handleJupyterTunnel(w http.ResponseWriter, r *http.Request, id
 	// Upgrade first; if AcceptTunnel rejects we still need a websocket
 	// channel to send a CLOSE frame so the helper sees a clean refusal
 	// instead of a transport error.
-	ws, err := jupyterUpgrader.Upgrade(w, r, nil)
+	upgrader := s.jupyterUpgrader()
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrader already wrote the HTTP error.
 		return

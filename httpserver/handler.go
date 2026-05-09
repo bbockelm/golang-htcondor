@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -54,13 +56,40 @@ type Handler struct {
 	credd                     htcondor.CreddClient
 	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
 	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
-	userHeader                string
-	signingKeyPath            string
-	trustDomain               string
-	uidDomain                 string
-	httpBaseURL               string // Base URL for HTTP API (for generating MCP file download links)
-	tlsCACertFile             string
-	logger                    *logging.Logger
+	// interactiveExtraSubmit holds operator-supplied extra submit-file
+	// lines that the interactive-terminal and Jupyter handlers merge
+	// into every submit file just before the `queue` directive. Loaded
+	// once at startup from HandlerConfig.InteractiveExtraSubmitFile;
+	// empty string means "no extras". The string is treated as raw
+	// submit-file syntax — typical contents are accounting-group
+	// pins, per-pool +Project tags, or default `requirements`
+	// fragments. Because this is operator-only config (the path is
+	// set by the same person who runs the API server), the contents
+	// are NOT validated against the GPU-string whitelist; the
+	// operator can write any submit-file directive.
+	interactiveExtraSubmit string
+	userHeader             string
+	// userHeaderTrustedProxies is the list of source-IP prefixes from
+	// which the userHeader is honored. Populated from
+	// HandlerConfig.UserHeaderTrustedProxies (CIDR list). nil + empty
+	// means the header is rejected from every source unless the
+	// "unsafe" demo flag below is true.
+	userHeaderTrustedProxies []*net.IPNet
+	// userHeaderUnsafeAllowAll, when true, bypasses the trusted-proxy
+	// CIDR check and accepts the user header from any source. This is
+	// the legacy behavior; it is dangerous in production (any client
+	// can spoof identity by setting the header) and exists ONLY to
+	// keep the demo / test mode usable. Wired to
+	// HTTP_API_USER_HEADER_TRUST_ANY=1 and the
+	// --user-header-trust-any-unsafe CLI flag, both of which log a
+	// loud warning at startup.
+	userHeaderUnsafeAllowAll bool
+	signingKeyPath           string
+	trustDomain              string
+	uidDomain                string
+	httpBaseURL              string // Base URL for HTTP API (for generating MCP file download links)
+	tlsCACertFile            string
+	logger                   *logging.Logger
 	// db is the single SQLite file shared by OAuth2/MCP storage, the
 	// embedded IDP, browser sessions, and user-saved templates. Opened
 	// at the top of NewHandler and migrated via appdb.Migrate; closed
@@ -92,6 +121,7 @@ type Handler struct {
 	httpMetricsState    *httpMetrics
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
 	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
+	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -103,6 +133,8 @@ type Handler struct {
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
 	mcpInstructions     string            // Server-level instructions provided to agents via MCP initialize
 	webuiAdminGroup     string            // Group required for Web UI admin pages (empty = no admin UI)
+	metricsPublic       bool              // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	htcondorConfig      *config.Config    // HTCondor config snapshot, surfaced read-only on the admin info page
 	shareSecret         []byte            // Random 32-byte HMAC key for short-lived signed URLs
 	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider         *IDPProvider      // Built-in IDP provider
@@ -145,19 +177,60 @@ type Handler struct {
 
 // HandlerConfig holds handler configuration
 type HandlerConfig struct {
-	ScheddName      string              // Schedd name
-	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader      string              // HTTP header to extract username from (optional)
-	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
-	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCACertFile   string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	Collector       *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
-	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
-	EnableMCP       bool                // Enable MCP endpoints with OAuth2 (default: false)
+	ScheddName string // Schedd name
+	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// InteractiveExtraSubmit holds extra HTCondor submit-file
+	// directives merged into the submit file produced for each
+	// interactive-terminal and JupyterLab job. The string value is
+	// spliced in verbatim just before the `queue` directive, so it
+	// can override or extend anything the builder emits (typical
+	// use: pin an accounting group, add +ProjectName, set a
+	// site-wide `requirements` fragment, force `concurrency_limits`,
+	// etc.).
+	//
+	// Trust model: the value comes from operator-only configuration
+	// (HTCondor config or env), so it's inserted into every submit
+	// file verbatim — no whitelist, no quoting. Treat this as the
+	// operator's hook into job admission policy, equivalent in
+	// privilege to writing the schedd's site_local config.
+	//
+	// Multi-line content is supported via HTCondor config syntax (a
+	// quoted multi-line value, or backslash continuations). Empty
+	// disables the feature. Configurable via
+	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
+	InteractiveExtraSubmit string
+	UserHeader             string // HTTP header to extract username from (optional)
+	// UserHeaderTrustedProxies is a list of CIDRs from which UserHeader
+	// is honored. When UserHeader is set, this list MUST be non-empty
+	// (or UserHeaderTrustAnyUnsafe must be true) — otherwise the
+	// header is silently ignored, treating the request as
+	// unauthenticated. Configure via HTTP_API_USER_HEADER_TRUSTED_PROXIES
+	// (comma-separated CIDRs, e.g. "127.0.0.1/32,::1/128,10.0.0.0/8")
+	// or programmatically.
+	UserHeaderTrustedProxies []string
+	// UserHeaderTrustAnyUnsafe disables the trusted-proxy check and
+	// accepts UserHeader from any source. This is the demo / test
+	// mode only — it is unsafe in any production deployment because
+	// it lets any client spoof identity by setting the header.
+	// Configure via HTTP_API_USER_HEADER_TRUST_ANY=1 (loud warning
+	// at startup).
+	UserHeaderTrustAnyUnsafe bool
+	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
+	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	Collector                *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics            bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL          time.Duration       // Metrics cache TTL (default: 10s)
+	// MetricsPublic disables the API-key auth gate on /metrics. Use
+	// only when network ACLs already isolate the endpoint (e.g. a
+	// private listening address or a sidecar proxy). Default: false
+	// — an admin must mint an API key with the `metrics` scope and
+	// configure Prometheus to send it as a Bearer token.
+	MetricsPublic bool
+	Logger        *logging.Logger // Logger instance (optional, creates default if nil)
+	EnableMCP     bool            // Enable MCP endpoints with OAuth2 (default: false)
 
 	// DBPath is the unified SQLite database file backing OAuth2/MCP
 	// storage, the embedded IDP, browser sessions, and user-saved
@@ -241,6 +314,18 @@ type HandlerConfig struct {
 	// LLMModel overrides the default Anthropic model id. Empty falls
 	// back to chat.DefaultAnthropicModel.
 	LLMModel string
+
+	// LLMOperatorInstructionsFile is the path to a file containing
+	// extra system-prompt rules the operator wants appended to every
+	// chat turn (e.g. "users in this pool may not request more than
+	// 64 GiB of memory; suggest fewer if asked"). Empty path = no
+	// addendum.
+	//
+	// File mode is enforced 0600/0400 on load — same rationale as the
+	// API-key file: the operator may put policy text here that they
+	// don't want every local user to read. Loaded once at startup; a
+	// hot-reload would need a server restart.
+	LLMOperatorInstructionsFile string
 
 	// JupyterWorkDir is where the embedded helper binary (materialized
 	// from package jupyterhelperbin) and per-instance scratch artifacts
@@ -331,6 +416,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
 		userHeader:                cfg.UserHeader,
+		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
 		jupyterWorkDir:            cfg.JupyterWorkDir,
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the
@@ -342,11 +428,73 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		streamBufferSize:   streamBufferSize,
 		streamWriteTimeout: streamWriteTimeout,
 		webuiAdminGroup:    cfg.WebUIAdminGroup,
+		metricsPublic:      cfg.MetricsPublic,
+		htcondorConfig:     cfg.HTCondorConfig,
 		token:              cfg.Token,
 	}
 
 	if h.webuiAdminGroup != "" {
 		logger.Info(logging.DestinationHTTP, "Web UI admin group configured", "admin_group", h.webuiAdminGroup)
+	}
+
+	// Operator-supplied extra submit-file directives. The value is
+	// inserted verbatim into every interactive-terminal / Jupyter
+	// submit file just before `queue` (see appendExtraSubmitLines).
+	// Empty disables; non-empty is logged at startup so the operator
+	// can confirm the directives loaded correctly.
+	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {
+		h.interactiveExtraSubmit = cfg.InteractiveExtraSubmit
+		logger.Info(logging.DestinationHTTP,
+			"Interactive submit-file extras configured",
+			"bytes", len(cfg.InteractiveExtraSubmit))
+	}
+
+	// Wire up the userHeader trust policy. Three states:
+	//  1. UserHeader unset → no policy needed; the header is never read.
+	//  2. UserHeader set + UserHeaderTrustAnyUnsafe true → demo / test
+	//     mode. Header is honored from any source. Loud warning so
+	//     operators notice if this leaks into a real deployment.
+	//  3. UserHeader set + trusted-proxy CIDR list non-empty → header
+	//     is honored only from those CIDRs. This is the production
+	//     mode (reverse proxy on a known network).
+	// If UserHeader is set but neither (2) nor (3) applies, the
+	// header is silently ignored (effectively disabled). We refuse to
+	// boot in that case so the operator notices the misconfiguration
+	// rather than silently dropping authentication.
+	if h.userHeader != "" {
+		for _, cidr := range cfg.UserHeaderTrustedProxies {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			_, network, err := net.ParseCIDR(cidr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR in UserHeaderTrustedProxies %q: %w", cidr, err)
+			}
+			h.userHeaderTrustedProxies = append(h.userHeaderTrustedProxies, network)
+		}
+		switch {
+		case h.userHeaderUnsafeAllowAll:
+			logger.Warn(logging.DestinationSecurity,
+				"UNSAFE: user header is honored from any source IP",
+				"header", h.userHeader,
+				"hint", "this is demo/test mode; do NOT use in production. "+
+					"In production, configure UserHeaderTrustedProxies (e.g. "+
+					"HTTP_API_USER_HEADER_TRUSTED_PROXIES=10.0.0.0/8).")
+		case len(h.userHeaderTrustedProxies) == 0:
+			return nil, fmt.Errorf(
+				"UserHeader=%q is set but neither UserHeaderTrustedProxies nor "+
+					"UserHeaderTrustAnyUnsafe is configured; refusing to start - "+
+					"in production, set UserHeaderTrustedProxies to the CIDRs of "+
+					"your trusted reverse proxy; for demo/test on a single "+
+					"host, set UserHeaderTrustAnyUnsafe=true (HTTP_API_USER_HEADER_TRUST_ANY=1)",
+				h.userHeader)
+		default:
+			logger.Info(logging.DestinationSecurity,
+				"User header is honored from configured trusted-proxy CIDRs",
+				"header", h.userHeader,
+				"trusted_proxy_count", len(h.userHeaderTrustedProxies))
+		}
 	}
 
 	// Random per-process HMAC key for short-lived shared download URLs.
@@ -575,6 +723,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.sessionStore = sessionStore
 	logger.Info(logging.DestinationHTTP, "Session store enabled", "ttl", sessionTTL)
 
+	// API-key store. Shares the unified app DB; the schema is in
+	// migration 0004_api_keys.sql. No background cleanup needed yet
+	// (rows are tiny and admins can soft-delete manually); a future
+	// migration can add a TTL purger if the table grows unbounded.
+	h.apiKeyStore = &apiKeyStore{db: h.db}
+
 	// Setup IDP provider if enabled (can work independently of MCP)
 	if cfg.EnableIDP {
 		idpIssuer := cfg.IDPIssuer
@@ -629,11 +783,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			return nil, fmt.Errorf("failed to load LLM API key: %w", err)
 		}
 		if llm != nil {
-			h.chatEngine = chat.NewEngine(llm, h.buildChatTools())
+			operatorAddendum, err := loadOperatorChatInstructions(cfg.LLMOperatorInstructionsFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load operator chat instructions: %w", err)
+			}
+			tools := h.buildChatTools()
+			h.chatEngine = chat.NewEngine(llm, tools, chatPageInstructions(), operatorAddendum)
 			logger.Info(logging.DestinationHTTP, "Chat endpoint enabled",
 				"upstream", llm.URL(),
 				"model", llm.Model(),
-				"tool_count", len(h.buildChatTools()),
+				"tool_count", len(tools),
+				"operator_instructions", cfg.LLMOperatorInstructionsFile != "",
 			)
 		}
 	} else if cfg.LLMAPIKeyFile != "" && !cfg.EnableMCP {
@@ -720,12 +880,299 @@ func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _
 // every route uniformly — not just the ones we remembered to wrap
 // in setupRoutes. The middleware short-circuits /metrics itself to
 // avoid Prometheus scrapes self-instrumenting.
+//
+// Security headers are emitted on every response (see
+// applySecurityHeaders). Setting them at the top wrapper guarantees
+// no route can opt out by accident — handlers further down the
+// stack can still override (e.g. relaxing frame-ancestors for an
+// embeddable widget) but the secure defaults are present until
+// explicitly changed.
+//
+// The response is also wrapped in a status-capturing writer so we
+// can call tokenCache.MarkValidated when a request bearing a JWT
+// returns 2xx. This is the "lazy validation" pattern: there is no
+// local way to verify the JWT signature (the only authoritative
+// validator is the schedd's CEDAR handshake), so we defer to "the
+// handler completed successfully" as evidence that the schedd
+// accepted the token — and only at that point trust the token's
+// `sub` claim for identity decisions like ownedByMe filtering.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	applySecurityHeaders(w)
+	sw := &statusCapturingResponseWriter{ResponseWriter: w}
+	defer h.markValidatedOnSuccess(r, sw)
 	if h.httpMetricsState != nil {
-		h.httpMetricsState.middleware(h.mux).ServeHTTP(w, r)
+		h.httpMetricsState.middleware(h.mux).ServeHTTP(sw, r)
 		return
 	}
-	h.mux.ServeHTTP(w, r)
+	h.mux.ServeHTTP(sw, r)
+}
+
+// statusCapturingResponseWriter records the status code passed to
+// WriteHeader so post-handler middleware can see it. Defaults to 200
+// because handlers that call Write without an explicit WriteHeader
+// implicitly produce 200.
+//
+// Hijack/Flush/Unwrap forwarding: same hard-won lesson as
+// statusRecorder in metrics.go. Embedding http.ResponseWriter does
+// NOT promote Hijacker / Flusher etc. through the interface — Go's
+// method-set rules only contribute the named interface's methods.
+// We forward Hijack explicitly (gorilla/websocket asserts it on the
+// writer before upgrading SSH and Jupyter WebSockets) and expose
+// Unwrap so http.NewResponseController can reach Flush/Push.
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (s *statusCapturingResponseWriter) WriteHeader(code int) {
+	s.statusCode = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Status returns the captured status code (200 if WriteHeader was never called).
+func (s *statusCapturingResponseWriter) Status() int {
+	if s.statusCode == 0 {
+		return http.StatusOK
+	}
+	return s.statusCode
+}
+
+// Unwrap exposes the wrapped writer for http.NewResponseController
+// (Go 1.20+), which covers Flush/Push/etc. without one forwarding
+// method per interface here.
+func (s *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}
+
+// Hijack forwards to the underlying ResponseWriter when it
+// implements http.Hijacker. Required for the SSH-to-job and Jupyter
+// WebSocket upgraders, which assert Hijacker on the writer before
+// taking over the TCP connection. Without this the upgrade fails
+// with "underlying ResponseWriter does not implement http.Hijacker"
+// and the WebSocket never connects.
+func (s *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := s.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("statusCapturingResponseWriter: underlying ResponseWriter (%T) does not implement http.Hijacker", s.ResponseWriter)
+	}
+	return hj.Hijack()
+}
+
+// Compile-time assertion: keep this wrapper Hijack-capable so
+// future refactors don't silently regress. (The metrics-layer
+// statusRecorder has the same assertion for the same reason.)
+var _ http.Hijacker = (*statusCapturingResponseWriter)(nil)
+
+// markValidatedOnSuccess promotes the request's bearer token to
+// "validated" when the handler returned a 2xx status. The token is
+// retrieved from the request context (placed there by
+// extractOrGenerateToken via withRequestToken). 4xx / 5xx responses
+// leave the token as-is — including the case where the schedd RPC
+// failed because the token was rejected by CEDAR.
+//
+// We deliberately mark validated only on 2xx (not just "no error"):
+// some handlers return 200 with a JSON error body, and we never
+// reach this point if WriteHeader hasn't been called at all (e.g.
+// the connection was reset before any header went out).
+func (h *Handler) markValidatedOnSuccess(r *http.Request, sw *statusCapturingResponseWriter) {
+	token := requestTokenFromContext(r.Context())
+	if token == "" || h.tokenCache == nil {
+		return
+	}
+	status := sw.Status()
+	if status < 200 || status >= 300 {
+		return
+	}
+	// The CEDAR handshake's authoritative username isn't easily
+	// surfaced here (the SessionCache is owned by cedar). For now
+	// we promote the existing JWT-claimed username to "validated";
+	// the assumption is that if the schedd accepted the token, it
+	// accepted the `sub` claim too. When cedar exposes the
+	// post-handshake identity we can pass it through as the
+	// authoritativeUsername arg.
+	h.tokenCache.MarkValidated(token, "")
+}
+
+// corsOriginAllowed reports whether the given Origin header value
+// is permitted for CORS Access-Control-Allow-Origin echo. We only
+// echo when the Origin exactly matches the configured httpBaseURL
+// (scheme + host). Same logic as checkWebSocketOrigin; kept
+// separate because CORS and WebSocket origin checks have
+// independently-evolving policies in many setups.
+//
+// Empty Origin is rejected here (browser CORS preflights always
+// send Origin; non-browser clients don't need CORS headers
+// anyway).
+func (h *Handler) corsOriginAllowed(origin string) bool {
+	if origin == "" || h.httpBaseURL == "" {
+		return false
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	expectedURL, err := url.Parse(h.httpBaseURL)
+	if err != nil {
+		return false
+	}
+	return originURL.Scheme == expectedURL.Scheme && originURL.Host == expectedURL.Host
+}
+
+// checkWebSocketOrigin returns the CheckOrigin function for the
+// websocket.Upgrader used on /jobs/.../ssh and /jupyter/* endpoints.
+//
+// The default gorilla/websocket policy is "any origin" — that's
+// fine for backend-to-backend tools but a foot-gun the moment
+// cookies move to SameSite=None or a Bearer-token auth path is
+// added that doesn't have SameSite to fall back on.
+//
+// Acceptance rules, evaluated in order:
+//
+//  1. No Origin header → allow. Non-browser clients (curl, wscat,
+//     the JupyterLab helper inside a job sandbox) don't send one,
+//     and we can't break them.
+//  2. Origin's host equals the request's r.Host → allow. This is
+//     the most reliable same-origin check: r.Host is the
+//     authority the client connected to, and the Origin header is
+//     the page's authority. If they match, the request came from
+//     a page hosted on this same server (a cross-site attacker's
+//     page can't forge an Origin to match a victim's r.Host
+//     because the WS handshake goes to the attacker's chosen host
+//     anyway). This rule deliberately ignores scheme: a server
+//     running plain HTTP behind an HTTPS-terminating proxy still
+//     sees `r.TLS == nil` even though the browser is on https,
+//     and we don't want that mismatch to break WebSockets.
+//  3. httpBaseURL is configured AND Origin matches it (scheme +
+//     host) → allow. Backstop for setups where the public URL
+//     differs from r.Host (e.g. the listener is on a different
+//     hostname than the public-facing one because of an alias).
+//  4. Otherwise → deny.
+//
+// Browser requests from a third-party origin fall through to (4).
+func (h *Handler) checkWebSocketOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Host == "" {
+		return false
+	}
+	// Rule 2: same-origin via r.Host (scheme-agnostic).
+	if originURL.Host == r.Host {
+		return true
+	}
+	// Rule 3: configured public base URL.
+	if h.httpBaseURL != "" {
+		baseURL, err := url.Parse(h.httpBaseURL)
+		if err == nil && baseURL.Scheme == originURL.Scheme && baseURL.Host == originURL.Host {
+			return true
+		}
+	}
+	return false
+}
+
+// isUserHeaderTrustedSource reports whether the request's source IP is
+// in a position where we can trust the configured user header. Returns
+// false if the header is not configured at all (callers should treat
+// that the same as "no, don't read it").
+//
+// Trust policy (mirrors the comment block in NewHandler):
+//   - userHeader empty: never trusted.
+//   - userHeaderUnsafeAllowAll true: always trusted (demo mode).
+//   - else: trusted iff the request's source IP is in one of the
+//     configured CIDRs.
+//
+// We use r.RemoteAddr — NOT X-Forwarded-For. The point of this check
+// is to confirm the connection is FROM the trusted proxy; once we
+// trust the proxy, we trust whatever it puts in our user header. If
+// the operator's network has multiple proxy hops, set the CIDR list
+// to cover all hops the request could come from.
+func (h *Handler) isUserHeaderTrustedSource(r *http.Request) bool {
+	if h.userHeader == "" {
+		return false
+	}
+	if h.userHeaderUnsafeAllowAll {
+		return true
+	}
+	if len(h.userHeaderTrustedProxies) == 0 {
+		// Should be unreachable given NewHandler's startup check, but
+		// defend in depth: refuse rather than silently letting the
+		// header through.
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// RemoteAddr without a port is unusual but accept it; net.ParseIP
+		// will tell us whether it's a valid IP.
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, network := range h.userHeaderTrustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// applySecurityHeaders sets the baseline browser security headers on
+// every response. These are deliberately conservative and apply
+// uniformly to API and SPA responses:
+//
+//   - Content-Security-Policy: default-src 'self' blocks externally
+//     hosted scripts/styles. 'unsafe-inline' is permitted for
+//     style-src AND script-src because the embedded Next.js static
+//     export ships inline <script> blocks for hydration / chunk
+//     bootstrap. The "right" answer here is per-response nonces
+//     injected into the Next.js HTML, but that requires runtime
+//     middleware and can't be done for a static export without
+//     significant surgery. Trade-off accepted because the
+//     fundamental XSS path the audit flagged (user-uploaded HTML
+//     served with `Content-Disposition: inline`) is closed in
+//     streamFileFromTar via `attachment` + nosniff; the CSP is
+//     belt-and-braces.
+//
+//     TODO: when we move to a dynamic Next.js deployment (or Next.js
+//     ships static-friendly nonces), tighten script-src back to
+//     'self' + nonces.
+//
+//   - X-Content-Type-Options: nosniff prevents MIME-sniffing turning
+//     a user-uploaded .txt into text/html — important alongside the
+//     /jobs/{id}/files/{filename} download path.
+//
+//   - X-Frame-Options: SAMEORIGIN keeps the OAuth2 consent page out
+//     of attacker iframes (clickjacking on the consent button).
+//
+//   - Referrer-Policy: same-origin avoids leaking the API path
+//     (which encodes job IDs and tokens) to third parties.
+//
+// The frame-ancestors directive in CSP duplicates X-Frame-Options
+// for browsers that honor CSP only; both are cheap to send.
+func applySecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	if h.Get("Content-Security-Policy") == "" {
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"img-src 'self' data: blob:; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"object-src 'none'; "+
+				"frame-ancestors 'self'; "+
+				"base-uri 'self'")
+	}
+	if h.Get("X-Content-Type-Options") == "" {
+		h.Set("X-Content-Type-Options", "nosniff")
+	}
+	if h.Get("X-Frame-Options") == "" {
+		h.Set("X-Frame-Options", "SAMEORIGIN")
+	}
+	if h.Get("Referrer-Policy") == "" {
+		h.Set("Referrer-Policy", "same-origin")
+	}
 }
 
 // Start initializes the handler and starts background goroutines.
@@ -935,8 +1382,18 @@ func (h *Handler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the original URL (relative path with query string)
+	// Build the original URL (relative path with query string).
+	// `return_to` is attacker-influenced (a phishing link can carry
+	// any value), so we MUST run it through isSafeLocalRedirect
+	// before storing — otherwise the OAuth2 callback will Redirect
+	// the browser to wherever the attacker chose. The
+	// already-authenticated `/login` handler does this; this code
+	// path was missing the check until the 2026-05 audit.
 	originalURL := r.URL.Query().Get("return_to")
+	if originalURL != "" && !isSafeLocalRedirect(originalURL) {
+		h.logger.Warn(logging.DestinationHTTP, "Rejecting unsafe return_to in login redirect", "value", originalURL)
+		originalURL = ""
+	}
 	if originalURL == "" {
 		originalURL = r.URL.Path
 		if r.URL.RawQuery != "" {
@@ -994,6 +1451,16 @@ func (h *Handler) GetSchedd() *htcondor.Schedd {
 	h.scheddMu.RLock()
 	defer h.scheddMu.RUnlock()
 	return h.schedd
+}
+
+// getCollector returns the collector instance, or nil when no
+// collector was configured. Used by chat tools that surface
+// pool-wide read-only data (slot status, GPU types, etc.); those
+// tools must short-circuit gracefully when the collector is absent
+// because the operator may have started the server with a direct
+// schedd address and no collector at all.
+func (h *Handler) getCollector() *htcondor.Collector {
+	return h.collector
 }
 
 // UpdateSchedd updates the schedd instance with a new address (thread-safe).

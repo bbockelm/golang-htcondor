@@ -358,7 +358,16 @@ func readSSE(ctx context.Context, body io.Reader, out chan<- StreamEvent) {
 			}
 		case "content_block_stop":
 			if curKind == "tool_use" {
-				input := json.RawMessage(curToolBuf.Bytes())
+				// COPY the buffered input bytes — bytes.Buffer.Bytes()
+				// aliases the buffer's backing array, and we're about
+				// to Reset() the buffer (and the next content_block
+				// will write fresh deltas into the same memory). The
+				// channel is buffered, so by the time the engine
+				// consumes this event the slice would otherwise have
+				// been overwritten with the *next* tool's input —
+				// json.Marshal then fails with "internal: failed to
+				// encode chat record" because the bytes are mangled.
+				input := json.RawMessage(append([]byte(nil), curToolBuf.Bytes()...))
 				if len(input) == 0 {
 					input = json.RawMessage("{}")
 				}

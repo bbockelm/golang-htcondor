@@ -18,6 +18,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/httpserver/apikey"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/ory/fosite"
 )
@@ -51,8 +52,19 @@ type Config struct {
 	Collector       *htcondor.Collector // Collector for metrics (optional)
 	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
 	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
-	Logger          *logging.Logger     // Logger instance (optional, creates default if nil)
-	JupyterWorkDir  string              // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
+	// MetricsPublic disables the API-key auth gate on /metrics.
+	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
+	MetricsPublic  bool
+	Logger         *logging.Logger // Logger instance (optional, creates default if nil)
+	JupyterWorkDir string          // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
+
+	// InteractiveExtraSubmit is an optional verbatim block of extra
+	// HTCondor submit-file directives merged into every
+	// interactive-terminal and Jupyter job. See
+	// HandlerConfig.InteractiveExtraSubmit for the trust model and
+	// full documentation. Configurable via
+	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
+	InteractiveExtraSubmit string
 
 	// Batch-submission template paths.
 	TemplateGlobalPath string // Optional YAML file with operator-curated templates
@@ -111,6 +123,11 @@ type Config struct {
 	LLMAPIURL string
 	// LLMModel overrides the default model id. Empty = package default.
 	LLMModel string
+	// LLMOperatorInstructionsFile is the path to a file with extra
+	// system-prompt rules the operator wants the chat assistant to
+	// follow on every turn. Empty disables. See HandlerConfig for
+	// the file-mode requirement and rationale.
+	LLMOperatorInstructionsFile string
 }
 
 // NewServer creates a new HTTP API server
@@ -131,55 +148,58 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Convert Config to HandlerConfig
 	handlerCfg := HandlerConfig{
-		ScheddName:                 cfg.ScheddName,
-		ScheddAddr:                 cfg.ScheddAddr,
-		UserHeader:                 cfg.UserHeader,
-		SigningKeyPath:             cfg.SigningKeyPath,
-		TrustDomain:                cfg.TrustDomain,
-		UIDDomain:                  cfg.UIDDomain,
-		HTTPBaseURL:                cfg.HTTPBaseURL,
-		TLSCACertFile:              cfg.TLSCACertFile,
-		Collector:                  cfg.Collector,
-		EnableMetrics:              cfg.EnableMetrics,
-		MetricsCacheTTL:            cfg.MetricsCacheTTL,
-		Logger:                     cfg.Logger,
-		EnableMCP:                  cfg.EnableMCP,
-		DBPath:                     cfg.DBPath,
-		KEKFilePath:                cfg.KEKFilePath,
-		OAuth2DBPath:               cfg.OAuth2DBPath,
-		JupyterWorkDir:             cfg.JupyterWorkDir,
-		TemplateGlobalPath:         cfg.TemplateGlobalPath,
-		OAuth2Issuer:               cfg.OAuth2Issuer,
-		OAuth2ClientID:             cfg.OAuth2ClientID,
-		OAuth2ClientSecret:         cfg.OAuth2ClientSecret,
-		OAuth2AuthURL:              cfg.OAuth2AuthURL,
-		OAuth2TokenURL:             cfg.OAuth2TokenURL,
-		OAuth2RedirectURL:          cfg.OAuth2RedirectURL,
-		OAuth2UserInfoURL:          cfg.OAuth2UserInfoURL,
-		OAuth2Scopes:               cfg.OAuth2Scopes,
-		OAuth2UsernameClaim:        cfg.OAuth2UsernameClaim,
-		OAuth2GroupsClaim:          cfg.OAuth2GroupsClaim,
-		OAuth2AccessTokenLifespan:  cfg.OAuth2AccessTokenLifespan,
-		OAuth2RefreshTokenLifespan: cfg.OAuth2RefreshTokenLifespan,
-		MCPAccessGroup:             cfg.MCPAccessGroup,
-		MCPReadGroup:               cfg.MCPReadGroup,
-		MCPWriteGroup:              cfg.MCPWriteGroup,
-		MCPInstructions:            cfg.MCPInstructions,
-		WebUIAdminGroup:            cfg.WebUIAdminGroup,
-		EnableIDP:                  cfg.EnableIDP,
-		IDPIssuer:                  cfg.IDPIssuer,
-		IDPAccessTokenLifespan:     cfg.IDPAccessTokenLifespan,
-		IDPRefreshTokenLifespan:    cfg.IDPRefreshTokenLifespan,
-		SessionTTL:                 cfg.SessionTTL,
-		HTCondorConfig:             cfg.HTCondorConfig,
-		PingInterval:               cfg.PingInterval,
-		StreamBufferSize:           cfg.StreamBufferSize,
-		StreamWriteTimeout:         cfg.StreamWriteTimeout,
-		Token:                      cfg.Token,
-		Credd:                      cfg.Credd,
-		LLMAPIKeyFile:              cfg.LLMAPIKeyFile,
-		LLMAPIURL:                  cfg.LLMAPIURL,
-		LLMModel:                   cfg.LLMModel,
+		ScheddName:                  cfg.ScheddName,
+		ScheddAddr:                  cfg.ScheddAddr,
+		UserHeader:                  cfg.UserHeader,
+		SigningKeyPath:              cfg.SigningKeyPath,
+		TrustDomain:                 cfg.TrustDomain,
+		UIDDomain:                   cfg.UIDDomain,
+		HTTPBaseURL:                 cfg.HTTPBaseURL,
+		TLSCACertFile:               cfg.TLSCACertFile,
+		Collector:                   cfg.Collector,
+		EnableMetrics:               cfg.EnableMetrics,
+		MetricsPublic:               cfg.MetricsPublic,
+		MetricsCacheTTL:             cfg.MetricsCacheTTL,
+		Logger:                      cfg.Logger,
+		EnableMCP:                   cfg.EnableMCP,
+		DBPath:                      cfg.DBPath,
+		KEKFilePath:                 cfg.KEKFilePath,
+		OAuth2DBPath:                cfg.OAuth2DBPath,
+		JupyterWorkDir:              cfg.JupyterWorkDir,
+		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
+		TemplateGlobalPath:          cfg.TemplateGlobalPath,
+		OAuth2Issuer:                cfg.OAuth2Issuer,
+		OAuth2ClientID:              cfg.OAuth2ClientID,
+		OAuth2ClientSecret:          cfg.OAuth2ClientSecret,
+		OAuth2AuthURL:               cfg.OAuth2AuthURL,
+		OAuth2TokenURL:              cfg.OAuth2TokenURL,
+		OAuth2RedirectURL:           cfg.OAuth2RedirectURL,
+		OAuth2UserInfoURL:           cfg.OAuth2UserInfoURL,
+		OAuth2Scopes:                cfg.OAuth2Scopes,
+		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
+		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
+		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
+		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
+		MCPAccessGroup:              cfg.MCPAccessGroup,
+		MCPReadGroup:                cfg.MCPReadGroup,
+		MCPWriteGroup:               cfg.MCPWriteGroup,
+		MCPInstructions:             cfg.MCPInstructions,
+		WebUIAdminGroup:             cfg.WebUIAdminGroup,
+		EnableIDP:                   cfg.EnableIDP,
+		IDPIssuer:                   cfg.IDPIssuer,
+		IDPAccessTokenLifespan:      cfg.IDPAccessTokenLifespan,
+		IDPRefreshTokenLifespan:     cfg.IDPRefreshTokenLifespan,
+		SessionTTL:                  cfg.SessionTTL,
+		HTCondorConfig:              cfg.HTCondorConfig,
+		PingInterval:                cfg.PingInterval,
+		StreamBufferSize:            cfg.StreamBufferSize,
+		StreamWriteTimeout:          cfg.StreamWriteTimeout,
+		Token:                       cfg.Token,
+		Credd:                       cfg.Credd,
+		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
+		LLMAPIURL:                   cfg.LLMAPIURL,
+		LLMModel:                    cfg.LLMModel,
+		LLMOperatorInstructionsFile: cfg.LLMOperatorInstructionsFile,
 	}
 
 	// Create the handler
@@ -498,6 +518,19 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hj.Hijack()
 }
 
+// Unwrap exposes the underlying ResponseWriter to Go 1.20+'s
+// http.NewResponseController, which walks the Unwrap chain to find
+// real Flusher / Hijacker / etc. implementations on wrapped writers.
+//
+// Without this, the chat SSE writer's Flush calls were silent no-ops:
+// the type assertion `rw.(http.Flusher)` against this wrapper returns
+// nil because Flush isn't re-declared here, so streaming SSE chunks
+// piled up in Go's chunked-encoding buffer until the response ended.
+// Result: every text-delta from the LLM appeared at once at the end
+// of the turn, looking exactly like a buffered (not streaming)
+// response — see chat/protocol.go's NewWriter for the consumer side.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
 // Compile-time assertion that *responseWriter implements http.Hijacker.
 // Mirrors the same pin we keep on *statusRecorder in metrics.go — every
 // response-writer wrapper that sits in front of the SSH or Jupyter
@@ -643,8 +676,19 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 		return "", fmt.Errorf("session cookie found but token generation not configured")
 	}
 
-	// If userHeader is configured and signing key is available, try to generate token
+	// If userHeader is configured and signing key is available, try to generate token.
+	// We honor the header ONLY when the request originates from a
+	// trusted-proxy CIDR (or the demo-mode unsafe override is on);
+	// otherwise an attacker who can reach the listener directly could
+	// spoof identity by setting the header. See isUserHeaderTrustedSource
+	// and the NewHandler trust-policy block for the full rationale.
 	if s.userHeader != "" && s.signingKeyPath != "" {
+		if !s.isUserHeaderTrustedSource(r) {
+			s.logger.Warn(logging.DestinationSecurity,
+				"Refusing user-header authentication from untrusted source",
+				"remote_addr", r.RemoteAddr, "header", s.userHeader)
+			return "", fmt.Errorf("user header authentication not permitted from this source")
+		}
 		username := r.Header.Get(s.userHeader)
 		if username == "" {
 			return "", fmt.Errorf("no authorization token and %s header is empty", s.userHeader)
@@ -680,14 +724,34 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 // createAuthenticatedContext creates a context with both token and SecurityConfig set
 // This is a helper to avoid duplicating security setup code in every handler
 func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, error) {
+	// API-key short-circuit. Bearer tokens beginning with the
+	// distinctive `htca-v1-` prefix are this server's own admin-
+	// minted API keys; we resolve them to a user identity + scope
+	// set without going through JWT parsing or the schedd cedar
+	// handshake (API keys don't authenticate against the schedd —
+	// they're for HTTP-only endpoints like /metrics). The branch is
+	// before token-cache / SecurityConfig setup so an API-key
+	// request never accidentally inherits an unrelated cached token.
+	if raw, err := extractBearerToken(r); err == nil && apikey.LooksLikeKey(raw) {
+		ctx, kerr := s.authenticateAPIKey(r, raw)
+		if kerr != nil {
+			return nil, kerr
+		}
+		return ctx, nil
+	}
+
 	// Extract bearer token or generate from user header
 	token, err := s.extractOrGenerateToken(r)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create context with token
-	ctx := WithToken(r.Context(), token)
+	// Create context with token. Stash the bearer token where the
+	// markValidatedOnSuccess middleware can find it after the
+	// handler returns — so a 2xx response promotes the token to
+	// validated and subsequent requests get authoritative identity.
+	ctx := withRequestToken(r.Context(), token)
+	ctx = WithToken(ctx, token)
 
 	// Determine which session cache to use based on authentication mode
 	var sessionCache *security.SessionCache
@@ -710,7 +774,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			entry, exists := s.tokenCache.Get(token)
 			if exists {
 				sessionCache = entry.SessionCache
-				s.logger.Debug(logging.DestinationSecurity, "Using cached session cache for bearer token")
+				s.logger.Debug(logging.DestinationSecurity, "Using cached session cache for bearer token", "validated", entry.Validated)
 			} else {
 				entry, err := s.tokenCache.Add(token)
 				if err != nil {
@@ -785,18 +849,19 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			// User header mode - username is always trusted from header
 			username = r.Header.Get(s.userHeader)
 		} else {
-			// Real bearer token - only use username if token is already in cache (validated)
-			if entry, exists := s.tokenCache.Get(token); exists {
-				// Token has been successfully used before, use cached username
-				username = entry.Username
-			}
+			// Real bearer token. Use the cached username only if a
+			// previous request marked the token Validated (i.e. it
+			// got a 2xx from a handler, which implies the schedd
+			// CEDAR handshake accepted it). Until then, identity is
+			// empty: ownedByMe filters and any other identity-keyed
+			// authz default to "unauthenticated", which is the safe
+			// fallback. This is the fix for the "ParseUnverified
+			// trusts sub" issue identified in the 2026-05 audit.
+			username = s.tokenCache.ValidatedUsername(token)
 		}
 	} else {
-		// Not using user header mode - only use username if token is in cache
-		if entry, exists := s.tokenCache.Get(token); exists {
-			// Token has been successfully used before, use cached username
-			username = entry.Username
-		}
+		// Not using user header mode — same gating as above.
+		username = s.tokenCache.ValidatedUsername(token)
 	}
 
 	// Set username in context for rate limiting only if from validated token

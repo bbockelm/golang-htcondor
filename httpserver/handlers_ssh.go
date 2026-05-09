@@ -48,16 +48,18 @@ type wsControlMsg struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// sshUpgrader is configured per-handler so that origin policy can be tuned
-// later without touching every call site. We accept any origin for now to
-// match the rest of the API's CORS behavior; production deployments behind
-// an OIDC proxy should override this.
-var sshUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin: func(_ *http.Request) bool {
-		return true
-	},
+// sshUpgrader returns a per-request websocket.Upgrader with origin
+// checking bound to the Handler's configured httpBaseURL. See
+// Handler.checkWebSocketOrigin for the policy. Constructed per call
+// because the gorilla/websocket Upgrader doesn't take a closure
+// over per-request state, but the cost is negligible (a struct
+// literal) and avoids exporting a global mutable upgrader.
+func (s *Handler) sshUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     s.checkWebSocketOrigin,
+	}
 }
 
 // handleJobSSH bridges a WebSocket client to an interactive SSH session
@@ -181,7 +183,8 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// All systems go: upgrade.
-	wsConn, err := sshUpgrader.Upgrade(w, r, nil)
+	upgrader := s.sshUpgrader()
+	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// gorilla/websocket already wrote an HTTP error response —
 		// usually 400 (handshake) or 426 (upgrade required), but

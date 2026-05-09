@@ -11,8 +11,21 @@
 //      `queue <cols> from ((...))` from this.
 //
 //   3. Inputs — file uploads attached after submission.
+//
+// === LLM AGENT INTEGRATION ===
+// The chat assistant rendered at the bottom is page-aware and hits
+// /api/v1/chat with `page: "submit"`. The system-prompt suffix and
+// the tool allowlist for this page live server-side at
+// httpserver/handlers_chat_tools.go (constants `submitPageInstructions`
+// and helpers `toolSetTemplateBody`, `toolSetInlineScript`, etc.).
+//
+// KEEP THESE IN SYNC: if a section is renamed/removed, a state field a
+// tool writes to is restructured, or the submit flow changes shape,
+// update the matching server-side description and tool dispatch logic
+// so the LLM doesn't hallucinate UI affordances. The submit button is
+// human-only by design — there is intentionally no submit_job tool.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import {
@@ -23,6 +36,7 @@ import {
   type TemplateColumn,
   type TemplateInputFile,
 } from '@/lib/api';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { Dropzone, type DroppedFile } from '@/components/Dropzone';
 import {
   ResourceRequestPanel,
@@ -32,14 +46,25 @@ import {
 import {
   applyResourcesToBody,
   bodyHasCoreResourceRequests,
+  bodyHasQueueLine,
   bodyHasResourceRequests,
   ensureTransferInput,
   getAttribute,
   readResourcesFromBody,
   setAttribute,
+  type ResourceFieldMask,
 } from '@/lib/submitFile';
 
 type TemplateMode = 'library' | 'custom';
+
+// TableSource picks how the per-job parameters are sourced.
+//   manual — user fills the rendered table (or pastes CSV)
+//   count  — no per-job parameters; submit N copies (HTCondor `queue N`).
+//            Use when each job needs only ProcId-based differentiation.
+//   upload — directory/tarball mode; one row per contained file.
+type TableSource = 'manual' | 'count' | 'upload';
+
+const MAX_TABLE_COUNT = 10000;
 
 interface CustomDraft {
   name: string;
@@ -58,6 +83,21 @@ interface CustomDraft {
   // keeps the submit-file body's `executable` and
   // `transfer_executable` lines in sync with the script's name.
   inlineScript: InlineScript | null;
+  // Additional inline files that ship in the job's sandbox alongside
+  // the wrapper script. Used for the "wrapper.sh + analyze.py"
+  // pattern: the wrapper is the executable (mode 0755 via
+  // inlineScript above), each entry here is a payload file (mode
+  // 0644). Distinct from `inputFiles` because these are co-edited in
+  // the chat UI rather than dropped from the user's filesystem.
+  inlineFiles: InlineFile[];
+}
+
+// InlineFile is one in-draft payload file. Same wire shape as
+// InlineScript but has its own list so the wrapper-script editor and
+// the multi-file editor stay independent.
+interface InlineFile {
+  name: string;
+  content: string; // raw text (UTF-8); base64-encoded at save/submit
 }
 
 // InlineScript carries the editor's state. Persisted as one of the
@@ -94,7 +134,27 @@ when_to_transfer_output = ON_EXIT
 `,
   inputFiles: [],
   inlineScript: null,
+  inlineFiles: [],
 };
+
+// SaveDialogValues is the state held in the save-template dialog as
+// the user edits. The dialog is shared between the manual "Save as
+// template" button and the agent's save_template chat tool — both
+// open it with sensibly-prefilled values, the user can edit any of
+// them before confirming.
+interface SaveDialogValues {
+  id: string;            // slug; empty = server slugifies from name
+  name: string;
+  description: string;
+  visibility: 'private' | 'shared';
+}
+
+// SaveDialogResult is what we hand back to the agent once the dialog
+// closes. action distinguishes a fresh save from an overwrite (so
+// the LLM can phrase its reply correctly) and from a user cancel.
+type SaveDialogResult =
+  | { ok: true; action: 'saved' | 'overwrote'; id: string; visibility: 'private' | 'shared' }
+  | { ok: false; error: string };
 
 // STARTER_INLINE_SCRIPT is what the editor prefills when the user
 // first checks the "Include inline executable script" box. The
@@ -120,12 +180,55 @@ export default function SubmitPage() {
   const [mode, setMode] = useState<TemplateMode>('library');
   const [selectedID, setSelectedID] = useState<string>('');
   const [draft, setDraft] = useState<CustomDraft>(STARTER_DRAFT);
+  // Mirror of `draft` for chat-tool handlers that READ state. The
+  // hooks bag is memoized so we don't churn `useChat`'s onToolCall
+  // binding on every keystroke; that means handler closures don't
+  // see fresh `draft` values. Mutating tools sidestep the issue by
+  // using `setDraft((prev) => …)` (the functional updater always
+  // sees current state), but read-only tools like read_inline_file
+  // must reach for this ref to avoid returning "(none)" right after
+  // a successful set_inline_script. Update is a passive side-effect
+  // — never write to draftRef during render.
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // Current user identity. Used to identify which user-source
+  // templates are "mine" (and therefore overwritable from the save
+  // dialog) vs. "shared by someone else" (read-only — saving creates
+  // a new entry under the actor instead of overwriting). Cached for
+  // the lifetime of the session — it's a feature flag, not state.
+  const meQuery = useQuery({
+    queryKey: ['auth-me'],
+    queryFn: api.auth.me,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const currentUser = meQuery.data?.username ?? '';
 
   const tplQuery = useQuery({
     queryKey: ['templates'],
     queryFn: api.templates.list,
   });
   const templates = tplQuery.data?.templates ?? [];
+  // IDs the actor has personally saved. Used to flag the save dialog
+  // as "Overwrite" rather than "Save", and to drive the save_template
+  // tool's `action` reply (saved vs overwrote). Computed against the
+  // user list because the picker also surfaces shared templates from
+  // other owners — those don't count as "mine."
+  const ownTemplateIDs = useMemo(
+    () =>
+      new Set(
+        templates
+          .filter(
+            (t) =>
+              t.source === 'user' && (!t.owner || t.owner === currentUser),
+          )
+          .map((t) => t.id),
+      ),
+    [templates, currentUser],
+  );
 
   // Auto-select the first library template once the list loads.
   useEffect(() => {
@@ -169,6 +272,17 @@ export default function SubmitPage() {
         content: utf8ToBase64(draft.inlineScript.content),
       });
     }
+    // Additional inline files (e.g. analyze.py the wrapper invokes)
+    // ship as ordinary 0644 sandbox files. base64-encoded the same
+    // way as the wrapper script.
+    for (const f of draft.inlineFiles) {
+      const trimmedName = f.name.trim();
+      if (!trimmedName) continue;
+      draftFiles.push({
+        name: trimmedName,
+        content: utf8ToBase64(f.content),
+      });
+    }
     return {
       name: draft.name || '(new template)',
       columns: draft.columns,
@@ -187,12 +301,17 @@ export default function SubmitPage() {
   // --- Table section state ------------------------------------------
   const [rows, setRows] = useState<string[][]>([['']]);
   // tableSource = 'manual' is the original behavior (user fills in
-  // the table by hand or pastes a CSV). 'upload' is the new mode
+  // the table by hand or pastes a CSV). 'count' submits a flat number
+  // of copies of the template (HTCondor's `queue N`); the per-job
+  // table is unused. 'upload' is the directory/tarball mode.
   // where the user picks a directory or tarball, and each contained
   // file becomes one row + one per-job input.
-  const [tableSource, setTableSource] = useState<'manual' | 'upload'>(
-    'manual',
-  );
+  const [tableSource, setTableSource] = useState<TableSource>('manual');
+  // count is the per-job count for tableSource === 'count'. Starts at
+  // 1 — a single copy is the safest default, especially for the
+  // chat-driven path where the LLM may set count without realizing it
+  // overrides the manual rows.
+  const [count, setCount] = useState<number>(1);
   // uploadFiles holds the per-job files contributed by 'upload' mode.
   // They're separate from the common-inputs `files` list so toggling
   // between modes is reversible — the upload set lives on, ready to
@@ -230,27 +349,94 @@ export default function SubmitPage() {
   const [files, setFiles] = useState<DroppedFile[]>([]);
 
   // --- Resources section state --------------------------------------
-  // Whether the user has chosen to override what the template provides
-  // (or fill in resources when the template is silent). When the
-  // template already sets request_cpus/memory/disk we default to NOT
-  // overriding — the template is the source of truth.
+  // Per-field override mask: which of cpus/memory/disk/gpus the user
+  // wants the form values to override. Each field defaults to "off"
+  // when the template already sets that attribute (so we don't
+  // silently rewrite what the template author chose) and "on" when
+  // the template is silent (so the schedd has something to plan
+  // against). The user can flip individual fields freely — overriding
+  // only memory while inheriting cpus and disk is fine.
   const templateHasCoreResources = useMemo(
     () => bodyHasCoreResourceRequests(active.contents),
     [active.contents],
   );
-  const [overrideResources, setOverrideResources] = useState(false);
+  const [overrideFields, setOverrideFields] = useState<ResourceFieldMask>({
+    cpus: false,
+    memory: false,
+    disk: false,
+    gpus: false,
+  });
   const [resources, setResources] = useState<ResourceRequest>(
     DEFAULT_RESOURCE_REQUEST,
   );
 
-  // When the active template changes, prime resources from whatever it
-  // declared (so the form is a faithful starting point if the user
-  // *does* choose to override) and reset the override flag based on
-  // whether the template already covers the core triple.
+  // --- Chat assistant state -----------------------------------------
+  //
+  // recentlyChanged tracks the section keys the LLM just mutated so the
+  // UI can flash them. Keys: "template" | "table" | "inputs" | "resources"
+  // | "submit". Each entry is auto-removed by a timeout (~3s) so the
+  // flash is transient.
+  const [recentlyChanged, setRecentlyChanged] = useState<Set<string>>(new Set());
+  const recentlyChangedTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+  const flashSection = useCallback((key: string) => {
+    setRecentlyChanged((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    const existing = recentlyChangedTimers.current.get(key);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      setRecentlyChanged((prev) => {
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      recentlyChangedTimers.current.delete(key);
+    }, 3000);
+    recentlyChangedTimers.current.set(key, t);
+  }, []);
+
+  useEffect(
+    () => () => {
+      // Clear pending flash timeouts on unmount; storing the Map ref
+      // means we don't need to chase down each timer ID individually.
+      for (const t of recentlyChangedTimers.current.values()) clearTimeout(t);
+      recentlyChangedTimers.current.clear();
+    },
+    [],
+  );
+
+  // When the active template changes, prime resources from whatever
+  // it declared (so the form is a faithful starting point if the user
+  // *does* choose to override) and reset the per-field override flags
+  // based on which attributes the template already covers. A field is
+  // ON by default exactly when the template is silent on it — that
+  // way we don't accidentally rewrite a template author's deliberate
+  // choice, and we don't leave a silent template with no resource
+  // numbers at all.
   useEffect(() => {
+    // Effect synchronizes form state to the active template — the
+    // navigation-reset-style pattern set-state-in-effect is
+    // heuristically wrong about. Silenced on the setState calls
+    // explicitly, like the other "sync derived state" effects in
+    // this file.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setResources(readResourcesFromBody(active.contents));
-    setOverrideResources(!templateHasCoreResources);
-  }, [active.contents, templateHasCoreResources]);
+    setOverrideFields({
+      cpus: getAttribute(active.contents, 'request_cpus') === undefined,
+      memory: getAttribute(active.contents, 'request_memory') === undefined,
+      disk: getAttribute(active.contents, 'request_disk') === undefined,
+      // GPUs are opt-in: most jobs don't want them, and a template
+      // that's silent on request_gpus shouldn't suddenly start
+      // requesting one because the form widget defaults to 0.
+      gpus: false,
+    });
+  }, [active.contents]);
 
   // First column's name; the per-job upload mode binds it to each
   // file's basename, so it's the variable that has to appear in
@@ -338,8 +524,17 @@ export default function SubmitPage() {
       // values overwrite whatever the template body had. If the
       // template already provides resources and the user opted not to
       // override, leave the body alone.
-      let effectiveContents = overrideResources
-        ? applyResourcesToBody(active.contents, resources)
+      // Per-field override: only the fields whose checkbox is on get
+      // rewritten in the body. If none are on, the body is passed
+      // through untouched (and we skip the rewrite entirely so we
+      // don't risk reordering attribute lines).
+      const anyOverride =
+        overrideFields.cpus ||
+        overrideFields.memory ||
+        overrideFields.disk ||
+        overrideFields.gpus;
+      let effectiveContents = anyOverride
+        ? applyResourcesToBody(active.contents, resources, overrideFields)
         : active.contents;
 
       // The auto-wiring of executable= / transfer_executable= and of
@@ -354,13 +549,19 @@ export default function SubmitPage() {
 
       // Use uploadRows when the table is sourced from a directory /
       // tarball — the manual `rows` state is preserved across mode
-      // toggles and would be stale.
-      const effectiveRows = tableSource === 'upload' ? uploadRows : rows;
-      const body = buildSubmitFile(
-        effectiveContents,
-        active.columns.map((c) => c.name),
-        effectiveRows,
-      );
+      // toggles and would be stale. `count` mode bypasses the table
+      // entirely and submits N copies of the same body.
+      let body: string;
+      if (tableSource === 'count') {
+        body = buildSubmitFileWithCount(effectiveContents, count);
+      } else {
+        const effectiveRows = tableSource === 'upload' ? uploadRows : rows;
+        body = buildSubmitFile(
+          effectiveContents,
+          active.columns.map((c) => c.name),
+          effectiveRows,
+        );
+      }
       const submitted = await api.jobs.submit(body);
 
       // Common files: template default attachments + the user's
@@ -409,16 +610,23 @@ export default function SubmitPage() {
   });
 
   // --- Save-as-template ---------------------------------------------
+  // The save flow is dialog-gated: both the manual "Save as template"
+  // button and the agent's `save_template` chat tool open the same
+  // dialog, the user confirms (possibly editing id/name/description/
+  // visibility), then this mutation runs with the dialog's values.
+  // Going through one mutation regardless of trigger keeps the
+  // post-save invalidation/redirect logic in one place.
   const saveTpl = useMutation({
-    mutationFn: () => {
-      // The inline-script editor's contents are a peer of the
-      // attached input files. Persist them as one of the
-      // template's input_files so a later round-trip (load
-      // saved template → edit → re-save) reproduces the same
-      // attachment list. The active.templateInputFiles memo above
-      // already does this fold for the runtime path; doing it
-      // again here keeps the save mutation's data shape obvious
-      // without depending on that memo's recompute timing.
+    mutationFn: (override: {
+      id?: string;
+      name: string;
+      description: string;
+      visibility: 'private' | 'shared';
+    }) => {
+      // Collect the per-template attachment list: explicit user-dropped
+      // input files + the inline wrapper script + each additional
+      // inline file. base64-encoded so the save endpoint accepts the
+      // same envelope the SPA also sends per-job at submit time.
       const files: TemplateInputFile[] = draft.inputFiles.map(
         ({ name, content }) => ({ name, content }),
       );
@@ -428,13 +636,19 @@ export default function SubmitPage() {
           content: utf8ToBase64(draft.inlineScript.content),
         });
       }
-      // draft.contents already has the executable= /
-      // transfer_executable= / transfer_input_files edits applied
-      // (the live-edit effects keep it in sync with the inline
-      // script and upload state), so we save it verbatim.
+      for (const f of draft.inlineFiles) {
+        const trimmedName = f.name.trim();
+        if (!trimmedName) continue;
+        files.push({
+          name: trimmedName,
+          content: utf8ToBase64(f.content),
+        });
+      }
       return api.templates.save({
-        name: draft.name,
-        description: draft.description,
+        id: override.id,
+        name: override.name,
+        description: override.description,
+        visibility: override.visibility,
         columns: draft.columns,
         contents: draft.contents,
         input_files: files,
@@ -448,17 +662,627 @@ export default function SubmitPage() {
     },
   });
 
+  // Dialog open state. `pending` carries the agent's resolve callback
+  // when the dialog was triggered from a chat tool — onConfirm /
+  // onCancel call it to deliver the result back to the LLM. Manual
+  // (button-triggered) opens leave pending=null and onConfirm just
+  // closes after the mutation resolves.
+  const [saveDialog, setSaveDialog] = useState<null | {
+    initial: SaveDialogValues;
+    pending?: (result: SaveDialogResult) => void;
+  }>(null);
+
   // The "rows" state is per-mode; pick the right one for the
   // disabled check so toggling into upload mode (which clears the
   // user's edits but preserves the manual rows in state) doesn't
   // silently re-enable the button on stale data.
   const effectiveRowsForGate =
     tableSource === 'upload' ? uploadRows : rows;
-  const submitDisabled =
-    submit.isPending ||
-    !active.contents.trim() ||
-    effectiveRowsForGate.length === 0 ||
-    effectiveRowsForGate.some((r) => r.every((c) => c.trim() === ''));
+  // Queue-line guard. The page synthesizes the queue statement from
+  // the table rows; any queue line in the body would either duplicate
+  // or contradict the synthesized one. Surface this BEFORE the user
+  // hits Submit (the schedd would also reject it, but only after a
+  // round-trip and a less helpful error).
+  const bodyHasQueue = useMemo(
+    () => bodyHasQueueLine(active.contents),
+    [active.contents],
+  );
+
+  // Effective per-job count. In count mode this is the user-set
+  // number; otherwise it's just the row count that will be submitted.
+  // Used for the button label and the row-count-based gates.
+  const effectiveJobCount =
+    tableSource === 'count'
+      ? Math.max(1, Math.floor(count) || 1)
+      : effectiveRowsForGate.length;
+
+  // submitBlockedReason returns null when the form is ready to submit
+  // OR a structured reason describing what's wrong + which section
+  // the user (or chat-driven highlight) should look at. We surface
+  // this prose on the page so a greyed-out button is never a mystery.
+  // Order matters: report the FIRST blocker so the user fixes one
+  // thing at a time instead of reading a wall of red.
+  const submitBlockedReason = useMemo<
+    { message: string; section: 'template' | 'table' | 'inputs' | 'resources' | 'submit' } | null
+  >(() => {
+    if (!active.contents.trim()) {
+      return {
+        section: 'template',
+        message: 'The submit-file body is empty. Pick a template or fill in the body.',
+      };
+    }
+    if (bodyHasQueue) {
+      return {
+        section: 'template',
+        message:
+          'The submit-file body contains a "queue" line. The page synthesizes the queue statement from the table; remove the line.',
+      };
+    }
+    if (tableSource === 'count') {
+      if (!Number.isFinite(count) || count < 1) {
+        return { section: 'table', message: 'Job count must be at least 1.' };
+      }
+      if (count > MAX_TABLE_COUNT) {
+        return {
+          section: 'table',
+          message: `Job count ${count} exceeds the per-batch limit of ${MAX_TABLE_COUNT}.`,
+        };
+      }
+    } else {
+      if (effectiveRowsForGate.length === 0) {
+        return {
+          section: 'table',
+          message:
+            tableSource === 'upload'
+              ? 'No files picked yet. Drop a directory or tarball to populate the table, switch to manual mode, or pick "Run N copies".'
+              : 'The job table has no rows. Add a row, paste CSV, switch to upload mode, or pick "Run N copies".',
+        };
+      }
+      if (effectiveRowsForGate.some((r) => r.every((c) => c.trim() === ''))) {
+        return {
+          section: 'table',
+          message: 'One of the table rows is completely empty; either fill it in or remove it.',
+        };
+      }
+    }
+    return null;
+  }, [
+    active.contents,
+    bodyHasQueue,
+    count,
+    effectiveRowsForGate,
+    tableSource,
+  ]);
+  const submitDisabled = submit.isPending || submitBlockedReason !== null;
+
+  // Chat surface gating. Same /api/v1/chat/info probe the jobs page
+  // uses; the server returns enabled=false when the LLM key isn't
+  // configured or MCP is off. Submit page has no "have any jobs"
+  // requirement (the user is creating jobs, not inspecting them).
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+
+  // Client-side tool dispatchers, keyed by the names the server
+  // advertises for page="submit". The hooks mutate page state via the
+  // existing setters, then call flashSection to surface the change in
+  // the UI. Server-side tools (query_slots, doc_search, etc.) don't
+  // need entries here — they execute on the server and the result
+  // arrives as a tool_result the panel renders inline.
+  //
+  // === KEEP IN SYNC WITH submitPageInstructions IN
+  // httpserver/handlers_chat_tools.go ===
+  // The server-side prose tells the LLM what these tools do; if you
+  // add or remove a hook here, update the matching description so
+  // the model doesn't hallucinate (or miss) tools.
+  const chatHooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      highlight_section: (input) => {
+        const sec = String(input.section ?? '');
+        if (!['template', 'table', 'inputs', 'resources', 'submit'].includes(sec)) {
+          return { ok: false, error: `unknown section: ${sec}` };
+        }
+        flashSection(sec);
+        return { ok: true, highlighted: sec };
+      },
+      set_template_body: (input) => {
+        const contents = String(input.contents ?? '');
+        if (!contents.trim()) {
+          return { ok: false, error: 'contents must be non-empty' };
+        }
+        // Reject bodies that include a queue line. The page synthesizes
+        // `queue <cols> from ((...))` from the table rows and a
+        // hand-written queue would either duplicate that line (HTCondor
+        // submit error) or produce a job count that doesn't match the
+        // user's table. Rejecting here surfaces the problem to the LLM
+        // immediately so it can retry without the offending line; the
+        // error text below also makes it past the SDK back into the
+        // assistant's next turn.
+        if (bodyHasQueueLine(contents)) {
+          return {
+            ok: false,
+            error:
+              'submit-file body must not contain a "queue" line; the page synthesizes one from the table rows. Remove the queue line and resend.',
+          };
+        }
+        // Ensure we're in custom mode — we shouldn't mutate a library
+        // template under the user's nose. If they're in library mode,
+        // fork the current selection into a draft first so they don't
+        // lose their starting point.
+        if (mode !== 'custom') {
+          setDraft((prev) => ({
+            ...prev,
+            name: selected?.name ? `${selected.name} (edited)` : prev.name,
+            description: selected?.description ?? prev.description,
+            columns: selected?.columns ?? prev.columns,
+            contents,
+          }));
+          setMode('custom');
+        } else {
+          setDraft((prev) => ({ ...prev, contents }));
+        }
+        flashSection('template');
+        return { ok: true, length: contents.length };
+      },
+      set_inline_script: (input) => {
+        const filename = String(input.filename ?? '').trim();
+        const content = String(input.content ?? '');
+        if (!filename || !content) {
+          return { ok: false, error: 'filename and content are both required' };
+        }
+        if (mode !== 'custom') {
+          // Same fork-into-draft semantics as set_template_body.
+          setDraft((prev) => ({
+            ...prev,
+            name: selected?.name ? `${selected.name} (edited)` : prev.name,
+            description: selected?.description ?? prev.description,
+            columns: selected?.columns ?? prev.columns,
+            contents: selected?.contents ?? prev.contents,
+            inlineScript: { name: filename, content },
+          }));
+          setMode('custom');
+        } else {
+          setDraft((prev) => ({
+            ...prev,
+            inlineScript: { name: filename, content },
+          }));
+        }
+        flashSection('template');
+        return { ok: true, filename, length: content.length };
+      },
+      clear_inline_script: () => {
+        setDraft((prev) =>
+          prev.inlineScript === null ? prev : { ...prev, inlineScript: null },
+        );
+        flashSection('template');
+        return { ok: true };
+      },
+
+      // Multi-file inline editing. The wrapper script is still
+      // managed via set_inline_script / clear_inline_script (the
+      // agent has different mental model for "the executable" vs
+      // "an additional payload file"); these tools refuse to touch
+      // the wrapper script's filename to keep the boundary clean.
+      add_inline_file: (input) => {
+        const name = String(input.name ?? '').trim();
+        const content = String(input.content ?? '');
+        if (!name) {
+          return { ok: false, error: 'name is required' };
+        }
+        if (name.includes('/')) {
+          return {
+            ok: false,
+            error: 'name must not contain path separators',
+          };
+        }
+        let conflict: string | null = null;
+        setDraft((prev) => {
+          if (prev.inlineScript && prev.inlineScript.name.trim() === name) {
+            conflict = 'wrapper-script';
+            return prev;
+          }
+          if (prev.inlineFiles.some((f) => f.name === name)) {
+            conflict = 'inline-file';
+            return prev;
+          }
+          if (prev.inputFiles.some((f) => f.name === name)) {
+            conflict = 'input-file';
+            return prev;
+          }
+          return {
+            ...prev,
+            inlineFiles: [...prev.inlineFiles, { name, content }],
+          };
+        });
+        if (conflict === 'wrapper-script') {
+          return {
+            ok: false,
+            error: `"${name}" is the wrapper script; use set_inline_script or pick a different name`,
+          };
+        }
+        if (conflict === 'inline-file') {
+          return {
+            ok: false,
+            error: `inline file "${name}" already exists; use set_inline_file_content to overwrite or replace_in_inline_file to edit`,
+          };
+        }
+        if (conflict === 'input-file') {
+          return {
+            ok: false,
+            error: `"${name}" is already in the user-uploaded input files; pick a different name`,
+          };
+        }
+        flashSection('template');
+        return { ok: true, name, length: content.length };
+      },
+
+      read_inline_file: (input) => {
+        const name = String(input.name ?? '').trim();
+        if (!name) {
+          return { ok: false, error: 'name is required' };
+        }
+        // Read via the ref (NOT the closure-captured `draft`) so a
+        // tool call immediately after add_inline_file / set_inline_
+        // script sees the latest state. The chatHooks memo doesn't
+        // depend on `draft` (would churn on every keystroke), so the
+        // closure here is stuck at the initial STARTER_DRAFT.
+        const d = draftRef.current;
+        if (d.inlineScript && d.inlineScript.name.trim() === name) {
+          return {
+            ok: true,
+            name,
+            kind: 'wrapper-script',
+            content: d.inlineScript.content,
+          };
+        }
+        const f = d.inlineFiles.find((x) => x.name === name);
+        if (!f) {
+          return {
+            ok: false,
+            error: `inline file "${name}" not found; current files: ${listAllInlineNames(d).join(', ') || '(none)'}`,
+          };
+        }
+        return { ok: true, name, kind: 'inline-file', content: f.content };
+      },
+
+      replace_in_inline_file: (input) => {
+        const name = String(input.name ?? '').trim();
+        const find = String(input.find ?? '');
+        const replace = String(input.replace ?? '');
+        if (!name) return { ok: false, error: 'name is required' };
+        if (find === '') {
+          return { ok: false, error: 'find string must not be empty' };
+        }
+        let result: { ok: boolean; error?: string; matches?: number } = {
+          ok: false,
+          error: 'unhandled',
+        };
+        const swap = (text: string): string | null => {
+          const occurrences = countOccurrences(text, find);
+          if (occurrences === 0) {
+            result = {
+              ok: false,
+              error: `find string not found in "${name}"`,
+            };
+            return null;
+          }
+          if (occurrences > 1) {
+            result = {
+              ok: false,
+              error: `find string matches ${occurrences} places in "${name}"; pass more surrounding context to disambiguate`,
+              matches: occurrences,
+            };
+            return null;
+          }
+          result = { ok: true, matches: 1 };
+          return text.replace(find, replace);
+        };
+
+        let touched = false;
+        setDraft((prev) => {
+          if (prev.inlineScript && prev.inlineScript.name.trim() === name) {
+            const next = swap(prev.inlineScript.content);
+            if (next === null) return prev;
+            touched = true;
+            return {
+              ...prev,
+              inlineScript: { ...prev.inlineScript, content: next },
+            };
+          }
+          const idx = prev.inlineFiles.findIndex((f) => f.name === name);
+          if (idx < 0) {
+            result = {
+              ok: false,
+              error: `inline file "${name}" not found; current files: ${listAllInlineNames(prev).join(', ') || '(none)'}`,
+            };
+            return prev;
+          }
+          const next = swap(prev.inlineFiles[idx].content);
+          if (next === null) return prev;
+          touched = true;
+          const newFiles = [...prev.inlineFiles];
+          newFiles[idx] = { ...newFiles[idx], content: next };
+          return { ...prev, inlineFiles: newFiles };
+        });
+        if (touched) flashSection('template');
+        return result;
+      },
+
+      set_inline_file_content: (input) => {
+        const name = String(input.name ?? '').trim();
+        const content = String(input.content ?? '');
+        if (!name) return { ok: false, error: 'name is required' };
+        let action: 'created' | 'overwrote' = 'created';
+        let conflict: string | null = null;
+        setDraft((prev) => {
+          if (prev.inlineScript && prev.inlineScript.name.trim() === name) {
+            conflict = 'wrapper-script';
+            return prev;
+          }
+          if (prev.inputFiles.some((f) => f.name === name)) {
+            conflict = 'input-file';
+            return prev;
+          }
+          const idx = prev.inlineFiles.findIndex((f) => f.name === name);
+          if (idx >= 0) {
+            action = 'overwrote';
+            const newFiles = [...prev.inlineFiles];
+            newFiles[idx] = { ...newFiles[idx], content };
+            return { ...prev, inlineFiles: newFiles };
+          }
+          return {
+            ...prev,
+            inlineFiles: [...prev.inlineFiles, { name, content }],
+          };
+        });
+        if (conflict === 'wrapper-script') {
+          return {
+            ok: false,
+            error: `"${name}" is the wrapper script; use set_inline_script (and the matching schema) instead`,
+          };
+        }
+        if (conflict === 'input-file') {
+          return {
+            ok: false,
+            error: `"${name}" collides with a user-uploaded input file; rename`,
+          };
+        }
+        flashSection('template');
+        return { ok: true, name, action, length: content.length };
+      },
+
+      delete_inline_file: (input) => {
+        const name = String(input.name ?? '').trim();
+        if (!name) return { ok: false, error: 'name is required' };
+        let removed = false;
+        setDraft((prev) => {
+          if (!prev.inlineFiles.some((f) => f.name === name)) {
+            return prev;
+          }
+          removed = true;
+          return {
+            ...prev,
+            inlineFiles: prev.inlineFiles.filter((f) => f.name !== name),
+          };
+        });
+        if (removed) flashSection('template');
+        return { ok: true, name, removed };
+      },
+
+      // Open the save-template dialog with the agent's suggested
+      // values pre-filled. Returns a Promise that resolves once the
+      // user clicks Save / Overwrite / Cancel — that's why this hook
+      // is async (the SDK awaits the return value to populate the
+      // tool result).
+      save_template: (input) => {
+        // Same staleness reasoning as read_inline_file: chatHooks
+        // doesn't depend on `draft` (would churn on every keystroke),
+        // so fall back to the latest values via draftRef rather than
+        // the closure-captured one.
+        const d = draftRef.current;
+        const id = slugify(String(input.id ?? '') || d.name);
+        const name = String(input.name ?? '').trim() || d.name;
+        const description =
+          String(input.description ?? '').trim() || d.description;
+        const visibility =
+          input.visibility === 'shared' ? 'shared' : 'private';
+        if (!name) {
+          return {
+            ok: false,
+            error:
+              'no name to save under; ask the user for a template name first or call set_template_description',
+          };
+        }
+        return new Promise<SaveDialogResult>((resolve) => {
+          setSaveDialog({
+            initial: { id, name, description, visibility },
+            pending: resolve,
+          });
+        });
+      },
+      set_resources: (input) => {
+        // The chat tool schema uses snake_case (memory_mb / disk_mb)
+        // because that's the convention HTCondor uses for ClassAd
+        // attributes — keeps the LLM's mental model consistent. The
+        // ResourceRequest type is camelCase, so we translate at this
+        // boundary.
+        const next: Partial<ResourceRequest> = {};
+        if (typeof input.cpus === 'number') next.cpus = input.cpus;
+        if (typeof input.memory_mb === 'number') next.memoryMB = input.memory_mb;
+        if (typeof input.disk_mb === 'number') next.diskMB = input.disk_mb;
+        if (Object.keys(next).length === 0) {
+          return { ok: false, error: 'at least one of cpus/memory_mb/disk_mb required' };
+        }
+        setResources((prev) => ({ ...prev, ...next }));
+        // Turn on the override flag for whichever fields the chat
+        // actually touched. Same per-field semantics the user gets
+        // from the checkboxes — overriding only memory leaves cpus
+        // and disk inheriting from the template.
+        setOverrideFields((prev) => ({
+          ...prev,
+          cpus: prev.cpus || next.cpus !== undefined,
+          memory: prev.memory || next.memoryMB !== undefined,
+          disk: prev.disk || next.diskMB !== undefined,
+        }));
+        flashSection('resources');
+        return { ok: true, applied: next };
+      },
+      add_template_input_file: (input) => {
+        const name = String(input.name ?? '').trim();
+        const content = String(input.content ?? '');
+        if (!name) return { ok: false, error: 'name is required' };
+        // The submit page already accepts arbitrary text files in
+        // draft.inputFiles. We base64-encode here so the existing
+        // save/submit pipeline can ship the bytes verbatim.
+        const encoded = utf8ToBase64(content);
+        setDraft((prev) => ({
+          ...prev,
+          inputFiles: [
+            ...prev.inputFiles.filter((f) => f.name !== name),
+            {
+              id: crypto.randomUUID(),
+              name,
+              content: encoded,
+              size: new Blob([content]).size,
+            },
+          ],
+        }));
+        if (mode !== 'custom') setMode('custom');
+        flashSection('template');
+        return { ok: true, name, bytes: content.length };
+      },
+      select_template: (input) => {
+        const id = String(input.id ?? '').trim();
+        if (!id) return { ok: false, error: 'id is required' };
+        const match = templates.find((t) => t.id === id);
+        if (!match) {
+          return {
+            ok: false,
+            error: `no template with id ${JSON.stringify(id)}; call list_submit_templates to see available ids`,
+          };
+        }
+        setMode('library');
+        setSelectedID(id);
+        flashSection('template');
+        return { ok: true, id, name: match.name };
+      },
+      switch_to_custom_template: (input) => {
+        const startFrom = String(input.start_from ?? 'current');
+        if (startFrom === 'blank') {
+          setDraft(STARTER_DRAFT);
+        } else if (selected) {
+          setDraft({
+            name: `${selected.name} (edited)`,
+            description: selected.description ?? '',
+            columns: selected.columns,
+            contents: selected.contents,
+            inputFiles: [],
+            inlineScript: null,
+            inlineFiles: [],
+          });
+        }
+        setMode('custom');
+        flashSection('template');
+        return { ok: true, mode: 'custom', start_from: startFrom };
+      },
+      set_template_description: (input) => {
+        const name = typeof input.name === 'string' ? input.name : undefined;
+        const description =
+          typeof input.description === 'string' ? input.description : undefined;
+        if (name === undefined && description === undefined) {
+          return { ok: false, error: 'pass name or description (or both)' };
+        }
+        setDraft((prev) => ({
+          ...prev,
+          ...(name !== undefined ? { name } : {}),
+          ...(description !== undefined ? { description } : {}),
+        }));
+        if (mode !== 'custom') setMode('custom');
+        flashSection('template');
+        return { ok: true };
+      },
+      set_template_columns: (input) => {
+        const raw = input.columns;
+        if (!Array.isArray(raw)) {
+          return { ok: false, error: 'columns must be an array of {name, description?}' };
+        }
+        // Validate up-front so the LLM gets a precise error rather than
+        // a partial mutation. Names must be HTCondor identifiers: same
+        // rule the queue-statement builder enforces at submit time.
+        const cleaned: TemplateColumn[] = [];
+        for (let i = 0; i < raw.length; i++) {
+          const c = raw[i] as Record<string, unknown> | null;
+          if (!c || typeof c !== 'object') {
+            return { ok: false, error: `columns[${i}] must be an object with a name` };
+          }
+          const name = typeof c.name === 'string' ? c.name : '';
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            return {
+              ok: false,
+              error: `columns[${i}].name "${name}" is not a valid identifier; use letters, digits, underscores; must not start with a digit`,
+            };
+          }
+          const description = typeof c.description === 'string' ? c.description : undefined;
+          cleaned.push({ name, ...(description ? { description } : {}) });
+        }
+        setDraft((prev) => ({ ...prev, columns: cleaned }));
+        if (mode !== 'custom') setMode('custom');
+        flashSection('template');
+        return { ok: true, columns: cleaned.length };
+      },
+      set_table_rows: (input) => {
+        const raw = input.rows;
+        if (!Array.isArray(raw)) {
+          return { ok: false, error: 'rows must be an array of arrays of strings' };
+        }
+        const expected = active.columns.length;
+        // Coerce each cell to a string and pad/truncate to the column
+        // count. This mirrors what the manual editor does when columns
+        // are added/removed: the row reshape doesn't drop user data
+        // silently, but extra cells the LLM tacked on past the schema
+        // get trimmed.
+        const rows: string[][] = raw.map((row) => {
+          const out: string[] = [];
+          if (Array.isArray(row)) {
+            for (let i = 0; i < expected; i++) {
+              out.push(typeof row[i] === 'string' ? (row[i] as string) : String(row[i] ?? ''));
+            }
+          } else {
+            for (let i = 0; i < expected; i++) out.push('');
+          }
+          return out;
+        });
+        setRows(rows);
+        // Switch out of upload mode — the LLM-supplied rows override
+        // any prior file selection. The user can flip back to upload
+        // mode by hand if they didn't want this.
+        setTableSource('manual');
+        flashSection('table');
+        return { ok: true, rows: rows.length, columns: expected };
+      },
+      set_table_count: (input) => {
+        const n = Number(input.count);
+        if (!Number.isFinite(n) || n < 1) {
+          return { ok: false, error: 'count must be a positive integer' };
+        }
+        if (n > MAX_TABLE_COUNT) {
+          return {
+            ok: false,
+            error: `count ${n} exceeds the per-batch limit of ${MAX_TABLE_COUNT}`,
+          };
+        }
+        setCount(Math.floor(n));
+        setTableSource('count');
+        flashSection('table');
+        return { ok: true, count: Math.floor(n) };
+      },
+    }),
+    [active.columns.length, flashSection, mode, selected, templates],
+  );
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -470,33 +1294,73 @@ export default function SubmitPage() {
         </p>
       </div>
 
-      <TemplateSection
-        mode={mode}
-        setMode={setMode}
-        templates={templates}
-        loading={tplQuery.isLoading}
-        loadError={tplQuery.error as Error | null}
-        selectedID={selectedID}
-        setSelectedID={setSelectedID}
-        draft={draft}
-        setDraft={setDraft}
-        onSave={() => saveTpl.mutate()}
-        saveState={saveTpl}
+      {/*
+        Assistant lives at the top of the page (vs. the bottom on the
+        jobs page) and is open by default — the agent is the primary
+        affordance here for first-time submitters who'd rather describe
+        their job in prose than wrestle with the form. The form below
+        stays the source of truth; the assistant just edits it.
+      */}
+      <ChatPanel
+        visible={chatVisible}
+        page="submit"
+        hooks={chatHooks}
+        // Submit page has no destructive server-side tools advertised;
+        // hide the auto-approve checkbox row entirely.
+        confirmableTools={[]}
+        headerLabel="Submit assistant"
+        togglerLabel="Ask the submit assistant"
+        pageHelp={`Try "scaffold a job that runs my Python script", "what GPU types are available?", or "wrap my command with a setup script".`}
+        defaultOpen
       />
 
-      <TableSection
-        columns={active.columns}
-        // In 'upload' mode the rows are derived from the picked
-        // files and we don't let the user edit them — every change
-        // comes from re-picking. In 'manual' mode the parent's
-        // setRows handles user edits as before.
-        rows={tableSource === 'upload' ? uploadRows : rows}
-        setRows={setRows}
-        source={tableSource}
-        setSource={setTableSource}
-        uploadFiles={uploadFiles}
-        setUploadFiles={setUploadFiles}
-      />
+      <ChatHighlight active={recentlyChanged.has('template')}>
+        <TemplateSection
+          mode={mode}
+          setMode={setMode}
+          templates={templates}
+          loading={tplQuery.isLoading}
+          loadError={tplQuery.error as Error | null}
+          selectedID={selectedID}
+          setSelectedID={setSelectedID}
+          draft={draft}
+          setDraft={setDraft}
+          onSave={() =>
+            // Manual button → open the same dialog the agent uses.
+            // Pre-fill from the current draft so the user mostly just
+            // confirms; they can still rename or flip visibility
+            // before saving.
+            setSaveDialog({
+              initial: {
+                id: slugify(draft.name),
+                name: draft.name,
+                description: draft.description,
+                visibility: 'private',
+              },
+            })
+          }
+          saveState={saveTpl}
+          currentUser={currentUser}
+        />
+      </ChatHighlight>
+
+      <ChatHighlight active={recentlyChanged.has('table')}>
+        <TableSection
+          columns={active.columns}
+          // In 'upload' mode the rows are derived from the picked
+          // files and we don't let the user edit them — every change
+          // comes from re-picking. In 'manual' mode the parent's
+          // setRows handles user edits as before.
+          rows={tableSource === 'upload' ? uploadRows : rows}
+          setRows={setRows}
+          source={tableSource}
+          setSource={setTableSource}
+          uploadFiles={uploadFiles}
+          setUploadFiles={setUploadFiles}
+          count={count}
+          setCount={setCount}
+        />
+      </ChatHighlight>
 
       {libraryUploadWarning && (
         <div
@@ -507,16 +1371,31 @@ export default function SubmitPage() {
         </div>
       )}
 
-      <InputsSection files={files} setFiles={setFiles} disabled={submit.isPending} />
+      {bodyHasQueue && (
+        <div
+          role="alert"
+          className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+        >
+          ⚠ The submit-file body contains a <code>queue</code> line. The
+          page synthesizes the queue statement from the table rows;
+          remove the <code>queue</code> line from the body to enable
+          submit.
+        </div>
+      )}
 
-      <ResourcesSection
-        templateHasResources={bodyHasResourceRequests(active.contents)}
-        templateHasCoreResources={templateHasCoreResources}
-        override={overrideResources}
-        setOverride={setOverrideResources}
-        resources={resources}
-        setResources={setResources}
-      />
+      <ChatHighlight active={recentlyChanged.has('inputs')}>
+        <InputsSection files={files} setFiles={setFiles} disabled={submit.isPending} />
+      </ChatHighlight>
+
+      <ChatHighlight active={recentlyChanged.has('resources')}>
+        <ResourcesSection
+          templateContents={active.contents}
+          fields={overrideFields}
+          setFields={setOverrideFields}
+          resources={resources}
+          setResources={setResources}
+        />
+      </ChatHighlight>
 
       {submit.isError && (
         <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -526,20 +1405,315 @@ export default function SubmitPage() {
         </div>
       )}
 
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => submit.mutate()}
-          disabled={submitDisabled}
-          className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+      <ChatHighlight active={recentlyChanged.has('submit')}>
+        <div className="space-y-2">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => submit.mutate()}
+              disabled={submitDisabled}
+              className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            >
+              {submit.isPending
+                ? 'Submitting…'
+                : `Submit batch (${effectiveJobCount} job${effectiveJobCount === 1 ? '' : 's'})`}
+            </button>
+            <span className="text-xs text-gray-500">
+              Submitting as <code>{active.name}</code>.
+            </span>
+          </div>
+          {/*
+            Surface WHY the button is disabled. A greyed-out button is
+            otherwise a guessing game; the user is left wondering which
+            section to fix. We tell them in prose AND drop a button
+            that flashes the offending section so they can find it on
+            a long page.
+          */}
+          {submitBlockedReason && !submit.isPending && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+            >
+              <span className="font-semibold">Can't submit yet:</span>
+              <span className="flex-1">{submitBlockedReason.message}</span>
+              <button
+                type="button"
+                onClick={() => flashSection(submitBlockedReason.section)}
+                className="rounded border border-amber-400 bg-white px-2 py-0.5 text-amber-800 hover:bg-amber-100"
+              >
+                Show me
+              </button>
+            </div>
+          )}
+        </div>
+      </ChatHighlight>
+
+      {saveDialog && (
+        <SaveTemplateDialog
+          initial={saveDialog.initial}
+          existingIDs={ownTemplateIDs}
+          isPending={saveTpl.isPending}
+          error={
+            saveTpl.error
+              ? saveTpl.error instanceof Error
+                ? saveTpl.error.message
+                : String(saveTpl.error)
+              : null
+          }
+          onConfirm={async (values) => {
+            try {
+              await saveTpl.mutateAsync({
+                id: values.id || undefined,
+                name: values.name,
+                description: values.description,
+                visibility: values.visibility,
+              });
+              const action: 'saved' | 'overwrote' =
+                ownTemplateIDs.has(values.id) ? 'overwrote' : 'saved';
+              saveDialog.pending?.({
+                ok: true,
+                action,
+                id: values.id,
+                visibility: values.visibility,
+              });
+              setSaveDialog(null);
+            } catch (e) {
+              // Surface the error in-dialog (saveTpl.error already
+              // populated by useMutation) and DO NOT close — let the
+              // user fix and retry. The agent's promise stays
+              // unresolved until the user either succeeds or cancels.
+              void e;
+            }
+          }}
+          onCancel={() => {
+            saveDialog.pending?.({
+              ok: false,
+              error: 'user canceled the save dialog',
+            });
+            saveTpl.reset();
+            setSaveDialog(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// SaveTemplateDialog is the confirmation gate for both the manual
+// "Save as template" button and the agent's save_template chat tool.
+// Pre-fills with sensibly-suggested values (id slug, name,
+// description, visibility); the user is free to change any of them
+// before clicking Save (or Overwrite if the id matches one they've
+// previously saved). Visibility offers Private / Shared with a
+// short explanation so users don't accidentally publish.
+function SaveTemplateDialog({
+  initial,
+  existingIDs,
+  isPending,
+  error,
+  onConfirm,
+  onCancel,
+}: {
+  initial: SaveDialogValues;
+  existingIDs: Set<string>;
+  isPending: boolean;
+  error: string | null;
+  onConfirm: (values: SaveDialogValues) => void;
+  onCancel: () => void;
+}) {
+  const [values, setValues] = useState<SaveDialogValues>(initial);
+  // Re-seed from initial when the dialog reopens with different
+  // suggestions (e.g. agent invokes with a new name after the user
+  // canceled the previous attempt).
+  useEffect(() => {
+    setValues(initial);
+  }, [initial]);
+
+  const idTrimmed = values.id.trim();
+  const isOverwrite = idTrimmed !== '' && existingIDs.has(idTrimmed);
+  const idValid =
+    idTrimmed === '' || /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/.test(idTrimmed);
+  const submittable =
+    !isPending && values.name.trim() !== '' && idValid;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div
+        role="dialog"
+        aria-labelledby="save-template-dialog-title"
+        aria-modal="true"
+        className="w-full max-w-lg rounded bg-white p-5 shadow-lg"
+      >
+        <h2
+          id="save-template-dialog-title"
+          className="text-lg font-semibold text-gray-900"
         >
-          {submit.isPending ? 'Submitting…' : `Submit batch (${effectiveRowsForGate.length} job${effectiveRowsForGate.length === 1 ? '' : 's'})`}
-        </button>
-        <span className="text-xs text-gray-500">
-          Submitting as <code>{active.name}</code>.
-        </span>
+          {isOverwrite ? 'Overwrite template' : 'Save as template'}
+        </h2>
+        <p className="mt-1 text-xs text-gray-500">
+          {isOverwrite
+            ? `An existing template with id "${idTrimmed}" will be replaced.`
+            : 'Saves the current submit-file body, columns, and inline files as a reusable template.'}
+        </p>
+
+        <div className="mt-4 space-y-3 text-sm">
+          <label className="block">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              Name
+            </div>
+            <input
+              type="text"
+              value={values.name}
+              onChange={(e) => {
+                const name = e.target.value;
+                setValues((v) => ({
+                  ...v,
+                  name,
+                  // Re-slugify the id whenever the user is still
+                  // working with the suggested slug (we infer this
+                  // by comparing against a slugify of the previous
+                  // name). Once the user has hand-edited the id
+                  // they take ownership of it and we stop touching.
+                  id:
+                    v.id === slugify(initial.name) ||
+                    v.id === '' ||
+                    v.id === slugify(v.name)
+                      ? slugify(name)
+                      : v.id,
+                }));
+              }}
+              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1"
+              autoFocus
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              ID (slug)
+            </div>
+            <input
+              type="text"
+              value={values.id}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, id: e.target.value }))
+              }
+              placeholder="auto-derived from name if empty"
+              className={`mt-0.5 w-full rounded border px-2 py-1 font-mono text-xs ${
+                idValid ? 'border-gray-300' : 'border-red-400'
+              }`}
+            />
+            {!idValid && (
+              <p className="mt-0.5 text-[11px] text-red-700">
+                ID must be lowercase alphanumeric with hyphens (e.g.
+                gpu-analyze).
+              </p>
+            )}
+          </label>
+          <label className="block">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              Description
+            </div>
+            <textarea
+              value={values.description}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, description: e.target.value }))
+              }
+              rows={2}
+              className="mt-0.5 w-full resize-none rounded border border-gray-300 px-2 py-1"
+            />
+          </label>
+          <fieldset className="rounded border border-gray-200 px-3 py-2">
+            <legend className="px-1 text-xs font-medium uppercase tracking-wide text-gray-500">
+              Visibility
+            </legend>
+            <label className="flex items-start gap-2 py-1">
+              <input
+                type="radio"
+                name="visibility"
+                checked={values.visibility === 'private'}
+                onChange={() =>
+                  setValues((v) => ({ ...v, visibility: 'private' }))
+                }
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Private</span>
+                <span className="ml-1 text-xs text-gray-500">
+                  — only you see it.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 py-1">
+              <input
+                type="radio"
+                name="visibility"
+                checked={values.visibility === 'shared'}
+                onChange={() =>
+                  setValues((v) => ({ ...v, visibility: 'shared' }))
+                }
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Shared</span>
+                <span className="ml-1 text-xs text-gray-500">
+                  — every authenticated user can see it in their
+                  picker. Only you can edit or delete.
+                </span>
+              </span>
+            </label>
+          </fieldset>
+        </div>
+
+        {error && (
+          <div className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(values)}
+            disabled={!submittable}
+            className={`rounded px-3 py-1.5 text-sm font-medium text-white ${
+              isOverwrite
+                ? 'bg-amber-600 hover:bg-amber-700'
+                : 'bg-brand-600 hover:bg-brand-700'
+            } disabled:opacity-50`}
+          >
+            {isPending ? 'Saving…' : isOverwrite ? 'Overwrite' : 'Save'}
+          </button>
+        </div>
       </div>
     </div>
   );
+}
+
+// ChatHighlight wraps a child block with a transient yellow ring +
+// soft-pulse animation when `active` is true. The agent's tool
+// callbacks call flashSection(key) which flips the matching `active`
+// for ~3 seconds before clearing. Wrapping (vs threading className
+// down) lets us keep the section components ignorant of the chat
+// layer.
+function ChatHighlight({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  // The ring/pulse is purely Tailwind so we avoid pulling in a custom
+  // keyframe; the existing `animate-pulse` is enough of a visual cue
+  // and matches what the jobs page uses for highlight_job.
+  const cls = active
+    ? 'ring-2 ring-amber-300 ring-offset-2 rounded-lg animate-pulse transition-shadow'
+    : 'transition-shadow';
+  return <div className={cls}>{children}</div>;
 }
 
 // ----------------------------------------------------------------------
@@ -558,6 +1732,7 @@ function TemplateSection({
   setDraft,
   onSave,
   saveState,
+  currentUser,
 }: {
   mode: TemplateMode;
   setMode: (m: TemplateMode) => void;
@@ -570,6 +1745,7 @@ function TemplateSection({
   setDraft: (d: CustomDraft) => void;
   onSave: () => void;
   saveState: { isPending: boolean; error: unknown };
+  currentUser: string;
 }) {
   const selected = templates.find((t) => t.id === selectedID);
 
@@ -602,28 +1778,40 @@ function TemplateSection({
             <>
               <label className="block">
                 <span className="text-sm font-medium text-gray-700">Template</span>
-                <select
-                  value={selectedID}
-                  onChange={(e) => setSelectedID(e.target.value)}
-                  className="mt-1 w-full rounded border border-gray-300 bg-white px-3 py-1.5 text-sm"
-                >
-                  {groupBySource(templates).map((group) => (
-                    <optgroup key={group.label} label={group.label}>
-                      {group.items.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
+                <TemplateCombobox
+                  templates={templates}
+                  selectedID={selectedID}
+                  setSelectedID={setSelectedID}
+                  currentUser={currentUser}
+                />
               </label>
               {selected && (
                 <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs space-y-2">
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-gray-700">{selected.name}</span>
                     <SourceBadge source={selected.source} />
+                    {selected.owner && selected.owner !== currentUser && (
+                      <span className="text-gray-500">by {selected.owner}</span>
+                    )}
                   </div>
+                  {selected.owner && selected.owner !== currentUser && (
+                    // Shared-template warning: when user A loads user B's
+                    // shared template, A is about to submit a job using
+                    // submit-file content B authored. The job runs as A,
+                    // so anything B encoded (executable, transfer files,
+                    // arguments, accounting groups) executes with A's
+                    // identity. This banner is the "review carefully"
+                    // affordance the security audit asked for: makes
+                    // shared-by-others templates visually distinct from
+                    // user-A's own and from system-built-in templates.
+                    <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-800">
+                      <strong>Authored by {selected.owner}.</strong> Review
+                      the template body and any default input files
+                      below before submitting — the job will run under
+                      your identity, with the schedd attributing every
+                      action to you.
+                    </div>
+                  )}
                   {selected.description && (
                     <p className="text-gray-600">{selected.description}</p>
                   )}
@@ -676,6 +1864,7 @@ function TemplateSection({
           onSave={onSave}
           saveState={saveState}
           templates={templates}
+          currentUser={currentUser}
         />
       )}
     </SectionCard>
@@ -688,12 +1877,14 @@ function CustomDraftEditor({
   onSave,
   saveState,
   templates,
+  currentUser,
 }: {
   draft: CustomDraft;
   setDraft: (d: CustomDraft) => void;
   onSave: () => void;
   saveState: { isPending: boolean; error: unknown };
   templates: Template[];
+  currentUser: string;
 }) {
   const canSave = draft.name.trim() !== '' && draft.contents.trim() !== '';
 
@@ -751,6 +1942,10 @@ function CustomDraftEditor({
       // here. Cleaner to leave the editor empty so the user opts in
       // explicitly if they want to convert.
       inlineScript: null,
+      // Same reasoning as inlineScript: don't auto-promote arbitrary
+      // input_files into the multi-file editor on clone. The user
+      // can re-add via the chat tool if they want them surfaced.
+      inlineFiles: [],
     });
   };
 
@@ -759,7 +1954,11 @@ function CustomDraftEditor({
       {/* Clone-from-existing — appears at the top so it's the first
           thing users see when they switch to "Write new template". */}
       {templates.length > 0 && (
-        <CloneFromPicker templates={templates} onClone={cloneFrom} />
+        <CloneFromPicker
+          templates={templates}
+          onClone={cloneFrom}
+          currentUser={currentUser}
+        />
       )}
 
       <div className="grid grid-cols-2 gap-3">
@@ -806,6 +2005,12 @@ function CustomDraftEditor({
       <InlineScriptEditor
         script={draft.inlineScript}
         setScript={(s) => setDraft({ ...draft, inlineScript: s })}
+      />
+
+      <InlineFilesEditor
+        files={draft.inlineFiles}
+        setFiles={(fs) => setDraft({ ...draft, inlineFiles: fs })}
+        reservedNames={inlineFilesReservedNames(draft)}
       />
 
       <Field label="Default input files (optional)">
@@ -860,42 +2065,30 @@ function CustomDraftEditor({
   );
 }
 
-// CloneFromPicker is a small one-shot select that triggers cloneFrom
-// on change. Sticky-empty (resets to the placeholder option) so the
-// user can clone twice in a row without a manual reset.
+// CloneFromPicker is a one-shot picker that fires cloneFrom on each
+// selection and never sticks the value — so the user can clone twice
+// in a row without a manual reset. Reuses TemplateCombobox in
+// "placeholder + selectedID=''" mode for visual consistency with the
+// main library picker (filterable, owner-aware, keyboard-navigable).
 function CloneFromPicker({
   templates,
   onClone,
+  currentUser,
 }: {
   templates: Template[];
   onClone: (id: string) => void;
+  currentUser: string;
 }) {
   return (
-    <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs flex items-center gap-2">
-      <span className="text-gray-600 shrink-0">Start from a copy of:</span>
-      <select
-        defaultValue=""
-        onChange={(e) => {
-          const v = e.target.value;
-          if (!v) return;
-          onClone(v);
-          e.target.value = '';
-        }}
-        className="flex-1 min-w-0 rounded border border-gray-300 bg-white px-2 py-1"
-      >
-        <option value="" disabled>
-          (pick a template to clone…)
-        </option>
-        {groupBySource(templates).map((group) => (
-          <optgroup key={group.label} label={group.label}>
-            {group.items.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
+    <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs">
+      <div className="text-gray-600 mb-1">Start from a copy of:</div>
+      <TemplateCombobox
+        templates={templates}
+        selectedID=""
+        setSelectedID={onClone}
+        placeholder="(pick a template to clone…)"
+        currentUser={currentUser}
+      />
     </div>
   );
 }
@@ -1103,6 +2296,164 @@ function InlineScriptEditor({
   );
 }
 
+// inlineFilesReservedNames returns the names already taken by the
+// wrapper script and user-uploaded input files. The InlineFilesEditor
+// surfaces these as conflicts so a user can't accidentally land two
+// files with the same name in the job sandbox (which would cause one
+// to clobber the other on transfer).
+function inlineFilesReservedNames(d: CustomDraft): Set<string> {
+  const out = new Set<string>();
+  if (d.inlineScript && d.inlineScript.name.trim() !== '') {
+    out.add(d.inlineScript.name.trim());
+  }
+  for (const f of d.inputFiles) out.add(f.name);
+  return out;
+}
+
+// InlineFilesEditor manages the additional in-draft files that ride
+// along with the job (the analyze.py / model.R / query.sql etc. that
+// the wrapper script invokes). Same backing state the chat tools
+// (add_inline_file, replace_in_inline_file, …) mutate, so a user
+// editing here and the agent editing through chat see the same list.
+//
+// Layout: a header with "+ Add file", then one row per file with a
+// filename input + content textarea + delete button. Empty list shows
+// a one-line nudge so the affordance is discoverable.
+function InlineFilesEditor({
+  files,
+  setFiles,
+  reservedNames,
+}: {
+  files: InlineFile[];
+  setFiles: (fs: InlineFile[]) => void;
+  reservedNames: Set<string>;
+}) {
+  const addBlank = () => {
+    // Pick a non-conflicting default name (script.py, script-2.py,
+    // …). Users can rename freely; the only constraint is uniqueness
+    // within the sandbox.
+    const taken = new Set([...reservedNames, ...files.map((f) => f.name)]);
+    let name = 'script.py';
+    let i = 2;
+    while (taken.has(name)) {
+      name = `script-${i}.py`;
+      i++;
+    }
+    setFiles([...files, { name, content: '' }]);
+  };
+
+  const updateAt = (idx: number, patch: Partial<InlineFile>) => {
+    const next = [...files];
+    next[idx] = { ...next[idx], ...patch };
+    setFiles(next);
+  };
+
+  const removeAt = (idx: number) => {
+    setFiles(files.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium text-gray-700">
+            Inline payload files
+          </h3>
+          <p className="text-xs text-gray-500">
+            Additional files edited inline alongside the wrapper script
+            — e.g. <code>analyze.py</code> that <code>run.sh</code>{' '}
+            invokes. Uploaded as 0644 in the job&apos;s sandbox (the
+            wrapper is the executable). Edit here, or ask the chat
+            assistant to scaffold one.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={addBlank}
+          className="shrink-0 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+        >
+          + Add file
+        </button>
+      </div>
+
+      {files.length === 0 ? (
+        <p className="text-xs italic text-gray-500">
+          No inline files yet. Click &ldquo;+ Add file&rdquo; or ask the
+          assistant to create one.
+        </p>
+      ) : (
+        files.map((f, i) => {
+          const trimmedName = f.name.trim();
+          const dupeWithReserved = reservedNames.has(trimmedName);
+          const dupeWithOther = files.some(
+            (g, j) => j !== i && g.name.trim() === trimmedName,
+          );
+          const nameInvalid =
+            trimmedName === '' ||
+            trimmedName.includes('/') ||
+            dupeWithReserved ||
+            dupeWithOther;
+          const errMsg = !trimmedName
+            ? 'name is required'
+            : trimmedName.includes('/')
+              ? 'name must not contain "/"'
+              : dupeWithReserved
+                ? 'name conflicts with the wrapper script or an uploaded file'
+                : dupeWithOther
+                  ? 'name conflicts with another inline file'
+                  : null;
+          return (
+            <div
+              key={i}
+              className="rounded border border-gray-200 bg-white p-2 space-y-1.5"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={f.name}
+                  onChange={(e) => updateAt(i, { name: e.target.value })}
+                  placeholder="analyze.py"
+                  className={`flex-1 rounded border px-2 py-1 font-mono text-sm ${
+                    nameInvalid ? 'border-red-400' : 'border-gray-300'
+                  }`}
+                  aria-label="Inline file name"
+                />
+                <span className="shrink-0 text-[11px] text-gray-400 tabular-nums">
+                  {humanSize(new Blob([f.content]).size)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeAt(i)}
+                  className="shrink-0 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-600 hover:border-red-400 hover:text-red-700"
+                  aria-label="Remove inline file"
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+              {errMsg && (
+                <p className="text-[11px] text-red-700">{errMsg}</p>
+              )}
+              <textarea
+                value={f.content}
+                onChange={(e) => updateAt(i, { content: e.target.value })}
+                spellCheck={false}
+                rows={8}
+                className="w-full resize-y rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+                placeholder={
+                  trimmedName.endsWith('.py')
+                    ? '#!/usr/bin/env python3\n# Your script…'
+                    : '# Your file contents…'
+                }
+              />
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 function TemplateInputFilesEditor({
   files,
   setFiles,
@@ -1230,6 +2581,51 @@ function makeFileId(): string {
 // that bites a naive `btoa(s)` call when the script contains
 // multibyte characters (emoji, CJK, etc. — rare in shell scripts but
 // not impossible).
+// slugify produces a template-id-safe identifier from arbitrary
+// human input: lowercase, non-alphanumeric runs collapsed to single
+// hyphens, leading/trailing hyphens stripped. Used to seed the
+// dialog's id field from the agent's suggestion or the draft name —
+// the user can still hand-edit the result before saving.
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// countOccurrences counts non-overlapping literal matches of `needle`
+// in `haystack`. Used by replace_in_inline_file to refuse ambiguous
+// edits — if the agent's find string matches >1 place, we want to
+// surface that instead of silently editing the first match.
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let from = 0;
+  while (true) {
+    const idx = haystack.indexOf(needle, from);
+    if (idx < 0) return count;
+    count++;
+    from = idx + needle.length;
+  }
+}
+
+// listAllInlineNames returns every name the inline-file editor knows
+// about — the wrapper script + the additional inline files. Used in
+// chat-tool error responses so the agent can quickly orient when it
+// asks for a file by the wrong name ("did you mean wrapper.sh or
+// analyze.py?").
+function listAllInlineNames(d: CustomDraft): string[] {
+  const out: string[] = [];
+  if (d.inlineScript && d.inlineScript.name.trim() !== '') {
+    out.push(d.inlineScript.name.trim());
+  }
+  for (const f of d.inlineFiles) {
+    const n = f.name.trim();
+    if (n) out.push(n);
+  }
+  return out;
+}
+
 function utf8ToBase64(s: string): string {
   const bytes = new TextEncoder().encode(s);
   return arrayBufferToBase64(bytes.buffer as ArrayBuffer);
@@ -1331,43 +2727,55 @@ function TableSection({
   setSource,
   uploadFiles,
   setUploadFiles,
+  count,
+  setCount,
 }: {
   columns: TemplateColumn[];
   rows: string[][];
   setRows: (r: string[][]) => void;
-  source: 'manual' | 'upload';
-  setSource: (s: 'manual' | 'upload') => void;
+  source: TableSource;
+  setSource: (s: TableSource) => void;
   uploadFiles: DroppedFile[];
   setUploadFiles: (f: DroppedFile[]) => void;
+  count: number;
+  setCount: (n: number) => void;
 }) {
   const columnNames = columns.map((c) => c.name);
-  return (
-    <SectionCard
-      title="2. Table"
-      subtitle={
-        columns.length === 0
+  // Count mode is always available even when the template has no
+  // columns — that's the single-job fallback the page used to render
+  // hardcoded; we now expose it as the explicit "Run N copies" option.
+  const subtitle =
+    source === 'count'
+      ? `Will submit ${Math.max(1, Math.floor(count) || 1)} cop${count === 1 ? 'y' : 'ies'} of the template.`
+      : source === 'upload'
+        ? `One job per file from the upload. ${uploadFiles.length} file${uploadFiles.length === 1 ? '' : 's'} loaded.`
+        : columns.length === 0
           ? 'This template has no variable columns; one row = one job.'
-          : source === 'upload'
-            ? `One job per file from the upload. ${uploadFiles.length} file${uploadFiles.length === 1 ? '' : 's'} loaded.`
-            : `Column headers come from the template. ${rows.length} row${rows.length === 1 ? '' : 's'} = ${rows.length} job${rows.length === 1 ? '' : 's'}.`
-      }
-    >
-      {/* Source toggle: manual table vs. directory/tarball upload.
-          Visible only when there's at least one column to fill —
-          a zero-column template is a fixed single job and "from
-          upload" doesn't make sense there. */}
-      {columns.length > 0 && (
-        <div className="mb-3 inline-flex rounded-md border border-gray-300 bg-white p-0.5 text-sm">
+          : `Column headers come from the template. ${rows.length} row${rows.length === 1 ? '' : 's'} = ${rows.length} job${rows.length === 1 ? '' : 's'}.`;
+  return (
+    <SectionCard title="2. Table" subtitle={subtitle}>
+      {/* Source toggle: manual table / fixed count / directory upload.
+          The count mode is always available; the other two require at
+          least one column on the template. */}
+      <div className="mb-3 inline-flex flex-wrap rounded-md border border-gray-300 bg-white p-0.5 text-sm">
+        {columns.length > 0 && (
           <ModeButton active={source === 'manual'} onClick={() => setSource('manual')}>
             Manual table
           </ModeButton>
+        )}
+        <ModeButton active={source === 'count'} onClick={() => setSource('count')}>
+          Run N copies
+        </ModeButton>
+        {columns.length > 0 && (
           <ModeButton active={source === 'upload'} onClick={() => setSource('upload')}>
             From directory / tarball
           </ModeButton>
-        </div>
-      )}
+        )}
+      </div>
 
-      {columns.length === 0 ? (
+      {source === 'count' ? (
+        <CountSource count={count} setCount={setCount} />
+      ) : columns.length === 0 ? (
         <div className="text-sm text-gray-500">
           Single fixed job. Click <em>Submit batch</em> to send 1 job.
         </div>
@@ -1503,6 +2911,44 @@ function TableSection({
 // inside sees the file at its basename. Preserving directory
 // structure would require materialising it on the worker, which the
 // HTCondor input-transfer flow doesn't do for us.
+// CountSource is the "Run N copies" alternative to the per-job table.
+// Renders a single integer input bound to `count`. The parent
+// synthesizes `queue N` at submit time. Useful when each job needs
+// only ProcId-based variation (typical Monte Carlo / stress-test /
+// "just run it" patterns) and a per-job table would be busy work.
+function CountSource({
+  count,
+  setCount,
+}: {
+  count: number;
+  setCount: (n: number) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <label className="flex items-center gap-2 text-sm">
+        <span className="text-gray-700">Number of jobs:</span>
+        <input
+          type="number"
+          min={1}
+          max={MAX_TABLE_COUNT}
+          step={1}
+          value={count}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            setCount(Number.isFinite(n) && n >= 1 ? n : 1);
+          }}
+          className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+        />
+      </label>
+      <p className="text-xs text-gray-500">
+        Each job runs the same submit-file body. Reference{' '}
+        <code>$(ProcId)</code> in the body (0 to N&minus;1) to differentiate
+        them.
+      </p>
+    </div>
+  );
+}
+
 function UploadSource({
   firstColumn,
   uploadFiles,
@@ -1946,54 +3392,226 @@ function InputsSection({
 }
 
 // ----------------------------------------------------------------------
-// Resources section: Step 4. Optional when the template already provides
-// the core request_cpus / request_memory / request_disk triple — the
-// user can opt to override; otherwise required so the schedd has
-// resource requests to plan the match against.
+// Resources section: Step 4. Per-field overrides — the user picks
+// which of cpus / memory / disk / gpus to override; the rest inherit
+// from the template body. Defaults are computed in the parent so
+// fields the template is silent on are checked by default (otherwise
+// the schedd would have nothing to plan against), and fields the
+// template already covers are unchecked by default (so we don't
+// silently rewrite a deliberate template choice).
 // ----------------------------------------------------------------------
 
 function ResourcesSection({
-  templateHasResources,
-  templateHasCoreResources,
-  override,
-  setOverride,
+  templateContents,
+  fields,
+  setFields,
   resources,
   setResources,
 }: {
-  templateHasResources: boolean;
-  templateHasCoreResources: boolean;
-  override: boolean;
-  setOverride: (v: boolean) => void;
+  templateContents: string;
+  fields: ResourceFieldMask;
+  setFields: React.Dispatch<React.SetStateAction<ResourceFieldMask>>;
   resources: ResourceRequest;
   setResources: (r: ResourceRequest) => void;
 }) {
-  const subtitle = templateHasCoreResources
-    ? 'The template already declares request_cpus, request_memory, and request_disk. Skip this step to use what it provides, or override.'
-    : 'The template does not declare resource requests. Pick CPU, memory, disk (and GPU if needed) — these get appended to the submit-file body.';
+  const tplValues = useMemo(
+    () => readResourcesFromBody(templateContents),
+    [templateContents],
+  );
+  const tplHas = (key: string) =>
+    getAttribute(templateContents, key) !== undefined;
+  const anyChecked =
+    fields.cpus || fields.memory || fields.disk || fields.gpus;
+
+  // Subtitle reflects what's actually about to happen at submit
+  // time. If the user has flipped at least one box on, we say so;
+  // otherwise we describe what will be inherited (or what's missing).
+  const subtitle = anyChecked
+    ? 'Overriding the checked fields below; unchecked fields inherit from the template body.'
+    : tplHas('request_cpus') || tplHas('request_memory') || tplHas('request_disk')
+      ? 'Inheriting all values from the template body. Tick a field to override just that one.'
+      : 'No resource requests will be sent and the schedd will fall back to its pool-wide defaults. Tick a field to set it explicitly.';
+
   return (
     <SectionCard title="4. Resources" subtitle={subtitle}>
-      {templateHasCoreResources && (
-        <label className="mb-3 flex items-center gap-2 text-sm text-gray-700">
+      <div className="space-y-3">
+        <ResourceFieldRow
+          label="CPUs"
+          checked={fields.cpus}
+          onChecked={(b) => setFields((p) => ({ ...p, cpus: b }))}
+          inheritedHint={
+            tplHas('request_cpus') ? `template: ${tplValues.cpus}` : 'template: not set'
+          }
+        >
           <input
-            type="checkbox"
-            checked={override}
-            onChange={(e) => setOverride(e.target.checked)}
-            className="rounded border-gray-300"
+            type="number"
+            min={1}
+            max={64}
+            value={resources.cpus}
+            disabled={!fields.cpus}
+            onChange={(e) =>
+              setResources({
+                ...resources,
+                cpus: clampInt(e.target.value, 1, 64, resources.cpus),
+              })
+            }
+            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
-          Override the template&apos;s resource requests
-        </label>
-      )}
-      {override ? (
-        <ResourceRequestPanel value={resources} onChange={setResources} />
-      ) : (
-        <p className="text-xs text-gray-500">
-          {templateHasResources
-            ? 'Using the values from the template body.'
-            : 'No resource requests will be sent. The schedd will fall back to its pool-wide defaults.'}
-        </p>
-      )}
+        </ResourceFieldRow>
+
+        <ResourceFieldRow
+          label="Memory (MiB)"
+          checked={fields.memory}
+          onChecked={(b) => setFields((p) => ({ ...p, memory: b }))}
+          inheritedHint={
+            tplHas('request_memory')
+              ? `template: ${tplValues.memoryMB} MiB`
+              : 'template: not set'
+          }
+        >
+          <input
+            type="number"
+            min={256}
+            step={256}
+            value={resources.memoryMB}
+            disabled={!fields.memory}
+            onChange={(e) =>
+              setResources({
+                ...resources,
+                memoryMB: clampInt(e.target.value, 256, undefined, resources.memoryMB),
+              })
+            }
+            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+          />
+        </ResourceFieldRow>
+
+        <ResourceFieldRow
+          label="Disk (MiB)"
+          checked={fields.disk}
+          onChecked={(b) => setFields((p) => ({ ...p, disk: b }))}
+          inheritedHint={
+            tplHas('request_disk')
+              ? `template: ${tplValues.diskMB} MiB`
+              : 'template: not set'
+          }
+        >
+          <input
+            type="number"
+            min={256}
+            step={256}
+            value={resources.diskMB}
+            disabled={!fields.disk}
+            onChange={(e) =>
+              setResources({
+                ...resources,
+                diskMB: clampInt(e.target.value, 256, undefined, resources.diskMB),
+              })
+            }
+            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+          />
+        </ResourceFieldRow>
+
+        <ResourceFieldRow
+          label="GPUs"
+          checked={fields.gpus}
+          onChecked={(b) => setFields((p) => ({ ...p, gpus: b }))}
+          inheritedHint={
+            tplHas('request_gpus')
+              ? `template: ${tplValues.gpus}`
+              : 'template: not set'
+          }
+        >
+          <input
+            type="number"
+            min={0}
+            max={16}
+            value={resources.gpus}
+            disabled={!fields.gpus}
+            onChange={(e) =>
+              setResources({
+                ...resources,
+                gpus: clampInt(e.target.value, 0, 16, resources.gpus),
+              })
+            }
+            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+          />
+        </ResourceFieldRow>
+
+        {/* GPU subfields only matter when the GPU override is on AND
+            the user is asking for at least one GPU. The shared
+            ResourceRequestPanel renders them; we reuse it for the
+            subfield-only case by hiding its CPU/memory/disk row via
+            CSS. Cleaner long-term might be to factor the subfields
+            out, but for this iteration the visual hide keeps the
+            change small and the GPU UX consistent with the
+            interactive page. */}
+        {fields.gpus && resources.gpus > 0 && (
+          <div className="ml-7 mt-2 rounded border border-gray-200 bg-gray-50 p-3">
+            <ResourceRequestPanel
+              value={resources}
+              onChange={setResources}
+              gpuSubfieldsOnly
+            />
+          </div>
+        )}
+      </div>
     </SectionCard>
   );
+}
+
+// ResourceFieldRow is one row in the per-field override list — a
+// leading checkbox + the field's input + an inheritance hint.
+// Disabled inputs (when the checkbox is unchecked) keep the value
+// visible but read-only so the user can re-enable without retyping.
+//
+// The input slot is a fixed-width column (`w-32 shrink-0`) so the
+// hint text starts at the same x across CPUs / Memory / Disk / GPUs
+// rows regardless of how many digits the input wants room for. The
+// individual inputs use `w-full` to fill the slot.
+function ResourceFieldRow({
+  label,
+  checked,
+  onChecked,
+  inheritedHint,
+  children,
+}: {
+  label: string;
+  checked: boolean;
+  onChecked: (v: boolean) => void;
+  inheritedHint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <label className="inline-flex items-center gap-2 w-44 shrink-0 text-gray-700">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChecked(e.target.checked)}
+          className="rounded border-gray-300"
+        />
+        {label}
+      </label>
+      <div className="w-32 shrink-0">{children}</div>
+      <span className="text-[11px] text-gray-400 truncate">{inheritedHint}</span>
+    </div>
+  );
+}
+
+// clampInt is the same input-clamp used by ResourceRequestPanel —
+// duplicated here to keep the per-field rows self-contained without
+// reaching into an internal helper.
+function clampInt(
+  raw: string,
+  min: number | undefined,
+  max: number | undefined,
+  fallback: number,
+): number {
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n)) return fallback;
+  if (min !== undefined && n < min) return min;
+  if (max !== undefined && n > max) return max;
+  return n;
 }
 
 // ----------------------------------------------------------------------
@@ -2116,6 +3734,15 @@ function buildSubmitFile(
   return `${body}\nqueue ${colsLine} from ((\n  ${rowsBody}\n))\n`;
 }
 
+// buildSubmitFileWithCount appends a flat `queue N` to the body. Used
+// for `tableSource === 'count'` where the user wants N copies of the
+// same job (typical for stress tests, parameter sweeps that vary by
+// $(ProcId), or one-off "just run it" cases).
+function buildSubmitFileWithCount(contents: string, count: number): string {
+  const n = Math.max(1, Math.floor(count) || 1);
+  return `${contents.trimEnd()}\nqueue ${n}\n`;
+}
+
 function quoteCell(s: string): string {
   // HTCondor's macro expansion handles quoted strings well; quote
   // anything with whitespace or a quote char to keep the row record
@@ -2140,4 +3767,230 @@ function groupBySource(
   if (groups.global.length) out.push({ label: 'Site templates', items: groups.global });
   if (groups.builtin.length) out.push({ label: 'Built-in', items: groups.builtin });
   return out;
+}
+
+// groupTemplatesForPicker is the dropdown's filtered + grouped view.
+// Differs from groupBySource: user-source templates split into "Mine"
+// (owner == current user) vs. "Shared by others" (owner != current
+// user, visibility == "shared"). The split makes it obvious in the
+// picker what you can edit/delete vs. what someone else owns.
+function groupTemplatesForPicker(
+  list: Template[],
+  currentUser: string,
+): { label: string; items: Template[] }[] {
+  const mine: Template[] = [];
+  const shared: Template[] = [];
+  const global: Template[] = [];
+  const builtin: Template[] = [];
+  for (const t of list) {
+    if (t.source === 'user') {
+      if (!t.owner || t.owner === currentUser) mine.push(t);
+      else shared.push(t);
+    } else if (t.source === 'global') {
+      global.push(t);
+    } else {
+      builtin.push(t);
+    }
+  }
+  const out: { label: string; items: Template[] }[] = [];
+  if (mine.length) out.push({ label: 'My templates', items: mine });
+  if (shared.length) out.push({ label: 'Shared by others', items: shared });
+  if (global.length) out.push({ label: 'Site templates', items: global });
+  if (builtin.length) out.push({ label: 'Built-in', items: builtin });
+  return out;
+}
+
+// TemplateCombobox is a typeahead picker that replaces the native
+// <select> + <optgroup> arrangement. Type to filter against the
+// template name, owner, and description (case-insensitive substring).
+// Arrow keys navigate; Enter selects; Esc closes. Each row shows the
+// name + source badge; for "Shared by others" rows it also shows
+// "by <owner>" so the user can disambiguate same-named templates.
+function TemplateCombobox({
+  templates,
+  selectedID,
+  setSelectedID,
+  currentUser,
+  placeholder,
+}: {
+  templates: Template[];
+  selectedID: string;
+  setSelectedID: (id: string) => void;
+  currentUser: string;
+  // Trigger label when nothing is selected. Defaults to "Select a
+  // template…". The clone-from picker passes "Start from a copy of…"
+  // and pairs it with selectedID="" to get the same combobox in
+  // "one-shot" mode (each pick triggers an action, the trigger
+  // never reflects a stable selection).
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [activeIdx, setActiveIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const selected = templates.find((t) => t.id === selectedID);
+  const triggerLabel = selected
+    ? selected.name
+    : placeholder ?? 'Select a template…';
+
+  // Flat filtered list (already in group order). We render groups
+  // visually but the keyboard nav needs to work over a single index
+  // space, so we always keep the flat ordering as the source of
+  // truth and stamp groups on the side for rendering.
+  const groups = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const matches = (t: Template): boolean => {
+      if (q === '') return true;
+      if (t.name.toLowerCase().includes(q)) return true;
+      if ((t.description ?? '').toLowerCase().includes(q)) return true;
+      if (t.owner && t.owner.toLowerCase().includes(q)) return true;
+      return false;
+    };
+    return groupTemplatesForPicker(
+      templates.filter(matches),
+      currentUser,
+    );
+  }, [templates, query, currentUser]);
+  const flat = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+
+  // Reset the highlighted row whenever the filter changes — the old
+  // index can point past the filtered list otherwise.
+  useEffect(() => {
+    setActiveIdx(0);
+  }, [query]);
+
+  // Click-outside to close.
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onClick);
+    return () => window.removeEventListener('mousedown', onClick);
+  }, [open]);
+
+  const choose = (t: Template) => {
+    setSelectedID(t.id);
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      {!open ? (
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(true);
+            setQuery('');
+            // Focus the input on the next tick — it doesn't exist
+            // until `open` flips and the input renders.
+            setTimeout(() => inputRef.current?.focus(), 0);
+          }}
+          className="mt-1 flex w-full items-center justify-between rounded border border-gray-300 bg-white px-3 py-1.5 text-left text-sm hover:border-gray-400"
+        >
+          <span className="flex items-center gap-2 truncate">
+            <span className={selected ? 'text-gray-900' : 'text-gray-400'}>
+              {triggerLabel}
+            </span>
+            {selected && <SourceBadge source={selected.source} />}
+            {selected && selected.owner && selected.owner !== currentUser && (
+              <span className="text-xs text-gray-500">
+                by {selected.owner}
+              </span>
+            )}
+          </span>
+          <span aria-hidden className="ml-2 text-gray-400">
+            ▾
+          </span>
+        </button>
+      ) : (
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          placeholder="Type to filter by name, owner, or description…"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setActiveIdx((i) => Math.min(flat.length - 1, i + 1));
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setActiveIdx((i) => Math.max(0, i - 1));
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              const t = flat[activeIdx];
+              if (t) choose(t);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setOpen(false);
+            }
+          }}
+          className="mt-1 w-full rounded border border-brand-400 bg-white px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand-400"
+        />
+      )}
+      {open && (
+        <div className="absolute left-0 right-0 z-10 mt-1 max-h-72 overflow-y-auto rounded border border-gray-300 bg-white shadow-lg">
+          {flat.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-gray-500">
+              No templates match.
+            </p>
+          ) : (
+            (() => {
+              let cursor = 0;
+              return groups.map((g) => (
+                <div key={g.label}>
+                  <div className="bg-gray-50 px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">
+                    {g.label}
+                  </div>
+                  {g.items.map((t) => {
+                    const idx = cursor++;
+                    const isActive = idx === activeIdx;
+                    const isCurrent = t.id === selectedID;
+                    return (
+                      <button
+                        key={`${t.source}:${t.owner ?? ''}:${t.id}`}
+                        type="button"
+                        onMouseEnter={() => setActiveIdx(idx)}
+                        onClick={() => choose(t)}
+                        className={`flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm ${
+                          isActive ? 'bg-brand-50' : 'bg-white'
+                        } ${isCurrent ? 'font-medium' : ''}`}
+                      >
+                        <span className="truncate">{t.name}</span>
+                        <SourceBadge source={t.source} />
+                        {t.owner && t.owner !== currentUser && (
+                          // Amber-tinted "by <owner>" pill so
+                          // shared-by-others rows stand out from "Mine"
+                          // and built-ins. Mirrors the banner shown
+                          // after selection — ditto the security-audit
+                          // motivation.
+                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                            by {t.owner}
+                          </span>
+                        )}
+                        {t.description && (
+                          <span className="ml-auto truncate text-[11px] text-gray-400">
+                            {t.description}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              ));
+            })()
+          )}
+        </div>
+      )}
+    </div>
+  );
 }

@@ -206,6 +206,77 @@ func TestPerUserIsolation(t *testing.T) {
 }
 
 // TestSaveValidation rejects invalid templates and bad column names.
+// TestVisibilitySharedAcrossOwners pins the cross-user picker:
+// templates owned by Bob with visibility="shared" must appear in
+// Alice's LoadAll, and Alice can Get them as starting points; templates
+// owned by Bob with visibility="private" stay invisible to Alice. The
+// regression we're guarding against is a future Save path that
+// accidentally widens private rows to shared (or a list query that
+// silently surfaces every owner's rows regardless of visibility).
+func TestVisibilitySharedAcrossOwners(t *testing.T) {
+	dir := t.TempDir()
+	lib, err := NewLibrary(LibraryConfig{UserStoreDBPath: filepath.Join(dir, "user.db")})
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	// Bob saves both a private and a shared template.
+	if _, err := lib.Save(Template{
+		Name:       "Bob Private",
+		Contents:   "# private\nqueue\n",
+		Columns:    []Column{{Name: "x"}},
+		Visibility: VisibilityPrivate,
+	}, "bob"); err != nil {
+		t.Fatalf("Save bob private: %v", err)
+	}
+	if _, err := lib.Save(Template{
+		Name:       "Bob Shared",
+		Contents:   "# shared\nqueue\n",
+		Columns:    []Column{{Name: "x"}},
+		Visibility: VisibilityShared,
+	}, "bob"); err != nil {
+		t.Fatalf("Save bob shared: %v", err)
+	}
+
+	// (a) Alice's LoadAll surfaces the shared row but not the private.
+	all := lib.All("alice")
+	var sawShared, sawPrivate bool
+	for _, t2 := range all {
+		if t2.Source != SourceUser {
+			continue
+		}
+		if t2.Owner == "bob" && t2.ID == "bob-shared" {
+			sawShared = true
+		}
+		if t2.Owner == "bob" && t2.ID == "bob-private" {
+			sawPrivate = true
+		}
+	}
+	if !sawShared {
+		t.Errorf("alice's picker should include bob's shared template; got %+v", all)
+	}
+	if sawPrivate {
+		t.Errorf("alice's picker must NOT leak bob's private template; got %+v", all)
+	}
+
+	// (b) Alice can Get bob's shared row (load as a starting point).
+	got, ok := lib.Get("bob-shared", "alice")
+	switch {
+	case !ok:
+		t.Errorf("alice should be able to Get bob-shared")
+	case got.Owner != "bob":
+		t.Errorf("expected Get to surface real owner=bob; got %q", got.Owner)
+	case got.Visibility != VisibilityShared:
+		t.Errorf("expected Visibility=shared on the loaded ad; got %q", got.Visibility)
+	}
+
+	// (c) Alice CANNOT Get bob's private row.
+	if _, ok := lib.Get("bob-private", "alice"); ok {
+		t.Errorf("alice should NOT be able to Get bob-private")
+	}
+}
+
 func TestSaveValidation(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "user.db")
 	lib, err := NewLibrary(LibraryConfig{UserStoreDBPath: store})

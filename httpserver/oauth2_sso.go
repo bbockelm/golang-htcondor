@@ -128,7 +128,24 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		default:
-			// Grant other scopes if requested (profile, email, etc.)
+			// Grant other scopes if requested (profile, email, condor:/*, etc.).
+			//
+			// Re: condor:/* scopes — these grant *narrowing* claims on
+			// the resulting HTCondor IDTOKEN (limit_authz), not new
+			// authority. The schedd ACL still has the final say:
+			// holding `condor:/WRITE` only lets the user submit if
+			// they're in ALLOW_WRITE on the schedd side. See
+			// mapCondorScopesToAuthz for the full security model.
+			//
+			// Because of that narrowing semantics, granting condor:/*
+			// here without an explicit per-user group check is safe in
+			// today's deployment: a non-submitter who somehow obtains
+			// `condor:/WRITE` still can't submit. The audit-style
+			// concern ("user clicks Authorize on a malicious client
+			// asking for condor:/ADMINISTRATOR → admin token") is
+			// also addressed defensively in mapCondorScopesToAuthz,
+			// which silently drops ADMINISTRATOR / CONFIG / DAEMON /
+			// NEGOTIATOR from the authz set even if requested.
 			grantedScopes = append(grantedScopes, scope)
 		}
 	}
@@ -298,8 +315,16 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			"subject", userInfo.Subject, "session_id", sessionID[:8]+"...",
 			"expires_at", sessionData.ExpiresAt)
 
-		// Redirect back to original URL or default to root
+		// Redirect back to original URL or default to root.
+		// Belt-and-braces re-validation: the state-bound originalURL
+		// was checked at redirectToLogin time, but we re-check here so
+		// any future code path that stores a return URL without going
+		// through redirectToLogin can't introduce an open redirect.
 		redirectURL := originalURL
+		if redirectURL != "" && !isSafeLocalRedirect(redirectURL) {
+			s.logger.Warn(logging.DestinationHTTP, "Discarding unsafe redirect URL from OAuth2 state", "value", redirectURL)
+			redirectURL = ""
+		}
 		if redirectURL == "" {
 			redirectURL = "/"
 		}

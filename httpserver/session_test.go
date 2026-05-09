@@ -176,8 +176,8 @@ func TestSessionCookie(t *testing.T) {
 	if !cookie.Secure {
 		t.Error("Cookie should be Secure")
 	}
-	if cookie.SameSite != http.SameSiteLaxMode {
-		t.Errorf("Expected SameSite=Lax, got %v", cookie.SameSite)
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("Expected SameSite=Strict, got %v", cookie.SameSite)
 	}
 
 	// Test getSessionCookie. gosec G124 doesn't apply to client-side

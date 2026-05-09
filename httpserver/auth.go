@@ -222,10 +222,25 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 	return schedd, nil
 }
 
-// TokenCacheEntry represents a cached token with its expiration and associated session cache
+// TokenCacheEntry represents a cached token with its expiration and associated session cache.
+//
+// Identity-trust note: Username is parsed from the JWT WITHOUT
+// verifying the signature (we have no local way to verify — the only
+// authoritative validator is the schedd's CEDAR handshake, which
+// happens later when we make a schedd call). Until that handshake
+// succeeds, the Username reflects whatever the client put in the
+// token's `sub` claim and MUST NOT be used as authoritative identity
+// (e.g. for filtering jobs to "owned by me", recording the Owner
+// when minting a share URL, or any other authorization decision).
+//
+// Validated reports whether at least one schedd op has succeeded with
+// this token. Code paths that need authoritative identity should
+// gate on Validated; code paths that only need a stable bucket key
+// (rate-limit per-token / per-username) can use Username directly.
 type TokenCacheEntry struct {
 	Token         string
-	Username      string // Username extracted from JWT (for rate limiting)
+	Username      string // sub from the JWT — unverified until Validated == true
+	Validated     bool   // true once a schedd op authenticated successfully with this token
 	Expiration    time.Time
 	SessionCache  *security.SessionCache
 	expiryTimer   *time.Timer
@@ -310,8 +325,14 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
-		Token:         token,
+		Token: token,
+		// AddValidated is the constructor for tokens that the caller
+		// has already verified (e.g. opaque-token introspection
+		// against the OAuth2 storage succeeded). Mark Validated so
+		// callers using ValidatedUsername see this identity
+		// immediately without waiting for a schedd handshake.
 		Username:      username,
+		Validated:     true,
 		Expiration:    expiration,
 		SessionCache:  sessionCache,
 		cancelCleanup: cancel,
@@ -326,6 +347,30 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	tc.entries[token] = entry
 
 	return entry, nil
+}
+
+// requestTokenContextKey carries the bearer token through the request
+// so the response-wrapping middleware in ServeHTTP can mark it
+// validated after a successful (2xx) response. See markValidatedOnSuccess
+// for the rationale.
+type requestTokenContextKey struct{}
+
+// withRequestToken stashes the token on the context so the
+// response-status middleware can find it.
+func withRequestToken(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestTokenContextKey{}, token)
+}
+
+// requestTokenFromContext retrieves the token previously stashed via
+// withRequestToken. Returns "" if none is set.
+func requestTokenFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(requestTokenContextKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // AddValidated adds a pre-validated token (e.g. opaque token) to the cache
@@ -420,4 +465,49 @@ func (tc *TokenCache) Size() int {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
 	return len(tc.entries)
+}
+
+// MarkValidated promotes a cached token to "validated" status, meaning
+// a schedd op has authenticated successfully with it. Callers may
+// optionally pass an authoritativeUsername observed from the schedd
+// handshake — if non-empty and different from the JWT-claimed
+// username, the entry is updated to the schedd-authoritative value
+// (this protects against any case where the unverified sub claim
+// disagreed with the schedd's interpretation).
+//
+// Idempotent: safe to call repeatedly per request.
+func (tc *TokenCache) MarkValidated(token, authoritativeUsername string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	entry, ok := tc.entries[token]
+	if !ok {
+		return
+	}
+	if authoritativeUsername != "" && entry.Username != authoritativeUsername {
+		entry.Username = authoritativeUsername
+	}
+	entry.Validated = true
+}
+
+// ValidatedUsername returns the username for a token only if it has
+// been marked validated via a successful schedd handshake. Use this
+// in code paths that must rely on authoritative identity (job-owner
+// filtering, share-URL minting, audit logs). For loose use cases
+// (rate-limit bucket key) the Get-and-read-Username pattern is fine.
+//
+// Returns "" if the token is unknown, expired, or not yet validated.
+func (tc *TokenCache) ValidatedUsername(token string) string {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	entry, ok := tc.entries[token]
+	if !ok {
+		return ""
+	}
+	if time.Now().After(entry.Expiration) {
+		return ""
+	}
+	if !entry.Validated {
+		return ""
+	}
+	return entry.Username
 }

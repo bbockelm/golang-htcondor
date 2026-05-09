@@ -86,6 +86,14 @@ export interface MatchAnalysisPanelProps {
    * a real matching problem. Pass undefined when QDate isn't available.
    */
   jobQDate?: number;
+  /**
+   * Which job ad source to analyze. Defaults to "live" (the schedd's
+   * current queue). Pass "archive" from the archive-detail page to
+   * answer "would this job have matched the current pool?" — the
+   * archived ad's Requirements expression is preserved and the
+   * analyzer doesn't care that the job no longer exists in the queue.
+   */
+  source?: 'live' | 'archive';
 }
 
 export function MatchAnalysisPanel({
@@ -95,6 +103,7 @@ export function MatchAnalysisPanel({
   defaultOpen = true,
   jobStatus,
   jobQDate,
+  source,
 }: MatchAnalysisPanelProps) {
   // We deliberately don't use react-query for this — it would cache the
   // result and make it harder to surface the "you haven't run this yet"
@@ -135,7 +144,7 @@ export function MatchAnalysisPanel({
     setLoading(true);
     setError(null);
     try {
-      const res = await api.jobs.matchAnalysis(jobID);
+      const res = await api.jobs.matchAnalysis(jobID, { source });
       setData(res);
     } catch (e) {
       if (e instanceof ApiError) {

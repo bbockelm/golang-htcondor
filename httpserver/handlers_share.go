@@ -177,6 +177,31 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		return
 	}
 
+	// Verify the requester actually owns the job before signing a
+	// share URL. Without this check, a user could mint a share URL
+	// for another user's job — the redeemer JWT would be issued as
+	// the requester, so a strict schedd ACL would refuse the
+	// download, but on a permissively-configured READ ACL it could
+	// succeed (and the audit log would show the requester as the
+	// downloader, hiding the actual data subject).
+	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
+		cluster, proc, classadStringLit(owner))
+	ads, _, qerr := s.schedd.QueryWithOptions(ctx, jobConstraint, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "Owner"},
+		Limit:      1,
+	})
+	if qerr != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("ownership check failed: %v", qerr))
+		return
+	}
+	if len(ads) == 0 {
+		// Either the job doesn't exist or it's owned by someone
+		// else. Return 404 in both cases — we don't want to
+		// disclose the existence of jobs the user doesn't own.
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
 	exp := time.Now().Add(ttl)
 	tok, err := s.signShareToken(sharePayload{
 		Cluster: cluster,

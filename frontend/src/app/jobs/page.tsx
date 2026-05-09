@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   api,
   ApiError,
@@ -108,13 +109,63 @@ export default function JobsPage() {
     [],
   );
 
-  const chatHooks = useMemo(
+  // Client-side tool dispatchers, keyed by tool name as advertised by
+  // the server. The ChatPanel forwards each LLM-emitted tool_use to
+  // hooks[toolName] and serializes whatever the handler returns as
+  // the tool_result.
+  //
+  // === KEEP IN SYNC WITH jobsPageInstructions IN
+  // httpserver/handlers_chat_tools.go ===
+  // The server-side instructions tell the LLM which UI affordances
+  // exist on this page. If you add or remove a hook here, update the
+  // matching prose so the model doesn't hallucinate (or miss) tools.
+  const chatHooks = useMemo<Record<string, (input: Record<string, unknown>) => unknown>>(
     () => ({
-      setFilter,
-      expandBatch,
-      highlightJob,
+      set_filter: (input) => {
+        const q = typeof input.query === 'string' ? input.query : '';
+        setFilter(q);
+        return { ok: true, applied_query: q };
+      },
+      expand_batch: (input) => {
+        const cid = Number(input.cluster_id);
+        if (!Number.isFinite(cid) || cid <= 0) {
+          return { ok: false, error: 'cluster_id must be a positive integer' };
+        }
+        expandBatch(cid);
+        return { ok: true, expanded_cluster_id: cid };
+      },
+      highlight_job: (input) => {
+        const cid = Number(input.cluster_id);
+        const pid = Number(input.proc_id);
+        if (!Number.isFinite(cid) || !Number.isFinite(pid)) {
+          return { ok: false, error: 'cluster_id and proc_id must be integers' };
+        }
+        highlightJob(cid, pid);
+        return { ok: true, highlighted: `${cid}.${pid}` };
+      },
     }),
     [expandBatch, highlightJob],
+  );
+
+  // Invalidate the jobs query when a chat-driven destructive tool
+  // finishes server-side. Without this, the schedd has already
+  // hold/released/removed the job but our table keeps showing the
+  // stale row until the 15-second polling interval fires. The
+  // ChatPanel calls onServerToolComplete exactly once per toolCallId
+  // so it's safe to invalidate unconditionally for the names below.
+  const jobsListQueryClient = useQueryClient();
+  const handleServerToolComplete = useCallback(
+    (toolName: string) => {
+      if (
+        toolName === 'remove_job' ||
+        toolName === 'remove_jobs' ||
+        toolName === 'hold_job' ||
+        toolName === 'release_job'
+      ) {
+        jobsListQueryClient.invalidateQueries({ queryKey: ['jobs'] });
+      }
+    },
+    [jobsListQueryClient],
   );
 
   return (
@@ -160,6 +211,21 @@ export default function JobsPage() {
         </Link>
       </div>
 
+      {/* Chat sits directly under the title, above the table. It's the
+          primary affordance for "why is X held?" / "release my idle
+          jobs" — the user shouldn't have to scroll past a long batch
+          list to find it. Mirrors the placement on the job-detail
+          page. */}
+      <ChatPanel
+        visible={chatVisible}
+        page="jobs"
+        hooks={chatHooks}
+        headerLabel="Job assistant"
+        togglerLabel="Ask about your jobs"
+        pageHelp={`Ask things like "how many of my jobs are held?", "why is my last batch stuck?", or "release everything that's held with code 13".`}
+        onServerToolComplete={handleServerToolComplete}
+      />
+
       {isLoading && <p className="text-gray-400">Loading…</p>}
 
       {error && (
@@ -192,7 +258,22 @@ export default function JobsPage() {
         </>
       )}
 
-      <ChatPanel visible={chatVisible} hooks={chatHooks} />
+      {/* Archive hint. Lives below the table because the typical
+          path is "user looked here, didn't find it, then wonders
+          where else to check." A subtle prompt at the bottom
+          handles that. */}
+      {data && (
+        <p className="text-xs text-gray-500">
+          Not seeing the job you&apos;re looking for? Check the{' '}
+          <Link
+            href="/archive"
+            className="text-brand-700 hover:underline"
+          >
+            archive
+          </Link>{' '}
+          for completed and removed jobs.
+        </p>
+      )}
     </div>
   );
 }
@@ -324,6 +405,88 @@ function groupIntoBatches(jobs: ClassAd[]): Batch[] {
 // command line, and the display-status names of the jobs inside.
 //
 // Empty query returns the input unchanged. Multi-token queries
+// useInfiniteList paginates a (possibly polling-refreshed) array via
+// IntersectionObserver — when the returned `sentinelRef` element
+// scrolls into view, the visible window grows by `pageSize`. Used by
+// BatchTable and JobsSubTable to cap initial render at ~20-25 rows
+// without giving up the "scroll to see more" affordance the user
+// expects.
+//
+// Reset semantics: when `resetKey` changes (e.g., the user types a
+// new filter, or expands a different batch), the visible window
+// snaps back to `pageSize`. Polling refreshes that grow `items`
+// in place leave the visible count alone — the user keeps seeing
+// the rows they were reading.
+//
+// `Show all` is exposed for the "show remaining N" link below the
+// table, since some users skip the scroll affordance.
+function useInfiniteList<T>(
+  items: T[],
+  pageSize: number,
+  resetKey?: unknown,
+): {
+  visible: T[];
+  sentinelRef: (el: Element | null) => void;
+  showAll: () => void;
+  hasMore: boolean;
+  total: number;
+  shown: number;
+} {
+  const [count, setCount] = useState(pageSize);
+
+  // Snap back to one page when the caller signals a fresh context.
+  // We deliberately do NOT include `items` here — we don't want a
+  // poll-driven array identity change to scroll the user back to
+  // the top mid-read.
+  useEffect(() => {
+    setCount(pageSize);
+  }, [pageSize, resetKey]);
+
+  // Clamp when the source list shrinks below the visible window
+  // (e.g., the filter narrowed) — without this, hasMore would
+  // briefly read false and the sentinel observer would stay
+  // disconnected even after the user clears the filter.
+  const total = items.length;
+  const shown = Math.min(count, total);
+  const hasMore = total > shown;
+
+  // Callback ref so we can connect/disconnect the IntersectionObserver
+  // when the sentinel mounts/unmounts (and re-mounts on rerender).
+  // Using a closure-captured Observer keeps the wiring local; no
+  // module-level state.
+  const sentinelRef = useCallback(
+    (el: Element | null) => {
+      if (!el || !hasMore) return;
+      const obs = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              setCount((c) => c + pageSize);
+            }
+          }
+        },
+        // rootMargin pre-fetches the next page when the sentinel is
+        // ~200px below the viewport — gives a continuous-scroll
+        // feel rather than a noticeable pause when the user hits
+        // the bottom.
+        { rootMargin: '200px' },
+      );
+      obs.observe(el);
+      // Disconnect on unmount via the ref-callback's cleanup form.
+      return () => obs.disconnect();
+    },
+    [hasMore, pageSize],
+  );
+
+  const showAll = useCallback(() => setCount(total), [total]);
+
+  // Slice once per render and return — slicing is cheap relative to
+  // the rendering cost we're avoiding.
+  const visible = items.slice(0, shown);
+
+  return { visible, sentinelRef, showAll, hasMore, total, shown };
+}
+
 // (whitespace-separated) require ALL tokens to match SOMEWHERE
 // in the haystack — feels natural for "held training-run" type
 // inputs.
@@ -369,6 +532,19 @@ function BatchTable({
   const queryClient = useQueryClient();
   const allBatches = groupIntoBatches(jobs);
   const batches = applyBatchFilter(allBatches, filter);
+  // Cap the initial render at 20 batches; the sentinel below the
+  // table reveals the next 20 each time it scrolls into view. The
+  // filter string drives the reset — typing a new query brings the
+  // user back to the first page of matches instead of leaving them
+  // halfway down a long list of mismatches.
+  const {
+    visible: visibleBatches,
+    sentinelRef: batchSentinelRef,
+    showAll: showAllBatches,
+    hasMore: hasMoreBatches,
+    total: totalBatches,
+    shown: shownBatches,
+  } = useInfiniteList(batches, 20, filter);
 
   const toggle = (id: number) =>
     setExpanded((prev) => {
@@ -433,7 +609,7 @@ function BatchTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {batches.map((b) => (
+            {visibleBatches.map((b) => (
               <BatchRow
                 key={b.batchID}
                 batch={b}
@@ -452,6 +628,31 @@ function BatchTable({
                 pendingReleaseActive={releaseJobMut.isPending}
               />
             ))}
+            {/* Sentinel + "showing N of M" footer. The sentinel <tr>
+                triggers IntersectionObserver to grow the visible
+                window; the "show all" link lets users skip the
+                scroll. Rendered as a single full-width row so the
+                table layout doesn't shift between paginated/full
+                states. */}
+            {totalBatches > 0 && (
+              <tr ref={batchSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
+                <td colSpan={7} className="px-3 py-2 text-xs text-gray-500">
+                  Showing {shownBatches} of {totalBatches} batches
+                  {hasMoreBatches && (
+                    <>
+                      {' '}— scroll to load more, or{' '}
+                      <button
+                        type="button"
+                        onClick={showAllBatches}
+                        className="text-brand-700 hover:underline"
+                      >
+                        show all
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -577,6 +778,19 @@ function JobsSubTable({
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
 }) {
+  const router = useRouter();
+  // Cap each expanded batch at 25 visible jobs initially; the
+  // sentinel row at the bottom reveals 25 more on each scroll. This
+  // sub-table mounts/unmounts as the user expands/collapses batches,
+  // so a separate resetKey isn't needed — fresh mount = fresh count.
+  const {
+    visible: visibleJobs,
+    sentinelRef: jobSentinelRef,
+    showAll: showAllJobs,
+    hasMore: hasMoreJobs,
+    total: totalJobs,
+    shown: shownJobs,
+  } = useInfiniteList(jobs, 25);
   return (
     <div className="border-t border-gray-200">
       <table className="min-w-full text-xs">
@@ -590,11 +804,20 @@ function JobsSubTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
-          {jobs.map((j) => (
+          {visibleJobs.map((j) => (
             <tr
               key={j.id}
+              // Clicking anywhere on the row that isn't already an
+              // interactive element (the job-id link, the action
+              // buttons, the open-icon link) navigates to the detail
+              // page. The Actions <td> stops propagation; the job-id
+              // <td> doesn't need to because the inner <Link> does
+              // its own navigation and Next's router.push to the
+              // same href is a no-op.
+              onClick={() => router.push(`/jobs/${j.id}`)}
               className={
-                j.id === highlighted
+                'cursor-pointer ' +
+                (j.id === highlighted
                   ? // animate-pulse-twice would be cute but we don't
                     // have a custom keyframe; a yellow flash via the
                     // standard pulse class for ~4 seconds (controlled
@@ -602,7 +825,7 @@ function JobsSubTable({
                     // parent) reads as "the assistant is pointing
                     // here right now".
                     'bg-yellow-100 animate-pulse'
-                  : 'hover:bg-white'
+                  : 'hover:bg-white')
               }>
               <td className="px-3 py-1.5 font-mono">
                 <Link
@@ -656,18 +879,34 @@ function JobsSubTable({
                     pending={pendingJobActive && pendingJob === j.id}
                     title={`Remove job ${j.id}`}
                   />
-                  <Link
-                    href={`/jobs/${j.id}`}
-                    className="inline-flex h-5 w-5 items-center justify-center rounded border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
-                    title="Open job detail"
-                    aria-label="Open job detail"
-                  >
-                    <PopOutIcon />
-                  </Link>
                 </div>
               </td>
             </tr>
           ))}
+          {/* Same sentinel + show-all pattern as the batch table.
+              Lives inside the sub-table's <tbody> so it scrolls
+              with the parent page (no inner scroll container) and
+              the IntersectionObserver fires off the natural
+              window scroll. */}
+          {totalJobs > 0 && (
+            <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
+              <td colSpan={5} className="px-3 py-1.5 text-[11px] text-gray-500">
+                Showing {shownJobs} of {totalJobs} jobs
+                {hasMoreJobs && (
+                  <>
+                    {' '}— scroll to load more, or{' '}
+                    <button
+                      type="button"
+                      onClick={showAllJobs}
+                      className="text-brand-700 hover:underline"
+                    >
+                      show all
+                    </button>
+                  </>
+                )}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -757,27 +996,6 @@ function JobStatusPill({ display }: { display: DisplayStatusInfo }) {
     >
       {display.label}
     </span>
-  );
-}
-
-// PopOutIcon: 14×14 square with arrow exiting top-right corner.
-function PopOutIcon() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M14 4h6v6" />
-      <path d="M20 4l-9 9" />
-      <path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
-    </svg>
   );
 }
 

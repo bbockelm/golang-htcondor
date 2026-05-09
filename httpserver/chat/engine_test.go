@@ -15,6 +15,7 @@ type fakeTool struct {
 	name        string
 	confirm     bool
 	clientSide  bool
+	pages       []string
 	lastInput   json.RawMessage
 	lastActor   string
 	calls       int
@@ -27,6 +28,7 @@ func (f *fakeTool) Description() string          { return "test " + f.name }
 func (f *fakeTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (f *fakeTool) ClientSide() bool             { return f.clientSide }
 func (f *fakeTool) RequiresConfirmation() bool   { return f.confirm }
+func (f *fakeTool) AvailablePages() []string     { return f.pages }
 func (f *fakeTool) Execute(_ context.Context, actor string, in json.RawMessage) (string, error) {
 	f.calls++
 	f.lastActor = actor
@@ -56,7 +58,7 @@ func (f *fakeTool) Execute(_ context.Context, actor string, in json.RawMessage) 
 // expected.
 func TestResolvePendingApprovalsExecutesApproved(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true, returnValue: `{"removed":1}`}
-	engine := NewEngine(nil /* anthropic client unused */, []Tool{tool})
+	engine := NewEngine(nil /* anthropic client unused */, []Tool{tool}, nil, "")
 
 	// Hand-craft an Anthropic-shape history with an unfinished
 	// tool_use waiting for a tool_result.
@@ -125,7 +127,7 @@ func TestResolvePendingApprovalsExecutesApproved(t *testing.T) {
 // doesn't side-execute tool_uses behind the user's back.
 func TestResolvePendingApprovalsLeavesUnapprovedAlone(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true}
-	engine := NewEngine(nil, []Tool{tool})
+	engine := NewEngine(nil, []Tool{tool}, nil, "")
 
 	msgs := []AnthropicMessage{
 		{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "remove"}}},
@@ -154,7 +156,7 @@ func TestResolvePendingApprovalsLeavesUnapprovedAlone(t *testing.T) {
 // tool_result on a previous round. Re-running would be a bug.
 func TestResolvePendingApprovalsSkipsAlreadyResolved(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true}
-	engine := NewEngine(nil, []Tool{tool})
+	engine := NewEngine(nil, []Tool{tool}, nil, "")
 
 	msgs := []AnthropicMessage{
 		{Role: "assistant", Content: []AnthropicContentBlock{
@@ -172,6 +174,35 @@ func TestResolvePendingApprovalsSkipsAlreadyResolved(t *testing.T) {
 	_ = engine.resolvePendingApprovals(context.Background(), w, "alice", msgs, approved)
 	if tool.calls != 0 {
 		t.Errorf("tool re-executed despite existing tool_result; calls=%d", tool.calls)
+	}
+}
+
+// TestWriterEmitsStepBoundaries pins the step-boundary protocol the
+// AI-SDK auto-resubmit predicate relies on. Without start-step /
+// finish-step chunks, lastAssistantMessageIsCompleteWithToolCalls
+// inspects the entire accumulated assistant message and considers any
+// turn ending in text after a resolved tool call as "complete with
+// tool calls" — fires another /api/v1/chat POST forever.
+func TestWriterEmitsStepBoundaries(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := NewWriter(rec)
+	w.WriteStepStart()
+	w.WriteText("hi")
+	w.WriteStepFinish()
+	w.Close()
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"start-step"`) {
+		t.Errorf("missing start-step chunk in body: %q", body)
+	}
+	if !strings.Contains(body, `"type":"finish-step"`) {
+		t.Errorf("missing finish-step chunk in body: %q", body)
+	}
+	idxStart := strings.Index(body, `"type":"start-step"`)
+	idxFinish := strings.Index(body, `"type":"finish-step"`)
+	if idxStart >= idxFinish {
+		t.Errorf("step boundaries out of order: start=%d finish=%d body=%q",
+			idxStart, idxFinish, body)
 	}
 }
 
@@ -232,4 +263,155 @@ func TestWriterToolApprovalSequence(t *testing.T) {
 	// were set before WriteHeader — we just make sure they're in
 	// the recorder.
 	_ = http.StatusOK
+}
+
+// TestEngineFiltersToolsByPage is the core multi-page guarantee:
+// when a request arrives with Page="submit", a tool tagged ["jobs"]
+// must NOT appear in the schema sent to Anthropic (and vice versa).
+// Untagged tools are universal and stay visible everywhere. The
+// failure mode this protects against is the LLM seeing — and
+// invoking — a UI-mutation tool whose target component isn't even
+// mounted on the current page.
+func TestEngineFiltersToolsByPage(t *testing.T) {
+	jobsOnly := &fakeTool{name: "set_filter", pages: []string{"jobs"}}
+	submitOnly := &fakeTool{name: "set_template_body", pages: []string{"submit"}}
+	universal := &fakeTool{name: "doc_search"} // pages nil = everywhere
+
+	engine := NewEngine(nil, []Tool{jobsOnly, submitOnly, universal}, nil, "")
+
+	cases := []struct {
+		page        string
+		wantTools   []string
+		bannedTools []string
+	}{
+		{
+			page:        "jobs",
+			wantTools:   []string{"set_filter", "doc_search"},
+			bannedTools: []string{"set_template_body"},
+		},
+		{
+			page:        "submit",
+			wantTools:   []string{"set_template_body", "doc_search"},
+			bannedTools: []string{"set_filter"},
+		},
+		{
+			// Empty page is "no filtering" — legacy callers without
+			// the Page field still see every tool. This is intentional;
+			// strict filtering kicks in only when a real page id arrives.
+			page:      "",
+			wantTools: []string{"set_filter", "set_template_body", "doc_search"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.page, func(t *testing.T) {
+			tools, schemas := engine.toolsForPage(tc.page)
+			gotNames := make(map[string]bool, len(tools))
+			for _, tool := range tools {
+				gotNames[tool.Name()] = true
+			}
+			for _, want := range tc.wantTools {
+				if !gotNames[want] {
+					t.Errorf("page=%q: missing tool %q from filter result", tc.page, want)
+				}
+			}
+			for _, banned := range tc.bannedTools {
+				if gotNames[banned] {
+					t.Errorf("page=%q: banned tool %q leaked through filter", tc.page, banned)
+				}
+			}
+			// Tool slice and schema slice must stay aligned (the
+			// engine sends `schemas` to Anthropic and dispatches by
+			// `tools`; a misalignment would dispatch wrong tools).
+			if len(tools) != len(schemas) {
+				t.Errorf("page=%q: tools=%d schemas=%d (must match)",
+					tc.page, len(tools), len(schemas))
+			}
+			for i := range tools {
+				if tools[i].Name() != schemas[i].Name {
+					t.Errorf("page=%q: index %d tool=%q schema=%q (out of sync)",
+						tc.page, i, tools[i].Name(), schemas[i].Name)
+				}
+			}
+		})
+	}
+}
+
+// TestSystemPromptComposition pins the system-prompt assembly:
+// the base preamble is always present, the per-page suffix is
+// included only when the page key is in the engine's instruction
+// map, and the operator addendum (if non-empty) appears last so
+// site rules trump everything above. Verifying these positionally
+// matters because the LLM weighs later prompt content as a higher
+// priority — a regression that puts operator rules above page
+// help would silently change behavior at every site.
+func TestSystemPromptComposition(t *testing.T) {
+	pageInstr := map[string]string{
+		"jobs":   "JOBS_INSTRUCTIONS_MARKER",
+		"submit": "SUBMIT_INSTRUCTIONS_MARKER",
+	}
+	engine := NewEngine(nil, nil, pageInstr, "OPERATOR_RULES_MARKER")
+
+	t.Run("known page includes its suffix and the operator addendum", func(t *testing.T) {
+		got := engine.systemPromptForPage("jobs", nil, "")
+		if !strings.Contains(got, "JOBS_INSTRUCTIONS_MARKER") {
+			t.Errorf("missing jobs suffix in prompt:\n%s", got)
+		}
+		if strings.Contains(got, "SUBMIT_INSTRUCTIONS_MARKER") {
+			t.Errorf("submit suffix leaked into jobs prompt:\n%s", got)
+		}
+		if !strings.Contains(got, "OPERATOR_RULES_MARKER") {
+			t.Errorf("missing operator addendum:\n%s", got)
+		}
+		// Operator rules must follow the page suffix — otherwise
+		// site policy would be overridden by per-page guidance.
+		if strings.Index(got, "JOBS_INSTRUCTIONS_MARKER") >
+			strings.Index(got, "OPERATOR_RULES_MARKER") {
+			t.Errorf("operator addendum appears BEFORE the page suffix; expected after")
+		}
+	})
+
+	t.Run("unknown page falls back to base+addendum only", func(t *testing.T) {
+		got := engine.systemPromptForPage("unknown_xyz", nil, "")
+		if strings.Contains(got, "JOBS_INSTRUCTIONS_MARKER") ||
+			strings.Contains(got, "SUBMIT_INSTRUCTIONS_MARKER") {
+			t.Errorf("unknown page leaked a known page's suffix:\n%s", got)
+		}
+		if !strings.Contains(got, "OPERATOR_RULES_MARKER") {
+			t.Errorf("unknown page should still include operator addendum:\n%s", got)
+		}
+	})
+
+	t.Run("empty operator addendum produces no operator block", func(t *testing.T) {
+		bare := NewEngine(nil, nil, pageInstr, "")
+		got := bare.systemPromptForPage("jobs", nil, "")
+		if strings.Contains(got, "Site operator instructions") {
+			t.Errorf("bare engine emitted operator block despite empty addendum:\n%s", got)
+		}
+	})
+
+	t.Run("page context is injected and respects the cap", func(t *testing.T) {
+		got := engine.systemPromptForPage("jobs", nil, "job_id=1.0\nstatus=Running")
+		if !strings.Contains(got, "Page context:") {
+			t.Errorf("missing 'Page context:' header in prompt:\n%s", got)
+		}
+		if !strings.Contains(got, "job_id=1.0") {
+			t.Errorf("missing page-context body in prompt:\n%s", got)
+		}
+		// Page context must come AFTER the page-specific instructions
+		// — a future regression that swaps the order would cause the
+		// page guidance to override the per-request facts.
+		if strings.Index(got, "JOBS_INSTRUCTIONS_MARKER") > strings.Index(got, "Page context:") {
+			t.Errorf("page context should appear AFTER the page-instructions block")
+		}
+
+		// Cap enforcement: a 4 KiB string must be truncated to the
+		// engine's cap with a "[truncated]" marker. Without the cap
+		// a runaway caller could pin gigantic strings into the
+		// system prompt.
+		huge := strings.Repeat("A", 4096)
+		clamped := engine.systemPromptForPage("jobs", nil, huge)
+		if !strings.Contains(clamped, "[truncated]") {
+			t.Errorf("huge page context should be marked truncated:\n%s", clamped)
+		}
+	})
 }

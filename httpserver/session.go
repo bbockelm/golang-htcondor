@@ -191,7 +191,26 @@ func (s *SessionStore) Size() int {
 // sessionCookieName is the name of the HTTP session cookie
 const sessionCookieName = "htcondor_session"
 
-// setSessionCookie sets an HTTP session cookie
+// setSessionCookie sets an HTTP session cookie.
+//
+// Cookie attributes:
+//   - HttpOnly: prevents JS readout (XSS containment).
+//   - Secure: only sent over HTTPS.
+//   - SameSite=Strict: NOT sent on cross-site requests (top-level
+//     navigation OR subresource). The SPA is served from the same
+//     origin as the API, so all in-app navigation works. The
+//     cross-site impact: a user clicking a bookmark / Slack link to
+//     a deep page will appear logged-out and bounce through SSO once
+//     before reaching the page (one extra hop, not broken). The
+//     IdP-role flow (/idp/* hosted by this server) similarly may
+//     pick up an extra hop when a relying party redirects in
+//     cross-site; the /idp/login page handles re-authentication.
+//
+// Strict is preferred over Lax here because Lax still allows
+// top-level GET navigation to carry the cookie, which is a CSRF
+// foothold for any state-changing endpoint that accidentally
+// accepts GET. Switching to Strict closes that class of bug at the
+// cookie layer rather than relying on per-endpoint method checks.
 func (s *Handler) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) {
 	// Determine if we should use Secure flag (HTTPS only)
 	// In production, sessions should only be transmitted over HTTPS
@@ -204,9 +223,9 @@ func (s *Handler) setSessionCookie(w http.ResponseWriter, sessionID string, expi
 		Path:     "/",
 		Expires:  expiresAt,
 		MaxAge:   int(time.Until(expiresAt).Seconds()),
-		HttpOnly: true,                 // Prevent JavaScript access
-		Secure:   secure,               // HTTPS only in production
-		SameSite: http.SameSiteLaxMode, // CSRF protection
+		HttpOnly: true,                    // Prevent JavaScript access
+		Secure:   secure,                  // HTTPS only in production
+		SameSite: http.SameSiteStrictMode, // CSRF — see doc comment
 	}
 
 	http.SetCookie(w, cookie)
@@ -221,7 +240,9 @@ func getSessionCookie(r *http.Request) (string, error) {
 	return cookie.Value, nil
 }
 
-// clearSessionCookie clears the session cookie
+// clearSessionCookie clears the session cookie.
+// SameSite must match setSessionCookie so the browser correctly
+// scopes the deletion request to a same-site response.
 func (s *Handler) clearSessionCookie(w http.ResponseWriter) {
 	cookie := &http.Cookie{
 		Name:     sessionCookieName,
@@ -230,7 +251,7 @@ func (s *Handler) clearSessionCookie(w http.ResponseWriter) {
 		MaxAge:   -1, // Delete cookie
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 	}
 	http.SetCookie(w, cookie)
 }

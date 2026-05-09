@@ -211,10 +211,15 @@ func TestLogoutEndpoint(t *testing.T) {
 			checkCookies:   true,
 		},
 		{
-			name:           "GET /logout returns success",
+			// GET /logout used to be supported for browser-based
+			// "<a href='/logout'>" links, but that exposes a CSRF
+			// vector (any third-party page can log a victim out
+			// with a top-level link). The 2026-05 audit response
+			// removed it; the SPA now POSTs from a button.
+			name:           "GET /logout returns Method Not Allowed",
 			method:         http.MethodGet,
 			cookies:        nil,
-			wantStatusCode: http.StatusOK,
+			wantStatusCode: http.StatusMethodNotAllowed,
 			wantStatus:     "",
 			wantMessage:    "",
 			checkCookies:   false,

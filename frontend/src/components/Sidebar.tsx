@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { api } from '@/lib/api';
 
 interface SidebarProps {
   userName?: string;
@@ -15,6 +16,7 @@ interface SidebarProps {
 const NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/jobs', label: 'Jobs' },
+  { href: '/archive', label: 'Archive' },
   { href: '/submit', label: 'Submit' },
   { href: '/interactive', label: 'Interactive' },
   { href: '/info', label: 'Info' },
@@ -23,6 +25,7 @@ const NAV = [
 const ADMIN_NAV = [
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
+  { href: '/admin/api-keys', label: 'API Keys' },
   { href: '/admin/logs', label: 'Logs' },
 ];
 
@@ -108,9 +111,27 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
           {userName ? (
             <>
               <div className="truncate text-gray-300">{userName}</div>
-              <a href="/logout" className="text-gray-400 hover:text-white">
+              <button
+                type="button"
+                onClick={async () => {
+                  // Logout is a POST (the GET form was removed for
+                  // CSRF safety in 2026-05). After the API clears the
+                  // session cookie, hard-navigate to root so the
+                  // session-aware UI re-fetches /auth/me and shows
+                  // "Sign in" instead of stale user data.
+                  try {
+                    await api.auth.logout();
+                  } catch {
+                    // Ignore — even if the API call fails, the user
+                    // wants to leave; the next /auth/me will fail
+                    // and the SPA will redirect them to /login.
+                  }
+                  window.location.href = '/';
+                }}
+                className="text-left text-gray-400 hover:text-white"
+              >
                 Sign out
-              </a>
+              </button>
             </>
           ) : (
             <a href="/login" className="text-brand-300 hover:text-white">

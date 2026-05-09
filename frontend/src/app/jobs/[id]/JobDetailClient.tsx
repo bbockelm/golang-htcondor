@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -13,6 +13,7 @@ import {
   type DisplayStatus,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
@@ -175,6 +176,12 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
   return (
     <div className="space-y-6">
+      {/* Chat sits at the top: it's the primary affordance for
+          investigation ("why is this held?", "tail my stderr") and
+          users don't scroll past two screens of panels to find a
+          collapsed pill at the bottom. */}
+      <JobDetailChat jobID={jobID} job={job} />
+
       <div className="rounded border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
         <Field label="Owner" value={owner ?? '—'} />
@@ -227,6 +234,8 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
       <OutputFilesPanel jobID={jobID} status={status} />
 
+      <LiveTailPanel jobID={jobID} status={status} />
+
       <TerminalPanel jobID={jobID} status={status} />
 
       <LogViewerPanel jobID={jobID} />
@@ -254,9 +263,247 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         }
       />
 
-      <JobDetailsSection job={job} />
+      <JobDetailsSection jobID={jobID} job={job} />
     </div>
   );
+}
+
+// Build a short page-context string the LLM can read so it doesn't
+// have to ask "which job?" on every turn. Keep this terse — it's
+// appended to the system prompt on every request, so verbosity costs
+// tokens. Only include facts the LLM might want to act on (the job_id
+// for run_in_job, the status to know whether ssh-to-job is even
+// available, the last host for cross-referencing).
+function buildJobChatContext(jobID: string, job: ClassAd): string {
+  const parts: string[] = [`job_id=${jobID}`];
+  const status = num(job.JobStatus);
+  if (status !== undefined) {
+    const display = displayJobStatus({
+      status: job.JobStatus as number | string | null | undefined,
+      holdReasonCode: job.HoldReasonCode as
+        | number
+        | string
+        | null
+        | undefined,
+    });
+    parts.push(`status=${display.label} (JobStatus=${status})`);
+  }
+  const owner = str(job.Owner);
+  if (owner) parts.push(`owner=${owner}`);
+  const lastHost = str(job.LastRemoteHost) ?? str(job.RemoteHost);
+  if (lastHost) parts.push(`last_host=${lastHost}`);
+  const hold = str(job.HoldReason);
+  if (hold) parts.push(`hold_reason=${hold}`);
+  return parts.join('\n');
+}
+
+// JobDetailChat hosts the per-job ChatPanel. Builds the per-request
+// page-context string and the client-side tool dispatch hooks. The
+// hooks operate against the React Query cache where possible (so a
+// follow-up read doesn't re-hit the schedd) and otherwise call the
+// underlying API client.
+//
+// === KEEP IN SYNC WITH jobDetailPageInstructions IN
+// httpserver/handlers_chat_tools.go ===
+function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
+  const queryClient = useQueryClient();
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+
+  const pageContext = useMemo(
+    () => buildJobChatContext(jobID, job),
+    [jobID, job],
+  );
+
+  const hooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      get_job_attributes: (input) => {
+        const names = Array.isArray(input.names)
+          ? (input.names as unknown[]).filter(
+              (n): n is string => typeof n === 'string',
+            )
+          : null;
+        if (!names || names.length === 0) {
+          // Full-ad request. Cap on size to protect the LLM context;
+          // most jobs are <40 KiB serialized, but a stuck-spam'd
+          // ChirpAttribute set could blow that out.
+          const text = JSON.stringify(job);
+          if (text.length > 64 * 1024) {
+            return {
+              ok: false,
+              error:
+                'job ClassAd exceeds 64 KiB; pass `names` to project specific attributes',
+            };
+          }
+          return { ok: true, attributes: job };
+        }
+        // Case-insensitive lookup against the ad's keys. ClassAds are
+        // case-insensitive on the wire; the JSON marshaling preserves
+        // whatever cap the schedd handed back, so the LLM might ask for
+        // "holdReason" while the ad has "HoldReason".
+        const lc: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(job)) {
+          lc[k.toLowerCase()] = v;
+        }
+        const out: Record<string, unknown> = {};
+        for (const n of names) {
+          const v = lc[n.toLowerCase()];
+          if (v !== undefined) out[n] = v;
+        }
+        return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
+      },
+
+      get_job_log: async () => {
+        try {
+          const data = await queryClient.fetchQuery({
+            queryKey: ['job-log', jobID],
+            queryFn: () => api.jobs.log(jobID),
+            staleTime: 5_000,
+          });
+          return { ok: true, ...data };
+        } catch (e) {
+          return { ok: false, error: errMsg(e) };
+        }
+      },
+
+      get_match_analysis: async () => {
+        try {
+          const data = await queryClient.fetchQuery({
+            queryKey: ['job-match-analysis', jobID],
+            queryFn: () => api.jobs.matchAnalysis(jobID),
+            staleTime: 30_000,
+          });
+          return { ok: true, ...data };
+        } catch (e) {
+          return { ok: false, error: errMsg(e) };
+        }
+      },
+
+      read_job_output: async (input) => {
+        const stream = String(input.stream ?? '');
+        if (stream !== 'stdout' && stream !== 'stderr') {
+          return { ok: false, error: 'stream must be "stdout" or "stderr"' };
+        }
+        const mode = String(input.mode ?? '');
+        if (!['head', 'tail', 'grep'].includes(mode)) {
+          return { ok: false, error: 'mode must be "head", "tail", or "grep"' };
+        }
+        try {
+          const fetcher =
+            stream === 'stdout' ? api.jobs.stdoutText : api.jobs.stderrText;
+          const data = await queryClient.fetchQuery({
+            queryKey: ['job-output', jobID, stream],
+            queryFn: () => fetcher(jobID),
+            staleTime: 60_000,
+          });
+          const lines = data.text.split('\n');
+          const n = clampInt(input.lines, 1, 500, 30);
+          if (mode === 'head') {
+            return {
+              ok: true,
+              stream,
+              mode,
+              lines: lines.slice(0, n),
+              total_lines: lines.length,
+              truncated: data.truncated,
+            };
+          }
+          if (mode === 'tail') {
+            return {
+              ok: true,
+              stream,
+              mode,
+              lines: lines.slice(Math.max(0, lines.length - n)),
+              total_lines: lines.length,
+              truncated: data.truncated,
+            };
+          }
+          // grep mode
+          const pattern = String(input.pattern ?? '');
+          if (!pattern) {
+            return { ok: false, error: 'grep mode requires a pattern' };
+          }
+          const flags =
+            input.case_insensitive === true ? 'i' : '';
+          let re: RegExp;
+          try {
+            re = new RegExp(pattern, flags);
+          } catch (e) {
+            return { ok: false, error: `invalid regex: ${errMsg(e)}` };
+          }
+          const ctx = clampInt(input.context_lines, 0, 5, 0);
+          const matches: { line: number; text: string }[] = [];
+          for (let i = 0; i < lines.length; i++) {
+            if (re.test(lines[i])) {
+              const start = Math.max(0, i - ctx);
+              const end = Math.min(lines.length, i + ctx + 1);
+              for (let j = start; j < end; j++) {
+                if (!matches.find((m) => m.line === j + 1)) {
+                  matches.push({ line: j + 1, text: lines[j] });
+                }
+              }
+            }
+            // Cap returned matches so a too-broad pattern doesn't
+            // blow out the model's context window.
+            if (matches.length >= 200) break;
+          }
+          return {
+            ok: true,
+            stream,
+            mode,
+            pattern,
+            matches,
+            match_count: matches.length,
+            total_lines: lines.length,
+            truncated: data.truncated,
+          };
+        } catch (e) {
+          return { ok: false, error: errMsg(e) };
+        }
+      },
+    }),
+    [job, jobID, queryClient],
+  );
+
+  return (
+    <ChatPanel
+      visible={chatVisible}
+      page="job-detail"
+      pageContext={pageContext}
+      hooks={hooks}
+      headerLabel="Job assistant"
+      togglerLabel="Ask about this job"
+      // Chat is the primary affordance on this page (investigation
+      // patterns: "why held?", "tail stderr", "ps inside the job"),
+      // so default to expanded so it's there the moment the page
+      // mounts instead of behind a pill click.
+      defaultOpen
+      pageHelp={`Ask things like "why is this held?", "what's it doing right now?", "show me the last 30 lines of stderr", or "did it actually start matching slots?".`}
+    />
+  );
+}
+
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+function clampInt(
+  v: unknown,
+  min: number,
+  max: number,
+  defaultValue: number,
+): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return defaultValue;
+  if (n < min) return min;
+  if (n > max) return max;
+  return Math.floor(n);
 }
 
 function TerminalPanel({
@@ -440,6 +687,271 @@ function OutputFilesPanel({
   );
 }
 
+// LiveTailPanel polls the schedd's STARTER_PEEK protocol (the same
+// path condor_tail uses) to surface stdout / stderr from a job's
+// sandbox while it's still running — the OutputFilesPanel above
+// only sees what got transferred back at completion. The panel
+// renders only for running jobs (status=2); idle / held / completed
+// jobs hide it since there's nothing live to peek at.
+//
+// Polling is paused by default to avoid surprise schedd / starter
+// load. Hitting "Live tail" arms a 3-second loop that runs until
+// the user pauses, the job leaves the running state, or the
+// component unmounts. Each poll asks for the bytes since the last
+// returned offset, so the wire stays small once the initial tail
+// snapshot has been pulled.
+function LiveTailPanel({
+  jobID,
+  status,
+}: {
+  jobID: string;
+  status: number | undefined;
+}) {
+  const isRunning = status === 2;
+
+  // engaged: the user has clicked "Live tail" at least once. Until
+  // then we don't render the dark output area or the controls — the
+  // panel stays a single button. Once engaged, it stays expanded
+  // for the rest of the session even when polling is paused.
+  const [engaged, setEngaged] = useState(false);
+
+  // Tab selector — most users want stdout, but a held / failing job
+  // is usually best diagnosed from stderr, so we make switching
+  // cheap. Switching resets text/offset so each tab has its own
+  // independent rolling window.
+  const [stream, setStream] = useState<'stdout' | 'stderr'>('stdout');
+
+  // Accumulated text + the next offset to ask for. Both reset when
+  // the user switches stream or hits Clear.
+  const [text, setText] = useState('');
+  const [offset, setOffset] = useState<number | null>(null); // null = "tail" (-1 on the wire)
+  const [active, setActive] = useState(false); // polling on?
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  // Auto-scroll the textarea so the latest output stays visible.
+  // useRef keeps us out of React's render cycle for what's a pure
+  // DOM-side effect.
+  const preRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    if (preRef.current) {
+      preRef.current.scrollTop = preRef.current.scrollHeight;
+    }
+  }, [text]);
+
+  // Stop polling automatically when the job leaves the running state
+  // — the starter session goes away with it, and another second of
+  // polling would just produce 409s. The set-state-in-effect rule
+  // doesn't have a great answer for "synchronize derived state to
+  // external props"; we silence it the same way the rest of the
+  // codebase does.
+  useEffect(() => {
+    if (!isRunning && active) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setActive(false);
+    }
+  }, [isRunning, active]);
+
+  const fetchOnce = useCallback(async () => {
+    setPending(true);
+    setError(null);
+    try {
+      const params: Parameters<typeof api.jobs.peek>[1] = { stream };
+      // First call leaves offsets unset → server uses -1 (tail).
+      // Subsequent calls feed the prior offset back so we only
+      // pull new bytes.
+      if (offset !== null) {
+        if (stream === 'stdout') params.stdout_offset = offset;
+        else params.stderr_offset = offset;
+      }
+      const res = await api.jobs.peek(jobID, params);
+      const got = stream === 'stdout' ? res.stdout : res.stderr;
+      if (got) {
+        // First fetch (offset===null) replaces the buffer — the
+        // starter returned a tail snapshot we want to display
+        // verbatim. Subsequent fetches append.
+        setText((prev) => (offset === null ? got.text : prev + got.text));
+        setOffset(got.offset);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  }, [jobID, stream, offset]);
+
+  // Polling loop. We use setTimeout (rather than setInterval) so a
+  // slow fetch can't pile up — we wait for one to complete before
+  // scheduling the next.
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      await fetchOnce();
+      if (cancelled) return;
+      timer = setTimeout(tick, 3000);
+    };
+    void tick();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [active, fetchOnce]);
+
+  const switchStream = (s: 'stdout' | 'stderr') => {
+    if (s === stream) return;
+    setStream(s);
+    setText('');
+    setOffset(null);
+    setError(null);
+  };
+
+  // closePanel collapses the panel back to the unengaged state and
+  // throws away the accumulated buffer + offset along the way.
+  // Polling stops, the dark output area disappears, and the user is
+  // back to the single "Live tail" button. Re-clicking it starts a
+  // fresh tail from the current end-of-file.
+  const closePanel = () => {
+    setEngaged(false);
+    setActive(false);
+    setText('');
+    setOffset(null);
+    setError(null);
+  };
+
+  // Hide entirely until the job is running. Live tail only works
+  // against a live starter, and showing a permanently-disabled
+  // panel for idle / completed jobs is just visual noise.
+  if (!isRunning) return null;
+
+  // Job is running but the user hasn't engaged yet: show a single
+  // affordance, no expansion. Clicking the button engages and starts
+  // the first poll in one motion (setActive(true) primes the loop
+  // effect; setEngaged(true) flips this branch off on the next
+  // render).
+  if (!engaged) {
+    return (
+      <div className="rounded border border-gray-200 bg-white p-3 flex items-center gap-3">
+        <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
+        <span className="text-xs text-gray-500">
+          Stream stdout / stderr from the running sandbox.
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            setEngaged(true);
+            setActive(true);
+          }}
+          className="ml-auto text-xs rounded border border-brand-600 bg-white px-2 py-0.5 text-brand-700 hover:bg-brand-50"
+        >
+          Live tail
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded border border-gray-200 bg-white p-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
+        <div className="inline-flex rounded border border-gray-300 bg-white p-0.5 text-xs">
+          <button
+            type="button"
+            onClick={() => switchStream('stdout')}
+            className={`rounded px-2 py-0.5 ${
+              stream === 'stdout'
+                ? 'bg-gray-200 text-gray-900'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            stdout
+          </button>
+          <button
+            type="button"
+            onClick={() => switchStream('stderr')}
+            className={`rounded px-2 py-0.5 ${
+              stream === 'stderr'
+                ? 'bg-gray-200 text-gray-900'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            stderr
+          </button>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActive((a) => !a)}
+            className={`text-xs rounded border px-2 py-0.5 ${
+              active
+                ? 'border-amber-500 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                : 'border-brand-600 bg-white text-brand-700 hover:bg-brand-50'
+            }`}
+          >
+            {active ? 'Pause' : pending ? '…' : 'Resume'}
+          </button>
+          <button
+            type="button"
+            onClick={closePanel}
+            className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+            title="Close the live tail (clears the buffer)"
+            aria-label="Close live tail"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-xs text-red-700 whitespace-pre-wrap">
+          {error}
+        </p>
+      )}
+
+      <pre
+        ref={preRef}
+        className="h-64 overflow-auto rounded bg-gray-900 px-3 py-2 font-mono text-[11px] text-gray-100 whitespace-pre-wrap break-words"
+      >
+        {text || (
+          <span className="text-gray-500">
+            Waiting for output on {stream}…
+          </span>
+        )}
+      </pre>
+
+      {active && (
+        <p className="text-[11px] text-gray-500">
+          Polling every 3 seconds.{' '}
+          {offset !== null && (
+            <span className="text-gray-400">
+              Offset: {offset.toLocaleString()} bytes
+            </span>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // OutputStreamPreview lazily fetches the (capped) text of a stdout or
 // stderr file and renders it inside a collapsible <details>. We
 // trigger the fetch on first open so unrelated detail-page traffic
@@ -512,7 +1024,18 @@ function OutputStreamPreview({
 // once they've opened a job: requested vs. used resources, environment
 // (universe / IWD / restarts), and the full raw ClassAd as a
 // drop-down with Copy-to-clipboard.
-function JobDetailsSection({ job }: { job: ClassAd }) {
+export function JobDetailsSection({
+  jobID,
+  job,
+  editable = true,
+}: {
+  jobID: string;
+  job: ClassAd;
+  // editable forwards through to AttributesTable. The archive
+  // detail page passes false to render the section as read-only —
+  // history records are immutable.
+  editable?: boolean;
+}) {
   return (
     <section className="rounded border border-gray-200 bg-white">
       <header className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 rounded-t">
@@ -524,13 +1047,460 @@ function JobDetailsSection({ job }: { job: ClassAd }) {
       <div className="p-4 space-y-4">
         <ResourceTable job={job} />
         <ExecutionTable job={job} />
+        <AttributesTable jobID={jobID} job={job} editable={editable} />
         <RawClassAd job={job} />
       </div>
     </section>
   );
 }
 
-function ResourceTable({ job }: { job: ClassAd }) {
+// AttributeType is what the user picks (or what we infer from the
+// existing value) to decide how to encode the new value into a
+// ClassAd literal at write time. "raw" lets the user supply any
+// expression — useful for references like `Memory * 2` or for
+// resetting an attribute to UNDEFINED.
+type AttributeType = 'string' | 'integer' | 'real' | 'boolean' | 'raw';
+
+interface AttributeRow {
+  name: string;
+  value: string;        // human-readable rendering of the current value
+  type: AttributeType;  // best-guess type from the JSON shape
+}
+
+// inferAttributeType picks a reasonable default editor type from a
+// JSON-decoded ClassAd attribute value. The user can override in the
+// edit row; we just want the dropdown to land on the most common
+// answer for each kind of value. Numbers split int/real; everything
+// else falls back to 'raw' (objects, arrays, expressions decoded as
+// strings that already look like ClassAd code, etc.).
+function inferAttributeType(v: unknown): AttributeType {
+  if (typeof v === 'boolean') return 'boolean';
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? 'integer' : 'real';
+  }
+  if (typeof v === 'string') return 'string';
+  return 'raw';
+}
+
+// formatAttributeForEdit renders the *editable* default text for the
+// edit-row's value input given the existing value. For strings we
+// surface the text *unquoted* — quotes are an encoding concern, the
+// user shouldn't have to type them. Everything else round-trips
+// through stringifyAdValue.
+function formatAttributeForEdit(v: unknown): string {
+  if (typeof v === 'string') return v;
+  return stringifyAdValue(v);
+}
+
+// validateAttributeInput runs the same checks the server will run, so
+// the user gets fast inline feedback ("not a valid integer") instead
+// of a 400 round-trip. We deliberately do NOT do the string quoting
+// here — that lives on the Go side using classad.Quote, which has the
+// authoritative escape table for ClassAd literals (\, ", \n, \t,
+// control chars, …). Mirroring it in JS would just recreate the
+// hand-rolled-quote-loop bug we hit the first time around.
+//
+// Returns null if valid, or an error message string if not.
+function validateAttributeInput(
+  type: AttributeType,
+  raw: string,
+): string | null {
+  switch (type) {
+    case 'string':
+      // Any text is a valid string; the empty string is meaningful
+      // (`""` after server quoting), so don't reject.
+      return null;
+    case 'integer': {
+      const trimmed = raw.trim();
+      const n = Number.parseInt(trimmed, 10);
+      if (!Number.isFinite(n) || String(n) !== trimmed) {
+        return `"${raw}" is not a valid integer`;
+      }
+      return null;
+    }
+    case 'real': {
+      const n = Number.parseFloat(raw.trim());
+      if (!Number.isFinite(n)) return `"${raw}" is not a valid real number`;
+      return null;
+    }
+    case 'boolean': {
+      const v = raw.trim().toLowerCase();
+      if (v === 'true' || v === 'false') return null;
+      return `boolean must be "true" or "false", not "${raw}"`;
+    }
+    case 'raw':
+      // Trust the user but reject empty / whitespace-only — too easy
+      // to "set X to nothing" silently.
+      if (raw.trim() === '') return 'expression must not be empty';
+      return null;
+  }
+}
+
+// AttributesTable surfaces the entire ClassAd as a searchable list,
+// in between the curated Resource/Execution rollups and the raw JSON
+// drop-down. Power users routinely need to peek at attributes that
+// don't have first-class UI (RemoteSysCpu, JobCurrentStartDate,
+// custom site-specific tags, …) without scrolling through 200 lines
+// of ClassAd JSON.
+//
+// Rows are also editable in place — click "edit" or double-click the
+// row to expand it into a value+type form. The (value, type) tuple
+// is encoded into a ClassAd expression (encodeAttributeForWire) and
+// PATCHed at /api/v1/jobs/{id}; the schedd refuses immutable /
+// protected attributes with a 403, surfaced inline.
+//
+// The table caps its visible rows at MAX_VISIBLE so it doesn't push
+// the rest of the page off-screen on a busy job; the rest scrolls
+// inside the body. A filter input matches case-insensitively against
+// either the attribute name or the rendered value.
+export function AttributesTable({
+  jobID,
+  job,
+  editable = true,
+}: {
+  jobID: string;
+  job: ClassAd;
+  // editable=false renders the table in pure read-only mode: no edit
+  // button column, no double-click-to-edit, no AttributeEditRow path.
+  // Used by the archive detail page since history records are
+  // immutable. Defaults to true so the live-job detail page (the
+  // first / canonical caller) doesn't have to opt in.
+  editable?: boolean;
+}) {
+  const [filter, setFilter] = useState('');
+
+  // Which row, if any, is currently in edit mode. Stored as the
+  // attribute name so it survives reorders / re-renders that might
+  // change row indices in the filtered list. null = nobody editing.
+  const [editingName, setEditingName] = useState<string | null>(null);
+
+  const queryClient = useQueryClient();
+
+  const rows = useMemo<AttributeRow[]>(() => {
+    const all = Object.entries(job).map(([name, raw]) => ({
+      name,
+      value: stringifyAdValue(raw),
+      type: inferAttributeType(raw),
+    }));
+    all.sort((a, b) => a.name.localeCompare(b.name));
+    return all;
+  }, [job]);
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.value.toLowerCase().includes(q),
+    );
+  }, [rows, filter]);
+
+  // 7 rows of ~28px (py-1.5 + line-height) plus a header. Keeping
+  // this in line-height-units rather than a fixed px height means
+  // the cap stays right if the row padding ever shifts. The edit
+  // row blows the cap when active (it has form fields), but that's
+  // intentional — once you're editing, you want to see the controls
+  // without scrolling.
+  const MAX_VISIBLE = 7;
+  const ROW_HEIGHT_PX = 28;
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3 mb-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          All Attributes
+        </h3>
+        <span className="text-[11px] text-gray-400 tabular-nums">
+          {filter ? `${filtered.length} / ${rows.length}` : `${rows.length}`}
+        </span>
+      </div>
+      <input
+        type="text"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="Filter by attribute name or value…"
+        className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
+        aria-label="Filter ClassAd attributes"
+      />
+      <div className="overflow-hidden rounded border border-gray-200">
+        <table className="min-w-full text-xs table-fixed">
+          <thead className="bg-gray-50 text-left text-[10px] uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className="px-3 py-1.5 w-56">Attribute</th>
+              <th className="px-3 py-1.5 w-20">Type</th>
+              <th className="px-3 py-1.5">Value</th>
+              {editable && <th className="px-3 py-1.5 w-16 text-right" />}
+            </tr>
+          </thead>
+        </table>
+        {filtered.length === 0 ? (
+          <p className="px-3 py-2 text-xs text-gray-500">
+            No matches.
+          </p>
+        ) : (
+          <div
+            className="overflow-y-auto"
+            // Don't cap height while editing — the form needs room.
+            style={
+              editingName
+                ? undefined
+                : { maxHeight: ROW_HEIGHT_PX * MAX_VISIBLE }
+            }
+          >
+            <table className="min-w-full text-xs table-fixed">
+              <tbody className="divide-y divide-gray-100">
+                {filtered.map((r) =>
+                  editable && editingName === r.name ? (
+                    <AttributeEditRow
+                      key={r.name}
+                      jobID={jobID}
+                      row={r}
+                      onCancel={() => setEditingName(null)}
+                      onSaved={() => {
+                        // Refresh the job ad so the row reflects the
+                        // schedd's authoritative value (it may have
+                        // canonicalised our expression).
+                        queryClient.invalidateQueries({ queryKey: ['job', jobID] });
+                        setEditingName(null);
+                      }}
+                    />
+                  ) : (
+                    <AttributeViewRow
+                      key={r.name}
+                      row={r}
+                      onEdit={editable ? () => setEditingName(r.name) : undefined}
+                    />
+                  ),
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// AttributeViewRow is the read-only display for one attribute. The
+// whole row is a click target — double-clicking enters edit mode
+// (handy on laptops where the inline icon button is fiddly), and
+// the explicit "edit" button at the right covers the discoverability
+// case. The hover background highlights the row the cursor is on,
+// which is the difference between "I'll click this" and "I think
+// I'm clicking this".
+function AttributeViewRow({
+  row,
+  onEdit,
+}: {
+  row: AttributeRow;
+  // onEdit=undefined puts the row into pure read-only mode (no edit
+  // button, no double-click handler, no "double-click to edit"
+  // tooltip). Archive detail page passes undefined since history
+  // records are immutable.
+  onEdit?: () => void;
+}) {
+  return (
+    <tr
+      className="hover:bg-gray-50 cursor-default"
+      onDoubleClick={onEdit}
+      title={onEdit ? 'Double-click to edit' : undefined}
+    >
+      <td className="px-3 py-1.5 w-56 font-mono text-gray-700 align-top break-all">
+        {row.name}
+      </td>
+      <td className="px-3 py-1.5 w-20 text-gray-500 align-top">
+        {row.type}
+      </td>
+      <td className="px-3 py-1.5 font-mono text-gray-900 break-all align-top">
+        {row.value}
+      </td>
+      {onEdit && (
+        <td className="px-3 py-1.5 w-16 text-right align-top">
+          <button
+            type="button"
+            onClick={onEdit}
+            className="text-[11px] rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+          >
+            edit
+          </button>
+        </td>
+      )}
+    </tr>
+  );
+}
+
+// AttributeEditRow swaps the value cell for a (type, value) pair of
+// inputs and turns the trailing button into a Save / Cancel pair.
+// Submission goes through api.jobs.edit; the parent invalidates the
+// job query on success so the row re-renders with the persisted
+// value (which may differ from what we sent — e.g. integer truncated,
+// expression evaluated server-side).
+function AttributeEditRow({
+  jobID,
+  row,
+  onCancel,
+  onSaved,
+}: {
+  jobID: string;
+  row: AttributeRow;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const [type, setType] = useState<AttributeType>(row.type);
+  // Initial text mirrors the displayed value. Strings come out
+  // un-quoted (the user types raw text — server quotes via
+  // classad.Quote); booleans default to the lowercase string form so
+  // the dropdown lands on the right option.
+  const [text, setText] = useState(() => {
+    if (row.type === 'boolean') {
+      const v = row.value.trim().toLowerCase();
+      return v === 'true' || v === 'false' ? v : 'true';
+    }
+    return formatAttributeForEdit(row.value);
+  });
+  const [error, setError] = useState<string | null>(null);
+
+  // When the user changes the type dropdown, keep the value field
+  // sane: switching INTO boolean snaps to "true" so the dropdown has
+  // a valid selection; switching OUT preserves what they typed.
+  const changeType = (next: AttributeType) => {
+    setType(next);
+    setError(null);
+    if (next === 'boolean') {
+      const v = text.trim().toLowerCase();
+      if (v !== 'true' && v !== 'false') setText('true');
+    }
+  };
+
+  const editMut = useMutation({
+    mutationFn: async () => {
+      // Send the typed shape — server does the encoding via
+      // classad.Quote so we don't have to mirror Go's full string
+      // escape table on the SPA side.
+      return api.jobs.edit(jobID, {
+        [row.name]: { type, value: text },
+      });
+    },
+    onSuccess: () => onSaved(),
+    onError: (e) =>
+      setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const submit = () => {
+    setError(null);
+    const validation = validateAttributeInput(type, text);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    editMut.mutate();
+  };
+
+  return (
+    <tr className="bg-amber-50/50">
+      <td className="px-3 py-1.5 w-56 font-mono text-gray-700 align-top break-all">
+        {row.name}
+      </td>
+      <td className="px-3 py-1.5 w-20 align-top">
+        <select
+          value={type}
+          onChange={(e) => changeType(e.target.value as AttributeType)}
+          className="w-full rounded border border-gray-300 bg-white px-1 py-0.5 text-[11px]"
+          aria-label="Attribute type"
+        >
+          <option value="string">string</option>
+          <option value="integer">integer</option>
+          <option value="real">real</option>
+          <option value="boolean">boolean</option>
+          <option value="raw">raw</option>
+        </select>
+      </td>
+      <td className="px-3 py-1.5 align-top">
+        {type === 'boolean' ? (
+          // Booleans get a dropdown: free text just invites typos
+          // ("True"/"yes"/"1") that fail validation, and there are
+          // only two valid values anyway.
+          <select
+            value={text === 'false' ? 'false' : 'true'}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+              if (e.key === 'Escape') onCancel();
+            }}
+            autoFocus
+            className="w-full rounded border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
+            aria-label="Boolean value"
+          >
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+              if (e.key === 'Escape') onCancel();
+            }}
+            autoFocus
+            spellCheck={false}
+            className="w-full rounded border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
+            placeholder={
+              type === 'string'
+                ? 'value (typed verbatim, no quotes)'
+                : type === 'raw'
+                  ? 'classad expression (e.g. Memory * 2)'
+                  : `${type} value`
+            }
+          />
+        )}
+        {error && (
+          <p className="mt-1 text-[11px] text-red-700">{error}</p>
+        )}
+      </td>
+      <td className="px-3 py-1.5 w-16 text-right align-top whitespace-nowrap">
+        <div className="inline-flex items-center gap-1">
+          <button
+            type="button"
+            onClick={submit}
+            disabled={editMut.isPending}
+            className="text-[11px] rounded border border-brand-600 bg-brand-600 px-2 py-0.5 font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          >
+            {editMut.isPending ? '…' : 'save'}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={editMut.isPending}
+            className="text-[11px] rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            cancel
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// stringifyAdValue collapses any JSON-shaped attribute value to a
+// short readable string. For nested objects / arrays we fall back to
+// JSON.stringify so the user can still see the structure inline; the
+// Raw ClassAd panel below has the pretty-printed version when they
+// need it.
+function stringifyAdValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+export function ResourceTable({ job }: { job: ClassAd }) {
   // Each row pulls a "requested" attribute and an "actual usage"
   // attribute. Most usage attributes are present only after the job
   // has run at least once; treat absence as "—".
@@ -591,7 +1561,7 @@ function ResourceTable({ job }: { job: ClassAd }) {
   );
 }
 
-function ExecutionTable({ job }: { job: ClassAd }) {
+export function ExecutionTable({ job }: { job: ClassAd }) {
   const rows: { label: string; value: React.ReactNode }[] = [
     { label: 'Universe', value: universeLabel(job.JobUniverse) },
     { label: 'Working dir', value: monoOrDash(str(job.Iwd)) },
@@ -640,7 +1610,7 @@ function ExecutionTable({ job }: { job: ClassAd }) {
   );
 }
 
-function RawClassAd({ job }: { job: ClassAd }) {
+export function RawClassAd({ job }: { job: ClassAd }) {
   const [copied, setCopied] = useState(false);
   const text = JSON.stringify(job, null, 2);
   const handleCopy = () => {
@@ -761,7 +1731,7 @@ function exitCodeCell(job: ClassAd): React.ReactNode {
   return <span className={`tabular-nums ${cls}`}>{exitCode}</span>;
 }
 
-function Field({
+export function Field({
   label,
   value,
   sub,
@@ -824,7 +1794,7 @@ export function statusPillCls(key: DisplayStatus): string {
   }
 }
 
-function StatusBadge({
+export function StatusBadge({
   display,
 }: {
   display: { key: DisplayStatus; label: string };
@@ -842,7 +1812,7 @@ function StatusBadge({
 // the calling component every `intervalMs`. Used to keep the
 // "12h3m ago"-style relative-time strings on the detail page roughly
 // accurate without an explicit refetch.
-function useNowTick(intervalMs: number): number {
+export function useNowTick(intervalMs: number): number {
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
     const id = setInterval(
@@ -858,7 +1828,7 @@ function useNowTick(intervalMs: number): number {
 // "1d2h", "5h3m", "12m4s", or "30s" string. Negative inputs are
 // clamped to 0 so a slight clock skew between the client and the
 // schedd's wallclock doesn't produce nonsense like "-3s ago".
-function humanDuration(seconds: number): string {
+export function humanDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
   const s = Math.floor(seconds);
   if (s < 60) return `${s}s`;

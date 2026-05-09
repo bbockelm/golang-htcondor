@@ -66,6 +66,14 @@ export interface ResourceRequestPanelProps {
   // surrounding section card already has one.
   title?: string;
   hint?: string;
+  // gpuSubfieldsOnly hides the CPU / memory / disk / GPU-count rows
+  // and renders just the GPU subfields (capability, memory, runtime,
+  // CUDA version, require_gpus). Used by the submit page's per-field
+  // override UI: when the user has the GPU override checkbox on AND
+  // request_gpus > 0, we still want them to be able to tune the
+  // subfields, but the count + the other top-level rows are already
+  // shown by the per-field rows above.
+  gpuSubfieldsOnly?: boolean;
 }
 
 export function ResourceRequestPanel({
@@ -74,6 +82,7 @@ export function ResourceRequestPanel({
   limits,
   title,
   hint,
+  gpuSubfieldsOnly,
 }: ResourceRequestPanelProps) {
   const lim = {
     minCpus: limits?.minCpus ?? 1,
@@ -86,6 +95,56 @@ export function ResourceRequestPanel({
 
   const patch = (p: Partial<ResourceRequest>) => onChange({ ...value, ...p });
   const numId = useId();
+
+  // GPU subfield grid — extracted so we can render it standalone via
+  // gpuSubfieldsOnly without duplicating the field list.
+  const gpuSubfields = (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+      <SelectField
+        label="Min CUDA capability"
+        value={value.gpuMinCapability}
+        onChange={(v) => patch({ gpuMinCapability: v })}
+        options={CUDA_CAPS.map((c) => ({
+          value: c,
+          label: c === '' ? '(any)' : c,
+        }))}
+      />
+      <NumField
+        label="Min GPU memory (MiB)"
+        min={0}
+        step={1024}
+        value={value.gpuMinMemoryMB}
+        onChange={(n) => patch({ gpuMinMemoryMB: n })}
+        hint="gpus_minimum_memory"
+      />
+      <TextField
+        label="Min CUDA runtime"
+        value={value.gpuMinRuntime}
+        onChange={(v) => patch({ gpuMinRuntime: v })}
+        placeholder="e.g. 11.0"
+        hint="gpus_minimum_runtime"
+      />
+      <TextField
+        label="CUDA version"
+        value={value.cudaVersion}
+        onChange={(v) => patch({ cudaVersion: v })}
+        placeholder="e.g. 12.1"
+        hint="cuda_version"
+      />
+      <TextField
+        label="require_gpus expression"
+        value={value.requireGpus}
+        onChange={(v) => patch({ requireGpus: v })}
+        placeholder="e.g. Capability >= 7.0 && GlobalMemoryMb >= 16000"
+        hint="Free-form ClassAd expression layered on top of the structured fields above."
+        fullWidth
+      />
+    </div>
+  );
+
+  if (gpuSubfieldsOnly) {
+    return gpuSubfields;
+  }
 
   return (
     <div className="space-y-4">
@@ -150,49 +209,7 @@ export function ResourceRequestPanel({
           </span>
         </div>
 
-        {value.gpus > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-            <SelectField
-              label="Min CUDA capability"
-              value={value.gpuMinCapability}
-              onChange={(v) => patch({ gpuMinCapability: v })}
-              options={CUDA_CAPS.map((c) => ({
-                value: c,
-                label: c === '' ? '(any)' : c,
-              }))}
-            />
-            <NumField
-              label="Min GPU memory (MiB)"
-              min={0}
-              step={1024}
-              value={value.gpuMinMemoryMB}
-              onChange={(n) => patch({ gpuMinMemoryMB: n })}
-              hint="gpus_minimum_memory"
-            />
-            <TextField
-              label="Min CUDA runtime"
-              value={value.gpuMinRuntime}
-              onChange={(v) => patch({ gpuMinRuntime: v })}
-              placeholder="e.g. 11.0"
-              hint="gpus_minimum_runtime"
-            />
-            <TextField
-              label="CUDA version"
-              value={value.cudaVersion}
-              onChange={(v) => patch({ cudaVersion: v })}
-              placeholder="e.g. 12.1"
-              hint="cuda_version"
-            />
-            <TextField
-              label="require_gpus expression"
-              value={value.requireGpus}
-              onChange={(v) => patch({ requireGpus: v })}
-              placeholder="e.g. Capability >= 7.0 && GlobalMemoryMb >= 16000"
-              hint="Free-form ClassAd expression layered on top of the structured fields above."
-              fullWidth
-            />
-          </div>
-        )}
+        {value.gpus > 0 && gpuSubfields}
       </div>
     </div>
   );

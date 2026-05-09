@@ -24,11 +24,18 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// extractUsernameFromToken extracts the username from an OAuth2 token using the configured claim
+// extractUsernameFromToken extracts the username from an OAuth2 token using the configured claim.
+//
+// This operates on a fosite-verified token; we never read the user
+// header here. (The header is honored only on initial-authentication
+// paths, gated by isUserHeaderTrustedSource. By the time we have a
+// fosite AccessRequester, the user identity has already been bound
+// into the token's `sub`.) The "userHeader configured" branch below
+// short-circuits to the token's subject because in deployments using
+// the userHeader path, the configured custom claim isn't populated —
+// `sub` is the source of truth.
 func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string {
-	// If user header is configured, that takes precedence (already set in context)
 	if h.userHeader != "" {
-		// This should have been handled earlier, but return subject as fallback
 		return token.GetSession().GetSubject()
 	}
 
@@ -157,6 +164,13 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 			secConfig.SecurityTag = username
 			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 		}
+
+		// Pass the caller's OAuth2-granted scopes into the MCP
+		// dispatch so handleListTools can filter the catalog and
+		// every other tool can consult them. Without this, the MCP
+		// layer has no idea which scopes the request was authorized
+		// with.
+		ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
 
 		// Restore the body for later reading
 		r.Body = io.NopCloser(bytes.NewBuffer(body))
@@ -373,8 +387,10 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	username := ""
 	var userGroups []string
 
-	// Method 1: User header (demo mode)
-	if h.userHeader != "" {
+	// Method 1: User header (demo mode).
+	// Only honored from configured trusted-proxy CIDRs (or in
+	// unsafe demo override). See isUserHeaderTrustedSource.
+	if h.isUserHeaderTrustedSource(r) {
 		username = r.Header.Get(h.userHeader)
 		if username != "" {
 			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
@@ -536,16 +552,49 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// User approved - create session and complete authorization
 			session := DefaultOpenIDConnectSession(username)
 
-			// Grant scopes based on group membership
+			// Per-scope consent: the consent page renders each
+			// requested scope as a checkbox (except `openid`, which
+			// is mandatory). The form delivers the user's accepted
+			// subset back via `scope` form values. We intersect:
+			//
+			//   accepted = set of scopes the user actually checked
+			//   policy   = getScopesForGroups(groups, accepted)
+			//
+			// `policy` is what we grant. The user can never grant
+			// MORE than the group policy allows (because policy
+			// re-filters); they can grant LESS by unchecking. This
+			// closes the audit C3 "all-or-nothing consent" gap.
 			requestedScopes := ar.GetRequestedScopes()
-			grantedScopes := h.getScopesForGroups(groups, requestedScopes)
+			requestedSet := make(map[string]bool, len(requestedScopes))
+			for _, s := range requestedScopes {
+				requestedSet[s] = true
+			}
+			// Filter accepted = (form values) ∩ (originally requested),
+			// so a malicious client can't sneak extra scopes through
+			// the form. Always include "openid" because OIDC mandates it.
+			acceptedSet := map[string]bool{"openid": true}
+			for _, formScope := range r.Form["scope"] {
+				if requestedSet[formScope] {
+					acceptedSet[formScope] = true
+				}
+			}
+			acceptedScopes := make([]string, 0, len(acceptedSet))
+			for s := range acceptedSet {
+				acceptedScopes = append(acceptedScopes, s)
+			}
+
+			// Grant scopes based on group membership intersected
+			// with what the user accepted on the form.
+			grantedScopes := h.getScopesForGroups(groups, acceptedScopes)
 			for _, scope := range grantedScopes {
 				ar.GrantScope(scope)
 			}
 
 			h.logger.Info(logging.DestinationHTTP, "User approved consent",
 				"username", username, "client_id", ar.GetClient().GetID(),
-				"requested_scopes", requestedScopes, "granted_scopes", grantedScopes)
+				"requested_scopes", requestedScopes,
+				"accepted_scopes", acceptedScopes,
+				"granted_scopes", grantedScopes)
 
 			// Generate OAuth2 response
 			response, err := h.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
@@ -1285,8 +1334,8 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		// Check authentication before showing the form (same as handleOAuth2Authorize)
 		username := ""
 
-		// Method 1: User header (demo mode)
-		if h.userHeader != "" {
+		// Method 1: User header (demo mode) — trusted-proxy gated.
+		if h.isUserHeaderTrustedSource(r) {
 			username = r.Header.Get(h.userHeader)
 			if username != "" {
 				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
@@ -1438,8 +1487,8 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		// 3. If neither, authentication is required
 		username := ""
 
-		// Method 1: User header (demo mode)
-		if h.userHeader != "" {
+		// Method 1: User header (demo mode) — trusted-proxy gated.
+		if h.isUserHeaderTrustedSource(r) {
 			username = r.Header.Get(h.userHeader)
 			if username != "" {
 				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
@@ -1467,14 +1516,20 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// Create session for user
 			session := DefaultOpenIDConnectSession(username)
 
-			// Approve the device code
-			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSession(ctx, userCode, username, session); err != nil {
+			acceptedScopes := narrowDeviceApprovalScopes(r.Form["scope"], request)
+
+			// Approve the device code with the user-narrowed scope set.
+			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
 				h.writeHTMLError(w, "Failed to approve device")
 				return
 			}
 
-			h.logger.Info(logging.DestinationHTTP, "Device code approved", "user_code", userCode, "username", username, "client_id", request.GetClient().GetID())
+			h.logger.Info(logging.DestinationHTTP, "Device code approved",
+				"user_code", userCode, "username", username,
+				"client_id", request.GetClient().GetID(),
+				"requested_scopes", request.GetRequestedScopes(),
+				"accepted_scopes", acceptedScopes)
 
 			// Return success page
 			h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
@@ -1517,15 +1572,41 @@ type consentPageParams struct {
 }
 
 // renderConsentPage renders a unified OAuth2 consent page for both authorization code and device flows.
+//
+// Each requested scope renders as a checked checkbox the user can
+// uncheck to decline that scope individually. `openid` is always
+// rendered as a fixed (non-checkbox) entry because OpenID Connect
+// requires it and the rest of the flow assumes it; declining it
+// would break the redirect / userinfo path. The POST handler
+// intersects the user-selected subset with the group-allowed set
+// returned by getScopesForGroups, so the user can never grant more
+// than the policy allows but can grant less.
 func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) {
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
 	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
 	for _, scope := range p.RequestedScopes {
-		fmt.Fprintf(&scopesHTML, "                <li>\n"+
-			"                    <strong>%s</strong>\n"+
-			"                    <p>%s</p>\n"+
-			"                </li>\n", html.EscapeString(scope), html.EscapeString(getScopeDescription(scope)))
+		desc := html.EscapeString(getScopeDescription(scope))
+		escScope := html.EscapeString(scope)
+		// openid is mandatory in OIDC; render as a fixed item with
+		// a hidden input so the form still carries it on submit.
+		if scope == "openid" {
+			fmt.Fprintf(&scopesHTML,
+				"                <li class=\"scope-fixed\">\n"+
+					"                    <input type=\"hidden\" name=\"scope\" value=\"%s\">\n"+
+					"                    <strong>%s</strong> <span class=\"required\">(required)</span>\n"+
+					"                    <p>%s</p>\n"+
+					"                </li>\n", escScope, escScope, desc)
+			continue
+		}
+		fmt.Fprintf(&scopesHTML,
+			"                <li class=\"scope-optional\">\n"+
+				"                    <label>\n"+
+				"                        <input type=\"checkbox\" name=\"scope\" value=\"%s\" checked>\n"+
+				"                        <strong>%s</strong>\n"+
+				"                        <p>%s</p>\n"+
+				"                    </label>\n"+
+				"                </li>\n", escScope, escScope, desc)
 	}
 	scopesHTML.WriteString("            </ul>")
 
@@ -1648,6 +1729,37 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
             font-size: 13px;
             line-height: 1.5;
             margin: 0;
+        }
+        .scopes-list li.scope-optional label {
+            display: grid;
+            grid-template-columns: 20px 1fr;
+            grid-template-rows: auto auto;
+            grid-column-gap: 12px;
+            align-items: start;
+            cursor: pointer;
+        }
+        .scopes-list li.scope-optional input[type="checkbox"] {
+            grid-row: 1 / span 2;
+            grid-column: 1;
+            margin-top: 2px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .scopes-list li.scope-optional strong {
+            grid-row: 1;
+            grid-column: 2;
+        }
+        .scopes-list li.scope-optional p {
+            grid-row: 2;
+            grid-column: 2;
+        }
+        .scopes-list li.scope-fixed .required {
+            color: #999;
+            font-size: 11px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         .actions {
             display: flex;
@@ -1884,24 +1996,15 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 		return false
 	}
 
-	// For tools/call, check the tool name
+	// For tools/call, check the tool name. The canonical allowlist
+	// lives in the mcpserver package (mcpserver.IsReadOnlyTool); we
+	// consult it here to avoid two parallel lists drifting apart.
 	if mcpRequest.Method == "tools/call" {
 		var params struct {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(mcpRequest.Params, &params); err == nil {
-			// Read-only tools
-			readOnlyTools := map[string]bool{
-				"query_jobs":                    true,
-				"get_job":                       true,
-				"analyze_job_match":             true,
-				"condor_doc_job_attributes":     true,
-				"condor_doc_machine_attributes": true,
-				"condor_doc_submit_syntax":      true,
-				"condor_doc_config_variables":   true,
-				"condor_doc_search":             true,
-			}
-			if readOnlyTools[params.Name] {
+			if mcpserver.IsReadOnlyTool(params.Name) {
 				return false
 			}
 		}
@@ -1909,6 +2012,38 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 
 	// All other methods/tools require write access
 	return true
+}
+
+// narrowDeviceApprovalScopes computes the intersection of three sets:
+//   - the scopes the user checked on the consent form (formAccepted),
+//   - the scopes the device originally requested,
+//   - the scopes group policy granted at device-authorize time
+//     (request.GetGrantedScopes()).
+//
+// `openid` is always included because OIDC requires it and the rest
+// of the flow depends on it. Pulling this out of
+// handleOAuth2DeviceVerify is purely a complexity-budget split — the
+// helper is exercised from one call site.
+func narrowDeviceApprovalScopes(formAccepted []string, request fosite.Requester) []string {
+	requestedSet := make(map[string]bool)
+	for _, s := range request.GetRequestedScopes() {
+		requestedSet[s] = true
+	}
+	grantedFromPolicy := make(map[string]bool)
+	for _, s := range request.GetGrantedScopes() {
+		grantedFromPolicy[s] = true
+	}
+	acceptedSet := map[string]bool{"openid": true}
+	for _, s := range formAccepted {
+		if requestedSet[s] && grantedFromPolicy[s] {
+			acceptedSet[s] = true
+		}
+	}
+	out := make([]string, 0, len(acceptedSet))
+	for s := range acceptedSet {
+		out = append(out, s)
+	}
+	return out
 }
 
 // hasCondorScopes checks if any condor:/* scopes are present in the list
@@ -1922,8 +2057,36 @@ func hasCondorScopes(scopes []string) bool {
 }
 
 // mapCondorScopesToAuthz maps condor:/* scopes to HTCondor authorization levels
-// Returns the authorization limits for the token
-// Maps 1-to-1 from condor:/FOO to FOO
+// Returns the authorization limits for the token (the "scope" claim in the
+// IDTOKEN, evaluated by HTCondor as `limit_authz`).
+//
+// Important security model note (read before assuming a granted condor:/*
+// scope means the user has that authz):
+//
+// HTCondor IDTOKEN authz claims *narrow* what the schedd will allow,
+// they do NOT expand it. The schedd still evaluates ALLOW_<LEVEL>
+// against the token subject. This is the opposite of SciTokens-style
+// authority delegation, where the scope claim is the source of truth
+// and the relying party trusts it directly. Concretely: a token with
+// `authz=[WRITE]` issued for alice@trust.domain only grants WRITE on
+// the schedd if alice is also in the schedd's ALLOW_WRITE list. If
+// she isn't, the schedd refuses regardless of what the token says.
+//
+// This is why we deliberately omit ADMINISTRATOR, CONFIG, DAEMON, and
+// NEGOTIATOR from the case below: even if the schedd's ACL would
+// otherwise grant alice ADMINISTRATOR (e.g. via OS-level identity),
+// minting an IDTOKEN that claims ADMINISTRATOR effectively grants
+// that authz to anyone holding the token. Restricting the mapping to
+// the operationally-useful read/write/advertise set keeps token
+// blast-radius bounded even if a token leaks.
+//
+// Maps 1-to-1 from condor:/FOO to FOO for the supported set; unknown
+// or restricted levels are silently dropped.
+//
+// TODO: when API-token / per-user-scope functionality lands, also
+// intersect this list with a per-user "permitted authz" computed from
+// group membership, so granting `condor:/WRITE` to a non-submitter
+// becomes a no-op rather than relying purely on schedd ACL.
 func mapCondorScopesToAuthz(scopes []string) []string {
 	authzMap := make(map[string]bool)
 

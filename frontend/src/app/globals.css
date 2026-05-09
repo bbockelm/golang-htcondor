@@ -13,3 +13,75 @@ body {
   background: var(--background);
   font-family: system-ui, -apple-system, sans-serif;
 }
+
+/* Compact markdown styling for chat bubbles. Browser defaults
+   give <ul>/<p>/<h*> generous vertical margins that look wrong
+   inside a 4-line response; tighten everything. */
+.markdown-body p {
+  margin: 0;
+}
+.markdown-body p + p {
+  margin-top: 0.5rem;
+}
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+.markdown-body ul {
+  list-style: disc;
+}
+.markdown-body ol {
+  list-style: decimal;
+}
+.markdown-body li + li {
+  margin-top: 0.125rem;
+}
+.markdown-body code {
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  font-size: 0.9em;
+}
+.markdown-body pre {
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+  margin: 0.5rem 0 0.25rem;
+}
+.markdown-body h1 {
+  font-size: 1.1em;
+}
+.markdown-body h2 {
+  font-size: 1.05em;
+}
+.markdown-body h3,
+.markdown-body h4 {
+  font-size: 1em;
+}
+.markdown-body a {
+  color: #b91c1c;
+  text-decoration: underline;
+}
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  padding: 0.125rem 0.5rem;
+  text-align: left;
+}

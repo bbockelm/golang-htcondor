@@ -140,6 +140,11 @@ type templateSaveRequest struct {
 	Columns     []templates.Column    `json:"columns"`
 	Contents    string                `json:"contents"`
 	InputFiles  []templates.InputFile `json:"input_files,omitempty"`
+	// Visibility — "private" (default) or "shared". Shared templates
+	// are visible to every authenticated user; the picker labels them
+	// with the owner's name. Only the owner can edit / delete; other
+	// users can load a shared template as a starting point.
+	Visibility templates.Visibility `json:"visibility,omitempty"`
 }
 
 func (s *Handler) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +174,7 @@ func (s *Handler) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
 		Columns:     req.Columns,
 		Contents:    req.Contents,
 		InputFiles:  req.InputFiles,
+		Visibility:  req.Visibility,
 	}, username)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
@@ -202,6 +208,16 @@ func (s *Handler) handleDeleteTemplate(w http.ResponseWriter, r *http.Request, i
 	if t.Source != templates.SourceUser {
 		s.writeError(w, http.StatusBadRequest,
 			fmt.Sprintf("cannot delete %s template (read-only)", t.Source))
+		return
+	}
+	// Get may return a SHARED template owned by someone else. The user
+	// can load it as a starting point but cannot mutate it. Without
+	// this check the Delete below would just no-op (templates_user is
+	// keyed (owner, id), so deleting someone else's row matches no
+	// rows) and the user would see a confusing 404.
+	if t.Owner != "" && t.Owner != username {
+		s.writeError(w, http.StatusForbidden,
+			fmt.Sprintf("template %q is owned by %s; only the owner can delete it", id, t.Owner))
 		return
 	}
 

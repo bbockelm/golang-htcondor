@@ -110,7 +110,7 @@ func TestOverlayClusterOntoProc(t *testing.T) {
 		}
 	})
 
-	t.Run("NilProcIsNoOp", func(t *testing.T) {
+	t.Run("NilProcIsNoOp", func(_ *testing.T) {
 		// Defensive: fetchProcAdForSpool returns (nil, nil) when no
 		// proc ad matched, in which case its caller surfaces a 404
 		// instead of calling overlay — but be explicit that overlay

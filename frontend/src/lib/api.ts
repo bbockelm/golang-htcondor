@@ -132,6 +132,13 @@ export interface JobListResponse {
   // page_token / error fields may appear; omitted here until needed.
 }
 
+// HistoryListResponse mirrors the Go HistoryListResponse struct in
+// httpserver/handlers_history.go. The buffered (non-streaming)
+// variant of /api/v1/jobs/archive returns this shape.
+export interface HistoryListResponse {
+  ads: ClassAd[];
+}
+
 export interface VersionInfo {
   version: string;
   commit: string;
@@ -178,6 +185,13 @@ export interface Template {
   contents: string;
   source: 'builtin' | 'global' | 'user';
   input_files?: TemplateInputFile[];
+  // User-template only: the username of the row's owner. Set to the
+  // current user for "mine"; set to another user for shared templates
+  // surfaced via the cross-user picker.
+  owner?: string;
+  // User-template only: 'private' or 'shared'. Built-in / global
+  // templates leave it absent.
+  visibility?: 'private' | 'shared';
 }
 
 export interface TemplateSaveRequest {
@@ -188,6 +202,8 @@ export interface TemplateSaveRequest {
   columns: TemplateColumn[];
   contents: string;
   input_files?: TemplateInputFile[];
+  // Optional. Defaults to 'private' server-side.
+  visibility?: 'private' | 'shared';
 }
 
 // MAX_TEMPLATE_INPUT_FILE_BYTES mirrors templates.MaxInputFileBytes
@@ -325,6 +341,33 @@ export interface JobLogResponse {
   parseError?: string;
 }
 
+// TypedAttributeValue is the SPA's preferred shape for attribute
+// edits — the Go backend encodes the raw `value` string into a
+// proper ClassAd expression based on `type`, using classad.Quote
+// for strings (which handles \, ", \n, \t, control chars, etc.
+// per Go's strconv rules). Sending a typed object instead of a
+// pre-quoted string means the SPA never has to mirror Go's
+// string-literal escape table — easy bugs we'd otherwise hit on
+// values containing backslashes or newlines.
+//
+// `value` is always a string regardless of `type`: integers and
+// reals come in as their textual form ("42", "3.14") and the server
+// parses them; booleans are "true" / "false".
+export interface TypedAttributeValue {
+  type: 'string' | 'integer' | 'real' | 'boolean' | 'raw';
+  value: string;
+}
+
+// JobPeekResponse is the JSON returned by GET /api/v1/jobs/{id}/peek.
+// Each stream is omitted when it wasn't requested or wasn't returned;
+// the per-stream `offset` is the absolute file offset *after* the
+// returned `text`, and is meant to be fed back as the next call's
+// `stdout_offset` / `stderr_offset` to stream incremental chunks.
+export interface JobPeekResponse {
+  stdout?: { text: string; offset: number };
+  stderr?: { text: string; offset: number };
+}
+
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's
 // Result struct in an envelope that also surfaces the raw Requirements
@@ -439,6 +482,43 @@ export interface AdminLogsResponse {
   entries: LogEntry[] | null;
 }
 
+export interface AdminCondorConfigEntry {
+  key: string;
+  // Empty string when redacted=true (server scrubbed an apparent secret).
+  value?: string;
+  redacted?: boolean;
+}
+
+export interface AdminCondorConfigResponse {
+  // false when no HTCondor config object was wired into this server
+  // — typically only the demo path. Treat as "feature unavailable".
+  configured: boolean;
+  entries?: AdminCondorConfigEntry[];
+}
+
+// AdminAPIKey is the metadata-only DTO the list endpoint returns.
+// The wire-format key (`htca-v1-...`) is NEVER on this type — it
+// only appears once, in AdminAPIKeyCreateResponse.key.
+export interface AdminAPIKey {
+  key_id: string;
+  name: string;
+  scopes: string[];
+  creator: string;
+  created_at: string;
+  expires_at?: string;
+  deleted_at?: string;
+  last_used_at?: string;
+}
+
+// AdminAPIKeyCreateResponse carries the only-shown-once full key
+// alongside the metadata. The component must display it,
+// optionally let the user copy, and DROP from React state on
+// next navigation. Don't persist to localStorage / IndexedDB.
+export interface AdminAPIKeyCreateResponse {
+  api_key: AdminAPIKey;
+  key: string;
+}
+
 // --- Client ---
 
 export const api = {
@@ -482,6 +562,42 @@ export const api = {
       return fetchJSON(`${BASE}/jobs${query ? '?' + query : ''}`);
     },
 
+    // Query the schedd's history (completed / removed jobs) at
+    // /api/v1/jobs/archive. The Go side is a wrapper around
+    // condor_history; the schedd owner-scopes results server-side
+    // for non-superuser sessions, so we don't need an `owned_by_me`
+    // flag here.
+    //
+    // We force `stream_results=false` so the response is a regular
+    // JSON `{ ads: [...] }` payload (HistoryListResponse) rather
+    // than the streaming NDJSON variant — fetchJSON / React Query
+    // both want a single response body.
+    archive: (params?: {
+      constraint?: string;
+      limit?: number | '*';
+      projection?: string;
+      since?: string;
+      // Keyset cursor: pass the (cluster, proc) of the LAST record
+      // from the previous page to fetch records strictly older than
+      // that. Server ANDs the equivalent ClassAd predicate into the
+      // constraint. Use this for infinite scroll instead of bumping
+      // `limit` — bumping limit re-scans records you already have.
+      before_cluster?: number;
+      before_proc?: number;
+    }): Promise<HistoryListResponse> => {
+      const qs = new URLSearchParams();
+      if (params?.constraint) qs.set('constraint', params.constraint);
+      if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+      if (params?.projection) qs.set('projection', params.projection);
+      if (params?.since) qs.set('since', params.since);
+      if (params?.before_cluster !== undefined)
+        qs.set('before_cluster', String(params.before_cluster));
+      if (params?.before_proc !== undefined)
+        qs.set('before_proc', String(params.before_proc));
+      qs.set('stream_results', 'false');
+      return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
+    },
+
     // GET /api/v1/jobs/{id} returns the ClassAd JSON directly.
     get: (id: string): Promise<ClassAd> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`),
@@ -507,6 +623,45 @@ export const api = {
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/release`, {
         method: 'POST',
         body: JSON.stringify(reason ? { reason } : {}),
+      }),
+
+    // Edit one or more attributes on a single job.
+    //
+    // Each value in `attributes` is either:
+    //   - A pre-encoded ClassAd expression as a bare string ('"hello"',
+    //     '42', 'RequestMemory * 2'). Same contract the chat tools use,
+    //     because the LLM-facing schemas advertise raw expressions.
+    //   - A typed `{ type, value }` object — the UI's edit row uses
+    //     this so the user types raw text and the server does the
+    //     ClassAd encoding (via classad.Quote on the Go side, which
+    //     handles \, ", \n, \t, control chars, etc. — the things our
+    //     hand-rolled JS quoting got wrong). `type` is one of
+    //     "string" | "integer" | "real" | "boolean" | "raw"; `value`
+    //     is always a string carrying the typed text.
+    //
+    // Returns 403 for immutable / protected attributes; 400 for a
+    // typed object that fails server-side validation.
+    edit: (
+      id: string,
+      attributes: Record<string, string | TypedAttributeValue>,
+    ): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ attributes }),
+      }),
+
+    // Bulk edit by constraint — same shape as `edit` but applied to
+    // every job whose ad satisfies the ClassAd expression. Returns
+    // `{ count, ... }` with the number of jobs affected. The chat
+    // assistant's per-page tool uses this for "set JobPrio=10 on
+    // every held job in cluster 42" style sweeps.
+    editByConstraint: (
+      constraint: string,
+      attributes: Record<string, string | TypedAttributeValue>,
+    ): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs`, {
+        method: 'PATCH',
+        body: JSON.stringify({ constraint, attributes }),
       }),
 
     submit: (submitFile: string): Promise<SubmitResponse> =>
@@ -548,6 +703,35 @@ export const api = {
     stderrText: (id: string, cap = 1 << 20) =>
       fetchTextWithCap(`${BASE}/jobs/${encodeURIComponent(id)}/stderr`, cap),
 
+    // Live-tail stdout / stderr from the running job's sandbox via
+    // the schedd's STARTER_PEEK protocol — the same protocol
+    // condor_tail uses. Pass back the previous response's offsets to
+    // stream incremental chunks; an offset of -1 (the default on the
+    // server side) asks the starter to "tail" — return the last
+    // max_bytes of the file. Returns 409 when the job isn't running.
+    peek: (
+      id: string,
+      params?: {
+        stream?: 'stdout' | 'stderr' | 'both';
+        stdout_offset?: number;
+        stderr_offset?: number;
+        max_bytes?: number;
+      },
+    ): Promise<JobPeekResponse> => {
+      const qs = new URLSearchParams();
+      if (params?.stream) qs.set('stream', params.stream);
+      if (params?.stdout_offset !== undefined)
+        qs.set('stdout_offset', String(params.stdout_offset));
+      if (params?.stderr_offset !== undefined)
+        qs.set('stderr_offset', String(params.stderr_offset));
+      if (params?.max_bytes !== undefined)
+        qs.set('max_bytes', String(params.max_bytes));
+      const query = qs.toString();
+      return fetchJSON(
+        `${BASE}/jobs/${encodeURIComponent(id)}/peek${query ? '?' + query : ''}`,
+      );
+    },
+
     // Fetch the parsed user log. The server reads the UserLog file from
     // the sandbox, runs userlog.Parse, and returns the structured event
     // list. Explicit fetch only — the panel shows a "Load log" button.
@@ -558,8 +742,24 @@ export const api = {
     // is a heavy call (collector slot dump on first invocation, ~30s
     // cache after) so the UI MUST gate it behind a user gesture rather
     // than auto-firing on page load.
-    matchAnalysis: (id: string): Promise<MatchAnalysisResponse> =>
-      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/match-analysis`),
+    //
+    // `source` decides which database the job ad is fetched from:
+    //   - "live" (default): the schedd's live queue. Right for jobs
+    //     currently held / idle / running on the /jobs detail page.
+    //   - "archive": the schedd's history. Right for the archive
+    //     detail page's "would this job have matched the current
+    //     pool?" affordance — the archived ad still carries the
+    //     Requirements expression even though the job itself is
+    //     gone.
+    matchAnalysis: (
+      id: string,
+      opts?: { source?: 'live' | 'archive' },
+    ): Promise<MatchAnalysisResponse> => {
+      const qs = opts?.source ? `?source=${opts.source}` : '';
+      return fetchJSON(
+        `${BASE}/jobs/${encodeURIComponent(id)}/match-analysis${qs}`,
+      );
+    },
 
     // Mint a short-lived public URL to share with someone else.
     shareOutput: (
@@ -665,6 +865,35 @@ export const api = {
     },
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ''}`),
+    // Read the running HTCondor config (admin only). The backend
+    // sorts keys case-insensitively and redacts password/secret/api-
+    // key/etc.-named values with `redacted:true`. Filtering is
+    // client-side — a typical condor_config readout is a few
+    // thousand keys but only a few KiB compressed, so a single fetch
+    // + in-memory filter is fine.
+    condorConfig: (): Promise<AdminCondorConfigResponse> =>
+      fetchJSON(`${BASE}/admin/condor-config`),
+    // API-key management. The full key value is ONLY returned in the
+    // create response (`key`); subsequent list calls return only
+    // metadata. Display the create-response key once and discard.
+    listAPIKeys: (): Promise<{
+      api_keys: AdminAPIKey[];
+      valid_scopes: Record<string, string>;
+    }> => fetchJSON(`${BASE}/admin/api-keys`),
+    createAPIKey: (req: {
+      name: string;
+      scopes: string[];
+      expires_at?: string;
+    }): Promise<AdminAPIKeyCreateResponse> =>
+      fetchJSON(`${BASE}/admin/api-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      }),
+    deleteAPIKey: (keyID: string): Promise<void> =>
+      fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
+        method: 'DELETE',
+      }),
   },
 
   chat: {

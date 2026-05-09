@@ -31,13 +31,30 @@ import (
 type Writer struct {
 	mu       sync.Mutex
 	w        *bufio.Writer
-	flusher  http.Flusher
+	rc       *http.ResponseController
 	textOpen bool   // tracks whether a text-start has been emitted without a matching text-end
 	textID   string // current text part id; valid only while textOpen is true
 }
 
 // NewWriter wraps an http.ResponseWriter for the chat handler. Sets
 // the SSE response headers if not already present.
+//
+// IMPORTANT: we use http.NewResponseController(rw) instead of the
+// classic `rw.(http.Flusher)` type assertion. The Go server pipes
+// every request through wrapping middleware (accessLogMiddleware's
+// responseWriter, metrics' statusRecorder, etc.) that captures status
+// codes and byte counts by embedding http.ResponseWriter. None of
+// those wrappers re-implement the Flusher interface explicitly — and
+// a direct type assertion fails on an embedded-interface wrapper, so
+// `flusher` would be nil and our Flush calls would be no-ops. Result:
+// every text-delta sits in Go's chunked-encoding buffer until the
+// response ends, so the entire turn appears at once in the browser
+// no matter how slow the upstream LLM streamed.
+//
+// http.NewResponseController (Go 1.20+) walks the Unwrap() chain to
+// find a real Flusher, so as long as every wrapper exposes Unwrap()
+// — which they do — we always get a working flush. Belt-and-braces:
+// see ../server.go and ../metrics.go for the wrappers.
 func NewWriter(rw http.ResponseWriter) *Writer {
 	if rw.Header().Get("Content-Type") == "" {
 		rw.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -47,8 +64,41 @@ func NewWriter(rw http.ResponseWriter) *Writer {
 	rw.Header().Set("x-vercel-ai-ui-message-stream", "v1")
 
 	w := bufio.NewWriter(rw)
-	flusher, _ := rw.(http.Flusher)
-	return &Writer{w: w, flusher: flusher}
+	return &Writer{w: w, rc: http.NewResponseController(rw)}
+}
+
+// WriteStepStart emits a start-step chunk. The AI-SDK on the client
+// uses these as boundaries between LLM "turns" within a single
+// streaming assistant message: lastAssistantMessageIsCompleteWithTool
+// Calls (the auto-resubmit predicate) only inspects parts AFTER the
+// most recent step-start. Without these, a turn that emits both a
+// (resolved) tool call AND trailing text gets misclassified as
+// "complete with tool calls" — the predicate fires forever and the
+// chat loops on /api/v1/chat with no progress.
+//
+// Pair with WriteStepFinish around each LLM call. Subsequent re-
+// submits accumulate into the same assistant message client-side, so
+// the step boundaries are what tells them apart.
+func (w *Writer) WriteStepStart() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.finishTextLocked()
+	w.writeChunkLocked(map[string]any{
+		"type": "start-step",
+	})
+}
+
+// WriteStepFinish emits a finish-step chunk balancing a prior
+// WriteStepStart. The SDK uses it to flush per-step state (active
+// text/reasoning parts); it doesn't push a part itself. Safe to skip,
+// but emitting matches the SDK's server-side conventions.
+func (w *Writer) WriteStepFinish() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.finishTextLocked()
+	w.writeChunkLocked(map[string]any{
+		"type": "finish-step",
+	})
 }
 
 // WriteText emits an incremental text delta. The first call
@@ -103,24 +153,43 @@ func (w *Writer) finishTextLocked() {
 // for streaming arg deltas, which we don't bother with — we always
 // have the complete input in hand).
 //
-// Used for both client-side tools (where the SPA is expected to
-// execute) and server-executed tools where the engine has run them
-// and is about to emit the result.
-func (w *Writer) WriteToolCall(toolCallID, toolName string, args json.RawMessage) {
+// providerExecuted controls whether the SDK fires `onToolCall` on
+// the client when the tool-input-available chunk arrives:
+//
+//	false — we're announcing a CLIENT-SIDE tool. The SPA is expected
+//	        to execute it via its hooks bag and post the result back
+//	        via addToolResult. onToolCall MUST fire.
+//	true  — we're announcing a SERVER-SIDE tool. We're just informing
+//	        the UI so it can render a "calling X..." indicator;
+//	        execution is happening server-side and the result chunk
+//	        follows shortly. onToolCall MUST NOT fire — if it did, the
+//	        SPA's handler would see an unknown-tool name and reply
+//	        with an error result that races the actual server result.
+//
+// The SDK's tool-input-available handler skips onToolCall when
+// providerExecuted is truthy (see ai/dist/index.mjs ~5669:
+// `if (onToolCall && !chunk.providerExecuted)`).
+func (w *Writer) WriteToolCall(toolCallID, toolName string, args json.RawMessage, providerExecuted bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.finishTextLocked()
-	w.writeChunkLocked(map[string]any{
+	startChunk := map[string]any{
 		"type":       "tool-input-start",
 		"toolCallId": toolCallID,
 		"toolName":   toolName,
-	})
-	w.writeChunkLocked(map[string]any{
+	}
+	availChunk := map[string]any{
 		"type":       "tool-input-available",
 		"toolCallId": toolCallID,
 		"toolName":   toolName,
 		"input":      jsonRaw(args),
-	})
+	}
+	if providerExecuted {
+		startChunk["providerExecuted"] = true
+		availChunk["providerExecuted"] = true
+	}
+	w.writeChunkLocked(startChunk)
+	w.writeChunkLocked(availChunk)
 }
 
 // WriteToolResult emits the result of a server-executed tool. The
@@ -170,18 +239,30 @@ func (w *Writer) WriteConfirmationRequest(toolCallID, toolName string, args json
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.finishTextLocked()
-	// Make the tool-input visible first so the UI has the args to
-	// render in the approval card.
+	// providerExecuted=true on the input chunks for two reasons:
+	//   1. The tool will be executed server-side (after user approval),
+	//      not in the browser. Without this flag the SDK fires
+	//      onToolCall on the client when tool-input-available lands;
+	//      our handler has no entry for the destructive tool and
+	//      replies with an "unknown client-side tool" error that
+	//      races the actual server result.
+	//   2. The auto-resubmit predicate (lastAssistantMessageIsComplete-
+	//      WithToolCalls) filters OUT providerExecuted parts, so a
+	//      pending approval-requested destructive tool doesn't gate
+	//      the predicate. Other client-side tools in the same turn
+	//      (e.g. set_filter) can still drive auto-resubmit when ready.
 	w.writeChunkLocked(map[string]any{
-		"type":       "tool-input-start",
-		"toolCallId": toolCallID,
-		"toolName":   toolName,
+		"type":             "tool-input-start",
+		"toolCallId":       toolCallID,
+		"toolName":         toolName,
+		"providerExecuted": true,
 	})
 	w.writeChunkLocked(map[string]any{
-		"type":       "tool-input-available",
-		"toolCallId": toolCallID,
-		"toolName":   toolName,
-		"input":      jsonRaw(args),
+		"type":             "tool-input-available",
+		"toolCallId":       toolCallID,
+		"toolName":         toolName,
+		"input":            jsonRaw(args),
+		"providerExecuted": true,
 	})
 	w.writeChunkLocked(map[string]any{
 		"type":       "tool-approval-request",
@@ -233,18 +314,14 @@ func (w *Writer) writeChunkLocked(chunk map[string]any) {
 		// passed in; emit a fixed error frame and move on.
 		_, _ = io.WriteString(w.w, "data: {\"type\":\"error\",\"errorText\":\"internal: failed to encode chat record\"}\n\n")
 		_ = w.w.Flush()
-		if w.flusher != nil {
-			w.flusher.Flush()
-		}
+		_ = w.rc.Flush()
 		return
 	}
 	_, _ = io.WriteString(w.w, "data: ")
 	_, _ = w.w.Write(encoded)
 	_, _ = io.WriteString(w.w, "\n\n")
 	_ = w.w.Flush()
-	if w.flusher != nil {
-		w.flusher.Flush()
-	}
+	_ = w.rc.Flush()
 }
 
 // jsonRaw normalizes a possibly-empty json.RawMessage so the SDK

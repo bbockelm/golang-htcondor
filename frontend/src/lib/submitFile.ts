@@ -283,6 +283,31 @@ export function bodyHasResourceRequests(text: string): boolean {
   return RESOURCE_KEYS.some((k) => getAttribute(text, k) !== undefined);
 }
 
+/**
+ * Returns true when the body contains a `queue ...` line (commented
+ * lines are ignored). The submit page synthesizes its own queue
+ * statement from the table rows; a hand-written one in the body would
+ * produce a duplicated or mis-counted queue, which HTCondor rejects.
+ *
+ * The check is line-oriented and case-insensitive on the keyword:
+ * any non-comment line whose first non-whitespace token is `queue`
+ * (followed by end-of-line, whitespace, or the start of an arg list)
+ * counts. We deliberately don't try to parse macro-conditional
+ * `if (...)` blocks — operator-curated templates aren't expected to
+ * carry conditional queues, and a false positive there is at most a
+ * UX warning.
+ */
+export function bodyHasQueueLine(text: string): boolean {
+  // Anchored: optional whitespace, the literal `queue`, then either
+  // EOL, whitespace, or `(` (for `queue (...) from`).
+  const re = /^\s*queue(?:[\s(]|$)/im;
+  for (const line of text.split('\n')) {
+    if (line.trimStart().startsWith('#')) continue;
+    if (re.test(line)) return true;
+  }
+  return false;
+}
+
 /** Returns true when the body sets the core CPU/memory/disk triple. */
 export function bodyHasCoreResourceRequests(text: string): boolean {
   return (
@@ -298,18 +323,28 @@ export function bodyHasCoreResourceRequests(text: string): boolean {
  * accepted as bare integers — HTCondor's units suffix syntax (`4G` etc.)
  * is left as-is in the body and ignored here; consumers that want
  * structured editing should use bare integers.
+ *
+ * Unit note: HTCondor's bare-integer convention differs by attribute —
+ * `request_memory` is interpreted as MiB, `request_disk` as KiB. The
+ * widget exposes both as MB to the user, so we divide the disk value
+ * by 1024 on read and multiply on write (see applyResourcesToBody) to
+ * keep the round-trip honest.
  */
 export function readResourcesFromBody(text: string): ResourceRequest {
+  const diskKB = parseIntOr(
+    getAttribute(text, 'request_disk'),
+    DEFAULT_RESOURCE_REQUEST.diskMB * 1024,
+  );
   return {
     cpus: parseIntOr(getAttribute(text, 'request_cpus'), DEFAULT_RESOURCE_REQUEST.cpus),
     memoryMB: parseIntOr(
       getAttribute(text, 'request_memory'),
       DEFAULT_RESOURCE_REQUEST.memoryMB,
     ),
-    diskMB: parseIntOr(
-      getAttribute(text, 'request_disk'),
-      DEFAULT_RESOURCE_REQUEST.diskMB,
-    ),
+    // Round to nearest MiB so a body that wrote `request_disk = 1500`
+    // (1.46 MiB) doesn't surface as `1` after the floor and lose data
+    // on re-save.
+    diskMB: Math.max(1, Math.round(diskKB / 1024)),
     gpus: parseIntOr(getAttribute(text, 'request_gpus'), DEFAULT_RESOURCE_REQUEST.gpus),
     gpuMinCapability:
       getAttribute(text, 'gpus_minimum_capability') ??
@@ -329,41 +364,87 @@ export function readResourcesFromBody(text: string): ResourceRequest {
 }
 
 /**
+ * ResourceFieldMask says which of the four resource groups (CPUs,
+ * memory, disk, GPUs) a caller wants applyResourcesToBody to actually
+ * touch. Used by the submit page's "step 4 — Resources" so the user
+ * can override only the fields they care about, leaving the rest at
+ * whatever the template body declared.
+ *
+ * The GPUs flag covers `request_gpus` *and* every gpus_minimum_*
+ * subfield: those are an inseparable package — request_gpus = 0
+ * implies all subfields go away — so it would be confusing to expose
+ * them as separate checkboxes.
+ */
+export interface ResourceFieldMask {
+  cpus: boolean;
+  memory: boolean;
+  disk: boolean;
+  gpus: boolean;
+}
+
+/** All four flags on; the "apply everything" default for legacy callers. */
+export const ALL_RESOURCE_FIELDS: ResourceFieldMask = {
+  cpus: true,
+  memory: true,
+  disk: true,
+  gpus: true,
+};
+
+/**
  * Apply a ResourceRequest to the body, replacing existing resource lines
- * and inserting missing ones. Setting `gpus = 0` removes every GPU
- * subfield so the body doesn't accumulate dead lines as the user toggles
- * the GPU section.
+ * and inserting missing ones.
+ *
+ * `mask` is optional — when omitted the function applies all four
+ * resource groups (existing behavior). When provided, only the fields
+ * whose mask flag is true are touched; the rest of the body's
+ * resource lines are left exactly as the template wrote them.
+ *
+ * Setting `gpus = 0` while the GPUs mask is on removes every GPU
+ * subfield so the body doesn't accumulate dead lines as the user
+ * toggles the GPU section.
  */
 export function applyResourcesToBody(
   text: string,
   r: ResourceRequest,
+  mask: ResourceFieldMask = ALL_RESOURCE_FIELDS,
 ): string {
   let next = text;
-  next = setAttribute(next, 'request_cpus', String(r.cpus));
-  next = setAttribute(next, 'request_memory', String(r.memoryMB));
-  next = setAttribute(next, 'request_disk', String(r.diskMB));
-
-  if (r.gpus > 0) {
-    next = setAttribute(next, 'request_gpus', String(r.gpus));
-    next = applyOrRemove(next, 'gpus_minimum_capability', r.gpuMinCapability);
-    next = applyOrRemove(
-      next,
-      'gpus_minimum_memory',
-      r.gpuMinMemoryMB > 0 ? String(r.gpuMinMemoryMB) : '',
-    );
-    next = applyOrRemove(next, 'gpus_minimum_runtime', r.gpuMinRuntime);
-    next = applyOrRemove(next, 'cuda_version', r.cudaVersion);
-    next = applyOrRemove(next, 'require_gpus', r.requireGpus);
-  } else {
-    for (const k of [
-      'request_gpus',
-      'gpus_minimum_memory',
-      'gpus_minimum_capability',
-      'gpus_minimum_runtime',
-      'cuda_version',
-      'require_gpus',
-    ]) {
-      next = removeAttribute(next, k);
+  if (mask.cpus) {
+    next = setAttribute(next, 'request_cpus', String(r.cpus));
+  }
+  if (mask.memory) {
+    next = setAttribute(next, 'request_memory', String(r.memoryMB));
+  }
+  if (mask.disk) {
+    // request_disk's bare-integer unit is KiB (per HTCondor's submit
+    // grammar) — we have to convert from the widget's MB to KB on the
+    // way out, otherwise a user picking 1024 MB ends up with a 1 MiB
+    // disk and the job dies in transfer.
+    next = setAttribute(next, 'request_disk', String(r.diskMB * 1024));
+  }
+  if (mask.gpus) {
+    if (r.gpus > 0) {
+      next = setAttribute(next, 'request_gpus', String(r.gpus));
+      next = applyOrRemove(next, 'gpus_minimum_capability', r.gpuMinCapability);
+      next = applyOrRemove(
+        next,
+        'gpus_minimum_memory',
+        r.gpuMinMemoryMB > 0 ? String(r.gpuMinMemoryMB) : '',
+      );
+      next = applyOrRemove(next, 'gpus_minimum_runtime', r.gpuMinRuntime);
+      next = applyOrRemove(next, 'cuda_version', r.cudaVersion);
+      next = applyOrRemove(next, 'require_gpus', r.requireGpus);
+    } else {
+      for (const k of [
+        'request_gpus',
+        'gpus_minimum_memory',
+        'gpus_minimum_capability',
+        'gpus_minimum_runtime',
+        'cuda_version',
+        'require_gpus',
+      ]) {
+        next = removeAttribute(next, k);
+      }
     }
   }
   return next;

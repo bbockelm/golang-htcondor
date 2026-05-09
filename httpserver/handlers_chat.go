@@ -4,11 +4,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/httpserver/chat"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
+
+// loadOperatorChatInstructions reads optional site-operator extra
+// system-prompt rules from a file. The rules are appended to every
+// chat turn's system prompt regardless of page, so site-specific
+// constraints (resource caps, preferred runtimes, support contacts)
+// can be expressed without touching code.
+//
+// Empty path = feature disabled (returns "", nil). Mode 0600/0400
+// is enforced just like the API-key file: operator may include
+// policy text they don't want every local user reading.
+//
+// Loaded once at startup via NewHandler. A change to the file does
+// not take effect until restart — keep the file small and the
+// guidance evergreen.
+func loadOperatorChatInstructions(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", path)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("%s has world/group perms (mode %#o); must be 0600 or 0400", path, perm)
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // operator-controlled path
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	// Trim only the trailing newline operators reflexively add; preserve
+	// internal whitespace which may be load-bearing for the prompt.
+	return strings.TrimRight(string(raw), "\r\n"), nil
+}
 
 // handleChat is POST /api/v1/chat. It validates the session,
 // streams the engine's output back to the browser using the AI
@@ -61,8 +99,11 @@ func (s *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	// history at us.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req chat.Request
+	// AI-SDK v6 posts extra top-level fields (id, trigger, messageId,
+	// …) that we ignore but the SDK may add to in any minor release.
+	// Strict-decode would 400 the user on an SDK bump, so we accept
+	// unknown fields and only validate what we actually consume.
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid chat request: %v", err))
 		return
@@ -73,7 +114,17 @@ func (s *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Switch into streaming mode and run the engine.
-	w.WriteHeader(http.StatusOK)
+	//
+	// IMPORTANT: do NOT call w.WriteHeader before NewWriter. NewWriter
+	// sets the SSE response headers (Content-Type: text/event-stream,
+	// Cache-Control: no-store, x-vercel-ai-ui-message-stream: v1) by
+	// calling rw.Header().Set(...), but those calls are no-ops once
+	// WriteHeader has already been called. Without these headers, the
+	// browser (or any intermediate proxy) buffers the response body
+	// and the user sees the entire reply land at once instead of
+	// streaming. Go auto-emits 200 + headers on the first body Write,
+	// which happens when the first chunk flushes — so we don't need
+	// to call WriteHeader explicitly at all.
 	writer := chat.NewWriter(w)
 	defer writer.Close()
 

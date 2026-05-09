@@ -384,12 +384,19 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 }
 
 // loadLLMConfig pulls the optional chat-feature configuration out of
-// HTCondor config: the API-key file path (always a file, never inline
-// bytes — same rationale as KEK), the optional URL override (for
-// proxy/cache deployments), and the optional model override. All
-// three are zero-valued when unset; the chat package treats an empty
-// APIKeyFile as "feature disabled".
-func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model string) {
+// HTCondor config:
+//
+//   - apiKeyFile: path to the Anthropic API key (always a file, never
+//     inline bytes — same rationale as KEK).
+//   - url: optional URL override (for proxy/cache deployments).
+//   - model: optional model id override.
+//   - operatorInstructionsFile: optional file with site-specific extra
+//     system-prompt rules appended to every chat turn.
+//
+// All four are zero-valued when unset; the chat package treats an
+// empty apiKeyFile as "feature disabled" and the others have safe
+// defaults.
+func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, operatorInstructionsFile string) {
 	if v, ok := cfg.Get("HTTP_API_LLM_API_KEY_FILE"); ok {
 		apiKeyFile = strings.TrimSpace(v)
 	}
@@ -398,6 +405,9 @@ func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model string) {
 	}
 	if v, ok := cfg.Get("HTTP_API_LLM_MODEL"); ok {
 		model = strings.TrimSpace(v)
+	}
+	if v, ok := cfg.Get("HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE"); ok {
+		operatorInstructionsFile = strings.TrimSpace(v)
 	}
 	return
 }
@@ -501,6 +511,19 @@ func loadJupyterWorkDir(cfg *config.Config) string {
 func loadTemplateGlobalPath(cfg *config.Config) string {
 	if p, ok := cfg.Get("HTTP_API_TEMPLATE_GLOBAL_PATH"); ok && p != "" {
 		return p
+	}
+	return ""
+}
+
+// loadInteractiveExtraSubmit returns the verbatim block of extra
+// submit-file directives the operator wants spliced into every
+// interactive-terminal and Jupyter submission. Empty disables. See
+// HandlerConfig.InteractiveExtraSubmit for the trust model. Restart
+// the API server to pick up changes (the value is read once at
+// startup).
+func loadInteractiveExtraSubmit(cfg *config.Config) string {
+	if v, ok := cfg.Get("HTTP_API_INTERACTIVE_EXTRA_SUBMIT"); ok {
+		return v
 	}
 	return ""
 }
@@ -1127,7 +1150,16 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	log.Printf("HTTP base URL: %s", httpBaseURL)
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	llmAPIKeyFile, llmAPIURL, llmModel := loadLLMConfig(cfg)
+	llmAPIKeyFile, llmAPIURL, llmModel, llmOperatorInstructions := loadLLMConfig(cfg)
+
+	// Metrics-endpoint exposure. Default: false (auth required). Set
+	// HTTP_API_METRICS_PUBLIC=true to skip the API-key gate when the
+	// endpoint is already isolated by network ACLs.
+	metricsPublic := false
+	if v, ok := cfg.Get("HTTP_API_METRICS_PUBLIC"); ok {
+		metricsPublic = strings.EqualFold(strings.TrimSpace(v), "true") ||
+			strings.TrimSpace(v) == "1"
+	}
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -1174,15 +1206,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPAccessTokenLifespan:     idpAccessLifespan,
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
+		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
 		HTCondorConfig:             cfg,
 		// LLM/chat configuration. Optional; the chat endpoint
 		// returns 503 unless all three (key file, MCP enabled, key
 		// readable) line up. The values are zero-strings when
 		// nothing is configured.
-		LLMAPIKeyFile: llmAPIKeyFile,
-		LLMAPIURL:     llmAPIURL,
-		LLMModel:      llmModel,
+		LLMAPIKeyFile:               llmAPIKeyFile,
+		LLMAPIURL:                   llmAPIURL,
+		LLMModel:                    llmModel,
+		LLMOperatorInstructionsFile: llmOperatorInstructions,
+		MetricsPublic:               metricsPublic,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -1466,7 +1501,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	log.Printf("HTTP base URL: %s", httpBaseURL)
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	demoLLMKeyFile, demoLLMURL, demoLLMModel := loadLLMConfig(cfg)
+	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMOperatorInstructions := loadLLMConfig(cfg)
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -1487,24 +1522,32 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
-		OAuth2Issuer:       httpBaseURL,
-		OAuth2ClientID:     "demo-client",
-		OAuth2ClientSecret: "demo-secret",
-		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
-		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:  httpBaseURL + "/mcp/oauth2/callback",
-		OAuth2Scopes:       []string{"openid", "profile", "email"},
-		EnableIDP:          true,
-		IDPIssuer:          httpBaseURL,
-		JupyterWorkDir:     loadJupyterWorkDir(cfg),
-		TemplateGlobalPath: loadTemplateGlobalPath(cfg),
-		HTCondorConfig:     cfg,
+		OAuth2Issuer:           httpBaseURL,
+		OAuth2ClientID:         "demo-client",
+		OAuth2ClientSecret:     "demo-secret",
+		OAuth2AuthURL:          httpBaseURL + "/mcp/oauth2/authorize",
+		OAuth2TokenURL:         httpBaseURL + "/mcp/oauth2/token",
+		OAuth2RedirectURL:      httpBaseURL + "/mcp/oauth2/callback",
+		OAuth2Scopes:           []string{"openid", "profile", "email"},
+		EnableIDP:              true,
+		IDPIssuer:              httpBaseURL,
+		JupyterWorkDir:         loadJupyterWorkDir(cfg),
+		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
+		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
+		HTCondorConfig:         cfg,
+		// In demo mode, the auto-created `admin` IDP user is a real
+		// admin: the IDP userinfo endpoint emits groups=["admin"]
+		// for state=admin users (see handleIDPUserInfo), and we
+		// match that here so the admin pages (api-keys, clients,
+		// etc.) become usable out of the box.
+		WebUIAdminGroup: "admin",
 		// Pick up the LLM/chat knobs in demo mode too so an
 		// operator can hand-test the chat surface against the
 		// embedded mini-condor without spinning up a real pool.
-		LLMAPIKeyFile: demoLLMKeyFile,
-		LLMAPIURL:     demoLLMURL,
-		LLMModel:      demoLLMModel,
+		LLMAPIKeyFile:               demoLLMKeyFile,
+		LLMAPIURL:                   demoLLMURL,
+		LLMModel:                    demoLLMModel,
+		LLMOperatorInstructionsFile: demoLLMOperatorInstructions,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

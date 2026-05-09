@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -344,6 +346,82 @@ func (s *Handler) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, AdminLogsResponse{
 		Enabled: true,
 		Entries: s.logBuffer.Entries(limit),
+	})
+}
+
+// AdminCondorConfigEntry is one (key, value) row from the HTCondor
+// config that we surface to the admin info page. Sensitive values
+// (matched by sensitiveCondorKeyPattern) come back with Redacted=true
+// and an empty Value so the admin can SEE the key is set without the
+// raw value rendering on screen — defense-in-depth even though
+// HTCondor convention is that secrets are paths, not literals.
+type AdminCondorConfigEntry struct {
+	Key      string `json:"key"`
+	Value    string `json:"value,omitempty"`
+	Redacted bool   `json:"redacted,omitempty"`
+}
+
+// AdminCondorConfigResponse is the full readout. Configured=false means
+// no HTCondor config object was wired into this server; treat as
+// "feature unavailable on this deployment" client-side.
+type AdminCondorConfigResponse struct {
+	Configured bool                     `json:"configured"`
+	Entries    []AdminCondorConfigEntry `json:"entries"`
+}
+
+// sensitiveCondorKeyPattern matches config keys whose VALUES we mask
+// before returning. HTCondor convention is that secrets live in
+// referenced files (passwords.d/POOL, pool_password, …) — so the
+// values here are usually paths, not bytes. But operators occasionally
+// stash credentials in env-derived knobs; redact anything that looks
+// secret-named to keep the admin readout safe to leave on screen.
+//
+// Match is case-insensitive and substring-based against the key.
+var sensitiveCondorKeyPattern = regexp.MustCompile(
+	`(?i)(PASSWORD|SECRET|PRIVATE_?KEY|API_?KEY|TOKEN|BEARER|CLIENT_?SECRET)`,
+)
+
+// handleAdminCondorConfig handles GET /api/v1/admin/condor-config.
+// Returns every key the HTCondor config object knows about, sorted
+// case-insensitively, with sensitive-looking values redacted.
+//
+// We deliberately do NOT support filter parameters server-side — the
+// SPA filters client-side after fetch (the full readout is on the
+// order of a few KiB compressed; not worth a query param round-trip).
+func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	if s.htcondorConfig == nil {
+		// No HTCondor config wired up (e.g. demo path that never
+		// loaded one). 200 with configured=false so the SPA renders
+		// "config unavailable" instead of an error.
+		s.writeJSON(w, http.StatusOK, AdminCondorConfigResponse{Configured: false})
+		return
+	}
+
+	keys := s.htcondorConfig.Keys()
+	sort.Slice(keys, func(i, j int) bool {
+		return strings.ToLower(keys[i]) < strings.ToLower(keys[j])
+	})
+
+	entries := make([]AdminCondorConfigEntry, 0, len(keys))
+	for _, k := range keys {
+		val, _ := s.htcondorConfig.Get(k)
+		if sensitiveCondorKeyPattern.MatchString(k) {
+			entries = append(entries, AdminCondorConfigEntry{Key: k, Redacted: true})
+			continue
+		}
+		entries = append(entries, AdminCondorConfigEntry{Key: k, Value: val})
+	}
+	s.writeJSON(w, http.StatusOK, AdminCondorConfigResponse{
+		Configured: true,
+		Entries:    entries,
 	})
 }
 

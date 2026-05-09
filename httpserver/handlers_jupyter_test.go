@@ -32,7 +32,12 @@ func TestBuildJupyterSubmitFile_Docker(t *testing.T) {
 	mustContain(t, got, "transfer_input_files = htcondor-jupyter-helper, jupyter-token")
 	mustContain(t, got, "request_cpus = 2")
 	mustContain(t, got, "request_memory = 4096")
-	mustContain(t, got, "request_disk = 4096")
+	// Disk is converted from MiB (the API surface) to KiB on the wire
+	// — HTCondor's request_disk default unit is KiB. 4096 MiB → 4194304 KiB.
+	// If this assertion goes back to "request_disk = 4096", the
+	// MiB-vs-KiB regression is back and Jupyter sessions get 4 MiB of
+	// scratch.
+	mustContain(t, got, "request_disk = 4194304")
 	// arm64 builds match either macOS-style "arm64" or Linux-style "AARCH64"
 	mustContain(t, got, `requirements = ((Arch == "arm64" || Arch == "AARCH64"))`)
 	// Linux/docker case: no OpSys pin.

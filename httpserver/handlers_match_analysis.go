@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/matchanalyzer"
@@ -68,13 +69,37 @@ func (s *Handler) handleJobMatchAnalysis(w http.ResponseWriter, r *http.Request,
 	// Fetch the job ad. We project Requirements specifically (plus the
 	// identifying triple) — the analyzer only reads Requirements off the
 	// job ad and we don't want to drag the entire JobAd over the wire.
+	//
+	// `?source=archive` redirects the lookup to HTCondor's history
+	// database (completed / removed jobs) so the archive-detail page
+	// can run "would this job have matched the current pool?" — the
+	// Requirements expression is preserved on archived ads and the
+	// analyzer doesn't care that the job no longer exists in the
+	// queue. Default behavior (no source param, or "live") still hits
+	// the live schedd query.
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
-		Limit:      1,
-	})
+	source := r.URL.Query().Get("source")
+	projection := []string{"ClusterId", "ProcId", "Requirements", "Owner"}
+	var jobAds []*classad.ClassAd
+	switch source {
+	case "", "live":
+		jobAds, _, err = s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+			Projection: projection,
+			Limit:      1,
+		})
+	case "archive":
+		jobAds, err = s.schedd.QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+			Source:     htcondor.HistorySourceJobHistory,
+			Projection: projection,
+			Limit:      1,
+			Backwards:  true,
+		})
+	default:
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid source %q (want \"live\" or \"archive\")", source))
+		return
+	}
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "match-analysis: query job", "error", err, "job", fmt.Sprintf("%d.%d", cluster, proc))
+		s.logger.Error(logging.DestinationHTTP, "match-analysis: query job", "error", err, "job", fmt.Sprintf("%d.%d", cluster, proc), "source", source)
 		s.writeError(w, http.StatusInternalServerError, "Failed to query job")
 		return
 	}

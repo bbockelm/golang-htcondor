@@ -39,8 +39,102 @@ type Resource struct {
 	MimeType    string `json:"mimeType,omitempty"`
 }
 
-// handleListTools returns the list of available tools
-func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface{} {
+// scopeContextKey carries the OAuth2 granted-scopes set into MCP
+// request handling so handleListTools can filter the catalog. The
+// HTTP transport populates this from fosite's
+// AccessRequester.GetGrantedScopes(); the stdio transport leaves it
+// nil, which is treated as "no filtering" — stdio is implicitly
+// trusted (it's the local process boundary).
+type scopeContextKey struct{}
+
+// WithGrantedScopes attaches the OAuth2-granted scope set to a
+// context. Used by the HTTP MCP transport to feed the scope filter
+// in handleListTools.
+func WithGrantedScopes(ctx context.Context, scopes []string) context.Context {
+	if scopes == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, scopeContextKey{}, scopes)
+}
+
+// grantedScopesFromContext returns the scope set previously attached
+// via WithGrantedScopes, or nil if the caller didn't set any. Callers
+// must treat nil as "no scope info available" and decide their
+// default policy — handleListTools defaults to "show everything"
+// because stdio is the unguarded use case.
+func grantedScopesFromContext(ctx context.Context) []string {
+	if v, ok := ctx.Value(scopeContextKey{}).([]string); ok {
+		return v
+	}
+	return nil
+}
+
+// scopesAllowTool reports whether the given scope set permits a tool
+// with the given name. The classification uses the same allowlist
+// the HTTP transport's methodRequiresWrite consults — adding a tool
+// in one place without updating the other will cause the list to
+// either over- or under-expose. The shared constant
+// readOnlyMCPTools below is the single source of truth.
+//
+// Returns true when scopes is nil (no constraint info), so the stdio
+// path keeps showing everything.
+func scopesAllowTool(scopes []string, name string) bool {
+	if scopes == nil {
+		return true
+	}
+	hasRead := false
+	hasWrite := false
+	for _, s := range scopes {
+		switch s {
+		case "mcp:read":
+			hasRead = true
+		case "mcp:write":
+			hasWrite = true
+		}
+	}
+	if hasWrite {
+		return true
+	}
+	if hasRead && readOnlyMCPTools[name] {
+		return true
+	}
+	return false
+}
+
+// IsReadOnlyTool reports whether the named MCP tool is in the
+// read-only allowlist. Used by both the in-package scope filter on
+// tools/list and the httpserver-side OAuth2 scope check on
+// tools/call. Putting the canonical list in this package keeps the
+// two paths from drifting.
+func IsReadOnlyTool(name string) bool {
+	return readOnlyMCPTools[name]
+}
+
+// readOnlyMCPTools is the canonical list of MCP tools that are safe
+// to call with only the mcp:read scope. The httpserver-side scope
+// gate consumes this via IsReadOnlyTool. Adding a new MCP tool
+// without updating this map silently classifies it as write-only.
+var readOnlyMCPTools = map[string]bool{
+	"query_jobs":                    true,
+	"get_job":                       true,
+	"analyze_job_match":             true,
+	"query_job_archive":             true,
+	"query_job_epochs":              true,
+	"query_transfer_history":        true,
+	"list_service_credentials":      true,
+	"get_credential_status":         true,
+	"condor_doc_job_attributes":     true,
+	"condor_doc_machine_attributes": true,
+	"condor_doc_submit_syntax":      true,
+	"condor_doc_config_variables":   true,
+	"condor_doc_search":             true,
+}
+
+// handleListTools returns the list of available tools, filtered by
+// the caller's OAuth2 scope set if the HTTP transport provided one
+// via WithGrantedScopes. Stdio callers (no scopes on context) see
+// the full catalog.
+func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interface{} {
 	tools := []Tool{
 		{
 			Name:        "submit_job",
@@ -587,8 +681,24 @@ func (s *Server) handleListTools(_ context.Context, _ json.RawMessage) interface
 		)
 	}
 
+	// Filter by caller's OAuth2 scopes if the HTTP transport
+	// supplied them. Read-only-token clients see only the
+	// read-safe subset; write-token and stdio (no scope info)
+	// clients see the full catalog. Without this filter, a
+	// read-only token client would see write tools in tools/list
+	// and try to call them, getting confusing
+	// insufficient_scope rejections — and a hostile relying
+	// party could enumerate the full attack surface to
+	// social-engineer a write upgrade.
+	scopes := grantedScopesFromContext(ctx)
+	filtered := tools[:0:0]
+	for _, t := range tools {
+		if scopesAllowTool(scopes, t.Name) {
+			filtered = append(filtered, t)
+		}
+	}
 	return map[string]interface{}{
-		"tools": tools,
+		"tools": filtered,
 	}
 }
 
@@ -939,7 +1049,15 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Owner-scope the query: a non-admin caller asking for cluster.proc
+	// X.Y must own that job (or get a "not found" rather than a leak
+	// of someone else's full ad). Admins skip the wrapper for
+	// cross-user troubleshooting.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
@@ -1011,7 +1129,13 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 
 	// Pull the job ad. Only Requirements + identifying triple are needed
 	// — the analyzer doesn't read other attributes off the job.
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Owner-scope so a non-admin caller can't analyze another user's
+	// job and harvest its Requirements expression.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
 		Limit:      1,
@@ -1111,8 +1235,8 @@ func (s *Server) toolRemoveJob(ctx context.Context, args map[string]interface{})
 
 // toolRemoveJobs handles removing multiple jobs
 func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	constraint, ok := args["constraint"].(string)
-	if !ok || constraint == "" {
+	llmConstraint, ok := args["constraint"].(string)
+	if !ok || llmConstraint == "" {
 		return nil, fmt.Errorf("constraint is required")
 	}
 
@@ -1121,13 +1245,22 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 		reason = "Removed via MCP bulk operation"
 	}
 
+	// Owner-scope the constraint so a non-admin caller's "remove
+	// everything" turns into "remove everything I own". Admins skip
+	// the wrapper for cross-user cleanup. CRITICAL: without this
+	// wrapper an LLM prompt-injection setting constraint = "true"
+	// could mass-remove every user's jobs (modulo schedd ACL).
+	constraint, ok := s.scopeToOwner(ctx, llmConstraint)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	results, err := s.schedd.RemoveJobs(ctx, constraint, reason)
 	if err != nil {
 		return nil, fmt.Errorf("bulk job removal failed: %w", err)
 	}
 
 	if results.TotalJobs == 0 {
-		return nil, fmt.Errorf("no jobs matched constraint '%s'", constraint)
+		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
 	}
 
 	return map[string]interface{}{
@@ -1135,7 +1268,7 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 			{
 				"type": "text",
 				"text": fmt.Sprintf("Removed %d of %d job(s) matching constraint '%s'",
-					results.Success, results.TotalJobs, constraint),
+					results.Success, results.TotalJobs, llmConstraint),
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -1555,8 +1688,20 @@ func (s *Server) toolQueryTransferHistory(ctx context.Context, args map[string]i
 
 // toolQueryHistory is a helper function for history queries
 func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface{}, source htcondor.HistoryRecordSource, typeName string) (interface{}, error) {
-	constraint, _ := args["constraint"].(string)
+	llmConstraint, _ := args["constraint"].(string)
+	// Owner-scope the constraint so a non-admin caller's history
+	// query never returns another user's records — the upstream
+	// schedd ACL is broadly READ on most pools, so without this
+	// wrapper a `mcp:write` token holder could dump every user's
+	// historical job ads.
+	constraint, ok := s.scopeToOwner(ctx, llmConstraint)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	if constraint == "" {
+		// scopeToOwner returns "" only for admin callers who passed
+		// an empty LLM constraint. Use "true" so HistoryQuery
+		// matches every record (the admin explicitly asked for it).
 		constraint = "true"
 	}
 
@@ -1709,6 +1854,14 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		filename, ok := fileMap["filename"].(string)
 		if !ok || filename == "" {
 			return nil, fmt.Errorf("files[%d].filename is required", i)
+		}
+		// Reject any filename that could escape the spool dir on
+		// the receiving schedd. Go's archive/tar won't escape, but
+		// the schedd's tar untar is C++ and may be permissive — and
+		// even if it isn't, this is a cheap defense-in-depth check
+		// that mirrors the policy on the file-DOWNLOAD path.
+		if err := validateTarEntryName(filename); err != nil {
+			return nil, fmt.Errorf("files[%d].filename: %w", i, err)
 		}
 
 		data, ok := fileMap["data"].(string)

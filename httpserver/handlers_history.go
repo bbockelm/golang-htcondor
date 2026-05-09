@@ -82,6 +82,50 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		constraint = "true" // Default: all records
 	}
 
+	// Keyset-pagination cursor. With the archive scanning backwards
+	// (newest first) and a per-page limit, we paginate deeper into
+	// history by ANDing in a "strictly older than the last record I
+	// saw" predicate. The (ClusterId, ProcId) tuple is the natural
+	// sort key — schedd-assigned, monotonically increasing per
+	// cluster, and each cluster/proc is unique. The OR-of-pairs form
+	// is the standard SQL keyset pagination idiom and is parseable
+	// by the schedd's classad expression evaluator.
+	//
+	// HistoryQueryOptions.Since is NOT what we want here — that's
+	// "stop scanning when matched" (newer-than semantics). For
+	// "give me records older than N.M" we have to extend the
+	// constraint. ScanLimit still applies and bounds the work per
+	// page.
+	beforeClusterStr := r.URL.Query().Get("before_cluster")
+	beforeProcStr := r.URL.Query().Get("before_proc")
+	if beforeClusterStr != "" {
+		beforeCluster, err := strconv.Atoi(beforeClusterStr)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid before_cluster: %v", err))
+			return
+		}
+		beforeProc := 0
+		if beforeProcStr != "" {
+			beforeProc, err = strconv.Atoi(beforeProcStr)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid before_proc: %v", err))
+				return
+			}
+		}
+		cursorPredicate := fmt.Sprintf(
+			"(ClusterId < %d || (ClusterId == %d && ProcId < %d))",
+			beforeCluster, beforeCluster, beforeProc,
+		)
+		// AND the cursor with the user-supplied constraint. Wrap
+		// both in parens so operator precedence in the user's
+		// expression doesn't accidentally break the cursor predicate.
+		if constraint == "true" {
+			constraint = cursorPredicate
+		} else {
+			constraint = fmt.Sprintf("(%s) && %s", constraint, cursorPredicate)
+		}
+	}
+
 	// Parse limit parameter
 	limit := 50 // default limit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {

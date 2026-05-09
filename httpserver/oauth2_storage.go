@@ -759,19 +759,58 @@ func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, user
 
 // ApproveDeviceCodeSession approves a device code (user authorized the device)
 func (s *OAuth2Storage) ApproveDeviceCodeSession(ctx context.Context, userCode string, subject string, session fosite.Session) error {
+	return s.approveDeviceCodeSessionInternal(ctx, userCode, subject, session, nil)
+}
+
+// ApproveDeviceCodeSessionWithScopes is like ApproveDeviceCodeSession
+// but also overrides the device code's granted_scopes column with
+// the supplied subset. Use this when the consent UI showed the user
+// per-scope checkboxes and the user declined some — the resulting
+// access token must reflect the user-approved intersection, not the
+// originally-requested set.
+//
+// Pass nil grantedScopes to leave the existing granted_scopes
+// untouched (equivalent to ApproveDeviceCodeSession). Pass an empty
+// (non-nil) slice to record "user explicitly approved zero scopes"
+// — useful as a sentinel; fosite will refuse to mint a token for a
+// no-scope grant, but we want the audit log to show the user's
+// choice.
+func (s *OAuth2Storage) ApproveDeviceCodeSessionWithScopes(ctx context.Context, userCode string, subject string, session fosite.Session, grantedScopes []string) error {
+	return s.approveDeviceCodeSessionInternal(ctx, userCode, subject, session, &grantedScopes)
+}
+
+func (s *OAuth2Storage) approveDeviceCodeSessionInternal(ctx context.Context, userCode string, subject string, session fosite.Session, grantedScopes *[]string) error {
 	sessionData, err := json.Marshal(session)
 	if err != nil {
 		return err
 	}
 
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE oauth2_device_codes
-		SET status = 'approved', subject = ?, session_data = ?
-		WHERE user_code = ? AND status = 'pending'
-	`, subject, string(sessionData), userCode)
-
-	if err != nil {
-		return err
+	var result sql.Result
+	if grantedScopes != nil {
+		// We deliberately re-write granted_scopes even when the
+		// caller passed an empty slice — see the doc comment for
+		// the rationale.
+		gsBytes, err := json.Marshal(*grantedScopes)
+		if err != nil {
+			return err
+		}
+		result, err = s.db.ExecContext(ctx, `
+			UPDATE oauth2_device_codes
+			SET status = 'approved', subject = ?, session_data = ?, granted_scopes = ?
+			WHERE user_code = ? AND status = 'pending'
+		`, subject, string(sessionData), string(gsBytes), userCode)
+		if err != nil {
+			return err
+		}
+	} else {
+		result, err = s.db.ExecContext(ctx, `
+			UPDATE oauth2_device_codes
+			SET status = 'approved', subject = ?, session_data = ?
+			WHERE user_code = ? AND status = 'pending'
+		`, subject, string(sessionData), userCode)
+		if err != nil {
+			return err
+		}
 	}
 
 	rows, err := result.RowsAffected()

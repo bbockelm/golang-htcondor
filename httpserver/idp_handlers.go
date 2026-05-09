@@ -438,6 +438,19 @@ func (h *Handler) handleIDPUserInfo(w http.ResponseWriter, r *http.Request) {
 		"name": username,
 	}
 
+	// Surface the user's groups so downstream OAuth2 clients (in
+	// particular this server's own SSO callback) can populate the
+	// browser session's Groups list. The IDP currently models
+	// authorization as a single `state` column with values
+	// {pending, active, admin}; we map admin → ["admin"] so any
+	// configured WebUIAdminGroup="admin" picks them up. Non-admin
+	// users get an empty groups list rather than a literal [state]
+	// because that detail is internal and could leak info if the
+	// state vocabulary expanded.
+	if state, err := h.idpProvider.storage.GetUserState(ctx, username); err == nil && state == "admin" {
+		userInfo["groups"] = []string{"admin"}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(userInfo); err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,14 @@ type Server struct {
 	// only triggers one collector query per cache window.
 	matchAnalysisOnce  sync.Once
 	matchAnalysisSlots *matchanalyzer.CollectorSlotProvider
+
+	// adminUsers is the set of subjects (JWT `sub` values) treated
+	// as administrators. Admin users skip the per-tool owner-scope
+	// wrapper that otherwise forces every query / mutation to be
+	// limited to the caller's own jobs. Configured via
+	// Config.AdminUsers; nil/empty means no admin users (default —
+	// every authenticated caller is treated as a normal user).
+	adminUsers map[string]struct{}
 }
 
 // TokenInfo stores information about a validated token
@@ -64,6 +73,15 @@ type Config struct {
 	Logger          *logging.Logger      // Logger instance (optional, creates default if nil)
 	Stdin           io.Reader            // Input stream (default: os.Stdin)
 	Stdout          io.Writer            // Output stream (default: os.Stdout)
+	// AdminUsers is the list of authenticated subjects (JWT `sub` /
+	// authenticated username) who get admin treatment in tool
+	// dispatch — most importantly, they are exempt from the
+	// per-tool owner-scope wrapper that otherwise restricts queries
+	// and mutations to the caller's own jobs. Match must be exact
+	// against the value returned by
+	// htcondor.GetAuthenticatedUserFromContext (typically
+	// "user@uid.domain"). Empty list = no admin users (default).
+	AdminUsers []string
 }
 
 // NewServer creates a new MCP server
@@ -117,6 +135,14 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout = os.Stdout
 	}
 
+	adminUsers := make(map[string]struct{}, len(cfg.AdminUsers))
+	for _, u := range cfg.AdminUsers {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			adminUsers[u] = struct{}{}
+		}
+	}
+
 	s := &Server{
 		schedd:          schedd,
 		collector:       cfg.Collector,
@@ -130,6 +156,7 @@ func NewServer(cfg Config) (*Server, error) {
 		stdin:           stdin,
 		stdout:          stdout,
 		validatedTokens: make(map[string]TokenInfo),
+		adminUsers:      adminUsers,
 	}
 
 	// Setup metrics if collector is provided

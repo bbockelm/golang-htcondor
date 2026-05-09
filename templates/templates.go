@@ -74,7 +74,33 @@ type Template struct {
 	InputFiles  []InputFile `json:"input_files,omitempty" yaml:"input_files,omitempty"`
 	Source      Source      `json:"source"               yaml:"-"`
 	Owner       string      `json:"owner,omitempty"      yaml:"-"` // user templates only
+	// Visibility controls who can see the template in the picker.
+	// "private" (default): only Owner. "shared": every authenticated
+	// user. The owner is always allowed to mutate; non-owners can
+	// load a shared template as a starting point but cannot edit or
+	// delete it. Built-in / global sources leave this blank — they
+	// have their own discoverability story (catalog YAMLs).
+	Visibility Visibility `json:"visibility,omitempty" yaml:"-"`
 }
+
+// Visibility is the access scope of a user-saved template.
+type Visibility string
+
+// Visibility values. The string forms are persisted in SQLite and
+// returned over the wire — don't rename them without a migration.
+//
+//   - VisibilityPrivate: only the template's owner sees it in the
+//     picker and can Load/Save it. The default for SaveTemplate
+//     when the field is omitted.
+//   - VisibilityShared: every authenticated user sees this template
+//     in their picker. Useful for "team" templates an admin or a
+//     trusted user wants to share, but note the social-engineering
+//     pivot: the SPA must clearly attribute shared templates to
+//     their author so users review them before submitting.
+const (
+	VisibilityPrivate Visibility = "private"
+	VisibilityShared  Visibility = "shared"
+)
 
 // Column is one variable on a template. Description is optional and
 // surfaces as the column header's help text in the batch table.
@@ -495,6 +521,19 @@ func (l *Library) Save(t Template, owner string) (Template, error) {
 	}
 	t.Source = SourceUser
 	t.Owner = owner
+	// Default to private when the caller didn't pick a visibility —
+	// matches the historical (pre-feature) behavior. Reject anything
+	// that's neither private nor shared so a future client typo
+	// can't silently land an unrecognized value in the DB.
+	switch t.Visibility {
+	case "":
+		t.Visibility = VisibilityPrivate
+	case VisibilityPrivate, VisibilityShared:
+		// valid
+	default:
+		return Template{}, fmt.Errorf("templates: invalid visibility %q (want %q or %q)",
+			t.Visibility, VisibilityPrivate, VisibilityShared)
+	}
 	if err := validateTemplate(&t); err != nil {
 		return Template{}, err
 	}
@@ -617,6 +656,13 @@ func (s *sqlUserTemplateStore) createTables() error {
 	if err := s.addColumnIfMissing(ctx, "templates_user", "input_files", "BLOB NOT NULL DEFAULT X''"); err != nil {
 		return err
 	}
+	// Templates default to private (matches pre-feature behavior).
+	// Goose migration 0003_template_visibility.sql covers the
+	// production-DB path; this addColumnIfMissing covers the
+	// legacy stand-alone-file path used by tests + UserStoreDBPath.
+	if err := s.addColumnIfMissing(ctx, "templates_user", "visibility", "TEXT NOT NULL DEFAULT 'private'"); err != nil {
+		return err
+	}
 	// Index on owner alone for fast LoadAll-by-user queries. The
 	// (owner, id) primary key already covers point lookups, but the
 	// index helps when scanning all rows for a single owner.
@@ -670,11 +716,18 @@ func (s *sqlUserTemplateStore) Close() error {
 	return s.db.Close()
 }
 
+// LoadAll returns the templates the given user is allowed to see in
+// the picker:
+//   - every row owned by `owner` (their private + shared templates)
+//   - every row from any OTHER owner whose visibility is "shared"
+//
+// Only the owner's rows expose mutation paths in the API layer; this
+// function is read-only and returns the union ordered by name.
 func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 	rows, err := s.db.QueryContext(context.Background(), `
-		SELECT id, name, description, columns_csv, columns_json, contents, input_files
+		SELECT owner, id, name, description, columns_csv, columns_json, contents, input_files, visibility
 		  FROM templates_user
-		 WHERE owner = ?
+		 WHERE owner = ? OR visibility = 'shared'
 		 ORDER BY name`, owner)
 	if err != nil {
 		return nil, err
@@ -686,15 +739,19 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 		var t Template
 		var colsCSV, colsJSON string
 		var inputFilesBlob []byte
-		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob); err != nil {
+		var visibility string
+		if err := rows.Scan(&t.Owner, &t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob, &visibility); err != nil {
 			return nil, err
 		}
-		t.Owner = owner
 		t.Source = SourceUser
+		t.Visibility = Visibility(visibility)
+		if t.Visibility == "" {
+			t.Visibility = VisibilityPrivate
+		}
 		t.Columns = decodeColumns(colsJSON, colsCSV)
 		files, ferr := decodeInputFiles(inputFilesBlob)
 		if ferr != nil {
-			return nil, fmt.Errorf("decode input_files for %s/%s: %w", owner, t.ID, ferr)
+			return nil, fmt.Errorf("decode input_files for %s/%s: %w", t.Owner, t.ID, ferr)
 		}
 		t.InputFiles = files
 		out = append(out, t)
@@ -702,27 +759,39 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 	return out, rows.Err()
 }
 
+// Get returns one template the user is allowed to see:
+//   - their own template at (owner, id), regardless of visibility, OR
+//   - any other user's template at id when its visibility is "shared".
+//
+// `owner` is the actor making the request; the returned Template's
+// Owner field reflects the actual writer (which may differ when the
+// user is loading a shared template).
 func (s *sqlUserTemplateStore) Get(id, owner string) (Template, bool, error) {
 	var t Template
 	var colsCSV, colsJSON string
 	var inputFilesBlob []byte
+	var visibility string
 	err := s.db.QueryRowContext(context.Background(), `
-		SELECT id, name, description, columns_csv, columns_json, contents, input_files
+		SELECT owner, id, name, description, columns_csv, columns_json, contents, input_files, visibility
 		  FROM templates_user
-		 WHERE owner = ? AND id = ?`, owner, id).
-		Scan(&t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob)
+		 WHERE id = ? AND (owner = ? OR visibility = 'shared')
+		 LIMIT 1`, id, owner).
+		Scan(&t.Owner, &t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob, &visibility)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Template{}, false, nil
 	}
 	if err != nil {
 		return Template{}, false, err
 	}
-	t.Owner = owner
 	t.Source = SourceUser
+	t.Visibility = Visibility(visibility)
+	if t.Visibility == "" {
+		t.Visibility = VisibilityPrivate
+	}
 	t.Columns = decodeColumns(colsJSON, colsCSV)
 	files, ferr := decodeInputFiles(inputFilesBlob)
 	if ferr != nil {
-		return Template{}, false, fmt.Errorf("decode input_files for %s/%s: %w", owner, id, ferr)
+		return Template{}, false, fmt.Errorf("decode input_files for %s/%s: %w", t.Owner, t.ID, ferr)
 	}
 	t.InputFiles = files
 	return t, true, nil
@@ -739,12 +808,16 @@ func (s *sqlUserTemplateStore) Save(t Template) error {
 	if err != nil {
 		return fmt.Errorf("encode input_files: %w", err)
 	}
+	visibility := string(t.Visibility)
+	if visibility == "" {
+		visibility = string(VisibilityPrivate)
+	}
 	// UPSERT: SQLite (>=3.24) and Postgres both speak ON CONFLICT.
 	// glebarez/sqlite tracks a recent SQLite version so we're fine.
 	_, err = s.db.ExecContext(context.Background(), `
 		INSERT INTO templates_user
-			(owner, id, name, description, columns_csv, columns_json, contents, input_files, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(owner, id, name, description, columns_csv, columns_json, contents, input_files, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(owner, id) DO UPDATE SET
 			name         = excluded.name,
 			description  = excluded.description,
@@ -752,8 +825,9 @@ func (s *sqlUserTemplateStore) Save(t Template) error {
 			columns_json = excluded.columns_json,
 			contents     = excluded.contents,
 			input_files  = excluded.input_files,
+			visibility   = excluded.visibility,
 			updated_at   = excluded.updated_at`,
-		t.Owner, t.ID, t.Name, t.Description, colsCSV, string(colsJSON), t.Contents, inputFilesBlob, now, now)
+		t.Owner, t.ID, t.Name, t.Description, colsCSV, string(colsJSON), t.Contents, inputFilesBlob, visibility, now, now)
 	return err
 }
 

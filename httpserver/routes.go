@@ -7,20 +7,40 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
-// setupRoutes sets up all HTTP routes for the Handler
+// setupRoutes sets up all HTTP routes for the Handler.
+//
+// CORS: by default we don't emit Access-Control-Allow-Origin at all
+// (the SPA is same-origin so browsers don't need it). When the
+// operator wires up the API to a separate-origin SPA they should
+// configure HTTP_API_BASE_URL; we then echo Origin back when it
+// matches the configured base URL, with credentials enabled. This
+// is stricter than the previous "Allow-Origin: *" policy, which
+// the audit flagged as accidentally making the API broadly
+// crawlable.
+//
+// Browsers refuse to send cookies on cross-origin XHR with
+// Allow-Origin: * regardless, so the previous policy didn't expose
+// authenticated data — but it did mean any third-party page could
+// fetch unauthenticated endpoints (the welcome page, /healthz,
+// version info) and read responses, including any that leaked
+// upstream metadata.
 func (h *Handler) setupRoutes() {
 	mux := h.mux
-	// CORS middleware: allow all origins
-	cors := func(h http.Handler) http.Handler {
+	cors := func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			origin := r.Header.Get("Origin")
+			if origin != "" && h.corsOriginAllowed(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Vary", "Origin")
+			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			h.ServeHTTP(w, r)
+			handler.ServeHTTP(w, r)
 		})
 	}
 
@@ -79,6 +99,18 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/admin/oauth2/clients/", cors(http.HandlerFunc(h.handleAdminDeleteClient)))
 	mux.Handle("/api/v1/admin/oauth2/tokens", cors(http.HandlerFunc(h.handleAdminListTokens)))
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
+	mux.Handle("/api/v1/admin/condor-config", cors(http.HandlerFunc(h.handleAdminCondorConfig)))
+	// API key management (admin-only). The collection path covers
+	// list (GET) and create (POST); the per-key path is for soft-
+	// delete (DELETE /api/v1/admin/api-keys/{key_id}).
+	mux.Handle("/api/v1/admin/api-keys", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			h.handleAdminCreateAPIKey(w, r)
+			return
+		}
+		h.handleAdminListAPIKeys(w, r)
+	})))
+	mux.Handle("/api/v1/admin/api-keys/", cors(http.HandlerFunc(h.handleAdminDeleteAPIKey)))
 
 	// Build/version info endpoint (authenticated)
 	mux.Handle("/api/v1/version", cors(http.HandlerFunc(h.handleVersion)))

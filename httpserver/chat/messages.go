@@ -2,94 +2,162 @@ package chat
 
 import (
 	"encoding/json"
-	"fmt"
+	"strings"
 )
 
-// RequestMessage is one turn from the AI-SDK `useChat()` payload.
+// RequestMessage is one turn from the AI-SDK v6 `useChat()` payload.
 // The browser sends every turn on every POST so the server stays
 // stateless. Content is loosely-typed because the AI SDK packs
-// "parts" of various kinds into the same array — text, tool calls,
-// tool results — and we only need to reshape them for Anthropic.
+// "parts" of various kinds into the same array — text and tool
+// invocations — and we only need to reshape them for Anthropic.
 type RequestMessage struct {
 	ID    string               `json:"id,omitempty"`
-	Role  string               `json:"role"` // "user" | "assistant" | "tool"
+	Role  string               `json:"role"` // "user" | "assistant"
 	Parts []RequestMessagePart `json:"parts,omitempty"`
-	// Content is the AI SDK v3 fallback for plain-text messages
-	// (older clients). When Parts is empty we treat Content as a
-	// single text part.
-	Content string `json:"content,omitempty"`
 }
 
 // RequestMessagePart is one element inside RequestMessage.Parts.
-// AI SDK part types we care about:
 //
-//	type=="text"            → Text is set
-//	type=="tool-call"       → ToolCallID / ToolName / Args set (assistant)
-//	type=="tool-result"     → ToolCallID / Result set (user, post-tool)
+// AI SDK v6 packs each tool invocation into a single part whose Type
+// is "tool-<toolName>" and whose lifecycle is tracked via State:
 //
-// Everything else is ignored on the request side (we don't echo
-// anything back from the SPA that isn't actionable).
+//	input-streaming         — args still streaming; ignore on server
+//	input-available         — args complete; emit tool_use to model
+//	input-approval-required — paused for user confirmation
+//	output-available        — result back; emit tool_use + tool_result
+//	output-error            — tool failed; emit tool_use + tool_result(err)
+//
+// The same part holds Input (model args) and Output (executed result)
+// once the lifecycle progresses, so we split it back into Anthropic's
+// separate tool_use / tool_result blocks at flatten-time.
 type RequestMessagePart struct {
-	Type       string          `json:"type"`
-	Text       string          `json:"text,omitempty"`
-	ToolCallID string          `json:"toolCallId,omitempty"`
-	ToolName   string          `json:"toolName,omitempty"`
-	Args       json.RawMessage `json:"args,omitempty"`
-	// Result is the JSON value the client-side tool returned. The
-	// AI SDK encodes it as an arbitrary value; we forward as-is.
-	Result json.RawMessage `json:"result,omitempty"`
-	// IsError flags a tool result that failed (the engine forwards
-	// it to Anthropic with is_error=true so the model can recover).
-	IsError bool `json:"isError,omitempty"`
+	Type       string `json:"type"`
+	Text       string `json:"text,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+
+	State     string          `json:"state,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
+	ErrorText string          `json:"errorText,omitempty"`
+}
+
+// toolPartName returns the tool name encoded in a tool part's Type
+// ("tool-<name>" → "<name>"). Empty when the part is not a tool part.
+func (p RequestMessagePart) toolPartName() string {
+	if !p.isToolPart() {
+		return ""
+	}
+	return strings.TrimPrefix(p.Type, "tool-")
+}
+
+// isToolPart reports whether the part is a v6 tool invocation part.
+func (p RequestMessagePart) isToolPart() bool {
+	return strings.HasPrefix(p.Type, "tool-")
+}
+
+// hasToolOutput reports whether a tool part carries an executed
+// result that should be replayed to the model as a tool_result.
+func (p RequestMessagePart) hasToolOutput() bool {
+	return p.State == "output-available" || p.State == "output-error" ||
+		len(p.Output) > 0 || p.ErrorText != ""
 }
 
 // messagesToAnthropic flattens the AI-SDK message stream into
-// Anthropic's stricter shape. The two main rules Anthropic enforces:
+// Anthropic's stricter shape. Two rules drive the reshape:
 //
-//  1. Roles strictly alternate user/assistant. Two consecutive
-//     same-role messages are rejected.
-//  2. Tool results live inside a user-role message as
-//     content_block.type=="tool_result".
+//  1. Roles strictly alternate user/assistant; consecutive same-role
+//     messages get merged.
+//  2. Every assistant tool_use must be followed (immediately) by a
+//     user-role message carrying a matching tool_result, with no
+//     post-tool assistant content in the same turn — Anthropic
+//     interprets text after tool_use as "model continued past the
+//     call without seeing the result" and rejects the request.
 //
-// AI SDK uses an explicit role="tool" for tool-result turns; we
-// rewrite those to user-role content blocks here so the wire shape
-// is what Anthropic expects.
-func messagesToAnthropic(in []RequestMessage) ([]AnthropicMessage, error) {
+// AI SDK v6 packs the entire model trajectory (pre-call text, tool
+// invocation, post-result text) into one assistant UIMessage's parts
+// list. We split each such message into the canonical
+// assistant→user(tool_result)→assistant sequence Anthropic expects.
+func messagesToAnthropic(in []RequestMessage) []AnthropicMessage {
 	out := make([]AnthropicMessage, 0, len(in))
 	for _, m := range in {
 		switch m.Role {
 		case "user":
 			content := partsToAnthropicUser(m)
 			if len(content) == 0 {
-				// Empty user turn — skip rather than send a zero-content
-				// message which Anthropic rejects.
 				continue
 			}
 			out = appendMessage(out, AnthropicMessage{Role: "user", Content: content})
 		case "assistant":
-			content, err := partsToAnthropicAssistant(m)
-			if err != nil {
-				return nil, err
+			for _, sub := range splitAssistantMessage(m) {
+				out = appendMessage(out, sub)
 			}
-			if len(content) == 0 {
-				continue
-			}
-			out = appendMessage(out, AnthropicMessage{Role: "assistant", Content: content})
-		case "tool":
-			// AI SDK v3 sometimes renders tool results as their own
-			// role=="tool" message. Anthropic wants them folded into
-			// a user turn — coalesce.
-			content := partsToToolResults(m)
-			if len(content) == 0 {
-				continue
-			}
-			out = appendMessage(out, AnthropicMessage{Role: "user", Content: content})
 		default:
-			// Unknown role — drop. Forward-compat with future AI SDK
-			// extensions; we'd rather drop than break the turn.
+			// Unknown role — drop. Forward-compat: don't break the
+			// turn when the SDK adds a new role kind.
 		}
 	}
-	return out, nil
+	return backfillInterruptedTools(out)
+}
+
+// backfillInterruptedTools handles the "user kept typing while a
+// client-side tool was still in flight" case. The SPA sends the full
+// history on every POST; if a previous assistant turn ended in a
+// tool_use that the client never resolved (e.g. fetch-query stalled,
+// user lost patience and typed a follow-up), the next user turn
+// arrives without a matching tool_result. Anthropic rejects that with
+// a 400 — every tool_use must have a tool_result in the next message.
+//
+// We synthesize an interrupted-by-user tool_result at the head of the
+// trailing user turn so the model sees "the call didn't finish" and
+// can move on. This only fires when there IS a user turn following
+// the unfinished assistant tool_use; a tool_use that's the genuinely-
+// last message (e.g. waiting for approval) is left alone for
+// resolvePendingApprovals to handle.
+func backfillInterruptedTools(msgs []AnthropicMessage) []AnthropicMessage {
+	for i := 0; i+1 < len(msgs); i++ {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		var pending []string
+		for _, b := range msgs[i].Content {
+			if b.Type == "tool_use" && b.ID != "" {
+				pending = append(pending, b.ID)
+			}
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		next := &msgs[i+1]
+		if next.Role != "user" {
+			// Two consecutive assistant messages would already be
+			// merged by appendMessage; if it's something else, the
+			// history is shaped weirder than our flatten produces
+			// and we can't safely splice.
+			continue
+		}
+		matched := map[string]bool{}
+		for _, b := range next.Content {
+			if b.Type == "tool_result" && b.ToolUseID != "" {
+				matched[b.ToolUseID] = true
+			}
+		}
+		var injected []AnthropicContentBlock
+		for _, id := range pending {
+			if matched[id] {
+				continue
+			}
+			injected = append(injected, AnthropicContentBlock{
+				Type:      "tool_result",
+				ToolUseID: id,
+				Content:   "tool call was interrupted by the user before it finished; no result is available",
+				IsError:   true,
+			})
+		}
+		if len(injected) > 0 {
+			next.Content = append(injected, next.Content...)
+		}
+	}
+	return msgs
 }
 
 // appendMessage handles Anthropic's "no two consecutive same-role
@@ -104,100 +172,113 @@ func appendMessage(dst []AnthropicMessage, msg AnthropicMessage) []AnthropicMess
 }
 
 // partsToAnthropicUser converts a user-role message into Anthropic
-// content blocks. Falls back to RequestMessage.Content when Parts is
-// empty — AI SDK older callers send plain strings.
+// content blocks. User turns hold prose; tool-result blocks land on
+// user turns only as a synthetic spillover from prior assistant
+// messages (see partsToAnthropicAssistant).
 func partsToAnthropicUser(m RequestMessage) []AnthropicContentBlock {
-	if len(m.Parts) == 0 {
-		if m.Content == "" {
-			return nil
-		}
-		return []AnthropicContentBlock{{Type: "text", Text: m.Content}}
-	}
 	out := make([]AnthropicContentBlock, 0, len(m.Parts))
 	for _, p := range m.Parts {
-		switch p.Type {
-		case "text":
+		switch {
+		case p.Type == "text":
 			if p.Text != "" {
 				out = append(out, AnthropicContentBlock{Type: "text", Text: p.Text})
 			}
-		case "tool-result":
+		case p.isToolPart() && p.hasToolOutput():
+			// Defensive: some clients pack executed tool results on
+			// user turns. Accept and forward.
 			out = append(out, toolResultBlock(p))
 		}
 	}
 	return out
 }
 
-// partsToAnthropicAssistant converts an assistant-role message,
-// preserving tool-call shape so Anthropic can match results to calls
-// on later turns. AI SDK encodes tool-calls as a separate part with
-// the same toolCallId the eventual tool-result references.
-func partsToAnthropicAssistant(m RequestMessage) ([]AnthropicContentBlock, error) {
-	if len(m.Parts) == 0 {
-		if m.Content == "" {
-			return nil, nil
+// splitAssistantMessage turns a v6 assistant UIMessage into the
+// sequence of Anthropic messages that represent the same conversation
+// trajectory. A single v6 message can describe multiple Anthropic
+// turns when the model called a tool mid-response: the parts list
+// holds [pre-call text, tool_use, post-result text] in chronological
+// order, but Anthropic requires those to be three separate messages
+// (assistant → user(tool_result) → assistant).
+//
+// The walk accumulates blocks into a pending assistant turn and
+// flushes whenever it encounters a tool part with output: the pending
+// turn (text + the tool_use) becomes the assistant message, the
+// output becomes a synthetic user message with the tool_result, and a
+// new pending turn captures everything that follows. Tool parts
+// without output (input-available, approval-requested, etc.) just
+// emit a tool_use; the next v6 message will carry the resolution.
+func splitAssistantMessage(m RequestMessage) []AnthropicMessage {
+	var out []AnthropicMessage
+	var pending []AnthropicContentBlock
+	flushAssistant := func() {
+		if len(pending) > 0 {
+			out = append(out, AnthropicMessage{Role: "assistant", Content: pending})
+			pending = nil
 		}
-		return []AnthropicContentBlock{{Type: "text", Text: m.Content}}, nil
 	}
-	out := make([]AnthropicContentBlock, 0, len(m.Parts))
 	for _, p := range m.Parts {
-		switch p.Type {
-		case "text":
+		switch {
+		case p.Type == "text":
 			if p.Text != "" {
-				out = append(out, AnthropicContentBlock{Type: "text", Text: p.Text})
+				pending = append(pending, AnthropicContentBlock{Type: "text", Text: p.Text})
 			}
-		case "tool-call":
-			args := p.Args
-			if len(args) == 0 {
-				args = json.RawMessage("{}")
+		case p.isToolPart():
+			// Skip parts where args aren't ready. Anything from
+			// input-available onward is fine to send to the model.
+			if p.State == "input-streaming" {
+				continue
 			}
-			out = append(out, AnthropicContentBlock{
+			name := p.toolPartName()
+			if name == "" || p.ToolCallID == "" {
+				continue
+			}
+			pending = append(pending, AnthropicContentBlock{
 				Type:  "tool_use",
 				ID:    p.ToolCallID,
-				Name:  p.ToolName,
-				Input: args,
+				Name:  name,
+				Input: rawOrEmptyObject(p.Input),
 			})
-		case "tool-result":
-			// Some clients (and our protocol writer when forwarding
-			// server-executed results) attach the tool-result to the
-			// assistant message, but Anthropic insists tool_result
-			// live in user-role messages. The flattener at the
-			// caller will move this on the next turn — for now we
-			// drop it from the assistant turn rather than emit an
-			// invalid message.
+			if p.hasToolOutput() {
+				flushAssistant()
+				out = append(out, AnthropicMessage{
+					Role:    "user",
+					Content: []AnthropicContentBlock{toolResultBlock(p)},
+				})
+			}
 		default:
-			return nil, fmt.Errorf("chat: unknown assistant part type %q", p.Type)
+			// Unknown part type — drop. Forward-compat for SDK bumps.
 		}
 	}
-	return out, nil
-}
-
-// partsToToolResults pulls just the tool-result entries from a
-// role=="tool" message, used by the coalescing branch in
-// messagesToAnthropic.
-func partsToToolResults(m RequestMessage) []AnthropicContentBlock {
-	out := make([]AnthropicContentBlock, 0, len(m.Parts))
-	for _, p := range m.Parts {
-		if p.Type == "tool-result" {
-			out = append(out, toolResultBlock(p))
-		}
-	}
+	flushAssistant()
 	return out
 }
 
-// toolResultBlock renders one AI-SDK tool-result part into
-// Anthropic's tool_result content block. The Result field is
-// arbitrary JSON; we serialize it to a string because Anthropic's
-// content-string field doesn't accept structured content for
-// tool_result blocks (the model parses the string itself).
+// toolResultBlock renders a v6 tool part's output half into a
+// tool_result content block. State output-error is converted to
+// is_error=true with errorText as the content.
 func toolResultBlock(p RequestMessagePart) AnthropicContentBlock {
-	resultStr := ""
-	if len(p.Result) > 0 {
-		resultStr = string(p.Result)
+	isErr := p.State == "output-error" || p.ErrorText != ""
+	var content string
+	switch {
+	case isErr && p.ErrorText != "":
+		content = p.ErrorText
+	case len(p.Output) > 0:
+		content = string(p.Output)
 	}
 	return AnthropicContentBlock{
 		Type:      "tool_result",
 		ToolUseID: p.ToolCallID,
-		Content:   resultStr,
-		IsError:   p.IsError,
+		Content:   content,
+		IsError:   isErr,
 	}
+}
+
+// rawOrEmptyObject normalizes a possibly-empty json.RawMessage so
+// the model never sees a literal empty value where it expects an
+// object input.
+func rawOrEmptyObject(r json.RawMessage) json.RawMessage {
+	if len(r) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return r
 }

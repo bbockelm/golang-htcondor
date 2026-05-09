@@ -102,6 +102,16 @@ func (req *InteractiveCreateTerminalRequest) validate() error {
 	if req.Gpus < 0 || req.Gpus > 16 {
 		return fmt.Errorf("gpus must be between 0 and 16, got %d", req.Gpus)
 	}
+	// GPU strings get concatenated raw into the submit file via
+	// resourceRequestLines's fmt.Fprintf. Without a whitelist a value
+	// like "12.0\nuniverse = parallel\n+JobUser = root" would inject
+	// arbitrary submit directives. Submit files are user-owned, so
+	// the user could submit anything anyway — but the request body
+	// validators are the right place to refuse out-of-band syntax
+	// that the SPA never produces.
+	if err := validateGPUSubmitFields(req.GpusMinimumCapability, req.GpusMinimumRuntime, req.CudaVersion, req.RequireGpus); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -208,6 +218,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		GpusMinimumRuntime:    req.GpusMinimumRuntime,
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
+		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
 	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, submitFile)
@@ -265,12 +276,48 @@ type interactiveTerminalSubmitArgs struct {
 	GpusMinimumRuntime    string
 	CudaVersion           string
 	RequireGpus           string
+
+	// ExtraSubmitLines is operator-supplied submit-file content
+	// merged in just before the `queue` directive. Empty when the
+	// operator hasn't configured InteractiveExtraSubmitFile. Plumbed
+	// from Handler.interactiveExtraSubmit.
+	ExtraSubmitLines string
+}
+
+// appendExtraSubmitLines writes operator-supplied extra submit-file
+// directives to sb, surrounded by a marker comment so the resulting
+// submit file makes the source obvious. No-op when extras is empty
+// or whitespace-only. The contents are passed through verbatim:
+// because the file is operator-only config (loaded at startup from
+// a path the operator chose), we trust whatever it contains the
+// same way HTCondor trusts its own site_local config.
+//
+// Always emits a leading newline so the marker line stands apart
+// from whatever directive immediately preceded it, and a trailing
+// newline so `queue` appears on its own line.
+func appendExtraSubmitLines(sb *strings.Builder, extras string) {
+	if strings.TrimSpace(extras) == "" {
+		return
+	}
+	sb.WriteString("\n# --- Operator-supplied extra submit directives ---\n")
+	sb.WriteString(extras)
+	if !strings.HasSuffix(extras, "\n") {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("# --- End operator-supplied extras ---\n")
 }
 
 // resourceRequestLines emits the request_cpus / request_memory /
 // request_disk plus optional request_gpus + gpus_minimum_* / cuda_version
 // / require_gpus lines. Shared between the terminal and Jupyter submit
 // generators so they speak the same vocabulary.
+//
+// Unit note: HTCondor's bare-integer convention differs by attribute —
+// `request_memory` is interpreted as MiB, `request_disk` as KiB. The
+// API surface speaks MiB for both, so we multiply diskMB by 1024 on
+// the way out. Without this, asking for 4096 MB of scratch produced
+// jobs that died in transfer because the schedd actually allocated
+// 4 MiB.
 func resourceRequestLines(
 	cpus, memoryMB, diskMB int,
 	gpus int, gpusMinCapability string, gpusMinMemoryMB int,
@@ -279,7 +326,7 @@ func resourceRequestLines(
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "request_cpus = %d\n", cpus)
 	fmt.Fprintf(&sb, "request_memory = %d\n", memoryMB)
-	fmt.Fprintf(&sb, "request_disk = %d\n", diskMB)
+	fmt.Fprintf(&sb, "request_disk = %d\n", diskMB*1024)
 	if gpus > 0 {
 		fmt.Fprintf(&sb, "request_gpus = %d\n", gpus)
 		if gpusMinCapability != "" {
@@ -335,6 +382,13 @@ func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string 
 	fmt.Fprintf(&sb, "log    = interactive.log\n")
 	fmt.Fprintf(&sb, "output = interactive.out\n")
 	fmt.Fprintf(&sb, "error  = interactive.err\n")
+
+	// Operator-supplied extras get spliced in just before `queue`
+	// so they can override anything the builder emitted above. The
+	// banner comment makes it obvious in the schedd's spool which
+	// directives came from us vs the operator's site policy.
+	appendExtraSubmitLines(&sb, a.ExtraSubmitLines)
+
 	fmt.Fprintf(&sb, "queue\n")
 	return sb.String()
 }

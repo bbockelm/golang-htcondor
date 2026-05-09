@@ -499,6 +499,17 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleJobLog(w, r, cluster, proc)
 			return
+		case "peek":
+			// GET /api/v1/jobs/{id}/peek?stream=stdout|stderr|both
+			//                            &stdout_offset=…&stderr_offset=…
+			//                            &max_bytes=…
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobPeek(w, r, cluster, proc)
+			return
 		case "match-analysis":
 			// GET /api/v1/jobs/{id}/match-analysis — explicit-fetch
 			// only; the front end gates this behind a button.
@@ -696,6 +707,109 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	})
 }
 
+// encodeJobAttributeValue translates one JSON value from a PATCH
+// /api/v1/jobs[/{id}] request body into a ClassAd-expression string
+// suitable for Schedd.SetAttribute.
+//
+// Two input shapes are accepted:
+//
+//  1. Bare JSON value (the historical contract — chat tools and
+//     anyone speaking native ClassAd send this):
+//     - string: passed through verbatim, assumed pre-encoded ClassAd
+//     - number: bare digits (int) or decimal (float)
+//     - bool:   "true" / "false"
+//     - null:   "UNDEFINED"
+//
+//  2. Typed object `{ "type": "string"|"integer"|"real"|"boolean"|"raw",
+//     "value": "<text>" }` (the SPA's edit-row sends this so the user
+//     doesn't have to think about ClassAd quoting):
+//     - string  → classad.Quote(value), which is fmt.Sprintf("%q", v) —
+//     the same %q escaping Go's strconv uses; handles \,
+//     ", \n, \t, control chars, and non-printable runes.
+//     That's a strict superset of what HTCondor's classad
+//     parser needs, so we don't have to reinvent the
+//     escape table here.
+//     - integer → strconv.ParseInt → re-emitted as bare digits
+//     - real    → strconv.ParseFloat → re-emitted as decimal
+//     - boolean → must be "true" / "false"
+//     - raw     → passed through verbatim
+//
+// Errors reach the user as 400s with a message that names the
+// attribute, so a typo on the SPA edit row points at the right field.
+func encodeJobAttributeValue(name string, value any) (string, error) {
+	if obj, ok := value.(map[string]any); ok {
+		typeRaw, _ := obj["type"].(string)
+		valRaw, hasVal := obj["value"]
+		if typeRaw == "" {
+			return "", fmt.Errorf("attribute %q: typed object missing 'type'", name)
+		}
+		if !hasVal {
+			return "", fmt.Errorf("attribute %q: typed object missing 'value'", name)
+		}
+		valStr, ok := valRaw.(string)
+		if !ok {
+			return "", fmt.Errorf("attribute %q: typed object 'value' must be a string (use type=integer/real for numerics)", name)
+		}
+		switch strings.ToLower(typeRaw) {
+		case "string":
+			// Library-driven escaping. Quote handles the full set
+			// of escapes the schedd's classad parser recognises.
+			return classad.Quote(valStr), nil
+		case "integer", "int":
+			n, err := strconv.ParseInt(strings.TrimSpace(valStr), 10, 64)
+			if err != nil {
+				return "", fmt.Errorf("attribute %q: %q is not a valid integer", name, valStr)
+			}
+			return strconv.FormatInt(n, 10), nil
+		case "real", "float":
+			f, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
+			if err != nil {
+				return "", fmt.Errorf("attribute %q: %q is not a valid real number", name, valStr)
+			}
+			return strconv.FormatFloat(f, 'g', -1, 64), nil
+		case "boolean", "bool":
+			v := strings.ToLower(strings.TrimSpace(valStr))
+			if v != "true" && v != "false" {
+				return "", fmt.Errorf("attribute %q: boolean must be \"true\" or \"false\", got %q", name, valStr)
+			}
+			return v, nil
+		case "raw", "expression":
+			if strings.TrimSpace(valStr) == "" {
+				return "", fmt.Errorf("attribute %q: raw expression must not be empty", name)
+			}
+			return valStr, nil
+		default:
+			return "", fmt.Errorf("attribute %q: unknown type %q (want string|integer|real|boolean|raw)", name, typeRaw)
+		}
+	}
+
+	switch v := value.(type) {
+	case string:
+		// Bare-string contract: caller pre-encoded ClassAd. Used by
+		// the chat tools, which take an `expression` arg the LLM is
+		// expected to format itself.
+		return v, nil
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10), nil
+		}
+		return strconv.FormatFloat(v, 'g', -1, 64), nil
+	case bool:
+		if v {
+			return "true", nil
+		}
+		return "false", nil
+	case nil:
+		return "UNDEFINED", nil
+	default:
+		jsonBytes, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("attribute %q: cannot serialize value: %w", name, err)
+		}
+		return string(jsonBytes), nil
+	}
+}
+
 // handleEditJob handles PATCH /api/v1/jobs/{id}
 func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	// Create authenticated context
@@ -728,43 +842,20 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
-	// Convert interface{} values to strings for SetAttribute
-	// If the value is already a string, assume it's in ClassAd format
-	// Otherwise, convert to appropriate ClassAd format
+	// Encode incoming JSON values as ClassAd expression strings. See
+	// encodeJobAttributeValue for the full table; the short version
+	// is that bare JSON values follow the historical pass-through
+	// rules (string = pre-encoded ClassAd, number/bool/null = obvious),
+	// and a typed object {"type":"string"|"integer"|…, "value":"…"}
+	// goes through classad.Quote for proper escape handling.
 	attributes := make(map[string]string)
 	for key, value := range req.Attributes {
-		// Convert value to string representation
-		switch v := value.(type) {
-		case string:
-			// String values are assumed to be in ClassAd format already
-			// (either literals like "256" or quoted strings like "\"hello\"")
-			attributes[key] = v
-		case float64:
-			// JSON numbers are float64
-			if v == float64(int64(v)) {
-				// It's an integer
-				attributes[key] = fmt.Sprintf("%d", int64(v))
-			} else {
-				attributes[key] = fmt.Sprintf("%f", v)
-			}
-		case bool:
-			if v {
-				attributes[key] = "true"
-			} else {
-				attributes[key] = "false"
-			}
-		case nil:
-			// For null values, set to UNDEFINED
-			attributes[key] = "UNDEFINED"
-		default:
-			// For complex types, convert to JSON string
-			jsonBytes, err := json.Marshal(v)
-			if err != nil {
-				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Cannot convert attribute %s to string: %v", key, err))
-				return
-			}
-			attributes[key] = string(jsonBytes)
+		encoded, err := encodeJobAttributeValue(key, value)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
+		attributes[key] = encoded
 	}
 
 	// Edit the job attributes
@@ -909,43 +1000,17 @@ func (s *Handler) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert interface{} values to strings for SetAttribute
-	// If the value is already a string, assume it's in ClassAd format
-	// Otherwise, convert to appropriate ClassAd format
+	// Encode each attribute via the shared helper — see
+	// encodeJobAttributeValue for the JSON-shape → ClassAd-expression
+	// rules.
 	attributes := make(map[string]string)
 	for key, value := range req.Attributes {
-		// Convert value to string representation
-		switch v := value.(type) {
-		case string:
-			// String values are assumed to be in ClassAd format already
-			// (either literals like "256" or quoted strings like "\"hello\"")
-			attributes[key] = v
-		case float64:
-			// JSON numbers are float64
-			if v == float64(int64(v)) {
-				// It's an integer
-				attributes[key] = fmt.Sprintf("%d", int64(v))
-			} else {
-				attributes[key] = fmt.Sprintf("%f", v)
-			}
-		case bool:
-			if v {
-				attributes[key] = "true"
-			} else {
-				attributes[key] = "false"
-			}
-		case nil:
-			// For null values, set to UNDEFINED
-			attributes[key] = "UNDEFINED"
-		default:
-			// For complex types, convert to JSON string
-			jsonBytes, err := json.Marshal(v)
-			if err != nil {
-				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Cannot convert attribute %s to string: %v", key, err))
-				return
-			}
-			attributes[key] = string(jsonBytes)
+		encoded, err := encodeJobAttributeValue(key, value)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
+		attributes[key] = encoded
 	}
 
 	// Set up options
@@ -1340,6 +1405,14 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		// Process each file in the multipart form
 		for fieldName, fileHeaders := range r.MultipartForm.File {
 			for _, fileHeader := range fileHeaders {
+				// Reject path-traversal-shaped filenames before
+				// opening the file. Mirrors the MCP-side check in
+				// toolUploadJobInput; both feed into the same
+				// schedd SpoolJobFilesFromTar receiver.
+				if err := validateTarEntryName(fileHeader.Filename); err != nil {
+					errChan <- fmt.Errorf("rejecting upload entry %q: %w", fileHeader.Filename, err)
+					return
+				}
 				// Open the multipart file
 				file, err := fileHeader.Open()
 				if err != nil {
@@ -1528,10 +1601,33 @@ func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename st
 					break
 				}
 
-				// Detect content type
-				contentType := http.DetectContentType(buf[:n])
-				w.Header().Set("Content-Type", contentType)
-				w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+				// Stored-XSS hardening: this endpoint serves user-uploaded
+				// job sandbox files. Earlier code emitted the detected
+				// MIME type with `Content-Disposition: inline`, which let
+				// a malicious user upload `evil.html` and have a victim
+				// who navigates to the URL execute the script under the
+				// API origin (where their session cookie lives).
+				//
+				// Mitigations applied here:
+				//   1. Always force `attachment` so the browser
+				//      downloads instead of rendering inline.
+				//   2. Ignore the sniffed type and emit a generic
+				//      `application/octet-stream`. We still call
+				//      DetectContentType above only because it has the
+				//      side effect of consuming up to 512 bytes — which
+				//      we then need to write out before the streaming
+				//      copy below picks up the rest of the file.
+				//   3. The applySecurityHeaders middleware emits
+				//      X-Content-Type-Options: nosniff globally, which
+				//      stops a lenient browser from re-sniffing the
+				//      octet-stream back into HTML.
+				//
+				// We keep the `filename=%q` quoting (Go-style escaping)
+				// from the prior code; CR/LF are escaped as literal
+				// `\r\n`, so the filename can't inject extra headers.
+				_ = http.DetectContentType(buf[:n]) // not used; see comment above
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 				w.WriteHeader(http.StatusOK)
 
 				// Write the buffer we already read
@@ -1600,6 +1696,43 @@ func (s *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.httpMetricsState == nil {
 		s.writeError(w, http.StatusNotImplemented, "Metrics not enabled")
 		return
+	}
+	// Authentication gate. Three precedence-ordered cases:
+	//   1. Operator opted into public exposure via
+	//      HTTP_API_METRICS_PUBLIC=true. Skip the gate; this matches
+	//      pre-API-key behavior for environments where the metrics
+	//      endpoint is already isolated by network ACLs.
+	//   2. Bearer token presented (and a chat-style API key is
+	//      detected). The shared createAuthenticatedContext path
+	//      handles parsing + scope attachment; we then check that
+	//      the `metrics` scope is present.
+	//   3. Anything else: 401. Unlike most endpoints, /metrics does
+	//      NOT support cookie-based browser sessions — Prometheus
+	//      doesn't have a cookie jar, and admin browser users have
+	//      no business hitting /metrics directly.
+	if !s.metricsPublic {
+		ctx, err := s.createAuthenticatedContext(r)
+		if err != nil {
+			s.writeError(w, http.StatusUnauthorized,
+				"Metrics endpoint requires an API key with the 'metrics' scope. "+
+					"Mint one in the admin UI, or set HTTP_API_METRICS_PUBLIC=true to disable auth.")
+			return
+		}
+		if !AuthenticatedViaAPIKey(ctx) {
+			s.writeError(w, http.StatusForbidden,
+				"Metrics endpoint requires an API key (not a session cookie or JWT)")
+			return
+		}
+		if !ContainsScope(ctx, "metrics") {
+			s.writeError(w, http.StatusForbidden,
+				"API key lacks the 'metrics' scope")
+			return
+		}
+		// Fall through to the prom handler with the authenticated
+		// request; we don't need to forward `ctx` anywhere because
+		// the prom handler doesn't read user identity, but
+		// re-attaching keeps any future middleware honest.
+		r = r.WithContext(ctx)
 	}
 	promhttp.HandlerFor(
 		s.httpMetricsState.registry,
@@ -1685,11 +1818,19 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, statusCode, snap)
 }
 
-// handleLogout handles POST /logout endpoint to clear session cookies
-// Also supports GET for browser-based logout
+// handleLogout handles POST /logout endpoint to clear session cookies.
+//
+// Only POST is accepted: the previous code path also accepted GET to
+// support a "<a href=/logout>Sign out</a>" link in the SPA, but that
+// also let an attacker page log victims out via a top-level link
+// (CSRF on logout is a nuisance/DoS vector and is consistently
+// flagged in audits). The SPA already calls POST via api.auth.logout;
+// any remaining `<a href>` links should be replaced with form POSTs
+// (or the SPA's logout button).
 func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed; use POST")
 		return
 	}
 

@@ -34,6 +34,14 @@ type Tool interface {
 	// or client-side tools; true for write actions (hold/release/
 	// remove). The frontend renders an Approve / Reject UI for these.
 	RequiresConfirmation() bool
+	// AvailablePages reports which SPA pages this tool is exposed on.
+	// Empty/nil means "every page" — i.e. universally available.
+	// The engine filters tools by Request.Page before advertising the
+	// schema to the LLM, so a tool tagged ["jobs"] is invisible from
+	// the submit page (and vice versa). Use this to prevent the LLM
+	// from calling a UI-mutation tool whose target component isn't
+	// even mounted.
+	AvailablePages() []string
 	Execute(ctx context.Context, actor string, input json.RawMessage) (string, error)
 }
 
@@ -53,37 +61,86 @@ type Request struct {
 	// as Tool.Name(); the engine checks membership before honoring
 	// RequiresConfirmation.
 	AutoApprove []string `json:"auto_approve,omitempty"`
+	// Page is the SPA page identifier (e.g. "jobs", "submit") sent
+	// with each request. The engine uses it to:
+	//   - filter the advertised tool schema to tools tagged for this
+	//     page (or untagged tools, which are universal), and
+	//   - select the per-page system-prompt suffix from the engine's
+	//     pageInstructions map.
+	// The Page string is NEVER interpolated into prompt text directly;
+	// it's only used as a map key, so a malicious browser sending a
+	// crafted Page value cannot inject prompt content.
+	Page string `json:"page,omitempty"`
+	// PageContext is a free-form string the SPA can send to provide
+	// per-request context the LLM should know about — e.g. on the
+	// per-job page, the cluster.proc id, current job status, last
+	// host. It's appended verbatim to the system prompt under a
+	// "Page context" header.
+	//
+	// Trust model: the SPA is not adversarial against itself, and the
+	// chat surface only ever shows the user their own data, so the
+	// risk of "prompt injection from the page context" is the same as
+	// the user typing the same content. Tools never read PageContext;
+	// it exists purely to pre-populate the model's working memory so
+	// the LLM doesn't waste tokens asking the user "which job?" on
+	// every turn. Cap is enforced by the engine.
+	PageContext string `json:"page_context,omitempty"`
 }
 
 // Engine drives one chat turn end-to-end. Construct with NewEngine
 // once at startup and reuse — it's safe for concurrent calls because
 // every Stream invocation owns its own state.
+//
+// The engine knows nothing about specific pages; it just filters
+// tools and looks up a system-prompt suffix by the page string the
+// SPA sends. Adding a new page is purely additive: register the
+// new tools (tagged with the page) and add a key to the
+// pageInstructions map.
 type Engine struct {
-	client     *AnthropicClient
-	tools      map[string]Tool
-	toolSchema []AnthropicTool
-	system     string
+	client           *AnthropicClient
+	tools            map[string]Tool
+	pageInstructions map[string]string
+	operatorAddendum string
 }
 
 // NewEngine builds an engine over the supplied LLM client and tool
-// registry. The system prompt is generated from the registered tool
-// list so adding a tool doesn't require a prompt edit.
-func NewEngine(client *AnthropicClient, tools []Tool) *Engine {
+// registry.
+//
+// pageInstructions maps an SPA page identifier (e.g. "jobs", "submit")
+// to a chunk of system-prompt text that's appended to the base prompt
+// whenever a request arrives with Page=<that key>. Pages NOT in this
+// map are still allowed (the SPA can send anything) — they just get
+// the base prompt with no page-specific guidance, plus only those
+// tools that are universally tagged. Operators looking to add a third
+// page should register tools and add an entry here together.
+//
+// operatorAddendum is freeform text supplied by the server admin via
+// configuration. It's appended to the system prompt on every turn,
+// regardless of page. Use it for site-specific rules ("we don't allow
+// LongJob requests over 24h", "our preferred default is Singularity")
+// — anything you'd hand to an in-house user-help operator.
+func NewEngine(
+	client *AnthropicClient,
+	tools []Tool,
+	pageInstructions map[string]string,
+	operatorAddendum string,
+) *Engine {
 	registry := make(map[string]Tool, len(tools))
-	schemas := make([]AnthropicTool, 0, len(tools))
 	for _, t := range tools {
 		registry[t.Name()] = t
-		schemas = append(schemas, AnthropicTool{
-			Name:        t.Name(),
-			Description: t.Description(),
-			InputSchema: t.InputSchema(),
-		})
+	}
+	// Defensive copies: callers might mutate the maps after handing
+	// them off, and the engine is supposed to be read-only after
+	// construction.
+	pi := make(map[string]string, len(pageInstructions))
+	for k, v := range pageInstructions {
+		pi[k] = v
 	}
 	return &Engine{
-		client:     client,
-		tools:      registry,
-		toolSchema: schemas,
-		system:     buildSystemPrompt(tools),
+		client:           client,
+		tools:            registry,
+		pageInstructions: pi,
+		operatorAddendum: operatorAddendum,
 	}
 }
 
@@ -112,12 +169,16 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 	approved := stringSet(req.PreApprovedToolUseIDs)
 	autoApprove := stringSet(req.AutoApprove)
 
+	// Compute the per-request tool slice and Anthropic schema. Tools
+	// not advertised to the LLM cannot be invoked, so an LLM jailbreak
+	// attempting to call a jobs-page tool from the submit page just
+	// fails at the schema-validation layer in the Anthropic API.
+	pageTools, pageSchema := e.toolsForPage(req.Page)
+	systemPrompt := e.systemPromptForPage(req.Page, pageTools, req.PageContext)
+
 	// Convert browser-shape messages to Anthropic-shape, dropping any
 	// fields the LLM doesn't need to see.
-	msgs, err := messagesToAnthropic(req.Messages)
-	if err != nil {
-		return fmt.Errorf("convert messages: %w", err)
-	}
+	msgs := messagesToAnthropic(req.Messages)
 
 	// Resolve any pending approvals. When the SPA sends us
 	// PreApprovedToolUseIDs, the user has clicked Approve on a
@@ -133,7 +194,15 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 	// for a client-side tool.
 	const maxToolHops = 8 // belt-and-braces against runaway loops
 	for hop := 0; hop < maxToolHops; hop++ {
-		events := e.client.Stream(ctx, e.system, msgs, e.toolSchema, "")
+		// Each iteration is one LLM call. Bracket it with start-step
+		// / finish-step chunks so the AI-SDK's auto-resubmit predicate
+		// (lastAssistantMessageIsCompleteWithToolCalls) can tell where
+		// each turn ends. Without these, the predicate inspects the
+		// ENTIRE accumulated assistant message — a turn that ends in
+		// text following resolved tool calls reads as "complete with
+		// tool calls" and the SDK fires a fresh /chat POST forever.
+		w.WriteStepStart()
+		events := e.client.Stream(ctx, systemPrompt, msgs, pageSchema, "")
 
 		// Collect the assistant turn's content blocks as we see
 		// them; the LLM might emit text + tool_use in the same turn.
@@ -186,6 +255,7 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 			if stopReason == "max_tokens" {
 				w.WriteText("\n\n[turn truncated: max tokens reached; ask me to continue]")
 			}
+			w.WriteStepFinish()
 			return nil
 		}
 
@@ -209,8 +279,10 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 			// Client-side tool: forward the tool_use to the browser
 			// and end this stream. The browser will execute and POST
 			// the result back, and we'll resume from there.
+			// providerExecuted=false so the SDK fires onToolCall on
+			// the client — that's how dispatch happens.
 			if tool.ClientSide() {
-				w.WriteToolCall(blk.ID, blk.Name, blk.Input)
+				w.WriteToolCall(blk.ID, blk.Name, blk.Input, false)
 				clientHandoff = true
 				continue
 			}
@@ -229,8 +301,10 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 			// Server-side execution. Emit the tool-input chunks first
 			// so the UI can render a "calling <tool>..." indicator;
 			// without these the user sees only the result with no
-			// context for what produced it.
-			w.WriteToolCall(blk.ID, blk.Name, blk.Input)
+			// context for what produced it. providerExecuted=true so
+			// the SDK does NOT fire onToolCall on the client — this is
+			// our work, not the browser's.
+			w.WriteToolCall(blk.ID, blk.Name, blk.Input, true)
 			res, err := tool.Execute(ctx, actor, blk.Input)
 			if err != nil {
 				toolResults = append(toolResults, errorToolResult(blk.ID, err.Error()))
@@ -248,6 +322,7 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 		if clientHandoff {
 			// We fired off at least one tool_use to the browser; the
 			// next round-trip carries the results. End the stream.
+			w.WriteStepFinish()
 			return nil
 		}
 
@@ -258,6 +333,9 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 				Content: toolResults,
 			})
 		}
+		// Close out this iteration's step before looping; the next
+		// iteration's WriteStepStart opens the next one.
+		w.WriteStepFinish()
 	}
 
 	w.WriteError("tool-call loop exceeded the safety limit; ask me a simpler question")
@@ -330,7 +408,13 @@ func (e *Engine) resolvePendingApprovals(
 			}
 			// Emit the tool-input chunks to the SPA so the UI shows
 			// "calling X…" as if this were a fresh execution.
-			w.WriteToolCall(blk.ID, blk.Name, blk.Input)
+			// providerExecuted=true: this is the resolution side of an
+			// approval round-trip — the part already exists on the
+			// client in state="approval-requested". Re-emitting with
+			// providerExecuted=true keeps the SDK from firing
+			// onToolCall a second time (which would race the actual
+			// result with an "unknown client-side tool" error reply).
+			w.WriteToolCall(blk.ID, blk.Name, blk.Input, true)
 			res, err := tool.Execute(ctx, actor, blk.Input)
 			if err != nil {
 				newResults = append(newResults, errorToolResult(blk.ID, err.Error()))
@@ -372,13 +456,73 @@ func errorToolResult(id, msg string) AnthropicContentBlock {
 	}
 }
 
-// buildSystemPrompt assembles the system message we send on every
-// turn. We keep it short and operator-evergreen: the LLM doesn't
+// toolsForPage filters the registered tool set down to those tagged
+// for the supplied page (plus untagged universal tools), returning
+// the filtered Tool slice paired with its Anthropic-wire schema.
+//
+// An empty page string ("") is treated as "every tool": this preserves
+// legacy callers who never set Request.Page. To get strict filtering,
+// the caller must send a non-empty page identifier.
+func (e *Engine) toolsForPage(page string) ([]Tool, []AnthropicTool) {
+	tools := make([]Tool, 0, len(e.tools))
+	schemas := make([]AnthropicTool, 0, len(e.tools))
+	for _, t := range e.tools {
+		if !toolAvailableOnPage(t, page) {
+			continue
+		}
+		tools = append(tools, t)
+		schemas = append(schemas, AnthropicTool{
+			Name:        t.Name(),
+			Description: t.Description(),
+			InputSchema: t.InputSchema(),
+		})
+	}
+	// Stable order makes prompts deterministic across reboots.
+	sortToolsByName(tools, schemas)
+	return tools, schemas
+}
+
+// toolAvailableOnPage returns true when the tool should be advertised
+// for the given page. Universal tools (empty AvailablePages list) are
+// available everywhere; page-tagged tools require an exact match. An
+// empty page string means "no filtering" (legacy callers).
+func toolAvailableOnPage(t Tool, page string) bool {
+	pages := t.AvailablePages()
+	if len(pages) == 0 {
+		return true
+	}
+	if page == "" {
+		return true
+	}
+	for _, p := range pages {
+		if p == page {
+			return true
+		}
+	}
+	return false
+}
+
+// systemPromptForPage assembles the system message we send on every
+// turn. We keep the base short and operator-evergreen: the LLM doesn't
 // need to know the operator's name or pool, just that it's helping
 // a single authenticated user investigate / manage their own jobs
 // and that the server enforces owner scoping irrespective of what
 // the LLM tries.
-func buildSystemPrompt(tools []Tool) string {
+//
+// On top of that base, we append (in order):
+//  1. The page-specific instructions block, if pageInstructions has
+//     an entry for the supplied page. Unknown pages add nothing.
+//  2. The list of currently-available tools, computed by the caller.
+//  3. The operator-supplied addendum from configuration. Always last
+//     so an operator can override or correct anything the standard
+//     prompts say.
+//
+// pageContextMaxLen caps the per-request context string. The SPA is
+// trusted but the cap defends against an out-of-control caller pinning
+// gigantic strings into the system prompt and burning tokens.
+const pageContextMaxLen = 2048
+
+func (e *Engine) systemPromptForPage(page string, tools []Tool, pageContext string) string {
 	var b strings.Builder
 	b.WriteString(`You are a HTCondor assistant embedded in an HTC user's job-management UI.
 Your job is to help the user investigate and act on THEIR OWN jobs in the local pool.
@@ -388,15 +532,60 @@ Owner scoping: every tool you call is silently scoped to the authenticated user.
 You CANNOT see or act on other users' jobs even if asked. If the user asks you to,
 explain that and suggest an alternative.
 
-Available tools:
+If a user asks you to do something none of your tools cover, describe the exact
+manual step they should take instead — don't pretend you did it.
 `)
+
+	if extra, ok := e.pageInstructions[page]; ok && extra != "" {
+		b.WriteString("\n")
+		b.WriteString(extra)
+		if !strings.HasSuffix(extra, "\n") {
+			b.WriteString("\n")
+		}
+	}
+
+	if pageContext != "" {
+		ctx := pageContext
+		if len(ctx) > pageContextMaxLen {
+			ctx = ctx[:pageContextMaxLen] + "\n[truncated]"
+		}
+		b.WriteString("\nPage context:\n")
+		b.WriteString(ctx)
+		if !strings.HasSuffix(ctx, "\n") {
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\nAvailable tools:\n")
 	for _, t := range tools {
 		fmt.Fprintf(&b, "  - %s: %s\n", t.Name(), t.Description())
 	}
-	b.WriteString(`
-Today's date: ` + time.Now().UTC().Format("2006-01-02") + `.
-`)
+	b.WriteString("\nToday's date: ")
+	b.WriteString(time.Now().UTC().Format("2006-01-02"))
+	b.WriteString(".\n")
+
+	if e.operatorAddendum != "" {
+		b.WriteString("\n--- Site operator instructions (highest priority) ---\n")
+		b.WriteString(e.operatorAddendum)
+		if !strings.HasSuffix(e.operatorAddendum, "\n") {
+			b.WriteString("\n")
+		}
+	}
+
 	return b.String()
+}
+
+// sortToolsByName sorts the parallel tools/schemas slices so prompt
+// text is stable across runs. Anthropic doesn't care about order, but
+// the test suite and human reviewers do.
+func sortToolsByName(tools []Tool, schemas []AnthropicTool) {
+	// Insertion sort; the tool count is always tiny (< 20).
+	for i := 1; i < len(tools); i++ {
+		for j := i; j > 0 && tools[j-1].Name() > tools[j].Name(); j-- {
+			tools[j-1], tools[j] = tools[j], tools[j-1]
+			schemas[j-1], schemas[j] = schemas[j], schemas[j-1]
+		}
+	}
 }
 
 // stringSet builds a tiny membership map from a slice; nil-safe.
