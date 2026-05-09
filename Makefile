@@ -15,6 +15,61 @@ build: build-jupyter-helper ## Build all packages with embedded version info + e
 	@echo "Building packages (version=$(VERSION) commit=$(COMMIT)) with -tags embed_jupyter_helper..."
 	go build -v -tags embed_jupyter_helper -ldflags "$(LDFLAGS)" ./...
 
+# --- HTCondor docs (MCP reference content) -------------------------------
+#
+# A subset of the upstream HTCondor RST docs is embedded into the api
+# binary so the MCP server can answer "what attribute is this?" /
+# "what does this submit command do?" / "which config macro controls
+# X?" without an external lookup. The source tree is expected at
+# reference/htcondor (cloned via stage-condor-docs below).
+#
+# The stage is fast and idempotent; the build-prod / Dockerfile.release
+# targets call it before invoking go build with -tags embed_condor_docs.
+CONDOR_DOCS_SRC ?= reference/htcondor/docs
+CONDOR_DOCS_DST := condordocs/dist
+HTCONDOR_GIT_URL ?= https://github.com/htcondor/htcondor.git
+HTCONDOR_GIT_REF ?= main
+
+.PHONY: fetch-condor-docs
+fetch-condor-docs: ## Clone or update reference/htcondor (only if missing)
+	@if [ ! -d reference/htcondor/.git ]; then \
+		echo "Cloning HTCondor source from $(HTCONDOR_GIT_URL) ($(HTCONDOR_GIT_REF))..."; \
+		mkdir -p reference; \
+		git clone --depth 1 --branch $(HTCONDOR_GIT_REF) $(HTCONDOR_GIT_URL) reference/htcondor; \
+	else \
+		echo "Reusing existing reference/htcondor checkout"; \
+	fi
+
+.PHONY: stage-condor-docs
+stage-condor-docs: ## Stage curated HTCondor RST docs into $(CONDOR_DOCS_DST) for embedding
+	@if [ ! -d "$(CONDOR_DOCS_SRC)" ]; then \
+		echo "ERROR: $(CONDOR_DOCS_SRC) not found. Run 'make fetch-condor-docs' or set CONDOR_DOCS_SRC."; \
+		exit 1; \
+	fi
+	@echo "Staging HTCondor docs from $(CONDOR_DOCS_SRC) -> $(CONDOR_DOCS_DST)..."
+	@rm -rf $(CONDOR_DOCS_DST)
+	@mkdir -p $(CONDOR_DOCS_DST)/config
+	@cp $(CONDOR_DOCS_SRC)/classad-attributes/job-classad-attributes.rst $(CONDOR_DOCS_DST)/job-attributes.rst
+	@cp $(CONDOR_DOCS_SRC)/classad-attributes/machine-classad-attributes.rst $(CONDOR_DOCS_DST)/machine-attributes.rst
+	@cp $(CONDOR_DOCS_SRC)/man-pages/condor_submit.rst $(CONDOR_DOCS_DST)/condor-submit.rst
+	@# Skip configuration-macros.rst itself — the upstream "all" page is
+	@# a Sphinx-time aggregation of generated content and is empty in
+	@# the source tree. The per-subsystem files under
+	@# admin-manual/configuration/ are the actual definitions.
+	@for f in $(CONDOR_DOCS_SRC)/admin-manual/configuration/*.rst; do \
+		base=$$(basename $$f); \
+		if [ "$$base" = "all.rst" ] || [ "$$base" = "index.rst" ]; then continue; fi; \
+		cp "$$f" "$(CONDOR_DOCS_DST)/config/$$base"; \
+	done
+	@echo "Staged docs:"
+	@ls -1 $(CONDOR_DOCS_DST) | sed 's|^|  |'
+
+.PHONY: clean-condor-docs
+clean-condor-docs: ## Remove staged HTCondor doc artifacts
+	rm -rf $(CONDOR_DOCS_DST)
+	@mkdir -p $(CONDOR_DOCS_DST)
+	@touch $(CONDOR_DOCS_DST)/.keep
+
 # --- Frontend (Web UI) ---
 #
 # The Next.js app lives under frontend/ and is built into a static export
@@ -35,55 +90,50 @@ dev-frontend: ## Run Next.js dev server (proxies /api to Go on :8080)
 
 # --- JupyterLab tunnel helper ----------------------------------------------
 #
-# The helper runs *inside* the JupyterLab job sandbox. We always cross-build a
-# linux/<host arch> binary for Docker-universe jobs (the standard Linux pool
-# case). When the host running `make build` is itself macOS, we also build a
-# darwin/<host arch> helper, because on macOS the API server falls back to
-# vanilla universe + on-the-fly conda — and the execute node is also macOS,
-# so it needs a darwin-native helper.
+# The helper runs *inside* the JupyterLab job sandbox on the execute node, so
+# it must match that machine's GOOS+GOARCH — not the API server's host arch.
+# Go cross-compiles trivially (CGO_ENABLED=0, no libc), so we just build all
+# the relevant target tuples every time and let the API server's submit
+# handler pick the right one at submit time based on the requirements
+# expression / inferred slot platform.
 #
-# Both binaries land in httpserver/jupyterhelperbin/dist/ where embed.go
-# (gated on the embed_jupyter_helper tag) picks them up.
-JUPYTER_HELPER_GOARCH        := $(shell go env GOARCH)
-JUPYTER_HELPER_GOOS_HOST     := $(shell go env GOOS)
-JUPYTER_HELPER_BIN           := bin/htcondor-jupyter-helper
-JUPYTER_HELPER_DARWIN_BIN    := bin/htcondor-jupyter-helper-darwin
-# Where the api binary's embed.FS will pick up the cross-compiled helper.
-# Must stay in sync with httpserver/jupyterhelperbin/embed.go's //go:embed.
-JUPYTER_HELPER_EMBED_DIR     := httpserver/jupyterhelperbin/dist
+# Targets are fixed below; add a row to JUPYTER_HELPER_TARGETS to extend.
+# Each target produces dist/htcondor-jupyter-helper-<goos>-<goarch>, which
+# the api binary's embed.FS picks up under the embed_jupyter_helper tag.
+JUPYTER_HELPER_TARGETS := \
+	linux/amd64 \
+	linux/arm64 \
+	darwin/arm64
+JUPYTER_HELPER_EMBED_DIR := httpserver/jupyterhelperbin/dist
 
 .PHONY: build-jupyter-helper
-build-jupyter-helper: ## Cross-compile the JupyterLab tunnel helper for linux/<host arch> (and darwin too if the host is macOS)
-	@echo "Building $(JUPYTER_HELPER_BIN) for linux/$(JUPYTER_HELPER_GOARCH)..."
+build-jupyter-helper: ## Cross-compile the JupyterLab tunnel helper for every target in JUPYTER_HELPER_TARGETS
 	@mkdir -p bin $(JUPYTER_HELPER_EMBED_DIR)
-	GOOS=linux GOARCH=$(JUPYTER_HELPER_GOARCH) CGO_ENABLED=0 go build \
-		-ldflags "$(LDFLAGS)" \
-		-o $(JUPYTER_HELPER_BIN) \
-		./cmd/htcondor-jupyter-helper
-	cp $(JUPYTER_HELPER_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper
-	@echo "Built $(JUPYTER_HELPER_BIN) (embed-staged)"
-	@if [ "$(JUPYTER_HELPER_GOOS_HOST)" = "darwin" ]; then \
-		echo "Host is darwin — also building $(JUPYTER_HELPER_DARWIN_BIN) for darwin/$(JUPYTER_HELPER_GOARCH)..."; \
-		GOOS=darwin GOARCH=$(JUPYTER_HELPER_GOARCH) CGO_ENABLED=0 go build \
+	@for target in $(JUPYTER_HELPER_TARGETS); do \
+		goos=$${target%/*}; \
+		goarch=$${target#*/}; \
+		out="$(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-$$goos-$$goarch"; \
+		echo "Building $$out for $$goos/$$goarch..."; \
+		GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build \
 			-ldflags "$(LDFLAGS)" \
-			-o $(JUPYTER_HELPER_DARWIN_BIN) \
-			./cmd/htcondor-jupyter-helper; \
-		cp $(JUPYTER_HELPER_DARWIN_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-darwin; \
-		echo "Built $(JUPYTER_HELPER_DARWIN_BIN) (embed-staged)"; \
-	fi
+			-o "$$out" \
+			./cmd/htcondor-jupyter-helper || exit 1; \
+	done
+	@echo "Embed-staged helpers in $(JUPYTER_HELPER_EMBED_DIR):"
+	@ls -1 $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-* 2>/dev/null | sed 's|^|  |' || true
 
 .PHONY: build-frontend
 build-frontend: ## Build Next.js static export into frontend/out
 	cd $(FRONTEND_DIR) && NODE_ENV=production npm run build
 
 .PHONY: build-prod
-build-prod: build-frontend build-jupyter-helper ## Build htcondor-api with embedded frontend + embedded JupyterLab helper
+build-prod: build-frontend build-jupyter-helper stage-condor-docs ## Build htcondor-api with embedded frontend + JupyterLab helper + HTCondor docs
 	@echo "Staging frontend export into $(WEBUI_DIST)..."
 	rm -rf $(WEBUI_DIST)
 	cp -r $(FRONTEND_DIR)/out $(WEBUI_DIST)
-	@echo "Building htcondor-api with -tags embed_frontend,embed_jupyter_helper..."
+	@echo "Building htcondor-api with -tags embed_frontend,embed_jupyter_helper,embed_condor_docs..."
 	mkdir -p bin
-	CGO_ENABLED=0 go build -tags "embed_frontend embed_jupyter_helper" -ldflags "$(LDFLAGS)" -o bin/htcondor-api ./cmd/htcondor-api
+	CGO_ENABLED=0 go build -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags "$(LDFLAGS)" -o bin/htcondor-api ./cmd/htcondor-api
 	@echo "Built bin/htcondor-api"
 
 .PHONY: clean-frontend
@@ -93,7 +143,7 @@ clean-frontend: ## Remove frontend build artifacts
 
 .PHONY: clean-jupyter-helper
 clean-jupyter-helper: ## Remove staged JupyterLab helper artifacts
-	rm -f $(JUPYTER_HELPER_BIN) $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper
+	rm -f $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-*
 	@touch $(JUPYTER_HELPER_EMBED_DIR)/.keep
 
 DEMO_LISTEN ?= :8080
@@ -157,7 +207,7 @@ verify: ## Verify dependencies
 	go mod verify
 
 .PHONY: clean
-clean: clean-frontend ## Clean build artifacts and coverage files
+clean: clean-frontend clean-condor-docs ## Clean build artifacts and coverage files
 	@echo "Cleaning..."
 	rm -f coverage.out coverage.html
 	rm -rf bin

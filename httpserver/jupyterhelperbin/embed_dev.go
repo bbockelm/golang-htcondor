@@ -16,11 +16,8 @@ import "errors"
 // built into the dist/ directory.
 var ErrNotEmbedded = errors.New("jupyterhelperbin: helper not embedded; rebuild with `make build` (which runs `build-jupyter-helper` first) or set -tags embed_jupyter_helper manually")
 
-// BytesFor returns ErrNotEmbedded in dev builds for any GOOS.
-func BytesFor(_ string) ([]byte, error) { return nil, ErrNotEmbedded }
-
-// Bytes returns ErrNotEmbedded in dev builds.
-func Bytes() ([]byte, error) { return nil, ErrNotEmbedded }
+// BytesFor returns ErrNotEmbedded in dev builds for any (GOOS, GOARCH).
+func BytesFor(_, _ string) ([]byte, error) { return nil, ErrNotEmbedded }
 
 // IsEmbedded reports whether the helper binary is compiled into this binary.
 func IsEmbedded() bool { return false }

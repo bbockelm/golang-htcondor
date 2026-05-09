@@ -33,7 +33,10 @@ import {
   applyResourcesToBody,
   bodyHasCoreResourceRequests,
   bodyHasResourceRequests,
+  ensureTransferInput,
+  getAttribute,
   readResourcesFromBody,
+  setAttribute,
 } from '@/lib/submitFile';
 
 type TemplateMode = 'library' | 'custom';
@@ -48,6 +51,21 @@ interface CustomDraft {
   // shell-script") since base64-decoding to learn the size every
   // render is wasteful.
   inputFiles: DraftInputFile[];
+  // Optional inline executable script — the "I want to write a quick
+  // shell script right here, no separate file" affordance. Belongs to
+  // the template editor (custom mode only) since the script is part
+  // of the template. When non-null, an effect at the SubmitPage level
+  // keeps the submit-file body's `executable` and
+  // `transfer_executable` lines in sync with the script's name.
+  inlineScript: InlineScript | null;
+}
+
+// InlineScript carries the editor's state. Persisted as one of the
+// template's input_files on save (and as a per-batch attachment on
+// submit) so the downstream pipeline doesn't need to special-case it.
+interface InlineScript {
+  name: string;    // e.g. "run.sh"
+  content: string; // raw script text (UTF-8); base64-encoded at save/submit time
 }
 
 // DraftInputFile carries both the encoded payload (for save / submit)
@@ -75,6 +93,23 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 `,
   inputFiles: [],
+  inlineScript: null,
+};
+
+// STARTER_INLINE_SCRIPT is what the editor prefills when the user
+// first checks the "Include inline executable script" box. The
+// shebang + `set -eu` is the safer-by-default minimum we want
+// people to start from; they can edit freely.
+const STARTER_INLINE_SCRIPT: InlineScript = {
+  name: 'run.sh',
+  content: `#!/bin/bash
+set -eu
+
+# Your job script. The submit-file body should set:
+#   executable = run.sh
+#   transfer_executable = true
+echo "Hello from job $1@$(hostname)"
+`,
 };
 
 export default function SubmitPage() {
@@ -120,11 +155,25 @@ export default function SubmitPage() {
         templateInputFiles: selected.input_files ?? [],
       };
     }
+    // Custom mode: fold the inline executable script into the
+    // input-files list. The body itself is kept in sync with the
+    // script's filename by an effect below — by the time the user
+    // submits, draft.contents already has executable=<script> and
+    // transfer_executable=true, so there's nothing to layer on top
+    // here. The inline-script feature stays a property of the
+    // template editor.
+    const draftFiles: TemplateInputFile[] = [...draft.inputFiles];
+    if (draft.inlineScript && draft.inlineScript.name.trim() !== '') {
+      draftFiles.push({
+        name: draft.inlineScript.name.trim(),
+        content: utf8ToBase64(draft.inlineScript.content),
+      });
+    }
     return {
       name: draft.name || '(new template)',
       columns: draft.columns,
       contents: draft.contents,
-      templateInputFiles: draft.inputFiles,
+      templateInputFiles: draftFiles,
     };
   }, [mode, selected, draft]);
 
@@ -137,14 +186,45 @@ export default function SubmitPage() {
 
   // --- Table section state ------------------------------------------
   const [rows, setRows] = useState<string[][]>([['']]);
+  // tableSource = 'manual' is the original behavior (user fills in
+  // the table by hand or pastes a CSV). 'upload' is the new mode
+  // where the user picks a directory or tarball, and each contained
+  // file becomes one row + one per-job input.
+  const [tableSource, setTableSource] = useState<'manual' | 'upload'>(
+    'manual',
+  );
+  // uploadFiles holds the per-job files contributed by 'upload' mode.
+  // They're separate from the common-inputs `files` list so toggling
+  // between modes is reversible — the upload set lives on, ready to
+  // be re-applied if the user toggles back. A name collision with a
+  // common-inputs entry is resolved at submit time, with the upload
+  // entry winning (since it's bound to a specific job iteration).
+  const [uploadFiles, setUploadFiles] = useState<DroppedFile[]>([]);
 
-  // Re-shape rows whenever the active template's columns change.
+  // Re-shape rows whenever the active template's columns change. In
+  // 'manual' mode we preserve the user's edits and only widen /
+  // narrow the column count. The 'upload' mode's rows are computed
+  // separately as a memo and overlaid below — keeping that
+  // derivation OUT of the effect avoids the React 19 hooks lint's
+  // "set-state-in-effect" warning while still giving us reactivity
+  // when uploadFiles or columns change.
   useEffect(() => {
     setRows((prev) => reshapeRows(prev, active.columns));
     // active.columns identity changes whenever description changes
     // too; we only care about names. columnNames is a stable hash.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [columnNames]);
+
+  // uploadRows: rows derived from the picked files in 'upload' mode.
+  // Lives as a memo (not state) so the React 19 hooks lint doesn't
+  // flag it, and so a change to uploadFiles is immediately reflected
+  // without an extra render pass.
+  const uploadRows = useMemo(
+    () => rowsFromUploadFiles(uploadFiles, active.columns),
+    // Same caveat as above re: columnNames being the right key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [uploadFiles, columnNames],
+  );
 
   // --- Inputs section state -----------------------------------------
   const [files, setFiles] = useState<DroppedFile[]>([]);
@@ -172,6 +252,85 @@ export default function SubmitPage() {
     setOverrideResources(!templateHasCoreResources);
   }, [active.contents, templateHasCoreResources]);
 
+  // First column's name; the per-job upload mode binds it to each
+  // file's basename, so it's the variable that has to appear in
+  // transfer_input_files for the upload to land in the right place.
+  const firstColumnName = active.columns[0]?.name ?? '';
+
+  // --- Live-edit effects --------------------------------------------
+  //
+  // These keep draft.contents (the textarea the user is looking at)
+  // in sync with two affordances elsewhere in the page:
+  //
+  //   1. Inline executable script — toggling it on / renaming it
+  //      rewrites `executable = …` and ensures
+  //      `transfer_executable = true`.
+  //   2. Upload-mode batch table — having uploaded files appends
+  //      `$(<firstCol>)` to `transfer_input_files`.
+  //
+  // Both only fire in custom mode; library templates are read-only.
+  // For the library + upload combination we surface a red warning
+  // under the table instead of silently mutating someone else's
+  // template.
+  //
+  // Each effect uses the functional setDraft form and bails out by
+  // returning `prev` unchanged when the rewrite is a no-op, so we
+  // don't spin React's render loop and don't fight the user when
+  // they edit the textarea by hand.
+
+  // We deliberately do NOT depend on draft.contents in the effect
+  // below — the user may be typing in the Submit-file body textarea,
+  // and rerunning the effect on every keystroke is wasteful (the
+  // bailout-on-identity inside setDraft already keeps it safe). The
+  // script object identity is the right trigger. The
+  // set-state-in-effect rule is heuristically wrong about "synchronize
+  // state to navigation / props"-style effects; we silence it on the
+  // setDraft line.
+  useEffect(() => {
+    if (mode !== 'custom') return;
+    const script = draft.inlineScript;
+    if (!script || !script.name.trim()) return;
+    const scriptName = script.name.trim();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDraft((prev) => {
+      let next = setAttribute(prev.contents, 'executable', scriptName);
+      next = setAttribute(next, 'transfer_executable', 'true');
+      if (next === prev.contents) return prev;
+      return { ...prev, contents: next };
+    });
+  }, [mode, draft.inlineScript]);
+
+  useEffect(() => {
+    if (mode !== 'custom') return;
+    if (tableSource !== 'upload') return;
+    if (uploadFiles.length === 0) return;
+    if (!firstColumnName) return;
+    const token = `$(${firstColumnName})`;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDraft((prev) => {
+      const next = ensureTransferInput(prev.contents, token);
+      if (next === prev.contents) return prev;
+      return { ...prev, contents: next };
+    });
+  }, [mode, tableSource, uploadFiles.length, firstColumnName]);
+
+  // Library mode + upload mode without a wired-up transfer_input_files:
+  // surface a red warning under the table so the user knows the
+  // upload won't reach the workers. We can't auto-edit a saved
+  // template (it's not ours to mutate), so the next-best thing is
+  // to make the broken-on-arrival case visible.
+  const libraryUploadWarning = useMemo<string | null>(() => {
+    if (mode !== 'library') return null;
+    if (tableSource !== 'upload') return null;
+    if (uploadFiles.length === 0) return null;
+    if (!firstColumnName) return null;
+    const token = `$(${firstColumnName})`;
+    const tif = getAttribute(active.contents, 'transfer_input_files') ?? '';
+    const tokens = tif.split(/[\s,]+/).filter(Boolean);
+    if (tokens.includes(token)) return null;
+    return `This template's transfer_input_files does not reference ${token}. The per-job upload files won't be sent to the workers — pick a different template, or save a custom one that adds ${token} to transfer_input_files.`;
+  }, [mode, tableSource, uploadFiles.length, firstColumnName, active.contents]);
+
   // --- Submit -------------------------------------------------------
   const submit = useMutation({
     mutationFn: async () => {
@@ -179,25 +338,66 @@ export default function SubmitPage() {
       // values overwrite whatever the template body had. If the
       // template already provides resources and the user opted not to
       // override, leave the body alone.
-      const effectiveContents = overrideResources
+      let effectiveContents = overrideResources
         ? applyResourcesToBody(active.contents, resources)
         : active.contents;
+
+      // The auto-wiring of executable= / transfer_executable= and of
+      // transfer_input_files for upload mode now happens *live* on
+      // draft.contents via effects further up — see the
+      // useEffect blocks that watch draft.inlineScript and the
+      // (tableSource, uploadFiles, firstColumnName) tuple. The active
+      // memo passes draft.contents through unchanged in custom mode,
+      // so by the time we get here those edits are already baked in.
+      // (Library mode is read-only; the effect-and-warning split
+      // means we surface a red warning under the table instead.)
+
+      // Use uploadRows when the table is sourced from a directory /
+      // tarball — the manual `rows` state is preserved across mode
+      // toggles and would be stale.
+      const effectiveRows = tableSource === 'upload' ? uploadRows : rows;
       const body = buildSubmitFile(
         effectiveContents,
         active.columns.map((c) => c.name),
-        rows,
+        effectiveRows,
       );
       const submitted = await api.jobs.submit(body);
 
-      // Merge the template's default attachments with the per-batch
-      // files the user dropped. Per-batch files win if a name
-      // collides — that's the user's most-recent intent.
-      const merged = await mergeTemplateAndUserFiles(
+      // Common files: template default attachments + the user's
+      // dropzone uploads + any inline executable script. These go to
+      // every job in the batch — the spool is per-proc on the schedd
+      // side, so each proc.subproc directory needs its own copy.
+      const commonFiles = await mergeTemplateAndUserFiles(
         active.templateInputFiles,
         files,
       );
-      if (submitted.job_ids.length > 0 && merged.length > 0) {
-        await api.jobs.uploadInputs(submitted.job_ids[0], merged);
+
+      // Upload mode: each row is bound to exactly one file from the
+      // picked directory / tarball, and submitted.job_ids[i] is that
+      // row's job. Fan out — every job gets the common set plus its
+      // own uploadFiles[i] entry. Without this fan-out the schedd
+      // (correctly) holds procs > 0 with "No such file or directory"
+      // because the per-job file never reached its spool, and even
+      // proc 0 only spools the file whose basename happens to match
+      // its TransferInput.
+      const isUploadMode =
+        tableSource === 'upload' && uploadFiles.length > 0;
+
+      const jobIDs = submitted.job_ids;
+      for (let i = 0; i < jobIDs.length; i++) {
+        let perJob = commonFiles;
+        if (isUploadMode && uploadFiles[i]) {
+          // Drop any common-files entry whose name collides with the
+          // per-job file — the per-job upload binds to this row's
+          // specific iteration, so it should win.
+          const uf = uploadFiles[i];
+          perJob = [
+            ...commonFiles.filter((f) => f.name !== uf.name),
+            { name: uf.name, file: uf.file, executable: uf.executable },
+          ];
+        }
+        if (perJob.length === 0) continue;
+        await api.jobs.uploadInputs(jobIDs[i], perJob);
       }
       return submitted;
     },
@@ -210,17 +410,36 @@ export default function SubmitPage() {
 
   // --- Save-as-template ---------------------------------------------
   const saveTpl = useMutation({
-    mutationFn: () =>
-      api.templates.save({
+    mutationFn: () => {
+      // The inline-script editor's contents are a peer of the
+      // attached input files. Persist them as one of the
+      // template's input_files so a later round-trip (load
+      // saved template → edit → re-save) reproduces the same
+      // attachment list. The active.templateInputFiles memo above
+      // already does this fold for the runtime path; doing it
+      // again here keeps the save mutation's data shape obvious
+      // without depending on that memo's recompute timing.
+      const files: TemplateInputFile[] = draft.inputFiles.map(
+        ({ name, content }) => ({ name, content }),
+      );
+      if (draft.inlineScript && draft.inlineScript.name.trim() !== '') {
+        files.push({
+          name: draft.inlineScript.name.trim(),
+          content: utf8ToBase64(draft.inlineScript.content),
+        });
+      }
+      // draft.contents already has the executable= /
+      // transfer_executable= / transfer_input_files edits applied
+      // (the live-edit effects keep it in sync with the inline
+      // script and upload state), so we save it verbatim.
+      return api.templates.save({
         name: draft.name,
         description: draft.description,
         columns: draft.columns,
         contents: draft.contents,
-        input_files: draft.inputFiles.map(({ name, content }) => ({
-          name,
-          content,
-        })),
-      }),
+        input_files: files,
+      });
+    },
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
       // Switch to library mode and select the new entry.
@@ -229,11 +448,17 @@ export default function SubmitPage() {
     },
   });
 
+  // The "rows" state is per-mode; pick the right one for the
+  // disabled check so toggling into upload mode (which clears the
+  // user's edits but preserves the manual rows in state) doesn't
+  // silently re-enable the button on stale data.
+  const effectiveRowsForGate =
+    tableSource === 'upload' ? uploadRows : rows;
   const submitDisabled =
     submit.isPending ||
     !active.contents.trim() ||
-    rows.length === 0 ||
-    rows.some((r) => r.every((c) => c.trim() === ''));
+    effectiveRowsForGate.length === 0 ||
+    effectiveRowsForGate.some((r) => r.every((c) => c.trim() === ''));
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -261,9 +486,26 @@ export default function SubmitPage() {
 
       <TableSection
         columns={active.columns}
-        rows={rows}
+        // In 'upload' mode the rows are derived from the picked
+        // files and we don't let the user edit them — every change
+        // comes from re-picking. In 'manual' mode the parent's
+        // setRows handles user edits as before.
+        rows={tableSource === 'upload' ? uploadRows : rows}
         setRows={setRows}
+        source={tableSource}
+        setSource={setTableSource}
+        uploadFiles={uploadFiles}
+        setUploadFiles={setUploadFiles}
       />
+
+      {libraryUploadWarning && (
+        <div
+          role="alert"
+          className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+        >
+          ⚠ {libraryUploadWarning}
+        </div>
+      )}
 
       <InputsSection files={files} setFiles={setFiles} disabled={submit.isPending} />
 
@@ -290,7 +532,7 @@ export default function SubmitPage() {
           disabled={submitDisabled}
           className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
-          {submit.isPending ? 'Submitting…' : `Submit batch (${rows.length} job${rows.length === 1 ? '' : 's'})`}
+          {submit.isPending ? 'Submitting…' : `Submit batch (${effectiveRowsForGate.length} job${effectiveRowsForGate.length === 1 ? '' : 's'})`}
         </button>
         <span className="text-xs text-gray-500">
           Submitting as <code>{active.name}</code>.
@@ -503,6 +745,12 @@ function CustomDraftEditor({
       columns: tpl.columns.map((c) => ({ ...c })),
       contents: tpl.contents,
       inputFiles: cloned,
+      // Cloning a library template never seeds the inline-script
+      // editor — the source's input_files might include something
+      // that LOOKS like a script but the user didn't write it inline
+      // here. Cleaner to leave the editor empty so the user opts in
+      // explicitly if they want to convert.
+      inlineScript: null,
     });
   };
 
@@ -554,6 +802,11 @@ function CustomDraftEditor({
           a <code>queue</code> line — the table section synthesizes one.
         </p>
       </Field>
+
+      <InlineScriptEditor
+        script={draft.inlineScript}
+        setScript={(s) => setDraft({ ...draft, inlineScript: s })}
+      />
 
       <Field label="Default input files (optional)">
         <TemplateInputFilesEditor
@@ -777,6 +1030,79 @@ function ColumnEditor({
 // with this template" list. Files are read into base64 immediately
 // so the saved template carries them verbatim; per-file 1 MiB cap
 // is enforced client-side (server enforces the same).
+// InlineScriptEditor renders the "I want to write the executable
+// script right here" affordance. Belongs to the custom-template
+// editor — the script is part of the template, so it's only
+// available when the user is writing a new template (library
+// templates are read-only).
+//
+// State is owned by the parent CustomDraft so the script round-trips
+// through save / load / submit unchanged. The editor serializes the
+// script as one of the template's input_files at save and submit
+// time. A SubmitPage-level effect keeps the parent's draft.contents
+// in sync — toggling the script on, or renaming it, immediately
+// rewrites the Submit-file body's `executable = …` and
+// `transfer_executable = true` lines so the textarea always reflects
+// what will actually be submitted.
+//
+// The executable bit is set on the receiving job by the existing
+// filename-extension heuristic in mergeTemplateAndUserFiles
+// (`.sh`/`.py`/etc. → +x). Default to `run.sh` so the heuristic
+// catches it; users who pick a non-extension name would need to
+// arrange the +x another way (e.g. via a wrapper script).
+function InlineScriptEditor({
+  script,
+  setScript,
+}: {
+  script: InlineScript | null;
+  setScript: (s: InlineScript | null) => void;
+}) {
+  return (
+    <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+      <label className="flex items-center gap-2 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={script !== null}
+          onChange={(e) => setScript(e.target.checked ? STARTER_INLINE_SCRIPT : null)}
+          className="rounded border-gray-300"
+        />
+        Write executable script inline
+      </label>
+
+      {script && (
+        <div className="space-y-2">
+          <Field label="Script filename">
+            <input
+              type="text"
+              value={script.name}
+              onChange={(e) => setScript({ ...script, name: e.target.value })}
+              placeholder="run.sh"
+              className="w-48 rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Attached as a default input file. The Submit-file body
+              above gets <code>executable = {script.name || 'run.sh'}</code>{' '}
+              and <code>transfer_executable = true</code> updated
+              automatically as you edit this — no need to maintain
+              those lines yourself. Names ending in .sh / .py / .pl /
+              .rb get the executable bit set when the job is
+              submitted.
+            </p>
+          </Field>
+          <Field label="Script content">
+            <textarea
+              value={script.content}
+              onChange={(e) => setScript({ ...script, content: e.target.value })}
+              spellCheck={false}
+              className="w-full h-48 rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+            />
+          </Field>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TemplateInputFilesEditor({
   files,
   setFiles,
@@ -897,6 +1223,18 @@ function makeFileId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// utf8ToBase64 encodes a UTF-8 string for the input-file `content`
+// field on the template-save / template-input wire shape, which is
+// always base64. The TextEncoder + chunked btoa avoids both the
+// argument-count limit on apply() and the latin-1-only restriction
+// that bites a naive `btoa(s)` call when the script contains
+// multibyte characters (emoji, CJK, etc. — rare in shell scripts but
+// not impossible).
+function utf8ToBase64(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  return arrayBufferToBase64(bytes.buffer as ArrayBuffer);
+}
+
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   // chunk to avoid hitting the argument-count limit for large files
@@ -921,6 +1259,35 @@ function base64ToFile(b64: string, name: string): File {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new File([bytes], name);
+}
+
+// rowsFromUploadFiles synthesizes the batch table from the list of
+// files contributed by step-2 "from upload" mode. The first column
+// of the active template gets the file's basename; any additional
+// columns are filled with empty strings (the user can switch back to
+// manual mode and edit them, or use a single-column template that
+// fits the upload pattern). Empty input → one empty row, mirroring
+// the manual-mode initial state.
+function rowsFromUploadFiles(
+  files: DroppedFile[],
+  cols: TemplateColumn[],
+): string[][] {
+  if (cols.length === 0) {
+    // Zero-column template: one row per file, no cells. Submit
+    // builder treats this as a fixed-job template and emits a bare
+    // `queue` line, so each "row" is one job.
+    return files.length === 0 ? [[]] : files.map(() => []);
+  }
+  if (files.length === 0) {
+    // Toggling into upload mode before picking files: keep one
+    // empty row so the table renders with the column headers.
+    return [cols.map(() => '')];
+  }
+  return files.map((f) => {
+    const row = cols.map(() => '');
+    row[0] = f.name; // first column gets the filename
+    return row;
+  });
 }
 
 // mergeTemplateAndUserFiles turns the template's default attachments
@@ -960,10 +1327,18 @@ function TableSection({
   columns,
   rows,
   setRows,
+  source,
+  setSource,
+  uploadFiles,
+  setUploadFiles,
 }: {
   columns: TemplateColumn[];
   rows: string[][];
   setRows: (r: string[][]) => void;
+  source: 'manual' | 'upload';
+  setSource: (s: 'manual' | 'upload') => void;
+  uploadFiles: DroppedFile[];
+  setUploadFiles: (f: DroppedFile[]) => void;
 }) {
   const columnNames = columns.map((c) => c.name);
   return (
@@ -972,13 +1347,36 @@ function TableSection({
       subtitle={
         columns.length === 0
           ? 'This template has no variable columns; one row = one job.'
-          : `Column headers come from the template. ${rows.length} row${rows.length === 1 ? '' : 's'} = ${rows.length} job${rows.length === 1 ? '' : 's'}.`
+          : source === 'upload'
+            ? `One job per file from the upload. ${uploadFiles.length} file${uploadFiles.length === 1 ? '' : 's'} loaded.`
+            : `Column headers come from the template. ${rows.length} row${rows.length === 1 ? '' : 's'} = ${rows.length} job${rows.length === 1 ? '' : 's'}.`
       }
     >
+      {/* Source toggle: manual table vs. directory/tarball upload.
+          Visible only when there's at least one column to fill —
+          a zero-column template is a fixed single job and "from
+          upload" doesn't make sense there. */}
+      {columns.length > 0 && (
+        <div className="mb-3 inline-flex rounded-md border border-gray-300 bg-white p-0.5 text-sm">
+          <ModeButton active={source === 'manual'} onClick={() => setSource('manual')}>
+            Manual table
+          </ModeButton>
+          <ModeButton active={source === 'upload'} onClick={() => setSource('upload')}>
+            From directory / tarball
+          </ModeButton>
+        </div>
+      )}
+
       {columns.length === 0 ? (
         <div className="text-sm text-gray-500">
           Single fixed job. Click <em>Submit batch</em> to send 1 job.
         </div>
+      ) : source === 'upload' ? (
+        <UploadSource
+          firstColumn={columnNames[0]}
+          uploadFiles={uploadFiles}
+          setUploadFiles={setUploadFiles}
+        />
       ) : (
         <div className="space-y-2">
           <CSVImporter columns={columnNames} setRows={setRows} />
@@ -1088,6 +1486,230 @@ function TableSection({
 // shapes: header row matching template columns (consumed and dropped)
 // or no header at all (every row is data).
 // ----------------------------------------------------------------------
+
+// UploadSource is the step-2 "from directory / tarball" mode body.
+// User picks a folder (via webkitdirectory) or a .tar / .tar.gz file
+// and the component:
+//   - Enumerates the contained files (skipping directories and tar
+//     metadata entries).
+//   - Pushes one DroppedFile per entry up to the parent's
+//     uploadFiles state, using the basename as the file's `name`.
+//   - The parent's effect synthesizes one table row per file with
+//     the basename in the first column. The submit body should
+//     reference the first column as $(<columnName>).
+//
+// Why basename, not full path: each per-job file is a transfer-input
+// to that one iteration. Job sandboxes are flat; the executable
+// inside sees the file at its basename. Preserving directory
+// structure would require materialising it on the worker, which the
+// HTCondor input-transfer flow doesn't do for us.
+function UploadSource({
+  firstColumn,
+  uploadFiles,
+  setUploadFiles,
+}: {
+  firstColumn: string;
+  uploadFiles: DroppedFile[];
+  setUploadFiles: (f: DroppedFile[]) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const acceptDirectory = async (fileList: FileList) => {
+    setError(null);
+    setWarnings([]);
+    const incoming: DroppedFile[] = [];
+    const seen = new Set<string>();
+    for (const f of Array.from(fileList)) {
+      // FileList from a webkitdirectory input includes nested files
+      // with relative paths via webkitRelativePath. Take the basename
+      // for both the upload key and the table cell — see the
+      // "why basename" note above.
+      const base = basenameOf(f.name);
+      if (!base || seen.has(base)) continue;
+      seen.add(base);
+      incoming.push({ id: makeFileId(), name: base, file: f, executable: false });
+    }
+    if (incoming.length === 0) {
+      setError('Directory contained no files.');
+      return;
+    }
+    setUploadFiles(incoming);
+  };
+
+  const acceptTarball = async (file: File) => {
+    setError(null);
+    setWarnings([]);
+    try {
+      const { readTarball } = await import('@/lib/tarball');
+      const result = await readTarball(file);
+      if (result.entries.length === 0) {
+        setError('Tarball contained no regular files.');
+        return;
+      }
+      const seen = new Set<string>();
+      const incoming: DroppedFile[] = [];
+      for (const entry of result.entries) {
+        const base = basenameOf(entry.name);
+        if (!base || seen.has(base)) continue;
+        seen.add(base);
+        // Wrap the entry's Blob in a File so the upload pipeline
+        // (which calls `form.append("input", file, name)`) can
+        // read it. The basename is what HTCondor sees in the
+        // sandbox, which matches what the synthesized $(file)
+        // expansion will reference.
+        incoming.push({
+          id: makeFileId(),
+          name: base,
+          file: new File([entry.content], base),
+          executable: false,
+        });
+      }
+      setUploadFiles(incoming);
+      if (result.warnings.length > 0) {
+        setWarnings(result.warnings);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded border border-dashed border-gray-300 bg-gray-50 p-4 space-y-3">
+        <div className="text-xs text-gray-700">
+          Pick a directory or a .tar / .tar.gz archive. Each file becomes
+          one job, with{' '}
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+            $({firstColumn || 'file'})
+          </code>{' '}
+          bound to the file&apos;s basename.{' '}
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+            transfer_input_files
+          </code>{' '}
+          is wired up automatically — the submit body gets{' '}
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+            $({firstColumn || 'file'})
+          </code>{' '}
+          appended (or set, if the attribute is missing) so each job
+          picks up its own file.
+        </div>
+
+        <div className="flex flex-wrap gap-2 text-xs">
+          <label className="cursor-pointer rounded border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
+            Pick directory…
+            <input
+              type="file"
+              // webkitdirectory + multiple is the de-facto cross-
+              // browser idiom for directory pickers. Chrome,
+              // Firefox, Safari, and Edge all support it. The
+              // ts-expect-error keeps tsc happy without a
+              // tsconfig DOM lib bump.
+              // @ts-expect-error -- webkitdirectory isn't in lib.dom yet
+              webkitdirectory=""
+              directory=""
+              multiple
+              className="sr-only"
+              onChange={(e) => {
+                if (e.target.files?.length) {
+                  acceptDirectory(e.target.files).catch((err) =>
+                    setError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+                e.target.value = '';
+              }}
+            />
+          </label>
+          <label className="cursor-pointer rounded border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
+            Pick tarball…
+            <input
+              type="file"
+              accept=".tar,.tar.gz,.tgz,application/x-tar,application/gzip"
+              className="sr-only"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) {
+                  acceptTarball(f).catch((err) =>
+                    setError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+                e.target.value = '';
+              }}
+            />
+          </label>
+          {uploadFiles.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setUploadFiles([]);
+                setError(null);
+                setWarnings([]);
+              }}
+              className="rounded border border-gray-300 bg-white px-3 py-1.5 text-red-700 hover:bg-red-50"
+            >
+              Clear ({uploadFiles.length})
+            </button>
+          )}
+        </div>
+
+        {error && <p className="text-xs text-red-700">{error}</p>}
+        {warnings.length > 0 && (
+          <details className="text-[11px] text-amber-800">
+            <summary className="cursor-pointer">
+              {warnings.length} parser warning{warnings.length === 1 ? '' : 's'}
+            </summary>
+            <ul className="mt-1 ml-4 list-disc space-y-0.5">
+              {warnings.slice(0, 50).map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+              {warnings.length > 50 && (
+                <li className="text-gray-500">
+                  …and {warnings.length - 50} more
+                </li>
+              )}
+            </ul>
+          </details>
+        )}
+      </div>
+
+      {uploadFiles.length > 0 && (
+        <div className="rounded border border-gray-200 bg-white">
+          <div className="border-b border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-600">
+            {uploadFiles.length} file{uploadFiles.length === 1 ? '' : 's'} = {uploadFiles.length} job{uploadFiles.length === 1 ? '' : 's'}
+          </div>
+          <ul className="divide-y divide-gray-100 max-h-48 overflow-auto">
+            {uploadFiles.slice(0, 200).map((f) => (
+              <li key={f.name} className="flex items-center gap-2 px-3 py-1 text-xs font-mono">
+                <span className="text-gray-400 tabular-nums w-12">
+                  {humanSize(f.file.size)}
+                </span>
+                <span className="truncate">{f.name}</span>
+              </li>
+            ))}
+            {uploadFiles.length > 200 && (
+              <li className="px-3 py-1 text-[11px] text-gray-500">
+                …and {uploadFiles.length - 200} more
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// basenameOf returns the trailing path component, treating both
+// '/' and '\' as separators. Used for tarball entries (which use
+// '/') and webkitdirectory FileList entries (browser-dependent
+// separators).
+function basenameOf(p: string): string {
+  if (p === '') return '';
+  // Strip trailing slashes (e.g. directory entries).
+  let s = p;
+  while (s.endsWith('/') || s.endsWith('\\')) s = s.slice(0, -1);
+  const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+  return i < 0 ? s : s.slice(i + 1);
+}
 
 function CSVImporter({
   columns,
@@ -1315,8 +1937,8 @@ function InputsSection({
 }) {
   return (
     <SectionCard
-      title="3. Inputs"
-      subtitle="Files dropped here are uploaded after submission and put in the job sandbox."
+      title="3. Common Inputs"
+      subtitle="Files attached to every job in the batch. (Per-job files come from step 2's upload mode if you used it.)"
     >
       <Dropzone files={files} onChange={setFiles} disabled={disabled} />
     </SectionCard>

@@ -17,14 +17,29 @@ RUN npm ci || npm install
 COPY frontend/. ./
 RUN NODE_ENV=production npm run build
 
+# --- Stage 1b: HTCondor docs ---
+#
+# Clone the HTCondor source so we can embed a curated subset of its RST
+# manual into the api binary. The MCP server uses these for read-only
+# reference tools (job/machine attributes, condor_submit syntax, config
+# macros). HTCONDOR_GIT_REF can be overridden to pin to a specific tag
+# or branch; default `main` is fine for "matches the docs we ship in
+# the runtime container's HTCondor RPM" since both move together.
+FROM --platform=$BUILDPLATFORM alpine:3.21 AS condor-docs
+RUN apk --no-cache add git
+ARG HTCONDOR_GIT_URL=https://github.com/htcondor/htcondor.git
+ARG HTCONDOR_GIT_REF=main
+RUN git clone --depth 1 --branch ${HTCONDOR_GIT_REF} ${HTCONDOR_GIT_URL} /htcondor
+
 # --- Stage 2: Go binary ---
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
 
-# Install ca-certificates for go mod download
-RUN apk --no-cache add ca-certificates
+# Install ca-certificates (for go mod download) and make (used by the
+# JupyterLab helper cross-compile loop in `make build-jupyter-helper`).
+RUN apk --no-cache add ca-certificates make
 
 WORKDIR /build
 
@@ -39,8 +54,30 @@ COPY . .
 # webui package, then build with -tags embed_frontend so go:embed picks
 # it up.
 COPY --from=frontend-builder /build/frontend/out /build/httpserver/webui/dist
+
+# Stage the HTCondor source from the docs stage and run the Make
+# target that copies the curated RST files into condordocs/dist/. The
+# Makefile keeps the file-selection logic in one place, so the
+# Dockerfile and a local build agree on what gets embedded.
+COPY --from=condor-docs /htcondor /build/reference/htcondor
+RUN make stage-condor-docs
+
+# Cross-compile the JupyterLab tunnel helper for every (GOOS, GOARCH)
+# tuple in JUPYTER_HELPER_TARGETS (currently linux/amd64, linux/arm64,
+# darwin/arm64) and stage the binaries under
+# httpserver/jupyterhelperbin/dist/. The api binary's go:embed picks
+# them up under -tags embed_jupyter_helper. We do this in the same
+# build stage as the api binary because Go cross-compiles cleanly
+# (CGO_ENABLED=0, no libc), so the build platform doesn't matter —
+# this is what lets us emit a single image that runs against any
+# execute-node arch.
+RUN make build-jupyter-helper
+
+# Build the api binary itself for the requested target. We embed the
+# frontend, the helpers, and the HTCondor reference docs so a deploy
+# from this image needs no external assets.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -v -tags embed_frontend -ldflags="-w -s" -o htcondor-api ./cmd/htcondor-api
+    go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o htcondor-api ./cmd/htcondor-api
 
 # Stage 2: Create minimal runtime image
 FROM alpine:3.21

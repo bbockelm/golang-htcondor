@@ -27,6 +27,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/httpserver"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/sharedport"
@@ -40,9 +41,36 @@ var (
 	collectorHost     = flag.String("collector", "", "Collector host:port (overrides COLLECTOR_HOST from config)")
 	scheddName        = flag.String("schedd", "", "Schedd name (overrides SCHEDD_NAME from config)")
 	scheddAddr        = flag.String("schedd-addr", "", "Schedd address (if specified, schedd name is ignored)")
+	// -local-name is the HTCondor-standard flag every DaemonCore daemon
+	// has to accept. condor_master automatically appends it for daemons
+	// that aren't in the built-in DC list — see masterDaemon.cpp:791.
+	// We capture it here so flag.Parse() doesn't reject our launch and
+	// thread the value through the HTCondor config layer so subsystem-
+	// scoped lookups (HTTP_API.<key> beats <key>) resolve correctly.
+	localName = flag.String("local-name", "", "HTCondor subsystem local-name; passed by condor_master for non-default DC daemons. Used as a config-lookup prefix.")
 )
 
 func main() {
+	// Capture every stdlib log.* line emitted before the structured
+	// logger is built. The buffer tees writes to stderr (preserving
+	// the operator-visible startup trace) and accumulates an in-
+	// memory copy that runNormalMode replays through slog once the
+	// daemon log file is open. Without this, the daemon-core env
+	// diagnostic and "Using UID_DOMAIN" lines never reach
+	// $(LOG)/HttpApiLog — making it look like the daemon's first
+	// few seconds vanished.
+	earlyBuf := logging.InstallEarlyBuffer(os.Stderr, 256)
+
+	// Pre-flag-parse diagnostic: log the daemon-core env vars
+	// condor_master *should* be passing us. If CONDOR_INHERIT is empty
+	// here, the daemon-mode path in runNormalMode will not engage and
+	// we'll fall through to a regular TCP bind — making it look like
+	// shared-port forwarding "didn't work" when in reality the master
+	// never wired it up. Logging this unconditionally at startup
+	// turns "shared-port silently broken" into a one-line diagnostic
+	// the operator can see in /tmp/error.log without recompiling.
+	logCondorEnvDiagnostic()
+
 	flag.Parse()
 
 	// Check for subcommands
@@ -65,11 +93,16 @@ func main() {
 
 	// Default behavior: run as server
 	if *demoMode {
-		if err := runDemoMode(); err != nil {
+		if err := runDemoMode(earlyBuf); err != nil {
+			// On the failure path, restore stdlib log to plain
+			// stderr so log.Fatalf below isn't swallowed by the
+			// buffer.
+			earlyBuf.Detach()
 			log.Fatalf("Demo mode failed: %v", err)
 		}
 	} else {
-		if err := runNormalMode(); err != nil {
+		if err := runNormalMode(earlyBuf); err != nil {
+			earlyBuf.Detach()
 			log.Fatalf("Server failed: %v", err)
 		}
 	}
@@ -99,56 +132,73 @@ type mcpConfig struct {
 	oauth2RefreshTokenLifespan time.Duration
 }
 
-// fixConfigDefaults handles edge cases in HTCondor configuration defaults
+// fixConfigDefaults handles edge cases in HTCondor configuration
+// defaults. When the `condor` user doesn't exist on the host (which
+// happens in development containers, CI, and minimal images), HTCondor's
+// own defaults that derive from `$(TILDE)` collapse to empty strings —
+// most notably LOCAL_DIR and LOG. We patch those here so the binary
+// can come up with sensible paths instead of refusing to start.
+//
+// We deliberately set LOG (the log directory) and let HTTP_API_LOG
+// default to `$(LOG)/HttpApiLog` via the param-overrides table — that
+// keeps every per-daemon log knob (HTTP_API_LOG, MAX_HTTP_API_LOG,
+// TRUNC_HTTP_API_LOG_ON_OPEN…) consistent with how every other DC
+// daemon resolves its log path.
 func fixConfigDefaults(cfg *config.Config, debug bool) {
-	// If TILDE is empty or unset, LOCAL_DIR should default to /usr
 	tilde, hasTilde := cfg.Get("TILDE")
 	if !hasTilde || tilde == "" {
-		// Check if LOCAL_DIR is already set
 		if localDir, hasLocalDir := cfg.Get("LOCAL_DIR"); !hasLocalDir || localDir == "" || localDir == "$(TILDE)" {
 			if debug {
 				log.Println("DEBUG: condor user does not exist, setting LOCAL_DIR to /usr and LOG to /var/log/condor")
 			}
 			cfg.Set("LOCAL_DIR", "/usr")
-			cfg.Set("HTTP_API_LOG", "/var/log/condor")
+			cfg.Set("LOG", "/var/log/condor")
 		}
 	}
 }
 
-// checkLogPathWritable checks if the log path directory exists and is writable
+// checkLogPathWritable verifies the log file path is workable: the
+// parent directory exists (we'll create it if not), is writable, and
+// — when an existing file is present at logPath — is openable for
+// append.
 func checkLogPathWritable(logPath string) error {
-	// Check if directory exists
-	info, err := os.Stat(logPath)
+	parent := filepath.Dir(logPath)
+	info, err := os.Stat(parent)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Try to create the directory
-			if err := os.MkdirAll(logPath, 0750); err != nil {
-				return fmt.Errorf("directory does not exist and cannot be created: %w", err)
+			if err := os.MkdirAll(parent, 0750); err != nil {
+				return fmt.Errorf("logfile parent directory %s does not exist and cannot be created: %w", parent, err)
 			}
 			return nil
 		}
-		return fmt.Errorf("cannot stat directory: %w", err)
+		return fmt.Errorf("cannot stat logfile parent directory %s: %w", parent, err)
 	}
-
-	// Check if it's a directory
 	if !info.IsDir() {
-		return fmt.Errorf("path is not a directory")
+		return fmt.Errorf("logfile parent path %s is not a directory", parent)
 	}
 
-	// Check if writable by trying to create a temp file
-	tempFile := filepath.Join(logPath, ".write_test")
-	// #nosec G304 -- Writing test file to verify log directory is writable
-	f, err := os.OpenFile(tempFile, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+	// Probe writability via a temp file in the parent directory.
+	// CreateTemp + the random suffix avoids racing with an existing
+	// .write_test left over from a prior run / a sibling daemon.
+	probe, err := os.CreateTemp(parent, ".logfile-probe-*")
 	if err != nil {
-		return fmt.Errorf("directory is not writable: %w", err)
+		return fmt.Errorf("parent directory %s is not writable: %w", parent, err)
 	}
-	if err := f.Close(); err != nil {
-		// Best effort cleanup
-		_ = os.Remove(tempFile)
-		return fmt.Errorf("failed to close test file: %w", err)
-	}
-	if err := os.Remove(tempFile); err != nil {
-		return fmt.Errorf("failed to remove test file: %w", err)
+	probeName := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(probeName)
+
+	// If a log file already exists at logPath, ensure we can open it
+	// for append — covers the case of a leftover file owned by a
+	// different uid in the same writable directory.
+	if fi, err := os.Stat(logPath); err == nil && !fi.IsDir() {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0) //nolint:gosec // path is operator-controlled
+		if err != nil {
+			return fmt.Errorf("existing log file %s is not writable by the daemon user: %w", logPath, err)
+		}
+		_ = f.Close()
+	} else if err == nil && fi.IsDir() {
+		return fmt.Errorf("log path %s exists but is a directory; HTTP_API_LOG must be a file (e.g. $(LOG)/HttpApiLog)", logPath)
 	}
 	return nil
 }
@@ -333,6 +383,25 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 	return config.AuthorizationEndpoint, config.TokenEndpoint, config.UserinfoEndpoint, nil
 }
 
+// loadLLMConfig pulls the optional chat-feature configuration out of
+// HTCondor config: the API-key file path (always a file, never inline
+// bytes — same rationale as KEK), the optional URL override (for
+// proxy/cache deployments), and the optional model override. All
+// three are zero-valued when unset; the chat package treats an empty
+// APIKeyFile as "feature disabled".
+func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model string) {
+	if v, ok := cfg.Get("HTTP_API_LLM_API_KEY_FILE"); ok {
+		apiKeyFile = strings.TrimSpace(v)
+	}
+	if v, ok := cfg.Get("HTTP_API_LLM_API_URL"); ok {
+		url = strings.TrimSpace(v)
+	}
+	if v, ok := cfg.Get("HTTP_API_LLM_MODEL"); ok {
+		model = strings.TrimSpace(v)
+	}
+	return
+}
+
 // loadKEKFilePath returns the path of the master KEK file from
 // HTCondor configuration, or "" when no KEK is configured.
 //
@@ -402,8 +471,13 @@ func loadDBPath(cfg *config.Config, logger *logging.Logger) string {
 	if hasDBPath && dbPath != "" {
 		return dbPath
 	}
+	// Default location: $(LOCAL_DIR)/lib/condor/htcondor-api.db —
+	// peer of EXECUTE, SPOOL, and the schedd's job_queue.log on a
+	// stock HTCondor install. Living in the daemon's per-host
+	// state directory means an operator's existing backup /
+	// retention / quota policy for that tree applies to us too.
 	if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
-		return filepath.Join(localDir, "htcondor-api.db")
+		return filepath.Join(localDir, "lib", "condor", "htcondor-api.db")
 	}
 	return "/var/lib/condor/htcondor-api.db"
 }
@@ -739,9 +813,18 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	return config
 }
 
-// loadConfigWithDefaults loads HTCondor configuration with fallbacks
+// loadConfigWithDefaults loads HTCondor configuration with fallbacks.
+// The Subsystem ("HTTP_API") and LocalName flow into ConfigOptions so
+// param-style lookups can pick up subsystem-scoped or instance-scoped
+// keys (e.g. HTTP_API.LISTEN, <localname>.LISTEN) before falling back
+// to the bare key. condor_master always passes -local-name <NAME>
+// when starting custom DC daemons, so honoring it here keeps us
+// consistent with how every other HTCondor daemon resolves config.
 func loadConfigWithDefaults() *config.Config {
-	cfg, err := config.New()
+	cfg, err := config.NewWithOptions(config.ConfigOptions{
+		Subsystem: "HTTP_API",
+		LocalName: *localName,
+	})
 	if err != nil {
 		// If config loading fails, create an empty config with minimal defaults
 		log.Printf("Warning: failed to load HTCondor configuration: %v", err)
@@ -754,6 +837,61 @@ func loadConfigWithDefaults() *config.Config {
 	debug := os.Getenv("HTCONDOR_API_DEBUG") != ""
 	fixConfigDefaults(cfg, debug)
 	return cfg
+}
+
+// dropPrivilegesIfRoot transitions the process to the condor user
+// when the binary was started as root (e.g., directly via systemd or
+// `sudo bin/htcondor-api`). When started by condor_master, the master
+// has already dropped to condor before exec'ing us, so euid is non-
+// zero on entry and this is a no-op.
+//
+// We honor CONDOR_USER / CONDOR_IDS / DROP_PRIVILEGES from the loaded
+// config (same knobs HTCondor's own daemons read), and tolerate the
+// condor user not existing — in that case we leave the binary
+// running as root with a warning, matching what HTCondor does in
+// containers where the user is missing.
+//
+// Must be called before opening the log file, the unified app DB, or
+// any other persistent resource the daemon will own — otherwise
+// those files end up root-owned and the daemon's later
+// operations-as-condor will hit EACCES.
+func dropPrivilegesIfRoot(cfg *config.Config) error {
+	if os.Geteuid() != 0 {
+		// Already running as a non-root user (the common case
+		// when started by condor_master). Nothing to do.
+		return nil
+	}
+
+	conf := droppriv.ConfigFromHTCondor(cfg)
+	// HTCondor's set_priv() machinery doesn't gate on
+	// DROP_PRIVILEGES — when running as root, the daemon always
+	// drops. Match that: force Enabled=true here so the daemon
+	// can't accidentally run-as-root because of a stale config
+	// knob. Operators who need to keep root for some reason can
+	// run the binary as a non-root user directly, which makes
+	// this whole function a no-op.
+	conf.Enabled = true
+
+	mgr, err := droppriv.NewManager(conf)
+	if err != nil {
+		// Most likely cause: condor user doesn't exist in the
+		// host's nsswitch chain (dev containers, CI). Log loud
+		// and continue as root rather than refusing to start —
+		// the operator may be doing local testing.
+		log.Printf("WARNING: cannot resolve condor user identity (%v); continuing as root", err)
+		return nil //nolint:nilerr // intentional: log + continue
+	}
+	if err := mgr.Start(); err != nil {
+		return fmt.Errorf("droppriv.Start: %w", err)
+	}
+	// Confirm via /proc/self that the drop took effect — the kernel
+	// state is what matters; if mgr.Start succeeds but the syscall
+	// underneath was a no-op (impossible in well-built droppriv,
+	// but a useful sanity check during the transition) we'd at
+	// least see it logged.
+	log.Printf("Dropped privileges to euid=%d egid=%d (was running as root)",
+		os.Geteuid(), os.Getegid())
+	return nil
 }
 
 // getScheddConfig extracts schedd configuration from CLI flags and config
@@ -860,7 +998,13 @@ func setupCollector(cfg *config.Config, logger *logging.Logger) *htcondor.Collec
 // init failure used to vanish into the void). The defer is a no-op
 // when logger is nil (createLogger itself failed) — main() still
 // reports that case via log.Fatalf to stderr.
-func runNormalMode() (rerr error) {
+//
+// HTCondor config knob the server understands and threads it into the
+// struct literal. Splitting it scatters related lookups across helpers
+// for no real readability gain.
+//
+//nolint:gocyclo // intentionally a long glue function: collects every
+func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	var logger *logging.Logger
 	defer func() {
 		if rerr == nil || logger == nil {
@@ -871,6 +1015,23 @@ func runNormalMode() (rerr error) {
 
 	// Load configuration
 	cfg := loadConfigWithDefaults()
+
+	// Drop privileges to the condor user before we touch any
+	// daemon-owned resources (log file, app DB, listener). HTCondor
+	// daemons started as root by condor_master are expected to run
+	// as the condor user — the master itself drops before our exec,
+	// but operators may also start the binary directly via systemd
+	// or for testing, in which case we'd inherit root and need to
+	// drop ourselves.
+	//
+	// Credentials that need root to read (pool signing key, KEK,
+	// TLS cert/key) are expected to be condor-readable per HTCondor
+	// convention (mode 0600 condor:condor or 0640 root:condor).
+	// dropPrivilegesIfRoot is a no-op when we're already non-root
+	// or when the condor user doesn't exist (dev/CI containers).
+	if err := dropPrivilegesIfRoot(cfg); err != nil {
+		return fmt.Errorf("failed to drop privileges: %w", err)
+	}
 
 	// Get schedd configuration
 	scheddNameValue, scheddAddrValue := getScheddConfig(cfg)
@@ -903,11 +1064,17 @@ func runNormalMode() (rerr error) {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	// Tee stdlib log into the structured logger so any log.Fatalf /
-	// log.Println from elsewhere (or from a third-party library)
-	// reaches the same stream the rest of the operator's tooling
-	// reads. Same motivation as the deferred error-logger above.
-	logger.RedirectStdLog()
+	// Drain everything stdlib log emitted before this point into the
+	// structured logger (so the early daemon-core diagnostic, the
+	// UID_DOMAIN/TRUST_DOMAIN trace, etc. show up in
+	// $(LOG)/HttpApiLog) and re-route subsequent stdlib log writes
+	// straight to slog. Replay encapsulates RedirectStdLog so we
+	// don't double-redirect.
+	if earlyBuf != nil {
+		earlyBuf.Replay(logger)
+	} else {
+		logger.RedirectStdLog()
+	}
 
 	// Create collector
 	collector := setupCollector(cfg, logger)
@@ -959,6 +1126,9 @@ func runNormalMode() (rerr error) {
 	httpBaseURL := loadHTTPBaseURL(cfg, listenAddrFromConfig, useTLS)
 	log.Printf("HTTP base URL: %s", httpBaseURL)
 
+	// LLM / chat-feature config. Zero-strings = chat disabled.
+	llmAPIKeyFile, llmAPIURL, llmModel := loadLLMConfig(cfg)
+
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     listenAddrFromConfig,
@@ -1006,6 +1176,13 @@ func runNormalMode() (rerr error) {
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
 		HTCondorConfig:             cfg,
+		// LLM/chat configuration. Optional; the chat endpoint
+		// returns 503 unless all three (key file, MCP enabled, key
+		// readable) line up. The values are zero-strings when
+		// nothing is configured.
+		LLMAPIKeyFile: llmAPIKeyFile,
+		LLMAPIURL:     llmAPIURL,
+		LLMModel:      llmModel,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -1100,7 +1277,7 @@ func runNormalMode() (rerr error) {
 }
 
 // runDemoMode runs the server with a mini condor setup
-func runDemoMode() error {
+func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
 		OutputPath: "stdout",
@@ -1113,6 +1290,14 @@ func runDemoMode() error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Same as runNormalMode: drain anything stdlib log captured
+	// before the structured logger existed.
+	if earlyBuf != nil {
+		earlyBuf.Replay(logger)
+	} else {
+		logger.RedirectStdLog()
 	}
 
 	logger.Info(logging.DestinationGeneral, "Starting in demo mode")
@@ -1280,6 +1465,9 @@ func runDemoMode() error {
 	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
 	log.Printf("HTTP base URL: %s", httpBaseURL)
 
+	// LLM / chat-feature config. Zero-strings = chat disabled.
+	demoLLMKeyFile, demoLLMURL, demoLLMModel := loadLLMConfig(cfg)
+
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:     *listenAddr,
@@ -1311,6 +1499,12 @@ func runDemoMode() error {
 		JupyterWorkDir:     loadJupyterWorkDir(cfg),
 		TemplateGlobalPath: loadTemplateGlobalPath(cfg),
 		HTCondorConfig:     cfg,
+		// Pick up the LLM/chat knobs in demo mode too so an
+		// operator can hand-test the chat surface against the
+		// embedded mini-condor without spinning up a real pool.
+		LLMAPIKeyFile: demoLLMKeyFile,
+		LLMAPIURL:     demoLLMURL,
+		LLMModel:      demoLLMModel,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

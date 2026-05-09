@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -1034,6 +1035,101 @@ func (s *Handler) handleBulkActionResults(w http.ResponseWriter, results *htcond
 	})
 }
 
+// jobInputSpoolProjection is the projection used by the /input and
+// /input/multipart handlers when looking up the ads before streaming
+// files into the spool. It must include every attribute
+// htcondor.getInputFilesFromJobAd reads — that helper computes the
+// allow-set of filenames the schedd will accept, and any name absent
+// from the set is silently dropped on its way through
+// sendJobFilesFromTar. Notably:
+//   - TransferInput: the explicit user-listed inputs
+//   - Cmd:           the executable's path; its basename is part of
+//     the allow-set when the path is relative AND
+//     TransferExecutable is true (e.g. the SPA's
+//     inline-script flow that submits with
+//     `executable = run.sh` + transfer_executable=true)
+//   - TransferExecutable: gates the Cmd-basename inclusion above
+//
+// Dropping any of these silently leaves the script out of the spool;
+// the schedd then fails the input transfer at execute time with
+// "errno 2 No such file or directory", and the job hold-loops on the
+// missing file. This list is the authoritative source for both
+// handler call sites.
+var jobInputSpoolProjection = []string{
+	"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable",
+}
+
+// fetchProcAdForSpool returns the proc ad for (cluster, proc) with
+// cluster-ad attributes overlaid. The HTCondor schedd stores
+// attributes shared across all procs of a cluster (Cmd,
+// TransferExecutable, …) on the cluster ad rather than duplicating
+// them per-proc — a `ClusterId == X && ProcId == Y` query alone
+// returns only the proc-specific differences. Without the overlay,
+// getInputFilesFromJobAd never sees Cmd, doesn't add the executable's
+// basename to the spool allow-set, and sendJobFilesFromTar silently
+// drops the inline script on its way to the schedd.
+//
+// We pull both ads in a single query (matching ProcId == proc OR
+// ProcId == -1) with FetchIncludeClusterAd so the cluster ad arrives
+// alongside the proc ad. The resulting proc ad has cluster attrs
+// copied in only where the proc didn't already define them — proc
+// wins on conflict, matching HTCondor's normal "cluster as defaults,
+// proc as overrides" semantics.
+func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int) (*classad.ClassAd, error) {
+	constraint := fmt.Sprintf("ClusterId == %d && (ProcId == %d || ProcId == -1)", cluster, proc)
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: jobInputSpoolProjection,
+		FetchOpts:  htcondor.FetchIncludeClusterAd,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var procAd, clusterAd *classad.ClassAd
+	for _, ad := range ads {
+		pid, ok := ad.EvaluateAttrInt("ProcId")
+		if !ok {
+			continue
+		}
+		switch {
+		case pid == int64(proc) && procAd == nil:
+			procAd = ad
+		case pid == -1 && clusterAd == nil:
+			clusterAd = ad
+		}
+	}
+	if procAd == nil {
+		return nil, nil
+	}
+	overlayClusterOntoProc(clusterAd, procAd)
+	return procAd, nil
+}
+
+// overlayClusterOntoProc copies cluster-ad attributes onto the proc
+// ad, but only where the proc doesn't already define them — proc
+// wins on conflict, matching HTCondor's "cluster as defaults, proc
+// as overrides" semantics. Called from fetchProcAdForSpool; pulled
+// out as a pure function so the cluster/proc merge can be tested
+// without spinning up a fake schedd.
+//
+// A nil cluster ad is a valid input (small jobs may not have one
+// distinct from the proc ad).
+func overlayClusterOntoProc(cluster, proc *classad.ClassAd) {
+	if cluster == nil || proc == nil {
+		return
+	}
+	for _, attr := range cluster.GetAttributes() {
+		if _, ok := proc.Lookup(attr); ok {
+			continue // proc has its own value; don't clobber
+		}
+		expr, ok := cluster.Lookup(attr)
+		if !ok || expr == nil {
+			continue
+		}
+		_ = proc.Set(attr, expr)
+	}
+}
+
 // JobActionFunc is a function that performs a job action (hold, release, etc.)
 type JobActionFunc func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error)
 
@@ -1107,13 +1203,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		return
 	}
 
-	// First, query for the job to get its proc ad with transfer attributes
-	// We need transfer-related attributes for spooling to work
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInput"}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: projection,
-	})
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1126,11 +1216,11 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
-
-	if len(jobAds) == 0 {
+	if procAd == nil {
 		s.writeError(w, http.StatusNotFound, "Job not found")
 		return
 	}
+	jobAds := []*classad.ClassAd{procAd}
 
 	// Read tarfile from request body
 	// Note: We should limit the size to prevent abuse
@@ -1175,12 +1265,11 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// First, query for the job to get its proc ad with transfer attributes
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInput"}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: projection,
-	})
+	// Fetch the proc ad with cluster attributes overlaid; see
+	// fetchProcAdForSpool for why this is necessary (Cmd /
+	// TransferExecutable live on the cluster ad and the proc-only
+	// query strips them).
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1193,11 +1282,11 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
-
-	if len(jobAds) == 0 {
+	if procAd == nil {
 		s.writeError(w, http.StatusNotFound, "Job not found")
 		return
 	}
+	jobAds := []*classad.ClassAd{procAd}
 
 	// Bound the request body before parsing so a hostile client can't
 	// stream gigabytes through ParseMultipartForm. MaxBytesReader caps
@@ -1216,6 +1305,23 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	defer func() {
 		_ = r.MultipartForm.RemoveAll()
 	}()
+
+	// Log the inventory of files we're about to spool. The two
+	// most common ways spooling fails silently are (a) the SPA
+	// didn't send a file the body references (so it never arrives
+	// here) and (b) it sent one the schedd's allow-set won't admit
+	// (so sendJobFilesFromTar drops it). Logging the input list
+	// makes the first case visible without `tcpdump`-ing the
+	// multipart body.
+	{
+		var inventory []string
+		for fieldName, fileHeaders := range r.MultipartForm.File {
+			for _, fh := range fileHeaders {
+				inventory = append(inventory, fmt.Sprintf("%s=%s(%d)", fieldName, fh.Filename, fh.Size))
+			}
+		}
+		log.Printf("spool upload for job %s: %d file(s) received: %v", jobID, len(inventory), inventory)
+	}
 
 	// Create a pipe for streaming tar conversion
 	pr, pw := io.Pipe()

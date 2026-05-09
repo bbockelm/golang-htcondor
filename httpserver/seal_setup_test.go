@@ -271,8 +271,20 @@ func TestScrubbedFormDataRemovesSecrets(t *testing.T) {
 func mustRand32(t *testing.T) []byte {
 	t.Helper()
 	out := make([]byte, 32)
-	if _, err := rand.Read(out); err != nil {
-		t.Fatalf("rand: %v", err)
+	// The KEK reader (seal.LoadMasterKEK) trims trailing
+	// \r\n\t<space> before validating length, so a raw byte from
+	// rand.Read landing on one of those four values would shrink
+	// the file below 32 bytes and fail validation. Re-roll the
+	// trailing byte until it's outside the trim set; uniformity
+	// over the remaining 252 byte values is fine for test KEKs.
+	for {
+		if _, err := rand.Read(out); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		switch out[len(out)-1] {
+		case '\r', '\n', '\t', ' ':
+			continue
+		}
+		return out
 	}
-	return out
 }

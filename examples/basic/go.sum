@@ -1,7 +1,7 @@
 github.com/PelicanPlatform/classad v0.0.4 h1:CKRLqSe+6tTvYELE/P1uYYugse8aAMKAnb+IC5HDqIU=
 github.com/PelicanPlatform/classad v0.0.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/bbockelm/cedar v0.0.24 h1:fM81xPAU+TqSNfK3CV5uQo1oeEETFcEhCrWxMpUhalQ=
-github.com/bbockelm/cedar v0.0.24/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
+github.com/bbockelm/cedar v0.0.25 h1:XvouwA5rICXLHAXTjSeuu1UxR5/aadKsjpXGljWSf/4=
+github.com/bbockelm/cedar v0.0.25/go.mod h1:K3g+fJeOUKWIZyOcFC29dAisP7oYH+IqCuLQQLW5n1U=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

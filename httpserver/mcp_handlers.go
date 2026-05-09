@@ -1892,9 +1892,14 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 		if err := json.Unmarshal(mcpRequest.Params, &params); err == nil {
 			// Read-only tools
 			readOnlyTools := map[string]bool{
-				"query_jobs":        true,
-				"get_job":           true,
-				"analyze_job_match": true,
+				"query_jobs":                    true,
+				"get_job":                       true,
+				"analyze_job_match":             true,
+				"condor_doc_job_attributes":     true,
+				"condor_doc_machine_attributes": true,
+				"condor_doc_submit_syntax":      true,
+				"condor_doc_config_variables":   true,
+				"condor_doc_search":             true,
 			}
 			if readOnlyTools[params.Name] {
 				return false

@@ -540,8 +540,24 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 
 	outputPath = sanitizeOutputPath(outputPath)
 
-	// Parse destination levels from <DAEMON>_DEBUG
-	destinationLevels := make(map[Destination]Verbosity)
+	// Parse destination levels from <DAEMON>_DEBUG.
+	//
+	// Default the cedar destination to Warn so cedar's own
+	// per-step Info chatter (handshake stages, "Found cached
+	// session <id>", "Registered inherited session") doesn't end
+	// up in the daemon log. Two reasons:
+	//   1. Cedar logs the full session ID at Info — those IDs are
+	//      sensitive lookup keys, and daemon logs are typically
+	//      world-readable on stock HTCondor installs (mode 0644).
+	//   2. The cedar Info stream is extremely chatty — useful
+	//      during a security debug pass, noise the rest of the
+	//      time.
+	// Operators who need cedar Info or Debug can opt in via
+	//   HTTP_API_DEBUG = cedar:debug
+	// in their condor config.
+	destinationLevels := map[Destination]Verbosity{
+		DestinationCedar: VerbosityWarn,
+	}
 	debugParam := strings.ToUpper(daemonName) + "_DEBUG"
 	if debugConfig, ok := cfg.Get(debugParam); ok && debugConfig != "" {
 		// Split by comma or whitespace
@@ -599,10 +615,19 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 	return New(&Config{
 		OutputPath:        outputPath,
 		DestinationLevels: destinationLevels,
-		MaxLogSize:        maxLogSize,
-		MaxNumLogs:        maxNumLogs,
-		TruncateOnOpen:    truncateOnOpen,
-		TouchLogInterval:  touchLogInterval,
+		// Match HTCondor's "D_ALWAYS shows up by default" baseline:
+		// without an explicit <DAEMON>_DEBUG knob, an unconfigured
+		// daemon should still produce its routine startup / activity
+		// logs. Leaving DefaultLevel at the Go zero value
+		// (VerbosityError) silences every Info/Warn line, which is
+		// what made our HttpApiLog appear "broken" — file was being
+		// written, just empty after the filtering handler dropped
+		// everything.
+		DefaultLevel:     VerbosityInfo,
+		MaxLogSize:       maxLogSize,
+		MaxNumLogs:       maxNumLogs,
+		TruncateOnOpen:   truncateOnOpen,
+		TouchLogInterval: touchLogInterval,
 	})
 }
 
@@ -1101,6 +1126,134 @@ func (w *stdlibLogWriter) Write(p []byte) (int, error) {
 		w.logger.Info(DestinationGeneral, msg)
 	}
 	return len(p), nil
+}
+
+// EarlyBuffer captures stdlib `log.*` output produced *before* the
+// structured logger is constructed, so those startup lines (the
+// daemon-core inheritance diagnostic, "Using UID_DOMAIN", any
+// log.Println from imported packages) can be replayed through the
+// daemon log file once slog is wired up. Without this, the early
+// trace only ever lands on stderr — invisible to anyone who's
+// tailing $(LOG)/HttpApiLog and trying to figure out what the
+// daemon did at startup.
+//
+// Lines are tee'd: they continue to write to the underlying stderr
+// (or whatever `log.Default()` was using) AND to an in-memory ring,
+// so an operator watching the process directly still sees them
+// immediately.
+type EarlyBuffer struct {
+	mu       sync.Mutex
+	lines    []earlyLine
+	cap      int
+	upstream io.Writer // tee target — usually os.Stderr
+	replayed bool
+}
+
+type earlyLine struct {
+	t   time.Time
+	msg string
+}
+
+// InstallEarlyBuffer redirects the stdlib `log` package's default
+// destination to a tee that writes to both `upstream` (typically
+// os.Stderr) and a bounded in-memory ring. The returned *EarlyBuffer
+// holds the captured lines until Replay drains them through a
+// structured Logger.
+//
+// `capLines` caps the ring at that many entries; older lines are
+// dropped FIFO when the cap is exceeded. Pick a generous default —
+// startup typically emits well under 100 lines, so even 256 is
+// effectively unbounded for normal runs while bounding pathological
+// loops.
+//
+// Pair every InstallEarlyBuffer with exactly one of Replay (success
+// path; drains to the logger and switches stdlib log into Logger
+// directly) or Detach (failure path; resumes plain stderr writes
+// without replay). Calling neither is a leak: subsequent log.*
+// calls keep accumulating lines forever.
+func InstallEarlyBuffer(upstream io.Writer, capLines int) *EarlyBuffer {
+	if upstream == nil {
+		upstream = os.Stderr
+	}
+	if capLines <= 0 {
+		capLines = 256
+	}
+	b := &EarlyBuffer{cap: capLines, upstream: upstream}
+	stdlog.SetOutput(b)
+	return b
+}
+
+// Write implements io.Writer. Each call corresponds to one stdlib
+// log line (stdlib log writes the entire formatted line in a single
+// Write). We pass it through to upstream verbatim so the operator
+// keeps seeing it on stderr in real time, and we strip the trailing
+// newline before stashing in the ring so replay doesn't double up
+// the line break.
+func (b *EarlyBuffer) Write(p []byte) (int, error) {
+	if b.upstream != nil {
+		// Best-effort tee: a stderr write failure shouldn't kill
+		// log.Println.
+		_, _ = b.upstream.Write(p)
+	}
+	msg := strings.TrimRight(string(p), "\n")
+	if msg == "" {
+		return len(p), nil
+	}
+	b.mu.Lock()
+	b.lines = append(b.lines, earlyLine{t: time.Now(), msg: msg})
+	if len(b.lines) > b.cap {
+		// Drop oldest. Keeping a sliding window means a runaway
+		// log loop can't OOM the process.
+		b.lines = b.lines[len(b.lines)-b.cap:]
+	}
+	b.mu.Unlock()
+	return len(p), nil
+}
+
+// Replay drains the buffered lines into l as Info records on the
+// General destination, then re-points stdlib log at the structured
+// logger directly (equivalent to calling Logger.RedirectStdLog).
+// Subsequent log.* calls go straight through and bypass the buffer.
+//
+// The replayed lines carry the original capture timestamp in the
+// message so an operator can see the original ordering even though
+// slog stamps its own time when the record is emitted.
+func (b *EarlyBuffer) Replay(l *Logger) {
+	if l == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.replayed {
+		b.mu.Unlock()
+		return
+	}
+	lines := b.lines
+	b.lines = nil
+	b.replayed = true
+	b.mu.Unlock()
+
+	for _, ln := range lines {
+		l.Info(DestinationGeneral, ln.msg, "captured_at", ln.t.Format(time.RFC3339Nano))
+	}
+	// Hand the stdlib log over to the structured logger directly —
+	// future log.* calls don't need to go through the buffer
+	// anymore.
+	l.RedirectStdLog()
+}
+
+// Detach restores stdlib log to its underlying writer (no replay).
+// Use on the failure path: if the daemon is exiting before the
+// structured logger could be built, calling Detach lets any further
+// log.Fatalf line still reach stderr instead of getting swallowed by
+// the buffer. Idempotent.
+func (b *EarlyBuffer) Detach() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.replayed {
+		return
+	}
+	b.replayed = true
+	stdlog.SetOutput(b.upstream)
 }
 
 // formatMessage is a helper to format Printf-style messages

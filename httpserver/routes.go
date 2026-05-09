@@ -99,6 +99,13 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/templates", cors(http.HandlerFunc(h.handleTemplates)))
 	mux.Handle("/api/v1/templates/", cors(http.HandlerFunc(h.handleTemplates)))
 
+	// Chat endpoint (LLM-backed assistant for the jobs view). The
+	// handlers themselves return 503 when the chat engine isn't
+	// configured; we always register so the SPA's /info probe
+	// gets a sensible answer regardless of feature state.
+	mux.Handle("/api/v1/chat", cors(http.HandlerFunc(h.handleChat)))
+	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
+
 	// Collector endpoints
 	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
 

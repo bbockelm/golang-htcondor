@@ -1159,8 +1159,9 @@ func parseJobAdsForSpooling(jobAds []*classad.ClassAd) ([]procID, map[procID]*jo
 func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	var inputFiles []string
 
-	if str, ok := ad.EvaluateAttrString("TransferInput"); ok && str != "" {
-		inputFiles = parseFileList(str)
+	transferInputRaw, _ := ad.EvaluateAttrString("TransferInput")
+	if transferInputRaw != "" {
+		inputFiles = parseFileList(transferInputRaw)
 	}
 
 	// Create set of input files for fast lookup
@@ -1177,20 +1178,36 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	// condor_submit's actual behavior, which only writes TransferExecutable
 	// to the ad when the user explicitly sets transfer_executable.
 	transferExe := true // default is true
+	transferExePresent := false
 	if expr, ok := ad.Lookup("TransferExecutable"); ok {
+		transferExePresent = true
 		val := expr.Eval(nil)
 		if b, err := val.BoolValue(); err == nil {
 			transferExe = b
 		}
 	}
-	if transferExe {
-		if expr, ok := ad.Lookup("Cmd"); ok {
-			val := expr.Eval(nil)
-			if cmd, err := val.StringValue(); err == nil && cmd != "" && !path.IsAbs(cmd) {
-				inputFileSet[path.Base(cmd)] = true
-			}
+	cmdValue := ""
+	cmdPresent := false
+	if expr, ok := ad.Lookup("Cmd"); ok {
+		cmdPresent = true
+		val := expr.Eval(nil)
+		if cmd, err := val.StringValue(); err == nil {
+			cmdValue = cmd
 		}
 	}
+	if transferExe && cmdValue != "" && !path.IsAbs(cmdValue) {
+		inputFileSet[path.Base(cmdValue)] = true
+	}
+
+	// Log the inputs that went into building the allow-set. Without
+	// this it's nearly impossible to tell from a held-job postmortem
+	// whether the proc ad's TransferInput was empty, whether Cmd was
+	// missing from the projection, or whether Cmd was absolute and
+	// therefore (intentionally) excluded. The cluster.proc isn't on
+	// the ad at this point, but the caller's logging usually carries
+	// it via the surrounding context.
+	log.Printf("spool allow-set source: TransferInput=%q Cmd=%q (present=%v) TransferExecutable=%v (present=%v) → set=%v",
+		transferInputRaw, cmdValue, cmdPresent, transferExe, transferExePresent, inputFileSet)
 
 	return inputFileSet
 }
@@ -1392,7 +1409,25 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 
 		// Check if this file should be transferred
 		if currentJobInfo == nil || !currentJobInfo.inputFiles[fileName] {
-			// File not in the input files list, skip it
+			// File not in the input files list, skip it. Log a
+			// warning so the silent drop is visible when something
+			// references a file we never spool — e.g., the SPA
+			// uploaded an inline script "run.sh" but the proc ad
+			// projection didn't pull Cmd / TransferExecutable, so
+			// getInputFilesFromJobAd never folded run.sh into the
+			// allow-set. Without this log line the symptom is the
+			// schedd holding the job at execute-time with ENOENT
+			// and no clue why.
+			if currentJobInfo == nil {
+				log.Printf("spool: skipping %s: no current job in stream", fileName)
+			} else {
+				allowed := make([]string, 0, len(currentJobInfo.inputFiles))
+				for k := range currentJobInfo.inputFiles {
+					allowed = append(allowed, k)
+				}
+				log.Printf("spool: skipping %s for job %d.%d (not in allow-set %v) — check that the proc ad's TransferInput/Cmd/TransferExecutable cover this file",
+					fileName, currentJobInfo.jobID.cluster, currentJobInfo.jobID.proc, allowed)
+			}
 			continue
 		}
 

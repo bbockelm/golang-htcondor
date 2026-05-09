@@ -101,6 +101,16 @@ type Config struct {
 	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token                   string               // Token for daemon authentication (optional)
 	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+
+	// LLMAPIKeyFile is the path to a file holding the Anthropic API
+	// key. Empty disables the chat endpoint. See HandlerConfig.
+	LLMAPIKeyFile string
+	// LLMAPIURL is an optional override for the upstream Anthropic
+	// endpoint, useful when the operator runs an LLM gateway. Empty
+	// = direct to api.anthropic.com.
+	LLMAPIURL string
+	// LLMModel overrides the default model id. Empty = package default.
+	LLMModel string
 }
 
 // NewServer creates a new HTTP API server
@@ -167,6 +177,9 @@ func NewServer(cfg Config) (*Server, error) {
 		StreamWriteTimeout:         cfg.StreamWriteTimeout,
 		Token:                      cfg.Token,
 		Credd:                      cfg.Credd,
+		LLMAPIKeyFile:              cfg.LLMAPIKeyFile,
+		LLMAPIURL:                  cfg.LLMAPIURL,
+		LLMModel:                   cfg.LLMModel,
 	}
 
 	// Create the handler
@@ -243,23 +256,28 @@ func parseURL(urlStr string) (*url.URL, error) {
 
 // initializeOAuth2 initializes the OAuth2 provider with actual listening address (delegates to Handler)
 
-// getDefaultDBPath returns a default database path using LOCAL_DIR
-// from HTCondor config — but skips LOCAL_DIR when it's set to a path
-// we know isn't writable.
+// getDefaultDBPath returns a default database path under HTCondor's
+// per-host state directory ($(LOCAL_DIR)/lib/condor) — the same
+// directory that holds EXECUTE, SPOOL siblings, and the schedd's
+// job_queue.log on a stock install. Living next to those files
+// means our DB inherits the same backup / quota / mount policy the
+// operator already applies to the rest of the daemon's state.
 //
+// Skips LOCAL_DIR when it's set to a known-unwritable system root.
 // Specifically: cmd/htcondor-api's fixConfigDefaults forces
 // LOCAL_DIR=/usr when the `condor` user doesn't exist (a common
 // containerised deployment), to satisfy other HTCondor knobs that
 // derive `/usr/etc`, `/usr/lib`, etc. from LOCAL_DIR. /usr is
 // system-owned and never writable by an unprivileged daemon, so a
-// DB path of `/usr/<filename>` produces SQLite's misleading
-// "out of memory (14)" on first write. We detect that case (and the
-// adjacent system roots) and fall through to a writable default.
+// DB path of `/usr/lib/condor/<filename>` produces SQLite's
+// misleading "out of memory (14)" on first write. We detect that
+// case (and the adjacent system roots) and fall through to a
+// writable default.
 func getDefaultDBPath(cfg *config.Config, filename string) string {
 	if cfg != nil {
 		if localDir, ok := cfg.Get("LOCAL_DIR"); ok && localDir != "" {
 			if !isReadOnlySystemPath(localDir) {
-				return filepath.Join(localDir, filename)
+				return filepath.Join(localDir, "lib", "condor", filename)
 			}
 		}
 	}
@@ -290,6 +308,38 @@ func isReadOnlySystemPath(p string) bool {
 	return false
 }
 
+// safeListenerAddr returns a string representation of ln's listening
+// address that's safe to put in operator-facing logs. For TCP it's the
+// usual "host:port" form. For Unix-domain listeners it strips
+// everything except the endpoint basename — the rest of the path
+// embeds the shared-port cookie (a long-lived secret HTCondor uses
+// to authenticate shared_port_server fd-pass requests) and must not
+// land in stdout, log files, or kubectl logs.
+//
+// The endpoint basename ("http_api") is what an external client would
+// reference via `?sock=http_api` in a sinful string, so it's the
+// useful piece for an operator to see at startup.
+func safeListenerAddr(ln net.Listener) string {
+	if ln == nil {
+		return ""
+	}
+	addr := ln.Addr()
+	if addr == nil {
+		return ""
+	}
+	if addr.Network() == "unix" {
+		path := addr.String()
+		// Linux abstract namespace prefix.
+		path = strings.TrimPrefix(path, "@")
+		base := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			base = path[i+1:]
+		}
+		return "<shared-port endpoint " + base + ">"
+	}
+	return addr.String()
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server", "address", s.httpServer.Addr)
@@ -310,9 +360,10 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	addrStr := safeListenerAddr(ln)
+	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr)
 	// Print to stdout for integration tests to detect start up
-	fmt.Printf("Server started on http://%s\n", ln.Addr().String())
+	fmt.Printf("Server started on http://%s\n", addrStr)
 	return s.httpServer.Serve(ln)
 }
 
@@ -331,8 +382,9 @@ func (s *Server) ServeListener(ln net.Listener, scheme string) error {
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("unsupported scheme %q (want http or https)", scheme)
 	}
+	addrStr := safeListenerAddr(ln)
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server on shared listener",
-		"scheme", scheme, "addr", ln.Addr().String())
+		"scheme", scheme, "addr", addrStr)
 
 	s.listener = ln
 	s.handlerCtx, s.cancelFunc = context.WithCancel(context.Background())
@@ -341,8 +393,8 @@ func (s *Server) ServeListener(ln net.Listener, scheme string) error {
 		return err
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Listening on shared listener", "address", ln.Addr().String())
-	fmt.Printf("Server started on %s://%s\n", scheme, ln.Addr().String())
+	s.logger.Info(logging.DestinationHTTP, "Listening on shared listener", "address", addrStr)
+	fmt.Printf("Server started on %s://%s\n", scheme, addrStr)
 
 	// httpServer.Serve and ServeTLS differ only in the TLS handshake
 	// that wraps each accepted conn. When the caller supplies TLSConfig
@@ -380,9 +432,10 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 		return err
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", ln.Addr().String())
+	addrStr := safeListenerAddr(ln)
+	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr)
 	// Print to stdout for integration tests to detect start up
-	fmt.Printf("Server started on https://%s\n", ln.Addr().String())
+	fmt.Printf("Server started on https://%s\n", addrStr)
 	return s.httpServer.ServeTLS(ln, certFile, keyFile)
 }
 

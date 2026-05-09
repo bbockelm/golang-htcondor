@@ -500,6 +500,15 @@ export const api = {
         body: JSON.stringify({ constraint, reason }),
       }),
 
+    // Release a single held job. The Go side maps this to
+    // condor_release for the matching cluster.proc; the queue moves
+    // the job from JobStatus=5 (Held) back to Idle.
+    release: (id: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/release`, {
+        method: 'POST',
+        body: JSON.stringify(reason ? { reason } : {}),
+      }),
+
     submit: (submitFile: string): Promise<SubmitResponse> =>
       fetchJSON(`${BASE}/jobs`, {
         method: 'POST',
@@ -656,6 +665,25 @@ export const api = {
     },
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ''}`),
+  },
+
+  chat: {
+    // Probe the chat feature. Returns enabled=false (with a reason)
+    // when the operator hasn't configured an LLM key, MCP isn't on,
+    // or anything else upstream of the engine is missing. The SPA
+    // hides the chat surface entirely on enabled=false.
+    info: (): Promise<{ enabled: boolean; reason?: string }> =>
+      fetch(`${BASE}/chat/info`, { credentials: 'include' }).then(
+        async (r) => {
+          if (r.status === 503) return r.json(); // returns {enabled:false,...}
+          if (!r.ok) throw new ApiError(r.status, r.statusText);
+          return r.json();
+        },
+      ),
+    // The streaming endpoint is consumed by the AI SDK's useChat
+    // hook (see ChatPanel). We don't expose a typed wrapper here —
+    // useChat handles the request shape and stream parsing.
+    streamURL: `${BASE}/chat`,
   },
 };
 

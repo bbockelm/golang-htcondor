@@ -558,18 +558,20 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	// matters; not exposed yet.)
 	universe := jupyterUniverseForGOOS(runtimeGOOS())
 	helperGOOS := jupyterHelperGOOSForUniverse(universe)
-	helperBytes, err := jupyterhelperbin.BytesFor(helperGOOS)
+	helperGOARCH := runtimeGOARCH()
+	helperBytes, err := jupyterhelperbin.BytesFor(helperGOOS, helperGOARCH)
 	if err != nil {
 		if errors.Is(err, jupyterhelperbin.ErrNotEmbedded) {
 			s.writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("JupyterLab is not available in this build for %s execute nodes. "+
-					"Rebuild the api binary with `make build` on a host that can produce the %s helper "+
-					"(linux helpers always; darwin helpers only when `make build` is run on a macOS host).",
-					helperGOOS, helperGOOS))
+				fmt.Sprintf("JupyterLab is not available in this build for %s/%s execute nodes. "+
+					"The api binary is built with -tags embed_jupyter_helper but the helper for this "+
+					"platform isn't in dist/. Add %q to JUPYTER_HELPER_TARGETS in the Makefile and "+
+					"rebuild via `make build` (Go cross-compiles the helper for every listed target).",
+					helperGOOS, helperGOARCH, helperGOOS+"/"+helperGOARCH))
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError,
-			fmt.Sprintf("failed to load JupyterLab helper for %s: %v", helperGOOS, err))
+			fmt.Sprintf("failed to load JupyterLab helper for %s/%s: %v", helperGOOS, helperGOARCH, err))
 		return
 	}
 

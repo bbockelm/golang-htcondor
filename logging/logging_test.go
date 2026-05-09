@@ -122,11 +122,20 @@ func TestFromConfigWithDaemon(t *testing.T) {
 		expectedLevels     map[Destination]Verbosity
 		expectedOutputPath string
 	}{
+		// Note: these tests set HTTP_API_LOG (the per-daemon log path)
+		// directly to "stdout"/"stderr". Our config layer's default
+		// — see config/param_overrides.go — sets HTTP_API_LOG to
+		// "$(LOG)/HttpApiLog", so simply pointing LOG at stdout/stderr
+		// is no longer enough to redirect the daemon's own output;
+		// HTTP_API_LOG would resolve to "stderr/HttpApiLog", which is
+		// not a sentinel. Real deployments override HTTP_API_LOG
+		// directly when they want a stream sink (typically only
+		// during local dev / unit tests).
 		{
 			name:       "HTTP_API_DEBUG with cedar:debug",
 			daemonName: "HTTP_API",
 			configText: `
-LOG = stdout
+HTTP_API_LOG = stdout
 HTTP_API_DEBUG = cedar:debug
 `,
 			expectedLevels: map[Destination]Verbosity{
@@ -138,7 +147,7 @@ HTTP_API_DEBUG = cedar:debug
 			name:       "HTTP_API_DEBUG with multiple destinations",
 			daemonName: "HTTP_API",
 			configText: `
-LOG = stderr
+HTTP_API_LOG = stderr
 HTTP_API_DEBUG = cedar:debug, http:info, schedd:warn
 `,
 			expectedLevels: map[Destination]Verbosity{
@@ -152,7 +161,7 @@ HTTP_API_DEBUG = cedar:debug, http:info, schedd:warn
 			name:       "SCHEDD_DEBUG with numeric levels",
 			daemonName: "SCHEDD",
 			configText: `
-LOG = stdout
+SCHEDD_LOG = stdout
 SCHEDD_DEBUG = cedar:2 schedd:1
 `,
 			expectedLevels: map[Destination]Verbosity{
@@ -165,7 +174,7 @@ SCHEDD_DEBUG = cedar:2 schedd:1
 			name:       "Mixed case destinations and levels",
 			daemonName: "HTTP_API",
 			configText: `
-LOG = stdout
+HTTP_API_LOG = stdout
 HTTP_API_DEBUG = CEDAR:DEBUG HTTP:INFO
 `,
 			expectedLevels: map[Destination]Verbosity{
@@ -175,17 +184,24 @@ HTTP_API_DEBUG = CEDAR:DEBUG HTTP:INFO
 			expectedOutputPath: "stdout",
 		},
 		{
-			name:               "No debug config (defaults to warn)",
-			daemonName:         "HTTP_API",
-			configText:         "LOG = stdout\n",
-			expectedLevels:     map[Destination]Verbosity{},
+			name:       "No debug config (defaults to warn)",
+			daemonName: "HTTP_API",
+			configText: "HTTP_API_LOG = stdout\n",
+			// FromConfigWithDaemon pre-seeds the Cedar destination
+			// at Warn so cedar's per-step Info chatter (and the
+			// session IDs it embeds) doesn't reach world-readable
+			// daemon logs by default. Operators opt cedar back into
+			// Info/Debug via HTTP_API_DEBUG = cedar:debug.
+			expectedLevels: map[Destination]Verbosity{
+				DestinationCedar: VerbosityWarn,
+			},
 			expectedOutputPath: "stdout",
 		},
 		{
 			name:       "Malformed pairs are skipped",
 			daemonName: "HTTP_API",
 			configText: `
-LOG = stdout
+HTTP_API_LOG = stdout
 HTTP_API_DEBUG = cedar:debug, invalid, http:info
 `,
 			expectedLevels: map[Destination]Verbosity{

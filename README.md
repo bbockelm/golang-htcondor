@@ -245,6 +245,61 @@ curl http://localhost:8080/api/v1/ping
 curl http://localhost:8080/metrics
 ```
 
+#### Running under `condor_master`
+
+Install the binary:
+
+```bash
+make build
+sudo install -m 0755 bin/htcondor-api /usr/sbin/htcondor-api
+```
+
+Then add the following lines to your HTCondor config:
+
+```condor
+# /etc/condor/config.d/50-htcondor-api.conf
+
+# Provide HTCondor with the path to the API server
+HTTP_API       = /usr/sbin/htcondor-api
+
+# Instruct the condor_master to run the HTTP API server
+DAEMON_LIST    = $(DAEMON_LIST), HTTP_API
+
+# Instructs the condor_master to setup condor_shared_port integration
+# for this daemon
+DC_DAEMON_LIST = +HTTP_API
+
+# Pins the shared_port ID to a specific name, allowing HTTP requests
+# to be appropriately routed
+HTTP_API_ARGS  = -local-name http_api
+```
+
+Reload:
+
+```bash
+sudo condor_restart -master
+```
+
+> **Note:** changes to `DC_DAEMON_LIST` only affect daemons created
+> *after* the master restart — `condor_reconfig` is insufficient
+
+After restart, you should be able to access the web interface via the
+common shared port on the HTCondor host:
+
+```bash
+$ curl http://localhost:9618/healthz
+{"status":"ok"}
+```
+
+A few optional knobs you may change after initial configuration:
+
+| Knob | Purpose |
+| --- | --- |
+| `HTTP_API_KEK_FILE` | Path to a file containing the master Key Encryption Key (32 raw bytes or 64-char hex, mode 0600/0400). Encrypts secrets in the database. Generate with `openssl rand -hex 32 > <path> && chmod 0600 <path>`. |
+| `HTTP_API_DB_PATH` | Unified database for state (OAuth2/MCP, IDP, sessions, templates). Default `$(LOCAL_DIR)/htcondor-api.db`. Parent directory must be writable by condor. |
+| `HTTP_API_SIGNING_KEY` | Pool signing-key file used to mint short-lived per-request tokens for session-cookie users. Defaults to `SEC_TOKEN_POOL_SIGNING_KEY_FILE`. |
+| `HTTP_API_BASE_URL` | Externally visible URL used to generate share links + OAuth2 redirects. |
+
 **Container Images:**
 
 Pre-built container images are available from GitHub Container Registry:

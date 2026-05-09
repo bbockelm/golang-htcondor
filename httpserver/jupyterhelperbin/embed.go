@@ -4,22 +4,20 @@
 // binaries that ship into JupyterLab jobs as transfer_input_files.
 // Build with -tags embed_jupyter_helper to include them; the dist/
 // directory must contain freshly cross-compiled helpers (see the
-// Makefile's `build-jupyter-helper` and `build-jupyter-helper-darwin`
-// targets).
+// Makefile's `build-jupyter-helper` target — it cross-compiles for
+// every (GOOS, GOARCH) tuple in JUPYTER_HELPER_TARGETS, by default
+// linux/amd64, linux/arm64, and darwin/arm64).
 //
-// Two GOOSes are supported:
+// Layout in dist/ is:
 //
-//   - linux  → dist/htcondor-jupyter-helper (always built)
-//   - darwin → dist/htcondor-jupyter-helper-darwin (only built when the
-//     host running `make build` is darwin; selected at submit time when
-//     the API server is running on macOS and falls back to vanilla
-//     universe + on-the-fly conda env, since macOS lacks Docker
-//     universe support)
+//	dist/htcondor-jupyter-helper-<goos>-<goarch>
 //
-// The submit handler picks the right one for each job based on the
-// universe it's about to use. We never write either to disk; the bytes
-// go straight into an in-memory fs.FS that's spooled to the schedd via
-// SpoolJobFilesFromFS.
+// e.g. dist/htcondor-jupyter-helper-linux-amd64. The submit handler
+// picks the right one per job based on the inferred execute-node
+// platform (see jupyterUniverseForGOOS / runtimeGOARCH in
+// handlers_jupyter.go). We never write either to disk on the API
+// server side; the bytes go straight into an in-memory fs.FS that's
+// spooled to the schedd via SpoolJobFilesFromFS.
 package jupyterhelperbin
 
 import (
@@ -36,37 +34,31 @@ var content embed.FS
 // without build tags.
 var ErrNotEmbedded = errors.New("jupyterhelperbin: helper not embedded; rebuild with `make build` (which runs `build-jupyter-helper` first) or set -tags embed_jupyter_helper manually")
 
-// BytesFor returns the helper binary for the given GOOS, ready to be
-// dropped into an fs.FS and spooled to the schedd. Supported values:
-// "linux", "darwin". Other values return ErrNotEmbedded.
+// BytesFor returns the helper binary for the given (GOOS, GOARCH),
+// ready to be dropped into an fs.FS and spooled to the schedd. Default
+// supported tuples are linux/amd64, linux/arm64, and darwin/arm64;
+// edit JUPYTER_HELPER_TARGETS in the Makefile to extend.
 //
-// Returns ErrNotEmbedded specifically when the embed tag is set but the
-// requested target wasn't built (e.g. asking for darwin on a Linux dev
-// machine where only the linux helper is in dist/).
-func BytesFor(goos string) ([]byte, error) {
-	var path string
-	switch goos {
-	case "linux":
-		path = "dist/htcondor-jupyter-helper"
-	case "darwin":
-		path = "dist/htcondor-jupyter-helper-darwin"
-	default:
-		return nil, fmt.Errorf("jupyterhelperbin: unsupported GOOS %q", goos)
+// Returns ErrNotEmbedded specifically when the embed tag is set but
+// the requested target wasn't built (e.g. asking for darwin/amd64 in
+// a build that only staged the three default targets).
+func BytesFor(goos, goarch string) ([]byte, error) {
+	if goos == "" || goarch == "" {
+		return nil, fmt.Errorf("jupyterhelperbin: BytesFor requires both GOOS and GOARCH (got %q, %q)", goos, goarch)
 	}
+	path := fmt.Sprintf("dist/htcondor-jupyter-helper-%s-%s", goos, goarch)
 	b, err := content.ReadFile(path)
 	if err != nil {
 		// Distinguish "embedded but missing this target" from "not
-		// embedded at all" for nicer error messages upstream.
-		return nil, fmt.Errorf("%w: missing %s (was the right `make build-jupyter-helper*` target run?)", ErrNotEmbedded, path)
+		// embedded at all" for nicer error messages upstream. The
+		// upstream submit handler renders this with the operator
+		// hint to extend JUPYTER_HELPER_TARGETS in the Makefile.
+		return nil, fmt.Errorf("%w: missing %s (extend JUPYTER_HELPER_TARGETS in the Makefile and rebuild)", ErrNotEmbedded, path)
 	}
 	return b, nil
 }
 
-// Bytes returns the linux helper. Retained for callers that haven't been
-// updated to BytesFor yet; equivalent to BytesFor("linux").
-func Bytes() ([]byte, error) { return BytesFor("linux") }
-
 // IsEmbedded reports whether the helper binaries are compiled into this
-// binary at all. To know whether a *specific* GOOS is available, call
-// BytesFor and check the error.
+// binary at all. To know whether a *specific* (GOOS, GOARCH) is
+// available, call BytesFor and check the error.
 func IsEmbedded() bool { return true }

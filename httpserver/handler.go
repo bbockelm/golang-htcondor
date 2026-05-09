@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
+	"github.com/bbockelm/golang-htcondor/httpserver/chat"
 	"github.com/bbockelm/golang-htcondor/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/matchanalyzer"
@@ -74,7 +75,12 @@ type Handler struct {
 	// helpers fall back to plaintext mode (back-compat with the
 	// pre-KEK schema). Set once in NewHandler after migration; the
 	// underlying AES-GCM is goroutine-safe.
-	sealer             *seal.Sealer
+	sealer *seal.Sealer
+
+	// chatEngine is non-nil when HTTP_API_LLM_API_KEY_FILE is
+	// configured AND MCP is enabled. The chat handler at
+	// /api/v1/chat uses it; everything else ignores it.
+	chatEngine         *chat.Engine
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	// httpMetrics holds the prometheus/client_golang registry plus the
@@ -222,6 +228,19 @@ type HandlerConfig struct {
 	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token                   string               // Token for daemon authentication (optional)
 	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+
+	// LLMAPIKeyFile is the path to a file holding the Anthropic API
+	// key used by the chat endpoint at /api/v1/chat. Empty disables
+	// the chat feature. The bytes never live in HTCondor config —
+	// only this file path does.
+	LLMAPIKeyFile string
+	// LLMAPIURL overrides the upstream Anthropic Messages endpoint.
+	// Use to point at a self-hosted LLM gateway / cache. Empty falls
+	// back to chat.DefaultAnthropicURL.
+	LLMAPIURL string
+	// LLMModel overrides the default Anthropic model id. Empty falls
+	// back to chat.DefaultAnthropicModel.
+	LLMModel string
 
 	// JupyterWorkDir is where the embedded helper binary (materialized
 	// from package jupyterhelperbin) and per-instance scratch artifacts
@@ -593,6 +612,34 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		if h.oauth2StateStore == nil {
 			h.oauth2StateStore = NewOAuth2StateStore()
 		}
+	}
+
+	// Setup the chat engine when both MCP and an LLM key are
+	// configured. The /api/v1/chat handler is gated on chatEngine
+	// being non-nil; the SPA hides its UI on a 503 from the info
+	// endpoint, so an unconfigured deployment looks identical to
+	// the pre-feature state.
+	if cfg.EnableMCP && cfg.LLMAPIKeyFile != "" {
+		llm, err := chat.NewAnthropicClient(chat.AnthropicConfig{
+			APIKeyFile: cfg.LLMAPIKeyFile,
+			URL:        cfg.LLMAPIURL,
+			Model:      cfg.LLMModel,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to load LLM API key: %w", err)
+		}
+		if llm != nil {
+			h.chatEngine = chat.NewEngine(llm, h.buildChatTools())
+			logger.Info(logging.DestinationHTTP, "Chat endpoint enabled",
+				"upstream", llm.URL(),
+				"model", llm.Model(),
+				"tool_count", len(h.buildChatTools()),
+			)
+		}
+	} else if cfg.LLMAPIKeyFile != "" && !cfg.EnableMCP {
+		logger.Warn(logging.DestinationHTTP,
+			"HTTP_API_LLM_API_KEY_FILE is set but HTTP_API_ENABLE_MCP is not; chat endpoint stays disabled. The chat surface reuses the MCP tool layer for owner-scoped job queries; both must be on together.",
+		)
 	}
 
 	// Setup metrics if collector is provided

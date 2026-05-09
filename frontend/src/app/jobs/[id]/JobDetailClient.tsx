@@ -46,12 +46,23 @@ export default function JobDetailClient(_props: {
   // Status 3 = Removed, 4 = Completed. Don't offer Remove for those.
   const status = data ? num(data.JobStatus) : undefined;
   const isTerminal = status === 3 || status === 4;
+  // Status 5 = Held. Surface a Release button so the user doesn't
+  // have to drop to the CLI to un-hold a job.
+  const isHeld = status === 5;
 
   const removeMut = useMutation({
     mutationFn: () => api.jobs.remove(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       router.push('/jobs');
+    },
+  });
+
+  const releaseMut = useMutation({
+    mutationFn: () => api.jobs.release(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
     },
   });
 
@@ -71,7 +82,18 @@ export default function JobDetailClient(_props: {
             in batch {batchID ?? '?'}
           </span>
         </h1>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {isHeld && data && (
+            <button
+              type="button"
+              onClick={() => releaseMut.mutate()}
+              disabled={releaseMut.isPending}
+              className="rounded border border-brand-600 bg-white px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+              title={`Release held job ${id}`}
+            >
+              {releaseMut.isPending ? 'Releasing…' : 'Release'}
+            </button>
+          )}
           {!isTerminal && data && (
             <ConfirmButton
               onConfirm={() => removeMut.mutate()}
@@ -88,6 +110,15 @@ export default function JobDetailClient(_props: {
           {removeMut.error instanceof ApiError
             ? removeMut.error.message
             : String(removeMut.error)}
+        </div>
+      )}
+
+      {releaseMut.error && (
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          Release failed:{' '}
+          {releaseMut.error instanceof ApiError
+            ? releaseMut.error.message
+            : String(releaseMut.error)}
         </div>
       )}
 

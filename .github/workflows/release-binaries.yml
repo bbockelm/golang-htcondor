@@ -1,0 +1,194 @@
+name: Release Binaries
+
+# Cross-compiles htcondor-api with the embedded Web UI and JupyterLab
+# tunnel helper, packages each target as a tar.gz with a SHA-256
+# checksum, and uploads the bundle to the GitHub Release for the tag.
+#
+# Mirrors the release-container.yml trigger so a `git tag vX.Y.Z` push
+# (or a UI-created release) produces both the multi-arch container
+# image and downloadable binaries on the same release page.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The frontend export and the cross-compiled JupyterLab helpers are
+  # arch-independent — building them once and reusing them across the
+  # per-target build matrix avoids running npm + 3x go cross-compile
+  # over and over.
+  prepare-assets:
+    name: Prepare embedded assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: cd frontend && npm ci
+
+      - name: Build frontend (static export)
+        run: cd frontend && NODE_ENV=production npm run build
+
+      - name: Cross-compile JupyterLab helpers
+        # Honours JUPYTER_HELPER_TARGETS in the Makefile (currently
+        # linux/amd64, linux/arm64, darwin/arm64). The api binary's
+        # embed.FS picks the right one at submit time based on the
+        # execute slot's platform.
+        run: make build-jupyter-helper
+
+      - name: Upload prepared assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-assets
+          path: |
+            frontend/out
+            httpserver/jupyterhelperbin/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: prepare-assets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Download prepared assets
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-assets
+          path: prepared-assets
+
+      - name: Stage assets into embed paths
+        # Mirror what `make build-prod` does — copy the static export to
+        # httpserver/webui/dist where embed.go picks it up under the
+        # embed_frontend tag, and put the cross-compiled helpers back
+        # into httpserver/jupyterhelperbin/dist for embed_jupyter_helper.
+        run: |
+          rm -rf httpserver/webui/dist
+          cp -r prepared-assets/frontend/out httpserver/webui/dist
+          mkdir -p httpserver/jupyterhelperbin/dist
+          cp -r prepared-assets/httpserver/jupyterhelperbin/dist/. httpserver/jupyterhelperbin/dist/
+          ls httpserver/jupyterhelperbin/dist
+
+      - name: Determine version
+        id: ver
+        run: |
+          # On tag push, GITHUB_REF_NAME is the tag (e.g. v0.0.25).
+          # On workflow_dispatch from a branch, fall back to a dev
+          # marker so the binary still has *something* identifiable.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          COMMIT="$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Build htcondor-api
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.version }}
+          COMMIT: ${{ steps.ver.outputs.commit }}
+        # -s -w strips the symbol table + DWARF info, knocking ~30% off
+        # the binary size. The embedded version is still surfaced via
+        # /api/v1/version because we inject it through -ldflags -X.
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -tags "embed_frontend embed_jupyter_helper" \
+            -ldflags "-s -w \
+              -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
+              -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
+            -o "dist/htcondor-api" \
+            ./cmd/htcondor-api
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          NAME="htcondor-api-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p artifacts
+          tar -czf "artifacts/${NAME}.tar.gz" -C dist htcondor-api
+          (cd artifacts && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          ls -l artifacts
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Attach to GitHub Release
+    # Only attach assets when this run was triggered by a tag push.
+    # workflow_dispatch from a branch produces "dev-*" binaries that
+    # don't correspond to any release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -l artifacts
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/htcondor-api-*.tar.gz
+            artifacts/htcondor-api-*.tar.gz.sha256
+          fail_on_unmatched_files: true

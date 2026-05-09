@@ -120,8 +120,75 @@ func Listen(socketPath string, opts Options) (*Listener, error) {
 
 // SocketPath returns the absolute UDS path the listener is bound to —
 // useful for tests and for emitting log lines that point at the address
-// shared_port has been told to forward to.
+// shared_port has been told to forward to. Returns "" for listeners
+// adopted via AdoptFD (the parent owns the path, not us).
 func (l *Listener) SocketPath() string { return l.socketPath }
+
+// AdoptFD wraps a Unix-domain listening fd that was passed to us via
+// process inheritance (typically from condor_master through
+// CONDOR_INHERIT's SharedPort: token) and returns a Listener that
+// runs the same shared-port handshake on incoming connections as
+// Listen does.
+//
+// The fd must already be in listening state and inheritable. After
+// AdoptFD returns successfully, the Listener owns the fd's lifecycle
+// — its Close will close the listener but will NOT remove the
+// underlying socket file: condor_master created that path under
+// $(DAEMON_SOCKET_DIR), and unlinking it would break the parent's
+// shared_port routing for sibling daemons.
+//
+// On error the fd is closed before returning so the caller doesn't
+// have to track ownership during failure paths.
+func AdoptFD(fd uintptr, opts Options) (*Listener, error) {
+	// os.NewFile takes ownership of the fd; if we hand the fd to
+	// net.FileListener it gets dup'd — we then close ours so we
+	// don't keep a stray reference. Any error path below must close
+	// either the os.File or the resulting net.Listener so the fd
+	// doesn't leak.
+	f := os.NewFile(fd, "shared-port-inherited")
+	if f == nil {
+		return nil, fmt.Errorf("sharedport: invalid inherited fd %d", fd)
+	}
+	ln, err := net.FileListener(f)
+	// FileListener dup'd the fd internally (Go runtime does that for
+	// every os.File-backed listener), so we must close our handle on
+	// success to avoid keeping the original around.
+	if cerr := f.Close(); cerr != nil && err == nil {
+		err = fmt.Errorf("sharedport: close adopted fd dup: %w", cerr)
+	}
+	if err != nil {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		return nil, fmt.Errorf("sharedport: wrap inherited fd %d: %w", fd, err)
+	}
+
+	uln, ok := ln.(*net.UnixListener)
+	if !ok {
+		_ = ln.Close()
+		return nil, fmt.Errorf("sharedport: inherited fd %d is not a Unix-domain listener (got %T)", fd, ln)
+	}
+
+	timeout := opts.HandshakeTimeout
+	if timeout <= 0 {
+		timeout = defaultHandshakeTimeout
+	}
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	l := &Listener{
+		// socketPath intentionally empty — see Close.
+		uln:     uln,
+		conns:   make(chan net.Conn),
+		closed:  make(chan struct{}),
+		timeout: timeout,
+		logf:    logf,
+	}
+	go l.acceptLoop()
+	return l, nil
+}
 
 func (l *Listener) acceptLoop() {
 	for {
@@ -278,7 +345,13 @@ func (l *Listener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.closed)
 		_ = l.uln.Close()
-		_ = os.Remove(l.socketPath)
+		// Only unlink the socket file when we own it (created via
+		// Listen). Listeners adopted via AdoptFD borrow the parent's
+		// listening socket — removing it would orphan any other
+		// daemons the parent is forwarding to.
+		if l.socketPath != "" {
+			_ = os.Remove(l.socketPath)
+		}
 	})
 	// Wait outside the Once: it's idempotent (Wait on a
 	// drained WaitGroup is a no-op) and we want every Close caller —

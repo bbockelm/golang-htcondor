@@ -12,7 +12,7 @@
 // schedd does not backfill it, and the submit code now sets QDate at
 // submit time (see submit.go).
 
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import {
@@ -25,6 +25,7 @@ import {
 } from '@/lib/api';
 import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ChatPanel } from '@/components/ChatPanel';
 
 // HoldReasonCode is part of the projection so we can re-label "Held
 // + spool" as "Uploading Inputs" client-side. See displayJobStatus
@@ -51,6 +52,70 @@ export default function JobsPage() {
       api.jobs.list({ projection: PROJECTION, limit: 1000, owned_by_me: ownedByMe }),
     refetchInterval: 15_000,
   });
+
+  // Chat surface gating. We hit /api/v1/chat/info on mount; the
+  // server returns enabled=false (with a reason) when the LLM key
+  // isn't configured or MCP is off. We additionally require the
+  // user to have at least one visible job — the assistant has
+  // nothing useful to do on an empty queue. Hidden state means the
+  // ChatPanel doesn't render at all (no idle pill, no requests).
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    // Cache for the lifetime of the tab — feature flag, not state.
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled && (data?.jobs.length ?? 0) > 0;
+
+  // Lifted state so the chat's client-side tools can drive the
+  // table view: filter substring, expanded-batch set, and a brief
+  // highlight on a specific job row. The BatchTable consumes
+  // them as props; the ChatPanel consumes them as imperative
+  // hooks.
+  const [filter, setFilter] = useState('');
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [highlighted, setHighlighted] = useState<string | null>(null); // "cluster.proc"
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const expandBatch = useCallback((clusterId: number) => {
+    setExpanded((prev) => {
+      if (prev.has(clusterId)) return prev;
+      const next = new Set(prev);
+      next.add(clusterId);
+      return next;
+    });
+  }, []);
+
+  const highlightJob = useCallback((clusterId: number, procId: number) => {
+    const id = `${clusterId}.${procId}`;
+    setHighlighted(id);
+    // Also expand the containing batch so the row is visible.
+    setExpanded((prev) => {
+      if (prev.has(clusterId)) return prev;
+      const next = new Set(prev);
+      next.add(clusterId);
+      return next;
+    });
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlighted(null), 4000);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
+
+  const chatHooks = useMemo(
+    () => ({
+      setFilter,
+      expandBatch,
+      highlightJob,
+    }),
+    [expandBatch, highlightJob],
+  );
 
   return (
     <div className="space-y-4">
@@ -114,7 +179,51 @@ export default function JobsPage() {
       )}
 
       {data && data.jobs.length > 0 && (
-        <BatchTable jobs={data.jobs} onChange={() => refetch()} />
+        <>
+          <FilterBar value={filter} onChange={setFilter} />
+          <BatchTable
+            jobs={data.jobs}
+            filter={filter}
+            expanded={expanded}
+            setExpanded={setExpanded}
+            highlighted={highlighted}
+            onChange={() => refetch()}
+          />
+        </>
+      )}
+
+      <ChatPanel visible={chatVisible} hooks={chatHooks} />
+    </div>
+  );
+}
+
+// FilterBar is the small substring-search input above the batches.
+// Bound to the lifted `filter` state on JobsPage so the chat's
+// `set_filter` tool can drive it programmatically.
+function FilterBar({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-gray-500">Filter:</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="batch name, cluster id, status…"
+        className="min-w-0 flex-1 max-w-sm rounded border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="text-gray-500 hover:text-gray-800"
+        >
+          clear
+        </button>
       )}
     </div>
   );
@@ -208,16 +317,58 @@ function groupIntoBatches(jobs: ClassAd[]): Batch[] {
   return Array.from(map.values()).sort((a, b) => b.batchID - a.batchID);
 }
 
+// applyBatchFilter does the user-facing substring filter. Both the
+// FilterBar input and the chat's `set_filter` tool drive this. We
+// match against a flat string built per batch — every field a user
+// might reference in the input box: name, cluster id, owner,
+// command line, and the display-status names of the jobs inside.
+//
+// Empty query returns the input unchanged. Multi-token queries
+// (whitespace-separated) require ALL tokens to match SOMEWHERE
+// in the haystack — feels natural for "held training-run" type
+// inputs.
+function applyBatchFilter(batches: Batch[], query: string): Batch[] {
+  const q = query.trim().toLowerCase();
+  if (q === '') return batches;
+  const tokens = q.split(/\s+/);
+  return batches.filter((b) => {
+    const haystack = [
+      b.name,
+      String(b.batchID),
+      b.cmd ?? '',
+      b.args ?? '',
+      // The status names the user actually reads in the row, e.g.
+      // "running", "held", "uploading inputs". Lower-cased so the
+      // substring compare against the lower-cased query is direct.
+      Object.entries(b.statusCounts)
+        .filter(([, n]) => n > 0)
+        .map(([k]) => k)
+        .join(' '),
+    ]
+      .join(' ')
+      .toLowerCase();
+    return tokens.every((t) => haystack.includes(t));
+  });
+}
+
 function BatchTable({
   jobs,
+  filter,
+  expanded,
+  setExpanded,
+  highlighted,
   onChange,
 }: {
   jobs: ClassAd[];
+  filter: string;
+  expanded: Set<number>;
+  setExpanded: React.Dispatch<React.SetStateAction<Set<number>>>;
+  highlighted: string | null; // "cluster.proc" of the chat-highlighted job
   onChange: () => void;
 }) {
-  const batches = groupIntoBatches(jobs);
   const queryClient = useQueryClient();
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const allBatches = groupIntoBatches(jobs);
+  const batches = applyBatchFilter(allBatches, filter);
 
   const toggle = (id: number) =>
     setExpanded((prev) => {
@@ -244,13 +395,25 @@ function BatchTable({
     },
   });
 
-  const removeError = removeBatchMut.error ?? removeJobMut.error;
+  const releaseJobMut = useMutation({
+    mutationFn: (jobID: string) => api.jobs.release(jobID),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      onChange();
+    },
+  });
+
+  const removeError =
+    removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
 
   return (
     <div className="space-y-2">
       {removeError && (
         <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          Remove failed:{' '}
+          {/* Failure message is shared between Remove and Release —
+              both kinds of mutation surface here, label with whichever
+              actually failed so the user can tell what happened. */}
+          {releaseJobMut.error ? 'Release' : 'Remove'} failed:{' '}
           {removeError instanceof ApiError
             ? removeError.message
             : String(removeError)}
@@ -275,14 +438,18 @@ function BatchTable({
                 key={b.batchID}
                 batch={b}
                 expanded={expanded.has(b.batchID)}
+                highlighted={highlighted}
                 onToggle={() => toggle(b.batchID)}
                 onRemoveBatch={() => removeBatchMut.mutate(b.batchID)}
                 onRemoveJob={(jobID) => removeJobMut.mutate(jobID)}
+                onReleaseJob={(jobID) => releaseJobMut.mutate(jobID)}
                 pendingBatch={
                   removeBatchMut.isPending && removeBatchMut.variables === b.batchID
                 }
                 pendingJob={removeJobMut.variables}
                 pendingJobActive={removeJobMut.isPending}
+                pendingRelease={releaseJobMut.variables}
+                pendingReleaseActive={releaseJobMut.isPending}
               />
             ))}
           </tbody>
@@ -295,21 +462,29 @@ function BatchTable({
 function BatchRow({
   batch,
   expanded,
+  highlighted,
   onToggle,
   onRemoveBatch,
   onRemoveJob,
+  onReleaseJob,
   pendingBatch,
   pendingJob,
   pendingJobActive,
+  pendingRelease,
+  pendingReleaseActive,
 }: {
   batch: Batch;
   expanded: boolean;
+  highlighted: string | null;
   onToggle: () => void;
   onRemoveBatch: () => void;
   onRemoveJob: (jobID: string) => void;
+  onReleaseJob: (jobID: string) => void;
   pendingBatch: boolean;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingRelease: string | undefined;
+  pendingReleaseActive: boolean;
 }) {
   return (
     <>
@@ -368,9 +543,13 @@ function BatchRow({
           <td colSpan={6} className="bg-gray-50 p-0">
             <JobsSubTable
               jobs={batch.jobs}
+              highlighted={highlighted}
               onRemoveJob={onRemoveJob}
+              onReleaseJob={onReleaseJob}
               pendingJob={pendingJob}
               pendingJobActive={pendingJobActive}
+              pendingRelease={pendingRelease}
+              pendingReleaseActive={pendingReleaseActive}
             />
           </td>
         </tr>
@@ -381,14 +560,22 @@ function BatchRow({
 
 function JobsSubTable({
   jobs,
+  highlighted,
   onRemoveJob,
+  onReleaseJob,
   pendingJob,
   pendingJobActive,
+  pendingRelease,
+  pendingReleaseActive,
 }: {
   jobs: BatchJob[];
+  highlighted: string | null;
   onRemoveJob: (id: string) => void;
+  onReleaseJob: (id: string) => void;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingRelease: string | undefined;
+  pendingReleaseActive: boolean;
 }) {
   return (
     <div className="border-t border-gray-200">
@@ -404,7 +591,19 @@ function JobsSubTable({
         </thead>
         <tbody className="divide-y divide-gray-200">
           {jobs.map((j) => (
-            <tr key={j.id} className="hover:bg-white">
+            <tr
+              key={j.id}
+              className={
+                j.id === highlighted
+                  ? // animate-pulse-twice would be cute but we don't
+                    // have a custom keyframe; a yellow flash via the
+                    // standard pulse class for ~4 seconds (controlled
+                    // by setHighlighted(null) on a timer in the
+                    // parent) reads as "the assistant is pointing
+                    // here right now".
+                    'bg-yellow-100 animate-pulse'
+                  : 'hover:bg-white'
+              }>
               <td className="px-3 py-1.5 font-mono">
                 <Link
                   href={`/jobs/${j.id}`}
@@ -436,6 +635,21 @@ function JobsSubTable({
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="inline-flex items-center gap-1.5">
+                  {j.display.key === 'held' && (
+                    <button
+                      type="button"
+                      onClick={() => onReleaseJob(j.id)}
+                      disabled={
+                        pendingReleaseActive && pendingRelease === j.id
+                      }
+                      className="rounded border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+                      title={`Release held job ${j.id}`}
+                    >
+                      {pendingReleaseActive && pendingRelease === j.id
+                        ? '…'
+                        : 'Release'}
+                    </button>
+                  )}
                   <ConfirmButton
                     compact
                     onConfirm={() => onRemoveJob(j.id)}

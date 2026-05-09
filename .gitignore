@@ -45,6 +45,7 @@ cmd/htcondor-api/tmp/
 
 # Build output (Makefile `build-prod` writes here)
 /bin/
+/httpserver/jupyterhelperbin/dist/
 
 # Go cache directories (when GOCACHE/GOTMPDIR point at the repo)
 /.gocache/
@@ -55,6 +56,12 @@ cmd/htcondor-api/tmp/
 # .keep placeholder is tracked so go:embed always finds something.
 /httpserver/webui/dist/*
 !/httpserver/webui/dist/.keep
+
+# HTCondor docs embed dir, staged by `make stage-condor-docs` from
+# reference/htcondor/docs. Only the .keep placeholder is tracked so
+# go:embed always has a directory to walk under the no-tag build.
+/condordocs/dist/*
+!/condordocs/dist/.keep
 
 # Runtime log files (job.log etc. from running jobs/demos in the repo)
 /job.log

@@ -369,6 +369,33 @@ export function applyResourcesToBody(
   return next;
 }
 
+/**
+ * Ensure `transfer_input_files` contains `token`. If the attribute is
+ * absent, sets it to just `token`. If it's present but the token isn't
+ * in the comma-separated list, appends `, token`. If it's already
+ * there, no-op.
+ *
+ * Used by the batch-submit upload mode to wire the per-job filename
+ * variable into the submit body without clobbering whatever else the
+ * template lists.
+ */
+export function ensureTransferInput(text: string, token: string): string {
+  const current = getAttribute(text, 'transfer_input_files');
+  if (current === undefined || current.trim() === '') {
+    return setAttribute(text, 'transfer_input_files', token);
+  }
+  // HTCondor tolerates comma- or whitespace-separated lists; tokenize
+  // on either so we don't double-add when the user wrote
+  // `transfer_input_files = $(file)` (no comma).
+  const tokens = current.split(/[\s,]+/).filter(Boolean);
+  if (tokens.includes(token)) return text;
+  return setAttribute(
+    text,
+    'transfer_input_files',
+    `${current.trim()}, ${token}`,
+  );
+}
+
 function applyOrRemove(text: string, key: string, value: string): string {
   if (value.trim() === '') return removeAttribute(text, key);
   return setAttribute(text, key, value);

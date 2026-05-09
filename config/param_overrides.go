@@ -37,4 +37,28 @@ var paramOverrides = []struct {
 		Name:    "SEC_DEFAULT_AUTHENTICATION_METHODS",
 		Default: "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL",
 	},
+	{
+		// HTTP_API_LOG follows HTCondor's per-daemon log convention:
+		// every DC daemon's log path defaults to $(LOG)/<CamelCase>Log
+		// (see param_info.in's MASTER_LOG, NEGOTIATOR_LOG, etc.).
+		// HTTP_API isn't in HTCondor's upstream param_info, so the
+		// generated paramDefaults table doesn't carry it — without
+		// this override, an operator who only sets `HTTP_API =
+		// /usr/sbin/htcondor-api` and adds it to DAEMON_LIST would
+		// get a "No LOG path configured, using stdout" startup log
+		// even though `$(LOG)` is set on the host. Defaulting here
+		// matches what every other daemon does and what operators
+		// expect.
+		Name:    "HTTP_API_LOG",
+		Default: "$(LOG)/HttpApiLog",
+	},
+	{
+		// Companion rotation cap, mirroring MAX_SCHEDD_LOG /
+		// MAX_MASTER_LOG. $(MAX_DEFAULT_LOG) is HTCondor's
+		// pool-wide rotation default (10 MiB out of the box) —
+		// inheriting it keeps HTTP_API consistent with the rest of
+		// the pool's log-management policy.
+		Name:    "MAX_HTTP_API_LOG",
+		Default: "$(MAX_DEFAULT_LOG)",
+	},
 }
