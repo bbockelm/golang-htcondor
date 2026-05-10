@@ -117,16 +117,17 @@ func TestMCPHTTPIntegration(t *testing.T) {
 
 	// Create HTTP server with MCP enabled
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: poolKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      trustDomain,
-		EnableMCP:      true,
-		OAuth2DBPath:   oauth2DBPath,
-		OAuth2Issuer:   baseURL,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           poolKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                trustDomain,
+		EnableMCP:                true,
+		OAuth2DBPath:             oauth2DBPath,
+		OAuth2Issuer:             baseURL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

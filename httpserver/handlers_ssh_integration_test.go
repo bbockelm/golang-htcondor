@@ -149,14 +149,15 @@ queue
 	}
 
 	server, err := NewServer(Config{
-		ListenAddr:     "127.0.0.1:0",
-		ScheddName:     location.Name,
-		ScheddAddr:     location.Address,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.htcondor.org",
-		UIDDomain:      "test.htcondor.org",
-		OAuth2DBPath:   filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
+		ListenAddr:               "127.0.0.1:0",
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.htcondor.org",
+		UIDDomain:                "test.htcondor.org",
+		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

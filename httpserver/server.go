@@ -35,23 +35,33 @@ type Server struct {
 
 // Config holds server configuration
 type Config struct {
-	ListenAddr      string              // Address to listen on (e.g., ":8080")
-	ScheddName      string              // Schedd name
-	ScheddAddr      string              // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader      string              // HTTP header to extract username from (optional)
-	SigningKeyPath  string              // Path to token signing key (optional, for token generation)
-	TrustDomain     string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain       string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL     string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCertFile     string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile      string              // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile   string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout     time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout    time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout     time.Duration       // HTTP idle timeout (default: 120s)
-	Collector       *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics   bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL time.Duration       // Metrics cache TTL (default: 10s)
+	ListenAddr string // Address to listen on (e.g., ":8080")
+	ScheddName string // Schedd name
+	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	UserHeader string // HTTP header to extract username from (optional)
+	// UserHeaderTrustedProxies is the CIDR list from which UserHeader
+	// is honored. See HandlerConfig.UserHeaderTrustedProxies for
+	// full docs and the security rationale. Configurable via
+	// HTTP_API_USER_HEADER_TRUSTED_PROXIES.
+	UserHeaderTrustedProxies []string
+	// UserHeaderTrustAnyUnsafe disables the trusted-proxy gate and
+	// honors UserHeader from any source. Demo / test only — see
+	// HandlerConfig.UserHeaderTrustAnyUnsafe. Configurable via
+	// HTTP_API_USER_HEADER_TRUST_ANY.
+	UserHeaderTrustAnyUnsafe bool
+	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
+	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCertFile              string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile               string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout              time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout             time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout              time.Duration       // HTTP idle timeout (default: 120s)
+	Collector                *htcondor.Collector // Collector for metrics (optional)
+	EnableMetrics            bool                // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL          time.Duration       // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
 	MetricsPublic  bool
@@ -151,6 +161,8 @@ func NewServer(cfg Config) (*Server, error) {
 		ScheddName:                  cfg.ScheddName,
 		ScheddAddr:                  cfg.ScheddAddr,
 		UserHeader:                  cfg.UserHeader,
+		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
+		UserHeaderTrustAnyUnsafe:    cfg.UserHeaderTrustAnyUnsafe,
 		SigningKeyPath:              cfg.SigningKeyPath,
 		TrustDomain:                 cfg.TrustDomain,
 		UIDDomain:                   cfg.UIDDomain,

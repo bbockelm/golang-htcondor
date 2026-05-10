@@ -892,16 +892,17 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 	// OAuth2Issuer will use placeholder, actual baseURL computed after server starts
 	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     "127.0.0.1:9618",
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: poolKeyPath,
-		TrustDomain:    "test.local",
-		UIDDomain:      "test.local",
-		EnableMCP:      true,
-		OAuth2DBPath:   oauth2DBPath,
-		OAuth2Issuer:   placeholderBaseURL,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               "127.0.0.1:9618",
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           poolKeyPath,
+		TrustDomain:              "test.local",
+		UIDDomain:                "test.local",
+		EnableMCP:                true,
+		OAuth2DBPath:             oauth2DBPath,
+		OAuth2Issuer:             placeholderBaseURL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

@@ -114,15 +114,16 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      "test.htcondor.org",
-		Collector:      collector,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                "test.htcondor.org",
+		Collector:                collector,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -310,15 +311,16 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      "test.htcondor.org",
-		Collector:      collector,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                "test.htcondor.org",
+		Collector:                collector,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -1488,15 +1490,16 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
 
 	server, err = NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.htcondor.org",
-		UIDDomain:      "test.htcondor.org",
-		Collector:      collector,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.htcondor.org",
+		UIDDomain:                "test.htcondor.org",
+		Collector:                collector,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		stopCondorMaster(condorMaster, t)
@@ -1653,18 +1656,19 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
 
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddAddr:     scheddAddr,
-		ScheddName:     "local",
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.domain",
-		UIDDomain:      "test.domain",
-		Collector:      collector,
-		ReadTimeout:    2 * time.Second, // Aggressive timeout for testing
-		WriteTimeout:   2 * time.Second,
-		IdleTimeout:    5 * time.Second,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddAddr:               scheddAddr,
+		ScheddName:               "local",
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.domain",
+		UIDDomain:                "test.domain",
+		Collector:                collector,
+		ReadTimeout:              2 * time.Second, // Aggressive timeout for testing
+		WriteTimeout:             2 * time.Second,
+		IdleTimeout:              5 * time.Second,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -2185,15 +2189,16 @@ func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir 
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      "test.htcondor.org",
-		Collector:      collector,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                "test.htcondor.org",
+		Collector:                collector,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

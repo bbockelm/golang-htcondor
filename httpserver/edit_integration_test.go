@@ -74,14 +74,15 @@ func TestHTTPEditJobIntegration(t *testing.T) {
 
 	// Setup test server
 	server, err := NewServer(Config{
-		ListenAddr:     "127.0.0.1:0",
-		ScheddName:     location.Name,
-		ScheddAddr:     location.Address,
-		UserHeader:     "X-Test-User", // Enable header-based auth for testing
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.htcondor.org",
-		UIDDomain:      "test.htcondor.org",
-		OAuth2DBPath:   filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
+		ListenAddr:               "127.0.0.1:0",
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User", // Enable header-based auth for testing
+		UserHeaderTrustAnyUnsafe: true,          // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.htcondor.org",
+		UIDDomain:                "test.htcondor.org",
+		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -331,14 +332,15 @@ func TestHTTPBulkEditJobsIntegration(t *testing.T) {
 
 	// Setup test server
 	server, err := NewServer(Config{
-		ListenAddr:     "127.0.0.1:0",
-		ScheddName:     location.Name,
-		ScheddAddr:     location.Address,
-		UserHeader:     "X-Test-User", // Enable header-based auth for testing
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    "test.htcondor.org",
-		UIDDomain:      "test.htcondor.org",
-		OAuth2DBPath:   filepath.Join(harness.GetSpoolDir(), "oauth2.db"), // Use temp directory for database
+		ListenAddr:               "127.0.0.1:0",
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User", // Enable header-based auth for testing
+		UserHeaderTrustAnyUnsafe: true,          // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.htcondor.org",
+		UIDDomain:                "test.htcondor.org",
+		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2.db"), // Use temp directory for database
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

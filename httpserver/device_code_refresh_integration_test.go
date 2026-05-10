@@ -110,16 +110,17 @@ func TestDeviceCodeWithRefreshFlow(t *testing.T) {
 
 	// Create HTTP server with MCP enabled (we'll update the URL after getting the actual port)
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: poolKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      trustDomain,
-		EnableMCP:      true,
-		OAuth2DBPath:   oauth2DBPath,
-		OAuth2Issuer:   "http://127.0.0.1:0", // Will use actual address from GetAddr()
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           poolKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                trustDomain,
+		EnableMCP:                true,
+		OAuth2DBPath:             oauth2DBPath,
+		OAuth2Issuer:             "http://127.0.0.1:0", // Will use actual address from GetAddr()
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

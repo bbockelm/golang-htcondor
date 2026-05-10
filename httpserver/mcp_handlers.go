@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -552,36 +553,19 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// User approved - create session and complete authorization
 			session := DefaultOpenIDConnectSession(username)
 
-			// Per-scope consent: the consent page renders each
-			// requested scope as a checkbox (except `openid`, which
-			// is mandatory). The form delivers the user's accepted
-			// subset back via `scope` form values. We intersect:
-			//
-			//   accepted = set of scopes the user actually checked
-			//   policy   = getScopesForGroups(groups, accepted)
-			//
-			// `policy` is what we grant. The user can never grant
-			// MORE than the group policy allows (because policy
-			// re-filters); they can grant LESS by unchecking. This
-			// closes the audit C3 "all-or-nothing consent" gap.
+			// Per-scope consent: a v1 consent page (rendered by
+			// renderConsentPage) carries `consent_form_version=1`
+			// and a `scope=...` value per kept-checked scope.
+			// Legacy / programmatic clients post just
+			// `action=approve` without that marker, in which case
+			// we approve the originally-requested set. This split
+			// closes the audit C3 "all-or-nothing consent" gap
+			// for browser users while staying backward-compatible
+			// with non-form clients (notably integration tests
+			// and any OAuth2 helper that drives consent
+			// programmatically without rendering HTML).
 			requestedScopes := ar.GetRequestedScopes()
-			requestedSet := make(map[string]bool, len(requestedScopes))
-			for _, s := range requestedScopes {
-				requestedSet[s] = true
-			}
-			// Filter accepted = (form values) ∩ (originally requested),
-			// so a malicious client can't sneak extra scopes through
-			// the form. Always include "openid" because OIDC mandates it.
-			acceptedSet := map[string]bool{"openid": true}
-			for _, formScope := range r.Form["scope"] {
-				if requestedSet[formScope] {
-					acceptedSet[formScope] = true
-				}
-			}
-			acceptedScopes := make([]string, 0, len(acceptedSet))
-			for s := range acceptedSet {
-				acceptedScopes = append(acceptedScopes, s)
-			}
+			acceptedScopes := narrowConsentScopes(requestedScopes, r.Form, "consent_form_version")
 
 			// Grant scopes based on group membership intersected
 			// with what the user accepted on the form.
@@ -1516,7 +1500,7 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// Create session for user
 			session := DefaultOpenIDConnectSession(username)
 
-			acceptedScopes := narrowDeviceApprovalScopes(r.Form["scope"], request)
+			acceptedScopes := narrowDeviceApprovalScopes(r.Form, request)
 
 			// Approve the device code with the user-narrowed scope set.
 			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
@@ -1621,8 +1605,18 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
         </div>`, html.EscapeString(p.DeviceCode))
 	}
 
-	// Build hidden fields
+	// Build hidden fields. We always emit `consent_form_version=1`
+	// so the POST handler can tell apart "this submission came
+	// from the per-scope-checkbox UI introduced in 2026-05" vs
+	// "this is a legacy non-checkbox client posting `action=approve`
+	// without enumerating scopes". The legacy path approves the
+	// originally-granted set; the v1 path honors only the scopes
+	// the user kept checked. Without this marker, integration
+	// tests that programmatically post approve (no form rendering)
+	// would see all their scopes filtered out except openid,
+	// breaking refresh-token flows that need offline_access.
 	var hiddenFieldsHTML strings.Builder
+	hiddenFieldsHTML.WriteString("            <input type=\"hidden\" name=\"consent_form_version\" value=\"1\">\n")
 	for name, value := range p.HiddenFields {
 		fmt.Fprintf(&hiddenFieldsHTML, "            <input type=\"hidden\" name=\"%s\" value=\"%s\">\n",
 			html.EscapeString(name), html.EscapeString(value))
@@ -2014,17 +2008,69 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 	return true
 }
 
+// narrowConsentScopes computes the user-approved scope subset for
+// the auth-code consent flow.
+//
+// Inputs:
+//   - requestedScopes: what the OAuth2 client originally asked for.
+//   - form: the parsed POST body.
+//   - markerField: the name of the hidden marker input that the v1
+//     consent page emits (renderConsentPage sets
+//     `consent_form_version=1`). Its presence tells the handler the
+//     POST came from the per-scope-checkbox UI.
+//
+// Behavior:
+//   - If markerField is absent, the caller is a legacy non-checkbox
+//     client (or an integration test) — return the full
+//     requestedScopes set verbatim. Backward-compatible.
+//   - If markerField is present, return (form["scope"] ∩
+//     requestedScopes) plus mandatory `openid`. The user can grant
+//     any subset of what was requested by toggling checkboxes.
+//
+// In both cases the caller will run the result through
+// getScopesForGroups for the final policy intersection; this
+// helper handles only the user-acceptance dimension.
+func narrowConsentScopes(requestedScopes []string, form url.Values, markerField string) []string {
+	if !form.Has(markerField) {
+		out := make([]string, len(requestedScopes))
+		copy(out, requestedScopes)
+		return out
+	}
+	requestedSet := make(map[string]bool, len(requestedScopes))
+	for _, s := range requestedScopes {
+		requestedSet[s] = true
+	}
+	acceptedSet := map[string]bool{"openid": true}
+	for _, s := range form["scope"] {
+		if requestedSet[s] {
+			acceptedSet[s] = true
+		}
+	}
+	out := make([]string, 0, len(acceptedSet))
+	for s := range acceptedSet {
+		out = append(out, s)
+	}
+	return out
+}
+
 // narrowDeviceApprovalScopes computes the intersection of three sets:
-//   - the scopes the user checked on the consent form (formAccepted),
+//   - the scopes the user checked on the consent form (form["scope"]),
 //   - the scopes the device originally requested,
 //   - the scopes group policy granted at device-authorize time
 //     (request.GetGrantedScopes()).
 //
-// `openid` is always included because OIDC requires it and the rest
-// of the flow depends on it. Pulling this out of
-// handleOAuth2DeviceVerify is purely a complexity-budget split — the
-// helper is exercised from one call site.
-func narrowDeviceApprovalScopes(formAccepted []string, request fosite.Requester) []string {
+// As with narrowConsentScopes, the form's `consent_form_version`
+// marker selects between v1 (per-scope) and legacy (approve all
+// originally-granted) behavior. `openid` is always included
+// because OIDC requires it.
+func narrowDeviceApprovalScopes(form url.Values, request fosite.Requester) []string {
+	if !form.Has("consent_form_version") {
+		// Legacy: approve everything the device-authorize step
+		// already granted via group policy.
+		out := make([]string, 0, len(request.GetGrantedScopes()))
+		out = append(out, request.GetGrantedScopes()...)
+		return out
+	}
 	requestedSet := make(map[string]bool)
 	for _, s := range request.GetRequestedScopes() {
 		requestedSet[s] = true
@@ -2034,7 +2080,7 @@ func narrowDeviceApprovalScopes(formAccepted []string, request fosite.Requester)
 		grantedFromPolicy[s] = true
 	}
 	acceptedSet := map[string]bool{"openid": true}
-	for _, s := range formAccepted {
+	for _, s := range form["scope"] {
 		if requestedSet[s] && grantedFromPolicy[s] {
 			acceptedSet[s] = true
 		}

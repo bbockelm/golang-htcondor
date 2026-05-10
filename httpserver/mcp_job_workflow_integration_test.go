@@ -119,15 +119,16 @@ func TestMCPJobWorkflowIntegration(t *testing.T) {
 	// Create HTTP server with MCP enabled
 	// Note: We'll update HTTPBaseURL after getting the actual port
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: poolKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      trustDomain,
-		EnableMCP:      true,
-		OAuth2DBPath:   oauth2DBPath,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           poolKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                trustDomain,
+		EnableMCP:                true,
+		OAuth2DBPath:             oauth2DBPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

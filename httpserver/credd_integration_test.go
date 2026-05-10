@@ -523,16 +523,17 @@ func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, pass
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
-		ListenAddr:     serverAddr,
-		ScheddName:     "local",
-		ScheddAddr:     scheddAddr,
-		UserHeader:     "X-Test-User",
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      "test.htcondor.org",
-		Collector:      collector,
-		OAuth2DBPath:   oauth2DBPath,
-		Credd:          creddClient,
+		ListenAddr:               serverAddr,
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                "test.htcondor.org",
+		Collector:                collector,
+		OAuth2DBPath:             oauth2DBPath,
+		Credd:                    creddClient,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)

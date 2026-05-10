@@ -989,6 +989,43 @@ func getUserHeaderConfig(cfg *config.Config) (userHeaderFromConfig, uidDomain, t
 	return userHeaderFromConfig, uidDomain, trustDomain
 }
 
+// loadUserHeaderTrustedProxies parses the comma-separated CIDR list
+// the operator must configure when HTTP_API_USER_HEADER is set in
+// production. Empty when unset; the Handler will refuse to start if
+// UserHeader is set without either this list OR the unsafe override.
+func loadUserHeaderTrustedProxies(cfg *config.Config) []string {
+	v, ok := cfg.Get("HTTP_API_USER_HEADER_TRUSTED_PROXIES")
+	if !ok || v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// loadUserHeaderTrustAnyUnsafe reports whether the operator has
+// explicitly opted into accepting the user header from any source IP.
+// Demo / test only; HandlerConfig logs a loud warning when this is
+// on. Configurable via HTTP_API_USER_HEADER_TRUST_ANY (any value
+// HTCondor's config parser treats as boolean-true: "true", "1",
+// "yes", "on").
+func loadUserHeaderTrustAnyUnsafe(cfg *config.Config) bool {
+	v, ok := cfg.Get("HTTP_API_USER_HEADER_TRUST_ANY")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // setupCollector creates collector from CLI flag or config
 func setupCollector(cfg *config.Config, logger *logging.Logger) *htcondor.Collector {
 	collectorHostValue := *collectorHost
@@ -1163,23 +1200,25 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	// Create and start server
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:     listenAddrFromConfig,
-		ScheddName:     scheddNameValue,
-		ScheddAddr:     scheddAddrValue,
-		UserHeader:     userHeaderFromConfig,
-		SigningKeyPath: signingKeyPath,
-		HTTPBaseURL:    httpBaseURL,
-		TLSCertFile:    tlsCertFile,
-		TLSKeyFile:     tlsKeyFile,
-		TLSCACertFile:  tlsCACertFile,
-		TrustDomain:    trustDomain,
-		UIDDomain:      uidDomain,
-		ReadTimeout:    readTimeout,
-		WriteTimeout:   writeTimeout,
-		IdleTimeout:    idleTimeout,
-		Collector:      collector,
-		Logger:         logger,
-		EnableMCP:      mcpCfg.enabled,
+		ListenAddr:               listenAddrFromConfig,
+		ScheddName:               scheddNameValue,
+		ScheddAddr:               scheddAddrValue,
+		UserHeader:               userHeaderFromConfig,
+		UserHeaderTrustedProxies: loadUserHeaderTrustedProxies(cfg),
+		UserHeaderTrustAnyUnsafe: loadUserHeaderTrustAnyUnsafe(cfg),
+		SigningKeyPath:           signingKeyPath,
+		HTTPBaseURL:              httpBaseURL,
+		TLSCertFile:              tlsCertFile,
+		TLSKeyFile:               tlsKeyFile,
+		TLSCACertFile:            tlsCACertFile,
+		TrustDomain:              trustDomain,
+		UIDDomain:                uidDomain,
+		ReadTimeout:              readTimeout,
+		WriteTimeout:             writeTimeout,
+		IdleTimeout:              idleTimeout,
+		Collector:                collector,
+		Logger:                   logger,
+		EnableMCP:                mcpCfg.enabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,
 		KEKFilePath:                loadKEKFilePath(cfg, logger),
@@ -1505,20 +1544,27 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
-		ListenAddr:     *listenAddr,
-		UserHeader:     *userHeader,
-		SigningKeyPath: signingKeyPath,
-		TrustDomain:    trustDomain,
-		UIDDomain:      uidDomain,
-		HTTPBaseURL:    httpBaseURL,
-		TLSCertFile:    certPath,
-		TLSKeyFile:     keyPath,
-		TLSCACertFile:  caPath,
-		Collector:      collector,
-		Logger:         logger,
-		Token:          serverToken, // Token for daemon authentication
-		EnableMCP:      true,        // Enable MCP in demo mode
-		DBPath:         appDBPath,
+		ListenAddr: *listenAddr,
+		UserHeader: *userHeader,
+		// Demo mode runs on a single host with no upstream proxy;
+		// honoring the user header from any source is fine because
+		// demo binds to localhost (or the operator's chosen demo
+		// host) and is meant for ad-hoc development. The server
+		// logs a loud warning at startup so this can't accidentally
+		// leak into production.
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              trustDomain,
+		UIDDomain:                uidDomain,
+		HTTPBaseURL:              httpBaseURL,
+		TLSCertFile:              certPath,
+		TLSKeyFile:               keyPath,
+		TLSCACertFile:            caPath,
+		Collector:                collector,
+		Logger:                   logger,
+		Token:                    serverToken, // Token for daemon authentication
+		EnableMCP:                true,        // Enable MCP in demo mode
+		DBPath:                   appDBPath,
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
