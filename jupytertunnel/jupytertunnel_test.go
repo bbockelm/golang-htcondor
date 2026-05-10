@@ -492,15 +492,26 @@ func TestTokenSingleUse(t *testing.T) {
 	}
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	// firstAcceptDone signals that the server-side AcceptTunnel for
+	// the FIRST connection has finished (success or failure). Without
+	// this synchronization, dialOnce() returns once the WS handshake
+	// completes, but the handler's AcceptTunnel runs after — so the
+	// test's second AcceptTunnel below could race in BEFORE the
+	// nonce is burned, see an empty `burned` map, and succeed. That
+	// race fired ~0.05% of the time when stress-testing this test
+	// (1 fail in 2000 runs).
+	firstAcceptDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			close(firstAcceptDone)
 			return
 		}
 		// Take the first one and let the registry burn the nonce, then
 		// the second connection attempt should fail.
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		_, err = reg.AcceptTunnel(id, bearer, ws)
+		close(firstAcceptDone)
 		if err != nil {
 			_ = ws.Close()
 			return
@@ -532,6 +543,13 @@ func TestTokenSingleUse(t *testing.T) {
 		// websocket.ErrBadHandshake covers "instance already closed" race;
 		// either way the first attempt did burn the nonce.
 		t.Logf("first dial returned: %v", err)
+	}
+	// Wait for the server-side AcceptTunnel to actually run; only
+	// after that has the nonce been burned in the registry.
+	select {
+	case <-firstAcceptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first AcceptTunnel to complete")
 	}
 	// Second redemption with same token must NOT succeed in registering.
 	// We can't easily inspect the websocket result, but the registry side
