@@ -2670,6 +2670,25 @@ func (s *Handler) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Override the global CSP for this route. The default policy set
+	// in applySecurityHeaders is `default-src 'self'`, which blocks
+	// the Swagger UI assets we pull from unpkg.com. Until we bundle
+	// swagger-ui-dist into the binary (TODO: ship the assets via
+	// go:embed so this route works air-gapped), allow unpkg + the
+	// cross-origin font/style/script the bundle needs.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"style-src 'self' 'unsafe-inline' https://unpkg.com; "+
+			"script-src 'self' 'unsafe-inline' https://unpkg.com; "+
+			"img-src 'self' data: https://unpkg.com; "+
+			"font-src 'self' data: https://unpkg.com; "+
+			// connect-src must include unpkg so browser devtools can
+			// fetch the .js.map sourcemaps the swagger-ui bundle
+			// references. Not fetching them is harmless (Swagger UI
+			// still runs) but produces noisy console errors.
+			"connect-src 'self' https://unpkg.com; "+
+			"frame-ancestors 'self'; "+
+			"base-uri 'self'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 

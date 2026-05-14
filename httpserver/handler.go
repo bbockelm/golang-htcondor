@@ -897,7 +897,19 @@ func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _
 // accepted the token — and only at that point trust the token's
 // `sub` claim for identity decisions like ownedByMe filtering.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	applySecurityHeaders(w)
+	// Don't impose our security headers on transparent reverse-proxy
+	// paths. JupyterLab in particular needs `script-src
+	// 'unsafe-eval'` (it compiles JSON schemas at runtime via
+	// `new Function`) and ships its own CSP / X-Frame-Options /
+	// nosniff in the upstream response. If we set our defaults
+	// first, the proxy's later `Header().Set` overrides ours —
+	// EXCEPT for keys Jupyter doesn't bother to send, where our
+	// defaults survive and break the app. Cleanest split: skip the
+	// middleware entirely for proxy paths and let the upstream
+	// response control its own headers.
+	if !isTransparentProxyPath(r.URL.Path) {
+		applySecurityHeaders(w)
+	}
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
 	defer h.markValidatedOnSuccess(r, sw)
 	if h.httpMetricsState != nil {
@@ -905,6 +917,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(sw, r)
+}
+
+// isTransparentProxyPath reports whether the given request path is
+// served by a transparent reverse proxy whose upstream owns the
+// response headers (and in particular CSP). Today this is just the
+// JupyterLab tunnel path; add to the list when introducing new
+// proxy passthroughs.
+func isTransparentProxyPath(p string) bool {
+	return strings.HasPrefix(p, "/api/v1/jupyter/")
 }
 
 // statusCapturingResponseWriter records the status code passed to
