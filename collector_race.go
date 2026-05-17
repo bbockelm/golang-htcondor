@@ -233,7 +233,9 @@ func raceDial[T raceCloseable](
 // circuits straight to ConnectAndAuthenticate so the no-failover
 // case pays no goroutine / channel overhead.
 func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.CommandType) (*client.HTCondorClient, string, error) {
-	addrs := c.addresses
+	// orderedAddrs applies the sticky-preferred reordering on top
+	// of the shuffled construction order.
+	addrs := c.orderedAddrs()
 	if len(addrs) == 0 {
 		// Fallback: c.addresses should be populated by NewCollector,
 		// but a hand-built &Collector{address: "…"} could skip it.
@@ -255,6 +257,7 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 		if err != nil {
 			return nil, addr, err
 		}
+		c.notePreferred(addr)
 		return cl, addr, nil
 	}
 
@@ -262,7 +265,7 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 	if stagger <= 0 {
 		stagger = DefaultCollectorRaceStagger
 	}
-	return raceDial(ctx, addrs, stagger,
+	cl, winner, err := raceDial(ctx, addrs, stagger,
 		func(actx context.Context, addr string) (*client.HTCondorClient, error) {
 			secConfig, err := GetSecurityConfigOrDefault(actx, nil, int(cmd), "CLIENT", addr)
 			if err != nil {
@@ -270,4 +273,12 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 			}
 			return client.ConnectAndAuthenticate(actx, addr, secConfig)
 		})
+	if err != nil {
+		return nil, winner, err
+	}
+	// Mark the winning address as preferred so subsequent dials
+	// from this Collector go to it first (the "sticky" half of the
+	// failover policy).
+	c.notePreferred(winner)
+	return cl, winner, nil
 }

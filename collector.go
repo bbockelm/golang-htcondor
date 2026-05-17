@@ -3,7 +3,9 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -32,17 +34,39 @@ const (
 // primary collector falls over to the secondary quickly. See
 // collector_race.go for the protocol; `raceStagger == 0` (the
 // default) means DefaultCollectorRaceStagger.
+//
+// Address ordering inside a list follows two principles, matching
+// the C++ HTCondor client:
+//
+//  1. At construction, the address list is shuffled. A fleet of
+//     identically-configured clients would otherwise pile onto the
+//     same primary collector; shuffling spreads load.
+//  2. After a successful dial, the winning address becomes "sticky"
+//     and is moved to position 0 for subsequent dials. Sustained
+//     traffic from one client therefore lands on a single collector
+//     until that collector fails, at which point the race naturally
+//     promotes whichever address won the failover.
 type Collector struct {
 	// address is the raw, user-supplied string (preserved for
 	// Address() so logs match what the user actually configured).
 	address string
-	// addresses is the parsed list of collector addresses, in the
-	// order the user gave them. A single-entry list is normal;
-	// multi-entry lists are raced.
+	// addresses is the parsed list of collector addresses. Shuffled
+	// at construction (single-entry lists are left alone). The
+	// preferred-address override below is applied per-dial without
+	// mutating this slice, so the shuffle remains the steady-state
+	// fallback order.
 	addresses []string
 	// raceStagger overrides the default per-attempt delay between
 	// concurrent connects. Zero = use DefaultCollectorRaceStagger.
 	raceStagger time.Duration
+
+	// mu guards the sticky-winner state below. dialAndAuthenticate
+	// reads `preferred` while building the per-attempt order and
+	// writes it on success; concurrent callers are common (every
+	// QueryAds/Advertise can happen in parallel), so the lock is
+	// load-bearing.
+	mu        sync.Mutex
+	preferred string // last-successful address; "" before first dial
 }
 
 // NewCollector creates a new Collector instance. address may be a
@@ -51,11 +75,22 @@ type Collector struct {
 //	NewCollector("cm-1.ospool.osg-htc.org,cm-2.ospool.osg-htc.org")
 //
 // With a list, attempts are raced with a 150 ms stagger and the
-// first that returns an authenticated CEDAR stream wins.
+// first that returns an authenticated CEDAR stream wins. The list
+// is shuffled at construction; see the Collector type comment for
+// the ordering policy.
 func NewCollector(address string) *Collector {
+	addrs := splitCollectorList(address)
+	if len(addrs) > 1 {
+		// rand/v2 is auto-seeded — no global rand.Seed needed and the
+		// result varies per process, which is exactly what we want
+		// for fleet-wide load spreading.
+		rand.Shuffle(len(addrs), func(i, j int) {
+			addrs[i], addrs[j] = addrs[j], addrs[i]
+		})
+	}
 	return &Collector{
 		address:   address,
-		addresses: splitCollectorList(address),
+		addresses: addrs,
 	}
 }
 
@@ -86,21 +121,69 @@ func (c *Collector) Address() string {
 	return c.address
 }
 
-// Addresses returns the parsed list of collector addresses, in
-// the order the user supplied them. For a single-collector setup
-// this returns a one-element slice. Never returns nil for a
-// Collector built via NewCollector with a non-empty address.
+// Addresses returns the parsed list of collector addresses in the
+// Collector's current dial-order: the last-successful address (if
+// any) first, then the post-shuffle remainder. For a single-
+// collector setup this returns a one-element slice. Never returns
+// nil for a Collector built via NewCollector with a non-empty
+// address.
+//
+// The returned slice is a defensive copy; mutating it has no
+// effect on the Collector.
 func (c *Collector) Addresses() []string {
 	if c == nil {
 		return nil
 	}
 	if len(c.addresses) > 0 {
-		return append([]string(nil), c.addresses...)
+		return c.orderedAddrs()
 	}
 	if c.address != "" {
 		return []string{c.address}
 	}
 	return nil
+}
+
+// orderedAddrs returns the address list with the sticky-preferred
+// entry pulled to position 0, leaving the rest in their construction
+// (shuffled) order. The returned slice is freshly allocated so
+// concurrent callers can mutate or hand it to raceDial without
+// disturbing each other.
+func (c *Collector) orderedAddrs() []string {
+	c.mu.Lock()
+	pref := c.preferred
+	c.mu.Unlock()
+
+	if pref == "" || len(c.addresses) <= 1 {
+		return append([]string(nil), c.addresses...)
+	}
+	out := make([]string, 0, len(c.addresses))
+	// Keep the preferred entry only if it's still in the list.
+	// Hand-built &Collector{} with an out-of-list preferred isn't
+	// expected, but defensively skip it if so.
+	found := false
+	for _, a := range c.addresses {
+		if a == pref {
+			found = true
+		}
+	}
+	if found {
+		out = append(out, pref)
+	}
+	for _, a := range c.addresses {
+		if a != pref {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// notePreferred records `addr` as the last-successful collector.
+// Subsequent dials will try it first. Pass "" to clear the sticky
+// state (e.g., on a hard reconfigure).
+func (c *Collector) notePreferred(addr string) {
+	c.mu.Lock()
+	c.preferred = addr
+	c.mu.Unlock()
 }
 
 // QueryAds queries the collector for daemon advertisements

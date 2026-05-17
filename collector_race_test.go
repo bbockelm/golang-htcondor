@@ -66,12 +66,121 @@ func TestSplitCollectorList(t *testing.T) {
 
 func TestNewCollector_ParsesList(t *testing.T) {
 	c := NewCollector("a,b ,, c")
-	want := []string{"a", "b", "c"}
-	if !slices.Equal(c.Addresses(), want) {
-		t.Errorf("Addresses() = %v; want %v", c.Addresses(), want)
+	// NewCollector shuffles, so we can't assert exact order — but
+	// the SET must round-trip cleanly.
+	want := map[string]bool{"a": true, "b": true, "c": true}
+	got := c.Addresses()
+	if len(got) != len(want) {
+		t.Fatalf("Addresses() = %v; want a permutation of %v", got, want)
+	}
+	for _, a := range got {
+		if !want[a] {
+			t.Errorf("Addresses() contained unexpected entry %q (full: %v)", a, got)
+		}
 	}
 	if c.Address() != "a,b ,, c" {
 		t.Errorf("Address() should return raw user string; got %q", c.Address())
+	}
+}
+
+// TestNewCollector_Shuffles probabilistically verifies that the
+// construction-time shuffle actually permutes. With 10 entries
+// and 8 trials the chance of the input order coming back every
+// time is 1/10!^8 — astronomically below flake territory.
+func TestNewCollector_Shuffles(t *testing.T) {
+	in := "a,b,c,d,e,f,g,h,i,j"
+	seenDifferent := false
+	for i := 0; i < 8; i++ {
+		c := NewCollector(in)
+		got := c.Addresses()
+		// Identity check against the original input order.
+		original := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+		if !slices.Equal(got, original) {
+			seenDifferent = true
+			break
+		}
+	}
+	if !seenDifferent {
+		t.Errorf("NewCollector did not shuffle across 8 trials — shuffle is missing or broken")
+	}
+}
+
+// TestSticky_PreferredMovesToFront verifies that after a successful
+// dial, the winning address is promoted to position 0 on the next
+// call to Addresses() / orderedAddrs().
+func TestSticky_PreferredMovesToFront(t *testing.T) {
+	c := NewCollector("a,b,c")
+	all := c.Addresses()
+	if len(all) != 3 {
+		t.Fatalf("expected 3 addresses; got %v", all)
+	}
+	// Pick the back-of-list entry from whatever shuffle landed us,
+	// pretend it just won a dial, and confirm it migrates to slot 0.
+	target := all[2]
+	c.notePreferred(target)
+	got := c.Addresses()
+	if got[0] != target {
+		t.Errorf("preferred %q should be first; got %v", target, got)
+	}
+	// The non-preferred entries should still all be present.
+	rest := map[string]bool{got[1]: true, got[2]: true}
+	for _, a := range all {
+		if a == target {
+			continue
+		}
+		if !rest[a] {
+			t.Errorf("address %q lost from order after notePreferred; have %v", a, got)
+		}
+	}
+}
+
+// TestSticky_DialOrderUsesPreferred drives the race helper with a
+// fake connect function and asserts that on a second dial the
+// previous winner is the first attempt scheduled.
+func TestSticky_DialOrderUsesPreferred(t *testing.T) {
+	c := NewCollector("a,b,c")
+	stagger := 5 * time.Millisecond
+
+	// First dial: force a specific winner by failing every other
+	// address and stalling them so the stagger ordering gives the
+	// winner a free shot.
+	pickWinner := func(forceWin string) func(ctx context.Context, addr string) (*fakeConn, error) {
+		return func(ctx context.Context, addr string) (*fakeConn, error) {
+			if addr == forceWin {
+				return &fakeConn{id: addr}, nil
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+	}
+
+	winnerR1 := c.Addresses()[1] // arbitrary non-first pick from the shuffled order
+	_, addr, err := raceDial(context.Background(), c.Addresses(), stagger, pickWinner(winnerR1))
+	if err != nil {
+		t.Fatalf("dial 1: %v", err)
+	}
+	if addr != winnerR1 {
+		t.Fatalf("dial 1 winner = %q; want forced %q", addr, winnerR1)
+	}
+	c.notePreferred(addr)
+
+	// Second dial: record the order in which the connect callback
+	// is invoked. The first invocation must be the previous winner.
+	var firstCall string
+	var once sync.Once
+	connectR2 := func(ctx context.Context, addr string) (*fakeConn, error) {
+		once.Do(func() { firstCall = addr })
+		return &fakeConn{id: addr}, nil
+	}
+	_, addr2, err := raceDial(context.Background(), c.Addresses(), stagger, connectR2)
+	if err != nil {
+		t.Fatalf("dial 2: %v", err)
+	}
+	if firstCall != winnerR1 {
+		t.Errorf("dial 2 first attempt = %q; want previous winner %q", firstCall, winnerR1)
+	}
+	if addr2 != winnerR1 {
+		t.Errorf("dial 2 winner = %q; want %q (sticky)", addr2, winnerR1)
 	}
 }
 
