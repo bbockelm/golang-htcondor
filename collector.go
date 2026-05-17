@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
@@ -24,26 +23,84 @@ const (
 	AvgBytesPerAttribute = 100
 )
 
-// Collector represents an HTCondor collector daemon
+// Collector represents an HTCondor collector daemon.
+//
+// The configured address may be a single host:port / sinful string
+// or a comma-separated list ("host1:9618,host2:9618") matching the
+// HTCondor COLLECTOR_HOST convention. With a list, every operation
+// races against the entries with a small stagger so a stalled
+// primary collector falls over to the secondary quickly. See
+// collector_race.go for the protocol; `raceStagger == 0` (the
+// default) means DefaultCollectorRaceStagger.
 type Collector struct {
+	// address is the raw, user-supplied string (preserved for
+	// Address() so logs match what the user actually configured).
 	address string
+	// addresses is the parsed list of collector addresses, in the
+	// order the user gave them. A single-entry list is normal;
+	// multi-entry lists are raced.
+	addresses []string
+	// raceStagger overrides the default per-attempt delay between
+	// concurrent connects. Zero = use DefaultCollectorRaceStagger.
+	raceStagger time.Duration
 }
 
-// NewCollector creates a new Collector instance
+// NewCollector creates a new Collector instance. address may be a
+// single host:port (or sinful string) or a comma-separated list:
+//
+//	NewCollector("cm-1.ospool.osg-htc.org,cm-2.ospool.osg-htc.org")
+//
+// With a list, attempts are raced with a 150 ms stagger and the
+// first that returns an authenticated CEDAR stream wins.
 func NewCollector(address string) *Collector {
 	return &Collector{
-		address: address,
+		address:   address,
+		addresses: splitCollectorList(address),
 	}
+}
+
+// WithRaceStagger returns a Collector with the inter-attempt
+// delay overridden. Setting stagger == 0 disables the stagger
+// (every address attempts in parallel from t=0). Negative values
+// are clamped to the default.
+//
+// This is a fluent-style modifier so it composes with NewCollector:
+//
+//	c := htcondor.NewCollector(addrs).WithRaceStagger(200 * time.Millisecond)
+func (c *Collector) WithRaceStagger(stagger time.Duration) *Collector {
+	if stagger < 0 {
+		stagger = DefaultCollectorRaceStagger
+	}
+	c.raceStagger = stagger
+	return c
 }
 
 // Address returns the address the collector is configured against. Useful
 // for logging and diagnostics; never returns the empty string for a Collector
-// constructed via NewCollector.
+// constructed via NewCollector. For a comma-separated list, returns the
+// raw list string the caller passed in.
 func (c *Collector) Address() string {
 	if c == nil {
 		return ""
 	}
 	return c.address
+}
+
+// Addresses returns the parsed list of collector addresses, in
+// the order the user supplied them. For a single-collector setup
+// this returns a one-element slice. Never returns nil for a
+// Collector built via NewCollector with a non-empty address.
+func (c *Collector) Addresses() []string {
+	if c == nil {
+		return nil
+	}
+	if len(c.addresses) > 0 {
+		return append([]string(nil), c.addresses...)
+	}
+	if c.address != "" {
+		return []string{c.address}
+	}
+	return nil
 }
 
 // QueryAds queries the collector for daemon advertisements
@@ -167,15 +224,9 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 	go func() {
 		defer close(ch)
 
-		// Get security config
-		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
-		if err != nil {
-			ch <- AdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
-			return
-		}
-
-		// Establish connection and authenticate
-		htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+		// Race connect+authenticate across all configured addresses;
+		// the security config is built per-address inside the helper.
+		htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
 		if err != nil {
 			ch <- AdResult{Err: fmt.Errorf("failed to connect and authenticate to collector: %w", err)}
 			return
@@ -299,15 +350,9 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 	// Determine the command based on ad type
 	cmd := getCommandForAdType(adType)
 
-	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create security config: %w", err)
-	}
-
-	// Establish connection and authenticate using cedar client
-	// This handles session resumption failures automatically
-	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+	// Race connect+authenticate across configured collector addresses.
+	// Single-address callers are unaffected (the helper short-circuits).
+	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
@@ -524,14 +569,8 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 		}
 	}
 
-	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
-	if err != nil {
-		return fmt.Errorf("failed to create security config: %w", err)
-	}
-
-	// Establish connection and authenticate
-	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+	// Race connect+authenticate across configured collector addresses.
+	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
@@ -618,19 +657,8 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 		}
 	}
 
-	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", c.address)
-	if err != nil {
-		errors := make([]error, len(ads))
-		secErr := fmt.Errorf("failed to create security config: %w", err)
-		for i := range errors {
-			errors[i] = secErr
-		}
-		return errors
-	}
-
-	// Establish connection and authenticate
-	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+	// Race connect+authenticate across configured collector addresses.
+	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		errors := make([]error, len(ads))
 		connErr := fmt.Errorf("failed to connect and authenticate to collector: %w", err)
@@ -673,9 +701,10 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 			// Flush buffer by sending DC_NOP and reconnecting
 			_ = sendGracefulHangup(ctx, cedarStream)
 
-			// Close and reconnect
+			// Close and reconnect — race again across the configured
+			// addresses so a mid-batch failover stays cheap.
 			_ = htcondorClient.Close()
-			htcondorClient, err = client.ConnectAndAuthenticate(ctx, c.address, secConfig)
+			htcondorClient, _, err = c.dialAndAuthenticate(ctx, cmd)
 			if err != nil {
 				connErr := fmt.Errorf("failed to reconnect to collector: %w", err)
 				for j := i; j < len(ads); j++ {
