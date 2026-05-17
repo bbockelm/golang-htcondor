@@ -102,26 +102,26 @@ func NewClientSecurityConfig(
 		return nil, err
 	}
 	if token != "" {
-		// Ensure cedar's AuthToken is in the method list so the
-		// supplied token actually goes on the wire as "TOKEN" — the
-		// only token-style spelling every HTCondor schedd / collector
-		// recognizes. mapAuthMethods folds the IDTOKENS config string
-		// into AuthToken too, so an operator with
-		// SEC_*_AUTHENTICATION_METHODS = IDTOKENS,SSL is already
-		// covered here.
-		hasToken := false
+		// Ensure cedar's AuthToken is at the FRONT of the method
+		// list so the supplied token actually goes on the wire as
+		// "TOKEN" first. mapAuthMethods folds the IDTOKENS config
+		// string into AuthToken, so an operator with
+		// SEC_*_AUTHENTICATION_METHODS = FS,IDTOKENS,SSL ends up
+		// with AuthFS first and would silently authenticate via FS
+		// before TOKEN was even tried — that defeats the purpose of
+		// supplying a token (production deployments lose the FS
+		// shortcut anyway, so callers passing a token are explicitly
+		// asking for token-based identity). We move AuthToken to
+		// position 0 unconditionally and preserve the rest as
+		// fallback order.
+		filtered := make([]security.AuthMethod, 0, len(secConfig.AuthMethods)+1)
+		filtered = append(filtered, security.AuthToken)
 		for _, m := range secConfig.AuthMethods {
-			if m == security.AuthToken {
-				hasToken = true
-				break
+			if m != security.AuthToken {
+				filtered = append(filtered, m)
 			}
 		}
-		if !hasToken {
-			// Prepend so cedar prefers TOKEN when both work: the
-			// token gives us a real identity vs. an anonymous SSL
-			// session.
-			secConfig.AuthMethods = append([]security.AuthMethod{security.AuthToken}, secConfig.AuthMethods...)
-		}
+		secConfig.AuthMethods = filtered
 		secConfig.Token = token
 	}
 	if sessionCache != nil {

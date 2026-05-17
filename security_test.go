@@ -457,6 +457,40 @@ func TestNewClientSecurityConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("WithToken_PromotesToFrontWhenIDTokensNotFirst", func(t *testing.T) {
+		// Production deployments often have FS,IDTOKENS,SSL — FS comes
+		// first because admin tooling on the host uses it. When the
+		// caller supplies a token, they're explicitly asking for
+		// token-based identity (cf. anonymous FS), so cedar MUST move
+		// TOKEN to position 0 even though it was already in the list.
+		// Without this, cedar's first-match-wins negotiation picks FS
+		// and the token is silently never tried.
+		cfg, err := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = FS,IDTOKENS,SSL\n"))
+		if err != nil {
+			t.Fatalf("config: %v", err)
+		}
+		prev := globalDefaultConfig.Load()
+		globalDefaultConfig.Store(cfg)
+		t.Cleanup(func() { globalDefaultConfig.Store(prev) })
+
+		got, err := NewClientSecurityConfig(t.Context(), "tok", "<127.0.0.1:9618>", 0, "CLIENT", nil)
+		if err != nil {
+			t.Fatalf("NewClientSecurityConfig: %v", err)
+		}
+		if len(got.AuthMethods) == 0 || got.AuthMethods[0] != security.AuthToken {
+			t.Errorf("expected AuthMethods[0] == AuthToken when token supplied, got %v", got.AuthMethods)
+		}
+		count := 0
+		for _, m := range got.AuthMethods {
+			if m == security.AuthToken {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one TOKEN entry; got %d in %v", count, got.AuthMethods)
+		}
+	})
+
 	t.Run("WithToken_DoesNotDuplicateWhenIDTokensPresent", func(t *testing.T) {
 		// IDTOKENS in the *config language* maps to cedar's AuthToken
 		// (see mapAuthMethods); we shouldn't prepend a second TOKEN
