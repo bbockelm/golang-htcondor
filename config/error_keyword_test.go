@@ -67,3 +67,37 @@ error  =  spaced.txt
 		t.Errorf("Expected error='spaced.txt', got '%s'", errorVal)
 	}
 }
+
+// TestErrorWithWidePadding covers column-aligned submit descriptions
+// where many spaces sit between the key and `=`. Real-world examples:
+//
+//	executable          = /path/to/x
+//	error               = $(Cluster).err
+//	warning             = warn.log
+//
+// The previous lexer lookahead only peeked 10 bytes after `error` /
+// `warning`, so any padding wider than that caused the lexer to
+// classify the line as an ERROR / WARNING directive rather than an
+// assignment. The submission would then fail with
+// `configuration error: = ..err` (the value, parsed as a directive
+// message). Regression coverage so a future refactor doesn't lose it.
+func TestErrorWithWidePadding(t *testing.T) {
+	// 15-space and 30-space padding both must work.
+	for _, n := range []int{15, 30, 128} {
+		pad := strings.Repeat(" ", n)
+		input := "error" + pad + "= file.err\n" +
+			"warning" + pad + "= file.warn\n"
+		cfg, err := NewFromReader(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("padding=%d: NewFromReader: %v", n, err)
+		}
+		if got, ok := cfg.Get("error"); !ok || got != "file.err" {
+			t.Errorf("padding=%d: error attribute = %q ok=%v; want %q true",
+				n, got, ok, "file.err")
+		}
+		if got, ok := cfg.Get("warning"); !ok || got != "file.warn" {
+			t.Errorf("padding=%d: warning attribute = %q ok=%v; want %q true",
+				n, got, ok, "file.warn")
+		}
+	}
+}

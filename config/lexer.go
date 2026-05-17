@@ -96,60 +96,52 @@ func (l *Lexer) peekChar() rune {
 	return l.nextCh
 }
 
-// peekNextNonWhitespace looks ahead to find the next non-whitespace character
-// We need to properly look ahead through whitespace to determine if it's '=' or ':'
+// peekNextNonWhitespace looks ahead through any run of space/tab/CR
+// to find the next significant character. Used by NextToken to
+// distinguish `error = value` (assignment) from `error message`
+// (directive). Newline ends the lookahead — there is no
+// continuation past the line.
+//
+// Implementation: bufio.Reader.Peek is non-consuming, so we ask for
+// a generous window (capped at the buffer size) and walk it. The
+// previous implementation peeked only 10 bytes, which silently
+// misclassified column-aligned submit descriptions like
+// `error               = file` as ERROR directives.
 func (l *Lexer) peekNextNonWhitespace() rune {
-	// Save current position in the buffer
-	savedCh := l.ch
-	savedNextCh := l.nextCh
-	savedCol := l.col
-	savedLine := l.line
-
-	// Temporarily advance through whitespace
-	tempCh := l.nextCh
-	for tempCh == ' ' || tempCh == '\t' || tempCh == '\r' {
-		// We can't easily advance through buffered reader, so we peek
-		// The simplest solution: peek one char ahead
-		if l.nextCh == ' ' || l.nextCh == '\t' || l.nextCh == '\r' {
-			// We have whitespace next - we need to look further
-			// This is tricky without modifying state
-			// Let's use a different strategy: mark the buffer position
-			// and try to peek ahead
-			break
-		}
-		tempCh = 0
+	switch l.nextCh {
+	case '=', ':':
+		return l.nextCh
+	case ' ', '\t', '\r':
+		// fall through to the lookahead below
+	default:
+		return l.nextCh
 	}
 
-	// If nextCh is '=', return it immediately
-	if l.nextCh == '=' {
-		return '='
-	}
-
-	// If nextCh is ':', return it immediately
-	if l.nextCh == ':' {
-		return ':'
-	}
-
-	// If nextCh is whitespace, we need a more sophisticated check
-	// For now, use buffered reader's Peek capability
-	if l.nextCh == ' ' || l.nextCh == '\t' || l.nextCh == '\r' {
-		// Peek ahead in the buffer
-		if peekBytes, err := l.input.Peek(10); err == nil {
-			// Look through peeked bytes for first non-whitespace
-			for _, b := range peekBytes {
-				if b != ' ' && b != '\t' && b != '\r' {
-					return rune(b)
-				}
-			}
+	// bufio.Reader.Peek tops out at the reader's buffer size. The
+	// default size for NewLexer's bufio.NewReader is 4096 bytes,
+	// which is plenty for whitespace runs in any realistic config
+	// or submit file. If a caller wires a smaller buffer, Peek
+	// returns ErrBufferFull along with whatever it could fit —
+	// still useful, so we don't check err.
+	const maxPeek = 4096
+	peekBytes, _ := l.input.Peek(maxPeek)
+	for _, b := range peekBytes {
+		switch b {
+		case ' ', '\t', '\r':
+			continue
+		case '\n':
+			// End of line before any non-whitespace. Return the
+			// newline so the caller treats the keyword as a
+			// directive with empty payload, matching legacy
+			// behavior for a bare `error\n` line.
+			return '\n'
+		default:
+			return rune(b)
 		}
 	}
-
-	// Restore state (though we didn't actually modify it)
-	_ = savedCh
-	_ = savedNextCh
-	_ = savedCol
-	_ = savedLine
-
+	// Whitespace all the way to EOF (or to the end of what we
+	// could see). Report the immediate whitespace; caller treats
+	// the keyword as a directive, which is the safe default.
 	return l.nextCh
 }
 
