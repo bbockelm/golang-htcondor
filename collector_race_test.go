@@ -168,7 +168,7 @@ func TestSticky_DialOrderUsesPreferred(t *testing.T) {
 	// is invoked. The first invocation must be the previous winner.
 	var firstCall string
 	var once sync.Once
-	connectR2 := func(ctx context.Context, addr string) (*fakeConn, error) {
+	connectR2 := func(_ context.Context, addr string) (*fakeConn, error) {
 		once.Do(func() { firstCall = addr })
 		return &fakeConn{id: addr}, nil
 	}
@@ -276,7 +276,7 @@ func TestRaceDial_StaggerOrders(t *testing.T) {
 
 func TestRaceDial_AllFail(t *testing.T) {
 	addrs := []string{"a", "b"}
-	connect := func(ctx context.Context, addr string) (*fakeConn, error) {
+	connect := func(_ context.Context, addr string) (*fakeConn, error) {
 		return nil, fmt.Errorf("boom-%s", addr)
 	}
 	_, _, err := raceDial(context.Background(), addrs, 5*time.Millisecond, connect)
@@ -300,7 +300,7 @@ func TestRaceDial_LateSuccessIsClosed(t *testing.T) {
 	addrs := []string{"fast", "slow"}
 	var lateConn *fakeConn
 	var mu sync.Mutex
-	connect := func(ctx context.Context, addr string) (*fakeConn, error) {
+	connect := func(_ context.Context, addr string) (*fakeConn, error) {
 		if addr == "fast" {
 			// Win, but not instantly — give the slow attempt time
 			// to pass its stagger gate and enter its sleep.
@@ -337,7 +337,7 @@ func TestRaceDial_LateSuccessIsClosed(t *testing.T) {
 }
 
 func TestRaceDial_EmptyAddresses(t *testing.T) {
-	connect := func(ctx context.Context, addr string) (*fakeConn, error) {
+	connect := func(_ context.Context, _ string) (*fakeConn, error) {
 		return nil, nil
 	}
 	_, _, err := raceDial(context.Background(), nil, time.Millisecond, connect)
@@ -350,7 +350,7 @@ func TestRaceDial_ContextCancellationStops(t *testing.T) {
 	// Cancel before any attempt finishes; we should bail with the
 	// parent context's error rather than waiting forever.
 	addrs := []string{"slowA", "slowB"}
-	connect := func(ctx context.Context, addr string) (*fakeConn, error) {
+	connect := func(ctx context.Context, _ string) (*fakeConn, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}

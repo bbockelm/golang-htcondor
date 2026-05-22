@@ -144,6 +144,11 @@ func raceDial[T raceCloseable](
 	attemptCtxs := make([]context.Context, len(addrs))
 	for i := range addrs {
 		attemptCtxs[i], cancels[i] = context.WithCancel(parent)
+		// Guarantee every cancel is eventually called so the
+		// derived contexts don't leak. The explicit cancels of
+		// losers below still happen — that's about stopping the
+		// loser goroutines promptly, not lifecycle.
+		defer cancels[i]()
 	}
 
 	out := make(chan raceResult[T], len(addrs))
@@ -222,17 +227,16 @@ func raceDial[T raceCloseable](
 
 // dialAndAuthenticate races authenticated connect attempts across
 // every address the Collector knows about, returning the winning
-// (client, address) pair. Each attempt gets its own derived
-// context so cancelling the losers does not affect the winner.
-//
-// Successful attempts that arrive after a winner has already been
-// chosen are closed; their addresses are logged via the returned
-// (addr, nil) path are never returned.
+// client. Each attempt gets its own derived context so cancelling
+// the losers does not affect the winner. The winning address is
+// recorded internally for sticky reordering on subsequent dials;
+// callers that need the address for logging can read it back via
+// the returned client's stream (`GetStream().PeerAddr()`).
 //
 // When the Collector has exactly one address the helper short-
 // circuits straight to ConnectAndAuthenticate so the no-failover
 // case pays no goroutine / channel overhead.
-func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.CommandType) (*client.HTCondorClient, string, error) {
+func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.CommandType) (*client.HTCondorClient, error) {
 	// orderedAddrs applies the sticky-preferred reordering on top
 	// of the shuffled construction order.
 	addrs := c.orderedAddrs()
@@ -251,14 +255,14 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 		addr := addrs[0]
 		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", addr)
 		if err != nil {
-			return nil, addr, fmt.Errorf("failed to create security config: %w", err)
+			return nil, fmt.Errorf("failed to create security config: %w", err)
 		}
 		cl, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
 		if err != nil {
-			return nil, addr, err
+			return nil, err
 		}
 		c.notePreferred(addr)
-		return cl, addr, nil
+		return cl, nil
 	}
 
 	stagger := c.raceStagger
@@ -274,11 +278,11 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 			return client.ConnectAndAuthenticate(actx, addr, secConfig)
 		})
 	if err != nil {
-		return nil, winner, err
+		return nil, err
 	}
 	// Mark the winning address as preferred so subsequent dials
 	// from this Collector go to it first (the "sticky" half of the
 	// failover policy).
 	c.notePreferred(winner)
-	return cl, winner, nil
+	return cl, nil
 }

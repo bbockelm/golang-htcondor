@@ -309,7 +309,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 
 		// Race connect+authenticate across all configured addresses;
 		// the security config is built per-address inside the helper.
-		htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
+		htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
 		if err != nil {
 			ch <- AdResult{Err: fmt.Errorf("failed to connect and authenticate to collector: %w", err)}
 			return
@@ -435,7 +435,7 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 
 	// Race connect+authenticate across configured collector addresses.
 	// Single-address callers are unaffected (the helper short-circuits).
-	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
+	htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
@@ -653,7 +653,7 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 	}
 
 	// Race connect+authenticate across configured collector addresses.
-	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
+	htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
@@ -741,7 +741,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 	}
 
 	// Race connect+authenticate across configured collector addresses.
-	htcondorClient, _, err := c.dialAndAuthenticate(ctx, cmd)
+	htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
 	if err != nil {
 		errors := make([]error, len(ads))
 		connErr := fmt.Errorf("failed to connect and authenticate to collector: %w", err)
@@ -787,7 +787,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 			// Close and reconnect — race again across the configured
 			// addresses so a mid-batch failover stays cheap.
 			_ = htcondorClient.Close()
-			htcondorClient, _, err = c.dialAndAuthenticate(ctx, cmd)
+			htcondorClient, err = c.dialAndAuthenticate(ctx, cmd)
 			if err != nil {
 				connErr := fmt.Errorf("failed to reconnect to collector: %w", err)
 				for j := i; j < len(ads); j++ {
