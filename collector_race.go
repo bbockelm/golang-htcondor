@@ -143,12 +143,16 @@ func raceDial[T raceCloseable](
 	cancels := make([]context.CancelFunc, len(addrs))
 	attemptCtxs := make([]context.Context, len(addrs))
 	for i := range addrs {
-		attemptCtxs[i], cancels[i] = context.WithCancel(parent)
-		// Guarantee every cancel is eventually called so the
-		// derived contexts don't leak. The explicit cancels of
-		// losers below still happen — that's about stopping the
-		// loser goroutines promptly, not lifecycle.
-		defer cancels[i]()
+		// Bind cancel to a local var first so gosec G118 sees the
+		// canonical "cancel := …; defer cancel()" pattern. We
+		// still store the cancel in the slice so the loser-
+		// cancellation loop below can fire it early — defer is
+		// just the lifecycle backstop that guarantees no leak
+		// regardless of whichever path we take out of raceDial.
+		actx, cancel := context.WithCancel(parent)
+		defer cancel()
+		attemptCtxs[i] = actx
+		cancels[i] = cancel
 	}
 
 	out := make(chan raceResult[T], len(addrs))
