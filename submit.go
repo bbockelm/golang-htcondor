@@ -8,12 +8,43 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/version"
+)
+
+// submitVersionString and condorPlatformString are the SubmitVersion
+// / CondorPlatform values the Go library stamps onto every job ad,
+// matching the role of CondorVersion()/CondorPlatform() in
+// HTCondor's submit_utils.cpp (see HTCONDOR-3413: the schedd sets
+// CondorVersion on the cluster ad, and the *client* is expected to
+// supply SubmitVersion so downstream tooling — condor_q, history,
+// log forensics — can identify which client minted the job).
+//
+// Format follows the literal "$CondorVersion: <ver> <stuff> $" and
+// "$CondorPlatform: <stuff> $" shapes that CondorVersionInfo
+// (condor_ver_info.cpp) parses by stripping the prefix. We include
+// "golang-htcondor" in the BuildID-style segment so an operator
+// reading a job log can immediately tell the submission came from
+// this library, not from condor_submit.
+//
+// Computed once at package init from the linker-injected version
+// values; recomputing per submission would waste CPU and the values
+// can't change at runtime anyway.
+var (
+	submitVersionString = fmt.Sprintf(
+		"$CondorVersion: %s BuildID: golang-htcondor-%s $",
+		version.Version, version.Commit,
+	)
+	condorPlatformString = fmt.Sprintf(
+		"$CondorPlatform: %s_%s $",
+		runtime.GOARCH, runtime.GOOS,
+	)
 )
 
 // SubmitFile represents a parsed HTCondor submit file
@@ -344,6 +375,15 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// QDate the schedd doesn't backfill, so the field stays undefined
 	// and clients render nothing.
 	_ = ad.Set("QDate", time.Now().Unix())
+
+	// SubmitVersion + CondorPlatform: condor_submit stamps these
+	// onto every base job (submit_utils.cpp around ATTR_SUBMIT_VERSION).
+	// Forensics tooling reads them to identify the submitter; without
+	// them, a job ad looks like it came from an unknown source. See
+	// the package-level submitVersionString / condorPlatformString
+	// comment for format rationale.
+	_ = ad.Set("SubmitVersion", submitVersionString)
+	_ = ad.Set("CondorPlatform", condorPlatformString)
 
 	// Apply live macro substitutions using a macro context
 	// This implements HTCondor's "live" macros that change per-job

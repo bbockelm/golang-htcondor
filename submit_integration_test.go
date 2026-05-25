@@ -124,9 +124,20 @@ var attributesToIgnore = map[string]bool{
 	"JobStartDate":         true,
 	"LastSuspensionTime":   true,
 
-	// Version-dependent attributes
+	// Version-dependent attributes. condor_submit stamps
+	// SubmitVersion onto every job (and the schedd stamps
+	// CondorVersion onto every cluster, post HTCONDOR-3413).
+	// golang-htcondor populates SubmitVersion + CondorPlatform
+	// too — see submit.go's submitVersionString / condorPlatformString
+	// for the rationale — but the strings will never match
+	// condor_submit's by design (we identify ourselves as
+	// golang-htcondor in the BuildID segment). Ignore both ways:
+	// the presence check would otherwise demand an exact-match
+	// implementation, and the value check would flag the
+	// intentional difference.
 	"CondorVersion":  true,
 	"CondorPlatform": true,
+	"SubmitVersion":  true,
 
 	// Auto-generated attributes that may differ
 	"ClusterId":     true,
