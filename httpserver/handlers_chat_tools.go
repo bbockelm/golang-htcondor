@@ -424,7 +424,7 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			`expression in 'constraint' (HTCondor's classad query language). ` +
 			`Common attributes: JobStatus (1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held), ` +
 			`HoldReason, BatchName (JobBatchName), QDate (epoch seconds), ClusterId, ProcId, ` +
-			`Owner, Cmd (command), Args. Returns up to 'limit' (default 50) most recent jobs.`,
+			`Owner, Cmd (command), Args. Returns up to 'limit' (default 50, max 100) most recent jobs.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -434,9 +434,9 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 				},
 				"limit": {
 					"type": "integer",
-					"description": "Max jobs to return (1-200; default 50).",
+					"description": "Max jobs to return (1-100; default 50).",
 					"minimum": 1,
-					"maximum": 200
+					"maximum": 100
 				}
 			}
 		}`),
@@ -449,8 +449,8 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			if limit <= 0 {
 				limit = 50
 			}
-			if limit > 200 {
-				limit = 200
+			if limit > 100 {
+				limit = 100
 			}
 			constraint := scopeToOwner(actor, args.Constraint)
 
@@ -528,9 +528,9 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 				},
 				"limit": {
 					"type": "integer",
-					"description": "Max records to return per call (1-200; default 50). Bump this only if a small query came back empty.",
+					"description": "Max records to return per call (1-100; default 50). Bump this only if a small query came back empty.",
 					"minimum": 1,
-					"maximum": 200
+					"maximum": 100
 				},
 				"scan_limit": {
 					"type": "integer",
@@ -556,8 +556,8 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 			if limit <= 0 {
 				limit = 50
 			}
-			if limit > 200 {
-				limit = 200
+			if limit > 100 {
+				limit = 100
 			}
 			scanLimit := args.ScanLimit
 			if scanLimit <= 0 {

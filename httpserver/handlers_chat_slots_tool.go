@@ -63,9 +63,9 @@ func (s *Handler) toolQuerySlots() chat.Tool {
 				},
 				"limit": {
 					"type": "integer",
-					"description": "When summarize=false, max rows to return (1-200; default 50).",
+					"description": "When summarize=false, max rows to return (1-100; default 50).",
 					"minimum": 1,
-					"maximum": 200
+					"maximum": 100
 				}
 			}
 		}`),
@@ -127,8 +127,8 @@ func (s *Handler) toolQuerySlots() chat.Tool {
 			if limit <= 0 {
 				limit = 50
 			}
-			if limit > 200 {
-				limit = 200
+			if limit > 100 {
+				limit = 100
 			}
 			detail := make([]map[string]any, 0, len(ads))
 			for i, ad := range ads {

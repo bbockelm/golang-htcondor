@@ -789,6 +789,18 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			}
 			tools := h.buildChatTools()
 			h.chatEngine = chat.NewEngine(llm, tools, chatPageInstructions(), operatorAddendum)
+			// Per-tool-call telemetry so operators can spot tools
+			// that systematically inflate token cost. Logs at INFO
+			// so it stays out of the way under normal use but
+			// shows up in any dashboard built off the access log.
+			h.chatEngine.SetTelemetry(func(toolName, actor string, bytes int, truncated bool) {
+				h.logger.Info(logging.DestinationHTTP, "Chat tool call",
+					"tool", toolName,
+					"actor", actor,
+					"result_bytes", bytes,
+					"engine_truncated", truncated,
+				)
+			})
 			logger.Info(logging.DestinationHTTP, "Chat endpoint enabled",
 				"upstream", llm.URL(),
 				"model", llm.Model(),

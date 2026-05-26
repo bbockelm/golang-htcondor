@@ -256,6 +256,11 @@ func splitAssistantMessage(m RequestMessage) []AnthropicMessage {
 // toolResultBlock renders a v6 tool part's output half into a
 // tool_result content block. State output-error is converted to
 // is_error=true with errorText as the content.
+//
+// Client-side tool outputs go through truncateToolResult for the
+// same engine-level defense-in-depth cap server-side outputs do.
+// (A misbehaving SPA hook can produce a multi-MB result just as
+// easily as a server tool.)
 func toolResultBlock(p RequestMessagePart) AnthropicContentBlock {
 	isErr := p.State == "output-error" || p.ErrorText != ""
 	var content string
@@ -265,6 +270,7 @@ func toolResultBlock(p RequestMessagePart) AnthropicContentBlock {
 	case len(p.Output) > 0:
 		content = string(p.Output)
 	}
+	content = truncateToolResult(content)
 	return AnthropicContentBlock{
 		Type:      "tool_result",
 		ToolUseID: p.ToolCallID,

@@ -329,15 +329,18 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
             )
           : null;
         if (!names || names.length === 0) {
-          // Full-ad request. Cap on size to protect the LLM context;
-          // most jobs are <40 KiB serialized, but a stuck-spam'd
-          // ChirpAttribute set could blow that out.
+          // Full-ad request. Cap on size to protect the LLM context.
+          // Was 64 KiB; tightened to 24 KiB (~6k tokens) in 2026-05.
+          // Common interesting projections are well under 1 KiB, so
+          // 24 KiB leaves plenty of room for "the full ad" on
+          // ordinary jobs while keeping a chirp-spam'd ad from
+          // single-handedly consuming a turn.
           const text = JSON.stringify(job);
-          if (text.length > 64 * 1024) {
+          if (text.length > 24 * 1024) {
             return {
               ok: false,
               error:
-                'job ClassAd exceeds 64 KiB; pass `names` to project specific attributes',
+                'job ClassAd exceeds 24 KiB; pass `names` with the specific attributes you need (typical interesting set: JobStatus, HoldReason, RemoteHost, RequestMemory, NumShadowStarts, ExitCode).',
             };
           }
           return { ok: true, attributes: job };
@@ -358,14 +361,31 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
         return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
       },
 
-      get_job_log: async () => {
+      get_job_log: async (input) => {
         try {
           const data = await queryClient.fetchQuery({
             queryKey: ['job-log', jobID],
             queryFn: () => api.jobs.log(jobID),
             staleTime: 5_000,
           });
-          return { ok: true, ...data };
+          // Cap events newest-first. The full log can contain hundreds
+          // of entries for re-tried jobs; the LLM rarely needs more
+          // than the recent slice. The original total event count is
+          // surfaced via total_events / truncated so the LLM knows
+          // when to ask for more.
+          const maxEvents = clampInt(input.max_events, 1, 100, 40);
+          const allEvents = data.events ?? [];
+          const trimmed =
+            allEvents.length > maxEvents
+              ? allEvents.slice(allEvents.length - maxEvents)
+              : allEvents;
+          return {
+            ok: true,
+            ...data,
+            events: trimmed,
+            total_events: allEvents.length,
+            event_window_truncated: trimmed.length < allEvents.length,
+          };
         } catch (e) {
           return { ok: false, error: errMsg(e) };
         }
@@ -378,7 +398,40 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
             queryFn: () => api.jobs.matchAnalysis(jobID),
             staleTime: 30_000,
           });
-          return { ok: true, ...data };
+          // Project the analyzer's full Result down to the fields
+          // the LLM can act on, dropping the heavy ones (per-predicate
+          // attribute distributions, long sample-host arrays). The
+          // SPA panel keeps the full response in its own cache; this
+          // trimming applies only to what we forward to the model.
+          const result = data.result;
+          const trimmedPredicates = (result.predicates ?? []).map((p) => ({
+            index: p.index,
+            source: p.source,
+            matched: p.matched,
+            not_matched: p.not_matched,
+            undefined: p.undefined,
+            error: p.error,
+            narrowing_score: p.narrowing_score,
+            sample_matched_hosts: (p.sample_matched_hosts ?? []).slice(0, 5),
+            sample_not_matched_hosts: (p.sample_not_matched_hosts ?? []).slice(
+              0,
+              5,
+            ),
+            // attribute_distributions deliberately omitted — useful
+            // for the GUI's histogram, useless for the chat LLM and
+            // can be tens of KB on big pools.
+          }));
+          return {
+            ok: true,
+            job_id: data.job_id,
+            requirements: data.requirements,
+            result: {
+              total_slots: result.total_slots,
+              full_matches: result.full_matches,
+              narrowing_predicate_index: result.narrowing_predicate_index,
+              predicates: trimmedPredicates,
+            },
+          };
         } catch (e) {
           return { ok: false, error: errMsg(e) };
         }
@@ -393,6 +446,34 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
         if (!['head', 'tail', 'grep'].includes(mode)) {
           return { ok: false, error: 'mode must be "head", "tail", or "grep"' };
         }
+        // Byte budget shared by all three modes. Lines that would
+        // push us over the cap are dropped and a `truncated_by_bytes`
+        // flag is returned so the LLM can react. 8 KiB ≈ ~2k tokens
+        // — enough for "what did this print near the end?" but not
+        // a token sink for chatty outputs.
+        const BYTE_CAP = 8 * 1024;
+        // Bound each individual line too. A single >1 KiB line is
+        // almost certainly base64 / a JSON blob / a stack trace dump
+        // — the LLM doesn't need the full payload to answer "what
+        // failed?". Long lines are truncated with an `…` marker.
+        const LINE_CAP = 1024;
+        const trimLine = (s: string): string =>
+          s.length > LINE_CAP ? s.slice(0, LINE_CAP) + '… [line truncated]' : s;
+        const takeLines = (
+          src: string[],
+        ): { lines: string[]; truncatedByBytes: boolean } => {
+          const out: string[] = [];
+          let total = 0;
+          for (const raw of src) {
+            const line = trimLine(raw);
+            if (total + line.length + 1 > BYTE_CAP) {
+              return { lines: out, truncatedByBytes: true };
+            }
+            out.push(line);
+            total += line.length + 1;
+          }
+          return { lines: out, truncatedByBytes: false };
+        };
         try {
           const fetcher =
             stream === 'stdout' ? api.jobs.stdoutText : api.jobs.stderrText;
@@ -402,25 +483,35 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
             staleTime: 60_000,
           });
           const lines = data.text.split('\n');
-          const n = clampInt(input.lines, 1, 500, 30);
+          const n = clampInt(input.lines, 1, 150, 30);
           if (mode === 'head') {
+            const sliced = lines.slice(0, n);
+            const { lines: out, truncatedByBytes } = takeLines(sliced);
             return {
               ok: true,
               stream,
               mode,
-              lines: lines.slice(0, n),
+              lines: out,
               total_lines: lines.length,
               truncated: data.truncated,
+              truncated_by_bytes: truncatedByBytes,
             };
           }
           if (mode === 'tail') {
+            // For tail, byte-cap from the END so the most recent
+            // lines (the ones the user usually wants) survive when
+            // the slice is too big.
+            const sliced = lines.slice(Math.max(0, lines.length - n));
+            const reversed = sliced.slice().reverse();
+            const { lines: outRev, truncatedByBytes } = takeLines(reversed);
             return {
               ok: true,
               stream,
               mode,
-              lines: lines.slice(Math.max(0, lines.length - n)),
+              lines: outRev.reverse(),
               total_lines: lines.length,
               truncated: data.truncated,
+              truncated_by_bytes: truncatedByBytes,
             };
           }
           // grep mode
@@ -438,19 +529,28 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
           }
           const ctx = clampInt(input.context_lines, 0, 5, 0);
           const matches: { line: number; text: string }[] = [];
-          for (let i = 0; i < lines.length; i++) {
+          let bytes = 0;
+          let truncatedByBytes = false;
+          outer: for (let i = 0; i < lines.length; i++) {
             if (re.test(lines[i])) {
               const start = Math.max(0, i - ctx);
               const end = Math.min(lines.length, i + ctx + 1);
               for (let j = start; j < end; j++) {
                 if (!matches.find((m) => m.line === j + 1)) {
-                  matches.push({ line: j + 1, text: lines[j] });
+                  const text = trimLine(lines[j]);
+                  if (bytes + text.length + 1 > BYTE_CAP) {
+                    truncatedByBytes = true;
+                    break outer;
+                  }
+                  matches.push({ line: j + 1, text });
+                  bytes += text.length + 1;
                 }
               }
             }
             // Cap returned matches so a too-broad pattern doesn't
-            // blow out the model's context window.
-            if (matches.length >= 200) break;
+            // blow out the model's context window. Dropped from 200
+            // → 100 to align with the new byte budget.
+            if (matches.length >= 100) break;
           }
           return {
             ok: true,
@@ -461,6 +561,7 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
             match_count: matches.length,
             total_lines: lines.length,
             truncated: data.truncated,
+            truncated_by_bytes: truncatedByBytes,
           };
         } catch (e) {
           return { ok: false, error: errMsg(e) };

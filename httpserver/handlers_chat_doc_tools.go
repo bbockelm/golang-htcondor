@@ -41,15 +41,15 @@ func toolDocJobAttributes() chat.Tool {
 				},
 				"context_lines": {
 					"type": "integer",
-					"description": "Lines of surrounding text per hit. Default 5, max 100.",
+					"description": "Lines of surrounding text per hit. Default 5, max 40.",
 					"minimum": 0,
-					"maximum": 100
+					"maximum": 40
 				},
 				"max_results": {
 					"type": "integer",
-					"description": "Cap on hits returned. Default 30.",
+					"description": "Cap on hits returned. Default 15, max 30. The response is also byte-capped (~24 KiB).",
 					"minimum": 1,
-					"maximum": 100
+					"maximum": 30
 				}
 			},
 			"required": ["query"]
@@ -83,15 +83,15 @@ func toolDocSearch() chat.Tool {
 				},
 				"context_lines": {
 					"type": "integer",
-					"description": "Lines of surrounding text per hit. Default 5, max 100.",
+					"description": "Lines of surrounding text per hit. Default 5, max 40.",
 					"minimum": 0,
-					"maximum": 100
+					"maximum": 40
 				},
 				"max_results": {
 					"type": "integer",
-					"description": "Cap on hits returned. Default 30.",
+					"description": "Cap on hits returned. Default 15, max 30. The response is also byte-capped (~24 KiB).",
 					"minimum": 1,
-					"maximum": 100
+					"maximum": 30
 				}
 			},
 			"required": ["query"]
@@ -102,6 +102,18 @@ func toolDocSearch() chat.Tool {
 		},
 	}
 }
+
+// docSearchDefaultMaxResults / docSearchMaxByteCap bound the LLM
+// cost of a single doc search. Without these, a worst-case
+// max_results=100 × context_lines=100 × wide-line could produce
+// ~800 KB of output (~200k tokens). The defaults target ~3k tokens
+// per call (15 results × 5 lines), with hard maxima carved to keep
+// even the worst-permissible config under ~6k tokens.
+const (
+	docSearchDefaultMaxResults = 15
+	docSearchDefaultContext    = 5
+	docSearchMaxByteCap        = 24 * 1024
+)
 
 // runDocSearch is the shared executor for both doc tools. Returns the
 // rendered prose (with file + line headers) so Anthropic's tool_result
@@ -115,6 +127,15 @@ func runDocSearch(in json.RawMessage, pages []condordocs.Page) (string, error) {
 	args.Query = strings.TrimSpace(args.Query)
 	if args.Query == "" {
 		return "", fmt.Errorf("query is required")
+	}
+	// Pick the chat-flavored defaults — condordocs.Search's package
+	// defaults are sized for the (uncapped) MCP path. The schema
+	// upper bounds enforce the maxima.
+	if args.MaxResults == 0 {
+		args.MaxResults = docSearchDefaultMaxResults
+	}
+	if args.ContextLines == 0 {
+		args.ContextLines = docSearchDefaultContext
 	}
 
 	hits, err := condordocs.Search(condordocs.SearchOptions{
@@ -137,12 +158,26 @@ func runDocSearch(in json.RawMessage, pages []condordocs.Page) (string, error) {
 		b.WriteString("es")
 	}
 	b.WriteString(":\n")
+	dropped := 0
 	for i, h := range hits {
-		fmt.Fprintf(&b, "\n--- [%d] page=%s source=%s line=%d ---\n", i+1, h.Page, h.Source, h.Line)
+		header := fmt.Sprintf("\n--- [%d] page=%s source=%s line=%d ---\n", i+1, h.Page, h.Source, h.Line)
+		// Belt-and-braces byte cap: even within the schema max,
+		// a wide-line page could pile up. Stop emitting full hits
+		// once we'd exceed the cap; record how many got dropped
+		// so the LLM can see it was truncated and either narrow
+		// the query or page.
+		if b.Len()+len(header)+len(h.Snippet) > docSearchMaxByteCap {
+			dropped = len(hits) - i
+			break
+		}
+		b.WriteString(header)
 		b.WriteString(h.Snippet)
 		if len(h.Snippet) > 0 && h.Snippet[len(h.Snippet)-1] != '\n' {
 			b.WriteByte('\n')
 		}
+	}
+	if dropped > 0 {
+		fmt.Fprintf(&b, "\n[truncated: %d more hit(s) elided to stay under the per-call byte cap; narrow the query or drop context_lines]\n", dropped)
 	}
 	return b.String(), nil
 }

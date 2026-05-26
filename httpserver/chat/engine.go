@@ -101,7 +101,20 @@ type Engine struct {
 	tools            map[string]Tool
 	pageInstructions map[string]string
 	operatorAddendum string
+	// telemetry is fired once per successfully-executed server-side
+	// tool call with the tool name, result byte length, whether the
+	// engine had to truncate, and the actor (typically the
+	// authenticated username). Optional; nil = no telemetry.
+	// Operators wire this to their structured logger to spot tools
+	// that systematically blow the LLM budget. Use SetTelemetry().
+	telemetry TelemetryFunc
 }
+
+// TelemetryFunc is fired once per server-executed tool call with
+// metadata useful for spotting unexpected token-cost regressions.
+// Bytes is the size of the result AFTER any engine-level truncation.
+// Truncated is true when the engine cap kicked in.
+type TelemetryFunc func(toolName, actor string, bytes int, truncated bool)
 
 // NewEngine builds an engine over the supplied LLM client and tool
 // registry.
@@ -141,6 +154,22 @@ func NewEngine(
 		tools:            registry,
 		pageInstructions: pi,
 		operatorAddendum: operatorAddendum,
+	}
+}
+
+// SetTelemetry installs an optional per-tool-call telemetry hook.
+// Safe to call once at construction time; not safe under concurrent
+// Stream() calls (the assumption being that operators configure once
+// at startup).
+func (e *Engine) SetTelemetry(fn TelemetryFunc) {
+	e.telemetry = fn
+}
+
+// emitTelemetry is a nil-safe shorthand; the hot path on every tool
+// call shouldn't carry an `if e.telemetry != nil` check.
+func (e *Engine) emitTelemetry(toolName, actor string, bytes int, truncated bool) {
+	if e.telemetry != nil {
+		e.telemetry(toolName, actor, bytes, truncated)
 	}
 }
 
@@ -305,12 +334,15 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 			// the SDK does NOT fire onToolCall on the client — this is
 			// our work, not the browser's.
 			w.WriteToolCall(blk.ID, blk.Name, blk.Input, true)
-			res, err := tool.Execute(ctx, actor, blk.Input)
+			rawRes, err := tool.Execute(ctx, actor, blk.Input)
 			if err != nil {
 				toolResults = append(toolResults, errorToolResult(blk.ID, err.Error()))
 				w.WriteToolError(blk.ID, blk.Name, err.Error())
 				continue
 			}
+			rawLen := len(rawRes)
+			res := truncateToolResult(rawRes)
+			e.emitTelemetry(blk.Name, actor, len(res), len(res) < rawLen)
 			toolResults = append(toolResults, AnthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: blk.ID,
@@ -415,12 +447,15 @@ func (e *Engine) resolvePendingApprovals(
 			// onToolCall a second time (which would race the actual
 			// result with an "unknown client-side tool" error reply).
 			w.WriteToolCall(blk.ID, blk.Name, blk.Input, true)
-			res, err := tool.Execute(ctx, actor, blk.Input)
+			rawRes, err := tool.Execute(ctx, actor, blk.Input)
 			if err != nil {
 				newResults = append(newResults, errorToolResult(blk.ID, err.Error()))
 				w.WriteToolError(blk.ID, blk.Name, err.Error())
 				continue
 			}
+			rawLen := len(rawRes)
+			res := truncateToolResult(rawRes)
+			e.emitTelemetry(blk.Name, actor, len(res), len(res) < rawLen)
 			newResults = append(newResults, AnthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: blk.ID,
@@ -454,6 +489,39 @@ func errorToolResult(id, msg string) AnthropicContentBlock {
 		Content:   msg,
 		IsError:   true,
 	}
+}
+
+// MaxToolResultBytes is the engine-level ceiling on a single
+// tool_result payload before we splice it into the conversation. Per-
+// tool caps (run_in_job's 8 KiB default, read_job_output's 8 KiB,
+// doc_search's 24 KiB, etc.) should normally keep results well below
+// this; the engine cap is defense-in-depth so a new tool that ships
+// without its own cap (or a tool that miscounts) can't blow out the
+// Anthropic context window — and every billed turn after — with a
+// runaway result.
+//
+// 32 KiB ≈ ~8k tokens. Sized to be the worst legitimate tool
+// response (a wide-context doc search at the schema max) plus a bit
+// of headroom; any larger and the LLM probably needed to iterate
+// rather than slurp.
+const MaxToolResultBytes = 32 * 1024
+
+// truncateToolResult returns content unchanged when it fits under
+// MaxToolResultBytes, or a truncated string with a tail marker that
+// makes the truncation obvious to the LLM so it can re-request a
+// narrower slice. Counts bytes (not runes / not tokens): close
+// enough for a defense-in-depth cap, and avoids the encoding round
+// trip a token-aware cap would need.
+func truncateToolResult(content string) string {
+	if len(content) <= MaxToolResultBytes {
+		return content
+	}
+	const marker = "\n\n[truncated: tool_result exceeded the engine cap; re-request a narrower slice to see the rest]"
+	keep := MaxToolResultBytes - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	return content[:keep] + marker
 }
 
 // toolsForPage filters the registered tool set down to those tagged

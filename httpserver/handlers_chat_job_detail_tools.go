@@ -29,12 +29,24 @@ import (
 // the SSH dial so a misbehaving schedd-side ACL can't be exploited
 // through this path.
 
-// runInJobInputCap caps the combined stdout+stderr returned to the
-// LLM. Big enough for log tails / process listings, small enough that
-// a runaway "cat /dev/urandom | base64" doesn't burn the model's
-// context window. We truncate hard at this many bytes and report the
-// truncation flag to the caller.
-const runInJobOutputCap = 64 * 1024
+// runInJobOutputCapDefault / runInJobOutputCapMax bound the combined
+// stdout+stderr returned to the LLM. The defaults were 64 KiB but
+// that was way too generous for chat: a single `ps -ef` could fill
+// an Anthropic turn with ~16k tokens of process listing, then keep
+// re-paying that cost in every subsequent turn because the result
+// stays in conversation history.
+//
+// 8 KiB (~2k tokens) is enough for "did the file appear?", "what's
+// in this config?", `tail -n 50 logfile`, etc. — the chat use
+// cases the tool is meant for. The LLM can request more via
+// `max_output_bytes` up to runInJobOutputCapMax (24 KiB ≈ ~6k
+// tokens), but the documented pattern is to pipe through
+// `head -c`/`tail -c`/`head -n`/`grep` instead — iterating with a
+// tighter pipe is dramatically cheaper than one big return.
+const (
+	runInJobOutputCapDefault = 8 * 1024
+	runInJobOutputCapMax     = 24 * 1024
+)
 
 // runInJobDefaultTimeout is the default wall-clock cap for a single
 // command. The LLM can request shorter via the input arg; longer is
@@ -49,6 +61,10 @@ type runInJobArgs struct {
 	JobID          string `json:"job_id"`
 	Command        string `json:"command"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	// MaxOutputBytes caps the returned combined stdout+stderr.
+	// Defaults to runInJobOutputCapDefault, clamped to
+	// runInJobOutputCapMax. Zero / negative means "use the default".
+	MaxOutputBytes int `json:"max_output_bytes,omitempty"`
 }
 
 // toolRunInJob runs a single non-interactive shell command inside the
@@ -71,12 +87,17 @@ func (s *Handler) toolRunInJob() chat.Tool {
 		description: `Run a single non-interactive shell command inside the job's sandbox ` +
 			`(equivalent to: condor_ssh_to_job <id> <cmd>). Only works while the job is ` +
 			`Running (status=2) or Transferring Output (status=6). Returns combined ` +
-			`stdout+stderr capped to 64 KiB plus the exit code. ` +
+			`stdout+stderr capped at 8 KiB by default (max 24 KiB via max_output_bytes) ` +
+			`plus the exit code. ` +
 			`USE FOR: quick read-only inspection — "ls -la", "ps -ef", "tail -n 30 logfile", ` +
-			`"top -b -n 1 | head -20", "cat config.json". DO NOT spawn long-running ` +
-			`processes; the per-call timeout (default 30s, max 60s) will kill them. The ` +
-			`shell session has the job's environment and current working directory. ` +
-			`Requires user confirmation.`,
+			`"top -b -n 1 | head -20", "cat config.json". ` +
+			`** TOKEN BUDGET: ** the returned output stays in chat history and is re-billed ` +
+			`every turn — prefer a tight pipe (head -c, tail -c, head -n, grep) over a big ` +
+			`raw return. Re-running with a narrower pipe is dramatically cheaper than ` +
+			`raising max_output_bytes. ` +
+			`DO NOT spawn long-running processes; the per-call timeout (default 30s, max 60s) ` +
+			`will kill them. The shell session has the job's environment and current ` +
+			`working directory. Requires user confirmation.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -93,6 +114,12 @@ func (s *Handler) toolRunInJob() chat.Tool {
 					"description": "Wall-clock cap. Default 30, max 60.",
 					"minimum": 1,
 					"maximum": 60
+				},
+				"max_output_bytes": {
+					"type": "integer",
+					"description": "Cap on combined stdout+stderr bytes returned. Default 8192 (~2k tokens). Max 24576. Prefer a tighter pipe over raising this.",
+					"minimum": 1024,
+					"maximum": 24576
 				}
 			},
 			"required": ["job_id", "command"]
@@ -175,9 +202,19 @@ func (s *Handler) execRunInJob(ctx context.Context, actor string, in json.RawMes
 	defer func() { _ = session.Close() }()
 
 	// Capture combined output with a hard cap so a chatty command
-	// can't blow up the LLM's context window.
+	// can't blow up the LLM's context window. The LLM can dial
+	// max_output_bytes up to runInJobOutputCapMax; we clamp
+	// silently — passing a too-big value isn't worth an error round
+	// trip, the LLM gets the cap-truncation signal in the response.
+	outCap := args.MaxOutputBytes
+	if outCap <= 0 {
+		outCap = runInJobOutputCapDefault
+	}
+	if outCap > runInJobOutputCapMax {
+		outCap = runInJobOutputCapMax
+	}
 	var buf cappedBuffer
-	buf.cap = runInJobOutputCap
+	buf.cap = outCap
 	session.Stdout = &buf
 	session.Stderr = &buf
 
@@ -479,7 +516,8 @@ func toolGetJobAttributes() chat.Tool {
 
 // toolGetJobLog returns the parsed userlog event stream for the job.
 // Each event has { event_type, event_typeno, time, ... event-specific
-// fields }. The SPA fetches via api.jobs.log() and forwards.
+// fields }. The SPA fetches via api.jobs.log() and forwards, then
+// trims to max_events newest-first to keep the LLM cost bounded.
 func toolGetJobLog() chat.Tool {
 	return &chatTool{
 		name:       "get_job_log",
@@ -489,8 +527,21 @@ func toolGetJobLog() chat.Tool {
 			`an ordered list of events: submit, execute, image-size, hold, evict, ` +
 			`terminate, etc. Each event carries the timestamp and event-type-specific ` +
 			`fields (HoldReason on hold events, ReturnValue on terminate, etc.). Useful ` +
-			`for "what happened?" / "when did it last run?" / "how many holds?" questions.`,
-		schema: json.RawMessage(`{"type": "object", "properties": {}}`),
+			`for "what happened?" / "when did it last run?" / "how many holds?" questions. ` +
+			`** TOKEN BUDGET: ** capped to max_events newest-first events (default 40, ` +
+			`max 100). For jobs that have been around forever, ask for a larger window ` +
+			`only when the early events actually matter.`,
+		schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"max_events": {
+					"type": "integer",
+					"description": "Cap on events returned, newest-first. Default 40, max 100.",
+					"minimum": 1,
+					"maximum": 100
+				}
+			}
+		}`),
 	}
 }
 
@@ -528,15 +579,18 @@ func toolReadJobOutput() chat.Tool {
 			`jobs whose output has been transferred back). Choose a ` + "`mode`" + `:` +
 			`"head" returns the first N lines, "tail" returns the last N lines, "grep" ` +
 			`returns lines matching a regex pattern (with surrounding context if you ` +
-			`set "context_lines"). Total output is capped to 64 KiB; if the file is ` +
-			`larger than 1 MiB the underlying fetch returns the first MiB only and the ` +
-			`response notes it via "truncated":true.`,
+			`set "context_lines"). ` +
+			`** TOKEN BUDGET: ** the response is byte-capped (~8 KiB / ~2k tokens) on top ` +
+			`of the line / match caps — wide lines get fewer of them. If the file is larger ` +
+			`than 1 MiB the underlying fetch returns the first MiB only and the response ` +
+			`notes it via "truncated":true. For verbose output, prefer grep with a tight ` +
+			`pattern over head/tail.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"stream":  {"type": "string", "enum": ["stdout", "stderr"], "description": "Which file to read."},
 				"mode":    {"type": "string", "enum": ["head", "tail", "grep"], "description": "What slice of the file to return."},
-				"lines":   {"type": "integer", "minimum": 1, "maximum": 500, "description": "Number of lines for head/tail (default 30)."},
+				"lines":   {"type": "integer", "minimum": 1, "maximum": 150, "description": "Number of lines for head/tail (default 30, max 150)."},
 				"pattern": {"type": "string", "description": "Regex pattern for grep mode."},
 				"context_lines": {"type": "integer", "minimum": 0, "maximum": 5, "description": "Lines of context around each grep match (default 0)."},
 				"case_insensitive": {"type": "boolean", "description": "If true, grep ignores case (default false)."}

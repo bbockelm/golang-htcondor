@@ -931,13 +931,25 @@ export default function SubmitPage() {
         // depend on `draft` (would churn on every keystroke), so the
         // closure here is stuck at the initial STARTER_DRAFT.
         const d = draftRef.current;
+        // Per-tool byte cap. Engine-level truncation would catch a
+        // huge content anyway, but a "file too big" error is a
+        // better signal to the LLM than silently mid-line-truncated
+        // bytes that look like the real file.
+        const FILE_BYTE_CAP = 24 * 1024;
+        const capped = (kind: 'wrapper-script' | 'inline-file', content: string) => {
+          if (content.length > FILE_BYTE_CAP) {
+            return {
+              ok: false,
+              error: `inline file "${name}" exceeds ${FILE_BYTE_CAP} bytes; ask the user about its contents or focus on a specific section.`,
+              name,
+              kind,
+              size_bytes: content.length,
+            };
+          }
+          return { ok: true, name, kind, content };
+        };
         if (d.inlineScript && d.inlineScript.name.trim() === name) {
-          return {
-            ok: true,
-            name,
-            kind: 'wrapper-script',
-            content: d.inlineScript.content,
-          };
+          return capped('wrapper-script', d.inlineScript.content);
         }
         const f = d.inlineFiles.find((x) => x.name === name);
         if (!f) {
@@ -946,7 +958,7 @@ export default function SubmitPage() {
             error: `inline file "${name}" not found; current files: ${listAllInlineNames(d).join(', ') || '(none)'}`,
           };
         }
-        return { ok: true, name, kind: 'inline-file', content: f.content };
+        return capped('inline-file', f.content);
       },
 
       replace_in_inline_file: (input) => {
