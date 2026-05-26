@@ -20,6 +20,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/mcpserver"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/handler/openid"
 	"golang.org/x/crypto/bcrypt"
@@ -273,19 +274,88 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 		return accessRequest, nil
 	}
 
-	// If OAuth2 validation failed, check if this might be an HTCondor IDTOKEN
-	// HTCondor IDTOKENs are JWTs with 3 parts separated by dots
-	// Return (nil, nil) to signal that this is an HTCondor token that should be
-	// passed directly to HTCondor for validation (not validated by us)
-	if len(strings.Split(tokenString, ".")) == 3 {
-		h.logger.Info(logging.DestinationHTTP, "OAuth2 validation failed, detected possible HTCondor token - will pass to HTCondor for validation")
-		// Return nil token with nil error to signal HTCondor token
-		// The caller must extract the token from the Authorization header
+	// fosite rejected the token. Decide whether to forward it to the
+	// schedd as a HTCondor IDTOKEN (legitimate fall-through for pool-
+	// authenticated tools like condor_token_fetch) OR surface a real
+	// 401 so the caller's auth client triggers a refresh.
+	//
+	// Previously this branch counted dots — `len(strings.Split(s,".")) == 3`
+	// — which is true for EVERY JWT-shaped string, including the
+	// OAuth2 access tokens fosite itself issues. The result: an
+	// expired token from our IDP got laundered to the schedd as a
+	// HTCondor IDTOKEN, the schedd rejected the signature, the MCP
+	// tool failed, and the HTTP response was 200 (JSON-RPC error
+	// envelope) so MCP clients like claude.ai never saw a 401 and
+	// never refreshed their OAuth session.
+	//
+	// The honest test is the `iss` claim:
+	//   - Matches our IDP / OAuth2 issuer → it's OUR token; respect
+	//     fosite's "no" and 401 so the client refreshes.
+	//   - Matches TRUST_DOMAIN              → likely a pool IDTOKEN;
+	//     forward to schedd for verification (return nil,nil).
+	//   - Anything else                      → 401; we don't know
+	//     what this is.
+	//
+	// We also log the underlying fosite error verbatim so an operator
+	// can see WHY introspection failed (expired, unknown client,
+	// revoked, ...) without having to crack the binary open.
+	classification := h.classifyUnknownToken(tokenString)
+	h.logger.Info(logging.DestinationHTTP,
+		"OAuth2 introspection rejected token",
+		"classification", classification,
+		"introspect_error", err.Error())
+	if classification == tokenClassPoolIDToken {
 		return nil, nil
 	}
-
-	// Not an OAuth2 token or HTCondor token
 	return nil, fmt.Errorf("token validation failed: %w", err)
+}
+
+// tokenClass tags how validateOAuth2Token decided to handle a token
+// fosite rejected. Used in log lines so misclassifications can be
+// triaged without re-instrumenting the code path.
+type tokenClass string
+
+const (
+	tokenClassOurIDP        tokenClass = "ours-rejected"  // iss matches our IDP; treat as 401
+	tokenClassPoolIDToken   tokenClass = "pool-idtoken"   // iss matches TRUST_DOMAIN; forward
+	tokenClassUnknownIssuer tokenClass = "unknown-issuer" // unrecognized iss; 401
+	tokenClassUnparseable   tokenClass = "unparseable"    // not a JWT at all; 401
+)
+
+// classifyUnknownToken inspects the `iss` claim of a token fosite
+// just rejected to decide whether it could legitimately be a
+// HTCondor IDTOKEN or whether it's something we should 401 on. The
+// parse is unverified — we're not checking the signature, just
+// reading the issuer — because actual signature verification is
+// what fosite + the schedd are doing further along.
+func (h *Handler) classifyUnknownToken(tokenString string) tokenClass {
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsed, _, perr := parser.ParseUnverified(tokenString, &jwt.RegisteredClaims{})
+	if perr != nil {
+		return tokenClassUnparseable
+	}
+	claims, ok := parsed.Claims.(*jwt.RegisteredClaims)
+	if !ok || claims.Issuer == "" {
+		return tokenClassUnknownIssuer
+	}
+	// Our IDP-issued tokens carry the configured AccessTokenIssuer.
+	// Reject anything bearing that issuer that fosite couldn't
+	// introspect — it's expired / revoked / signed with a rotated
+	// key, and forwarding it to the schedd would just trigger a
+	// signature-verification error and a misleading 200 + JSON-RPC
+	// error envelope.
+	if h.oauth2Provider != nil &&
+		claims.Issuer == h.oauth2Provider.config.AccessTokenIssuer {
+		return tokenClassOurIDP
+	}
+	// HTCondor pool tokens carry iss == TRUST_DOMAIN. Anything else
+	// (an upstream OIDC provider whose introspection we don't
+	// support, a stale token from a previous deployment, etc.) is
+	// safer to 401 on than to silently forward.
+	if h.trustDomain != "" && claims.Issuer == h.trustDomain {
+		return tokenClassPoolIDToken
+	}
+	return tokenClassUnknownIssuer
 }
 
 // filterRequestedScopes filters the requested scopes to only include those allowed for the client.
