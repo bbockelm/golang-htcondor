@@ -1361,8 +1361,25 @@ func (h *Handler) writeOAuthError(w http.ResponseWriter, statusCode int, errorCo
 	}
 }
 
-// addWWWAuthenticateHeader adds RFC 6750 compliant WWW-Authenticate header
-// See: https://datatracker.ietf.org/doc/html/rfc6750#section-3
+// addWWWAuthenticateHeader writes the WWW-Authenticate header for a
+// 401/403 response. We emit two specs at once:
+//
+//   - RFC 6750 §3 — the canonical Bearer-token challenge, with the
+//     `realm` / `error` / `error_description` parameters every
+//     OAuth2-aware client knows how to surface.
+//   - RFC 9728 §5.1 — the OAuth 2.0 Protected Resource Metadata
+//     `resource_metadata` parameter pointing at our
+//     /.well-known/oauth-protected-resource document. This is what
+//     MCP-spec-compliant clients (claude.ai's MCP client, in
+//     particular) read to discover the authorization server and
+//     trigger an interactive re-auth flow. Without it some clients
+//     give up and surface a generic error instead of refreshing.
+//
+// References:
+//
+//   - https://datatracker.ietf.org/doc/html/rfc6750#section-3
+//   - https://datatracker.ietf.org/doc/html/rfc9728#section-5.1
+//   - https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
 func (h *Handler) addWWWAuthenticateHeader(w http.ResponseWriter, errorCode, errorDescription string) {
 	var headerValue string
 
@@ -1392,6 +1409,17 @@ func (h *Handler) addWWWAuthenticateHeader(w http.ResponseWriter, errorCode, err
 		if errorDescription != "" {
 			headerValue += fmt.Sprintf(`, error_description="%s"`, errorDescription)
 		}
+	}
+
+	// Append RFC 9728's `resource_metadata` parameter when we have a
+	// public base URL to advertise. The client GETs this URL to find
+	// the authorization server and any required scopes, then runs the
+	// usual OAuth 2.0 dance. We skip when httpBaseURL is empty (e.g.
+	// some test setups) — emitting a malformed/relative URL would be
+	// worse than emitting no hint at all.
+	if h.httpBaseURL != "" {
+		headerValue += fmt.Sprintf(`, resource_metadata="%s/.well-known/oauth-protected-resource"`,
+			strings.TrimRight(h.httpBaseURL, "/"))
 	}
 
 	w.Header().Set("WWW-Authenticate", headerValue)

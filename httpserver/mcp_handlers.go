@@ -285,8 +285,8 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 	// expired token from our IDP got laundered to the schedd as a
 	// HTCondor IDTOKEN, the schedd rejected the signature, the MCP
 	// tool failed, and the HTTP response was 200 (JSON-RPC error
-	// envelope) so MCP clients like claude.ai never saw a 401 and
-	// never refreshed their OAuth session.
+	// envelope) so MCP clients never saw a 401 and never refreshed
+	// their OAuth session.
 	//
 	// The honest test is the `iss` claim:
 	//   - Matches our IDP / OAuth2 issuer → it's OUR token; respect
@@ -300,14 +300,68 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 	// can see WHY introspection failed (expired, unknown client,
 	// revoked, ...) without having to crack the binary open.
 	classification := h.classifyUnknownToken(tokenString)
+	// Pull `iss`, `sub`, and `kid` out of the rejected token for the
+	// log line.
+	//   - iss tells you which issuer-string the token claims, which
+	//     directly explains classifier outcomes (especially the case
+	//     where iss coincidentally matches TRUST_DOMAIN and the
+	//     classifier routes to pool-idtoken).
+	//   - sub identifies the user the token claims to be for —
+	//     useful for figuring out which user's session is failing.
+	//   - kid pins the signing key. If `kid` references a passwords.d/
+	//     entry that was rotated, that's the cause; if it's empty,
+	//     the token is unsigned-or-HMAC and not really a HTCondor
+	//     IDTOKEN regardless of iss.
+	insp := inspectToken(tokenString)
 	h.logger.Info(logging.DestinationHTTP,
 		"OAuth2 introspection rejected token",
 		"classification", classification,
+		"iss", insp.Issuer,
+		"sub", insp.Subject,
+		"kid", insp.KeyID,
 		"introspect_error", err.Error())
 	if classification == tokenClassPoolIDToken {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("token validation failed: %w", err)
+}
+
+// tokenInspection is the diagnostic payload we log when a token
+// fails OAuth2 introspection. All fields may be empty: a token that
+// doesn't parse as a JWT yields a zero-value tokenInspection, and
+// individual claims may be absent. The values are NEVER trusted for
+// authorization decisions; they exist solely so a server log can
+// answer "what did the token actually look like?" without the
+// operator having to capture and decode the Bearer header.
+type tokenInspection struct {
+	Issuer  string
+	Subject string
+	KeyID   string // header.kid; identifies the signing key in passwords.d/
+}
+
+// inspectToken extracts the diagnostic-useful claims from a JWT
+// without verifying the signature. Used by the auth failure log
+// path; production routing decisions go through classifyUnknownToken
+// which calls into this same parser. Failing to parse returns the
+// zero value — the caller's log will then show empty fields, which
+// is itself a useful signal (the Bearer wasn't even a JWT).
+func inspectToken(tokenString string) tokenInspection {
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsed, _, err := parser.ParseUnverified(tokenString, &jwt.RegisteredClaims{})
+	if err != nil {
+		return tokenInspection{}
+	}
+	out := tokenInspection{}
+	if claims, ok := parsed.Claims.(*jwt.RegisteredClaims); ok {
+		out.Issuer = claims.Issuer
+		out.Subject = claims.Subject
+	}
+	// Header is a map[string]any; kid may be absent or non-string on
+	// malformed tokens — return "" silently in either case.
+	if kid, ok := parsed.Header["kid"].(string); ok {
+		out.KeyID = kid
+	}
+	return out
 }
 
 // tokenClass tags how validateOAuth2Token decided to handle a token
