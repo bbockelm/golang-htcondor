@@ -268,9 +268,10 @@ Install with: `make pre-commit-install` or `pip install pre-commit && pre-commit
 ## Useful Resources
 
 ### Project Documentation
-- [README.md](../README.md): Getting started and usage examples
+- [README.md](../README.md): Project overview + entry points
+- [docs/library.md](../docs/library.md): Go library usage
+- [docs/server.md](../docs/server.md): HTTP API + MCP server
 - [CONTRIBUTING.md](../CONTRIBUTING.md): Contribution guidelines
-- [DEPENDENCIES.md](../DEPENDENCIES.md): Dependency setup instructions
 - [DEV_SETUP.md](DEV_SETUP.md): Development tools and CI setup
 
 ### HTCondor Documentation
