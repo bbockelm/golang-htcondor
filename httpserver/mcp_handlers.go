@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/mcpserver"
@@ -327,34 +326,47 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 }
 
 // tokenInspection is the diagnostic payload we log when a token
-// fails OAuth2 introspection. All fields may be empty: a token that
-// doesn't parse as a JWT yields a zero-value tokenInspection, and
-// individual claims may be absent. The values are NEVER trusted for
-// authorization decisions; they exist solely so a server log can
-// answer "what did the token actually look like?" without the
-// operator having to capture and decode the Bearer header.
+// fails OAuth2 introspection AND the input to the classifier's
+// origin decision. All fields may be empty: a token that doesn't
+// parse as a JWT yields a zero-value tokenInspection, and
+// individual claims may be absent. The values are NEVER trusted
+// for AUTHORIZATION decisions (those go through the schedd's
+// signature verifier); the marker is only used for routing the
+// HTTP response — 401-to-our-client vs. forward-to-schedd.
 type tokenInspection struct {
-	Issuer  string
-	Subject string
-	KeyID   string // header.kid; identifies the signing key in passwords.d/
+	Issuer   string
+	Subject  string
+	KeyID    string // header.kid; identifies the signing key in passwords.d/
+	TokenUse string // "mcp-oauth2" on tokens this server's OAuth2 flow minted; "" on real condor IDTOKENs
 }
 
 // inspectToken extracts the diagnostic-useful claims from a JWT
 // without verifying the signature. Used by the auth failure log
-// path; production routing decisions go through classifyUnknownToken
-// which calls into this same parser. Failing to parse returns the
-// zero value — the caller's log will then show empty fields, which
-// is itself a useful signal (the Bearer wasn't even a JWT).
+// path AND by classifyUnknownToken's origin decision. Failing to
+// parse returns the zero value — the caller's log will then show
+// empty fields, which is itself a useful signal (the Bearer wasn't
+// even a JWT).
+//
+// We parse with jwt.MapClaims so non-RFC-7519 claims like
+// `token_use` (our sentinel) are reachable. RegisteredClaims would
+// drop them silently.
 func inspectToken(tokenString string) tokenInspection {
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-	parsed, _, err := parser.ParseUnverified(tokenString, &jwt.RegisteredClaims{})
+	parsed, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
 	if err != nil {
 		return tokenInspection{}
 	}
 	out := tokenInspection{}
-	if claims, ok := parsed.Claims.(*jwt.RegisteredClaims); ok {
-		out.Issuer = claims.Issuer
-		out.Subject = claims.Subject
+	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+		if v, ok := claims["iss"].(string); ok {
+			out.Issuer = v
+		}
+		if v, ok := claims["sub"].(string); ok {
+			out.Subject = v
+		}
+		if v, ok := claims["token_use"].(string); ok {
+			out.TokenUse = v
+		}
 	}
 	// Header is a map[string]any; kid may be absent or non-string on
 	// malformed tokens — return "" silently in either case.
@@ -376,37 +388,54 @@ const (
 	tokenClassUnparseable   tokenClass = "unparseable"    // not a JWT at all; 401
 )
 
-// classifyUnknownToken inspects the `iss` claim of a token fosite
-// just rejected to decide whether it could legitimately be a
-// HTCondor IDTOKEN or whether it's something we should 401 on. The
-// parse is unverified — we're not checking the signature, just
-// reading the issuer — because actual signature verification is
-// what fosite + the schedd are doing further along.
+// classifyUnknownToken decides whether a token fosite just rejected
+// should be forwarded to the schedd (real condor_token_create
+// output) or surfaced as a 401 (one of our own OAuth2 tokens that
+// expired / got revoked / was minted against a rotated key).
+//
+// PRIMARY signal: the `token_use` claim. Our OAuth2 mint stamps
+// every access token with `token_use = MCPTokenUseMarker`; real
+// HTCondor IDTOKENs never carry this field. When present, the
+// token is positively identified as ours regardless of issuer —
+// which is what lets us distinguish in deployments where the
+// OAuth2 issuer is configured to equal TRUST_DOMAIN (both kinds
+// of token then have identical iss/sub/kid).
+//
+// FALLBACK signal: the `iss` claim, for tokens minted before the
+// marker was introduced and for genuinely-foreign tokens. If iss
+// matches the configured OAuth2 issuer we 401; if it matches
+// TRUST_DOMAIN we forward; otherwise we 401.
+//
+// The classifier never verifies the signature — fosite (already
+// failed) and the schedd (where forwarded tokens go) handle that.
+// Forging a `token_use` claim is therefore possible at this layer,
+// but the worst-case is "attacker's unsigned token gets 401'd
+// instead of also-401'd at the schedd"; no privilege escalation.
 func (h *Handler) classifyUnknownToken(tokenString string) tokenClass {
-	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-	parsed, _, perr := parser.ParseUnverified(tokenString, &jwt.RegisteredClaims{})
-	if perr != nil {
+	insp := inspectToken(tokenString)
+	if insp.Issuer == "" && insp.Subject == "" && insp.TokenUse == "" && insp.KeyID == "" {
+		// inspectToken returns zero value when the input isn't a
+		// parseable JWT at all. Treat as unparseable.
 		return tokenClassUnparseable
 	}
-	claims, ok := parsed.Claims.(*jwt.RegisteredClaims)
-	if !ok || claims.Issuer == "" {
-		return tokenClassUnknownIssuer
-	}
-	// Our IDP-issued tokens carry the configured AccessTokenIssuer.
-	// Reject anything bearing that issuer that fosite couldn't
-	// introspect — it's expired / revoked / signed with a rotated
-	// key, and forwarding it to the schedd would just trigger a
-	// signature-verification error and a misleading 200 + JSON-RPC
-	// error envelope.
-	if h.oauth2Provider != nil &&
-		claims.Issuer == h.oauth2Provider.config.AccessTokenIssuer {
+	// Marker takes precedence over iss. A fosite-issued token whose
+	// row is gone from the DB (introspect fails) still carries
+	// token_use=mcp-oauth2, and we want a 401 — not a futile
+	// forward to the schedd.
+	if insp.TokenUse == MCPTokenUseMarker {
 		return tokenClassOurIDP
 	}
-	// HTCondor pool tokens carry iss == TRUST_DOMAIN. Anything else
-	// (an upstream OIDC provider whose introspection we don't
-	// support, a stale token from a previous deployment, etc.) is
-	// safer to 401 on than to silently forward.
-	if h.trustDomain != "" && claims.Issuer == h.trustDomain {
+	if insp.Issuer == "" {
+		return tokenClassUnknownIssuer
+	}
+	// Legacy / fallback: tokens minted before the marker existed,
+	// or external tokens. iss against our IDP wins over iss against
+	// TRUST_DOMAIN if they happen to differ.
+	if h.oauth2Provider != nil &&
+		insp.Issuer == h.oauth2Provider.config.AccessTokenIssuer {
+		return tokenClassOurIDP
+	}
+	if h.trustDomain != "" && insp.Issuer == h.trustDomain {
 		return tokenClassPoolIDToken
 	}
 	return tokenClassUnknownIssuer
@@ -2343,7 +2372,15 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		"scopes", scopes,
 		"signing_key_path", h.signingKeyPath,
 	)
-	token, err := security.GenerateJWT(
+	// Mint via the local generator (NOT cedar's security.GenerateJWT)
+	// so we can attach a `token_use=mcp-oauth2` claim. That claim is
+	// invisible to the schedd's verifier (it ignores unknown claims)
+	// but lets our own auth classifier positively identify these
+	// tokens as ours and 401 them when fosite rejects on introspect.
+	// Without the marker, fosite-issued tokens are indistinguishable
+	// from condor_token_create output on iss/sub/kid — they're
+	// minted with the same pool key against the same trust domain.
+	token, err := generateMCPAccessJWT(
 		filepath.Dir(h.signingKeyPath),
 		filepath.Base(h.signingKeyPath),
 		username,
