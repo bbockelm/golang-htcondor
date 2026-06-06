@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // TokenInfo stores OAuth2 token information for a trust domain
@@ -636,43 +636,26 @@ func checkExistingToken(trustDomain string) (string, error) {
 
 // isValidTokenForDomain checks if a token is valid JWT for the specific trust domain and won't expire for at least 5 minutes
 func isValidTokenForDomain(token, trustDomain string) bool {
-	// Parse JWT to check expiration and issuer
-	// JWT format: header.payload.signature
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
+	// Parse the JWT without verifying its signature — we only need the
+	// issuer and expiry claims to decide whether this cached token is
+	// still usable. Signature verification happens later at the schedd.
+	var claims jwt.RegisteredClaims
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	if _, _, err := parser.ParseUnverified(token, &claims); err != nil {
 		return false
 	}
 
-	// Decode payload (base64url)
-	payloadData, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		// Try with standard base64
-		payloadData, err = base64.RawStdEncoding.DecodeString(parts[1])
-		if err != nil {
-			return false
-		}
-	}
-
-	// Parse JSON payload
-	var payload struct {
-		Exp int64  `json:"exp"`
-		Iss string `json:"iss"`
-	}
-	if err := json.Unmarshal(payloadData, &payload); err != nil {
+	// Check if token's issuer matches the trust domain.
+	// The issuer URL should contain the trust domain as its host.
+	if !strings.Contains(claims.Issuer, trustDomain) {
 		return false
 	}
 
-	// Check if token's issuer matches the trust domain
-	// The issuer URL should contain the trust domain as its host
-	if !strings.Contains(payload.Iss, trustDomain) {
+	// Check if token expires in more than 5 minutes.
+	if claims.ExpiresAt == nil {
 		return false
 	}
-
-	// Check if token expires in more than 5 minutes
-	expiresAt := time.Unix(payload.Exp, 0)
-	fiveMinutesFromNow := time.Now().Add(5 * time.Minute)
-
-	return expiresAt.After(fiveMinutesFromNow)
+	return claims.ExpiresAt.After(time.Now().Add(5 * time.Minute))
 }
 
 // getTokenDirectory returns the token directory path from SEC_TOKEN_DIRECTORY or ~/.condor/tokens.d

@@ -525,10 +525,14 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 		return "", fmt.Errorf("failed to parse submit file: %w", err)
 	}
 
-	// Create QMGMT connection
+	// Create QMGMT connection. We propagate the error verbatim —
+	// NewQmgmtConnection already returns "failed to connect and
+	// authenticate to schedd at <addr>: …", so re-wrapping with
+	// "failed to connect to schedd at <addr>: …" here just produces
+	// the same address in two adjacent prefixes of the chain.
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
-		return "", fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
+		return "", err
 	}
 	defer func() {
 		if cerr := qmgmt.Close(); cerr != nil && err == nil {
@@ -614,10 +618,13 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		return 0, nil, fmt.Errorf("failed to parse submit file: %w", err)
 	}
 
-	// Connect to schedd's queue management interface
+	// Connect to schedd's queue management interface. Propagate the
+	// inner error verbatim; see the comment in Submit for why we
+	// don't re-wrap with another "failed to connect to schedd at ..."
+	// prefix.
 	qmgmt, err := NewQmgmtConnection(ctx, s.address)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to connect to schedd at %s: %w", s.address, err)
+		return 0, nil, err
 	}
 	defer func() {
 		if cerr := qmgmt.Close(); cerr != nil && err == nil {
