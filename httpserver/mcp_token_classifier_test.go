@@ -46,26 +46,6 @@ func makeJWT(t *testing.T, issuer string) string {
 	return s
 }
 
-// makeMarkedJWT mints a JWT carrying the MCP-OAuth2 sentinel claim
-// PLUS an arbitrary issuer. The combination matters: the classifier
-// must prefer the marker even when iss matches TRUST_DOMAIN (which
-// is the actual production case our log line surfaced).
-func makeMarkedJWT(t *testing.T, issuer string) string {
-	t.Helper()
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"iss":       issuer,
-		"sub":       "alice",
-		"iat":       time.Now().Unix(),
-		"exp":       time.Now().Add(time.Hour).Unix(),
-		"token_use": MCPTokenUseMarker,
-	})
-	s, err := tok.SignedString([]byte("classifier-test-throwaway-key"))
-	if err != nil {
-		t.Fatalf("SignedString: %v", err)
-	}
-	return s
-}
-
 // testTrustDomain is the TRUST_DOMAIN value all classifier tests
 // use. Constant so the iss-comparison paths can refer to it as
 // "iss matches TRUST_DOMAIN" without re-stating it everywhere.
@@ -147,73 +127,30 @@ func TestClassifyUnknownTokenUnparseable(t *testing.T) {
 	}
 }
 
-// TestClassifyMarkedTokenWithTrustDomainIssuer is the
-// production-bug pin: a token carrying `token_use=mcp-oauth2` AND
-// iss=TRUST_DOMAIN (the OSG deployment shape) must classify as
-// tokenClassOurIDP and produce a 401, NOT pool-idtoken. Before the
-// marker, this combination forwarded to the schedd, the schedd
-// rejected the signature for unrelated reasons, and the MCP
-// response was a 200 with a JSON-RPC error so claude.ai never
-// refreshed. The marker reverses that decision.
-func TestClassifyMarkedTokenWithTrustDomainIssuer(t *testing.T) {
+// TestClassifyTokenWithTrustDomainIssuerForwards confirms a genuine
+// external IDTOKEN (e.g. condor_token_fetch output from a CLI user),
+// whose iss==TRUST_DOMAIN, is forwarded to the schedd for signature
+// verification rather than 401'd. Our own MCP clients don't reach this
+// path — they present an opaque fosite token — so this is purely the
+// external-pool-token case.
+func TestClassifyTokenWithTrustDomainIssuerForwards(t *testing.T) {
 	h := classifierTestHandler("https://ap40.example.com")
-	tok := makeMarkedJWT(t, testTrustDomain)
-	got := h.classifyUnknownToken(tok)
-	if got != tokenClassOurIDP {
-		t.Errorf("marked + iss==TRUST_DOMAIN classified as %v, want tokenClassOurIDP", got)
-	}
-}
-
-// TestClassifyMarkedTokenWithForeignIssuer confirms the marker is
-// the dominant signal even for unrecognized issuers. This shouldn't
-// happen in practice (our mint always uses TRUST_DOMAIN as iss) but
-// the safe behavior on a malformed-but-marked token is still to 401
-// it as ours rather than forward.
-func TestClassifyMarkedTokenWithForeignIssuer(t *testing.T) {
-	h := classifierTestHandler("https://ap40.example.com")
-	tok := makeMarkedJWT(t, "https://random.example.org")
-	got := h.classifyUnknownToken(tok)
-	if got != tokenClassOurIDP {
-		t.Errorf("marked + foreign iss classified as %v, want tokenClassOurIDP", got)
-	}
-}
-
-// TestClassifyUnmarkedTokenStillFallsBackToIssuer confirms tokens
-// minted BEFORE the marker landed (or genuine condor_token_create
-// output) still classify by iss. Without this back-compat path, a
-// real pool IDTOKEN — which never carries token_use — would 401
-// and break command-line condor_token_* clients.
-func TestClassifyUnmarkedTokenStillFallsBackToIssuer(t *testing.T) {
-	h := classifierTestHandler("https://ap40.example.com")
-	tok := makeJWT(t, testTrustDomain) // no token_use claim
+	tok := makeJWT(t, testTrustDomain)
 	got := h.classifyUnknownToken(tok)
 	if got != tokenClassPoolIDToken {
-		t.Errorf("unmarked + iss==TRUST_DOMAIN classified as %v, want tokenClassPoolIDToken", got)
+		t.Errorf("iss==TRUST_DOMAIN classified as %v, want tokenClassPoolIDToken", got)
 	}
 }
 
-// TestInspectTokenSurfacesTokenUse confirms the marker reaches the
-// log line. We log token_use on auth failures so an operator can
-// see WHY the classifier routed the way it did; if inspectToken
-// silently dropped the field the log signal would disappear too.
-func TestInspectTokenSurfacesTokenUse(t *testing.T) {
-	tok := makeMarkedJWT(t, testTrustDomain)
-	insp := inspectToken(tok)
-	if insp.TokenUse != MCPTokenUseMarker {
-		t.Errorf("TokenUse = %q, want %q", insp.TokenUse, MCPTokenUseMarker)
-	}
-}
-
-// TestGenerateMCPAccessJWTEmbedsMarker confirms our local minter
-// actually puts the marker into the issued token. This is the test
-// that catches "someone refactored the minter and forgot the
-// marker" — without it the classifier silently goes back to
-// forwarding our own tokens to the schedd.
-func TestGenerateMCPAccessJWTEmbedsMarker(t *testing.T) {
+// TestGenerateMCPAccessJWTBackdatesNotBefore confirms our local minter
+// (a) backdates the `nbf` claim by nbfClockSkewLeeway so the schedd
+// won't reject the token over small clock skew, (b) carries the
+// expected diagnostic claims, and (c) no longer stamps the retired
+// token_use marker.
+func TestGenerateMCPAccessJWTBackdatesNotBefore(t *testing.T) {
 	// We need a passwords.d/-style key file on disk. Use a fixed
 	// 32-byte payload — the minter XOR-unscrambles with 0xdeadbeef
-	// then runs HKDF; any bytes work for "did we end up with a JWT
-	// that has the marker?".
+	// then runs HKDF; any bytes work for inspecting the claims.
 	keyDir := t.TempDir()
 	keyPath := keyDir + "/POOL"
 	keyBytes := make([]byte, 32)
@@ -224,22 +161,38 @@ func TestGenerateMCPAccessJWTEmbedsMarker(t *testing.T) {
 		t.Fatalf("writeKey: %v", err)
 	}
 
-	now := time.Now().Unix()
+	iat := time.Now().Unix()
 	token, err := generateMCPAccessJWT(keyDir, "POOL",
 		"alice@example.com", testTrustDomain,
-		now, now+3600, []string{"READ"})
+		iat, iat+3600, []string{"READ"})
 	if err != nil {
 		t.Fatalf("generateMCPAccessJWT: %v", err)
 	}
 
-	insp := inspectToken(token)
-	if insp.TokenUse != MCPTokenUseMarker {
-		t.Errorf("minted token lacks token_use marker; got %q, want %q",
-			insp.TokenUse, MCPTokenUseMarker)
+	// Decode the claims directly to inspect nbf / token_use, which
+	// inspectToken doesn't surface.
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsed, _, err := parser.ParseUnverified(token, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("ParseUnverified: %v", err)
 	}
-	// Sanity-check the rest of the claims survived too — a future
-	// refactor that drops sub or iss on the way to adding the
-	// marker would still pass the marker check above.
+	claims := parsed.Claims.(jwt.MapClaims)
+
+	nbf, ok := claims["nbf"].(float64)
+	if !ok {
+		t.Fatalf("minted token missing nbf claim; claims=%v", claims)
+	}
+	wantNbf := iat - int64(nbfClockSkewLeeway.Seconds())
+	if int64(nbf) != wantNbf {
+		t.Errorf("nbf = %d, want %d (iat %d backdated by %s)",
+			int64(nbf), wantNbf, iat, nbfClockSkewLeeway)
+	}
+	if _, present := claims["token_use"]; present {
+		t.Errorf("minted token still carries retired token_use claim: %v", claims["token_use"])
+	}
+
+	// Sanity-check the diagnostic claims survived.
+	insp := inspectToken(token)
 	if insp.Issuer != testTrustDomain {
 		t.Errorf("Issuer = %q, want %q", insp.Issuer, testTrustDomain)
 	}

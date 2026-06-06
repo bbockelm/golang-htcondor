@@ -152,10 +152,11 @@ func TestCondorScopesIntegration(t *testing.T) {
 			token, refreshToken := getOAuth2TokenWithCondorScopes(t, httpClient, baseURL, clientID, clientSecret, "testuser", []string{"condor:/READ"})
 			t.Logf("Received access token: %s...", token[:min(50, len(token))])
 
-			// Verify the token is a JWT (3 parts separated by dots)
-			parts := strings.Split(token, ".")
-			if len(parts) != 3 {
-				t.Errorf("Token should be a JWT with 3 parts, got %d parts", len(parts))
+			// The access token is now fosite's own opaque token — the
+			// HTCondor IDTOKEN is minted server-side per request, never
+			// handed to the client — so it is NOT a 3-part JWT.
+			if token == "" {
+				t.Error("Access token should not be empty")
 			}
 
 			// Verify refresh token is present
@@ -169,10 +170,11 @@ func TestCondorScopesIntegration(t *testing.T) {
 			token, refreshToken := getOAuth2TokenWithCondorScopes(t, httpClient, baseURL, clientID, clientSecret, "testuser", []string{"condor:/WRITE"})
 			t.Logf("Received access token: %s...", token[:min(50, len(token))])
 
-			// Verify the token is a JWT
-			parts := strings.Split(token, ".")
-			if len(parts) != 3 {
-				t.Errorf("Token should be a JWT with 3 parts, got %d parts", len(parts))
+			// The access token is now fosite's own opaque token — the
+			// HTCondor IDTOKEN is minted server-side per request, never
+			// handed to the client — so it is NOT a 3-part JWT.
+			if token == "" {
+				t.Error("Access token should not be empty")
 			}
 
 			// Verify refresh token is present
@@ -187,10 +189,11 @@ func TestCondorScopesIntegration(t *testing.T) {
 			token, refreshToken := getOAuth2TokenWithCondorScopes(t, httpClient, baseURL, clientID, clientSecret, "testuser", scopes)
 			t.Logf("Received access token: %s...", token[:min(50, len(token))])
 
-			// Verify the token is a JWT
-			parts := strings.Split(token, ".")
-			if len(parts) != 3 {
-				t.Errorf("Token should be a JWT with 3 parts, got %d parts", len(parts))
+			// The access token is now fosite's own opaque token — the
+			// HTCondor IDTOKEN is minted server-side per request, never
+			// handed to the client — so it is NOT a 3-part JWT.
+			if token == "" {
+				t.Error("Access token should not be empty")
 			}
 
 			// Verify refresh token is present
@@ -218,10 +221,10 @@ func TestCondorScopesIntegration(t *testing.T) {
 			newToken := refreshOAuth2Token(t, httpClient, baseURL, clientID, clientSecret, refreshToken)
 			t.Logf("Refreshed access token: %s...", newToken[:min(50, len(newToken))])
 
-			// Verify the new token is also a JWT
-			parts := strings.Split(newToken, ".")
-			if len(parts) != 3 {
-				t.Errorf("Refreshed token should be a JWT with 3 parts, got %d parts", len(parts))
+			// The refreshed access token is likewise an opaque fosite
+			// token, not a 3-part JWT.
+			if newToken == "" {
+				t.Error("Refreshed access token should not be empty")
 			}
 
 			// Tokens should be different (different timestamps at minimum)

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/golang-htcondor/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -188,7 +189,60 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	t.Log("Step 6: Testing MCP job query...")
 	testMCPQueryJobs(t, client, baseURL, accessToken, clusterID)
 
+	// Step 7: Test the forward path — a raw HTCondor IDTOKEN (as a CLI
+	// user's condor_token_create / condor_token_fetch produces: pool-
+	// signed, iss=TRUST_DOMAIN, no OAuth2/token_use marker) presented
+	// directly to /mcp/message must be classified as a pool IDTOKEN and
+	// forwarded to the schedd, NOT 401'd.
+	t.Log("Step 7: Testing forward path with a raw HTCondor IDTOKEN...")
+	testMCPForwardRawCondorToken(t, client, baseURL, passwordsDir, trustDomain, testUser, clusterID)
+
 	t.Log("All MCP HTTP integration tests passed!")
+}
+
+// testMCPForwardRawCondorToken mints an HTCondor IDTOKEN with the pool
+// signing key (the same crypto condor_token_create uses) and presents it
+// directly to /mcp/message. This exercises validateOAuth2Token's
+// forward-to-schedd path: fosite can't introspect it, the classifier
+// sees iss==TRUST_DOMAIN with no marker and returns pool-idtoken, and the
+// handler hands the bearer to the schedd for authentication.
+func testMCPForwardRawCondorToken(t *testing.T, client *http.Client, baseURL, passwordsDir, trustDomain, user string, clusterID int) {
+	now := time.Now().Unix()
+	rawToken, err := security.GenerateJWT(
+		passwordsDir, "POOL",
+		user+"@"+trustDomain, trustDomain,
+		now, now+300,
+		[]string{"READ"},
+	)
+	if err != nil {
+		t.Fatalf("failed to mint raw HTCondor IDTOKEN: %v", err)
+	}
+
+	params := map[string]interface{}{
+		"name": "query_jobs",
+		"arguments": map[string]interface{}{
+			"constraint": fmt.Sprintf("ClusterId == %d", clusterID),
+			"projection": []string{"ClusterId", "ProcId", "JobStatus"},
+		},
+	}
+	paramsBytes, _ := json.Marshal(params)
+	mcpReq := mcpserver.MCPMessage{
+		JSONRPC: "2.0",
+		ID:      7,
+		Method:  "tools/call",
+		Params:  json.RawMessage(paramsBytes),
+	}
+
+	// sendMCPRequest already fails the test on a non-200 status, which is
+	// the key assertion: a 401 here would mean the forward path is broken.
+	mcpResp := sendMCPRequest(t, client, baseURL, rawToken, mcpReq)
+	if mcpResp.Error != nil {
+		t.Fatalf("query_jobs via raw IDTOKEN returned an error: %v", mcpResp.Error.Message)
+	}
+	if _, ok := mcpResp.Result.(map[string]interface{}); !ok {
+		t.Fatalf("query_jobs via raw IDTOKEN returned no result map: %+v", mcpResp.Result)
+	}
+	t.Log("Raw HTCondor IDTOKEN was forwarded to the schedd and authenticated successfully")
 }
 
 // createOAuth2Client creates a new OAuth2 client in the storage
