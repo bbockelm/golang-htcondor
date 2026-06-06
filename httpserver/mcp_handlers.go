@@ -334,10 +334,9 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 // signature verifier); the marker is only used for routing the
 // HTTP response — 401-to-our-client vs. forward-to-schedd.
 type tokenInspection struct {
-	Issuer   string
-	Subject  string
-	KeyID    string // header.kid; identifies the signing key in passwords.d/
-	TokenUse string // "mcp-oauth2" on tokens this server's OAuth2 flow minted; "" on real condor IDTOKENs
+	Issuer  string
+	Subject string
+	KeyID   string // header.kid; identifies the signing key in passwords.d/
 }
 
 // inspectToken extracts the diagnostic-useful claims from a JWT
@@ -346,10 +345,6 @@ type tokenInspection struct {
 // parse returns the zero value — the caller's log will then show
 // empty fields, which is itself a useful signal (the Bearer wasn't
 // even a JWT).
-//
-// We parse with jwt.MapClaims so non-RFC-7519 claims like
-// `token_use` (our sentinel) are reachable. RegisteredClaims would
-// drop them silently.
 func inspectToken(tokenString string) tokenInspection {
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
 	parsed, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
@@ -363,9 +358,6 @@ func inspectToken(tokenString string) tokenInspection {
 		}
 		if v, ok := claims["sub"].(string); ok {
 			out.Subject = v
-		}
-		if v, ok := claims["token_use"].(string); ok {
-			out.TokenUse = v
 		}
 	}
 	// Header is a map[string]any; kid may be absent or non-string on
@@ -389,48 +381,38 @@ const (
 )
 
 // classifyUnknownToken decides whether a token fosite just rejected
-// should be forwarded to the schedd (real condor_token_create
-// output) or surfaced as a 401 (one of our own OAuth2 tokens that
-// expired / got revoked / was minted against a rotated key).
+// should be forwarded to the schedd (a real HTCondor IDTOKEN, e.g.
+// condor_token_fetch output from a CLI user) or surfaced as a 401.
 //
-// PRIMARY signal: the `token_use` claim. Our OAuth2 mint stamps
-// every access token with `token_use = MCPTokenUseMarker`; real
-// HTCondor IDTOKENs never carry this field. When present, the
-// token is positively identified as ours regardless of issuer —
-// which is what lets us distinguish in deployments where the
-// OAuth2 issuer is configured to equal TRUST_DOMAIN (both kinds
-// of token then have identical iss/sub/kid).
+// Our own MCP clients never reach this path: they present fosite's
+// opaque access token, which fosite introspects successfully. An
+// EXPIRED/revoked one fails introspection but isn't a JWT, so it
+// classifies as unparseable → 401, which is exactly what we want
+// (the client refreshes). Only genuine external IDTOKENs are JWTs
+// that warrant forwarding.
 //
-// FALLBACK signal: the `iss` claim, for tokens minted before the
-// marker was introduced and for genuinely-foreign tokens. If iss
-// matches the configured OAuth2 issuer we 401; if it matches
-// TRUST_DOMAIN we forward; otherwise we 401.
+// We classify by the `iss` claim:
+//   - matches our OAuth2 issuer → 401 (a stale token we minted before
+//     this server returned fosite tokens, or a forgery);
+//   - matches TRUST_DOMAIN → forward to the schedd for signature
+//     verification;
+//   - anything else → 401.
 //
 // The classifier never verifies the signature — fosite (already
 // failed) and the schedd (where forwarded tokens go) handle that.
-// Forging a `token_use` claim is therefore possible at this layer,
-// but the worst-case is "attacker's unsigned token gets 401'd
-// instead of also-401'd at the schedd"; no privilege escalation.
 func (h *Handler) classifyUnknownToken(tokenString string) tokenClass {
 	insp := inspectToken(tokenString)
-	if insp.Issuer == "" && insp.Subject == "" && insp.TokenUse == "" && insp.KeyID == "" {
+	if insp.Issuer == "" && insp.Subject == "" && insp.KeyID == "" {
 		// inspectToken returns zero value when the input isn't a
-		// parseable JWT at all. Treat as unparseable.
+		// parseable JWT at all (e.g. an opaque fosite access token).
+		// Treat as unparseable → 401.
 		return tokenClassUnparseable
-	}
-	// Marker takes precedence over iss. A fosite-issued token whose
-	// row is gone from the DB (introspect fails) still carries
-	// token_use=mcp-oauth2, and we want a 401 — not a futile
-	// forward to the schedd.
-	if insp.TokenUse == MCPTokenUseMarker {
-		return tokenClassOurIDP
 	}
 	if insp.Issuer == "" {
 		return tokenClassUnknownIssuer
 	}
-	// Legacy / fallback: tokens minted before the marker existed,
-	// or external tokens. iss against our IDP wins over iss against
-	// TRUST_DOMAIN if they happen to differ.
+	// iss against our IDP wins over iss against TRUST_DOMAIN if they
+	// happen to differ.
 	if h.oauth2Provider != nil &&
 		insp.Issuer == h.oauth2Provider.config.AccessTokenIssuer {
 		return tokenClassOurIDP
@@ -859,85 +841,14 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	}
 	h.logger.Info(logging.DestinationHTTP, "Successfully created access response")
 
-	// Check if condor:/* scopes are requested
-	requestedScopes := accessRequest.GetRequestedScopes()
-	if hasCondorScopes(requestedScopes) {
-		// Generate HTCondor IDTOKEN and replace the access token
-		h.replaceWithCondorToken(ctx, w, r, accessRequest, response)
-		return
-	}
-
-	// Standard OAuth2 flow - write the response as-is
+	// Always return fosite's own access token — even for condor:/*
+	// scopes. The client uses this token against THIS server's MCP
+	// endpoint; we mint a short-lived HTCondor IDTOKEN on demand,
+	// per request, in handleMCPMessage to talk to the schedd. This
+	// keeps the credential the client holds introspectable and
+	// revocable by fosite, and means the client never carries a
+	// pool-signed token.
 	h.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
-}
-
-// replaceWithCondorToken replaces the OAuth2 access token with an HTCondor IDTOKEN
-// while preserving the refresh token and other fields
-func (h *Handler) replaceWithCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, accessRequest fosite.AccessRequester, response fosite.AccessResponder) {
-	// Check if we can generate HTCondor tokens
-	if h.signingKeyPath == "" || h.trustDomain == "" {
-		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
-		err := &fosite.RFC6749Error{
-			ErrorField:       "server_error",
-			DescriptionField: "Server not configured to issue HTCondor tokens",
-			HintField:        "Contact administrator to configure signing key and trust domain",
-			CodeField:        http.StatusInternalServerError,
-		}
-		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
-		return
-	}
-
-	// Get the username from the session
-	username := accessRequest.GetSession().GetSubject()
-	if username == "" {
-		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
-		err := &fosite.RFC6749Error{
-			ErrorField:       "invalid_request",
-			DescriptionField: "Cannot determine user identity",
-			CodeField:        http.StatusBadRequest,
-		}
-		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
-		return
-	}
-
-	// Get requested scopes
-	requestedScopes := accessRequest.GetRequestedScopes()
-
-	// Generate HTCondor IDTOKEN
-	idtoken, err := h.generateHTCondorTokenWithScopes(username, requestedScopes)
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
-			"error", err,
-			"username", username,
-			"scopes", requestedScopes)
-		fositeErr := &fosite.RFC6749Error{
-			ErrorField:       "server_error",
-			DescriptionField: "Failed to generate HTCondor IDTOKEN",
-			CodeField:        http.StatusInternalServerError,
-		}
-		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, fositeErr)
-		return
-	}
-
-	h.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for condor scopes",
-		"username", username,
-		"scopes", requestedScopes)
-
-	// Get the response as a map and replace the access token with HTCondor IDTOKEN
-	// The response already has the refresh token and other OAuth2 fields
-	tokenResponse := response.ToMap()
-	h.logger.Info(logging.DestinationHTTP, "Token response map created", "has_refresh_token", tokenResponse["refresh_token"] != nil)
-	tokenResponse["access_token"] = idtoken
-	tokenResponse["token_type"] = "Bearer"
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.WriteHeader(http.StatusOK)
-
-	if err := json.NewEncoder(w).Encode(tokenResponse); err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to encode token response", "error", err)
-	}
 }
 
 // handleDeviceCodeTokenRequest handles token requests with device_code grant type
@@ -970,13 +881,6 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 		}
 		h.logger.Error(logging.DestinationHTTP, "Device code token request failed", "error", err)
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid device code")
-		return
-	}
-
-	// Check if condor:/* scopes are requested - generate HTCondor IDTOKEN instead
-	grantedScopes := request.GetGrantedScopes()
-	if hasCondorScopes(grantedScopes) {
-		h.handleDeviceCodeCondorToken(ctx, w, r, request)
 		return
 	}
 
@@ -1029,83 +933,6 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 		"expires_in":    int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         strings.Join(request.GetGrantedScopes(), " "),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
-	}
-}
-
-// handleDeviceCodeCondorToken handles device code token requests when condor scopes are requested
-// It generates an HTCondor IDTOKEN instead of a standard OAuth2 access token
-func (h *Handler) handleDeviceCodeCondorToken(ctx context.Context, w http.ResponseWriter, _ *http.Request, request fosite.Requester) {
-	// Check if we can generate HTCondor tokens
-	if h.signingKeyPath == "" || h.trustDomain == "" {
-		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor tokens: signing key or trust domain not configured")
-		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Server not configured to issue HTCondor tokens")
-		return
-	}
-
-	// Get the username from the session
-	username := request.GetSession().GetSubject()
-	if username == "" {
-		h.logger.Error(logging.DestinationHTTP, "Cannot generate condor token: no username in session")
-		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Cannot determine user identity")
-		return
-	}
-
-	// Get granted scopes
-	grantedScopes := request.GetGrantedScopes()
-
-	// Generate HTCondor IDTOKEN
-	idtoken, err := h.generateHTCondorTokenWithScopes(username, grantedScopes)
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor IDTOKEN",
-			"error", err,
-			"username", username,
-			"scopes", grantedScopes)
-		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate HTCondor IDTOKEN")
-		return
-	}
-
-	h.logger.Info(logging.DestinationHTTP, "Generated HTCondor IDTOKEN for device code flow",
-		"username", username,
-		"scopes", grantedScopes)
-
-	// Set per-token expiries on the session before generating the refresh token
-	// (see comment in handleDeviceCodeTokenRequest). The access token here is the
-	// HTCondor IDTOKEN, which has its own JWT-level expiry, but the refresh token
-	// still flows through fosite's HMAC strategy and needs the session expiry set.
-	setStandardTokenExpiries(ctx, h.oauth2Provider.config, request.GetSession())
-
-	// Generate refresh token using fosite
-	strategy := h.oauth2Provider.GetStrategy()
-	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
-		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
-		return
-	}
-
-	// Store the refresh token session
-	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
-	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
-		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
-		return
-	}
-
-	// Build response with HTCondor IDTOKEN as access token
-	response := map[string]interface{}{
-		"access_token":  idtoken,
-		"token_type":    "Bearer",
-		"expires_in":    int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
-		"refresh_token": refreshToken,
-		"scope":         strings.Join(grantedScopes, " "),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2318,6 +2145,12 @@ func mapCondorScopesToAuthz(scopes []string) []string {
 	return authz
 }
 
+// condorIDTokenLifetime is how long an on-demand HTCondor IDTOKEN is
+// valid. It's minted per request for a single schedd interaction and
+// never handed to the client, so it stays short; cedar's session cache
+// keeps subsequent requests from re-handshaking.
+const condorIDTokenLifetime = 5 * time.Minute
+
 // generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
 func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
 	if h.signingKeyPath == "" {
@@ -2336,8 +2169,13 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		username = username + "@" + h.uidDomain
 	}
 
+	// This IDTOKEN is minted on demand for a single schedd interaction
+	// and never handed to the client, so it can be short-lived. cedar
+	// caches the authenticated session after the first handshake, so a
+	// short expiry doesn't force a re-handshake mid-session; a fresh
+	// token is minted on the next cache-miss request anyway.
 	iat := time.Now().Unix()
-	exp := time.Now().Add(1 * time.Hour).Unix()
+	exp := time.Now().Add(condorIDTokenLifetime).Unix()
 
 	// Check if condor:/* scopes are present
 	var authz []string
@@ -2373,13 +2211,9 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		"signing_key_path", h.signingKeyPath,
 	)
 	// Mint via the local generator (NOT cedar's security.GenerateJWT)
-	// so we can attach a `token_use=mcp-oauth2` claim. That claim is
-	// invisible to the schedd's verifier (it ignores unknown claims)
-	// but lets our own auth classifier positively identify these
-	// tokens as ours and 401 them when fosite rejects on introspect.
-	// Without the marker, fosite-issued tokens are indistinguishable
-	// from condor_token_create output on iss/sub/kid — they're
-	// minted with the same pool key against the same trust domain.
+	// so we can backdate the `nbf` claim to absorb clock skew between
+	// this server and the schedd (we've seen even 1s of skew cause
+	// rejections). The token is otherwise a standard HTCondor IDTOKEN.
 	token, err := generateMCPAccessJWT(
 		filepath.Dir(h.signingKeyPath),
 		filepath.Base(h.signingKeyPath),

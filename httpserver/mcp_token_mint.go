@@ -12,29 +12,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/hkdf"
 )
 
-// MCPTokenUseMarker is the value of the `token_use` JWT claim our
-// OAuth2 access tokens carry. It positively identifies a JWT as
-// minted by this server's OAuth2 flow (vs. an actual
-// condor_token_create-issued IDTOKEN), letting the auth path 401
-// our own expired/revoked tokens instead of forwarding them to the
-// schedd as if they were pool tokens.
-//
-// The HTCondor schedd ignores unknown JWT claims during signature
-// verification — it only checks iss/sub/scope/iat/exp/jti — so the
-// extra claim is invisible to anything outside this server.
-const MCPTokenUseMarker = "mcp-oauth2" //nolint:gosec // not a credential — public JWT-claim sentinel value, not a key/password
+// nbfClockSkewLeeway backdates the `nbf` (not-before) claim on minted
+// IDTOKENs. The schedd rejects a token whose nbf is in its future, and
+// we've observed even ~1s of clock skew between this server and the
+// schedd cause spurious rejections; backdating by a few seconds
+// absorbs that skew without meaningfully widening the token's validity.
+const nbfClockSkewLeeway = 10 * time.Second
 
 // generateMCPAccessJWT mints an HTCondor-compatible JWT identical in
-// shape to cedar's security.GenerateJWT output PLUS a `token_use`
-// claim that lets our auth classifier positively identify these
-// tokens. We replicate cedar's logic locally (rather than calling
-// its GenerateJWT) for one reason: cedar's API doesn't accept
-// arbitrary extra claims. When that's fixed upstream this function
-// should collapse to a thin wrapper.
+// shape to cedar's security.GenerateJWT output, PLUS a backdated `nbf`
+// claim (see nbfClockSkewLeeway). We replicate cedar's logic locally
+// (rather than calling its GenerateJWT) for one reason: cedar's API
+// doesn't let us set nbf / arbitrary claims. When that's fixed
+// upstream this function should collapse to a thin wrapper.
 //
 // The signing path is BYTE-IDENTICAL to cedar's:
 //
@@ -97,15 +92,16 @@ func generateMCPAccessJWT(
 	}
 	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
 
-	// Payload. Standard HTCondor IDTOKEN claims plus our sentinel.
-	// Key insertion order doesn't matter — JSON objects are
-	// unordered — but we use a map literal for readability.
+	// Payload. Standard HTCondor IDTOKEN claims. `nbf` is backdated by
+	// nbfClockSkewLeeway so the schedd doesn't reject the token over
+	// small clock differences. Key insertion order doesn't matter —
+	// JSON objects are unordered — but we use a map literal for clarity.
 	payload := map[string]any{
-		"sub":       subject,
-		"jti":       jti,
-		"iat":       issuedAt,
-		"exp":       expiration,
-		"token_use": MCPTokenUseMarker, // <-- the marker
+		"sub": subject,
+		"jti": jti,
+		"iat": issuedAt,
+		"nbf": issuedAt - int64(nbfClockSkewLeeway.Seconds()),
+		"exp": expiration,
 	}
 	if issuer != "" {
 		payload["iss"] = issuer
