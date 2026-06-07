@@ -247,6 +247,77 @@ func TestDynamicClientRegistrationScopeFormats(t *testing.T) {
 	}
 }
 
+// TestDynamicClientRegistrationGrantsOfflineAccess pins the fix that lets
+// refresh tokens work: a dynamically-registered client must be allowed
+// the offline_access scope. If it isn't, filterScopesForClient strips
+// offline_access at authorize time and fosite never issues a refresh
+// token — the bug that left claude.ai re-authenticating on every expiry.
+// The registration response's scope mirrors the stored client scopes, so
+// asserting on it proves what the client is registered with.
+func TestDynamicClientRegistrationGrantsOfflineAccess(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	server, err := NewServer(Config{
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: filepath.Join(t.TempDir(), "reg.db"),
+		OAuth2Issuer: "http://localhost:8080",
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	register := func(t *testing.T, body map[string]interface{}) []string {
+		t.Helper()
+		reqBody, _ := json.Marshal(body)
+		req := httptest.NewRequestWithContext(context.Background(), "POST", "/mcp/oauth2/register", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		server.handleOAuth2Register(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("registration failed: status %d, body %s", rr.Code, rr.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return strings.Fields(resp["scope"].(string))
+	}
+
+	hasOffline := func(scopes []string) bool {
+		for _, s := range scopes {
+			if s == "offline_access" {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("explicitly requested offline_access is accepted", func(t *testing.T) {
+		scopes := register(t, map[string]interface{}{
+			"redirect_uris": []string{"http://localhost:8080/callback"},
+			"scope":         "openid offline_access mcp:read",
+		})
+		if !hasOffline(scopes) {
+			t.Errorf("registered scopes %v missing offline_access (was it rejected/stripped?)", scopes)
+		}
+	})
+
+	t.Run("default scopes include offline_access", func(t *testing.T) {
+		scopes := register(t, map[string]interface{}{
+			"redirect_uris": []string{"http://localhost:8080/callback"},
+			// no scope -> server defaults apply
+		})
+		if !hasOffline(scopes) {
+			t.Errorf("default registered scopes %v missing offline_access", scopes)
+		}
+	})
+}
+
 // TestOAuth2MetadataScopes tests that the OAuth2 metadata includes all supported scopes
 func TestOAuth2MetadataScopes(t *testing.T) {
 	// Create temporary directory for test database
@@ -301,11 +372,12 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 	}
 
 	expectedScopes := map[string]bool{
-		"openid":    false,
-		"profile":   false,
-		"email":     false,
-		"mcp:read":  false,
-		"mcp:write": false,
+		"openid":         false,
+		"profile":        false,
+		"email":          false,
+		"offline_access": false,
+		"mcp:read":       false,
+		"mcp:write":      false,
 	}
 
 	for _, scope := range scopesSupported {
@@ -318,7 +390,9 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 		}
 	}
 
-	// Check all expected scopes are present
+	// Check all expected scopes are present. offline_access in particular
+	// must be advertised, or clients like claude.ai never request it and
+	// never receive a refresh token.
 	for scope, found := range expectedScopes {
 		if !found {
 			t.Errorf("Expected scope '%s' not found in scopes_supported", scope)
@@ -404,11 +478,12 @@ func TestOAuth2ProtectedResourceMetadata(t *testing.T) {
 	}
 
 	expectedScopes := map[string]bool{
-		"openid":    false,
-		"profile":   false,
-		"email":     false,
-		"mcp:read":  false,
-		"mcp:write": false,
+		"openid":         false,
+		"profile":        false,
+		"email":          false,
+		"offline_access": false,
+		"mcp:read":       false,
+		"mcp:write":      false,
 	}
 
 	for _, scope := range scopesSupported {
