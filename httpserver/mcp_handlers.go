@@ -1068,16 +1068,20 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		regReq.ResponseTypes = []string{"code"}
 	}
 	if len(regReq.Scopes) == 0 {
-		regReq.Scopes = []string{"openid", "profile", "email", "mcp:read", "mcp:write"}
+		regReq.Scopes = []string{"openid", "profile", "email", "offline_access", "mcp:read", "mcp:write"}
 	}
 
-	// Validate requested scopes against supported scopes
+	// Validate requested scopes against supported scopes. offline_access
+	// must be accepted and registered on the client; without it in the
+	// client's allowed set, filterScopesForClient strips it at authorize
+	// time and fosite never issues a refresh token.
 	supportedScopes := map[string]bool{
-		"openid":    true,
-		"profile":   true,
-		"email":     true,
-		"mcp:read":  true,
-		"mcp:write": true,
+		"openid":         true,
+		"profile":        true,
+		"email":          true,
+		"offline_access": true,
+		"mcp:read":       true,
+		"mcp:write":      true,
 	}
 	for _, scope := range regReq.Scopes {
 		// Allow condor:/* scopes
@@ -1135,6 +1139,20 @@ func generateRandomString(length int) string {
 	return hex.EncodeToString(b)
 }
 
+// oauth2AdvertisedScopes is the scope set published in both OAuth2
+// discovery documents (authorization-server and protected-resource
+// metadata). offline_access MUST be advertised: clients like claude.ai
+// only request the scopes the server advertises, so without it here they
+// never ask for a refresh token and silently end up with access-token-
+// only sessions that force a full re-auth on every expiry.
+var oauth2AdvertisedScopes = []string{
+	"openid", "profile", "email",
+	"offline_access",
+	"mcp:read", "mcp:write",
+	"condor:/READ", "condor:/WRITE",
+	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
+}
+
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
 // Implements RFC 8414: OAuth 2.0 Authorization Server Metadata
 func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
@@ -1158,7 +1176,7 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
+		"scopes_supported":                      oauth2AdvertisedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
 	}
@@ -1187,7 +1205,7 @@ func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _
 		"authorization_servers":                 []string{issuer},
 		"bearer_methods_supported":              []string{"header"},
 		"resource_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
+		"scopes_supported":                      oauth2AdvertisedScopes,
 		"resource_documentation":                issuer + "/mcp",
 	}
 

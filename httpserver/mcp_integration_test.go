@@ -197,7 +197,134 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	t.Log("Step 7: Testing forward path with a raw HTCondor IDTOKEN...")
 	testMCPForwardRawCondorToken(t, client, baseURL, passwordsDir, trustDomain, testUser, clusterID)
 
+	// Step 8: A dynamically-registered client (RFC 7591) that requests
+	// offline_access must receive a refresh token. This is the end-to-end
+	// guard for the "claude.ai re-auths on every expiry" bug: the DCR
+	// endpoint must advertise+accept offline_access so it survives scope
+	// filtering and fosite issues a refresh token.
+	t.Log("Step 8: Testing refresh-token issuance for a dynamically-registered client...")
+	dcrID, dcrSecret := registerDCRClient(t, client, baseURL)
+	refreshTok := getRefreshTokenViaAuthCode(t, client, baseURL, dcrID, dcrSecret, testUser)
+	t.Logf("Refresh token issued to DCR client: %s...", refreshTok[:min(12, len(refreshTok))])
+
 	t.Log("All MCP HTTP integration tests passed!")
+}
+
+// registerDCRClient registers an OAuth2 client via the RFC 7591 dynamic
+// client registration endpoint, requesting offline_access, and returns
+// its credentials. It asserts the registered scope set actually includes
+// offline_access — if the server stripped or rejected it, no refresh
+// token could ever be issued to this client.
+func registerDCRClient(t *testing.T, httpClient *http.Client, baseURL string) (string, string) {
+	regBody, _ := json.Marshal(map[string]interface{}{
+		"redirect_uris":  []string{"http://localhost:18081/callback"},
+		"grant_types":    []string{"authorization_code", "refresh_token"},
+		"response_types": []string{"code"},
+		"scope":          "openid profile email offline_access mcp:read mcp:write",
+		"client_name":    "dcr-refresh-test",
+	})
+	req, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/register", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("DCR request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("DCR failed: status %d, body %s", resp.StatusCode, string(body))
+	}
+	var reg struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reg); err != nil {
+		t.Fatalf("decode DCR response: %v", err)
+	}
+	if !strings.Contains(reg.Scope, "offline_access") {
+		t.Fatalf("DCR client not granted offline_access; scope=%q", reg.Scope)
+	}
+	return reg.ClientID, reg.ClientSecret
+}
+
+// getRefreshTokenViaAuthCode runs the full authorization-code flow for a
+// client, requesting offline_access, and returns the refresh token from
+// the token response. It fails the test if no refresh token was issued —
+// the regression this whole change guards against.
+func getRefreshTokenViaAuthCode(t *testing.T, httpClient *http.Client, baseURL, clientID, clientSecret, username string) string {
+	const scope = "openid profile email offline_access mcp:read mcp:write"
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18081/callback&scope=%s&state=teststate&username=%s",
+		baseURL, clientID, url.QueryEscape(scope), username)
+	req, _ := http.NewRequest("GET", authURL, nil)
+	req.Header.Set("X-Test-User", username)
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	defer func() { httpClient.CheckRedirect = nil }()
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("authorize request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	location := resp.Header.Get("Location")
+	if location == "" {
+		t.Fatal("no redirect location from authorize")
+	}
+
+	// Approve consent if redirected there.
+	if strings.Contains(location, "/mcp/oauth2/consent") {
+		u, err := url.Parse(location)
+		if err != nil {
+			t.Fatalf("parse consent URL: %v", err)
+		}
+		form := url.Values{}
+		form.Set("action", "approve")
+		form.Set("state", u.Query().Get("state"))
+		form.Set("scope", scope)
+		creq, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", strings.NewReader(form.Encode()))
+		creq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		creq.Header.Set("X-Test-User", username)
+		cresp, err := httpClient.Do(creq)
+		if err != nil {
+			t.Fatalf("consent request failed: %v", err)
+		}
+		defer cresp.Body.Close()
+		location = cresp.Header.Get("Location")
+		if location == "" {
+			t.Fatal("no redirect location from consent")
+		}
+	}
+
+	code := extractCodeFromURL(t, location)
+	if code == "" {
+		t.Fatalf("no authorization code in redirect: %s", location)
+	}
+
+	tokenReq, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18081/callback&client_id=%s&client_secret=%s",
+			code, clientID, clientSecret)))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResp, err := httpClient.Do(tokenReq)
+	if err != nil {
+		t.Fatalf("token request failed: %v", err)
+	}
+	defer tokenResp.Body.Close()
+	if tokenResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(tokenResp.Body)
+		t.Fatalf("token request failed: status %d, body %s", tokenResp.StatusCode, string(body))
+	}
+	var td struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&td); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if td.RefreshToken == "" {
+		t.Fatalf("no refresh_token issued despite offline_access (granted scope=%q)", td.Scope)
+	}
+	return td.RefreshToken
 }
 
 // testMCPForwardRawCondorToken mints an HTCondor IDTOKEN with the pool
