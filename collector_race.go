@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -44,9 +45,23 @@ import (
 // happy-eyeballs cadence the user-facing dialer should be running.
 const DefaultCollectorRaceStagger = 150 * time.Millisecond
 
+// addDefaultCollectorPort appends ":9618" to addr when addr has no
+// port and is not already a sinful string ("<…>").
+func addDefaultCollectorPort(addr string) string {
+	if strings.HasPrefix(addr, "<") {
+		return addr // sinful string — do not touch
+	}
+	_, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr + ":9618"
+	}
+	return addr
+}
+
 // splitCollectorList parses an HTCondor-style comma-separated
 // COLLECTOR_HOST string. Whitespace around each entry is trimmed;
-// empty entries are dropped.
+// empty entries are dropped. Each entry that has no port is given
+// the default HTCondor collector port (9618).
 //
 // Bracket awareness: HTCondor sinful strings of the form
 // "<host:port?key=val&key=val>" are opaque blobs we must not
@@ -74,7 +89,7 @@ func splitCollectorList(s string) []string {
 	flush := func() {
 		t := strings.TrimSpace(cur.String())
 		if t != "" {
-			out = append(out, t)
+			out = append(out, addDefaultCollectorPort(t))
 		}
 		cur.Reset()
 	}
