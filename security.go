@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -301,6 +302,78 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 	}
 
 	return secConfig, nil
+}
+
+// GetServerSecurityConfig builds a *server-side* SecurityConfig from the
+// HTCondor configuration. It takes the same auth/crypto methods and security
+// levels as GetSecurityConfig (so the server enforces the pool's SEC_* policy),
+// and additionally loads the credentials a server needs to *verify* incoming
+// authentications rather than to present its own:
+//
+//   - SSL: the server certificate/key/CA (AUTH_SSL_SERVER_CERTFILE / KEYFILE /
+//     CAFILE) instead of the client ones.
+//   - TOKEN/IDTOKENS: the signing keys used to validate presented tokens
+//     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
+//     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
+//     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
+//
+// This is what a Go HTCondor daemon (e.g. a CCB server) should use so it
+// authenticates clients with the same policy and keys as the C++ daemons.
+func GetServerSecurityConfig(cfg *config.Config, command int, secContext string) (*security.SecurityConfig, error) {
+	if secContext == "" {
+		secContext = "DEFAULT"
+	}
+	sc, err := GetSecurityConfig(cfg, command, secContext)
+	if err != nil {
+		return nil, err
+	}
+
+	hasMethod := func(m security.AuthMethod) bool {
+		for _, am := range sc.AuthMethods {
+			if am == m {
+				return true
+			}
+		}
+		return false
+	}
+
+	// SSL: replace the client cert/key/CA (loaded by GetSecurityConfig) with the
+	// server's own.
+	if hasMethod(security.AuthSSL) {
+		if v, ok := cfg.Get("AUTH_SSL_SERVER_CERTFILE"); ok {
+			sc.CertFile = v
+		}
+		if v, ok := cfg.Get("AUTH_SSL_SERVER_KEYFILE"); ok {
+			sc.KeyFile = v
+		}
+		if v, ok := cfg.Get("AUTH_SSL_SERVER_CAFILE"); ok {
+			sc.CAFile = v
+		}
+	}
+
+	// TOKEN/IDTOKENS: the keys and trust domain used to verify presented tokens.
+	if hasMethod(security.AuthToken) || hasMethod(security.AuthSciTokens) {
+		if v, ok := cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE"); ok {
+			sc.TokenPoolSigningKeyFile = v
+		}
+		if v, ok := cfg.Get("SEC_PASSWORD_DIRECTORY"); ok {
+			sc.TokenSigningKeyDir = v
+		}
+		if v, ok := cfg.Get("SEC_TOKEN_MAX_AGE"); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				sc.TokenMaxAge = n
+			}
+		}
+		// Trust domain identifies the issuer this pool accepts; it defaults to
+		// the pool's UID_DOMAIN when TRUST_DOMAIN is unset.
+		if v, ok := cfg.Get("TRUST_DOMAIN"); ok && v != "" {
+			sc.TrustDomain = v
+		} else if v, ok := cfg.Get("UID_DOMAIN"); ok {
+			sc.TrustDomain = v
+		}
+	}
+
+	return sc, nil
 }
 
 // getSecurityLevel retrieves a security level setting with context and default fallback
