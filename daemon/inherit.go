@@ -65,10 +65,10 @@ func logEnvDiagnostic(logger *logging.Logger) {
 // a "SharedPort:<full_name>*<fd>*<state>*…" token, and passes the fd through
 // fork+exec. By the time we start, that listening fd is already open; we just
 // find the SharedPort: token and wrap the fd as a net.Listener.
-func resolveSharedPortListener(logger *logging.Logger) (*sharedport.Listener, error) {
+func resolveSharedPortListener(logger *logging.Logger) (*sharedport.Listener, string, error) {
 	inherit := os.Getenv("CONDOR_INHERIT")
 	if inherit == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	fd, fullName, ok := extractSharedPortFromInherit(inherit)
@@ -76,7 +76,7 @@ func resolveSharedPortListener(logger *logging.Logger) (*sharedport.Listener, er
 		logger.Warn(logging.DestinationGeneral,
 			"CONDOR_INHERIT lacks SharedPort: token; falling back to standalone bind",
 			"hint", "ensure DC_DAEMON_LIST includes this daemon and USE_SHARED_PORT = true")
-		return nil, nil
+		return nil, "", nil
 	}
 
 	logf := func(format string, args ...any) {
@@ -87,13 +87,15 @@ func resolveSharedPortListener(logger *logging.Logger) (*sharedport.Listener, er
 		Logf:             logf,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("adopt inherited shared-port fd %d (endpoint %s): %w", fd, endpointBaseName(fullName), err)
+		return nil, "", fmt.Errorf("adopt inherited shared-port fd %d (endpoint %s): %w", fd, endpointBaseName(fullName), err)
 	}
-	// fullName is "<cookie>/<endpoint_name>"; log only the basename so an
-	// unprivileged reader of the log can't lift the per-master cookie.
+	// fullName is "<cookie>/<endpoint_name>"; the endpoint name is also our
+	// shared-port "sock" id. Log only the basename so an unprivileged reader of
+	// the log can't lift the per-master cookie.
+	endpoint := endpointBaseName(fullName)
 	logger.Info(logging.DestinationGeneral, "accepting shared-port forwarded connections",
-		"endpoint", endpointBaseName(fullName), "inherited_fd", fd)
-	return ln, nil
+		"endpoint", endpoint, "inherited_fd", fd)
+	return ln, endpoint, nil
 }
 
 // endpointBaseName extracts the basename ("ccb") from a SharedPort full_name of

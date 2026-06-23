@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bbockelm/cedar/addresses"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -56,9 +57,10 @@ type Daemon struct {
 
 	master *htcondor.Master // nil when running standalone
 
-	mu         sync.Mutex
-	stopAlive  func()
-	onReconfig []func(*config.Config)
+	mu             sync.Mutex
+	sharedPortName string // shared-port "sock" id, set by Listener when adopted
+	stopAlive      func()
+	onReconfig     []func(*config.Config)
 }
 
 // New constructs a Daemon: it loads configuration and logging, and — when
@@ -145,17 +147,62 @@ func (d *Daemon) OnReconfig(fn func(*config.Config)) {
 // Otherwise (or when no shared-port token was passed) it calls fallback to bind
 // a normal listener.
 func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, error) {
-	spln, err := resolveSharedPortListener(d.log)
+	spln, endpoint, err := resolveSharedPortListener(d.log)
 	if err != nil {
 		return nil, err
 	}
 	if spln != nil {
+		d.mu.Lock()
+		d.sharedPortName = endpoint
+		d.mu.Unlock()
 		return spln, nil
 	}
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
 	return fallback()
+}
+
+// SharedPortName returns the shared-port "sock" id this daemon listens on (the
+// inherited endpoint name), or "" when not running behind shared port. Valid
+// only after Listener has been called.
+func (d *Daemon) SharedPortName() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sharedPortName
+}
+
+// AdvertisedSinful derives this daemon's externally reachable command address
+// when it is running behind shared port: the shared-port server's host:port
+// (taken from the inherited master command address, which shares the shared-port
+// server's TCP endpoint) with this daemon's "sock" id. It returns ("", false)
+// when not behind shared port, or when the master address is unavailable or
+// unparseable.
+//
+// This assumes the common deployment where the daemon's shared-port server is
+// the same one fronting condor_master (USE_SHARED_PORT with the master's
+// shared_port). If a separate routable address is required (e.g.
+// TCP_FORWARDING_HOST), supply it explicitly rather than relying on this.
+func (d *Daemon) AdvertisedSinful() (string, bool) {
+	sock := d.SharedPortName()
+	if sock == "" || d.master == nil {
+		return "", false
+	}
+	return deriveAdvertisedSinful(d.master.Address(), sock)
+}
+
+// deriveAdvertisedSinful builds "<host:port?sock=sock>" from a shared-port
+// server command address and a sock id. Returns ("", false) if serverAddr has no
+// usable host:port or sock is empty.
+func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
+	if sock == "" {
+		return "", false
+	}
+	info, err := addresses.ParseSinful(serverAddr)
+	if err != nil || info.Host == "" || info.Port == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s:%s?sock=%s", info.Host, info.Port, sock), true
 }
 
 // Serve runs the daemon lifecycle. It starts serve(ctx, ln) in the background,
