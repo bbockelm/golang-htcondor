@@ -27,10 +27,10 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/httpserver"
 	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/sharedport"
 )
 
 var (
@@ -61,15 +61,9 @@ func main() {
 	// few seconds vanished.
 	earlyBuf := logging.InstallEarlyBuffer(os.Stderr, 256)
 
-	// Pre-flag-parse diagnostic: log the daemon-core env vars
-	// condor_master *should* be passing us. If CONDOR_INHERIT is empty
-	// here, the daemon-mode path in runNormalMode will not engage and
-	// we'll fall through to a regular TCP bind — making it look like
-	// shared-port forwarding "didn't work" when in reality the master
-	// never wired it up. Logging this unconditionally at startup
-	// turns "shared-port silently broken" into a one-line diagnostic
-	// the operator can see in /tmp/error.log without recompiling.
-	logCondorEnvDiagnostic()
+	// The daemon-core env diagnostic (which condor_master vars are present,
+	// whether a shared-port endpoint was inherited) is logged by daemon.New in
+	// runNormalMode via the shared daemon framework.
 
 	flag.Parse()
 
@@ -1262,92 +1256,52 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	// Daemon mode: when launched by condor_master, attach the master
-	// keepalive loop and (optionally) accept HTTP/HTTPS connections
-	// forwarded by condor_shared_port instead of binding our own TCP
-	// port. The ctx is plumbed all the way through so SIGTERM tears
-	// down keepalive cleanly along with the HTTP server.
-	hookCtx, hookCancel := context.WithCancel(context.Background())
-	defer hookCancel()
-	var hooks *daemonHooks
-	var spListener *sharedport.Listener
-	if runUnderCondorMaster() {
-		hooks, err = startDaemonHooks(hookCtx, logger)
-		if err != nil {
-			logger.Warn(logging.DestinationGeneral,
-				"condor_master detected but hook setup failed; running standalone",
-				"error", err)
-		}
-		spListener, err = resolveSharedPortListener(cfg, logger)
-		if err != nil {
-			return fmt.Errorf("shared-port listener: %w", err)
-		}
+	// Bootstrap condor_master integration (DC_SET_READY readiness +
+	// DC_CHILDALIVE keepalive), the command-socket listener (the shared-port
+	// endpoint inherited from condor_master, or a TCP bind), and the graceful
+	// SIGTERM/SIGINT/SIGHUP run loop via the shared daemon framework.
+	// Privileges were already dropped and the logger built above, so daemon.New
+	// reuses the logger and its own privilege drop is a no-op.
+	d, err := daemon.New(daemon.Options{Subsys: "HTTP_API", Config: cfg, Logger: logger})
+	if err != nil {
+		return fmt.Errorf("daemon bootstrap: %w", err)
 	}
 
-	// Start server in goroutine. Three flavors:
-	//   - shared_port forwarding: serve on the UDS-backed listener
-	//   - TLS: traditional HTTPS bind
-	//   - plain HTTP bind
-	errChan := make(chan error, 1)
-	go func() {
-		switch {
-		case spListener != nil:
-			scheme := "http"
-			if tlsCertFile != "" && tlsKeyFile != "" {
-				// In shared-port mode, TLS termination at the daemon
-				// requires the http.Server to have its TLSConfig pre-
-				// populated. Today the regular Start/StartTLS handle
-				// that internally; the cleanest way to surface that
-				// limitation is to refuse to start TLS over shared_port
-				// rather than silently fall back to HTTP.
-				errChan <- fmt.Errorf("shared-port forwarding with TLS is not yet supported; use plain HTTP for the forwarded connections")
-				return
-			}
-			errChan <- server.ServeListener(spListener, scheme)
-		case tlsCertFile != "" && tlsKeyFile != "":
-			errChan <- server.StartTLS(tlsCertFile, tlsKeyFile)
-		default:
-			errChan <- server.Start()
-		}
-	}()
+	ln, err := d.Listener(func() (net.Listener, error) {
+		return (&net.ListenConfig{}).Listen(context.Background(), "tcp", listenAddrFromConfig)
+	})
+	if err != nil {
+		return fmt.Errorf("listener: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
 
-	// Once the listener is up, tell the master we're ready and start
-	// the keepalive loop. We delay both until *after* the goroutine
-	// kicked off above has had a chance to bind, on the theory that
-	// "ready" is meaningful only when we can actually answer requests.
-	if hooks != nil {
-		go func() {
-			// Tiny delay to let the listener bind before we claim ready.
-			// The master's idle timer is on the order of minutes, so
-			// being a few hundred ms late here is harmless.
-			time.Sleep(200 * time.Millisecond)
-			hooks.SignalReady(hookCtx)
-			hooks.StartKeepAlive(hookCtx)
+	// TLS termination over a shared-port-forwarded connection is not supported
+	// (the daemon is handed already-accepted TCP fds); refuse it rather than
+	// silently downgrade to plain HTTP.
+	if useTLS && d.SharedPortName() != "" {
+		return fmt.Errorf("shared-port forwarding with TLS is not supported; use plain HTTP for the forwarded connections")
+	}
+
+	// serve runs the HTTP(S) server on the framework-provided listener and
+	// honors ctx cancellation by gracefully shutting the server down.
+	serve := func(ctx context.Context, l net.Listener) error {
+		go func() { //nolint:gosec // G118: ctx is Done before we shut down, so the deadline must be an independent context, not a child of ctx
+			<-ctx.Done()
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = server.Shutdown(sctx)
 		}()
+		cert, key := "", ""
+		if useTLS {
+			cert, key = tlsCertFile, tlsKeyFile
+		}
+		if err := server.ServeListenerWithCert(l, cert, key); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
 
-	// Wait for shutdown signal or error
-	select {
-	case sig := <-sigChan:
-		logger.Info(logging.DestinationGeneral, "Received shutdown signal", "signal", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		hooks.Stop()
-		if spListener != nil {
-			_ = spListener.Close()
-		}
-		return server.Shutdown(ctx)
-	case err := <-errChan:
-		hooks.Stop()
-		if spListener != nil {
-			_ = spListener.Close()
-		}
-		return err
-	}
+	return d.Serve(context.Background(), ln, serve)
 }
 
 // runDemoMode runs the server with a mini condor setup

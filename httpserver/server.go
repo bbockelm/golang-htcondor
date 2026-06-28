@@ -444,6 +444,30 @@ func (s *Server) ServeListener(ln net.Listener, scheme string) error {
 	return s.httpServer.Serve(ln)
 }
 
+// ServeListenerWithCert is the listener-injecting analog of Start/StartTLS used
+// by the daemon framework, which supplies the (shared-port or TCP) listener: it
+// runs the handler then serves on ln, terminating TLS from certFile/keyFile when
+// both are set (https) or speaking plain HTTP otherwise. It returns
+// http.ErrServerClosed after Shutdown, like the standard library.
+func (s *Server) ServeListenerWithCert(ln net.Listener, certFile, keyFile string) error {
+	scheme := "http"
+	if certFile != "" && keyFile != "" {
+		scheme = "https"
+	}
+	s.listener = ln
+	s.handlerCtx, s.cancelFunc = context.WithCancel(context.Background())
+	if err := s.Handler.Start(s.handlerCtx, ln, scheme); err != nil {
+		return err
+	}
+	addrStr := safeListenerAddr(ln)
+	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr, "scheme", scheme)
+	fmt.Printf("Server started on %s://%s\n", scheme, addrStr)
+	if scheme == "https" {
+		return s.httpServer.ServeTLS(ln, certFile, keyFile)
+	}
+	return s.httpServer.Serve(ln)
+}
+
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
