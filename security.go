@@ -373,7 +373,20 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		}
 	}
 
+	// Read the server's credential files (SSL key/cert, token signing keys) as
+	// root via droppriv, so they remain readable after the daemon drops to the
+	// condor account. The cache supports reload-on-SIGHUP; callers wire its
+	// Reload via daemon.OnReconfig (see CredentialReloader).
+	sc.Credentials = NewCredentialCache()
+
 	return sc, nil
+}
+
+// CredentialReloader is implemented by a SecurityConfig.Credentials value (e.g.
+// *CredentialCache) that can drop cached credentials so the next read picks up
+// rotated keys / renewed certs. A daemon wires this to its SIGHUP reconfigure.
+type CredentialReloader interface {
+	Reload()
 }
 
 // getSecurityLevel retrieves a security level setting with context and default fallback
