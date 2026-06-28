@@ -2,10 +2,12 @@ package htcondor
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
 // deadbeef is the XOR mask HTCondor "scrambles" on-disk signing keys with
@@ -21,18 +23,30 @@ var deadbeef = []byte{0xde, 0xad, 0xbe, 0xef}
 // Unreadable individual key files are skipped (a key the daemon cannot read is
 // not one it can use); a missing directory is reported as an error so a
 // misconfiguration is visible.
+//
+// SEC_PASSWORD_DIRECTORY and its key files are root-owned (0700/0600), so the
+// directory listing and each file are read as root via droppriv — matching
+// HTCondor's set_priv(PRIV_ROOT) — letting a daemon that has dropped to the
+// condor account still load them (a no-op re-elevation when already root).
 func LoadSigningKeys(cfg *config.Config) (map[string][]byte, error) {
 	dir, ok := cfg.Get("SEC_PASSWORD_DIRECTORY")
 	if !ok || dir == "" {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(dir)
+	// Open the directory as root and list it from the open fd (the permission
+	// check happens at open, so the subsequent getdents runs fine post-restore).
+	df, err := droppriv.OpenAsRoot(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// The directory (often a default path) simply does not exist on a
 			// pool that is not using signing keys -> no keys available.
 			return nil, nil
 		}
+		return nil, fmt.Errorf("opening SEC_PASSWORD_DIRECTORY %q: %w", dir, err)
+	}
+	entries, err := df.ReadDir(-1)
+	_ = df.Close()
+	if err != nil {
 		return nil, fmt.Errorf("reading SEC_PASSWORD_DIRECTORY %q: %w", dir, err)
 	}
 	keys := make(map[string][]byte)
@@ -40,18 +54,23 @@ func LoadSigningKeys(cfg *config.Config) (map[string][]byte, error) {
 		if e.IsDir() {
 			continue
 		}
-		// G304: dir is the operator-configured SEC_PASSWORD_DIRECTORY and the
-		// name comes from ReadDir of that same directory.
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec
-		if err != nil {
-			continue // skip keys we cannot read
-		}
-		if len(raw) == 0 {
-			continue
+		raw, err := readFileAsRoot(filepath.Join(dir, e.Name()))
+		if err != nil || len(raw) == 0 {
+			continue // skip keys we cannot read or that are empty
 		}
 		keys[e.Name()] = unscrambleSigningKey(raw)
 	}
 	return keys, nil
+}
+
+// readFileAsRoot reads an entire file as root via droppriv.
+func readFileAsRoot(path string) ([]byte, error) {
+	f, err := droppriv.OpenAsRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
 }
 
 // unscrambleSigningKey reverses HTCondor's on-disk scrambling (XOR with the
