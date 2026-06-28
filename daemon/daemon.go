@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,9 +63,11 @@ type Options struct {
 // from a single Run/Serve call.
 type Daemon struct {
 	subsys string
-	cfg    *config.Config
-	log    *logging.Logger
-	grace  time.Duration
+	// cfg is swapped atomically on SIGHUP reconfigure; readers (Config) load it
+	// without locking, so a reconfigure never races a concurrent reader.
+	cfg   atomic.Pointer[config.Config]
+	log   *logging.Logger
+	grace time.Duration
 
 	master *htcondor.Master // nil when running standalone
 
@@ -126,12 +129,12 @@ func New(opts Options) (*Daemon, error) {
 
 	d := &Daemon{
 		subsys:          opts.Subsys,
-		cfg:             cfg,
 		log:             logger,
 		grace:           grace,
 		sessionStore:    opts.SessionStore,
 		sessionInterval: opts.SessionSnapshotInterval,
 	}
+	d.cfg.Store(cfg)
 
 	if d.sessionStore != nil {
 		if err := d.restoreSessions(); err != nil {
@@ -158,7 +161,7 @@ func New(opts Options) (*Daemon, error) {
 func (d *Daemon) Subsys() string { return d.subsys }
 
 // Config returns the daemon's configuration.
-func (d *Daemon) Config() *config.Config { return d.cfg }
+func (d *Daemon) Config() *config.Config { return d.cfg.Load() }
 
 // Logger returns the daemon's logger.
 func (d *Daemon) Logger() *logging.Logger { return d.log }
@@ -321,8 +324,8 @@ func (d *Daemon) reconfigure() {
 		d.log.Warn(logging.DestinationGeneral, "reconfigure: reloading config failed; keeping current", "error", err)
 		return
 	}
+	d.cfg.Store(cfg)
 	d.mu.Lock()
-	d.cfg = cfg
 	cbs := append([]func(*config.Config){}, d.onReconfig...)
 	d.mu.Unlock()
 	for _, fn := range cbs {
