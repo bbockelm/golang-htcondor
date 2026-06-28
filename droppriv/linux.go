@@ -50,6 +50,38 @@ func runAsUser(target Identity, fn func() error) error {
 	return restoreErr
 }
 
+// withRoot runs fn with this thread's effective credentials elevated to root,
+// restoring them afterward. Like runAsUser it pins the goroutine to its OS
+// thread so the elevation is per-thread (RawSyscall SETRESUID), never a
+// process-wide root window that would briefly elevate concurrent goroutines.
+// This mirrors HTCondor's set_priv(PRIV_ROOT) used to read root-owned 0600
+// credentials after the daemon has dropped to the condor account.
+//
+// When the thread is already root the elevation is a no-op. When the process is
+// not privileged enough to elevate (e.g. a plain user in dev/CI), fn runs under
+// the current identity — matching set_priv's no-op-when-unprivileged behavior —
+// so the operation simply fails later if the target is inaccessible.
+func withRoot(fn func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	state, err := captureThreadCredentials()
+	if err != nil {
+		return fn()
+	}
+	if err := elevateToRoot(state); err != nil {
+		// Not privileged to elevate; undo any partial change and run best-effort.
+		_ = restoreThreadCredentials(state)
+		return fn()
+	}
+	opErr := fn()
+	restoreErr := restoreThreadCredentials(state)
+	if opErr != nil {
+		return opErr
+	}
+	return restoreErr
+}
+
 func captureThreadCredentials() (threadCredentials, error) {
 	var ruid, euid, suid int
 	//nolint:gosec // G103: unsafe.Pointer required for Linux syscall interface
