@@ -25,6 +25,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/sessioncache"
 )
 
 // Options configures a Daemon.
@@ -45,6 +46,16 @@ type Options struct {
 	// ShutdownGrace bounds how long Serve waits for the served handler to stop
 	// after a termination signal before returning anyway (default 15s).
 	ShutdownGrace time.Duration
+
+	// SessionStore, if set, persists the CEDAR security session cache so clients
+	// can resume sessions across a restart instead of re-authenticating. The
+	// daemon restores it before serving and snapshots it periodically and on
+	// shutdown. The caller retains ownership of the store and must Close it.
+	SessionStore sessioncache.SessionStore
+
+	// SessionSnapshotInterval is how often the session cache is snapshotted to
+	// SessionStore (default 30s). Ignored when SessionStore is nil.
+	SessionSnapshotInterval time.Duration
 }
 
 // Daemon is an HTCondor daemon bootstrap. It is safe to construct once and use
@@ -56,6 +67,9 @@ type Daemon struct {
 	grace  time.Duration
 
 	master *htcondor.Master // nil when running standalone
+
+	sessionStore    sessioncache.SessionStore // nil unless session persistence enabled
+	sessionInterval time.Duration
 
 	mu             sync.Mutex
 	sharedPortName string // shared-port "sock" id, set by Listener when adopted
@@ -97,10 +111,18 @@ func New(opts Options) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		subsys: opts.Subsys,
-		cfg:    cfg,
-		log:    logger,
-		grace:  grace,
+		subsys:          opts.Subsys,
+		cfg:             cfg,
+		log:             logger,
+		grace:           grace,
+		sessionStore:    opts.SessionStore,
+		sessionInterval: opts.SessionSnapshotInterval,
+	}
+
+	if d.sessionStore != nil {
+		if err := d.restoreSessions(); err != nil {
+			return nil, fmt.Errorf("daemon: restoring session cache: %w", err)
+		}
 	}
 
 	logEnvDiagnostic(logger)
@@ -232,6 +254,20 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 	d.signalReady(ctx)
 	d.startKeepAlive(ctx)
 	defer d.stopKeepAlive()
+
+	// Session-cache persistence: snapshot periodically, and on shutdown stop the
+	// loop, wait for it to exit, then take a final snapshot — so no snapshot can
+	// race the caller's store Close.
+	if d.sessionStore != nil {
+		sctx, scancel := context.WithCancel(ctx)
+		loopDone := make(chan struct{})
+		go func() { defer close(loopDone); d.sessionSnapshotLoop(sctx) }()
+		defer func() {
+			scancel()
+			<-loopDone
+			d.finalSessionSnapshot()
+		}()
+	}
 
 	for {
 		select {
