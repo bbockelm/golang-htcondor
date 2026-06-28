@@ -96,6 +96,14 @@ func New(opts Options) (*Daemon, error) {
 		}
 	}
 
+	// Drop privileges (if running as root and DROP_PRIVILEGES is enabled) before
+	// building the logger or opening any other owned resource, so they belong to
+	// the dropped-to user. The outcome is logged once the logger exists.
+	drop, err := maybeDropPrivileges(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+
 	logger := opts.Logger
 	if logger == nil {
 		var err error
@@ -103,6 +111,12 @@ func New(opts Options) (*Daemon, error) {
 		if err != nil {
 			return nil, fmt.Errorf("daemon: building logger: %w", err)
 		}
+	}
+	switch {
+	case drop.dropped:
+		logger.Info(logging.DestinationGeneral, "dropped privileges", "euid", drop.uid, "egid", drop.gid)
+	case drop.note != "":
+		logger.Warn(logging.DestinationGeneral, drop.note)
 	}
 
 	grace := opts.ShutdownGrace
