@@ -47,16 +47,6 @@ type Options struct {
 	// ShutdownGrace bounds how long Serve waits for the served handler to stop
 	// after a termination signal before returning anyway (default 15s).
 	ShutdownGrace time.Duration
-
-	// SessionStore, if set, persists the CEDAR security session cache so clients
-	// can resume sessions across a restart instead of re-authenticating. The
-	// daemon restores it before serving and snapshots it periodically and on
-	// shutdown. The caller retains ownership of the store and must Close it.
-	SessionStore sessioncache.SessionStore
-
-	// SessionSnapshotInterval is how often the session cache is snapshotted to
-	// SessionStore (default 30s). Ignored when SessionStore is nil.
-	SessionSnapshotInterval time.Duration
 }
 
 // Daemon is an HTCondor daemon bootstrap. It is safe to construct once and use
@@ -128,19 +118,11 @@ func New(opts Options) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		subsys:          opts.Subsys,
-		log:             logger,
-		grace:           grace,
-		sessionStore:    opts.SessionStore,
-		sessionInterval: opts.SessionSnapshotInterval,
+		subsys: opts.Subsys,
+		log:    logger,
+		grace:  grace,
 	}
 	d.cfg.Store(cfg)
-
-	if d.sessionStore != nil {
-		if err := d.restoreSessions(); err != nil {
-			return nil, fmt.Errorf("daemon: restoring session cache: %w", err)
-		}
-	}
 
 	logEnvDiagnostic(logger)
 	if UnderCondorMaster() {

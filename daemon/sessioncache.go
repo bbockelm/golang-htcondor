@@ -13,9 +13,23 @@ import (
 // when no interval is configured.
 const defaultSessionSnapshotInterval = 30 * time.Second
 
-// restoreSessions loads persisted sessions into the global CEDAR session cache.
-// It runs during New, before the daemon serves, so the first request can resume
-// an existing session.
+// EnableSessionPersistence turns on persistence of the CEDAR security session
+// cache so clients can resume sessions across a restart. It restores the store's
+// records into the cache immediately and arranges for Serve to snapshot the
+// cache periodically (interval, or 30s if <= 0) and once more on shutdown.
+//
+// Call it after New and before Serve. Crucially, open the store *after* New
+// (which is where the daemon drops privileges) so the database file is owned by
+// the dropped-to service account rather than root. The caller retains ownership
+// of the store and must Close it (after Serve returns).
+func (d *Daemon) EnableSessionPersistence(store sessioncache.SessionStore, interval time.Duration) error {
+	d.sessionStore = store
+	d.sessionInterval = interval
+	return d.restoreSessions()
+}
+
+// restoreSessions loads persisted sessions into the global CEDAR session cache,
+// before the daemon serves, so the first request can resume an existing session.
 func (d *Daemon) restoreSessions() error {
 	n, err := sessioncache.Restore(context.Background(), d.sessionStore, security.GetSessionCache(),
 		func(rec sessioncache.SessionRecord, err error) {
