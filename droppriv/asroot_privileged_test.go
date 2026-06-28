@@ -22,7 +22,7 @@ func TestOpenAsRootElevatesAfterDrop(t *testing.T) {
 	dir := t.TempDir()
 	// Let the dropped user traverse the dir so the test isolates the file's
 	// 0600 mode rather than directory permissions.
-	if err := os.Chmod(dir, 0o755); err != nil {
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the dir must be world-traversable so the dropped user reaches the 0600 file under test
 		t.Fatal(err)
 	}
 	secret := filepath.Join(dir, "secret")
@@ -40,7 +40,7 @@ func TestOpenAsRootElevatesAfterDrop(t *testing.T) {
 	defer func() { _ = mgr.Stop() }()
 
 	// As nobody, a plain open of the root-owned 0600 file must be denied.
-	if f, err := os.Open(secret); err == nil {
+	if f, err := os.Open(secret); err == nil { //nolint:gosec // G304: secret is a test-controlled temp path
 		_ = f.Close()
 		t.Fatal("plain os.Open of a root-owned 0600 file succeeded as nobody; expected EACCES")
 	}
