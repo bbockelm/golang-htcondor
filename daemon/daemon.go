@@ -64,6 +64,9 @@ type Daemon struct {
 	sessionStore    sessioncache.SessionStore // nil unless session persistence enabled
 	sessionInterval time.Duration
 
+	shutdownCh   chan struct{} // closed by Shutdown to request a graceful stop
+	shutdownOnce sync.Once
+
 	mu             sync.Mutex
 	sharedPortName string // shared-port "sock" id, set by Listener when adopted
 	stopAlive      func()
@@ -118,9 +121,10 @@ func New(opts Options) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		subsys: opts.Subsys,
-		log:    logger,
-		grace:  grace,
+		subsys:     opts.Subsys,
+		log:        logger,
+		grace:      grace,
+		shutdownCh: make(chan struct{}),
 	}
 	d.cfg.Store(cfg)
 
@@ -275,6 +279,13 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 		case <-ctx.Done():
 			d.waitServe(serveErr)
 			return ctx.Err()
+		case <-d.shutdownCh:
+			// Shutdown() was called (e.g. by a DC_OFF command handler); treat it
+			// like a termination signal: graceful, returns nil.
+			d.log.Info(logging.DestinationGeneral, "shutdown requested; shutting down")
+			cancel()
+			d.waitServe(serveErr)
+			return nil
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGHUP:
@@ -287,6 +298,20 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 			}
 		}
 	}
+}
+
+// Shutdown requests a graceful stop of a running Serve: it cancels the served
+// handler, waits up to ShutdownGrace, and makes Serve return nil. Safe to call
+// from a command handler (e.g. DC_OFF) or any goroutine; idempotent and a no-op
+// before Serve starts (the request is latched and observed once Serve runs).
+func (d *Daemon) Shutdown() {
+	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
+}
+
+// Reconfigure reloads the configuration and runs OnReconfig callbacks, the same
+// work SIGHUP triggers. Safe to call from a command handler (e.g. DC_RECONFIG).
+func (d *Daemon) Reconfigure() {
+	d.reconfigure()
 }
 
 // waitServe waits for the served handler to finish, bounded by ShutdownGrace.
