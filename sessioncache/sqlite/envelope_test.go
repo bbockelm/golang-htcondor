@@ -95,7 +95,30 @@ func TestEnvelopeRotationRewrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotation: new key should open: %v", err)
 	}
-	if !bytes.Equal(env3.dek, env.dek) {
-		t.Error("rewrapped DEK must equal the original DEK")
+	if !bytes.Equal(env3.master, env.master) {
+		t.Error("rewrapped master key must equal the original master key")
+	}
+	if !bytes.Equal(env3.sessionKey, env.sessionKey) {
+		t.Error("derived session key must match after rewrap")
+	}
+}
+
+// TestEnvelopeDerivesDistinctSubkey checks the session-record key is derived
+// from the master key, not equal to it (so the master can derive other keys).
+func TestEnvelopeDerivesDistinctSubkey(t *testing.T) {
+	env, err := newEnvelope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(env.master, env.sessionKey) {
+		t.Error("session key must be derived from, not equal to, the master key")
+	}
+	// Derivation is deterministic for a given master.
+	again, err := envelopeFromMaster(env.master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again.sessionKey, env.sessionKey) {
+		t.Error("subkey derivation must be deterministic for a given master key")
 	}
 }

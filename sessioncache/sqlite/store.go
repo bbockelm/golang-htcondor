@@ -116,7 +116,11 @@ func (s *store) initEnvelope(keys []SigningKey) error {
 
 	env, err := openEnvelope(rows, keys)
 	if err != nil {
-		s.log.Warn("session cache: no available signing key can decrypt the stored DEK; re-initializing (cached sessions discarded)")
+		// The session cache is advisory: if no available signing key can recover
+		// the master key (keys rotated away, tampering), flush the cache and
+		// re-initialize with a fresh master key rather than failing startup. The
+		// only cost is that cached sessions are discarded and clients re-auth.
+		s.log.Warn("session cache: cannot recover the master key from any available signing key; flushing the cache and re-initializing")
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM session`); err != nil {
 			return err
 		}
