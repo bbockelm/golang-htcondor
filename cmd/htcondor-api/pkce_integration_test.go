@@ -71,7 +71,7 @@ SEC_PASSWORD_DIRECTORY = %s
 	// Step 1: Build the htcondor-api CLI tool
 	t.Log("Step 1: Building htcondor-api CLI tool...")
 	cliBinary := filepath.Join(tempDir, "htcondor-api")
-	buildCmd := exec.Command("go", "build", "-o", cliBinary, ".")
+	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", cliBinary, ".")
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build htcondor-api: %v\nOutput: %s", err, output)
 	}

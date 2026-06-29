@@ -1,18 +1,13 @@
-package main
+package daemon
 
-import (
-	"testing"
-)
+import "testing"
 
-// TestExtractSharedPortFromInherit covers the parser that pulls the
-// SharedPort fd + endpoint name out of CONDOR_INHERIT — the load-bearing
-// step in our DaemonCore-style shared-port wiring.
-//
-// The "real-world" case is taken from a live condor_master 25.8.2
-// container running our binary as a +HTTP_API DC daemon. Keeping
-// this exact string here means a future change to the cedar
-// SharedPortEndpoint serialization will trip a unit test before it
-// breaks the deployment.
+// TestExtractSharedPortFromInherit covers the parser that pulls the SharedPort
+// fd + endpoint name out of CONDOR_INHERIT — the load-bearing step in the
+// DaemonCore-style shared-port wiring. The "real-world" case is from a live
+// condor_master 25.8.2 running a Go binary as a DaemonCore daemon; keeping the
+// exact string here means a future change to the cedar SharedPortEndpoint
+// serialization trips a unit test before it breaks a deployment.
 func TestExtractSharedPortFromInherit(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -34,11 +29,7 @@ func TestExtractSharedPortFromInherit(t *testing.T) {
 			inherit: "29 <172.17.0.4:9618?sock=master> 0 0",
 			wantOK:  false,
 		},
-		{
-			name:    "empty inherit string",
-			inherit: "",
-			wantOK:  false,
-		},
+		{name: "empty inherit string", inherit: "", wantOK: false},
 		{
 			name:    "malformed SharedPort token (no asterisk)",
 			inherit: "29 <sinful> 0 SharedPort:no-fields-here 0",
@@ -50,7 +41,7 @@ func TestExtractSharedPortFromInherit(t *testing.T) {
 			wantOK:  false,
 		},
 		{
-			name:     "alternate ordering — SharedPort before terminator (defensive)",
+			name:     "SharedPort before terminator (defensive)",
 			inherit:  "1234 <addr> 0 SharedPort:cookie/name*7*6*0*0*0*0***1**0*0* 0",
 			wantFD:   7,
 			wantName: "cookie/name",
@@ -73,5 +64,19 @@ func TestExtractSharedPortFromInherit(t *testing.T) {
 				t.Errorf("name = %q, want %q", name, tc.wantName)
 			}
 		})
+	}
+}
+
+func TestEndpointBaseName(t *testing.T) {
+	cases := map[string]string{
+		"cookie/http_api_29_7856": "http_api_29_7856",
+		"cookie/ccb":              "ccb",
+		"no-slash":                "<unknown>",
+		"trailing/":               "<unknown>",
+	}
+	for in, want := range cases {
+		if got := endpointBaseName(in); got != want {
+			t.Errorf("endpointBaseName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

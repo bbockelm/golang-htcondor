@@ -147,27 +147,43 @@ func Chown(userName, path string, uid, gid int) error {
 // OpenAsRoot opens a file as root user.
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func (m *Manager) OpenAsRoot(path string) (*os.File, error) {
-	//nolint:gosec // G304 - intentionally allows root file access, path validation is caller's responsibility
-	return os.Open(path)
+	var f *os.File
+	err := withRoot(func() error {
+		var e error
+		//nolint:gosec // G304 - intentionally allows root file access, path validation is caller's responsibility
+		f, e = os.Open(path)
+		return e
+	})
+	return f, err
 }
 
 // OpenFileAsRoot opens a file as root user with specified flags and permissions.
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func (m *Manager) OpenFileAsRoot(path string, flag int, perm os.FileMode) (*os.File, error) {
-	//nolint:gosec // G304 - intentionally allows root file access, path validation is caller's responsibility
-	return os.OpenFile(path, flag, perm)
+	var f *os.File
+	err := withRoot(func() error {
+		var e error
+		//nolint:gosec // G304 - intentionally allows root file access, path validation is caller's responsibility
+		f, e = os.OpenFile(path, flag, perm)
+		return e
+	})
+	return f, err
 }
 
 // MkdirAllAsRoot creates directories as root user.
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func (m *Manager) MkdirAllAsRoot(path string, perm os.FileMode) error {
-	return os.MkdirAll(path, perm)
+	return withRoot(func() error {
+		return os.MkdirAll(path, perm)
+	})
 }
 
 // ChownAsRoot changes ownership as root user.
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func (m *Manager) ChownAsRoot(path string, uid, gid int) error {
-	return os.Chown(path, uid, gid)
+	return withRoot(func() error {
+		return os.Chown(path, uid, gid)
+	})
 }
 
 // Package-level root functions
