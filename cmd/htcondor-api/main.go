@@ -48,6 +48,13 @@ var (
 	// thread the value through the HTCondor config layer so subsystem-
 	// scoped lookups (HTTP_API.<key> beats <key>) resolve correctly.
 	localName = flag.String("local-name", "", "HTCondor subsystem local-name; passed by condor_master for non-default DC daemons. Used as a config-lookup prefix.")
+	// -sock is the other HCondor-standard DaemonCore flag the master may
+	// append: it fixes the shared-port endpoint name (so SHARED_PORT_HTTP_
+	// FORWARDING_ID can target this daemon, and reconnects are stable). The
+	// master creates and names the endpoint; we inherit its fd via
+	// CONDOR_INHERIT regardless, so we only need to accept the flag without
+	// letting flag.Parse() reject our launch.
+	_ = flag.String("sock", "", "HTCondor shared-port endpoint name; passed by condor_master. Accepted for compatibility; the endpoint fd is inherited via CONDOR_INHERIT.")
 )
 
 func main() {
@@ -1285,15 +1292,12 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	// TLS termination over a shared-port-forwarded connection is not supported
-	// (the daemon is handed already-accepted TCP fds); refuse it rather than
-	// silently downgrade to plain HTTP.
-	if useTLS && d.SharedPortName() != "" {
-		return fmt.Errorf("shared-port forwarding with TLS is not supported; use plain HTTP for the forwarded connections")
-	}
-
 	// serve runs the HTTP(S) server on the framework-provided listener and
-	// honors ctx cancellation by gracefully shutting the server down.
+	// honors ctx cancellation by gracefully shutting the server down. When the
+	// listener is the shared-port endpoint inherited from condor_master,
+	// condor_shared_port forwards already-accepted client fds here (it sniffs
+	// the TLS ClientHello / HTTP request line); ServeTLS terminates TLS on those
+	// forwarded connections exactly as it does for a directly-bound TCP port.
 	serve := func(ctx context.Context, l net.Listener) error {
 		go func() { //nolint:gosec // G118: ctx is Done before we shut down, so the deadline must be an independent context, not a child of ctx
 			<-ctx.Done()
