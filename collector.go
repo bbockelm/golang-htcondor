@@ -28,7 +28,7 @@ const (
 // Collector represents an HTCondor collector daemon.
 //
 // The configured address may be a single host:port / sinful string
-// or a comma-separated list ("host1:9618,host2:9618") matching the
+// or a comma-separated list ("host1,host2" or "host1:9618,host2:9618") matching the
 // HTCondor COLLECTOR_HOST convention. With a list, every operation
 // races against the entries with a small stagger so a stalled
 // primary collector falls over to the secondary quickly. See
@@ -70,14 +70,15 @@ type Collector struct {
 }
 
 // NewCollector creates a new Collector instance. address may be a
-// single host:port (or sinful string) or a comma-separated list:
+// single hostname, host:port (or sinful string), or a comma-separated list:
 //
 //	NewCollector("cm-1.ospool.osg-htc.org,cm-2.ospool.osg-htc.org")
 //
-// With a list, attempts are raced with a 150 ms stagger and the
-// first that returns an authenticated CEDAR stream wins. The list
-// is shuffled at construction; see the Collector type comment for
-// the ordering policy.
+// Entries without a port number are given the default HTCondor
+// collector port (9618). With a list, attempts are raced with a
+// 150 ms stagger and the first that returns an authenticated CEDAR
+// stream wins. The list is shuffled at construction; see the
+// Collector type comment for the ordering policy.
 func NewCollector(address string) *Collector {
 	addrs := splitCollectorList(address)
 	if len(addrs) > 1 {

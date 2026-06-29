@@ -20,17 +20,26 @@ func TestSplitCollectorList(t *testing.T) {
 		want []string
 	}{
 		{"", nil},
-		{"a", []string{"a"}},
-		{"a,b", []string{"a", "b"}},
-		{" a , b ", []string{"a", "b"}},
-		{"a,,b", []string{"a", "b"}},
-		{",a,b,", []string{"a", "b"}},
+		// Bare hostnames get the default port appended.
+		{"a", []string{"a:9618"}},
+		{"a,b", []string{"a:9618", "b:9618"}},
+		{" a , b ", []string{"a:9618", "b:9618"}},
+		{"a,,b", []string{"a:9618", "b:9618"}},
+		{",a,b,", []string{"a:9618", "b:9618"}},
 		{
 			"cm-1.ospool.osg-htc.org,cm-2.ospool.osg-htc.org",
-			[]string{"cm-1.ospool.osg-htc.org", "cm-2.ospool.osg-htc.org"},
+			[]string{"cm-1.ospool.osg-htc.org:9618", "cm-2.ospool.osg-htc.org:9618"},
 		},
+		// Explicit port is preserved as-is.
+		{"a:9618", []string{"a:9618"}},
+		{"a:1234", []string{"a:1234"}},
 		// Mixed bracketed sinful + bare hostname: the top-level
 		// comma still separates them; nothing inside <…> is dissected.
+		// The bare "host" gets :9618; the sinful string is left alone.
+		{
+			"host,<10.0.0.1:9618?sock=collector>",
+			[]string{"host:9618", "<10.0.0.1:9618?sock=collector>"},
+		},
 		{
 			"host:9618,<10.0.0.1:9618?sock=collector>",
 			[]string{"host:9618", "<10.0.0.1:9618?sock=collector>"},
@@ -51,9 +60,10 @@ func TestSplitCollectorList(t *testing.T) {
 		// Unbalanced brackets: clamp depth at zero and keep parsing.
 		// The stray ">" goes into the current token but doesn't open
 		// a new context; the comma after still acts as a separator.
+		// "a>" has no port so :9618 is appended; "b" likewise.
 		{
 			"a>,b",
-			[]string{"a>", "b"},
+			[]string{"a>:9618", "b:9618"},
 		},
 	}
 	for _, c := range cases {
@@ -68,7 +78,7 @@ func TestNewCollector_ParsesList(t *testing.T) {
 	c := NewCollector("a,b ,, c")
 	// NewCollector shuffles, so we can't assert exact order — but
 	// the SET must round-trip cleanly.
-	want := map[string]bool{"a": true, "b": true, "c": true}
+	want := map[string]bool{"a:9618": true, "b:9618": true, "c:9618": true}
 	got := c.Addresses()
 	if len(got) != len(want) {
 		t.Fatalf("Addresses() = %v; want a permutation of %v", got, want)
@@ -94,7 +104,7 @@ func TestNewCollector_Shuffles(t *testing.T) {
 		c := NewCollector(in)
 		got := c.Addresses()
 		// Identity check against the original input order.
-		original := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+		original := []string{"a:9618", "b:9618", "c:9618", "d:9618", "e:9618", "f:9618", "g:9618", "h:9618", "i:9618", "j:9618"}
 		if !slices.Equal(got, original) {
 			seenDifferent = true
 			break
@@ -371,4 +381,3 @@ func TestRaceDial_ContextCancellationStops(t *testing.T) {
 		t.Fatal("raceDial did not return after parent context cancel")
 	}
 }
-
