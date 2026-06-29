@@ -28,7 +28,7 @@ func TestMasterKeepAliveAndReady(t *testing.T) {
 		t.Fatalf("failed to write daemon source: %v", err)
 	}
 
-	buildCmd := exec.Command("go", "build", "-o", daemonBin, daemonSrc)
+	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", daemonBin, daemonSrc)
 	buildCmd.Env = append(os.Environ(), "GO111MODULE=on")
 	buildCmd.Dir = projectRoot(t)
 	if output, err := buildCmd.CombinedOutput(); err != nil {
