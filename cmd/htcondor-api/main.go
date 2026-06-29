@@ -143,10 +143,17 @@ func fixConfigDefaults(cfg *config.Config, debug bool) {
 	if !hasTilde || tilde == "" {
 		if localDir, hasLocalDir := cfg.Get("LOCAL_DIR"); !hasLocalDir || localDir == "" || localDir == "$(TILDE)" {
 			if debug {
-				log.Println("DEBUG: condor user does not exist, setting LOCAL_DIR to /usr and LOG to /var/log/condor")
+				log.Println("DEBUG: condor user does not exist, setting LOCAL_DIR to /usr")
 			}
+			// Only patch LOCAL_DIR. We deliberately do NOT override LOG here:
+			// an operator may have set LOG explicitly, and the config layer
+			// stores defaults and user values in the same map with no
+			// explicit-vs-default provenance, so clobbering LOG would silently
+			// discard a real setting. When LOG is left at its default
+			// ($(LOCAL_DIR)/log, now under /usr) and is unwritable, the logging
+			// layer's writability check already falls back to stdout — which is
+			// the right behavior for a dev run without a condor user.
 			cfg.Set("LOCAL_DIR", "/usr")
-			cfg.Set("LOG", "/var/log/condor")
 		}
 	}
 }
@@ -754,17 +761,20 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
 	}
 
+	// Resolve the unified application database path. This is the shared
+	// application DB (sessions, OAuth2, IDP, API keys) — NOT MCP-specific —
+	// so it must be resolved whether or not MCP is enabled; otherwise an
+	// operator's HTTP_API_DB_PATH is silently ignored and the server falls
+	// back to the default location. The OAuth2DBPath alias on the Config
+	// struct is no longer a silent fallback (see loadDBPath); a deprecation
+	// warning is logged when the legacy HTTP_API_OAUTH2_DB_PATH is set
+	// without HTTP_API_DB_PATH.
+	config.oauth2DBPath = loadDBPath(cfg, logger)
+	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
+
 	if !config.enabled {
 		return config
 	}
-
-	// Resolve the unified application database path. The
-	// OAuth2DBPath alias on the Config struct is no longer a silent
-	// fallback (see loadDBPath); a deprecation warning is logged here
-	// when the legacy HTTP_API_OAUTH2_DB_PATH is set without
-	// HTTP_API_DB_PATH.
-	config.oauth2DBPath = loadDBPath(cfg, logger)
-	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
 	// Load OAuth2 issuer
 	config.oauth2Issuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
