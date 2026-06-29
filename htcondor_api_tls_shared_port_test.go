@@ -101,7 +101,8 @@ func TestHTCondorAPIServesTLSOverSharedPort(t *testing.T) {
 
 	// Build the real htcondor-api binary into the short work dir.
 	bin := filepath.Join(workDir, "htcondor-api")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/htcondor-api")
+	// -buildvcs=false: CI checkouts can't always stamp VCS metadata.
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "./cmd/htcondor-api")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		t.Fatalf("build htcondor-api: %v", err)

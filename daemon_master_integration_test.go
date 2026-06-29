@@ -16,7 +16,9 @@ import (
 func buildTestDaemon(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "testgodaemon")
-	cmd := exec.CommandContext(context.Background(), "go", "build", "-o", bin, "./internal/testdaemon") //nolint:gosec // G204: building a fixed test fixture
+	// -buildvcs=false: CI checkouts can't always stamp VCS metadata (git
+	// ownership / shallow clones), which fails the build otherwise.
+	cmd := exec.CommandContext(context.Background(), "go", "build", "-buildvcs=false", "-o", bin, "./internal/testdaemon") //nolint:gosec // G204: building a fixed test fixture
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("building test daemon: %v", err)
