@@ -283,7 +283,13 @@ func TestManagerResetAll(t *testing.T) {
 }
 
 func TestConcurrentAccess(t *testing.T) {
-	limiter := NewLimiter(100, 50)
+	// This test verifies that concurrent Allow() calls track distinct users
+	// safely (the per-user limiter map). Allow() only registers a user *after*
+	// the global check passes, so the global limit must not bind here: with a
+	// binding global burst, goroutine scheduling could let one user drain it
+	// before the other user runs, leaving that user unregistered and flaking
+	// UserCount. Use a global rate high enough to never deny within this test.
+	limiter := NewLimiter(1_000_000, 50)
 
 	const numGoroutines = 10
 	const numRequests = 100
