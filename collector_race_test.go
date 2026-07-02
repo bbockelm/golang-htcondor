@@ -240,12 +240,18 @@ func TestRaceDial_StaggerOrders(t *testing.T) {
 	// just past the stagger. The second's later start beats the
 	// first's response → the second wins.
 	const stagger = 30 * time.Millisecond
+	// slowA is deliberately far slower than fastB (seconds vs. milliseconds) so
+	// the timing assertions have a wide margin: fastB must win, and raceDial must
+	// return promptly after fastB succeeds rather than waiting for slowA. A tight
+	// upper bound near slowA's delay would flake on slow/loaded CI (emulated
+	// arm64), so we only need "well under slowA".
+	const slowADelay = 2 * time.Second
 	addrs := []string{"slowA", "fastB"}
 	connect := func(ctx context.Context, addr string) (*fakeConn, error) {
 		switch addr {
 		case "slowA":
 			select {
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(slowADelay):
 				return &fakeConn{id: addr}, nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -269,7 +275,9 @@ func TestRaceDial_StaggerOrders(t *testing.T) {
 	if elapsed < stagger {
 		t.Errorf("returned before stagger elapsed: %v < %v", elapsed, stagger)
 	}
-	if elapsed > 90*time.Millisecond {
+	// fastB returns ~immediately after its staggered start (~stagger). Allow a
+	// generous ceiling that still proves raceDial did not wait for slowA.
+	if elapsed > slowADelay/2 {
 		t.Errorf("returned later than expected: %v", elapsed)
 	}
 }
@@ -371,4 +379,3 @@ func TestRaceDial_ContextCancellationStops(t *testing.T) {
 		t.Fatal("raceDial did not return after parent context cancel")
 	}
 }
-
