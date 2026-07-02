@@ -47,6 +47,10 @@ func walkBoundSlotAttrs(expr ast.Expr, seen map[string]struct{}) {
 		if v.Scope == ast.TargetScope || v.Scope == ast.NoScope {
 			seen[v.Name] = struct{}{}
 		}
+	case *ast.ParenExpr:
+		// classad v0.1.0+ preserves parentheses as a node (matching the
+		// reference ClassAd unparser); descend through it transparently.
+		walkBoundSlotAttrs(v.Inner, seen)
 	case *ast.BinaryOp:
 		walkBoundSlotAttrs(v.Left, seen)
 		walkBoundSlotAttrs(v.Right, seen)
@@ -164,6 +168,12 @@ func rewriteBareRefs(expr ast.Expr, jobAttrs map[string]bool) ast.Expr {
 		// outcome (and matches what an operator would expect from
 		// reading the predicate).
 		return &ast.AttributeReference{Name: v.Name, Scope: ast.TargetScope}
+	case *ast.ParenExpr:
+		inner := rewriteBareRefs(v.Inner, jobAttrs)
+		if inner == v.Inner {
+			return v
+		}
+		return &ast.ParenExpr{Inner: inner}
 	case *ast.BinaryOp:
 		left := rewriteBareRefs(v.Left, jobAttrs)
 		right := rewriteBareRefs(v.Right, jobAttrs)

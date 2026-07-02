@@ -3,8 +3,8 @@ module github.com/bbockelm/golang-htcondor
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.0.4
-	github.com/bbockelm/cedar v0.1.1
+	github.com/PelicanPlatform/classad v0.1.0
+	github.com/bbockelm/cedar v0.1.2
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/glebarez/sqlite v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -124,5 +124,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.53.0
 )
-
-replace github.com/bbockelm/cedar => /Users/bbockelm/projects/golang-cedar

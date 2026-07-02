@@ -56,10 +56,15 @@ func (ShallowAndDecomposer) Decompose(req ast.Expr) ([]Predicate, error) {
 	return preds, nil
 }
 
-// collectAndLeaves performs the recursive split. We unwrap parenthesized
-// groupings implicitly because the AST doesn't carry parens — `(A && B) && C`
-// and `A && (B && C)` parse to the same tree shape.
+// collectAndLeaves performs the recursive split. classad v0.1.0+ preserves
+// parentheses as an ast.ParenExpr node (matching the reference ClassAd
+// unparser), so we unwrap those transparently before testing for `&&` —
+// otherwise `(A && B) && C` would not split at the outer conjunction.
 func collectAndLeaves(expr ast.Expr, out *[]ast.Expr) {
+	if p, ok := expr.(*ast.ParenExpr); ok {
+		collectAndLeaves(p.Inner, out)
+		return
+	}
 	if bin, ok := expr.(*ast.BinaryOp); ok && bin.Op == "&&" {
 		collectAndLeaves(bin.Left, out)
 		collectAndLeaves(bin.Right, out)
@@ -119,6 +124,9 @@ func walkAttrRefs(expr ast.Expr, seen map[string]struct{}) {
 			// (rare in slot matching contexts). Neither is a slot
 			// reference, so don't add to the projection.
 		}
+	case *ast.ParenExpr:
+		// classad v0.1.0+ preserves parentheses as a node; descend through it.
+		walkAttrRefs(v.Inner, seen)
 	case *ast.BinaryOp:
 		walkAttrRefs(v.Left, seen)
 		walkAttrRefs(v.Right, seen)
