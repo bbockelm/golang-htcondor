@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -104,22 +105,30 @@ func TestScheddQueryRateLimit(t *testing.T) {
 		}
 	})
 
-	// Test 2: Queries exceeding burst should block or fail
+	// Test 2: Queries exceeding the global burst should block until tokens refill.
+	//
+	// Drain the burst with a *distinct user per query* so the (more restrictive)
+	// per-user limiter never binds — only the global limit (2 qps, burst 4)
+	// constrains. That keeps the follow-up wait bounded by the global refill
+	// (~500ms) rather than the per-user refill (1 qps => ~1s), which would race
+	// the query's 1s rate-limit timeout and flake on slow CI (e.g. emulated arm64).
 	t.Run("queries exceeding burst wait", func(t *testing.T) {
 		// Reset rate limiters to start fresh
 		manager.ResetAll()
 
-		// Consume burst (2 queries at 2 qps = burst of 4)
+		// Consume the global burst of 4 (2 qps * 2), one distinct user each.
 		for i := 0; i < 4; i++ {
-			_, err := schedd.Query(ctx, constraint, projection)
-			if err != nil {
-				t.Fatalf("query %d failed: %v", i, err)
+			uctx := WithAuthenticatedUser(context.Background(), fmt.Sprintf("burst-user-%d", i))
+			if _, err := schedd.Query(uctx, constraint, projection); err != nil {
+				t.Fatalf("burst query %d failed: %v", i, err)
 			}
 		}
 
-		// Next query should block until tokens are available
+		// The next query (fresh user, so per-user tokens remain) must wait for a
+		// global token to refill (~500ms), well under the 1s rate-limit timeout.
 		start := time.Now()
-		_, err := schedd.Query(ctx, constraint, projection)
+		uctx := WithAuthenticatedUser(context.Background(), "burst-user-final")
+		_, err := schedd.Query(uctx, constraint, projection)
 		elapsed := time.Since(start)
 
 		if err != nil {

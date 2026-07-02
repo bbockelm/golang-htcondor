@@ -127,13 +127,17 @@ func TestVerifyHostnameResolution(t *testing.T) {
 	}
 }
 
-func TestCommandPerms(t *testing.T) {
-	reg := CommandPerms(67, 68, 67)
-	if len(reg) == 0 || reg[0] != PermDaemon {
-		t.Errorf("register should map to DAEMON first, got %v", reg)
+func TestAuthorize(t *testing.T) {
+	// A wide-open READ policy authorizes any peer at READ but not at DAEMON.
+	p := newTestPolicy(t, mapConfig{"ALLOW_READ": "*"}, nil, nil)
+	if !p.Authorize("READ", "127.0.0.1:5000", "someone@example.com") {
+		t.Error("READ should be authorized under ALLOW_READ = *")
 	}
-	req := CommandPerms(67, 68, 68)
-	if len(req) != 1 || req[0] != PermRead {
-		t.Errorf("request should map to READ, got %v", req)
+	if p.Authorize("DAEMON", "127.0.0.1:5000", "someone@example.com") {
+		t.Error("DAEMON should not be authorized without an ALLOW_DAEMON rule")
+	}
+	// ALLOW (special) is always authorized, and a bare host (no port) still parses.
+	if !p.Authorize("ALLOW", "127.0.0.1", "") {
+		t.Error("ALLOW must always authorize")
 	}
 }

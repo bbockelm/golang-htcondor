@@ -47,6 +47,10 @@ func walkBoundSlotAttrs(expr ast.Expr, seen map[string]struct{}) {
 		if v.Scope == ast.TargetScope || v.Scope == ast.NoScope {
 			seen[v.Name] = struct{}{}
 		}
+	case *ast.ParenExpr:
+		// classad v0.1.0+ preserves parentheses as a node (matching the
+		// reference ClassAd unparser); descend through it transparently.
+		walkBoundSlotAttrs(v.Inner, seen)
 	case *ast.BinaryOp:
 		walkBoundSlotAttrs(v.Left, seen)
 		walkBoundSlotAttrs(v.Right, seen)
@@ -164,6 +168,12 @@ func rewriteBareRefs(expr ast.Expr, jobAttrs map[string]bool) ast.Expr {
 		// outcome (and matches what an operator would expect from
 		// reading the predicate).
 		return &ast.AttributeReference{Name: v.Name, Scope: ast.TargetScope}
+	case *ast.ParenExpr:
+		inner := rewriteBareRefs(v.Inner, jobAttrs)
+		if inner == v.Inner {
+			return v
+		}
+		return &ast.ParenExpr{Inner: inner}
 	case *ast.BinaryOp:
 		left := rewriteBareRefs(v.Left, jobAttrs)
 		right := rewriteBareRefs(v.Right, jobAttrs)
@@ -178,14 +188,7 @@ func rewriteBareRefs(expr ast.Expr, jobAttrs map[string]bool) ast.Expr {
 		}
 		return &ast.UnaryOp{Op: v.Op, Expr: inner}
 	case *ast.FunctionCall:
-		newArgs := make([]ast.Expr, len(v.Args))
-		changed := false
-		for i, a := range v.Args {
-			newArgs[i] = rewriteBareRefs(a, jobAttrs)
-			if newArgs[i] != a {
-				changed = true
-			}
-		}
+		newArgs, changed := rewriteBareRefSlice(v.Args, jobAttrs)
 		if !changed {
 			return v
 		}
@@ -221,14 +224,7 @@ func rewriteBareRefs(expr ast.Expr, jobAttrs map[string]bool) ast.Expr {
 		}
 		return &ast.SubscriptExpr{Container: c, Index: i}
 	case *ast.ListLiteral:
-		newElems := make([]ast.Expr, len(v.Elements))
-		changed := false
-		for i, e := range v.Elements {
-			newElems[i] = rewriteBareRefs(e, jobAttrs)
-			if newElems[i] != e {
-				changed = true
-			}
-		}
+		newElems, changed := rewriteBareRefSlice(v.Elements, jobAttrs)
 		if !changed {
 			return v
 		}
@@ -237,4 +233,19 @@ func rewriteBareRefs(expr ast.Expr, jobAttrs map[string]bool) ast.Expr {
 	// Literals (Integer/Real/String/Bool/Undefined/Error) and
 	// RecordLiteral pass through unchanged.
 	return expr
+}
+
+// rewriteBareRefSlice applies rewriteBareRefs to each element, returning the new
+// slice and whether any element changed (identity-compared, so an all-unchanged
+// slice lets the caller preserve the original node and its structure sharing).
+func rewriteBareRefSlice(exprs []ast.Expr, jobAttrs map[string]bool) ([]ast.Expr, bool) {
+	out := make([]ast.Expr, len(exprs))
+	changed := false
+	for i, e := range exprs {
+		out[i] = rewriteBareRefs(e, jobAttrs)
+		if out[i] != e {
+			changed = true
+		}
+	}
+	return out, changed
 }

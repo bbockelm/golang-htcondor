@@ -1,4 +1,4 @@
-github.com/PelicanPlatform/classad v0.0.4 h1:CKRLqSe+6tTvYELE/P1uYYugse8aAMKAnb+IC5HDqIU=
-github.com/PelicanPlatform/classad v0.0.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad v0.1.0 h1:jnRQvH+J9ZpVOyhPiuazoKPB8F9Qm3P78ah65aAscCo=
+github.com/PelicanPlatform/classad v0.1.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
 golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=

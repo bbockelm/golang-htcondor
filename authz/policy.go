@@ -233,18 +233,17 @@ func (p *Policy) expandHostAddresses(host string) []string {
 	return keys
 }
 
-// CommandPerms maps a CEDAR command to the permission(s) that authorize it. A
-// request is allowed if any listed permission verifies. (CCB_REGISTER accepts
-// DAEMON or any ADVERTISE_* level, matching the C++ ccb_server registration.)
-func CommandPerms(ccbRegister, ccbRequest, command int) []Perm {
-	switch command {
-	case ccbRegister:
-		return []Perm{PermDaemon, PermAdvertiseStartd, PermAdvertiseSchedd, PermAdvertiseMaster}
-	case ccbRequest:
-		return []Perm{PermRead}
-	default:
-		return []Perm{PermDaemon}
+// Authorize adapts Verify to the string-based callback a CEDAR command server
+// uses (server.Server.Authorizer): it reports whether user, connecting from
+// peerAddr ("host:port"), is allowed at the named authorization level (an
+// HTCondor DCpermission name such as "READ" or "DAEMON"). An unparseable
+// peerAddr yields a nil IP, which Verify treats as matching no host rule.
+func (p *Policy) Authorize(perm, peerAddr, user string) bool {
+	host, _, err := net.SplitHostPort(peerAddr)
+	if err != nil {
+		host = peerAddr
 	}
+	return p.Verify(Perm(perm), net.ParseIP(host), user)
 }
 
 // Verify reports whether the authenticated user connecting from addr is allowed

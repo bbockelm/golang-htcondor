@@ -21,35 +21,34 @@ import (
 // children (SIGHUP / SIGTERM) — handled by Serve directly; these handlers cover
 // the case where a tool targets this daemon's command port.
 //
-// The caller registers these on the same cedarserver.Server it uses for its own
-// commands, then serves it via Daemon.Serve. Authentication is governed by the
-// server's security config; callers that need per-command authorization should
-// enforce it in addition (e.g. the authz package).
+// Each command is registered with the authorization level HTCondor's DaemonCore
+// uses for it (see daemon_core_main.cpp), so the server advertises correct
+// ValidCommands and — when the caller wires an Authorizer — enforces per-command
+// authorization consistently. The caller registers these on the same
+// cedarserver.Server it uses for its own commands, then serves it via
+// Daemon.Serve.
 func (d *Daemon) RegisterDefaultCommands(srv *cedarserver.Server) {
 	nop := func(context.Context, *cedarserver.Conn) error { return nil }
-	for _, cmd := range []int{
-		commands.DC_NOP,
-		commands.DC_NOP_READ,
-		commands.DC_NOP_WRITE,
-		commands.DC_NOP_NEGOTIATOR,
-	} {
-		srv.Handle(cmd, nop)
-	}
+	// DC_NOP is registered at ALLOW; the level-specific NOPs gate at their level.
+	srv.Handle(commands.DC_NOP, nop, "ALLOW")
+	srv.Handle(commands.DC_NOP_READ, nop, "READ")
+	srv.Handle(commands.DC_NOP_WRITE, nop, "WRITE")
+	srv.Handle(commands.DC_NOP_NEGOTIATOR, nop, "NEGOTIATOR")
 
 	reconfig := func(_ context.Context, c *cedarserver.Conn) error {
 		d.log.Info(logging.DestinationGeneral, "DC_RECONFIG received; reloading configuration", "remote", c.RemoteAddr)
 		d.Reconfigure()
 		return nil
 	}
-	srv.Handle(commands.DC_RECONFIG, reconfig)
-	srv.Handle(commands.DC_RECONFIG_FULL, reconfig)
+	srv.Handle(commands.DC_RECONFIG, reconfig, "ADMINISTRATOR")
+	srv.Handle(commands.DC_RECONFIG_FULL, reconfig, "ADMINISTRATOR")
 
 	off := func(_ context.Context, c *cedarserver.Conn) error {
 		d.log.Info(logging.DestinationGeneral, "DC_OFF received; shutting down", "command", c.Command, "remote", c.RemoteAddr)
 		d.Shutdown()
 		return nil
 	}
-	srv.Handle(commands.DC_OFF_GRACEFUL, off)
-	srv.Handle(commands.DC_OFF_PEACEFUL, off)
-	srv.Handle(commands.DC_OFF_FAST, off)
+	srv.Handle(commands.DC_OFF_GRACEFUL, off, "ADMINISTRATOR")
+	srv.Handle(commands.DC_OFF_PEACEFUL, off, "ADMINISTRATOR")
+	srv.Handle(commands.DC_OFF_FAST, off, "ADMINISTRATOR")
 }

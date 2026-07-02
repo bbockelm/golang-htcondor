@@ -41,14 +41,17 @@ func TestStartKeepAliveLoop(t *testing.T) {
 	stop, errCh, err := master.StartKeepAlive(context.Background(), opts)
 	require.NoError(t, err)
 
-	time.Sleep(3*opts.Interval + opts.Interval/2)
+	// Poll for at least two keep-alive ticks instead of sleeping a fixed window:
+	// on a loaded/slow runner (e.g. emulated CI) ticks can be delayed, so a fixed
+	// sleep could observe fewer than expected. Eventually tolerates that jitter.
+	require.Eventually(t, func() bool {
+		return sender.keepAliveCount() >= 2
+	}, 2*time.Second, opts.Interval/2)
 	stop()
 
 	for err := range errCh {
 		require.NoError(t, err)
 	}
-
-	assert.GreaterOrEqual(t, sender.keepAliveCount(), 2)
 }
 
 func TestSendReadyDefaults(t *testing.T) {
