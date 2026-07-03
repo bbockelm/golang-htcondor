@@ -16,17 +16,21 @@ promote the case to parity. HTCondor's C++ is the ground truth.
 | 2 | `K = v   # trailing` | ~~`v`~~ → `v   # trailing` | `v   # trailing` | **FIXED** — `#` inside a value is literal; only a full-line `#` is a comment (lexer.go). |
 | 3 | `DN = $DIRNAME(/a/b/c)` | `/a/b/` | `` (empty) | **Intentional extension** — Go adds `$DIRNAME` (HTCondor uses `$Fp`). Kept. |
 | 4 | `BN = $BASENAME(/a/b/c)` | `c` | `` (empty) | **Intentional extension** — Go adds `$BASENAME` (HTCondor uses `$Fn`). Kept. |
-| 5 | `I = $INT(0x10)` | `$INT(0x10)` (literal) | `0` | Open — Go leaves `$INT(hex)` literal; HTCondor evaluates it (to `0`). C++'s `0` is itself odd; low priority. |
-| 6 | `NAME = MINUTE` / `VAL = $($(NAME))` | `60` | `$(MINUTE)` | Open — Go re-expands an inner macro's result; HTCondor is single-pass. Needs an algorithm change (don't re-scan substituted text). |
-| 7 | `FOO = 1` / `foo = 2` / `USE = $(Foo)` | accepted | rejected | Open — likely the reserved `use` keyword (`USE = …`), not case redefinition. Needs a narrower repro before "fixing". |
-| 8 | `LONG = a \` (indented continuation) | accepted | rejected | Open — leading whitespace on continuation lines. Narrow which form HTCondor rejects. |
-| 9 | `C : colonval` | rejected | accepted | Open — colon is meta-only; HTCondor accepts the line as a non-error, Go errors. |
-| 10 | `if 1 > 0` … `endif` | accepted | rejected | Open — Go evaluates a numeric `if` comparison; HTCondor's `if` grammar rejects it. |
+| 5 | `I = $INT(0x10)` | `$INT(0x10)` (literal) | `0` | **Documented** — `$INT` evaluates its arg as a **ClassAd expression** (`0x10`→`0`) and `EXCEPT`s (hard-aborts) on non-integers like `5x3`. Not replicating the abort; the `0x10`→`0` value depends on ClassAd parsing. |
+| 6 | `NAME = MINUTE` / `VAL = $($(NAME))` | `60` | `$(MINUTE)` | **Intentional extension** — Go re-expands an inner macro's result; HTCondor is single-pass. Kept. |
+| 7 | `FOO = 1` / `foo = 2` / `USE = $(Foo)` | accepted | rejected | Open (exotic) — it's the reserved `use` keyword (`USE = …` → *"use needs a keyword before :"*), not case redefinition. |
+| 8 | `LONG = a \` (continuation) | accepted | rejected | Open (**investigate**) — HTCondor rejected *every* continuation form probed, which is surprising; don't change Go until understood. |
+| 9 | `C : colonval` | rejected | `C=colonval` | Open — colon **is** an assignment operator in HTCondor; Go rejects it. Needs lexer/grammar work. |
+| 10 | `if 1 > 0` … `endif` | accepted | rejected | Open (**decision**) — HTCondor's `if` accepts only bare bool / `defined X` / `version <op> x`; it rejects **all** comparisons (`>`,`<`,`==`,`!=`) **and** `&&`/`||`. Go implements the richer set (deliberate, tested). Strict-match vs keep-as-extension is a product call. |
 
 ## Next
 
-Open items 5–10 are parser/grammar or expansion-semantics decisions; each wants
-a minimized repro (the fuzzer will produce more) and a check against the
-HTCondor manual on which side is right. Items 6, 7, 9, 10 in particular need
-care — "matching C++" could mean making Go *reject* things it currently accepts,
-so confirm intent before changing the grammar.
+Fixed: `$(DOLLAR)` (#1) and inline-`#` (#2). Extensions kept: `$DIRNAME`/`$BASENAME`
+(#3–4) and nested re-expansion (#6). Documented: `$INT` (#5).
+
+Still open and each bigger than a bug fix:
+- **#10 `if` grammar** — matching HTCondor removes Go's comparison + logical-operator
+  support in `if` (and their tests). Needs a product decision.
+- **#9 colon** — add colon as an assignment operator (lexer/grammar).
+- **#8 continuation** — first understand *why* HTCondor rejects the probed forms.
+- **#7 `use` keyword** — exotic; low priority.

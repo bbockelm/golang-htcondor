@@ -49,20 +49,20 @@ var seeds = []seedCase{
 		reason: "INTENTIONAL: Go adds $DIRNAME (-> /a/b/); HTCondor has no $DIRNAME (uses $Fp). Kept as an extension."},
 	{input: "BN = $BASENAME(/a/b/c)\n",
 		reason: "INTENTIONAL: Go adds $BASENAME (-> c); HTCondor has no $BASENAME (uses $Fn). Kept as an extension."},
+	{input: "NAME = MINUTE\nVAL = $($(NAME))\n",
+		reason: "INTENTIONAL: nested $($(NAME)) — Go re-expands the inner macro's result (-> 60); HTCondor is single-pass and leaves $(MINUTE). Kept as an extension."},
 
 	// --- known divergences still to resolve (findings) ---
-	{input: "NAME = MINUTE\nVAL = $($(NAME))\n",
-		reason: "nested expansion: Go re-expands the result of an inner macro ($(MINUTE) -> 60); HTCondor leaves $(MINUTE) literal (single pass)"},
 	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n",
-		reason: "USE keyword / case: HTCondor rejects the source (likely the reserved 'use' keyword); Go accepts. Needs a narrower repro."},
+		reason: "reserved 'use' keyword: HTCondor reads 'USE = ...' as a metaknob ('use needs a keyword before :') and errors; Go treats USE as an ordinary name. Exotic."},
 	{input: "LONG = a \\\n b \\\n c\n",
-		reason: "line continuation with leading space on continuation lines: Go accepts, HTCondor rejects"},
+		reason: "line continuation: HTCondor rejects these forms (all indented/non-indented variants), which is surprising — needs its own investigation before changing Go."},
 	{input: "C : colonval\n",
-		reason: "colon assignment: Go rejects 'C : colonval'; HTCondor accepts the line (colon is meta-only, treated as non-error)"},
+		reason: "colon assignment: HTCondor accepts 'C : colonval' as C=colonval (colon is an assignment operator); Go rejects it. Needs lexer/grammar work."},
 	{input: "I = $INT(0x10)\n",
-		reason: "$INT hex: Go leaves $INT(0x10) unexpanded; HTCondor evaluates it (to 0)"},
+		reason: "$INT: HTCondor evaluates the arg as a ClassAd expression ($INT(0x10)->0) and EXCEPTs (aborts) on non-integers like 5x3; Go leaves it literal. Not worth replicating the abort."},
 	{input: "if 1 > 0\n  Y = t\nendif\n",
-		reason: "if with a numeric comparison: Go accepts '1 > 0'; HTCondor rejects the if-expression grammar"},
+		reason: "if grammar: HTCondor's 'if' accepts only bare bool / defined X / version <op> x — it REJECTS all comparisons (>,<,==,!=) AND compound &&/||. Go implements the richer set. DECISION PENDING: strict (remove Go's if-expressions) vs keep as extension."},
 }
 
 // divergence runs both engines on the same preluded source and returns a
