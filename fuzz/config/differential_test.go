@@ -41,26 +41,26 @@ var seeds = []seedCase{
 	{input: "BLOB @=end\nline1\nline2\n@end\n"},
 	{input: "   SPACED    =     trimmed   \n"},
 	{input: "EMPTY =\n"},
+	{input: "D = a$(DOLLAR)b\n"},                   // fixed: $(DOLLAR) -> literal '$'
+	{input: "# a comment\n\nK = v   # trailing\n"}, // fixed: '#' inside a value is literal
 
-	// --- known divergences (findings) ---
+	// --- intentional Go extensions (will always diverge; NOT bugs) ---
+	{input: "DN = $DIRNAME(/a/b/c)\n",
+		reason: "INTENTIONAL: Go adds $DIRNAME (-> /a/b/); HTCondor has no $DIRNAME (uses $Fp). Kept as an extension."},
+	{input: "BN = $BASENAME(/a/b/c)\n",
+		reason: "INTENTIONAL: Go adds $BASENAME (-> c); HTCondor has no $BASENAME (uses $Fn). Kept as an extension."},
+
+	// --- known divergences still to resolve (findings) ---
 	{input: "NAME = MINUTE\nVAL = $($(NAME))\n",
 		reason: "nested expansion: Go re-expands the result of an inner macro ($(MINUTE) -> 60); HTCondor leaves $(MINUTE) literal (single pass)"},
 	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n",
-		reason: "case-insensitive redefinition: Go accepts, HTCondor rejects the source"},
-	{input: "# a comment\n\nK = v   # trailing\n",
-		reason: "trailing '#': Go strips it as a comment; HTCondor keeps '# trailing' as part of the value (# only starts a full-line comment)"},
+		reason: "USE keyword / case: HTCondor rejects the source (likely the reserved 'use' keyword); Go accepts. Needs a narrower repro."},
 	{input: "LONG = a \\\n b \\\n c\n",
 		reason: "line continuation with leading space on continuation lines: Go accepts, HTCondor rejects"},
 	{input: "C : colonval\n",
 		reason: "colon assignment: Go rejects 'C : colonval'; HTCondor accepts the line (colon is meta-only, treated as non-error)"},
-	{input: "D = a$(DOLLAR)b\n",
-		reason: "$(DOLLAR): Go expands to empty; HTCondor expands to a literal '$'"},
 	{input: "I = $INT(0x10)\n",
 		reason: "$INT hex: Go leaves $INT(0x10) unexpanded; HTCondor evaluates it (to 0)"},
-	{input: "DN = $DIRNAME(/a/b/c)\n",
-		reason: "$DIRNAME: Go implements it (-> /a/b/); HTCondor has no $DIRNAME (uses $Fp), expands to empty"},
-	{input: "BN = $BASENAME(/a/b/c)\n",
-		reason: "$BASENAME: Go implements it (-> c); HTCondor has no $BASENAME (uses $Fn), expands to empty"},
 	{input: "if 1 > 0\n  Y = t\nendif\n",
 		reason: "if with a numeric comparison: Go accepts '1 > 0'; HTCondor rejects the if-expression grammar"},
 }

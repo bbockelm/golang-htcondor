@@ -300,8 +300,10 @@ func (l *Lexer) readUntilNewline() string {
 		l.readChar()
 	}
 
-	// Read until newline, handling line continuation
-	for l.ch != '\n' && l.ch != 0 && l.ch != '#' {
+	// Read until newline, handling line continuation. A '#' is NOT a comment
+	// here: HTCondor only treats '#' as a comment at the start of a line, so a
+	// '#' inside a value (e.g. "K = v # note") is literal and kept.
+	for l.ch != '\n' && l.ch != 0 {
 		switch {
 		case l.ch == '\\' && l.peekChar() == '\n':
 			// Trim trailing whitespace before the backslash

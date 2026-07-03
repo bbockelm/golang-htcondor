@@ -783,6 +783,15 @@ func (c *Config) expandMacros(value string) (string, error) {
 			defaultVal = parts[1]
 		}
 
+		// $(DOLLAR) is a predefined macro that expands to a literal '$'.
+		// HTCondor handles it in expand_macro itself, independent of the
+		// defaults table, so it must resolve even in a defaults-free parse.
+		if strings.EqualFold(varName, "DOLLAR") {
+			result = result[:dollarIdx] + "$" + result[endIdx+1:]
+			depth++
+			continue
+		}
+
 		// Check for circular reference
 		if c.evaluating[varName] {
 			// Skip this macro to avoid infinite loop
