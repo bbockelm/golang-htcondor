@@ -16,6 +16,55 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+// join_continuations replicates HTCondor's getline_implementation
+// (config.cpp): the config file/line reader trims leading and trailing
+// whitespace from each physical line and joins lines ending in a backslash
+// onto the next, producing the logical lines that Parse_config_string then
+// parses. Parse_config_string itself does NOT do this (it just splits on
+// '\n'), so calling it directly on raw text mishandles continuations and
+// indented lines. We reproduce the reader here so the oracle matches the real
+// config parse. (The rare '#'-in-continuation special cases are not modeled.)
+std::string join_continuations(const char *config) {
+	std::string result;
+	std::string logical;
+	const char *p = config;
+	while (*p) {
+		const char *nl = strchr(p, '\n');
+		std::string line = nl ? std::string(p, nl - p) : std::string(p);
+
+		const char ws[] = " \t\r";
+		size_t b = line.find_first_not_of(ws);
+		std::string trimmed;
+		if (b != std::string::npos) {
+			size_t e = line.find_last_not_of(ws);
+			trimmed = line.substr(b, e - b + 1);
+		}
+
+		if (!trimmed.empty() && trimmed.back() == '\\') {
+			trimmed.pop_back();
+			logical += trimmed; // keep accumulating the logical line
+		} else {
+			logical += trimmed;
+			result += logical;
+			result += '\n';
+			logical.clear();
+		}
+		if (!nl) {
+			break;
+		}
+		p = nl + 1;
+	}
+	if (!logical.empty()) {
+		result += logical;
+		result += '\n';
+	}
+	return result;
+}
+
+} // namespace
+
 extern "C" int config_parse_expand(const char *text, char **out) {
 	*out = nullptr;
 	try {
@@ -40,7 +89,11 @@ extern "C" int config_parse_expand(const char *text, char **out) {
 		MACRO_SOURCE src = {false, false, 0, 0, 0, 0};
 		insert_source("fuzz", set, src);
 
-		int rc = Parse_config_string(src, 0, text, set, ctx);
+		// Join backslash-continuations and trim lines exactly as the real
+		// config reader (getline_implementation) does before Parse_config_string
+		// sees them.
+		std::string joined = join_continuations(text);
+		int rc = Parse_config_string(src, 0, joined.c_str(), set, ctx);
 		if (rc != 0) {
 			// Parse error (rc is the offending line, or negative). The table may
 			// be partial; we do not compare it — the caller only needs to see

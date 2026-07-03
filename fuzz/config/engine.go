@@ -90,7 +90,14 @@ func StripRefEnv(canonTable string) string {
 // the canonical expanded table. text is expected to already include RefEnv (see
 // Prelude); pass the identical string to oracle.ParseExpand.
 func GoParseExpand(text string) Result {
-	c, err := config.NewFromReaderWithOptions(strings.NewReader(text), config.ConfigOptions{SkipDefaults: true})
+	// HTCondorCompat: compare Go against HTCondor faithfully — disable Go-only
+	// grammar extensions (e.g. the richer `if` conditions) so those show up as
+	// parity, not noise. Remaining intentional extensions ($DIRNAME/$BASENAME,
+	// nested re-expansion) are tracked as known divergences in the seed table.
+	c, err := config.NewFromReaderWithOptions(strings.NewReader(text), config.ConfigOptions{
+		SkipDefaults:   true,
+		HTCondorCompat: true,
+	})
 	if err != nil {
 		return Result{Parsed: false}
 	}

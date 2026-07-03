@@ -19,18 +19,19 @@ promote the case to parity. HTCondor's C++ is the ground truth.
 | 5 | `I = $INT(0x10)` | `$INT(0x10)` (literal) | `0` | **Documented** — `$INT` evaluates its arg as a **ClassAd expression** (`0x10`→`0`) and `EXCEPT`s (hard-aborts) on non-integers like `5x3`. Not replicating the abort; the `0x10`→`0` value depends on ClassAd parsing. |
 | 6 | `NAME = MINUTE` / `VAL = $($(NAME))` | `60` | `$(MINUTE)` | **Intentional extension** — Go re-expands an inner macro's result; HTCondor is single-pass. Kept. |
 | 7 | `FOO = 1` / `foo = 2` / `USE = $(Foo)` | accepted | rejected | Open (exotic) — it's the reserved `use` keyword (`USE = …` → *"use needs a keyword before :"*), not case redefinition. |
-| 8 | `LONG = a \` (continuation) | accepted | rejected | Open (**investigate**) — HTCondor rejected *every* continuation form probed, which is surprising; don't change Go until understood. |
-| 9 | `C : colonval` | rejected | `C=colonval` | Open — colon **is** an assignment operator in HTCondor; Go rejects it. Needs lexer/grammar work. |
-| 10 | `if 1 > 0` … `endif` | accepted | rejected | Open (**decision**) — HTCondor's `if` accepts only bare bool / `defined X` / `version <op> x`; it rejects **all** comparisons (`>`,`<`,`==`,`!=`) **and** `&&`/`||`. Go implements the richer set (deliberate, tested). Strict-match vs keep-as-extension is a product call. |
+| 8 | `LONG = a \` (continuation) | joined | (rejected) | **FIXED (oracle bug)** — `Parse_config_string` doesn't join `\`-continuations; the real reader (`getline_implementation`) does. The shim now joins/trims lines the same way, so continuations parse. Go was already correct. |
+| 9 | `C : colonval` | ~~rejected~~ → `C=colonval` | `C=colonval` | **FIXED** — colon is now an assignment operator in the lexer (a statement-start plain identifier followed by `:` reads the value like `=`). |
+| 10 | `if 1 > 0` … `endif` | accepted (default) / rejected (compat) | rejected | **FIXED via mode** — HTCondor's `if` accepts only bare bool / `defined X` / `version <op> x`; it rejects **all** comparisons (`>`,`<`,`==`,`!=`) **and** `&&`/`||`. Go keeps its richer `if` by default (extension) and rejects it under `ConfigOptions{HTCondorCompat:true}`, which the fuzzer uses. |
 
 ## Next
 
-Fixed: `$(DOLLAR)` (#1) and inline-`#` (#2). Extensions kept: `$DIRNAME`/`$BASENAME`
-(#3–4) and nested re-expansion (#6). Documented: `$INT` (#5).
+Fixed: `$(DOLLAR)` (#1), inline-`#` (#2), colon assignment (#9), and the continuation
+oracle bug (#8). Handled by mode: rich `if` (#10) — default keeps it, compat rejects
+it, fuzzer runs in compat. Extensions kept: `$DIRNAME`/`$BASENAME` (#3–4) and nested
+re-expansion (#6). Documented, not chased: `$INT` (#5).
 
-Still open and each bigger than a bug fix:
-- **#10 `if` grammar** — matching HTCondor removes Go's comparison + logical-operator
-  support in `if` (and their tests). Needs a product decision.
-- **#9 colon** — add colon as an assignment operator (lexer/grammar).
-- **#8 continuation** — first understand *why* HTCondor rejects the probed forms.
-- **#7 `use` keyword** — exotic; low priority.
+Remaining open:
+- **#7 `use` keyword** — Go treats `use` as an ordinary name when followed by `=`;
+  HTCondor reserves it. Exotic; low priority.
+- **#5 `$INT`** — Go leaves non-integer `$INT(...)` literal; HTCondor evaluates via
+  ClassAd and aborts on failure. Not worth replicating the abort.

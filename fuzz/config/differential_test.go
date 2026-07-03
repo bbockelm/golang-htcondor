@@ -43,6 +43,9 @@ var seeds = []seedCase{
 	{input: "EMPTY =\n"},
 	{input: "D = a$(DOLLAR)b\n"},                   // fixed: $(DOLLAR) -> literal '$'
 	{input: "# a comment\n\nK = v   # trailing\n"}, // fixed: '#' inside a value is literal
+	{input: "C : colonval\n"},                      // fixed: colon is an assignment operator
+	{input: "LONG = a \\\n b \\\n c\n"},            // fixed oracle: it now joins continuations like getline
+	{input: "if 1 > 0\n  Y = t\nendif\n"},          // parity in HTCondorCompat: Go rejects it too
 
 	// --- intentional Go extensions (will always diverge; NOT bugs) ---
 	{input: "DN = $DIRNAME(/a/b/c)\n",
@@ -55,14 +58,8 @@ var seeds = []seedCase{
 	// --- known divergences still to resolve (findings) ---
 	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n",
 		reason: "reserved 'use' keyword: HTCondor reads 'USE = ...' as a metaknob ('use needs a keyword before :') and errors; Go treats USE as an ordinary name. Exotic."},
-	{input: "LONG = a \\\n b \\\n c\n",
-		reason: "line continuation: HTCondor rejects these forms (all indented/non-indented variants), which is surprising — needs its own investigation before changing Go."},
-	{input: "C : colonval\n",
-		reason: "colon assignment: HTCondor accepts 'C : colonval' as C=colonval (colon is an assignment operator); Go rejects it. Needs lexer/grammar work."},
 	{input: "I = $INT(0x10)\n",
 		reason: "$INT: HTCondor evaluates the arg as a ClassAd expression ($INT(0x10)->0) and EXCEPTs (aborts) on non-integers like 5x3; Go leaves it literal. Not worth replicating the abort."},
-	{input: "if 1 > 0\n  Y = t\nendif\n",
-		reason: "if grammar: HTCondor's 'if' accepts only bare bool / defined X / version <op> x — it REJECTS all comparisons (>,<,==,!=) AND compound &&/||. Go implements the richer set. DECISION PENDING: strict (remove Go's if-expressions) vs keep as extension."},
 }
 
 // divergence runs both engines on the same preluded source and returns a
