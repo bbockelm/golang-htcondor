@@ -212,7 +212,13 @@ func (c *Config) includeCommand(command string) error {
 // parseAndExecute parses and executes configuration from a reader
 func (c *Config) parseAndExecute(r io.Reader) error {
 	lex := NewLexer(r)
-	stmts, err := Parse(lex)
+	// HTCondor rejects a config with any invalid line; the Go default is
+	// lenient (drops unparseable lines). Use the strict parse in compat mode.
+	parse := Parse
+	if c.options.HTCondorCompat {
+		parse = ParseStrict
+	}
+	stmts, err := parse(lex)
 	if err != nil {
 		return err
 	}

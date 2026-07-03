@@ -206,6 +206,13 @@ func (p *parser) Lex(lval *yySymType) int {
 	tok := p.lexer.NextToken()
 	p.lastTok = tok
 
+	// goyacc treats a token value <= 0 as end-of-input. Our lexer emits a named
+	// EOF token; translate it to 0 so the parser reduces and accepts cleanly
+	// instead of reporting a spurious "unexpected EOF" before the final reduce.
+	if tok.Token == EOF {
+		return 0
+	}
+
 	// Set the string value for tokens that have literal values
 	switch tok.Token {
 	case IDENT, STRING, NUMBER, ASSIGN:
@@ -237,6 +244,18 @@ func (p *parser) Error(s string) {
 
 // Parse parses the input and returns the list of statements
 func Parse(lexer *Lexer) ([]Statement, error) {
+	return parseInternal(lexer, false)
+}
+
+// ParseStrict is like Parse but surfaces any syntax error even when a partial
+// result was produced. HTCondor rejects a config source outright if any line is
+// invalid (e.g. a bare "0" with no assignment operator, which the lenient Parse
+// silently drops), so the HTCondor-compat path uses this.
+func ParseStrict(lexer *Lexer) ([]Statement, error) {
+	return parseInternal(lexer, true)
+}
+
+func parseInternal(lexer *Lexer, strict bool) ([]Statement, error) {
 	p := &parser{
 		lexer:  lexer,
 		result: nil,
@@ -244,6 +263,13 @@ func Parse(lexer *Lexer) ([]Statement, error) {
 	}
 
 	yyParse(p)
+
+	// In strict mode any syntax error fails the whole parse, matching HTCondor.
+	// (With the EOF fix in Lex, a clean parse leaves p.errors empty, so this
+	// only fires on real errors.)
+	if strict && len(p.errors) > 0 {
+		return nil, p.errors[0]
+	}
 
 	// If we got results (even empty), return them if there were no critical errors
 	// This allows graceful handling of minor syntax issues and empty input
