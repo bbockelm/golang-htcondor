@@ -35,7 +35,9 @@ PY
 )
 
 # The util library is versioned (libcondor_utils_25_8_0). Find it and derive -l.
-UTIL=$(ls "$LIBDIR"/libcondor_utils_*.dylib "$LIBDIR"/libcondor_utils_*.so 2>/dev/null | head -1)
+# Tolerate a non-matching glob (e.g. no *.so on macOS) so this stays safe when
+# sourced under `set -e`/`pipefail` from config-fuzz.sh.
+UTIL=$( { ls "$LIBDIR"/libcondor_utils_*.dylib "$LIBDIR"/libcondor_utils_*.so 2>/dev/null || true; } | head -1)
 UTIL_L=$(basename "$UTIL" | sed -E 's/^lib([^.]+)\.(dylib|so).*/\1/')
 
 # Embed rpaths for every dir the util library and its transitive deps

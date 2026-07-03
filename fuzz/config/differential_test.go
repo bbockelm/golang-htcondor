@@ -46,6 +46,8 @@ var seeds = []seedCase{
 	{input: "C : colonval\n"},                      // fixed: colon is an assignment operator
 	{input: "LONG = a \\\n b \\\n c\n"},            // fixed oracle: it now joins continuations like getline
 	{input: "if 1 > 0\n  Y = t\nendif\n"},          // parity in HTCondorCompat: Go rejects it too
+	{input: "0\n"},                                 // fuzzer finding: bare non-assignment line; compat rejects it like HTCondor
+	{input: "FOO = bar\n0\n"},                      // a bad line among good ones fails the whole parse in compat
 
 	// --- intentional Go extensions (will always diverge; NOT bugs) ---
 	{input: "DN = $DIRNAME(/a/b/c)\n",
@@ -60,6 +62,8 @@ var seeds = []seedCase{
 		reason: "reserved 'use' keyword: HTCondor reads 'USE = ...' as a metaknob ('use needs a keyword before :') and errors; Go treats USE as an ordinary name. Exotic."},
 	{input: "I = $INT(0x10)\n",
 		reason: "$INT: HTCondor evaluates the arg as a ClassAd expression ($INT(0x10)->0) and EXCEPTs (aborts) on non-integers like 5x3; Go leaves it literal. Not worth replicating the abort."},
+	{input: "foo bar\n",
+		reason: "whitespace assignment: HTCondor treats the first whitespace as an assignment operator, so 'foo bar' means 'foo = bar' (and '0 0', 'x y' parse); Go requires '='/':'. A real HTCondor leniency, like colon — could be added to the lexer later."},
 }
 
 // divergence runs both engines on the same preluded source and returns a

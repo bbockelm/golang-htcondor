@@ -30,7 +30,19 @@ oracle bug (#8). Handled by mode: rich `if` (#10) — default keeps it, compat r
 it, fuzzer runs in compat. Extensions kept: `$DIRNAME`/`$BASENAME` (#3–4) and nested
 re-expansion (#6). Documented, not chased: `$INT` (#5).
 
+## Coverage-guided fuzzing (via hack/config-fuzz.sh)
+
+The fuzzer runs the Go side in `HTCondorCompat` mode so intentional extensions
+don't create noise. It found these within seconds each:
+
+| # | Input | Go | C++ (truth) | Status |
+|---|---|---|---|---|
+| 11 | `0` (bare non-assignment line) | ~~accepted~~ → rejected | rejected | **FIXED** — lenient `Parse` silently dropped unparseable lines; compat now uses `ParseStrict`, and a spurious EOF error was fixed in `Lex` so real errors surface cleanly. |
+| 12 | `foo bar` (two tokens, whitespace) | rejected | accepted (`foo`=`bar`) | Open — HTCondor treats whitespace as an implicit assignment operator; Go requires `=`/`:`. Real leniency, like colon; could be added to the lexer. |
+
 Remaining open:
+- **#12 whitespace assignment** — HTCondor accepts `NAME VALUE` (space-separated);
+  Go requires an operator. Lexer work, low priority.
 - **#7 `use` keyword** — Go treats `use` as an ordinary name when followed by `=`;
   HTCondor reserves it. Exotic; low priority.
 - **#5 `$INT`** — Go leaves non-integer `$INT(...)` literal; HTCondor evaluates via
