@@ -607,8 +607,17 @@ func getTargetTypeForAdType(adType string) string {
 
 // AdvertiseOptions configures advertisement behavior
 type AdvertiseOptions struct {
-	// Command specifies the UPDATE command to use (e.g., UPDATE_STARTD_AD)
-	// If not specified, it will be determined from the ad's MyType attribute
+	// Command specifies the UPDATE command to use (e.g., UPDATE_SCHEDD_AD).
+	//
+	// The zero value means "derive the command from the ad's MyType"
+	// (getCommandForAdvertise), which is the intended default and yields the
+	// correct command for every standard ad type. NOTE: because UPDATE_STARTD_AD
+	// is itself 0, an explicit Command: UPDATE_STARTD_AD is indistinguishable from
+	// the unset zero value and is also derived from MyType -- identical for a
+	// Machine/StartD ad, so this matters only for the nonsensical case of forcing a
+	// startd update on an ad whose MyType is absent or non-startd (which would
+	// instead derive UPDATE_AD_GENERIC). To force any other command, set it here
+	// (all other UPDATE_* commands are non-zero and are honored exactly).
 	Command commands.CommandType
 	// WithAck requests acknowledgment from the collector (forces TCP)
 	WithAck bool
