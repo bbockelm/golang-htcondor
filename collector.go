@@ -11,7 +11,6 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/stream"
 )
 
 const (
@@ -793,16 +792,6 @@ func estimateClassAdSize(ad *classad.ClassAd) int {
 	// This is conservative to avoid buffer overflow
 	attrs := ad.GetAttributes()
 	return len(attrs) * AvgBytesPerAttribute
-}
-
-// sendGracefulHangup sends DC_NOP command for graceful connection closure
-func sendGracefulHangup(ctx context.Context, cedarStream *stream.Stream) error {
-	msg := message.NewMessageForStream(cedarStream)
-	// Send DC_NOP (1) as hangup signal
-	if err := msg.PutInt32(ctx, int32(commands.DC_NOP)); err != nil {
-		return err
-	}
-	return msg.FlushFrame(ctx, true)
 }
 
 // LocateDaemon locates a daemon by querying the collector
