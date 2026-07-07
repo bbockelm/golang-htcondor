@@ -288,6 +288,16 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 						continue
 					}
 
+					// $(DOLLAR) is a predefined macro expanding to a literal '$'.
+					// HTCondor handles it in expand_macro itself, independent of
+					// the defaults table, so it resolves even in a defaults-free
+					// parse.
+					if strings.EqualFold(varName, "DOLLAR") {
+						result = result[:dollarIdx] + "$" + result[endIdx+1:]
+						changed = true
+						continue
+					}
+
 					// Check for circular reference
 					if c.evaluating[varName] {
 						return result, fmt.Errorf("circular reference detected: %s", varName)

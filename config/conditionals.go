@@ -10,6 +10,14 @@ import (
 func (c *Config) evaluateCondition(condition string) (bool, error) {
 	condition = strings.TrimSpace(condition)
 
+	// In HTCondor-compat mode, reject the compound logical operators: an
+	// HTCondor `if` accepts only a bare boolean, `defined X`, or
+	// `version <op> x` — no && / ||. (Version conditions never contain these,
+	// so this is safe to check up front.)
+	if c.options.HTCondorCompat && (strings.Contains(condition, "&&") || strings.Contains(condition, "||")) {
+		return false, fmt.Errorf("if-condition %q: HTCondor does not support && / || (Go extension; enable it by leaving HTCondorCompat off)", condition)
+	}
+
 	// Handle logical operators first (before checking for specific patterns)
 	// This allows compound expressions like "defined(FOO) && defined(BAR)"
 	if strings.Contains(condition, "&&") {
@@ -67,6 +75,17 @@ func (c *Config) evaluateCondition(condition string) (bool, error) {
 	value, ok := c.values[condition]
 	if ok {
 		return c.isTruthy(value), nil
+	}
+
+	// In HTCondor-compat mode, reject relational/equality comparisons: they are
+	// a Go extension. (`version <op> x` was already consumed above, so any
+	// operator reaching here is a bare comparison HTCondor would reject.)
+	if c.options.HTCondorCompat {
+		for _, op := range []string{"==", "!=", ">=", "<=", ">", "<"} {
+			if strings.Contains(condition, op) {
+				return false, fmt.Errorf("if-condition %q: HTCondor does not support the %q comparison (Go extension; enable it by leaving HTCondorCompat off)", condition, op)
+			}
+		}
 	}
 
 	// Handle comparison operators

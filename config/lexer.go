@@ -52,14 +52,24 @@ type Lexer struct {
 	afterUse            bool // True if the previous token was USE
 	afterIfOrElif       bool // True if the previous token was IF or ELIF
 	afterErrorOrWarning bool // True if the previous token was ERROR or WARNING
+
+	// stmtStart is true when the next token begins a new statement (line).
+	// prevIdentAssignable is true when the immediately preceding token was a
+	// statement-start plain identifier — i.e. an assignment target — so a
+	// following ':' is an assignment operator ("C : val" == "C = val"), matching
+	// HTCondor. Keywords (use/include/if/...) are not plain identifiers, so
+	// their ':' (e.g. `include : file`) stays a COLON.
+	stmtStart           bool
+	prevIdentAssignable bool
 }
 
 // NewLexer creates a new lexer
 func NewLexer(r io.Reader) *Lexer {
 	l := &Lexer{
-		input: bufio.NewReader(r),
-		line:  1,
-		col:   0,
+		input:     bufio.NewReader(r),
+		line:      1,
+		col:       0,
+		stmtStart: true, // the first token begins a statement
 	}
 	l.readChar()
 	l.readChar() // Initialize both ch and nextCh
@@ -300,8 +310,10 @@ func (l *Lexer) readUntilNewline() string {
 		l.readChar()
 	}
 
-	// Read until newline, handling line continuation
-	for l.ch != '\n' && l.ch != 0 && l.ch != '#' {
+	// Read until newline, handling line continuation. A '#' is NOT a comment
+	// here: HTCondor only treats '#' as a comment at the start of a line, so a
+	// '#' inside a value (e.g. "K = v # note") is literal and kept.
+	for l.ch != '\n' && l.ch != 0 {
 		switch {
 		case l.ch == '\\' && l.peekChar() == '\n':
 			// Trim trailing whitespace before the backslash
@@ -467,11 +479,20 @@ func (l *Lexer) NextToken() *TokenInfo {
 		Col:  l.col,
 	}
 
+	// Capture and clear the per-statement flags before dispatching this token.
+	// atStmtStart: is this token the first on its line? colonAssignable: was the
+	// previous token a statement-start plain identifier (so ':' means assign)?
+	atStmtStart := l.stmtStart
+	colonAssignable := l.prevIdentAssignable
+	l.stmtStart = false
+	l.prevIdentAssignable = false
+
 	switch l.ch {
 	case 0:
 		tok.Token = EOF
 
 	case '\n':
+		l.stmtStart = true // the next token begins a new statement
 		l.readChar()
 		return l.NextToken() // Skip newlines and get next token
 
@@ -500,9 +521,17 @@ func (l *Lexer) NextToken() *TokenInfo {
 		}
 
 	case ':':
-		tok.Token = COLON
-		tok.Lit = ":"
-		l.readChar()
+		if colonAssignable {
+			// "C : value" is an assignment in HTCondor, equivalent to "C = value".
+			// Read the value the same way '=' does.
+			tok.Token = ASSIGN
+			l.readChar()
+			tok.Lit = l.readUntilNewline()
+		} else {
+			tok.Token = COLON
+			tok.Lit = ":"
+			l.readChar()
+		}
 
 	case '(':
 		tok.Token = LPAREN
@@ -581,6 +610,11 @@ func (l *Lexer) NextToken() *TokenInfo {
 				}
 			} else {
 				tok.Token = IDENT
+				// A plain identifier at the start of a statement is an assignment
+				// target: a following ':' is the assignment operator.
+				if atStmtStart {
+					l.prevIdentAssignable = true
+				}
 			}
 		case unicode.IsDigit(l.ch) || (l.ch == '-' && unicode.IsDigit(l.peekChar())):
 			tok.Token = NUMBER

@@ -11,7 +11,6 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/stream"
 )
 
 const (
@@ -608,8 +607,17 @@ func getTargetTypeForAdType(adType string) string {
 
 // AdvertiseOptions configures advertisement behavior
 type AdvertiseOptions struct {
-	// Command specifies the UPDATE command to use (e.g., UPDATE_STARTD_AD)
-	// If not specified, it will be determined from the ad's MyType attribute
+	// Command specifies the UPDATE command to use (e.g., UPDATE_SCHEDD_AD).
+	//
+	// The zero value means "derive the command from the ad's MyType"
+	// (getCommandForAdvertise), which is the intended default and yields the
+	// correct command for every standard ad type. NOTE: because UPDATE_STARTD_AD
+	// is itself 0, an explicit Command: UPDATE_STARTD_AD is indistinguishable from
+	// the unset zero value and is also derived from MyType -- identical for a
+	// Machine/StartD ad, so this matters only for the nonsensical case of forcing a
+	// startd update on an ad whose MyType is absent or non-startd (which would
+	// instead derive UPDATE_AD_GENERIC). To force any other command, set it here
+	// (all other UPDATE_* commands are non-zero and are honored exactly).
 	Command commands.CommandType
 	// WithAck requests acknowledgment from the collector (forces TCP)
 	WithAck bool
@@ -700,123 +708,17 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 	if len(ads) == 0 {
 		return nil
 	}
-
-	// Apply defaults
-	if opts == nil {
-		opts = &AdvertiseOptions{}
-	}
-	if !opts.WithAck && !opts.UseTCP {
-		opts.UseTCP = true
-	}
-	if opts.WithAck {
-		opts.UseTCP = true
-	}
-
-	// WithAck doesn't support multiple ads in one connection
-	if opts.WithAck {
-		errors := make([]error, len(ads))
-		for i, ad := range ads {
-			errors[i] = c.Advertise(ctx, ad, opts)
-		}
-		return errors
-	}
-
-	// Determine command from first ad if not specified
-	cmd := opts.Command
-	if cmd == 0 {
-		cmd = getCommandForAdvertise(ads[0])
-	}
-
-	// Apply rate limiting
-	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
-	if rateLimitManager != nil {
-		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
-			errors := make([]error, len(ads))
-			rateLimitErr := fmt.Errorf("rate limit exceeded: %w", err)
-			for i := range errors {
-				errors[i] = rateLimitErr
-			}
-			return errors
-		}
-	}
-
-	// Race connect+authenticate across configured collector addresses.
-	htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
-	if err != nil {
-		errors := make([]error, len(ads))
-		connErr := fmt.Errorf("failed to connect and authenticate to collector: %w", err)
-		for i := range errors {
-			errors[i] = connErr
-		}
-		return errors
-	}
-	defer func() { _ = htcondorClient.Close() }()
-
-	// Get CEDAR stream
-	cedarStream := htcondorClient.GetStream()
-
-	// Send all ads using the multi-sending protocol
+	// Send each ad as its own single-ad update rather than streaming ad-frames on
+	// one connection. The collector's connection-reuse protocol frames each ad as
+	// a distinct command -- the C++ condor_collector stashes the socket and
+	// re-reads a command int per ad -- so a burst of bare ad-frames is not
+	// portable (the C++ collector accepts only the first and drops the rest). The
+	// cached security session keeps the per-ad authentication cheap, and real
+	// daemons advertise one ad at a time (from distinct addresses) in any case.
 	errors := make([]error, len(ads))
-
-	bufferSize := 0
 	for i, ad := range ads {
-		// Check context cancellation
-		select {
-		case <-ctx.Done():
-			for j := i; j < len(ads); j++ {
-				errors[j] = ctx.Err()
-			}
-			return errors
-		default:
-		}
-
-		// Ensure MyAddress is set
-		if err := ensureMyAddress(ad); err != nil {
-			errors[i] = err
-			continue
-		}
-
-		// Estimate ad size (rough approximation)
-		adSize := estimateClassAdSize(ad)
-		// HTCondor's multi-sending protocol has buffer limits. When buffer exceeds MaxAdvertiseBufferSize,
-		// we need to flush and reconnect to avoid protocol violations and memory issues on the collector side.
-		if bufferSize+adSize > MaxAdvertiseBufferSize && bufferSize > 0 {
-			// Flush buffer by sending DC_NOP and reconnecting
-			_ = sendGracefulHangup(ctx, cedarStream)
-
-			// Close and reconnect — race again across the configured
-			// addresses so a mid-batch failover stays cheap.
-			_ = htcondorClient.Close()
-			htcondorClient, err = c.dialAndAuthenticate(ctx, cmd)
-			if err != nil {
-				connErr := fmt.Errorf("failed to reconnect to collector: %w", err)
-				for j := i; j < len(ads); j++ {
-					errors[j] = connErr
-				}
-				return errors
-			}
-			cedarStream = htcondorClient.GetStream()
-			bufferSize = 0
-		}
-
-		// Send the ad
-		msg := message.NewMessageForStream(cedarStream)
-		if err := msg.PutClassAd(ctx, ad); err != nil {
-			errors[i] = fmt.Errorf("failed to send ClassAd: %w", err)
-			continue
-		}
-		if err := msg.FlushFrame(ctx, true); err != nil {
-			errors[i] = fmt.Errorf("failed to flush message: %w", err)
-			continue
-		}
-
-		bufferSize += adSize
+		errors[i] = c.Advertise(ctx, ad, opts)
 	}
-
-	// Send graceful hangup (DC_NOP) for collector v7.7.3+
-	_ = sendGracefulHangup(ctx, cedarStream)
-
 	return errors
 }
 
@@ -891,16 +793,6 @@ func estimateClassAdSize(ad *classad.ClassAd) int {
 	// This is conservative to avoid buffer overflow
 	attrs := ad.GetAttributes()
 	return len(attrs) * AvgBytesPerAttribute
-}
-
-// sendGracefulHangup sends DC_NOP command for graceful connection closure
-func sendGracefulHangup(ctx context.Context, cedarStream *stream.Stream) error {
-	msg := message.NewMessageForStream(cedarStream)
-	// Send DC_NOP (1) as hangup signal
-	if err := msg.PutInt32(ctx, int32(commands.DC_NOP)); err != nil {
-		return err
-	}
-	return msg.FlushFrame(ctx, true)
 }
 
 // LocateDaemon locates a daemon by querying the collector

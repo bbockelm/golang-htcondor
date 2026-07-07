@@ -50,6 +50,27 @@ type ConfigOptions struct {
 	// Subsystem is the HTCondor subsystem (e.g., "MASTER", "SCHEDD", "STARTD")
 	// This affects subsystem-specific variable resolution (e.g., MASTER.VARIABLE)
 	Subsystem string
+
+	// HTCondorCompat restricts the parser to HTCondor's exact grammar,
+	// disabling Go-only extensions so a config behaves the same here as under
+	// condor_config. Currently this gates the richer `if` conditions: HTCondor
+	// accepts only a bare boolean, `defined X`, or `version <op> x`, whereas Go
+	// also allows numeric/string comparisons and && / ||. Default (false) keeps
+	// the extensions; the differential config fuzzer sets this so it compares Go
+	// against HTCondor faithfully. (Other extensions — $DIRNAME/$BASENAME,
+	// nested-macro re-expansion — remain on even in compat for now and are
+	// tracked as intentional divergences.)
+	HTCondorCompat bool
+
+	// SkipDefaults, when true, suppresses initBuiltins(): no param_info
+	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
+	// no auto-detected macros (FULL_HOSTNAME, DETECTED_CPUS, TILDE, ...). The
+	// resulting Config contains only what the parsed source defines. This
+	// mirrors HTCondor's Parse_config_string on a fresh MACRO_SET with a NULL
+	// defaults table, which is what the differential config fuzzer compares
+	// against; it is also useful for parsing standalone snippets whose meaning
+	// must not depend on host state.
+	SkipDefaults bool
 }
 
 // Config represents an HTCondor configuration with key-value pairs
@@ -95,7 +116,9 @@ func NewWithOptions(opts ConfigOptions) (*Config, error) {
 	}
 
 	// Initialize with built-in macros and param defaults
-	cfg.initBuiltins()
+	if !opts.SkipDefaults {
+		cfg.initBuiltins()
+	}
 
 	// Load from environment
 	return cfg, cfg.LoadFromEnvironment()
@@ -116,7 +139,9 @@ func NewFromReaderWithOptions(r io.Reader, opts ConfigOptions) (*Config, error) 
 	}
 
 	// Initialize built-in macros and param defaults
-	cfg.initBuiltins()
+	if !opts.SkipDefaults {
+		cfg.initBuiltins()
+	}
 
 	// Parse and execute using the new parser
 	if err := cfg.parseAndExecute(r); err != nil {
@@ -767,6 +792,15 @@ func (c *Config) expandMacros(value string) (string, error) {
 		defaultVal := ""
 		if len(parts) > 1 {
 			defaultVal = parts[1]
+		}
+
+		// $(DOLLAR) is a predefined macro that expands to a literal '$'.
+		// HTCondor handles it in expand_macro itself, independent of the
+		// defaults table, so it must resolve even in a defaults-free parse.
+		if strings.EqualFold(varName, "DOLLAR") {
+			result = result[:dollarIdx] + "$" + result[endIdx+1:]
+			depth++
+			continue
 		}
 
 		// Check for circular reference
