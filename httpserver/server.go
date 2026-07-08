@@ -60,7 +60,11 @@ type Config struct {
 	WriteTimeout             time.Duration       // HTTP write timeout (default: 30s)
 	IdleTimeout              time.Duration       // HTTP idle timeout (default: 120s)
 	Collector                *htcondor.Collector // Collector for metrics (optional)
-	EnableMetrics            bool                // Enable /metrics endpoint (default: true if Collector is set)
+	// JobQueueLogPath, if set, is the path to the schedd's job_queue.log; the
+	// server mirrors it into a watch-enabled collection and serves
+	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
+	JobQueueLogPath string
+	EnableMetrics   bool // Enable /metrics endpoint (default: true if Collector is set)
 	MetricsCacheTTL          time.Duration       // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
@@ -169,6 +173,7 @@ func NewServer(cfg Config) (*Server, error) {
 		HTTPBaseURL:                 cfg.HTTPBaseURL,
 		TLSCACertFile:               cfg.TLSCACertFile,
 		Collector:                   cfg.Collector,
+		JobQueueLogPath:             cfg.JobQueueLogPath,
 		EnableMetrics:               cfg.EnableMetrics,
 		MetricsPublic:               cfg.MetricsPublic,
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,

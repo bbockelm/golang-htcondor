@@ -63,6 +63,7 @@ func (h *Handler) setupRoutes() {
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
 
 	// Job management endpoints
+	mux.Handle("/api/v1/jobs/watch", cors(http.HandlerFunc(h.handleJobsWatch))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(h.handleJobs)))
 	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(h.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
