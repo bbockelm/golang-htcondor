@@ -6,12 +6,66 @@ package jobqueue
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/collections"
 
 	"github.com/bbockelm/golang-htcondor/classadlog"
 )
+
+// jobFactoryPrivateAttrs are cluster-ad attributes a proc does not inherit and
+// that must not fan out to procs when they change: HTCondor's job-factory (late
+// materialization) bookkeeping, which mutates as procs are materialized but is
+// meaningless to a proc. Keeping these parent-private means a 10k-proc factory's
+// per-proc cluster-ad churn causes zero watch fan-out.
+var jobFactoryPrivateAttrs = []string{
+	"JobMaterializeNextProcId",
+	"JobMaterializeNextRow",
+	"TotalSubmitProcs",
+	"EditedClusterAttrs",
+	"JobMaterializePaused",
+	"JobMaterializePauseReason",
+}
+
+// parseJobKey splits a job_queue.log key "cluster.proc" into its integers.
+func parseJobKey(key []byte) (cluster, proc int, ok bool) {
+	s := string(key)
+	dot := strings.LastIndexByte(s, '.')
+	if dot < 0 {
+		return 0, 0, false
+	}
+	cl, err1 := strconv.Atoi(s[:dot])
+	pr, err2 := strconv.Atoi(s[dot+1:])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return cl, pr, true
+}
+
+// jobParentKey maps a proc key "N.M" (M >= 0) to its cluster ad "N.-1"; a cluster
+// ad (M == -1) or a malformed key has no parent.
+func jobParentKey(key []byte) []byte {
+	cl, pr, ok := parseJobKey(key)
+	if !ok || pr < 0 {
+		return nil
+	}
+	return []byte(strconv.Itoa(cl) + ".-1")
+}
+
+// jobStructural marks cluster ads (proc == -1), which are chained-to but hidden.
+func jobStructural(key []byte) bool {
+	_, pr, ok := parseJobKey(key)
+	return ok && pr == -1
+}
+
+// mirrorable reports whether a key is a real job or its cluster ad (cluster >= 1),
+// excluding the schedd's header/schema ads (cluster 0) and malformed keys.
+func mirrorable(key []byte) bool {
+	cl, _, ok := parseJobKey(key)
+	return ok && cl >= 1
+}
 
 // DefaultPollInterval is how often the log is polled when Options.PollInterval
 // is unset.
@@ -35,9 +89,11 @@ type Options struct {
 // applies only committed transactions and coalesces early-job churn, so watchers
 // see settled job state.
 //
-// Attribute inheritance is not resolved: each ad carries only the attributes set
-// on its own key (a job ad does not inherit its cluster ad's attributes). Watch
-// the cluster ad (proc -1) too if those matter.
+// Proc ads chain to their cluster ad (the collection is configured with
+// ParentKeyFor/IsStructural), so a query or watch resolves attributes stored only
+// on the cluster (e.g. DAGManJobId, Owner) and results/events carry them
+// flattened. Cluster ads are hidden from results; factory bookkeeping is
+// parent-private, so late-materialization churn does not fan out to procs.
 type Mirror struct {
 	reader   *classadlog.Reader
 	col      *collections.Collection
@@ -64,6 +120,13 @@ func New(filename string, opts Options) (*Mirror, error) {
 	col := collections.New(collections.Options{
 		WatchHistory:  opts.WatchHistory,
 		WatchCoalesce: opts.WatchCoalesce,
+		// Chain proc ads to their cluster ad so a query/watch like DAGManJobId == 42
+		// resolves the cluster's attribute; the cluster ad is stored (co-located,
+		// used as the parent) but hidden from results. Factory bookkeeping stays
+		// parent-private so its per-proc churn does not fan out.
+		ParentKeyFor:       jobParentKey,
+		IsStructural:       jobStructural,
+		ParentPrivateAttrs: jobFactoryPrivateAttrs,
 	})
 	return &Mirror{
 		reader:   r,
@@ -120,8 +183,13 @@ func (m *Mirror) sync() {
 	}
 }
 
-// applyKey mirrors one key's current state into the collection.
+// applyKey mirrors one key's current state into the collection. Cluster ads are
+// mirrored too (as structural parents); the schedd's header/schema ads (cluster
+// 0) and malformed keys are skipped.
 func (m *Mirror) applyKey(key string) {
+	if !mirrorable([]byte(key)) {
+		return
+	}
 	ad := m.reader.GetClassAd(key)
 	if ad == nil {
 		delete(m.mirrored, key)
@@ -137,6 +205,9 @@ func (m *Mirror) applyKey(key string) {
 func (m *Mirror) resync() {
 	live := make(map[string]struct{})
 	for _, key := range m.reader.GetAllKeys() {
+		if !mirrorable([]byte(key)) {
+			continue
+		}
 		ad := m.reader.GetClassAd(key)
 		if ad == nil {
 			continue

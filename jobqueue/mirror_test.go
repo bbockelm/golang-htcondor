@@ -160,3 +160,60 @@ func TestMirrorFilteredWatch(t *testing.T) {
 	}
 	expectKind(t, ch, collections.WatchSynced)
 }
+
+// TestMirrorChainedDAG verifies that a proc ad chains to its cluster ad: a
+// DAGManJobId stored only on the cluster ad selects that cluster's procs through
+// a filtered watch, and the delivered events carry the inherited attribute.
+func TestMirrorChainedDAG(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "job_queue.log")
+	log := "107 1 CreationTimestamp 1700000000\n" +
+		"105\n101 1.-1 Job\n103 1.-1 DAGManJobId 42\n106\n" +
+		"105\n101 1.0 Job\n103 1.0 ProcId 0\n106\n" +
+		"105\n101 1.1 Job\n103 1.1 ProcId 1\n106\n" +
+		"105\n101 2.-1 Job\n103 2.-1 DAGManJobId 7\n106\n" +
+		"105\n101 2.0 Job\n103 2.0 ProcId 0\n106\n"
+	if err := os.WriteFile(logPath, []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(logPath, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	match := func(ad *classad.ClassAd) bool {
+		d, ok := ad.EvaluateAttrInt("DAGManJobId")
+		return ok && d == 42
+	}
+	seq, err := m.Collection().Watch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan collections.WatchEvent, 64)
+	go func() {
+		for ev := range collections.WatchFilter(seq, match) {
+			ch <- ev
+		}
+	}()
+
+	expectKind(t, ch, collections.WatchReset)
+	got := map[string]int64{}
+	for {
+		ev := nextEvent(t, ch)
+		if ev.Kind == collections.WatchSynced {
+			break
+		}
+		if ev.Kind == collections.WatchUpsert {
+			d, _ := ev.Ad.EvaluateAttrInt("DAGManJobId")
+			got[string(ev.Key)] = d
+		}
+	}
+	if len(got) != 2 || got["1.0"] != 42 || got["1.1"] != 42 {
+		t.Errorf("chained filtered watch = %v, want procs 1.0 and 1.1 with DAGManJobId 42 (via cluster chain)", got)
+	}
+}
