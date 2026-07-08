@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 )
@@ -700,26 +701,115 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 	return nil
 }
 
-// AdvertiseMultiple sends multiple advertisements to the collector efficiently
-// Uses the multi-sending protocol to reuse the connection
-// If ads exceed maxBufferSize (default 1MB), they are sent in batches
-// Returns a slice of errors (one per ad), or nil if all succeeded
+// AdvertiseMultiple sends many advertisements over as few connections as
+// possible using HTCondor's persistent command-socket protocol: one
+// authenticated connection carries a run of updates, the first riding the
+// connection's negotiated command and each follow-on prefixed with its own
+// command integer. Matching the C++ condor_collector (and DaemonCore), the
+// command integer and the ad are two separate CEDAR messages -- [cmd + EOM]
+// then [ad + EOM] -- which is exactly how a C++ daemon streams a schedd ad plus
+// submitter ads down one stashed socket.
+//
+// This amortizes the per-ad TCP connect + authenticate cost that otherwise
+// dominates advertising (a fresh connection per ad). On a send error the
+// connection is torn down and re-established, and the remaining ads continue on
+// the new one. Returns one error per ad (nil entries where the ad succeeded), or
+// nil if the batch was empty.
 func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassAd, opts *AdvertiseOptions) []error {
 	if len(ads) == 0 {
 		return nil
 	}
-	// Send each ad as its own single-ad update rather than streaming ad-frames on
-	// one connection. The collector's connection-reuse protocol frames each ad as
-	// a distinct command -- the C++ condor_collector stashes the socket and
-	// re-reads a command int per ad -- so a burst of bare ad-frames is not
-	// portable (the C++ collector accepts only the first and drops the rest). The
-	// cached security session keeps the per-ad authentication cheap, and real
-	// daemons advertise one ad at a time (from distinct addresses) in any case.
-	errors := make([]error, len(ads))
-	for i, ad := range ads {
-		errors[i] = c.Advertise(ctx, ad, opts)
+	if opts == nil {
+		opts = &AdvertiseOptions{}
 	}
-	return errors
+	errs := make([]error, len(ads))
+
+	rlm := getRateLimitManager()
+	username := GetAuthenticatedUserFromContext(ctx)
+
+	var conn *client.HTCondorClient
+	firstOnConn := false
+	closeConn := func() {
+		if conn != nil {
+			_ = conn.Close()
+			conn = nil
+		}
+	}
+	defer closeConn()
+
+	for i, ad := range ads {
+		if ad == nil {
+			errs[i] = fmt.Errorf("ad cannot be nil")
+			continue
+		}
+		cmd := opts.Command
+		if cmd == 0 {
+			cmd = getCommandForAdvertise(ad)
+		}
+		if err := ensureMyAddress(ad); err != nil {
+			errs[i] = err
+			continue
+		}
+		if rlm != nil {
+			if err := rlm.WaitCollector(ctx, username); err != nil {
+				errs[i] = fmt.Errorf("rate limit exceeded: %w", err)
+				continue
+			}
+		}
+
+		// (Re)establish the shared connection. The first ad's command is carried
+		// by the DC_AUTHENTICATE handshake, so it needs no command-int prefix.
+		if conn == nil {
+			hc, err := c.dialAndAuthenticate(ctx, cmd)
+			if err != nil {
+				errs[i] = fmt.Errorf("failed to connect and authenticate to collector: %w", err)
+				continue
+			}
+			conn = hc
+			firstOnConn = true
+		}
+		stream := conn.GetStream()
+
+		// A follow-on update on a reused socket is a single message: the command
+		// integer, then the ad, then one end_of_message -- no separate command
+		// message and no re-handshake, matching the C++ condor_collector's reused
+		// update socket (sendTCPUpdate: put(cmd) then finishUpdate). The first ad's
+		// command was carried by the DC_AUTHENTICATE handshake, so it needs no
+		// command prefix.
+		msg := message.NewMessageForStream(stream)
+		if !firstOnConn {
+			if err := msg.PutInt(ctx, int(cmd)); err != nil {
+				errs[i] = fmt.Errorf("failed to send command: %w", err)
+				closeConn()
+				continue
+			}
+		}
+		if err := msg.PutClassAd(ctx, ad); err != nil {
+			errs[i] = fmt.Errorf("failed to send ClassAd: %w", err)
+			closeConn()
+			continue
+		}
+		if err := msg.FinishMessage(ctx); err != nil {
+			errs[i] = fmt.Errorf("failed to finish message: %w", err)
+			closeConn()
+			continue
+		}
+
+		if opts.WithAck {
+			responseMsg := message.NewMessageFromStream(stream)
+			ok, err := responseMsg.GetInt32(ctx)
+			if err != nil {
+				errs[i] = fmt.Errorf("failed to read acknowledgment: %w", err)
+				closeConn()
+				continue
+			}
+			if ok == 0 {
+				errs[i] = fmt.Errorf("collector rejected advertisement")
+			}
+		}
+		firstOnConn = false
+	}
+	return errs
 }
 
 // getCommandForAdvertise determines the UPDATE command based on ad's MyType
