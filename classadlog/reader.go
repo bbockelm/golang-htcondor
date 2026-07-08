@@ -19,6 +19,15 @@ type Reader struct {
 	collection *Collection
 	mu         sync.RWMutex // Protects collection during updates
 
+	// Change tracking (guarded by mu): the set of keys modified since the last
+	// Changes() call, whether a full reload (rotation) happened, and whether a
+	// transaction is currently open. Lets a consumer (e.g. a mirror) apply only
+	// the keys that changed, and defer acting until an open transaction closes so
+	// only committed state is observed.
+	changed      map[string]struct{}
+	resetPending bool
+	inTxn        bool
+
 	// Watch support
 	watchCtx    context.Context
 	watchCancel context.CancelFunc
@@ -33,6 +42,7 @@ func NewReader(filename string) (*Reader, error) {
 		parser:     NewParser(filename),
 		prober:     NewProber(),
 		collection: NewCollection(),
+		changed:    make(map[string]struct{}),
 	}, nil
 }
 
@@ -85,6 +95,11 @@ func (r *Reader) fullReload(ctx context.Context) error {
 	r.collection.Reset()
 	r.parser.SetNextOffset(0)
 	r.prober.Reset()
+	// Signal consumers to re-sync from scratch; individual change marks from the
+	// replay below are subsumed by the reset.
+	r.resetPending = true
+	r.changed = make(map[string]struct{})
+	r.inTxn = false
 
 	// Read all entries
 	if err := r.parser.Open(); err != nil {
@@ -163,28 +178,70 @@ func (r *Reader) incrementalUpdate(ctx context.Context) error {
 	return nil
 }
 
-// applyEntry applies a log entry to the collection
+// applyEntry applies a log entry to the collection and records the affected key
+// and transaction state for change tracking. Callers hold r.mu.
 func (r *Reader) applyEntry(entry *LogEntry) error {
 	switch entry.OpType {
 	case OpNewClassAd:
+		r.markChanged(entry.Key)
 		return r.collection.NewClassAd(entry.Key, entry.MyType, entry.TargetType)
 
 	case OpDestroyClassAd:
+		r.markChanged(entry.Key)
 		return r.collection.DestroyClassAd(entry.Key)
 
 	case OpSetAttribute:
+		r.markChanged(entry.Key)
 		return r.collection.SetAttribute(entry.Key, entry.Name, entry.Value)
 
 	case OpDeleteAttribute:
+		r.markChanged(entry.Key)
 		return r.collection.DeleteAttribute(entry.Key, entry.Name)
 
-	case OpBeginTransaction, OpEndTransaction, OpLogHistoricalSequenceNumber:
-		// These operations can be ignored for read-only access
+	case OpBeginTransaction:
+		r.inTxn = true
+		return nil
+
+	case OpEndTransaction:
+		r.inTxn = false
+		return nil
+
+	case OpLogHistoricalSequenceNumber:
 		return nil
 
 	default:
 		return fmt.Errorf("unknown operation type: %v", entry.OpType)
 	}
+}
+
+// markChanged records that key was modified (caller holds r.mu).
+func (r *Reader) markChanged(key string) {
+	if r.changed == nil {
+		r.changed = make(map[string]struct{})
+	}
+	r.changed[key] = struct{}{}
+}
+
+// Changes returns the keys modified since the previous call, whether a full
+// reload (log rotation) occurred, and whether a transaction is currently open.
+// Call after Poll. While a transaction is open it returns (nil, false, true)
+// without draining, so a consumer applies only committed transactions; once the
+// transaction closes, the accumulated keys (and any pending reset) are returned
+// and cleared.
+func (r *Reader) Changes() (keys []string, reset, inTxn bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inTxn {
+		return nil, false, true
+	}
+	reset = r.resetPending
+	keys = make([]string, 0, len(r.changed))
+	for k := range r.changed {
+		keys = append(keys, k)
+	}
+	r.changed = make(map[string]struct{})
+	r.resetPending = false
+	return keys, reset, false
 }
 
 // Query returns ClassAds matching the constraint
