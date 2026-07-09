@@ -3,8 +3,8 @@ module github.com/bbockelm/golang-htcondor
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.1.0
-	github.com/bbockelm/cedar v0.1.2
+	github.com/PelicanPlatform/classad v0.4.0
+	github.com/bbockelm/cedar v0.3.0
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/glebarez/sqlite v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -18,15 +18,20 @@ require (
 )
 
 require (
+	github.com/PelicanPlatform/classad/collections v0.4.0
 	github.com/hashicorp/yamux v0.1.2
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/prometheus/client_golang v1.13.0
 )
 
 require (
+	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
+	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.37.0 // indirect

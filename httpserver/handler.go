@@ -20,6 +20,7 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobqueue"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/httpserver/appdb/seal"
@@ -53,6 +54,7 @@ type Handler struct {
 	// or has been failing, even if the cached address looks stable.
 	scheddAddrLastConfirmedAt time.Time
 	collector                 *htcondor.Collector
+	jobMirror                 *jobqueue.Mirror // nil unless a job_queue.log is configured
 	credd                     htcondor.CreddClient
 	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
 	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
@@ -221,6 +223,7 @@ type HandlerConfig struct {
 	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
 	Collector                *htcondor.Collector // Collector for metrics (optional)
+	JobQueueLogPath          string              // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
 	EnableMetrics            bool                // Enable /metrics endpoint (default: true if Collector is set)
 	MetricsCacheTTL          time.Duration       // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
@@ -404,6 +407,20 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// from the collector this is also literally true; if it came from
 	// configuration it's the closest meaningful baseline we have.
 	now := time.Now()
+
+	// If a job_queue.log is configured, build the mirror now (its Run loop is
+	// started in Start). A failure here is non-fatal: the jobs watch endpoint
+	// simply reports unavailable.
+	var jobMirror *jobqueue.Mirror
+	if cfg.JobQueueLogPath != "" {
+		if jm, err := jobqueue.New(cfg.JobQueueLogPath, jobqueue.Options{}); err != nil {
+			logger.Warn(logging.DestinationHTTP, "failed to create job queue mirror",
+				"path", cfg.JobQueueLogPath, "error", err)
+		} else {
+			jobMirror = jm
+		}
+	}
+
 	h := &Handler{
 		schedd:                    schedd,
 		scheddName:                cfg.ScheddName,
@@ -411,6 +428,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		scheddAddrSetAt:           now,
 		scheddAddrLastConfirmedAt: now,
 		collector:                 cfg.Collector,
+		jobMirror:                 jobMirror,
 		credd:                     cfg.Credd,
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
@@ -1218,6 +1236,11 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.setupRoutes()
 
 	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
+
+	// Tail the schedd's job_queue.log into the watch collection, if configured.
+	if h.jobMirror != nil {
+		go func() { _ = h.jobMirror.Run(h.ctx) }()
+	}
 
 	// Initialize IDP if enabled
 	if err := h.initializeIDP(ln, protocol); err != nil {

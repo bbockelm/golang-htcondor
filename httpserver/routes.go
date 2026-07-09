@@ -63,6 +63,7 @@ func (h *Handler) setupRoutes() {
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
 
 	// Job management endpoints
+	mux.Handle("/api/v1/jobs/watch", cors(http.HandlerFunc(h.handleJobsWatch))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
 	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(h.handleJobs)))
 	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(h.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
@@ -139,7 +140,8 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
 
 	// Collector endpoints
-	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath) // Pattern with trailing slash catches /api/v1/collector/* paths
+	mux.Handle("/api/v1/collector/watch", cors(http.HandlerFunc(h.handleCollectorWatch))) // SSE ad-change stream (more specific than the dispatcher below)
+	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath)                           // Pattern with trailing slash catches /api/v1/collector/* paths
 
 	// Ping endpoints
 	mux.HandleFunc("/api/v1/ping", h.handlePing)              // Ping both collector and schedd
