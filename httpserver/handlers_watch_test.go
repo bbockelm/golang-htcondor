@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http/httptest"
 	"strings"
@@ -59,20 +60,20 @@ func TestCursorFromRequest(t *testing.T) {
 	enc := base64.StdEncoding.EncodeToString(cur)
 
 	// Last-Event-ID header.
-	r := httptest.NewRequest("GET", "/api/v1/collector/watch", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET","/api/v1/collector/watch", nil)
 	r.Header.Set("Last-Event-ID", enc)
 	if got := cursorFromRequest(r); string(got) != string(cur) {
 		t.Errorf("Last-Event-ID: got %q want %q", got, cur)
 	}
 
 	// ?cursor= query fallback.
-	r2 := httptest.NewRequest("GET", "/api/v1/collector/watch?cursor="+enc, nil)
+	r2 := httptest.NewRequestWithContext(context.Background(), "GET","/api/v1/collector/watch?cursor="+enc, nil)
 	if got := cursorFromRequest(r2); string(got) != string(cur) {
 		t.Errorf("?cursor: got %q want %q", got, cur)
 	}
 
 	// Absent -> nil (full replay).
-	r3 := httptest.NewRequest("GET", "/api/v1/collector/watch", nil)
+	r3 := httptest.NewRequestWithContext(context.Background(), "GET","/api/v1/collector/watch", nil)
 	if got := cursorFromRequest(r3); got != nil {
 		t.Errorf("absent cursor: got %q want nil", got)
 	}

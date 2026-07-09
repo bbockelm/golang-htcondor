@@ -25,7 +25,7 @@ func TestStreamCollectionEventsSSE(t *testing.T) {
 	log := "107 1 CreationTimestamp 1700000000\n" +
 		"105\n101 1.0 Job\n103 1.0 DAGManJobId 42\n103 1.0 JobStatus 2\n106\n" +
 		"105\n101 2.0 Job\n103 2.0 DAGManJobId 7\n106\n"
-	if err := os.WriteFile(logPath, []byte(log), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

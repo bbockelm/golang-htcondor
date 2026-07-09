@@ -13,7 +13,7 @@ import (
 
 func appendLog(t *testing.T, path, text string) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: path is a t.TempDir()-based test file
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestMirror(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "job_queue.log")
 	// A fresh log begins with a historical-sequence record.
-	if err := os.WriteFile(logPath, []byte("107 1 CreationTimestamp 1700000000\n"), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte("107 1 CreationTimestamp 1700000000\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -120,7 +120,7 @@ func TestMirror(t *testing.T) {
 func TestMirrorFilteredWatch(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "job_queue.log")
-	if err := os.WriteFile(logPath, []byte("107 1 CreationTimestamp 1700000000\n"), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte("107 1 CreationTimestamp 1700000000\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Two jobs: one in DAG 42, one in DAG 7.
@@ -173,7 +173,7 @@ func TestMirrorChainedDAG(t *testing.T) {
 		"105\n101 1.1 Job\n103 1.1 ProcId 1\n106\n" +
 		"105\n101 2.-1 Job\n103 2.-1 DAGManJobId 7\n106\n" +
 		"105\n101 2.0 Job\n103 2.0 ProcId 0\n106\n"
-	if err := os.WriteFile(logPath, []byte(log), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m, err := New(logPath, Options{})
