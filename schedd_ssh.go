@@ -31,7 +31,6 @@ package htcondor
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -44,7 +43,6 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
-	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -411,127 +409,25 @@ func (info *JobConnectInfo) OpenSSH(ctx context.Context, opts *JobShellOptions) 
 }
 
 // buildAESStarterSession constructs a cedar SessionEntry from a claim ID
-// returned by GET_JOB_CONNECT_INFO, pinned to AES-GCM regardless of which
-// legacy cipher HTCondor chose to advertise as "preferred" in the session
-// info.
+// returned by GET_JOB_CONNECT_INFO. The claim carries a non-negotiated
+// (inherited) session the schedd minted for us; cedar re-derives the key and
+// cipher from it exactly as HTCondor does — keying on the first method of the
+// exported CryptoMethodsList (AES for any modern pool, since HTCondor uses the
+// list head) and deriving the key with HKDF(salt="htcondor", info="keygen").
+// cedar's stream layer implements only AES-GCM, so CreateNonNegotiatedSession
+// rejects a session keyed on anything else.
 //
-// The HTCondor schedd, when exporting session info to a 25.4+ peer, populates
-// two attributes:
-//
-//   - CryptoMethods    — a *single* method picked by the back-compat helper
-//     getPreferredOldCryptProtocol(): BLOWFISH > 3DES > AES.
-//     Older daemons read this field.
-//   - CryptoMethodsList — the modern full list, e.g. "AES.BLOWFISH.3DES",
-//     with '.' as the delimiter (',' is not legal inside
-//     a claim ID).
-//
-// We always want AES because: (a) modern HTCondor supports it everywhere,
-// (b) cedar v0.0.23's stream encryption only implements AES-GCM. We accept
-// the session iff AES is in the modern list.
+// (This used to reimplement the derivation locally to force AES, because an
+// older cedar read the legacy single CryptoMethods field — typically BLOWFISH
+// — and used the wrong HKDF salt. Both are fixed in cedar now, so we just
+// delegate.)
 func buildAESStarterSession(claim *security.ClaimID, peerAddr string) (*security.SessionEntry, error) {
-	attrs, err := security.ImportSessionInfoAttributes(claim.SecSessionInfo())
-	if err != nil {
-		return nil, fmt.Errorf("parse session info: %w", err)
-	}
-	if !sessionListContainsAES(attrs) {
-		return nil, fmt.Errorf("starter session does not advertise AES (CryptoMethods=%q, CryptoMethodsList=%q)",
-			attrs["CryptoMethods"], attrs["CryptoMethodsList"])
-	}
-
-	derivedKey, err := deriveAES256SessionKey(claim.SecSessionKey())
-	if err != nil {
-		return nil, err
-	}
-
-	policy := classad.New()
-	_ = policy.Set("SecUseSession", "YES")
-	_ = policy.Set("SecSid", claim.SecSessionID())
-	_ = policy.Set("SecEnact", "YES")
-	_ = policy.Set("SecNegotiatedSession", false)
-	// Override the legacy preferred-method to AES so any downstream cedar
-	// code that re-reads the policy sees the right cipher.
-	_ = policy.Set("CryptoMethods", "AES")
-	for k, v := range attrs {
-		if k == "CryptoMethods" {
-			continue
-		}
-		_ = policy.Set(k, v)
-	}
-	// Authenticated identity for the policy. The starter punched a hole for
-	// the job owner FQU when the schedd called createJobOwnerSecSession on
-	// our behalf — but the *cedar-level* identity for this resumption is
-	// just whoever can prove knowledge of the session key. Mark it FAMILY
-	// to match cedar's convention for inherited sessions; the starter does
-	// its own per-FQU authorization.
-	_ = policy.Set("SecAuthenticationMethods", "FAMILY")
-	_ = policy.Set("SecUser", "condor@parent")
-
-	keyInfo := &security.KeyInfo{
-		Data:     derivedKey,
-		Protocol: "AES", // CryptoMethod constant; matches cedar's CryptoAES
-	}
-
-	var expiration time.Time
-	if expiresStr, ok := attrs["SessionExpires"]; ok {
-		if v, perr := parseInt64(expiresStr); perr == nil && v > 0 {
-			expiration = time.Unix(v, 0)
-		}
-	}
-
-	return security.NewSessionEntry(
-		claim.SecSessionID(),
-		peerAddr,
-		keyInfo,
-		policy,
-		expiration,
-		0,  // no lease for one-shot starter session
-		"", // no security tag
-	), nil
-}
-
-func sessionListContainsAES(attrs map[string]string) bool {
-	// Modern field uses '.' as separator inside claim-id-safe strings.
-	if list, ok := attrs["CryptoMethodsList"]; ok {
-		for _, m := range strings.Split(list, ".") {
-			if strings.EqualFold(strings.TrimSpace(m), "AES") {
-				return true
-			}
-		}
-	}
-	// Fall back to the legacy single-value field.
-	if v, ok := attrs["CryptoMethods"]; ok && strings.EqualFold(strings.TrimSpace(v), "AES") {
-		return true
-	}
-	return false
-}
-
-// deriveAES256SessionKey runs HKDF-SHA256 on the session-key string and
-// returns 32 bytes for AES-256.
-//
-// The salt and info parameters are NOT empty: HTCondor's
-// Condor_Crypt_Base::hkdf (in condor_io/condor_crypt.cpp) hard-codes
-// salt="htcondor" and info="keygen", and the starter derives its key with
-// those exact arguments — see condor_secman.cpp:3886 in the
-// CreateNonNegotiatedSecuritySession path. cedar v0.0.23's
-// deriveSessionKey uses nil/nil, which produces a *different* key and
-// makes AES-GCM tag verification fail on the starter side. We bypass cedar
-// for this step.
-func deriveAES256SessionKey(sessionKey string) ([]byte, error) {
-	if sessionKey == "" {
-		return nil, errors.New("empty session key")
-	}
-	r := hkdf.New(sha256.New, []byte(sessionKey), []byte("htcondor"), []byte("keygen"))
-	out := make([]byte, 32)
-	if _, err := r.Read(out); err != nil {
-		return nil, fmt.Errorf("hkdf: %w", err)
-	}
-	return out, nil
-}
-
-func parseInt64(s string) (int64, error) {
-	var v int64
-	_, err := fmt.Sscanf(s, "%d", &v)
-	return v, err
+	return security.CreateNonNegotiatedSession(&security.InheritedSession{
+		Type:        security.SessionTypeNormal,
+		SessionID:   claim.SecSessionID(),
+		SessionInfo: claim.SecSessionInfo(),
+		SessionKey:  claim.SecSessionKey(),
+	}, peerAddr)
 }
 
 // decodeCondorBase64 decodes a base64 blob produced by HTCondor's

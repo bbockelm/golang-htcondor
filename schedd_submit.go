@@ -8,34 +8,38 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
+	"github.com/bbockelm/golang-htcondor/qmgmt"
 )
 
-// SetAttributeFlags controls behavior when setting job attributes
-type SetAttributeFlags int
+// SetAttributeFlags controls behavior when setting job attributes. It aliases
+// the shared codec type in the qmgmt package.
+type SetAttributeFlags = qmgmt.SetAttributeFlags
 
 const (
-	// SetAttributeNoAck indicates not to wait for acknowledgment when setting attributes
-	SetAttributeNoAck SetAttributeFlags = 1 << 0
+	// SetAttributeNoAck indicates not to wait for acknowledgment when setting
+	// attributes (SetAttribute_NoAck, bit 1<<1 in condor_qmgr.h).
+	SetAttributeNoAck SetAttributeFlags = qmgmt.SetNoAck
 )
 
-// QMGMT Protocol Commands (from qmgmt_constants.h)
-// These constants match HTCondor's internal command codes and use underscores to match the C++ naming
+// QMGMT Protocol Commands. The canonical definitions now live in the qmgmt
+// codec package (shared with the server); these names are kept for backward
+// compatibility and match HTCondor's C++ naming convention.
 //
 //nolint:revive // Protocol constants match HTCondor C++ naming convention
 const (
-	CONDOR_NewCluster               = 10002
-	CONDOR_NewProc                  = 10003
-	CONDOR_DestroyCluster           = 10004
-	CONDOR_SetAttribute             = 10006
-	CONDOR_SetAttribute2            = 10027
-	CONDOR_BeginTransaction         = 10023
-	CONDOR_CommitTransactionNoFlags = 10007
-	CONDOR_CommitTransaction        = 10031
-	CONDOR_AbortTransaction         = 10024
-	CONDOR_SetEffectiveOwner        = 10030
-	CONDOR_GetCapabilities          = 10036
-	CONDOR_CloseSocket              = 10028
-	QMGMT_WRITE_CMD                 = 1112
+	CONDOR_NewCluster               = qmgmt.OpNewCluster
+	CONDOR_NewProc                  = qmgmt.OpNewProc
+	CONDOR_DestroyCluster           = qmgmt.OpDestroyCluster
+	CONDOR_SetAttribute             = qmgmt.OpSetAttribute
+	CONDOR_SetAttribute2            = qmgmt.OpSetAttribute2
+	CONDOR_BeginTransaction         = qmgmt.OpBeginTransaction
+	CONDOR_CommitTransactionNoFlags = qmgmt.OpCommitTransactionNoFlags
+	CONDOR_CommitTransaction        = qmgmt.OpCommitTransaction
+	CONDOR_AbortTransaction         = qmgmt.OpAbortTransaction
+	CONDOR_SetEffectiveOwner        = qmgmt.OpSetEffectiveOwner
+	CONDOR_GetCapabilities          = qmgmt.OpGetCapabilities
+	CONDOR_CloseSocket              = qmgmt.OpCloseSocket
+	QMGMT_WRITE_CMD                 = qmgmt.WriteCmd
 )
 
 // QmgmtConnection represents an active connection to the schedd for queue management operations
