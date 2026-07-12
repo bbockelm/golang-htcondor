@@ -234,7 +234,7 @@ func (l *Listener) handle(c *net.UnixConn) {
 		return
 	}
 
-	conn, err := receiveForwardedConn(c)
+	conn, err := ReceiveForwardedConn(c)
 	if err != nil {
 		l.logf("sharedport: receive fd: %v", err)
 		return
@@ -250,12 +250,23 @@ func (l *Listener) handle(c *net.UnixConn) {
 	}
 }
 
-// receiveForwardedConn does a single recvmsg on c expecting a 1-byte
-// data record and an SCM_RIGHTS ancillary message carrying exactly one
-// fd. Returns a net.Conn wrapping that fd. Any extra fds in the cmsg
-// (which shared_port never sends, but we tolerate) are closed
-// immediately to avoid descriptor leaks.
-func receiveForwardedConn(c *net.UnixConn) (net.Conn, error) {
+// ReceiveForwardedConn is the consumer side of the fd-pass handshake: it does a
+// single recvmsg on c expecting a 1-byte data record and an SCM_RIGHTS
+// ancillary message carrying exactly one fd, and returns a net.Conn wrapping
+// that fd. It is the receive-side counterpart of SendForwardedConn.
+//
+// This is the primitive the shared_port Listener uses internally after reading
+// the PASS_SOCK header, but it is exported so callers implementing their own
+// fd-passing rendezvous (e.g. an EP startd handing an activated syscall socket
+// to a process-mode starter over a private Unix socket) can drive the receive
+// half directly, pairing it with SendForwardedConn on the sending end. The
+// caller is responsible for any framing/header exchange that precedes the fd
+// (SendForwardedConn writes a PASS_SOCK header; a private protocol may send its
+// own control message instead and call this once the fd is announced).
+//
+// Any extra fds in the cmsg (which shared_port never sends, but we tolerate)
+// are closed immediately to avoid descriptor leaks.
+func ReceiveForwardedConn(c *net.UnixConn) (net.Conn, error) {
 	oob := make([]byte, syscall.CmsgSpace(4))
 	buf := make([]byte, 1)
 	_, oobn, _, _, err := c.ReadMsgUnix(buf, oob)

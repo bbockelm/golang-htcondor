@@ -3,7 +3,6 @@ package htcondor
 import (
 	"archive/tar"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,7 +18,13 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
+	"github.com/bbockelm/golang-htcondor/filetransfer"
 )
+
+// ftOpts is the shared file-transfer wire configuration for the tool-side
+// spool/receive paths. Logging is routed to the standard logger to preserve the
+// long-standing per-file log output.
+var ftOpts = filetransfer.Options{Logf: log.Printf}
 
 // procID represents a job ID (cluster.proc)
 type procID struct {
@@ -241,26 +246,11 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 		outputRemaps = buildRemapLookup(remapsList)
 	}
 
-	// c-e. Receive files using FileTransfer protocol
-	// First receive the transfer protocol headers (final_transfer flag and xfer_info)
-	headerMsg := message.NewMessageFromStream(cedarStream)
-
-	// Read final_transfer flag
-	finalTransfer, err := headerMsg.GetInt32(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to receive final_transfer flag: %w", err)
-	}
-	_ = finalTransfer // 0 = intermediate, 1 = final
-
-	// Read xfer_info ClassAd
-	xferInfo, err := headerMsg.GetClassAd(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to receive xfer_info ClassAd: %w", err)
-	}
-	_ = xferInfo // Contains SandboxSize
-	// EOM after xfer_info (implicit)
-
-	// Now receive the files
+	// c-e. Receive files using the shared FileTransfer stream core, which reads
+	// the preamble (final_transfer flag + xfer_info ad) and then the per-file
+	// loop, writing to a tar-backed sink that applies the output-file filter and
+	// remaps. The tool download path performs no final TransferAck (ReceiveAck
+	// left false), preserving its long-standing behavior against the schedd.
 	if err := s.receiveJobFiles(ctx, cedarStream, tarWriter, dirPrefix, transferOutputFiles, outputRemaps); err != nil {
 		return fmt.Errorf("failed to receive files for job %d.%d: %w", clusterID, procID, err)
 	}
@@ -268,299 +258,81 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 	return nil
 }
 
-// receiveJobFiles receives files for a single job and writes them to the tar archive
-//
-//nolint:gocyclo // Complex function required for HTCondor file transfer protocol
+// receiveJobFiles receives files for a single job and writes them to the tar
+// archive, delegating the wire protocol to filetransfer.ReceiveStream and
+// applying the output-file filter, path-traversal guard and output remaps in a
+// tar-backed Sink. ReceiveAck is left false to preserve the tool's behavior
+// against the schedd's TRANSFER_DATA uploader (which sends no final ack here).
 func (s *Schedd) receiveJobFiles(ctx context.Context, cedarStream *stream.Stream, tarWriter *tar.Writer, dirPrefix string, transferOutputFiles map[string]bool, outputRemaps map[string]OutputRemap) error {
-	// Track whether we've received GO_AHEAD_ALWAYS from the peer
-	goAheadAlways := false
+	sink := &tarSink{
+		tw:        tarWriter,
+		dirPrefix: dirPrefix,
+		filter:    transferOutputFiles,
+		remaps:    outputRemaps,
+	}
+	_, err := filetransfer.ReceiveStream(ctx, cedarStream, sink, ftOpts)
+	return err
+}
 
-	for {
-		// Read transfer command
-		msg := message.NewMessageFromStream(cedarStream)
-		cmd, err := msg.GetInt32(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive transfer command: %w", err)
-		}
+// tarSink is a filetransfer.Sink that writes received files into a tar archive,
+// preserving the download-path semantics of the former inline receive loop: an
+// optional output-file allow-list, a path-traversal guard, and TransferOutput
+// remaps (URL remaps are skipped since those files were transferred elsewhere).
+type tarSink struct {
+	tw        *tar.Writer
+	dirPrefix string
+	filter    map[string]bool        // nil => accept all
+	remaps    map[string]OutputRemap // nil => no remaps
+}
 
-		transferCmd := TransferCommand(cmd)
+// tarEntryWriter adapts a tar entry to an io.WriteCloser; Close is a no-op since
+// the next WriteHeader (or the tar.Writer's own Close) finalizes the entry.
+type tarEntryWriter struct{ tw *tar.Writer }
 
-		// EOM after command (implicit)
+func (w tarEntryWriter) Write(p []byte) (int, error) { return w.tw.Write(p) }
+func (w tarEntryWriter) Close() error                { return nil }
 
-		switch transferCmd {
-		case CommandFinished:
-			// End of files for this job
-			return nil
-
-		case CommandXferFile:
-			// Protocol for receiving a file:
-			// 1. Read filename (string) - no EOM yet
-			// 2. If PeerDoesGoAhead: EOM, then GoAhead exchange
-			// 3. Read file_mode (int32/int64) + EOM (from get_file_with_permissions)
-			// 4. Read file_size (int64) + buffer_size (int32) + file data
-
-			msg = message.NewMessageFromStream(cedarStream)
-			fileName, err := msg.GetString(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to receive filename: %w", err)
+func (t *tarSink) File(name string, mode int64, size int64) (io.WriteCloser, error) {
+	if t.filter != nil && !t.filter[name] {
+		log.Printf("Skipped file %s (not in TransferOutputFiles)", name)
+		return nil, nil
+	}
+	cleanPath := path.Clean(name)
+	if strings.HasPrefix(cleanPath, "..") || strings.Contains(cleanPath, "/../") {
+		log.Printf("Ignoring file with path traversal: %s", name)
+		return nil, nil
+	}
+	outputPath := cleanPath
+	if t.remaps != nil {
+		if remappedPath, remap, found := applyOutputRemap(name, t.remaps); found {
+			if remap.IsURL {
+				log.Printf("Skipping file %s (remapped to URL: %s)", name, remap.Destination)
+				return nil, nil
 			}
-
-			// Modern HTCondor uses GoAhead protocol
-			// Perform bidirectional GoAhead handshake (only on first file if GO_AHEAD_ALWAYS is set)
-			if !goAheadAlways {
-				// Constants from file_transfer.cpp
-				const (
-					goAheadAlwaysValue = 2 // Peer will send all files without asking again
-				)
-
-				// 1. Receive server's alive_interval request
-				serverAliveMsg := message.NewMessageFromStream(cedarStream)
-				serverAliveInterval, err := serverAliveMsg.GetInt32(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to receive server alive_interval: %w", err)
-				}
-				_ = serverAliveInterval // Acknowledge it
-				// EOM after alive_interval (implicit)
-
-				// 2. Send GoAhead response to server
-				clientGoAhead := classad.New()
-				_ = clientGoAhead.Set("Result", int64(goAheadAlwaysValue)) // We always go ahead
-				_ = clientGoAhead.Set("Timeout", int64(300))
-
-				goAheadMsg := message.NewMessageForStream(cedarStream)
-				if err := goAheadMsg.PutClassAd(ctx, clientGoAhead); err != nil {
-					return fmt.Errorf("failed to send client GoAhead: %w", err)
-				}
-				if err := goAheadMsg.FinishMessage(ctx); err != nil {
-					return fmt.Errorf("failed to finish client GoAhead message: %w", err)
-				}
-
-				// 3. Send our alive_interval request
-				aliveMsg := message.NewMessageForStream(cedarStream)
-				aliveInterval := int32(300) // 5 minutes
-				if err := aliveMsg.PutInt32(ctx, aliveInterval); err != nil {
-					return fmt.Errorf("failed to send alive_interval: %w", err)
-				}
-				if err := aliveMsg.FinishMessage(ctx); err != nil {
-					return fmt.Errorf("failed to finish alive_interval message: %w", err)
-				}
-
-				// 4. Receive server's GoAhead ClassAd
-				serverGoAheadMsg := message.NewMessageFromStream(cedarStream)
-				serverGoAheadAd, err := serverGoAheadMsg.GetClassAd(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to receive GoAhead from server: %w", err)
-				}
-
-				// Check Result in GoAhead
-				resultExpr, ok := serverGoAheadAd.Lookup("Result")
-				if !ok {
-					return fmt.Errorf("GoAhead missing Result attribute")
-				}
-				resultVal := resultExpr.Eval(nil)
-				result, err := resultVal.IntValue()
-				if err != nil || result <= 0 {
-					return fmt.Errorf("GoAhead failed: Result=%v", result)
-				}
-
-				// Check if we got GO_AHEAD_ALWAYS - if so, no more handshakes needed
-				if result == goAheadAlwaysValue {
-					goAheadAlways = true
-					log.Printf("Received GO_AHEAD_ALWAYS - no more handshakes needed")
-				}
-				// EOM after GoAhead (implicit)
-
-				log.Printf("Completed GoAhead handshake for %s", fileName)
-			} else {
-				log.Printf("Skipping GoAhead handshake for %s (GO_AHEAD_ALWAYS set)", fileName)
-			}
-
-			// Read file permissions (from get_file_with_permissions)
-			msg = message.NewMessageFromStream(cedarStream)
-			fileMode, err := msg.GetInt64(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to receive file permissions: %w", err)
-			}
-			// EOM after permissions (implicit)
-
-			// Read file size and buffer size (from get_file/put_file protocol)
-			msg = message.NewMessageFromStream(cedarStream)
-			fileSize, err := msg.GetInt64(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to receive file size: %w", err)
-			}
-
-			// Read buffer size (for AES encrypted transfers)
-			bufferSize, err := msg.GetInt32(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to receive buffer size: %w", err)
-			}
-			_ = bufferSize // We know the buffer size but will read in chunks
-			// EOM after size/buffer (implicit)
-
-			// Check if this file should be transferred (if filter is set)
-			if transferOutputFiles != nil && !transferOutputFiles[fileName] {
-				// File not in the output files list, skip it by reading and discarding
-				discarded := int64(0)
-				const maxChunkSize = 256 * 1024
-				for discarded < fileSize {
-					remaining := fileSize - discarded
-					chunkSize := remaining
-					if chunkSize > maxChunkSize {
-						chunkSize = maxChunkSize
-					}
-
-					chunkMsg := message.NewMessageFromStream(cedarStream)
-					_, err := chunkMsg.GetBytes(ctx, int(chunkSize))
-					if err != nil {
-						return fmt.Errorf("failed to discard file data: %w", err)
-					}
-					discarded += chunkSize
-				}
-				log.Printf("Skipped file %s (not in TransferOutputFiles)", fileName)
-				continue
-			}
-
-			// Resolve relative path and ensure it stays within dirPrefix
-			cleanPath := path.Clean(fileName)
-			if strings.HasPrefix(cleanPath, "..") || strings.Contains(cleanPath, "/../") {
-				// Path tries to escape, log and skip
-				log.Printf("Ignoring file with path traversal: %s", fileName)
-				// Read and discard the file data
-				discarded := int64(0)
-				const maxChunkSize = 256 * 1024
-				for discarded < fileSize {
-					remaining := fileSize - discarded
-					chunkSize := remaining
-					if chunkSize > maxChunkSize {
-						chunkSize = maxChunkSize
-					}
-
-					chunkMsg := message.NewMessageFromStream(cedarStream)
-					_, err := chunkMsg.GetBytes(ctx, int(chunkSize))
-					if err != nil {
-						return fmt.Errorf("failed to discard file data: %w", err)
-					}
-					discarded += chunkSize
-				}
-				continue
-			}
-
-			// Check for output remapping
-			// If a remap exists and destination is a URL, skip this file
-			// If a remap exists and destination is a path, use the remapped name
-			outputPath := cleanPath
-			if outputRemaps != nil {
-				// Check for remap using the original filename - supports both exact and prefix matching
-				if remappedPath, remap, found := applyOutputRemap(fileName, outputRemaps); found {
-					if remap.IsURL {
-						// File is remapped to a URL - it was transferred elsewhere, skip it
-						log.Printf("Skipping file %s (remapped to URL: %s)", fileName, remap.Destination)
-						discarded := int64(0)
-						const maxChunkSize = 256 * 1024
-						for discarded < fileSize {
-							remaining := fileSize - discarded
-							chunkSize := remaining
-							if chunkSize > maxChunkSize {
-								chunkSize = maxChunkSize
-							}
-
-							chunkMsg := message.NewMessageFromStream(cedarStream)
-							_, err := chunkMsg.GetBytes(ctx, int(chunkSize))
-							if err != nil {
-								return fmt.Errorf("failed to discard file data: %w", err)
-							}
-							discarded += chunkSize
-						}
-						continue
-					}
-					// Use the remapped destination path
-					outputPath = remappedPath
-					log.Printf("Remapping output file %s -> %s", fileName, outputPath)
-				}
-			}
-
-			// Build full path in tar: dirPrefix/outputPath
-			tarPath := path.Join(dirPrefix, outputPath)
-
-			// Write tar header
-			header := &tar.Header{
-				Name:    tarPath,
-				Size:    fileSize,
-				Mode:    fileMode,
-				ModTime: time.Now(),
-			}
-
-			if err := tarWriter.WriteHeader(header); err != nil {
-				return fmt.Errorf("failed to write tar header for %s: %w", tarPath, err)
-			}
-
-			// Stream file data directly to tar
-			// File data comes in chunks, each chunk is a separate CEDAR message
-			totalRead := int64(0)
-			const maxChunkSize = 256 * 1024 // Match AES buffer size from sender
-			for totalRead < fileSize {
-				// Calculate chunk size for this read
-				remaining := fileSize - totalRead
-				chunkSize := remaining
-				if chunkSize > maxChunkSize {
-					chunkSize = maxChunkSize
-				}
-
-				// Each chunk is a separate message
-				chunkMsg := message.NewMessageFromStream(cedarStream)
-				chunkData, err := chunkMsg.GetBytes(ctx, int(chunkSize))
-				if err != nil {
-					return fmt.Errorf("failed to read file data chunk for %s: %w", fileName, err)
-				}
-				// EOM after chunk (implicit)
-
-				if _, err := tarWriter.Write(chunkData); err != nil {
-					return fmt.Errorf("failed to write to tar for %s: %w", fileName, err)
-				}
-
-				totalRead += int64(len(chunkData))
-			}
-
-			if totalRead != fileSize {
-				return fmt.Errorf("file size mismatch for %s: expected %d, got %d", fileName, fileSize, totalRead)
-			}
-
-		case CommandMkdir:
-			// Read directory name
-			msg = message.NewMessageFromStream(cedarStream)
-			dirName, err := msg.GetString(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to receive directory name: %w", err)
-			}
-			// EOM (implicit)
-
-			// Resolve path
-			cleanPath := path.Clean(dirName)
-			if strings.HasPrefix(cleanPath, "..") || strings.Contains(cleanPath, "/../") {
-				log.Printf("Ignoring directory with path traversal: %s", dirName)
-				continue
-			}
-
-			// Build full path in tar: dirPrefix/dirName
-			tarPath := path.Join(dirPrefix, cleanPath)
-
-			// Write directory entry to tar
-			header := &tar.Header{
-				Name:     tarPath + "/",
-				Mode:     0755,
-				Typeflag: tar.TypeDir,
-			}
-
-			if err := tarWriter.WriteHeader(header); err != nil {
-				return fmt.Errorf("failed to write tar header for directory %s: %w", tarPath, err)
-			}
-
-		default:
-			// Unknown command, skip it
-			log.Printf("Unknown transfer command: %d", cmd)
+			outputPath = remappedPath
+			log.Printf("Remapping output file %s -> %s", name, outputPath)
 		}
 	}
+	tarPath := path.Join(t.dirPrefix, outputPath)
+	header := &tar.Header{Name: tarPath, Size: size, Mode: mode, ModTime: time.Now()}
+	if err := t.tw.WriteHeader(header); err != nil {
+		return nil, fmt.Errorf("failed to write tar header for %s: %w", tarPath, err)
+	}
+	return tarEntryWriter{tw: t.tw}, nil
+}
+
+func (t *tarSink) Mkdir(name string) error {
+	cleanPath := path.Clean(name)
+	if strings.HasPrefix(cleanPath, "..") || strings.Contains(cleanPath, "/../") {
+		log.Printf("Ignoring directory with path traversal: %s", name)
+		return nil
+	}
+	tarPath := path.Join(t.dirPrefix, cleanPath)
+	header := &tar.Header{Name: tarPath + "/", Mode: 0755, Typeflag: tar.TypeDir}
+	if err := t.tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("failed to write tar header for directory %s: %w", tarPath, err)
+	}
+	return nil
 }
 
 // SpoolJobFilesFromFS uploads input files to the schedd for the specified jobs.
@@ -712,155 +484,22 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 	return nil
 }
 
-// sendSingleFile sends a single file using the HTCondor file transfer protocol
-// This implements the per-file protocol from FileTransfer and ReliSock
+// sendSingleFile sends a single file using the HTCondor file transfer protocol.
+// It is a thin adapter over filetransfer.SendFile (the shared stream core):
+// fileReader supplies the bytes, and peerGoesAheadAlways/fileIndex are bridged
+// into a filetransfer.SendState so the GO_AHEAD_ALWAYS latch carries across a
+// job's files exactly as before.
 func (s *Schedd) sendSingleFile(ctx context.Context, cedarStream *stream.Stream, fileName string, fileSize int64, fileMode int64, fileReader io.Reader, peerGoesAheadAlways *bool, fileIndex int) error {
-	log.Printf("Sending file: %s", fileName)
-
-	// Send CommandXferFile
-	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt32(ctx, int32(CommandXferFile)); err != nil {
-		return fmt.Errorf("failed to send CommandXferFile: %w", err)
+	state := &filetransfer.SendState{PeerGoesAheadAlways: *peerGoesAheadAlways, FileIndex: fileIndex}
+	spec := filetransfer.FileSpec{
+		WireName: fileName,
+		Mode:     fileMode,
+		Size:     fileSize,
+		Open:     func() (io.ReadCloser, error) { return io.NopCloser(fileReader), nil },
 	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish CommandXferFile message: %w", err)
-	}
-
-	// Send filename
-	msg = message.NewMessageForStream(cedarStream)
-	if err := msg.PutString(ctx, fileName); err != nil {
-		return fmt.Errorf("failed to send filename: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish filename message: %w", err)
-	}
-
-	// GoAhead protocol constants from file_transfer.cpp
-	const (
-		goAheadAlways = 2 // send all files without asking again
-	)
-
-	// Perform bidirectional GoAhead handshake (only for first file, or if not GO_AHEAD_ALWAYS)
-	if fileIndex == 0 || !*peerGoesAheadAlways {
-		// 1. Client sends alive_interval
-		msg = message.NewMessageForStream(cedarStream)
-		aliveInterval := int32(300) // 5 minutes
-		if err := msg.PutInt32(ctx, aliveInterval); err != nil {
-			return fmt.Errorf("failed to send alive_interval: %w", err)
-		}
-		if err := msg.FinishMessage(ctx); err != nil {
-			return fmt.Errorf("failed to finish alive_interval message: %w", err)
-		}
-
-		// 2. Client receives GoAhead ClassAd from server
-		goAheadMsg := message.NewMessageFromStream(cedarStream)
-		goAheadAd, err := goAheadMsg.GetClassAd(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive GoAhead from server: %w", err)
-		}
-
-		// Check Result in GoAhead
-		resultExpr, ok := goAheadAd.Lookup("Result")
-		if !ok {
-			return fmt.Errorf("GoAhead missing Result attribute")
-		}
-		resultVal := resultExpr.Eval(nil)
-		result, err := resultVal.IntValue()
-		if err != nil || result <= 0 {
-			return fmt.Errorf("GoAhead failed: Result=%v", result)
-		}
-
-		// Check if we got goAheadAlways
-		if result == goAheadAlways {
-			*peerGoesAheadAlways = true
-			log.Printf("  Received GO_AHEAD_ALWAYS - no more handshakes needed")
-		}
-
-		// 3. Server sends alive_interval request - receive it
-		serverAliveMsg := message.NewMessageFromStream(cedarStream)
-		serverAliveInterval, err := serverAliveMsg.GetInt32(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to receive server alive_interval: %w", err)
-		}
-		_ = serverAliveInterval // Just acknowledge it
-
-		// 4. Client sends GoAhead response back to server
-		clientGoAhead := classad.New()
-		_ = clientGoAhead.Set("Result", int64(goAheadAlways)) // We always go ahead
-		_ = clientGoAhead.Set("Timeout", int64(300))
-
-		msg = message.NewMessageForStream(cedarStream)
-		if err := msg.PutClassAd(ctx, clientGoAhead); err != nil {
-			return fmt.Errorf("failed to send client GoAhead: %w", err)
-		}
-		if err := msg.FinishMessage(ctx); err != nil {
-			return fmt.Errorf("failed to finish client GoAhead message: %w", err)
-		}
-
-		log.Printf("  Completed GoAhead handshake for %s", fileName)
-	} else {
-		log.Printf("  Skipping GoAhead handshake (GO_AHEAD_ALWAYS already set)")
-	}
-
-	// Step 1: Send file permissions as SEPARATE message
-	msg = message.NewMessageForStream(cedarStream)
-	//nolint:gosec // File mode is limited to 12 bits (0777), safe to convert to int32
-	if err := msg.PutInt32(ctx, int32(fileMode)); err != nil {
-		return fmt.Errorf("failed to send file permissions: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish permissions message: %w", err)
-	}
-
-	// Step 2: Send file size + buffer size as SEPARATE message
-	msg = message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt64(ctx, fileSize); err != nil {
-		return fmt.Errorf("failed to send file size: %w", err)
-	}
-
-	// Send buffer size for AESGCM encrypted transfers (256KB)
-	const aesBufferSize = int32(256 * 1024) // AES_FILE_BUF_SZ from C++
-	if err := msg.PutInt32(ctx, aesBufferSize); err != nil {
-		return fmt.Errorf("failed to send buffer size: %w", err)
-	}
-
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish file size message: %w", err)
-	}
-
-	// Stream file data in chunks matching the buffer size we advertised (256KB for AES)
-	const aesChunkSize = 256 * 1024
-	buffer := make([]byte, aesChunkSize)
-	var totalRead int64
-
-	for {
-		n, err := fileReader.Read(buffer)
-		if n > 0 {
-			// In buffered mode, each chunk is a separate CEDAR message
-			chunkMsg := message.NewMessageForStream(cedarStream)
-			if err := chunkMsg.PutBytes(ctx, buffer[:n]); err != nil {
-				return fmt.Errorf("failed to send file data chunk for %s: %w", fileName, err)
-			}
-			if err := chunkMsg.FinishMessage(ctx); err != nil {
-				return fmt.Errorf("failed to finish file data chunk message for %s: %w", fileName, err)
-			}
-			totalRead += int64(n)
-		}
-
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read file data for %s: %w", fileName, err)
-		}
-	}
-
-	if totalRead != fileSize {
-		return fmt.Errorf("file size mismatch for %s: expected %d, read %d", fileName, fileSize, totalRead)
-	}
-
-	log.Printf("  Successfully sent %d bytes for %s", totalRead, fileName)
-	return nil
+	err := filetransfer.SendFile(ctx, cedarStream, spec, state, ftOpts)
+	*peerGoesAheadAlways = state.PeerGoesAheadAlways
+	return err
 }
 
 // sendJobFiles sends files for a single job using the HTCondor file transfer protocol
@@ -878,134 +517,24 @@ func (s *Schedd) sendJobFiles(ctx context.Context, cedarStream *stream.Stream, _
 
 	log.Printf("sendJobFiles: received %d input files to send", len(inputFiles))
 
-	// Calculate total sandbox size for all files
-	var sandboxSize int64
+	// Build the send plan (intermediate/spool transfer). Each file is opened
+	// lazily against fsys as filetransfer.SendStream streams it.
+	plan := filetransfer.SendPlan{FinalTransfer: false}
 	for _, filePath := range inputFiles {
-		fileInfo, err := fs.Stat(fsys, filePath)
+		info, err := fs.Stat(fsys, filePath)
 		if err != nil {
 			return fmt.Errorf("failed to stat file %s: %w", filePath, err)
 		}
-		sandboxSize += fileInfo.Size()
+		name := filePath
+		plan.Files = append(plan.Files, filetransfer.FileSpec{
+			WireName: name,
+			Mode:     int64(info.Mode().Perm()),
+			Size:     info.Size(),
+			Open:     func() (io.ReadCloser, error) { return fsys.Open(name) },
+		})
 	}
 
-	// 1. Send final_transfer flag (0 = intermediate transfer, files go to spool)
-	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt32(ctx, int32(0)); err != nil {
-		return fmt.Errorf("failed to send final_transfer flag: %w", err)
-	}
-
-	// 2. Send xfer_info ClassAd (protocol version >= 8.1.0)
-	// This contains ATTR_SANDBOX_SIZE to tell the schedd how much data to expect
-	xferInfo := classad.New()
-	_ = xferInfo.Set("SandboxSize", sandboxSize)
-	if err := msg.PutClassAd(ctx, xferInfo); err != nil {
-		return fmt.Errorf("failed to send xfer_info ClassAd: %w", err)
-	}
-
-	// 3. EOM
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish xfer_info message: %w", err)
-	}
-
-	// Track whether we have GO_AHEAD_ALWAYS from the schedd
-	peerGoesAheadAlways := false
-
-	// Send each file (or just CommandFinished if no files)
-	if len(inputFiles) > 0 {
-		for i, filePath := range inputFiles {
-			// Open and read file
-			file, err := fsys.Open(filePath)
-			if err != nil {
-				return fmt.Errorf("failed to open file %s: %w", filePath, err)
-			}
-
-			// Get file info for size and permissions
-			stat, err := file.Stat()
-			if err != nil {
-				_ = file.Close()
-				return fmt.Errorf("failed to stat file %s: %w", filePath, err)
-			}
-			fileSize := stat.Size()
-			fileMode := stat.Mode().Perm()
-
-			log.Printf("  File size: %d bytes, mode: %o", fileSize, fileMode)
-
-			// Send the file using the common protocol
-			if err := s.sendSingleFile(ctx, cedarStream, filePath, fileSize, int64(fileMode), file, &peerGoesAheadAlways, i); err != nil {
-				_ = file.Close()
-				return err
-			}
-
-			_ = file.Close()
-		}
-	}
-
-	log.Printf("Sending CommandFinished")
-
-	// Send CommandFinished
-	msg = message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt32(ctx, int32(CommandFinished)); err != nil {
-		return fmt.Errorf("failed to send CommandFinished: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish CommandFinished message: %w", err)
-	}
-
-	// Per ExitDoUpload (file_transfer.cpp:6101), after CommandFinished, the client must
-	// send a TransferAck to the schedd before receiving the schedd's TransferAck
-	log.Printf("Sending upload TransferAck")
-	uploadAck := classad.New()
-	_ = uploadAck.Set("Result", int64(0)) // 0 = success
-
-	// Add TransferStats (empty for now, but required)
-	transferStats := classad.New()
-	_ = uploadAck.Set("TransferStats", transferStats)
-
-	msg = message.NewMessageForStream(cedarStream)
-	if err := msg.PutClassAd(ctx, uploadAck); err != nil {
-		return fmt.Errorf("failed to send upload TransferAck: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish upload TransferAck: %w", err)
-	}
-
-	// Now receive download TransferAck from schedd
-	log.Printf("Waiting for download TransferAck from schedd")
-	ackMsg := message.NewMessageFromStream(cedarStream)
-	ackAd, err := ackMsg.GetClassAd(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to receive download TransferAck: %w", err)
-	}
-
-	log.Printf("Received transfer acknowledgment: %s", ackAd.String())
-
-	// Check result in ack
-	resultExpr, ok := ackAd.Lookup("Result")
-	if !ok {
-		return fmt.Errorf("transfer ack missing Result attribute")
-	}
-	resultVal := resultExpr.Eval(nil)
-	result, err := resultVal.IntValue()
-	if err != nil {
-		return fmt.Errorf("transfer ack Result is not an integer: %w", err)
-	}
-
-	if result != 0 {
-		// Transfer failed - extract error details if available
-		var holdReason string
-		if expr, ok := ackAd.Lookup("HoldReason"); ok {
-			val := expr.Eval(nil)
-			if str, err := val.StringValue(); err == nil {
-				holdReason = str
-			}
-		}
-		if holdReason != "" {
-			return fmt.Errorf("transfer failed (result=%d): %s", result, holdReason)
-		}
-		return fmt.Errorf("transfer failed (result=%d)", result)
-	}
-
-	return nil
+	return filetransfer.SendStream(ctx, cedarStream, plan, ftOpts)
 }
 
 // SpoolJobFilesFromTar uploads input files to the schedd for the specified jobs.
@@ -1470,95 +999,13 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 // sendCommandFinished sends a CommandFinished message and receives the transfer acknowledgment
 // This follows the same protocol as the end of sendJobFiles (ExitDoUpload)
 func (s *Schedd) sendCommandFinished(ctx context.Context, cedarStream *stream.Stream) error {
-	log.Printf("Sending CommandFinished")
-
-	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt32(ctx, int32(CommandFinished)); err != nil {
-		return fmt.Errorf("failed to send CommandFinished: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish CommandFinished message: %w", err)
-	}
-
-	// Per ExitDoUpload (file_transfer.cpp:6101), after CommandFinished, the client must
-	// send a TransferAck to the schedd before receiving the schedd's TransferAck
-	log.Printf("Sending upload TransferAck")
-	uploadAck := classad.New()
-	_ = uploadAck.Set("Result", int64(0)) // 0 = success
-
-	// Add TransferStats (empty for now, but required)
-	transferStats := classad.New()
-	_ = uploadAck.Set("TransferStats", transferStats)
-
-	msg = message.NewMessageForStream(cedarStream)
-	if err := msg.PutClassAd(ctx, uploadAck); err != nil {
-		return fmt.Errorf("failed to send upload TransferAck: %w", err)
-	}
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish upload TransferAck: %w", err)
-	}
-
-	// Now receive download TransferAck from schedd
-	log.Printf("Waiting for download TransferAck from schedd")
-	ackMsg := message.NewMessageFromStream(cedarStream)
-	ackAd, err := ackMsg.GetClassAd(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to receive download TransferAck: %w", err)
-	}
-
-	log.Printf("Received transfer acknowledgment: %s", ackAd.String())
-
-	// Check result in ack
-	resultExpr, ok := ackAd.Lookup("Result")
-	if !ok {
-		return fmt.Errorf("transfer ack missing Result attribute")
-	}
-	resultVal := resultExpr.Eval(nil)
-	result, err := resultVal.IntValue()
-	if err != nil {
-		return fmt.Errorf("transfer ack Result is not an integer: %w", err)
-	}
-
-	if result != 0 {
-		// Transfer failed - extract error details if available
-		var holdReason string
-		if expr, ok := ackAd.Lookup("HoldReason"); ok {
-			val := expr.Eval(nil)
-			if str, err := val.StringValue(); err == nil {
-				holdReason = str
-			}
-		}
-		if holdReason != "" {
-			return fmt.Errorf("transfer failed (result=%d): %s", result, holdReason)
-		}
-		return fmt.Errorf("transfer failed (result=%d)", result)
-	}
-
-	return nil
+	return filetransfer.SendFinished(ctx, cedarStream, ftOpts)
 }
 
 // sendTransferProtocolHeaders sends the file transfer protocol headers required before sending files
 // This includes the final_transfer flag and xfer_info ClassAd with SandboxSize
 func (s *Schedd) sendTransferProtocolHeaders(ctx context.Context, cedarStream *stream.Stream, sandboxSize int64) error {
-	// 1. Send final_transfer flag (0 = intermediate transfer, files go to spool)
-	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutInt32(ctx, int32(0)); err != nil {
-		return fmt.Errorf("failed to send final_transfer flag: %w", err)
-	}
-
-	// 2. Send xfer_info ClassAd (protocol version >= 8.1.0)
-	xferInfo := classad.New()
-	_ = xferInfo.Set("SandboxSize", sandboxSize)
-	if err := msg.PutClassAd(ctx, xferInfo); err != nil {
-		return fmt.Errorf("failed to send xfer_info ClassAd: %w", err)
-	}
-
-	// 3. EOM
-	if err := msg.FinishMessage(ctx); err != nil {
-		return fmt.Errorf("failed to finish xfer_info message: %w", err)
-	}
-
-	return nil
+	return filetransfer.SendPreamble(ctx, cedarStream, sandboxSize, false, ftOpts)
 }
 
 // releaseJobsWithEmptySpool performs an empty spool for jobs that don't need input files.

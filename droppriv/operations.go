@@ -1,6 +1,7 @@
 package droppriv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -124,19 +125,19 @@ func Open(userName, path string) (*os.File, error) {
 	return DefaultManager().Open(userName, path)
 }
 
-// OpenFile provides a package-level helper using the default manager.
+// OpenFile provides a package-level helper delegating to the default Privsep.
 func OpenFile(userName, path string, flag int, perm os.FileMode) (*os.File, error) {
-	return DefaultManager().OpenFile(userName, path, flag, perm)
+	return DefaultPrivsep().OpenFile(context.Background(), userName, path, flag, perm)
 }
 
-// MkdirAll provides a package-level helper using the default manager.
+// MkdirAll provides a package-level helper delegating to the default Privsep.
 func MkdirAll(userName, path string, perm os.FileMode) error {
-	return DefaultManager().MkdirAll(userName, path, perm)
+	return DefaultPrivsep().MkdirAll(context.Background(), userName, path, perm)
 }
 
-// Chown provides a package-level helper using the default manager.
+// Chown provides a package-level helper delegating to the default Privsep.
 func Chown(userName, path string, uid, gid int) error {
-	return DefaultManager().Chown(userName, path, uid, gid)
+	return DefaultPrivsep().Chown(context.Background(), userName, path, uid, gid)
 }
 
 // Root-specific operations

@@ -624,6 +624,26 @@ type AdvertiseOptions struct {
 	WithAck bool
 	// UseTCP forces TCP connection (default: true)
 	UseTCP bool
+	// PrivateAd is an optional companion "private" ad sent immediately after the
+	// public ad on the SAME CEDAR message (public ad, then private ad, then a
+	// single end_of_message), mirroring the C++ startd's UPDATE_STARTD_AD wire
+	// (dc_collector.cpp): putClassAd(public) then putClassAd(private).
+	//
+	// This carries the STARTD_PVT ad -- the private half of the public+private
+	// Machine ad pair the negotiator requires, holding the slot's ClaimId. The
+	// collector matches the private ad to its public ad by Name and MyAddress,
+	// so a private ad should carry those; Advertise copies "MyAddress" from the
+	// public ad into the private ad if the public ad has it and the private ad
+	// does not, matching dc_collector.cpp.
+	//
+	// The private ad is serialized WITH private (secret) attributes included
+	// (PutClassAdIncludePrivate) so its ClaimId survives the trip; the public ad
+	// is serialized normally, which redacts any secret attributes.
+	//
+	// Optional: a nil PrivateAd sends only the public ad (a missing private ad is
+	// tolerated by the collector). Only honored by Advertise; AdvertiseMultiple
+	// returns an error if PrivateAd is set (see AdvertiseMultiple).
+	PrivateAd *classad.ClassAd
 }
 
 // Advertise sends an advertisement to the collector
@@ -677,10 +697,10 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 		return err
 	}
 
-	// Send the ad
+	// Send the ad (plus an optional private companion ad on the same message).
 	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutClassAd(ctx, ad); err != nil {
-		return fmt.Errorf("failed to send ClassAd: %w", err)
+	if err := putAdvertiseAds(ctx, msg, ad, opts.PrivateAd); err != nil {
+		return err
 	}
 	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish message: %w", err)
@@ -723,6 +743,18 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 		opts = &AdvertiseOptions{}
 	}
 	errs := make([]error, len(ads))
+
+	// PrivateAd is a single-ad concept (one public+private pair on one message);
+	// batching many public ads down a shared socket has no place to attach a
+	// per-ad private companion. Reject it explicitly rather than silently drop it.
+	// Callers needing STARTD_PVT pairs should use Advertise per slot.
+	if opts.PrivateAd != nil {
+		err := fmt.Errorf("AdvertiseMultiple does not support opts.PrivateAd; use Advertise for public+private ad pairs")
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
+	}
 
 	rlm := getRateLimitManager()
 	username := GetAuthenticatedUserFromContext(ctx)
@@ -874,6 +906,44 @@ func ensureMyAddress(ad *classad.ClassAd) error {
 		return fmt.Errorf("failed to set MyAddress: %w", err)
 	}
 
+	return nil
+}
+
+// putAdvertiseAds writes the public ad and, if present, its private companion ad
+// onto msg WITHOUT finishing the message (the caller sends the end_of_message).
+// This mirrors the C++ startd's UPDATE_STARTD_AD wire in dc_collector.cpp:
+// putClassAd(public) then putClassAd(private) on one CEDAR message.
+//
+// The public ad is serialized normally (secret attributes redacted). The private
+// ad is serialized with PutClassAdIncludePrivate so its ClaimId (a private/secret
+// attribute) is not stripped. "MyAddress" is copied from the public ad into the
+// private ad when the public ad has it and the private ad does not, so the
+// collector/negotiator can match the private ad to its public ad.
+func putAdvertiseAds(ctx context.Context, msg *message.Message, ad, privateAd *classad.ClassAd) error {
+	if err := msg.PutClassAd(ctx, ad); err != nil {
+		return fmt.Errorf("failed to send ClassAd: %w", err)
+	}
+	if privateAd == nil {
+		return nil
+	}
+
+	// Copy MyAddress from the public ad into the private ad if missing there,
+	// matching dc_collector.cpp (the negotiator matches private<->public ads by
+	// MyAddress and Name).
+	if _, ok := privateAd.Lookup("MyAddress"); !ok {
+		if addr, ok := ad.EvaluateAttrString("MyAddress"); ok {
+			if err := privateAd.Set("MyAddress", addr); err != nil {
+				return fmt.Errorf("failed to copy MyAddress into private ad: %w", err)
+			}
+		}
+	}
+
+	// Send the private ad WITH private attributes so a ClaimId survives.
+	if err := msg.PutClassAdWithOptions(ctx, privateAd, &message.PutClassAdConfig{
+		Options: message.PutClassAdIncludePrivate,
+	}); err != nil {
+		return fmt.Errorf("failed to send private ClassAd: %w", err)
+	}
 	return nil
 }
 

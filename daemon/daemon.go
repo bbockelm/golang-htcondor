@@ -13,6 +13,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -258,6 +259,35 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 	d.startKeepAlive(ctx)
 	defer d.stopKeepAlive()
 
+	// Parent-death monitor. A C++ DaemonCore daemon exits when its condor_master
+	// parent vanishes; ours must too. If the master dies without gracefully
+	// signaling us (a crash, or a test harness killing it), no SIGTERM is
+	// delivered — we are silently reparented (to launchd on macOS, init/a
+	// subreaper on Linux) and would otherwise spin forever. This monitor notices
+	// the master is gone and drives the same graceful shutdown path as SIGTERM.
+	// It runs ONLY under condor_master, where the contract "our parent pid
+	// changing ⇒ the master exited" holds; a standalone daemon's parent is a
+	// shell/test that may legitimately change, so the monitor is disabled there.
+	// Complementary to keepalive: keepalive tells the master we are alive; this
+	// notices the master dying.
+	masterGoneCh := make(chan struct{})
+	if d.UnderMaster() {
+		originalPPID := d.master.ParentPID()
+		if originalPPID <= 0 {
+			originalPPID = os.Getppid()
+		}
+		stopMonitor := make(chan struct{})
+		monitorDone := make(chan struct{})
+		go d.masterMonitor(originalPPID, stopMonitor, monitorDone, masterGoneCh)
+		// Stop the monitor on any Serve exit. This defer is registered after the
+		// ctx cancel defer, so (LIFO) it runs first: we halt and join the monitor
+		// goroutine before anything else tears down.
+		defer func() {
+			close(stopMonitor)
+			<-monitorDone
+		}()
+	}
+
 	// Session-cache persistence: snapshot periodically, and on shutdown stop the
 	// loop, wait for it to exit, then take a final snapshot — so no snapshot can
 	// race the caller's store Close.
@@ -283,6 +313,13 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 			// Shutdown() was called (e.g. by a DC_OFF command handler); treat it
 			// like a termination signal: graceful, returns nil.
 			d.log.Info(logging.DestinationGeneral, "shutdown requested; shutting down")
+			cancel()
+			d.waitServe(serveErr)
+			return nil
+		case <-masterGoneCh:
+			// The condor_master parent died without signaling us. Treat it like a
+			// termination signal: graceful, returns nil. (The monitor already
+			// logged the specifics.)
 			cancel()
 			d.waitServe(serveErr)
 			return nil
@@ -370,6 +407,73 @@ func (d *Daemon) startKeepAlive(ctx context.Context) {
 			d.log.Warn(logging.DestinationGeneral, "DC_CHILDALIVE error", "error", e)
 		}
 	}()
+}
+
+// masterPollInterval is how often the parent-death monitor checks whether the
+// condor_master parent is still alive. Small enough that tests don't wait long,
+// but a poll (not a busy loop).
+const masterPollInterval = 2 * time.Second
+
+// masterMonitor polls for the condor_master parent dying and closes goneCh when
+// it does, driving Serve down the graceful-shutdown path. originalPPID is our
+// parent pid recorded at Serve start (the master pid). stop halts the loop
+// (closed by Serve on exit); done is closed when the goroutine returns so Serve
+// can join it. It runs only under condor_master; see the call site in Serve.
+func (d *Daemon) masterMonitor(originalPPID int, stop <-chan struct{}, done chan<- struct{}, goneCh chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(masterPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			currentPPID := os.Getppid()
+			if masterGone(originalPPID, currentPPID, func() bool { return pidAlive(originalPPID) }) {
+				d.log.Info(logging.DestinationGeneral, "condor_master parent exited; shutting down",
+					"master_pid", originalPPID, "current_ppid", currentPPID)
+				close(goneCh)
+				return
+			}
+		}
+	}
+}
+
+// masterGone decides whether the condor_master parent has died, given the parent
+// pid recorded at Serve start (originalPPID), the current parent pid, and a probe
+// that reports whether the recorded master pid is still alive.
+//
+// The parent changing (currentPPID != originalPPID) is the primary, race-free
+// signal: under condor_master the only way our parent pid changes is the master
+// exiting and us being reparented (to launchd=1 on macOS, init/a subreaper on
+// Linux). It is portable across those platforms and never has a false negative —
+// once reparented, os.Getppid() no longer equals the master pid. We deliberately
+// do NOT key on PPID==1, since a subreaper could adopt us to a non-1 pid.
+//
+// As a belt-and-suspenders secondary check, a recorded master pid that no longer
+// exists (masterAlive false, i.e. kill(pid,0)→ESRCH) also means gone; this covers
+// the (theoretical) case where reparenting hasn't yet updated PPID.
+func masterGone(originalPPID, currentPPID int, masterAlive func() bool) bool {
+	if currentPPID != originalPPID {
+		return true
+	}
+	if masterAlive != nil && !masterAlive() {
+		return true
+	}
+	return false
+}
+
+// pidAlive reports whether pid names a live process, via signal 0. ESRCH means
+// gone; EPERM means it exists but we may not signal it (still alive).
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPERM)
 }
 
 // stopKeepAlive halts the keepalive loop. Idempotent.
