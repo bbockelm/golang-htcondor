@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor/examples/security_config
 go 1.25.7
 
 require (
-	github.com/bbockelm/cedar v0.5.0
+	github.com/bbockelm/cedar v0.5.2
 	github.com/bbockelm/golang-htcondor v0.0.0-20251113012241-ab2a8efb0537
 )
 
