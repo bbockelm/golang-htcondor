@@ -589,7 +589,7 @@ func createQueryAd(adType string, constraint *classad.Expr, projection []string,
 // getTargetTypeForAdType maps ad type to TargetType
 func getTargetTypeForAdType(adType string) string {
 	switch adType {
-	case "StartdAd", "Machine":
+	case "StartdAd", "Machine", "Startd":
 		return "Machine"
 	case "ScheddAd", "Schedd":
 		return "Scheduler"

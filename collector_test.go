@@ -115,3 +115,26 @@ func TestGetCommandForAdType(t *testing.T) {
 		})
 	}
 }
+
+// TestAdTypeCommandTargetConsistency guards that every ad-type alias accepted by
+// getCommandForAdType resolves to the right TargetType. The "Startd" alias
+// regressed here: it produced QUERY_STARTD_ADS but a "Startd" TargetType (via the
+// default), so the collector returned per-startd daemon ads (MyType "StartD",
+// no per-slot Cpus/Memory/State) instead of the slot "Machine" ads matchmaking
+// needs.
+func TestAdTypeCommandTargetConsistency(t *testing.T) {
+	cases := []struct{ adType, wantTarget string }{
+		{"Startd", "Machine"},
+		{"StartdAd", "Machine"},
+		{"Machine", "Machine"},
+		{"Schedd", "Scheduler"},
+		{"Submitter", "Submitter"},
+		{"Collector", "Collector"},
+		{"Negotiator", "Negotiator"},
+	}
+	for _, tc := range cases {
+		if got := getTargetTypeForAdType(tc.adType); got != tc.wantTarget {
+			t.Errorf("getTargetTypeForAdType(%q) = %q, want %q", tc.adType, got, tc.wantTarget)
+		}
+	}
+}
