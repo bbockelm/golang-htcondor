@@ -183,6 +183,12 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 		d.mu.Unlock()
 		return spln, nil
 	}
+	// Non-shared-port under condor_master: adopt the command socket the master pre-created
+	// and inherited to us, rather than binding our own (which would EADDRINUSE against the
+	// master's already-bound port). See issue #119.
+	if iln := resolveInheritedListener(d.log); iln != nil {
+		return iln, nil
+	}
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
