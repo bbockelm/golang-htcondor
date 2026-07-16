@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -142,4 +143,69 @@ func extractSharedPortFromInherit(inherit string) (fd int, fullName string, ok b
 		return n, fullName, true
 	}
 	return 0, "", false
+}
+
+// resolveInheritedListener adopts the command-socket TCP listener that condor_master
+// pre-created and passed down through CONDOR_INHERIT's inherit-list, which is how a daemon
+// receives its command socket when USE_SHARED_PORT=False (there is no SharedPort: token
+// then). Returns (nil, nil) when no adoptable inherited stream socket is present, so the
+// caller falls back to a standalone bind. See issue #119.
+func resolveInheritedListener(logger *logging.Logger) (net.Listener, error) {
+	inherit := os.Getenv("CONDOR_INHERIT")
+	if inherit == "" {
+		return nil, nil
+	}
+	fd, ok := extractInheritedCommandSocket(inherit)
+	if !ok {
+		return nil, nil
+	}
+	f := os.NewFile(uintptr(fd), "inherited-command-socket")
+	if f == nil {
+		return nil, nil
+	}
+	ln, err := net.FileListener(f)
+	_ = f.Close() // net.FileListener dup'd the fd; release our reference to the original
+	if err != nil {
+		// The inherited fd was not a stream listener (e.g. only a UDP SafeSock was passed,
+		// or the fd is not adoptable): fall back to a standalone bind rather than fail.
+		logger.Warn(logging.DestinationGeneral,
+			"inherited command socket not adoptable; falling back to standalone bind",
+			"fd", fd, "error", err.Error())
+		return nil, nil
+	}
+	logger.Info(logging.DestinationGeneral,
+		"adopted inherited command socket from condor_master", "fd", fd, "addr", ln.Addr().String())
+	return ln, nil
+}
+
+// extractInheritedCommandSocket parses CONDOR_INHERIT's inherit-list -- the serialized
+// command sockets before the "0" sentinel -- and returns the fd of the FIRST one: the
+// ReliSock TCP command-port listener condor_master pre-created (it creates the stream
+// ReliSock before the optional UDP SafeSock, so the first entry is the listener to adopt).
+// Returns ok=false when the inherit-list is empty (the sentinel is first) or malformed.
+//
+// Format (daemon_core.cpp extractInheritedSocks):
+//
+//	<ppid> <psinful> <sock1> <sock2> ... 0 <remaining-items>...
+//
+// Each sockN is a serialized ReliSock/SafeSock, "<fd>*<state>*..." (the same encoding the
+// SharedPort: token carries after its endpoint name).
+func extractInheritedCommandSocket(inherit string) (fd int, ok bool) {
+	fields := strings.Fields(inherit)
+	if len(fields) < 3 {
+		return 0, false // need at least ppid, psinful, and a sock or the "0" sentinel
+	}
+	first := fields[2] // the first inherit-list entry, or the sentinel if none
+	if first == "0" {
+		return 0, false // no inherited sockets
+	}
+	fdStr := first
+	if i := strings.IndexByte(first, '*'); i >= 0 {
+		fdStr = first[:i]
+	}
+	n, err := strconv.Atoi(fdStr)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
