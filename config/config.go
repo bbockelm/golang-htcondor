@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -151,12 +152,27 @@ func NewFromReaderWithOptions(r io.Reader, opts ConfigOptions) (*Config, error) 
 	return cfg, nil
 }
 
-// Get retrieves a configuration value
+// Get retrieves a configuration value, honoring HTCondor's subsystem and
+// local-name prefix precedence. For a Config created with a Subsystem and/or
+// LocalName, a more specific definition overrides the bare parameter, most
+// specific first:
+//
+//	<SUBSYS>.<LOCALNAME>.<KEY>   (e.g. COLLECTOR.HTCVIEW.CONDOR_VIEW_HOST)
+//	<LOCALNAME>.<KEY>            (e.g. HTCVIEW.CONDOR_VIEW_HOST)
+//	<SUBSYS>.<KEY>               (e.g. COLLECTOR.CONDOR_VIEW_HOST)
+//	<KEY>                        (the bare parameter)
+//
+// This is what lets two daemons of the same subsystem run under one
+// condor_master with distinct config -- e.g. the stock C++ condor_collector and
+// an htc-collector view host (started with -local-name HTCVIEW) taking different
+// COLLECTOR_LOG, COLLECTOR_ADDRESS_FILE, and CONDOR_VIEW_HOST values.
 func (c *Config) Get(key string) (string, bool) {
 	// Check for macro expansion
 	if strings.HasPrefix(key, "$(") && strings.HasSuffix(key, ")") {
 		key = key[2 : len(key)-1]
 	}
+
+	key = c.scopedLookupKey(key)
 
 	val, ok := c.values[key]
 	if !ok {
@@ -170,6 +186,36 @@ func (c *Config) Get(key string) (string, bool) {
 	}
 
 	return expanded, true
+}
+
+// scopedLookupKey returns the most specific map key that exists for the bare
+// parameter name, applying the Config's subsystem/local-name prefixes in
+// HTCondor precedence order (see Get). It leaves an already-qualified key (one
+// containing '.') untouched so an explicit dotted lookup is not re-prefixed, and
+// returns key unchanged when neither subsystem nor local name is set or no scoped
+// definition exists.
+func (c *Config) scopedLookupKey(key string) string {
+	subsys, local := c.options.Subsystem, c.options.LocalName
+	if (subsys == "" && local == "") || strings.ContainsRune(key, '.') {
+		return key
+	}
+	// Most specific first; only override when a scoped definition actually exists.
+	if subsys != "" && local != "" {
+		if _, ok := c.values[subsys+"."+local+"."+key]; ok {
+			return subsys + "." + local + "." + key
+		}
+	}
+	if local != "" {
+		if _, ok := c.values[local+"."+key]; ok {
+			return local + "." + key
+		}
+	}
+	if subsys != "" {
+		if _, ok := c.values[subsys+"."+key]; ok {
+			return subsys + "." + key
+		}
+	}
+	return key
 }
 
 // Set sets a configuration value
@@ -1013,49 +1059,55 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	// Check for CONDOR_CONFIG
-	if configPath := os.Getenv("CONDOR_CONFIG"); configPath != "" {
-		if configPath == "ONLY_ENV" {
-			// Skip file loading
-			return nil
-		}
-
-		// Try to load the config file
-		//nolint:gosec // G304: Config path comes from validated environment/parameters
-		f, err := os.Open(configPath)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if cerr := f.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("failed to close config file: %w", cerr)
+	// Locate the root configuration file: CONDOR_CONFIG, or a default location.
+	rootPath := os.Getenv("CONDOR_CONFIG")
+	if rootPath == "ONLY_ENV" {
+		// Explicit request to skip all file loading.
+		return nil
+	}
+	if rootPath == "" {
+		for _, path := range []string{"/etc/condor/condor_config", "/usr/local/etc/condor_config"} {
+			if _, err := os.Stat(path); err == nil {
+				rootPath = path
+				break
 			}
-		}()
-
-		return c.parseReader(f, configPath)
-	}
-
-	// Try default locations
-	defaultPaths := []string{
-		"/etc/condor/condor_config",
-		"/usr/local/etc/condor_config",
-	}
-
-	for _, path := range defaultPaths {
-		//nolint:gosec // G304: Checking known default config paths
-		f, err := os.Open(path)
-		if err == nil {
-			defer func() {
-				if cerr := f.Close(); cerr != nil && err == nil {
-					err = fmt.Errorf("failed to close config file: %w", cerr)
-				}
-			}()
-			return c.parseReader(f, path)
 		}
 	}
+	if rootPath == "" {
+		// No config file found, that's OK.
+		return nil
+	}
 
-	// No config file found, that's OK
-	return nil
+	if err := c.parseConfigFile(rootPath); err != nil {
+		return err
+	}
+
+	// HTCondor then reads the local configuration chain, with later sources
+	// overriding earlier ones: the LOCAL_CONFIG_DIR directories (config.d, files
+	// in lexicographic order) followed by the LOCAL_CONFIG_FILE list. Without
+	// this, anything defined there -- commonly LOG, LOCAL_DIR, security, and pool
+	// knobs on a production install -- is silently missed and the built-in
+	// param defaults win instead (e.g. LOG resolves to $(LOCAL_DIR)/log rather
+	// than the config.d override).
+	if err := c.processLocalConfigDir(); err != nil {
+		return err
+	}
+	return c.processLocalConfigFile()
+}
+
+// parseConfigFile opens and parses a single configuration file at path.
+func (c *Config) parseConfigFile(path string) (err error) {
+	//nolint:gosec // G304: config path comes from CONDOR_CONFIG / known defaults
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close config file: %w", cerr)
+		}
+	}()
+	return c.parseReader(f, path)
 }
 
 // processLocalConfigDir processes directories listed in LOCAL_CONFIG_DIR
@@ -1069,6 +1121,18 @@ func (c *Config) processLocalConfigDir() error {
 
 	// Split on comma and/or space
 	dirs := splitConfigList(dirList)
+
+	// Files whose basename matches LOCAL_CONFIG_DIR_EXCLUDE_REGEXP are skipped --
+	// this is how HTCondor keeps editor backups, package leftovers (.rpmnew,
+	// .dpkg-dist), and helper scripts (.py/.sh/.pl) out of config.d parsing. A
+	// config.d without this filter would try to parse those as config and fail or
+	// mis-set values.
+	var excludeRe *regexp.Regexp
+	if pat, ok := c.Get("LOCAL_CONFIG_DIR_EXCLUDE_REGEXP"); ok && pat != "" {
+		if re, err := regexp.Compile(pat); err == nil {
+			excludeRe = re
+		}
+	}
 
 	for _, dir := range dirs {
 		dir = strings.TrimSpace(dir)
@@ -1099,6 +1163,9 @@ func (c *Config) processLocalConfigDir() error {
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue // Skip subdirectories
+			}
+			if excludeRe != nil && excludeRe.MatchString(entry.Name()) {
+				continue // Excluded by LOCAL_CONFIG_DIR_EXCLUDE_REGEXP
 			}
 
 			filePath := filepath.Join(dir, entry.Name())
@@ -1155,6 +1222,13 @@ func (c *Config) processLocalConfigFile() error {
 		//nolint:gosec // G304: File path comes from validated config directive
 		f, err := os.Open(file)
 		if err != nil {
+			// A missing LOCAL_CONFIG_FILE is tolerated unless
+			// REQUIRE_LOCAL_CONFIG_FILE is true (HTCondor's shipped config sets it
+			// false and points LOCAL_CONFIG_FILE at a file that need not exist).
+			required, _ := c.Get("REQUIRE_LOCAL_CONFIG_FILE")
+			if os.IsNotExist(err) && !c.isTruthy(required) {
+				continue
+			}
 			return fmt.Errorf("error opening %s: %w", file, err)
 		}
 		err = c.parseAndExecute(f)
