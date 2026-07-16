@@ -16,7 +16,7 @@ import (
 func TestLoadFromEnvironmentProcessesLocalChain(t *testing.T) {
 	tmp := t.TempDir()
 	confd := filepath.Join(tmp, "config.d")
-	if err := os.MkdirAll(confd, 0o755); err != nil {
+	if err := os.MkdirAll(confd, 0o750); err != nil {
 		t.Fatal(err)
 	}
 

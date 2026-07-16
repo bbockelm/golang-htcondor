@@ -83,6 +83,7 @@ func resolveSharedPortListener(logger *logging.Logger) (*sharedport.Listener, st
 	logf := func(format string, args ...any) {
 		logger.Warn(logging.DestinationGeneral, "shared-port event", "msg", fmt.Sprintf(format, args...))
 	}
+	//nolint:gosec // G115: fd is a small non-negative descriptor from the CONDOR_INHERIT SharedPort token
 	ln, err := sharedport.AdoptFD(uintptr(fd), sharedport.Options{
 		HandshakeTimeout: 10 * time.Second,
 		Logf:             logf,
@@ -150,18 +151,19 @@ func extractSharedPortFromInherit(inherit string) (fd int, fullName string, ok b
 // receives its command socket when USE_SHARED_PORT=False (there is no SharedPort: token
 // then). Returns (nil, nil) when no adoptable inherited stream socket is present, so the
 // caller falls back to a standalone bind. See issue #119.
-func resolveInheritedListener(logger *logging.Logger) (net.Listener, error) {
+func resolveInheritedListener(logger *logging.Logger) net.Listener {
 	inherit := os.Getenv("CONDOR_INHERIT")
 	if inherit == "" {
-		return nil, nil
+		return nil
 	}
 	fd, ok := extractInheritedCommandSocket(inherit)
 	if !ok {
-		return nil, nil
+		return nil
 	}
+	//nolint:gosec // G115: fd is a small non-negative descriptor from the CONDOR_INHERIT inherit-list
 	f := os.NewFile(uintptr(fd), "inherited-command-socket")
 	if f == nil {
-		return nil, nil
+		return nil
 	}
 	ln, err := net.FileListener(f)
 	_ = f.Close() // net.FileListener dup'd the fd; release our reference to the original
@@ -171,11 +173,11 @@ func resolveInheritedListener(logger *logging.Logger) (net.Listener, error) {
 		logger.Warn(logging.DestinationGeneral,
 			"inherited command socket not adoptable; falling back to standalone bind",
 			"fd", fd, "error", err.Error())
-		return nil, nil
+		return nil
 	}
 	logger.Info(logging.DestinationGeneral,
 		"adopted inherited command socket from condor_master", "fd", fd, "addr", ln.Addr().String())
-	return ln, nil
+	return ln
 }
 
 // extractInheritedCommandSocket parses CONDOR_INHERIT's inherit-list -- the serialized

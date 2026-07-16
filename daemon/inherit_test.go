@@ -109,11 +109,11 @@ func TestExtractInheritedCommandSocket(t *testing.T) {
 // inherit-list and asserts resolveInheritedListener adopts it as a working listener that
 // accepts connections dialed to the original address.
 func TestResolveInheritedListener(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test listener; context plumbing adds nothing here
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	f, err := ln.(*net.TCPListener).File() // a dup fd standing in for the inherited one
 	if err != nil {
 		t.Fatal(err)
@@ -126,25 +126,22 @@ func TestResolveInheritedListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adopted, err := resolveInheritedListener(logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	adopted := resolveInheritedListener(logger)
 	if adopted == nil {
 		t.Fatal("expected to adopt the inherited command socket")
 	}
-	defer adopted.Close()
+	defer func() { _ = adopted.Close() }()
 
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, _ := adopted.Accept()
 		accepted <- c
 	}()
-	dc, err := net.Dial("tcp", ln.Addr().String())
+	dc, err := net.Dial("tcp", ln.Addr().String()) //nolint:noctx // test dial to a local listener
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dc.Close()
+	defer func() { _ = dc.Close() }()
 	select {
 	case c := <-accepted:
 		if c == nil {
