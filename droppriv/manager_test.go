@@ -12,7 +12,7 @@ import (
 func TestConfigFromHTCondor(t *testing.T) {
 	cfg := config.NewEmpty()
 	cfg.Set("DROP_PRIVILEGES", "true")
-	cfg.Set("CONDOR_IDS", "42:84")
+	cfg.Set("CONDOR_IDS", "42.84") // HTCondor CONDOR_IDS is dot-separated "<uid>.<gid>"
 	cfg.Set("CONDOR_USER", "daemon")
 
 	conf := ConfigFromHTCondor(cfg)

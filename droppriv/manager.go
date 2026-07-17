@@ -151,6 +151,16 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("failed to drop privileges: %w", err)
 	}
 
+	// Never silently remain root. If the drop target resolved to uid/gid 0 -- e.g. a
+	// misconfigured CONDOR_IDS or an unresolvable CONDOR_USER that fell back to the
+	// current (root) identity -- a "successful" drop leaves the process privileged.
+	// That is exactly the accident we must not have: refuse to continue as root.
+	if os.Geteuid() == 0 || os.Getegid() == 0 {
+		return fmt.Errorf("privilege drop left the process running as root (euid=%d egid=%d): "+
+			"refusing to run privileged; set CONDOR_IDS=<uid>.<gid> or CONDOR_USER to a non-root account",
+			os.Geteuid(), os.Getegid())
+	}
+
 	return nil
 }
 
@@ -237,9 +247,10 @@ func currentIdentity() (Identity, error) {
 }
 
 func parseIDPair(ids string) (Identity, error) {
-	parts := strings.Split(strings.TrimSpace(ids), ":")
+	// HTCondor's CONDOR_IDS is dot-separated "<uid>.<gid>" (e.g. "4.4"), not colon.
+	parts := strings.Split(strings.TrimSpace(ids), ".")
 	if len(parts) != 2 {
-		return Identity{}, fmt.Errorf("expected uid:gid format, got %q", ids)
+		return Identity{}, fmt.Errorf("expected uid.gid format, got %q", ids)
 	}
 	uid, err := parseUint32(strings.TrimSpace(parts[0]))
 	if err != nil {
