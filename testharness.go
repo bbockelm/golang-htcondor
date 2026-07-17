@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/config"
@@ -240,6 +241,11 @@ ENABLE_WEB_SERVER = False
 		"_CONDOR_LOCAL_DIR="+h.tmpDir,
 	)
 	h.masterCmd.Dir = h.tmpDir
+	// Run the master as its own process-group leader so Shutdown can reap the whole
+	// daemon tree (condor_procd, schedd, shared_port, ...) as a group. Otherwise a
+	// child that outlives the master keeps writing under the t.TempDir spool/lock,
+	// and Go's TempDir RemoveAll fails with "directory not empty".
+	h.masterCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Capture output for debugging
 	h.masterCmd.Stdout = os.Stdout
@@ -470,29 +476,52 @@ func (h *CondorTestHarness) checkStartdStatus() {
 
 // Shutdown stops the HTCondor instance
 func (h *CondorTestHarness) Shutdown() {
-	if h.masterCmd != nil && h.masterCmd.Process != nil {
-		h.t.Log("Shutting down HTCondor master")
+	if h.masterCmd == nil || h.masterCmd.Process == nil {
+		return
+	}
+	h.t.Log("Shutting down HTCondor master")
 
-		// Try graceful shutdown first
-		if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
-			h.t.Logf("Failed to send interrupt to master: %v", err)
+	// Capture the process-group id before the process is reaped (Getpgid fails once
+	// it's gone); the master was started as a group leader, so pgid == the master pid.
+	pgid, pgidErr := syscall.Getpgid(h.masterCmd.Process.Pid)
+
+	// Try graceful shutdown first.
+	if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
+		h.t.Logf("Failed to send interrupt to master: %v", err)
+	}
+
+	// Wait a bit for graceful shutdown.
+	done := make(chan error, 1)
+	go func() {
+		done <- h.masterCmd.Wait()
+	}()
+
+	select {
+	case <-time.After(5 * time.Second):
+		// Force kill if graceful shutdown times out.
+		if err := h.masterCmd.Process.Kill(); err != nil {
+			h.t.Logf("Failed to kill master: %v", err)
 		}
+		<-done // Wait for process to finish
+	case <-done:
+		// Graceful shutdown succeeded.
+	}
 
-		// Wait a bit for graceful shutdown
-		done := make(chan error, 1)
-		go func() {
-			done <- h.masterCmd.Wait()
-		}()
-
-		select {
-		case <-time.After(5 * time.Second):
-			// Force kill if graceful shutdown times out
-			if err := h.masterCmd.Process.Kill(); err != nil {
-				h.t.Logf("Failed to kill master: %v", err)
+	// Backstop: SIGKILL the whole process group so no orphaned child (condor_procd,
+	// schedd, shared_port) survives the master still holding open / writing files
+	// under the t.TempDir tree -- otherwise TempDir's RemoveAll races them and fails
+	// with "directory not empty". Harmless if the group is already gone (ESRCH).
+	if pgidErr == nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		// Wait for the group to drain so the kernel has released the children's file
+		// handles before the caller's TempDir RemoveAll runs. kill(-pgid, 0) returns
+		// ESRCH once no process in the group remains.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := syscall.Kill(-pgid, 0); err != nil {
+				break // ESRCH: the process group is gone
 			}
-			<-done // Wait for process to finish
-		case <-done:
-			// Graceful shutdown succeeded
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
 }
