@@ -99,6 +99,10 @@ jobs:
         version: v2.6.1
         working-directory: ${{ matrix.module }}
         args: --timeout=5m
+        # Skip `golangci-lint config verify`, which fetches a JSON schema from
+        # golangci-lint.run and intermittently times out (flaked Lint jobs on
+        # #128/#129). We don't need remote config validation in CI.
+        verify: false
 
   build:
     name: Build
