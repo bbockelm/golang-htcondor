@@ -10,10 +10,22 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X github.com/bbockelm/golang-htcondor/version.Version=$(VERSION) \
            -X github.com/bbockelm/golang-htcondor/version.Commit=$(COMMIT)
 
+# This is a multi-module repo (no committed go.work — the workspace is dev-local):
+#   .            -> github.com/bbockelm/golang-htcondor         (core library + daemon framework)
+#   ./webapi     -> github.com/bbockelm/golang-htcondor/webapi  (web server, OAuth2 issuer, MCP, UI)
+#   ./localcredmon -> .../golang-htcondor/localcredmon          (local credential monitor daemon)
+# Each nested module carries a `replace ... => ../`, so it builds standalone. The
+# build/test targets fan out over the modules, running go in each directory with
+# GOWORK=off so a developer's local go.work never changes the result.
+APP_MODULE_DIRS := . webapi localcredmon
+
 .PHONY: build
-build: build-jupyter-helper ## Build all packages with embedded version info + embedded JupyterLab helper
-	@echo "Building packages (version=$(VERSION) commit=$(COMMIT)) with -tags embed_jupyter_helper..."
-	go build -v -tags embed_jupyter_helper -ldflags "$(LDFLAGS)" ./...
+build: build-jupyter-helper ## Build all modules with embedded version info + embedded JupyterLab helper
+	@echo "Building all modules (version=$(VERSION) commit=$(COMMIT)) with -tags embed_jupyter_helper..."
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> build $$dir"; \
+		(cd $$dir && GOWORK=off go build -v -tags embed_jupyter_helper -ldflags "$(LDFLAGS)" ./...) || exit 1; \
+	done
 
 # --- HTCondor docs (MCP reference content) -------------------------------
 #
@@ -26,7 +38,7 @@ build: build-jupyter-helper ## Build all packages with embedded version info + e
 # The stage is fast and idempotent; the build-prod / Dockerfile.release
 # targets call it before invoking go build with -tags embed_condor_docs.
 CONDOR_DOCS_SRC ?= reference/htcondor/docs
-CONDOR_DOCS_DST := condordocs/dist
+CONDOR_DOCS_DST := webapi/condordocs/dist
 HTCONDOR_GIT_URL ?= https://github.com/htcondor/htcondor.git
 HTCONDOR_GIT_REF ?= main
 
@@ -77,8 +89,8 @@ clean-condor-docs: ## Remove staged HTCondor doc artifacts
 # and rebuild the Go binary with -tags embed_frontend so the SPA is
 # embedded into the binary.
 
-FRONTEND_DIR := frontend
-WEBUI_DIST   := httpserver/webui/dist
+FRONTEND_DIR := webapi/frontend
+WEBUI_DIST   := webapi/httpserver/webui/dist
 
 .PHONY: frontend-install
 frontend-install: ## Install frontend npm dependencies
@@ -104,7 +116,7 @@ JUPYTER_HELPER_TARGETS := \
 	linux/amd64 \
 	linux/arm64 \
 	darwin/arm64
-JUPYTER_HELPER_EMBED_DIR := httpserver/jupyterhelperbin/dist
+JUPYTER_HELPER_EMBED_DIR := webapi/httpserver/jupyterhelperbin/dist
 
 .PHONY: build-jupyter-helper
 build-jupyter-helper: ## Cross-compile the JupyterLab tunnel helper for every target in JUPYTER_HELPER_TARGETS
@@ -112,12 +124,12 @@ build-jupyter-helper: ## Cross-compile the JupyterLab tunnel helper for every ta
 	@for target in $(JUPYTER_HELPER_TARGETS); do \
 		goos=$${target%/*}; \
 		goarch=$${target#*/}; \
-		out="$(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-$$goos-$$goarch"; \
+		out="$(CURDIR)/$(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-$$goos-$$goarch"; \
 		echo "Building $$out for $$goos/$$goarch..."; \
-		GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build \
+		(cd webapi && GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 GOWORK=off go build \
 			-ldflags "$(LDFLAGS)" \
 			-o "$$out" \
-			./cmd/htcondor-jupyter-helper || exit 1; \
+			./cmd/htcondor-jupyter-helper) || exit 1; \
 	done
 	@echo "Embed-staged helpers in $(JUPYTER_HELPER_EMBED_DIR):"
 	@ls -1 $(JUPYTER_HELPER_EMBED_DIR)/htcondor-jupyter-helper-* 2>/dev/null | sed 's|^|  |' || true
@@ -133,7 +145,7 @@ build-prod: build-frontend build-jupyter-helper stage-condor-docs ## Build htcon
 	cp -r $(FRONTEND_DIR)/out $(WEBUI_DIST)
 	@echo "Building htcondor-api with -tags embed_frontend,embed_jupyter_helper,embed_condor_docs..."
 	mkdir -p bin
-	CGO_ENABLED=0 go build -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags "$(LDFLAGS)" -o bin/htcondor-api ./cmd/htcondor-api
+	cd webapi && CGO_ENABLED=0 GOWORK=off go build -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags "$(LDFLAGS)" -o $(CURDIR)/bin/htcondor-api ./cmd/htcondor-api
 	@echo "Built bin/htcondor-api"
 
 .PHONY: clean-frontend
@@ -154,20 +166,37 @@ demo: build-prod ## Run htcondor-api in demo mode (rebuilds with embedded UI fir
 	bin/htcondor-api -demo -listen $(DEMO_LISTEN)
 
 .PHONY: test
-test: ## Run all tests
+test: ## Run all tests across every module
 	@echo "Running tests..."
-	go test -v ./...
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> test $$dir"; \
+		(cd $$dir && GOWORK=off go test -v ./...) || exit 1; \
+	done
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (requires HTCondor)
 	@echo "Running integration tests..."
 	@echo "Note: This requires HTCondor to be installed"
-	go test -v -tags=integration -timeout=5m ./...
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> test-integration $$dir"; \
+		(cd $$dir && GOWORK=off go test -v -tags=integration -timeout=5m ./...) || exit 1; \
+	done
 
 .PHONY: test-race
 test-race: ## Run tests with race detector
 	@echo "Running tests with race detector..."
-	go test -v -race ./...
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> test-race $$dir"; \
+		(cd $$dir && GOWORK=off go test -v -race ./...) || exit 1; \
+	done
+
+.PHONY: vet
+vet: ## Run go vet on every module
+	@echo "Running go vet..."
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> vet $$dir"; \
+		(cd $$dir && GOWORK=off go vet ./...) || exit 1; \
+	done
 
 .PHONY: test-cover
 test-cover: ## Run tests with coverage
@@ -177,14 +206,20 @@ test-cover: ## Run tests with coverage
 	@echo "Coverage report generated: coverage.html"
 
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: ## Run golangci-lint on every module
 	@echo "Running linter..."
-	golangci-lint run
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> lint $$dir"; \
+		(cd $$dir && GOWORK=off golangci-lint run) || exit 1; \
+	done
 
 .PHONY: lint-fix
-lint-fix: ## Run golangci-lint and auto-fix issues
+lint-fix: ## Run golangci-lint and auto-fix issues on every module
 	@echo "Running linter with auto-fix..."
-	golangci-lint run --fix
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "==> lint-fix $$dir"; \
+		(cd $$dir && GOWORK=off golangci-lint run --fix) || exit 1; \
+	done
 
 .PHONY: fmt
 fmt: ## Format code with gofmt
@@ -197,9 +232,24 @@ imports: ## Organize imports with goimports
 	goimports -w .
 
 .PHONY: tidy
-tidy: ## Run go mod tidy
-	@echo "Tidying modules..."
-	go mod tidy
+tidy: ## Run go mod tidy on the application modules (core, webapi, localcredmon)
+	@echo "Tidying application modules..."
+	@for dir in $(APP_MODULE_DIRS); do \
+		echo "  ==> go mod tidy in $$dir"; \
+		(cd $$dir && GOWORK=off go mod tidy) || exit 1; \
+	done
+
+.PHONY: tidy-all
+tidy-all: ## Run go mod tidy on EVERY module in the repo (app modules, examples, test clients)
+	@echo "Tidying every module (excluding reference/, node_modules/, build caches)..."
+	@find . -name go.mod \
+		-not -path './.gocache/*' -not -path './.gotmp/*' \
+		-not -path './reference/*' -not -path '*/node_modules/*' \
+		-not -path './build/*' | sort | while read -r mod; do \
+		dir=$$(dirname "$$mod"); \
+		echo "  ==> go mod tidy in $$dir"; \
+		(cd "$$dir" && GOWORK=off go mod tidy) || exit 1; \
+	done
 
 .PHONY: verify
 verify: ## Verify dependencies
@@ -217,10 +267,12 @@ clean: clean-frontend clean-condor-docs ## Clean build artifacts and coverage fi
 .PHONY: examples
 examples: ## Build all examples
 	@echo "Building examples..."
-	cd examples/basic && go build -v
-	cd examples/file_transfer_demo && go build -v
-	cd examples/param_defaults_demo && go build -v
-	cd examples/queue_demo && go build -v
+	@# The example modules are standalone (own go.mod + replace => ../..) and
+	@# are not part of the root go.work, so build them with the workspace off.
+	cd examples/basic && GOWORK=off go build -v
+	cd examples/file_transfer_demo && GOWORK=off go build -v
+	cd examples/param_defaults_demo && GOWORK=off go build -v
+	cd examples/queue_demo && GOWORK=off go build -v
 
 .PHONY: pre-commit
 pre-commit: ## Run pre-commit hooks on all files
@@ -259,7 +311,8 @@ docker-build-multiarch: ## Build multi-architecture Docker image
 docker-test: ## Run tests inside Docker container
 	@echo "Running tests inside Docker container..."
 	docker build -t $(DOCKER_IMAGE) .
-	docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) go test -v ./...
+	docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) \
+		/bin/sh -c 'for d in . webapi localcredmon; do (cd $$d && GOWORK=off go test -v ./...) || exit 1; done'
 
 .PHONY: docker-test-integration
 docker-test-integration: ## Run integration tests inside Docker container with HTCondor
@@ -268,7 +321,7 @@ docker-test-integration: ## Run integration tests inside Docker container with H
 	docker run --rm --privileged -v $(PWD):/workspace -w /workspace $(DOCKER_IMAGE) /bin/bash -c "\
 		sudo condor_master && \
 		sleep 5 && \
-		go test -v -tags=integration -timeout=5m ./httpserver/"
+		cd webapi && GOWORK=off go test -v -tags=integration -timeout=5m ./httpserver/"
 
 .PHONY: docker-shell
 docker-shell: ## Start interactive shell in Docker container

@@ -14,6 +14,11 @@ cmd/tmp/*
 *.exe
 *.test
 *.out
+
+# Go workspace files are developer-local; the image builds each module
+# standalone via its replace directive, so a stray go.work must not leak in.
+go.work
+go.work.sum
 /main
 /htcondor-api
 /metrics_demo

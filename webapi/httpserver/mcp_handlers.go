@@ -1,0 +1,2249 @@
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"time"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/ory/fosite"
+	"github.com/ory/fosite/handler/openid"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// extractUsernameFromToken extracts the username from an OAuth2 token using the configured claim.
+//
+// This operates on a fosite-verified token; we never read the user
+// header here. (The header is honored only on initial-authentication
+// paths, gated by isUserHeaderTrustedSource. By the time we have a
+// fosite AccessRequester, the user identity has already been bound
+// into the token's `sub`.) The "userHeader configured" branch below
+// short-circuits to the token's subject because in deployments using
+// the userHeader path, the configured custom claim isn't populated —
+// `sub` is the source of truth.
+func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string {
+	if h.userHeader != "" {
+		return token.GetSession().GetSubject()
+	}
+
+	// Use configured claim name (default: "sub")
+	claimName := h.oauth2UsernameClaim
+	if claimName == "" {
+		claimName = "sub"
+	}
+
+	// If using default "sub" claim, use GetSubject() method
+	if claimName == "sub" {
+		return token.GetSession().GetSubject()
+	}
+
+	// For other claims, get from session's extra claims
+	session := token.GetSession()
+	if oidcSession, ok := session.(*openid.DefaultSession); ok {
+		if claims := oidcSession.IDTokenClaims(); claims != nil {
+			if username, ok := claims.Extra[claimName].(string); ok && username != "" {
+				return username
+			}
+		}
+	}
+
+	// Fallback to subject if custom claim not found
+	return token.GetSession().GetSubject()
+}
+
+// handleMCPMessage handles MCP JSON-RPC messages over HTTP
+func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
+	// Validate OAuth2 token or detect HTCondor token
+	token, err := h.validateOAuth2Token(r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
+		return
+	}
+
+	// Create context with security config for HTCondor operations
+	ctx := r.Context()
+
+	// Check if this is an HTCondor token (token == nil && err == nil)
+	if token == nil {
+		// This is an HTCondor token - extract it and pass to HTCondor for validation
+		auth := r.Header.Get("Authorization")
+		parts := strings.SplitN(auth, " ", 2)
+		if len(parts) != 2 {
+			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
+			return
+		}
+		htcToken := parts[1]
+
+		h.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
+
+		// Build a SecurityConfig from the configured CLIENT methods
+		// (so SSL is offered alongside TOKEN when the pool's auth
+		// methods include it). HTCondor still validates the token
+		// itself; we just don't lock the wire to TOKEN-only.
+		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+			return
+		}
+		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+		// For HTCondor tokens, we don't validate scopes here - HTCondor does that
+		// Just process the MCP message
+	} else {
+		// This is an OAuth2 token - validate scopes and generate HTCondor token
+
+		// Extract username from token using configured claim
+		username := h.extractUsernameFromToken(token)
+		if username == "" {
+			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
+
+		// Read MCP message from request body to check scopes
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+			h.writeError(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+
+		// Parse MCP message
+		var mcpRequest mcpserver.MCPMessage
+		if err := json.Unmarshal(body, &mcpRequest); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+			h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+			return
+		}
+
+		// Check if the requested MCP method is allowed based on OAuth2 scopes
+		if !h.isMethodAllowedByScopes(token, &mcpRequest) {
+			h.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
+			h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Signing key path", "path", h.signingKeyPath, "trust_domain", h.trustDomain)
+
+		// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
+		// If we have a signing key, generate an HTCondor token for this user
+		if h.signingKeyPath != "" && h.trustDomain != "" {
+			htcToken, err := h.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
+				h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+				return
+			}
+
+			// Build a SecurityConfig from the configured CLIENT
+			// methods, then overlay the generated token and the
+			// per-user SecurityTag (so cedar's session cache keys
+			// the resumed session by user, not just by peer addr).
+			secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+				return
+			}
+			secConfig.SecurityTag = username
+			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+		}
+
+		// Pass the caller's OAuth2-granted scopes into the MCP
+		// dispatch so handleListTools can filter the catalog and
+		// every other tool can consult them. Without this, the MCP
+		// layer has no idea which scopes the request was authorized
+		// with.
+		ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
+
+		// Restore the body for later reading
+		r.Body = io.NopCloser(bytes.NewBuffer(body))
+	}
+
+	// Read MCP message from request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
+		h.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		return
+	}
+
+	// Parse MCP message
+	var mcpRequest mcpserver.MCPMessage
+	if err := json.Unmarshal(body, &mcpRequest); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
+		h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+		return
+	}
+
+	// Create a temporary MCP server to handle this request
+	// IMPORTANT: Reuse the HTTP server's schedd connection to avoid redundant
+	// authentication and key exchange on every MCP request
+	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		Schedd:         h.schedd,
+		Credd:          h.credd,
+		Instructions:   h.mcpInstructions,
+		SigningKeyPath: h.signingKeyPath,
+		TrustDomain:    h.trustDomain,
+		UIDDomain:      h.uidDomain,
+		HTTPBaseURL:    h.httpBaseURL,
+		Logger:         h.logger,
+	})
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Create pipes for stdin/stdout simulation
+	var responseBuffer bytes.Buffer
+
+	// Write the request to a buffer that the MCP server can read
+	requestBuffer := bytes.NewBuffer(body)
+
+	// Temporarily replace the server's stdin/stdout
+	originalStdin := mcpServer.SetStdin(requestBuffer)
+	originalStdout := mcpServer.SetStdout(&responseBuffer)
+	defer func() {
+		mcpServer.SetStdin(originalStdin)
+		mcpServer.SetStdout(originalStdout)
+	}()
+
+	// Handle the message directly using the MCP server's handler
+	response := mcpServer.HandleMessage(ctx, &mcpRequest)
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// validateOAuth2Token validates an OAuth2 token from the Authorization header
+func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, error) {
+	if h.oauth2Provider == nil {
+		return nil, fmt.Errorf("OAuth2 not configured")
+	}
+
+	// Extract token from Authorization header
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return nil, fmt.Errorf("missing Authorization header")
+	}
+
+	parts := strings.SplitN(auth, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return nil, fmt.Errorf("invalid Authorization header format")
+	}
+
+	tokenString := parts[1]
+
+	// First try to validate as OAuth2 token using fosite
+	ctx := r.Context()
+	session := &openid.DefaultSession{}
+
+	tokenType, accessRequest, err := h.oauth2Provider.GetProvider().IntrospectToken(
+		ctx,
+		tokenString,
+		fosite.AccessToken,
+		session,
+	)
+	_ = tokenType // Not used but returned by IntrospectToken
+
+	if err == nil {
+		// Successfully validated as OAuth2 token
+		return accessRequest, nil
+	}
+
+	// fosite rejected the token. Decide whether to forward it to the
+	// schedd as a HTCondor IDTOKEN (legitimate fall-through for pool-
+	// authenticated tools like condor_token_fetch) OR surface a real
+	// 401 so the caller's auth client triggers a refresh.
+	//
+	// Previously this branch counted dots — `len(strings.Split(s,".")) == 3`
+	// — which is true for EVERY JWT-shaped string, including the
+	// OAuth2 access tokens fosite itself issues. The result: an
+	// expired token from our IDP got laundered to the schedd as a
+	// HTCondor IDTOKEN, the schedd rejected the signature, the MCP
+	// tool failed, and the HTTP response was 200 (JSON-RPC error
+	// envelope) so MCP clients never saw a 401 and never refreshed
+	// their OAuth session.
+	//
+	// The honest test is the `iss` claim:
+	//   - Matches our IDP / OAuth2 issuer → it's OUR token; respect
+	//     fosite's "no" and 401 so the client refreshes.
+	//   - Matches TRUST_DOMAIN              → likely a pool IDTOKEN;
+	//     forward to schedd for verification (return nil,nil).
+	//   - Anything else                      → 401; we don't know
+	//     what this is.
+	//
+	// We also log the underlying fosite error verbatim so an operator
+	// can see WHY introspection failed (expired, unknown client,
+	// revoked, ...) without having to crack the binary open.
+	classification := h.classifyUnknownToken(tokenString)
+	// Pull `iss`, `sub`, and `kid` out of the rejected token for the
+	// log line.
+	//   - iss tells you which issuer-string the token claims, which
+	//     directly explains classifier outcomes (especially the case
+	//     where iss coincidentally matches TRUST_DOMAIN and the
+	//     classifier routes to pool-idtoken).
+	//   - sub identifies the user the token claims to be for —
+	//     useful for figuring out which user's session is failing.
+	//   - kid pins the signing key. If `kid` references a passwords.d/
+	//     entry that was rotated, that's the cause; if it's empty,
+	//     the token is unsigned-or-HMAC and not really a HTCondor
+	//     IDTOKEN regardless of iss.
+	insp := inspectToken(tokenString)
+	h.logger.Info(logging.DestinationHTTP,
+		"OAuth2 introspection rejected token",
+		"classification", classification,
+		"iss", insp.Issuer,
+		"sub", insp.Subject,
+		"kid", insp.KeyID,
+		"introspect_error", err.Error())
+	if classification == tokenClassPoolIDToken {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("token validation failed: %w", err)
+}
+
+// tokenInspection is the diagnostic payload we log when a token
+// fails OAuth2 introspection AND the input to the classifier's
+// origin decision. All fields may be empty: a token that doesn't
+// parse as a JWT yields a zero-value tokenInspection, and
+// individual claims may be absent. The values are NEVER trusted
+// for AUTHORIZATION decisions (those go through the schedd's
+// signature verifier); the marker is only used for routing the
+// HTTP response — 401-to-our-client vs. forward-to-schedd.
+type tokenInspection struct {
+	Issuer  string
+	Subject string
+	KeyID   string // header.kid; identifies the signing key in passwords.d/
+}
+
+// inspectToken extracts the diagnostic-useful claims from a JWT
+// without verifying the signature. Used by the auth failure log
+// path AND by classifyUnknownToken's origin decision. Failing to
+// parse returns the zero value — the caller's log will then show
+// empty fields, which is itself a useful signal (the Bearer wasn't
+// even a JWT).
+func inspectToken(tokenString string) tokenInspection {
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	parsed, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return tokenInspection{}
+	}
+	out := tokenInspection{}
+	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+		if v, ok := claims["iss"].(string); ok {
+			out.Issuer = v
+		}
+		if v, ok := claims["sub"].(string); ok {
+			out.Subject = v
+		}
+	}
+	// Header is a map[string]any; kid may be absent or non-string on
+	// malformed tokens — return "" silently in either case.
+	if kid, ok := parsed.Header["kid"].(string); ok {
+		out.KeyID = kid
+	}
+	return out
+}
+
+// tokenClass tags how validateOAuth2Token decided to handle a token
+// fosite rejected. Used in log lines so misclassifications can be
+// triaged without re-instrumenting the code path.
+type tokenClass string
+
+const (
+	tokenClassOurIDP        tokenClass = "ours-rejected"  // iss matches our IDP; treat as 401
+	tokenClassPoolIDToken   tokenClass = "pool-idtoken"   // iss matches TRUST_DOMAIN; forward
+	tokenClassUnknownIssuer tokenClass = "unknown-issuer" // unrecognized iss; 401
+	tokenClassUnparseable   tokenClass = "unparseable"    // not a JWT at all; 401
+)
+
+// classifyUnknownToken decides whether a token fosite just rejected
+// should be forwarded to the schedd (a real HTCondor IDTOKEN, e.g.
+// condor_token_fetch output from a CLI user) or surfaced as a 401.
+//
+// Our own MCP clients never reach this path: they present fosite's
+// opaque access token, which fosite introspects successfully. An
+// EXPIRED/revoked one fails introspection but isn't a JWT, so it
+// classifies as unparseable → 401, which is exactly what we want
+// (the client refreshes). Only genuine external IDTOKENs are JWTs
+// that warrant forwarding.
+//
+// We classify by the `iss` claim:
+//   - matches our OAuth2 issuer → 401 (a stale token we minted before
+//     this server returned fosite tokens, or a forgery);
+//   - matches TRUST_DOMAIN → forward to the schedd for signature
+//     verification;
+//   - anything else → 401.
+//
+// The classifier never verifies the signature — fosite (already
+// failed) and the schedd (where forwarded tokens go) handle that.
+func (h *Handler) classifyUnknownToken(tokenString string) tokenClass {
+	insp := inspectToken(tokenString)
+	if insp.Issuer == "" && insp.Subject == "" && insp.KeyID == "" {
+		// inspectToken returns zero value when the input isn't a
+		// parseable JWT at all (e.g. an opaque fosite access token).
+		// Treat as unparseable → 401.
+		return tokenClassUnparseable
+	}
+	if insp.Issuer == "" {
+		return tokenClassUnknownIssuer
+	}
+	// iss against our IDP wins over iss against TRUST_DOMAIN if they
+	// happen to differ.
+	if h.oauth2Provider != nil &&
+		insp.Issuer == h.oauth2Provider.config.AccessTokenIssuer {
+		return tokenClassOurIDP
+	}
+	if h.trustDomain != "" && insp.Issuer == h.trustDomain {
+		return tokenClassPoolIDToken
+	}
+	return tokenClassUnknownIssuer
+}
+
+// filterRequestedScopes filters the requested scopes to only include those allowed for the client.
+// This prevents errors when clients request scopes that were added after registration.
+func (h *Handler) filterRequestedScopes(ctx context.Context, r *http.Request) (*http.Request, error) {
+	// Get client_id from the request
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		// No client_id, can't filter - return original request
+		return r, nil
+	}
+
+	// Get the client from storage
+	client, err := h.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	if err != nil {
+		// Client not found or error - let fosite handle it
+		return r, nil
+	}
+
+	// Get requested scopes from the request
+	requestedScopesStr := r.FormValue("scope")
+	if requestedScopesStr == "" {
+		// No scopes requested, nothing to filter
+		return r, nil
+	}
+
+	requestedScopes := strings.Fields(requestedScopesStr)
+	allowedScopes := client.GetScopes()
+
+	// Create a map of allowed scopes for quick lookup
+	allowedScopeMap := make(map[string]bool)
+	for _, scope := range allowedScopes {
+		allowedScopeMap[scope] = true
+	}
+
+	// Filter to only allowed scopes
+	filteredScopes := make([]string, 0, len(requestedScopes))
+	for _, scope := range requestedScopes {
+		if allowedScopeMap[scope] {
+			filteredScopes = append(filteredScopes, scope)
+		} else {
+			h.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for client",
+				"client_id", clientID, "scope", scope)
+		}
+	}
+
+	// If no scopes were filtered, return original request
+	if len(filteredScopes) == len(requestedScopes) {
+		return r, nil
+	}
+
+	// Create a new request with filtered scopes
+	// Clone the request and modify the Form values
+	newReq := r.Clone(ctx)
+	if err := newReq.ParseForm(); err != nil {
+		return r, err
+	}
+
+	// Update the scope parameter
+	newReq.Form.Set("scope", strings.Join(filteredScopes, " "))
+
+	h.logger.Info(logging.DestinationHTTP, "Filtered scopes for client",
+		"client_id", clientID,
+		"requested", len(requestedScopes),
+		"allowed", len(filteredScopes))
+
+	return newReq, nil
+}
+
+// handleOAuth2Authorize handles OAuth2 authorization requests
+func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Filter requested scopes to only those allowed for the client
+	filteredReq, err := h.filterRequestedScopes(ctx, r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		// Continue with original request if filtering fails
+		filteredReq = r
+	}
+
+	// Parse authorization request
+	ar, err := h.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, filteredReq)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to create authorize request", "error", err)
+		h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		return
+	}
+
+	// Determine authentication method:
+	// 1. If userHeader is configured, use that (for demo/testing mode)
+	// 2. If existing session, use that
+	// 3. If OAuth2 SSO is configured and no userHeader, initiate SSO flow
+
+	username := ""
+	var userGroups []string
+
+	// Method 1: User header (demo mode).
+	// Only honored from configured trusted-proxy CIDRs (or in
+	// unsafe demo override). See isUserHeaderTrustedSource.
+	if h.isUserHeaderTrustedSource(r) {
+		username = r.Header.Get(h.userHeader)
+		if username != "" {
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", h.userHeader)
+		}
+	}
+
+	// Method 2: Existing session
+	if username == "" {
+		// Check if user has a session
+		if session, ok := h.getSessionFromRequest(r); ok {
+			username = session.Username
+			userGroups = session.Groups
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+		}
+	}
+
+	// Method 3: OAuth2 SSO flow
+	if username == "" {
+		// If OAuth2 SSO is configured, redirect to upstream IDP
+		if h.oauth2Config != nil {
+			// Generate state parameter
+			state, err := h.oauth2StateStore.GenerateState()
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				return
+			}
+
+			// Store authorize request for later retrieval
+			h.oauth2StateStore.Store(state, ar)
+
+			// Build authorization URL
+			authURL := h.oauth2Config.AuthCodeURL(state)
+
+			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
+				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
+
+			// Redirect to IDP
+			http.Redirect(w, r, authURL, http.StatusFound)
+			return
+		}
+	}
+
+	// If still no username, authentication is required
+	if username == "" {
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available")
+		h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	// User authenticated via header or query parameter - redirect to consent page
+	h.logger.Info(logging.DestinationHTTP, "User authenticated, redirecting to consent page",
+		"username", username, "client_id", ar.GetClient().GetID())
+
+	// Generate state parameter for consent
+	state, err := h.oauth2StateStore.GenerateState()
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate consent state", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+		return
+	}
+
+	// Store authorize request and username for consent page
+	h.oauth2StateStore.StoreWithUsername(state, ar, "", username, userGroups)
+
+	// Redirect to consent page
+	consentURL := fmt.Sprintf("/mcp/oauth2/consent?state=%s", state)
+	http.Redirect(w, r, consentURL, http.StatusFound)
+}
+
+// getScopeDescription returns a human-readable description of an OAuth2 scope
+func getScopeDescription(scope string) string {
+	descriptions := map[string]string{
+		"openid":                   "Basic authentication information",
+		"profile":                  "Access to your profile information",
+		"email":                    "Access to your email address",
+		"offline_access":           "Ability to refresh access tokens",
+		"mcp:read":                 "Read-only access to HTCondor jobs and resources via MCP protocol",
+		"mcp:write":                "Full access to submit and manage HTCondor jobs via MCP protocol",
+		"condor:/READ":             "HTCondor READ authorization - allows reading job and daemon information",
+		"condor:/WRITE":            "HTCondor WRITE authorization - allows submitting and managing jobs",
+		"condor:/ADVERTISE_STARTD": "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
+		"condor:/ADVERTISE_SCHEDD": "HTCondor ADVERTISE_SCHEDD authorization - allows advertising schedd daemons",
+		"condor:/ADVERTISE_MASTER": "HTCondor ADVERTISE_MASTER authorization - allows advertising master daemons",
+		"condor:/ADMINISTRATOR":    "HTCondor ADMINISTRATOR authorization - full administrative access",
+		"condor:/CONFIG":           "HTCondor CONFIG authorization - allows modifying configuration",
+		"condor:/DAEMON":           "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
+		"condor:/NEGOTIATOR":       "HTCondor NEGOTIATOR authorization - allows negotiator operations",
+	}
+
+	if desc, ok := descriptions[scope]; ok {
+		return desc
+	}
+
+	// Handle custom condor:/* scopes
+	if strings.HasPrefix(scope, "condor:/") {
+		authLevel := strings.TrimPrefix(scope, "condor:/")
+		return fmt.Sprintf("HTCondor %s authorization", authLevel)
+	}
+
+	// Default for unknown scopes
+	return fmt.Sprintf("Access with scope: %s", scope)
+}
+
+// handleOAuth2Consent handles the OAuth2 consent page
+func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	ctx := r.Context()
+
+	// Get state from query parameter for GET or form value for POST
+	state := r.URL.Query().Get("state")
+	if state == "" && r.Method == http.MethodPost {
+		// Parse form first if POST
+		if err := r.ParseForm(); err == nil {
+			state = r.FormValue("state")
+		}
+	}
+
+	if state == "" {
+		h.writeError(w, http.StatusBadRequest, "Missing state parameter")
+		return
+	}
+
+	// Retrieve the authorize request, username, and groups
+	ar, username, groups, ok := h.oauth2StateStore.GetWithUsername(state)
+	if !ok || ar == nil {
+		h.logger.Error(logging.DestinationHTTP, "Invalid or expired consent state", "state", state)
+		h.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		// Display consent form
+		h.renderConsentPage(w, consentPageParams{
+			Title:           "Authorize Application",
+			Username:        username,
+			ClientID:        ar.GetClient().GetID(),
+			RequestedScopes: ar.GetRequestedScopes(),
+			FormAction:      "/mcp/oauth2/consent",
+			HiddenFields:    map[string]string{"state": state},
+		})
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Form already parsed above when getting state
+		// Handle approval/denial
+		action := r.FormValue("action")
+
+		if action == "approve" {
+			// User approved - create session and complete authorization
+			session := DefaultOpenIDConnectSession(username)
+
+			// Per-scope consent: a v1 consent page (rendered by
+			// renderConsentPage) carries `consent_form_version=1`
+			// and a `scope=...` value per kept-checked scope.
+			// Legacy / programmatic clients post just
+			// `action=approve` without that marker, in which case
+			// we approve the originally-requested set. This split
+			// closes the audit C3 "all-or-nothing consent" gap
+			// for browser users while staying backward-compatible
+			// with non-form clients (notably integration tests
+			// and any OAuth2 helper that drives consent
+			// programmatically without rendering HTML).
+			requestedScopes := ar.GetRequestedScopes()
+			acceptedScopes := narrowConsentScopes(requestedScopes, r.Form, "consent_form_version")
+
+			// Grant scopes based on group membership intersected
+			// with what the user accepted on the form.
+			grantedScopes := h.getScopesForGroups(groups, acceptedScopes)
+			for _, scope := range grantedScopes {
+				ar.GrantScope(scope)
+			}
+
+			h.logger.Info(logging.DestinationHTTP, "User approved consent",
+				"username", username, "client_id", ar.GetClient().GetID(),
+				"requested_scopes", requestedScopes,
+				"accepted_scopes", acceptedScopes,
+				"granted_scopes", grantedScopes)
+
+			// Generate OAuth2 response
+			response, err := h.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to create authorize response after consent",
+					"error", err, "username", username)
+				h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+				// Remove the state entry
+				h.oauth2StateStore.Remove(state)
+				return
+			}
+
+			h.logger.Info(logging.DestinationHTTP, "Successfully created authorize response after consent", "username", username)
+
+			// Remove the state entry
+			h.oauth2StateStore.Remove(state)
+
+			// Write the OAuth2 response
+			h.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+			return
+		}
+
+		if action == "deny" {
+			// User denied - return access denied error
+			h.logger.Info(logging.DestinationHTTP, "User denied consent",
+				"username", username, "client_id", ar.GetClient().GetID())
+
+			// Remove the state entry
+			h.oauth2StateStore.Remove(state)
+
+			// Return access denied error to client
+			accessDeniedErr := fosite.ErrAccessDenied.WithDescription("User denied authorization")
+			h.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, accessDeniedErr)
+			return
+		}
+
+		// Invalid action
+		h.writeError(w, http.StatusBadRequest, "Invalid action")
+		return
+	}
+
+	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+// handleOAuth2Token handles OAuth2 token requests
+func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	ctx := r.Context()
+
+	// Parse form data
+	if err := r.ParseForm(); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to parse form", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
+		return
+	}
+
+	// Filter requested scopes to only those allowed for the client
+	filteredReq, err := h.filterRequestedScopes(ctx, r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
+		// Continue with original request if filtering fails
+		filteredReq = r
+	}
+	r = filteredReq
+
+	grantType := r.FormValue("grant_type")
+
+	// Log the incoming request for debugging
+	h.logger.Info(logging.DestinationHTTP, "Token request received",
+		"grant_type", grantType,
+		"client_id", r.FormValue("client_id"),
+		"scope", r.FormValue("scope"))
+
+	// Handle device_code grant type separately
+	if grantType == "urn:ietf:params:oauth:grant-type:device_code" {
+		h.handleDeviceCodeTokenRequest(w, r)
+		return
+	}
+
+	// Create the session object
+	session := &openid.DefaultSession{}
+
+	// Create access request
+	accessRequest, err := h.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
+	if err != nil {
+		// Extract more detailed error information
+		errorDetails := fmt.Sprintf("%v", err)
+		var rfc6749Err *fosite.RFC6749Error
+		if errors.As(err, &rfc6749Err) {
+			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
+				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
+		}
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access request",
+			"error", err, "error_details", errorDetails,
+			"client_id", r.FormValue("client_id"))
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+
+	// Create access response (for all flows - this generates tokens including refresh token)
+	h.logger.Info(logging.DestinationHTTP, "Creating access response",
+		"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+		"requested_scopes", accessRequest.GetRequestedScopes())
+	response, err := h.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
+	if err != nil {
+		// Log more details about the error - unwrap to see the root cause
+		rootErr := err
+		for errors.Unwrap(rootErr) != nil {
+			rootErr = errors.Unwrap(rootErr)
+		}
+		h.logger.Error(logging.DestinationHTTP, "Failed to create access response",
+			"error", err,
+			"root_error", rootErr,
+			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+			"client_id", accessRequest.GetClient().GetID())
+		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+		return
+	}
+	h.logger.Info(logging.DestinationHTTP, "Successfully created access response")
+
+	// Always return fosite's own access token — even for condor:/*
+	// scopes. The client uses this token against THIS server's MCP
+	// endpoint; we mint a short-lived HTCondor IDTOKEN on demand,
+	// per request, in handleMCPMessage to talk to the schedd. This
+	// keeps the credential the client holds introspectable and
+	// revocable by fosite, and means the client never carries a
+	// pool-signed token.
+	h.oauth2Provider.GetProvider().WriteAccessResponse(ctx, w, accessRequest, response)
+}
+
+// handleDeviceCodeTokenRequest handles token requests with device_code grant type
+func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	deviceCode := r.FormValue("device_code") //nolint:gosec // G120: body already limited by handleOAuth2Token caller
+	if deviceCode == "" {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code is required")
+		return
+	}
+
+	// Create device code handler
+	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
+
+	// Create session
+	session := &openid.DefaultSession{}
+
+	// Handle device code access request
+	request, err := deviceHandler.HandleDeviceAccessRequest(ctx, deviceCode, session)
+	if err != nil {
+		// Map errors to OAuth error responses
+		if errors.Is(err, ErrAuthorizationPending) {
+			h.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
+			return
+		}
+		if errors.Is(err, fosite.ErrAccessDenied) {
+			h.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
+			return
+		}
+		h.logger.Error(logging.DestinationHTTP, "Device code token request failed", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid device code")
+		return
+	}
+
+	// Set per-token expiries on the session before generating tokens. This custom
+	// device-code flow bypasses fosite's NewAccessRequest/NewAccessResponse pipeline,
+	// which is the only place fosite would otherwise call SetExpiresAt for us. If we
+	// skip this, the stored session has zero-valued ExpiresAt entries, which means
+	// (a) access tokens fall back to GetRequestedAt + AccessTokenLifespan — and the
+	// device code's RequestedAt can be up to ~10 minutes old, eating into the
+	// access-token lifetime — and (b) refresh tokens get an "unlimited lifetime" path
+	// in fosite's HMAC strategy, ignoring the configured RefreshTokenLifespan
+	// entirely. See PelicanPlatform/pelican#3389 for the same bug class.
+	setStandardTokenExpiries(ctx, h.oauth2Provider.config, request.GetSession())
+
+	// Generate tokens using fosite
+	strategy := h.oauth2Provider.GetStrategy()
+	accessToken, _, err := strategy.GenerateAccessToken(ctx, request)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate access token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	refreshToken, _, err := strategy.GenerateRefreshToken(ctx, request)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to generate refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	// Store tokens
+	signature := strategy.AccessTokenSignature(ctx, accessToken)
+	if err := h.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, signature, request); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to store access token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
+	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	// Build response
+	response := map[string]interface{}{
+		"access_token":  accessToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"refresh_token": refreshToken,
+		"scope":         strings.Join(request.GetGrantedScopes(), " "),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// handleOAuth2Introspect handles OAuth2 token introspection requests
+func (h *Handler) handleOAuth2Introspect(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+	session := &openid.DefaultSession{}
+
+	ir, err := h.oauth2Provider.GetProvider().NewIntrospectionRequest(ctx, r, session)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to create introspection request", "error", err)
+		h.oauth2Provider.GetProvider().WriteIntrospectionError(ctx, w, err)
+		return
+	}
+
+	h.oauth2Provider.GetProvider().WriteIntrospectionResponse(ctx, w, ir)
+}
+
+// handleOAuth2Revoke handles OAuth2 token revocation requests
+func (h *Handler) handleOAuth2Revoke(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	ctx := r.Context()
+
+	err := h.oauth2Provider.GetProvider().NewRevocationRequest(ctx, r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to revoke token", "error", err)
+		h.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, err)
+		return
+	}
+
+	h.oauth2Provider.GetProvider().WriteRevocationResponse(ctx, w, nil)
+}
+
+// handleOAuth2Register handles dynamic client registration (RFC 7591)
+func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse registration request
+	// RFC 7591 defines "scope" as a space-separated string, but some clients
+	// may send it as an array. We use json.RawMessage to handle both formats.
+	var rawReq struct {
+		RedirectURIs  []string        `json:"redirect_uris"`
+		GrantTypes    []string        `json:"grant_types"`
+		ResponseTypes []string        `json:"response_types"`
+		Scope         json.RawMessage `json:"scope"`
+		ClientName    string          `json:"client_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&rawReq); err != nil {
+		h.writeError(w, http.StatusBadRequest, "Invalid registration request")
+		return
+	}
+
+	// Parse scope field: accept both a space-separated string (RFC 7591) and an array
+	var regReq struct {
+		RedirectURIs  []string
+		GrantTypes    []string
+		ResponseTypes []string
+		Scopes        []string
+		ClientName    string
+	}
+	regReq.RedirectURIs = rawReq.RedirectURIs
+	regReq.GrantTypes = rawReq.GrantTypes
+	regReq.ResponseTypes = rawReq.ResponseTypes
+	regReq.ClientName = rawReq.ClientName
+
+	if len(rawReq.Scope) > 0 {
+		// Try as string first (RFC 7591 standard)
+		var scopeStr string
+		if err := json.Unmarshal(rawReq.Scope, &scopeStr); err == nil {
+			if scopeStr != "" {
+				regReq.Scopes = strings.Fields(scopeStr)
+			}
+		} else {
+			// Fall back to array format
+			if err := json.Unmarshal(rawReq.Scope, &regReq.Scopes); err != nil {
+				h.writeError(w, http.StatusBadRequest, "Invalid scope format: must be a space-separated string or array of strings")
+				return
+			}
+		}
+	}
+
+	// Validate redirect URIs
+	if len(regReq.RedirectURIs) == 0 {
+		h.writeError(w, http.StatusBadRequest, "At least one redirect_uri is required")
+		return
+	}
+
+	// Generate client ID and secret
+	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
+	clientSecret := generateRandomString(32)
+
+	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
+		return
+	}
+
+	// Default values
+	if len(regReq.GrantTypes) == 0 {
+		regReq.GrantTypes = []string{"authorization_code", "refresh_token"}
+	}
+	if len(regReq.ResponseTypes) == 0 {
+		regReq.ResponseTypes = []string{"code"}
+	}
+	if len(regReq.Scopes) == 0 {
+		regReq.Scopes = []string{"openid", "profile", "email", "offline_access", "mcp:read", "mcp:write"}
+	}
+
+	// Validate requested scopes against supported scopes. offline_access
+	// must be accepted and registered on the client; without it in the
+	// client's allowed set, filterScopesForClient strips it at authorize
+	// time and fosite never issues a refresh token.
+	supportedScopes := map[string]bool{
+		"openid":         true,
+		"profile":        true,
+		"email":          true,
+		"offline_access": true,
+		"mcp:read":       true,
+		"mcp:write":      true,
+	}
+	for _, scope := range regReq.Scopes {
+		// Allow condor:/* scopes
+		if strings.HasPrefix(scope, "condor:/") {
+			continue
+		}
+		if !supportedScopes[scope] {
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
+			return
+		}
+	}
+
+	// Create the client
+	client := &fosite.DefaultClient{
+		ID:            clientID,
+		Secret:        hashedSecret,
+		RedirectURIs:  regReq.RedirectURIs,
+		GrantTypes:    regReq.GrantTypes,
+		ResponseTypes: regReq.ResponseTypes,
+		Scopes:        regReq.Scopes,
+		Public:        false,
+	}
+
+	if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to create client", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
+		return
+	}
+
+	// Return registration response
+	resp := map[string]interface{}{
+		"client_id":      clientID,
+		"client_secret":  clientSecret,
+		"redirect_uris":  regReq.RedirectURIs,
+		"grant_types":    regReq.GrantTypes,
+		"response_types": regReq.ResponseTypes,
+		"scope":          strings.Join(regReq.Scopes, " "),
+		"client_name":    regReq.ClientName,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// generateRandomString generates a cryptographically random hex string.
+// The returned string is 2*length hex characters (length random bytes).
+func generateRandomString(length int) string {
+	b := make([]byte, length)
+	if _, err := cryptorand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
+// oauth2AdvertisedScopes is the scope set published in both OAuth2
+// discovery documents (authorization-server and protected-resource
+// metadata). offline_access MUST be advertised: clients like claude.ai
+// only request the scopes the server advertises, so without it here they
+// never ask for a refresh token and silently end up with access-token-
+// only sessions that force a full re-auth on every expiry.
+var oauth2AdvertisedScopes = []string{
+	"openid", "profile", "email",
+	"offline_access",
+	"mcp:read", "mcp:write",
+	"condor:/READ", "condor:/WRITE",
+	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
+}
+
+// handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
+// Implements RFC 8414: OAuth 2.0 Authorization Server Metadata
+func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusNotFound, "OAuth2 not configured")
+		return
+	}
+
+	// Get the issuer URL from the OAuth2 provider config
+	issuer := h.oauth2Provider.config.AccessTokenIssuer
+
+	metadata := map[string]interface{}{
+		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/mcp/oauth2/authorize",
+		"token_endpoint":                        issuer + "/mcp/oauth2/token",
+		"registration_endpoint":                 issuer + "/mcp/oauth2/register",
+		"introspection_endpoint":                issuer + "/mcp/oauth2/introspect",
+		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
+		"device_authorization_endpoint":         issuer + "/mcp/oauth2/device/authorize",
+		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      oauth2AdvertisedScopes,
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"code_challenge_methods_supported":      []string{"plain", "S256"},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(metadata); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode metadata", "error", err)
+	}
+}
+
+// handleOAuth2ProtectedResourceMetadata handles OAuth 2.0 Protected Resource metadata discovery
+// Implements RFC 9068: OAuth 2.0 Protected Resource Metadata
+// See: https://datatracker.ietf.org/doc/html/rfc9068
+func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusNotFound, "OAuth2 not configured")
+		return
+	}
+
+	// Get the issuer URL from the OAuth2 provider config
+	issuer := h.oauth2Provider.config.AccessTokenIssuer
+
+	metadata := map[string]interface{}{
+		"resource":                              issuer,
+		"authorization_servers":                 []string{issuer},
+		"bearer_methods_supported":              []string{"header"},
+		"resource_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      oauth2AdvertisedScopes,
+		"resource_documentation":                issuer + "/mcp",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(metadata); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode protected resource metadata", "error", err)
+	}
+}
+
+// handleOAuth2DeviceAuthorize handles device authorization requests (RFC 8628)
+func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	ctx := r.Context()
+
+	// Parse client credentials from request
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
+
+	// Get client
+	client, err := h.oauth2Provider.GetStorage().GetClient(ctx, clientID)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
+		return
+	}
+
+	// Parse requested scopes
+	scopeStr := r.FormValue("scope")
+	var scopes []string
+	if scopeStr != "" {
+		scopes = strings.Split(scopeStr, " ")
+	} else {
+		// Default scopes
+		scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+
+	// Filter scopes to only those allowed for the client
+	allowedScopes := client.GetScopes()
+	allowedScopeMap := make(map[string]bool)
+	for _, scope := range allowedScopes {
+		allowedScopeMap[scope] = true
+	}
+
+	filteredScopes := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if allowedScopeMap[scope] {
+			filteredScopes = append(filteredScopes, scope)
+		} else {
+			h.logger.Info(logging.DestinationHTTP, "Filtering out unavailable scope for device authorization",
+				"client_id", clientID, "scope", scope)
+		}
+	}
+	scopes = filteredScopes
+
+	if len(scopes) > 0 {
+		h.logger.Info(logging.DestinationHTTP, "Device authorization with filtered scopes",
+			"client_id", clientID, "scopes", strings.Join(scopes, " "))
+	}
+
+	// Create device code handler
+	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
+
+	// Handle device authorization
+	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Device authorization failed", "error", err)
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Device authorization failed")
+		return
+	}
+
+	// Return device authorization response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err)
+	}
+}
+
+// handleOAuth2DeviceVerify handles the user code verification page
+func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request) {
+	if h.oauth2Provider == nil {
+		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		return
+	}
+
+	// Limit request body size for form parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	ctx := r.Context()
+
+	if r.Method == http.MethodGet {
+		// Check authentication before showing the form (same as handleOAuth2Authorize)
+		username := ""
+
+		// Method 1: User header (demo mode) — trusted-proxy gated.
+		if h.isUserHeaderTrustedSource(r) {
+			username = r.Header.Get(h.userHeader)
+			if username != "" {
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", h.userHeader)
+			}
+		}
+
+		// Method 2: Check for session
+		if username == "" {
+			if session, ok := h.getSessionFromRequest(r); ok {
+				username = session.Username
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+			}
+		}
+
+		// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
+		if username == "" && h.oauth2Config != nil {
+			// Generate state parameter
+			state, err := h.oauth2StateStore.GenerateState()
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+				return
+			}
+
+			// Store the return URL (current device verification URL)
+			returnURL := r.URL.String()
+			h.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
+
+			// Build authorization URL
+			authURL := h.oauth2Config.AuthCodeURL(state)
+
+			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
+				"state", state, "auth_url", authURL, "return_url", returnURL)
+
+			// Redirect to IDP
+			http.Redirect(w, r, authURL, http.StatusFound)
+			return
+		}
+
+		// If still no username, authentication is required
+		if username == "" {
+			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+			h.writeError(w, http.StatusUnauthorized, "Authentication required")
+			return
+		}
+
+		// Get user code from query parameter
+		userCode := r.URL.Query().Get("user_code")
+
+		// If user code is provided, look up the device code session and show consent page
+		if userCode != "" {
+			userCode = strings.ToUpper(strings.TrimSpace(userCode))
+
+			// Get device code session by user code
+			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+				h.writeHTMLError(w, "Invalid or expired user code")
+				return
+			}
+
+			// Show consent page with scopes
+			h.renderDeviceConsentPage(w, r, username, userCode, request)
+			return
+		}
+
+		// Display verification form (for entering user code)
+		html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Device Authorization</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+        h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
+        p { color: #666; font-size: 14px; margin-bottom: 20px; line-height: 1.6; }
+        input[type="text"] {
+            font-size: 24px; padding: 14px; width: 100%; margin: 10px 0 20px;
+            text-transform: uppercase; text-align: center; letter-spacing: 4px;
+            border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace;
+            color: #667eea; font-weight: bold;
+        }
+        input[type="text"]:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2); }
+        button {
+            background: #667eea; color: white; padding: 14px 28px; border: none;
+            border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer;
+            width: 100%; transition: all 0.2s ease;
+        }
+        button:hover { background: #5568d3; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
+        @media (max-width: 600px) { .container { padding: 30px 20px; } h1 { font-size: 24px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Device Authorization</h1>
+        <p>Enter the code displayed on your device:</p>
+        <form method="GET" action="/mcp/oauth2/device/verify">
+            <input type="text" name="user_code" placeholder="XXXX-XXXX" required pattern="[A-Za-z0-9-]+" />
+            <button type="submit">Continue</button>
+        </form>
+    </div>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(html))
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Handle approval/denial
+		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
+		action := r.FormValue("action")
+
+		if userCode == "" {
+			h.writeHTMLError(w, "User code is required")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
+			return
+		}
+
+		// Determine authentication method (same as handleOAuth2Authorize):
+		// 1. If userHeader is configured, use that (for demo/testing mode)
+		// 2. If OAuth2 SSO is configured and no userHeader, check for session
+		// 3. If neither, authentication is required
+		username := ""
+
+		// Method 1: User header (demo mode) — trusted-proxy gated.
+		if h.isUserHeaderTrustedSource(r) {
+			username = r.Header.Get(h.userHeader)
+			if username != "" {
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+					"username", username, "header", h.userHeader)
+			}
+		}
+
+		// Method 2: Check for session
+		if username == "" {
+			if session, ok := h.getSessionFromRequest(r); ok {
+				username = session.Username
+				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+			}
+		}
+
+		// If still no username, authentication is required
+		if username == "" {
+			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+			h.writeHTMLError(w, "Authentication required")
+			return
+		}
+
+		switch action {
+		case "approve":
+			// Create session for user
+			session := DefaultOpenIDConnectSession(username)
+
+			acceptedScopes := narrowDeviceApprovalScopes(r.Form, request)
+
+			// Approve the device code with the user-narrowed scope set.
+			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
+				h.writeHTMLError(w, "Failed to approve device")
+				return
+			}
+
+			h.logger.Info(logging.DestinationHTTP, "Device code approved",
+				"user_code", userCode, "username", username,
+				"client_id", request.GetClient().GetID(),
+				"requested_scopes", request.GetRequestedScopes(),
+				"accepted_scopes", acceptedScopes)
+
+			// Return success page
+			h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
+				"&#10003; Authorization Complete",
+				"You have successfully authorized the device.",
+				"You can close this window now.")
+		case "deny":
+			// Deny the device code
+			if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
+				h.writeHTMLError(w, "Failed to deny device")
+				return
+			}
+
+			h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
+
+			// Return denial page
+			h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
+				"&#10007; Authorization Denied",
+				"You have denied authorization for this device.",
+				"You can close this window now.")
+		default:
+			h.writeHTMLError(w, "Invalid action")
+		}
+		return
+	}
+
+	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+// consentPageParams defines the parameters for rendering a consent page.
+type consentPageParams struct {
+	Title           string            // Page title (e.g., "Authorize Application" or "Authorize Device")
+	Username        string            // Authenticated username
+	ClientID        string            // OAuth2 client ID
+	RequestedScopes []string          // Scopes being requested
+	FormAction      string            // Form POST target URL
+	HiddenFields    map[string]string // Hidden form fields (e.g., "state" or "user_code")
+	DeviceCode      string            // If non-empty, show device code verification section
+}
+
+// renderConsentPage renders a unified OAuth2 consent page for both authorization code and device flows.
+//
+// Each requested scope renders as a checked checkbox the user can
+// uncheck to decline that scope individually. `openid` is always
+// rendered as a fixed (non-checkbox) entry because OpenID Connect
+// requires it and the rest of the flow assumes it; declining it
+// would break the redirect / userinfo path. The POST handler
+// intersects the user-selected subset with the group-allowed set
+// returned by getScopesForGroups, so the user can never grant more
+// than the policy allows but can grant less.
+func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) {
+	// Build scopes list HTML
+	var scopesHTML strings.Builder
+	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
+	for _, scope := range p.RequestedScopes {
+		desc := html.EscapeString(getScopeDescription(scope))
+		escScope := html.EscapeString(scope)
+		// openid is mandatory in OIDC; render as a fixed item with
+		// a hidden input so the form still carries it on submit.
+		if scope == "openid" {
+			fmt.Fprintf(&scopesHTML,
+				"                <li class=\"scope-fixed\">\n"+
+					"                    <input type=\"hidden\" name=\"scope\" value=\"%s\">\n"+
+					"                    <strong>%s</strong> <span class=\"required\">(required)</span>\n"+
+					"                    <p>%s</p>\n"+
+					"                </li>\n", escScope, escScope, desc)
+			continue
+		}
+		fmt.Fprintf(&scopesHTML,
+			"                <li class=\"scope-optional\">\n"+
+				"                    <label>\n"+
+				"                        <input type=\"checkbox\" name=\"scope\" value=\"%s\" checked>\n"+
+				"                        <strong>%s</strong>\n"+
+				"                        <p>%s</p>\n"+
+				"                    </label>\n"+
+				"                </li>\n", escScope, escScope, desc)
+	}
+	scopesHTML.WriteString("            </ul>")
+
+	// Build device code section if applicable
+	var deviceCodeSection string
+	if p.DeviceCode != "" {
+		deviceCodeSection = fmt.Sprintf(`
+        <div class="client-info">
+            <h2>Device Code</h2>
+            <p class="device-code">%s</p>
+            <p style="margin-top: 10px; font-size: 12px;">Verify this code matches the one shown on your device.</p>
+        </div>`, html.EscapeString(p.DeviceCode))
+	}
+
+	// Build hidden fields. We always emit `consent_form_version=1`
+	// so the POST handler can tell apart "this submission came
+	// from the per-scope-checkbox UI introduced in 2026-05" vs
+	// "this is a legacy non-checkbox client posting `action=approve`
+	// without enumerating scopes". The legacy path approves the
+	// originally-granted set; the v1 path honors only the scopes
+	// the user kept checked. Without this marker, integration
+	// tests that programmatically post approve (no form rendering)
+	// would see all their scopes filtered out except openid,
+	// breaking refresh-token flows that need offline_access.
+	var hiddenFieldsHTML strings.Builder
+	hiddenFieldsHTML.WriteString("            <input type=\"hidden\" name=\"consent_form_version\" value=\"1\">\n")
+	for name, value := range p.HiddenFields {
+		fmt.Fprintf(&hiddenFieldsHTML, "            <input type=\"hidden\" name=\"%s\" value=\"%s\">\n",
+			html.EscapeString(name), html.EscapeString(value))
+	}
+
+	pageHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>%s</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 600px;
+            width: 100%%;
+            padding: 40px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .user-info {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 30px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .user-info strong {
+            color: #333;
+        }
+        .client-info {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            border-radius: 6px;
+        }
+        .client-info h2 {
+            font-size: 16px;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        .client-info p {
+            color: #555;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .device-code {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+            font-family: monospace;
+            letter-spacing: 2px;
+        }
+        .permissions {
+            margin-bottom: 30px;
+        }
+        .permissions h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .scopes-list {
+            list-style: none;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .scopes-list li {
+            padding: 16px 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .scopes-list li:last-child {
+            border-bottom: none;
+        }
+        .scopes-list li strong {
+            display: block;
+            color: #667eea;
+            font-size: 14px;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .scopes-list li p {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+            margin: 0;
+        }
+        .scopes-list li.scope-optional label {
+            display: grid;
+            grid-template-columns: 20px 1fr;
+            grid-template-rows: auto auto;
+            grid-column-gap: 12px;
+            align-items: start;
+            cursor: pointer;
+        }
+        .scopes-list li.scope-optional input[type="checkbox"] {
+            grid-row: 1 / span 2;
+            grid-column: 1;
+            margin-top: 2px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .scopes-list li.scope-optional strong {
+            grid-row: 1;
+            grid-column: 2;
+        }
+        .scopes-list li.scope-optional p {
+            grid-row: 2;
+            grid-column: 2;
+        }
+        .scopes-list li.scope-fixed .required {
+            color: #999;
+            font-size: 11px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+        .actions button {
+            flex: 1;
+            padding: 14px 28px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        button.approve {
+            background: #667eea;
+            color: white;
+        }
+        button.approve:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button.deny {
+            background: #e0e0e0;
+            color: #666;
+        }
+        button.deny:hover {
+            background: #d0d0d0;
+            color: #333;
+        }
+        .warning {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #856404;
+            line-height: 1.5;
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 30px 20px;
+            }
+            h1 {
+                font-size: 24px;
+            }
+            .actions {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>%s</h1>
+        <div class="user-info">
+            Logged in as <strong>%s</strong>
+        </div>
+        %s
+        <div class="client-info">
+            <h2>Application</h2>
+            <p><strong>Client ID:</strong> %s</p>
+        </div>
+
+        <div class="permissions">
+            <h2>Requested Permissions</h2>
+            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                This application is requesting access to:
+            </p>
+            %s
+        </div>
+
+        <form method="POST" action="%s" id="consentForm">
+%s            <input type="hidden" name="action" value="" id="actionInput">
+            <div class="actions">
+                <button type="submit" value="approve" class="approve" id="approveBtn">Authorize</button>
+                <button type="submit" value="deny" class="deny" id="denyBtn">Deny</button>
+            </div>
+        </form>
+        <script>
+            var btns = document.querySelectorAll('#consentForm button[type=submit]');
+            for (var i = 0; i < btns.length; i++) {
+                btns[i].addEventListener('click', function() {
+                    document.getElementById('actionInput').value = this.value;
+                    for (var j = 0; j < btns.length; j++) {
+                        btns[j].disabled = true;
+                    }
+                    document.getElementById('approveBtn').textContent = 'Authorizing...';
+                    document.getElementById('consentForm').submit();
+                });
+            }
+        </script>
+
+        <div class="warning">
+            <strong>⚠️ Security Notice:</strong> Only authorize applications you trust.
+            This will allow the application to perform actions on your behalf with the permissions listed above.
+        </div>
+    </div>
+</body>
+</html>`,
+		html.EscapeString(p.Title),
+		html.EscapeString(p.Title),
+		html.EscapeString(p.Username),
+		deviceCodeSection,
+		html.EscapeString(p.ClientID),
+		scopesHTML.String(),
+		html.EscapeString(p.FormAction),
+		hiddenFieldsHTML.String(),
+	)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(pageHTML))
+}
+
+// renderDeviceConsentPage renders the consent page for device code flow
+func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
+	h.renderConsentPage(w, consentPageParams{
+		Title:           "Authorize Device",
+		Username:        username,
+		ClientID:        request.GetClient().GetID(),
+		RequestedScopes: request.GetRequestedScopes(),
+		FormAction:      "/mcp/oauth2/device/verify",
+		HiddenFields:    map[string]string{"user_code": userCode},
+		DeviceCode:      userCode,
+	})
+}
+
+// renderResultPage renders a styled result page (success, denied, error).
+func (h *Handler) renderResultPage(w http.ResponseWriter, statusCode int, title, accentColor, heading, message, submessage string) {
+	pageHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>%s</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            max-width: 500px;
+            width: 100%%;
+            padding: 40px;
+            text-align: center;
+        }
+        h1 { color: %s; margin-bottom: 20px; font-size: 28px; }
+        p { color: #555; font-size: 16px; margin: 10px 0; line-height: 1.6; }
+        .sub { color: #999; font-size: 14px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>%s</h1>
+        <p>%s</p>
+        <p class="sub">%s</p>
+    </div>
+</body>
+</html>`,
+		html.EscapeString(title),
+		accentColor,
+		heading,
+		html.EscapeString(message),
+		html.EscapeString(submessage),
+	)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write([]byte(pageHTML))
+}
+
+// writeHTMLError writes a styled HTML error page
+func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
+	h.renderResultPage(w, http.StatusBadRequest, "Error", "#f44336",
+		"Error",
+		message,
+		"")
+}
+
+// isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
+func (h *Handler) isMethodAllowedByScopes(token fosite.AccessRequester, mcpRequest *mcpserver.MCPMessage) bool {
+	scopes := token.GetGrantedScopes()
+
+	// Check if user has mcp:write or mcp:read scopes
+	hasRead := false
+	hasWrite := false
+	for _, scope := range scopes {
+		if scope == "mcp:read" {
+			hasRead = true
+		}
+		if scope == "mcp:write" {
+			hasWrite = true
+		}
+	}
+
+	// Determine if the method requires write access
+	requiresWrite := h.methodRequiresWrite(mcpRequest)
+
+	// Allow if user has write access, or has read access and method doesn't require write
+	if hasWrite {
+		return true
+	}
+	if hasRead && !requiresWrite {
+		return true
+	}
+
+	return false
+}
+
+// methodRequiresWrite determines if an MCP method requires write access
+func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
+	// Read-only methods
+	readOnlyMethods := map[string]bool{
+		"initialize":     true,
+		"tools/list":     true,
+		"resources/list": true,
+		"resources/read": true,
+	}
+
+	// Check if method itself is read-only
+	if readOnlyMethods[mcpRequest.Method] {
+		return false
+	}
+
+	// For tools/call, check the tool name. The canonical allowlist
+	// lives in the mcpserver package (mcpserver.IsReadOnlyTool); we
+	// consult it here to avoid two parallel lists drifting apart.
+	if mcpRequest.Method == "tools/call" {
+		var params struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(mcpRequest.Params, &params); err == nil {
+			if mcpserver.IsReadOnlyTool(params.Name) {
+				return false
+			}
+		}
+	}
+
+	// All other methods/tools require write access
+	return true
+}
+
+// narrowConsentScopes computes the user-approved scope subset for
+// the auth-code consent flow.
+//
+// Inputs:
+//   - requestedScopes: what the OAuth2 client originally asked for.
+//   - form: the parsed POST body.
+//   - markerField: the name of the hidden marker input that the v1
+//     consent page emits (renderConsentPage sets
+//     `consent_form_version=1`). Its presence tells the handler the
+//     POST came from the per-scope-checkbox UI.
+//
+// Behavior:
+//   - If markerField is absent, the caller is a legacy non-checkbox
+//     client (or an integration test) — return the full
+//     requestedScopes set verbatim. Backward-compatible.
+//   - If markerField is present, return (form["scope"] ∩
+//     requestedScopes) plus mandatory `openid`. The user can grant
+//     any subset of what was requested by toggling checkboxes.
+//
+// In both cases the caller will run the result through
+// getScopesForGroups for the final policy intersection; this
+// helper handles only the user-acceptance dimension.
+func narrowConsentScopes(requestedScopes []string, form url.Values, markerField string) []string {
+	if !form.Has(markerField) {
+		out := make([]string, len(requestedScopes))
+		copy(out, requestedScopes)
+		return out
+	}
+	requestedSet := make(map[string]bool, len(requestedScopes))
+	for _, s := range requestedScopes {
+		requestedSet[s] = true
+	}
+	acceptedSet := map[string]bool{"openid": true}
+	for _, s := range form["scope"] {
+		if requestedSet[s] {
+			acceptedSet[s] = true
+		}
+	}
+	out := make([]string, 0, len(acceptedSet))
+	for s := range acceptedSet {
+		out = append(out, s)
+	}
+	return out
+}
+
+// narrowDeviceApprovalScopes computes the intersection of three sets:
+//   - the scopes the user checked on the consent form (form["scope"]),
+//   - the scopes the device originally requested,
+//   - the scopes group policy granted at device-authorize time
+//     (request.GetGrantedScopes()).
+//
+// As with narrowConsentScopes, the form's `consent_form_version`
+// marker selects between v1 (per-scope) and legacy (approve all
+// originally-granted) behavior. `openid` is always included
+// because OIDC requires it.
+func narrowDeviceApprovalScopes(form url.Values, request fosite.Requester) []string {
+	if !form.Has("consent_form_version") {
+		// Legacy: approve everything the device-authorize step
+		// already granted via group policy.
+		out := make([]string, 0, len(request.GetGrantedScopes()))
+		out = append(out, request.GetGrantedScopes()...)
+		return out
+	}
+	requestedSet := make(map[string]bool)
+	for _, s := range request.GetRequestedScopes() {
+		requestedSet[s] = true
+	}
+	grantedFromPolicy := make(map[string]bool)
+	for _, s := range request.GetGrantedScopes() {
+		grantedFromPolicy[s] = true
+	}
+	acceptedSet := map[string]bool{"openid": true}
+	for _, s := range form["scope"] {
+		if requestedSet[s] && grantedFromPolicy[s] {
+			acceptedSet[s] = true
+		}
+	}
+	out := make([]string, 0, len(acceptedSet))
+	for s := range acceptedSet {
+		out = append(out, s)
+	}
+	return out
+}
+
+// hasCondorScopes checks if any condor:/* scopes are present in the list
+func hasCondorScopes(scopes []string) bool {
+	for _, scope := range scopes {
+		if strings.HasPrefix(scope, "condor:/") {
+			return true
+		}
+	}
+	return false
+}
+
+// mapCondorScopesToAuthz maps condor:/* scopes to HTCondor authorization levels
+// Returns the authorization limits for the token (the "scope" claim in the
+// IDTOKEN, evaluated by HTCondor as `limit_authz`).
+//
+// Important security model note (read before assuming a granted condor:/*
+// scope means the user has that authz):
+//
+// HTCondor IDTOKEN authz claims *narrow* what the schedd will allow,
+// they do NOT expand it. The schedd still evaluates ALLOW_<LEVEL>
+// against the token subject. This is the opposite of SciTokens-style
+// authority delegation, where the scope claim is the source of truth
+// and the relying party trusts it directly. Concretely: a token with
+// `authz=[WRITE]` issued for alice@trust.domain only grants WRITE on
+// the schedd if alice is also in the schedd's ALLOW_WRITE list. If
+// she isn't, the schedd refuses regardless of what the token says.
+//
+// This is why we deliberately omit ADMINISTRATOR, CONFIG, DAEMON, and
+// NEGOTIATOR from the case below: even if the schedd's ACL would
+// otherwise grant alice ADMINISTRATOR (e.g. via OS-level identity),
+// minting an IDTOKEN that claims ADMINISTRATOR effectively grants
+// that authz to anyone holding the token. Restricting the mapping to
+// the operationally-useful read/write/advertise set keeps token
+// blast-radius bounded even if a token leaks.
+//
+// Maps 1-to-1 from condor:/FOO to FOO for the supported set; unknown
+// or restricted levels are silently dropped.
+//
+// TODO: when API-token / per-user-scope functionality lands, also
+// intersect this list with a per-user "permitted authz" computed from
+// group membership, so granting `condor:/WRITE` to a non-submitter
+// becomes a no-op rather than relying purely on schedd ACL.
+func mapCondorScopesToAuthz(scopes []string) []string {
+	authzMap := make(map[string]bool)
+
+	for _, scope := range scopes {
+		if !strings.HasPrefix(scope, "condor:/") {
+			continue
+		}
+
+		// Extract the authorization level from condor:/LEVEL
+		authLevel := strings.TrimPrefix(scope, "condor:/")
+		authLevel = strings.ToUpper(authLevel)
+
+		// Map scope 1-to-1 to HTCondor authorization levels
+		// Supported: READ, WRITE, ADVERTISE_STARTD, ADVERTISE_SCHEDD, ADVERTISE_MASTER
+		switch authLevel {
+		case "READ", "WRITE", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER":
+			authzMap[authLevel] = true
+		default:
+			// Unknown authorization level, ignore
+			continue
+		}
+	}
+
+	// Convert map to slice
+	var authz []string
+	for auth := range authzMap {
+		authz = append(authz, auth)
+	}
+
+	return authz
+}
+
+// condorIDTokenLifetime is how long an on-demand HTCondor IDTOKEN is
+// valid. It's minted per request for a single schedd interaction and
+// never handed to the client, so it stays short; cedar's session cache
+// keeps subsequent requests from re-handshaking.
+const condorIDTokenLifetime = 5 * time.Minute
+
+// generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
+func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
+	if h.signingKeyPath == "" {
+		return "", fmt.Errorf("signing key path not configured")
+	}
+
+	if h.trustDomain == "" {
+		return "", fmt.Errorf("trust domain not configured")
+	}
+
+	// Ensure username has domain suffix
+	if !strings.Contains(username, "@") {
+		if h.uidDomain == "" {
+			return "", fmt.Errorf("UID domain not configured")
+		}
+		username = username + "@" + h.uidDomain
+	}
+
+	// This IDTOKEN is minted on demand for a single schedd interaction
+	// and never handed to the client, so it can be short-lived. cedar
+	// caches the authenticated session after the first handshake, so a
+	// short expiry doesn't force a re-handshake mid-session; a fresh
+	// token is minted on the next cache-miss request anyway.
+	iat := time.Now().Unix()
+	exp := time.Now().Add(condorIDTokenLifetime).Unix()
+
+	// Check if condor:/* scopes are present
+	var authz []string
+	if hasCondorScopes(scopes) {
+		// Map condor:/* scopes to HTCondor authorization levels
+		authz = mapCondorScopesToAuthz(scopes)
+	} else {
+		// Map MCP scopes to HTCondor authorization levels (legacy behavior)
+		hasWrite := false
+		for _, scope := range scopes {
+			if scope == "mcp:write" {
+				hasWrite = true
+				break
+			}
+		}
+
+		if hasWrite {
+			// Full access for write scope
+			authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+		} else {
+			// Read-only access for read scope
+			authz = []string{"READ"}
+		}
+	}
+
+	h.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",
+		"username", username,
+		"trust_domain", h.trustDomain,
+		"iat", iat,
+		"exp", exp,
+		"authz", authz,
+		"scopes", scopes,
+		"signing_key_path", h.signingKeyPath,
+	)
+	// Mint via the local generator (NOT cedar's security.GenerateJWT)
+	// so we can backdate the `nbf` claim to absorb clock skew between
+	// this server and the schedd (we've seen even 1s of skew cause
+	// rejections). The token is otherwise a standard HTCondor IDTOKEN.
+	token, err := generateMCPAccessJWT(
+		filepath.Dir(h.signingKeyPath),
+		filepath.Base(h.signingKeyPath),
+		username,
+		h.trustDomain,
+		iat,
+		exp,
+		authz,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate JWT: %w", err)
+	}
+
+	return token, nil
+}

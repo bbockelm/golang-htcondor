@@ -27,26 +27,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
         with:
           go-version: '1.25'
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: webapi/frontend/package-lock.json
 
       - name: Install frontend deps
-        run: cd frontend && npm ci
+        run: cd webapi/frontend && npm ci
 
       - name: Build frontend (static export)
-        run: cd frontend && NODE_ENV=production npm run build
+        run: cd webapi/frontend && NODE_ENV=production npm run build
 
       - name: Cross-compile JupyterLab helpers
         # Honours JUPYTER_HELPER_TARGETS in the Makefile (currently
@@ -56,12 +56,15 @@ jobs:
         run: make build-jupyter-helper
 
       - name: Upload prepared assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: prepared-assets
+          # Both paths share webapi/ as their least-common-ancestor, so the
+          # uploaded artifact strips that prefix: it contains frontend/out and
+          # httpserver/jupyterhelperbin/dist (see the staging step below).
           path: |
-            frontend/out
-            httpserver/jupyterhelperbin/dist
+            webapi/frontend/out
+            webapi/httpserver/jupyterhelperbin/dist
           if-no-files-found: error
           retention-days: 1
 
@@ -81,31 +84,33 @@ jobs:
             goarch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
         with:
           go-version: '1.25'
           cache: true
 
       - name: Download prepared assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: prepared-assets
           path: prepared-assets
 
       - name: Stage assets into embed paths
         # Mirror what `make build-prod` does — copy the static export to
-        # httpserver/webui/dist where embed.go picks it up under the
+        # webapi/httpserver/webui/dist where embed.go picks it up under the
         # embed_frontend tag, and put the cross-compiled helpers back
-        # into httpserver/jupyterhelperbin/dist for embed_jupyter_helper.
+        # into webapi/httpserver/jupyterhelperbin/dist for embed_jupyter_helper.
+        # (The uploaded artifact stripped the webapi/ prefix, so the
+        # prepared-assets/ source paths are unprefixed.)
         run: |
-          rm -rf httpserver/webui/dist
-          cp -r prepared-assets/frontend/out httpserver/webui/dist
-          mkdir -p httpserver/jupyterhelperbin/dist
-          cp -r prepared-assets/httpserver/jupyterhelperbin/dist/. httpserver/jupyterhelperbin/dist/
-          ls httpserver/jupyterhelperbin/dist
+          rm -rf webapi/httpserver/webui/dist
+          cp -r prepared-assets/frontend/out webapi/httpserver/webui/dist
+          mkdir -p webapi/httpserver/jupyterhelperbin/dist
+          cp -r prepared-assets/httpserver/jupyterhelperbin/dist/. webapi/httpserver/jupyterhelperbin/dist/
+          ls webapi/httpserver/jupyterhelperbin/dist
 
       - name: Determine version
         id: ver
@@ -132,15 +137,18 @@ jobs:
         # -s -w strips the symbol table + DWARF info, knocking ~30% off
         # the binary size. The embedded version is still surfaced via
         # /api/v1/version because we inject it through -ldflags -X.
+        # Built from the webapi module (no committed go.work; the module resolves
+        # core via its `replace ... => ../`). GOWORK=off makes it independent of
+        # any local workspace.
         run: |
           mkdir -p dist
-          go build \
+          cd webapi && GOWORK=off go build \
             -trimpath \
             -tags "embed_frontend embed_jupyter_helper" \
             -ldflags "-s -w \
               -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
               -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
-            -o "dist/htcondor-api" \
+            -o "$GITHUB_WORKSPACE/dist/htcondor-api" \
             ./cmd/htcondor-api
 
       - name: Package
@@ -158,7 +166,7 @@ jobs:
           ls -l artifacts
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.package.outputs.name }}
           path: artifacts/*
@@ -177,7 +185,7 @@ jobs:
       contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -186,7 +194,7 @@ jobs:
         run: ls -l artifacts
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             artifacts/htcondor-api-*.tar.gz

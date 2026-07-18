@@ -24,13 +24,13 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
     - name: Build Docker image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
       with:
         context: .
         platforms: ${{ matrix.platform }}
@@ -45,7 +45,7 @@ jobs:
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
           golang-htcondor:test-${{ matrix.tag }} \
-          /bin/sh -c "go install gotest.tools/gotestsum@latest && gotestsum -- -v ./..."
+          /bin/sh -c "go install gotest.tools/gotestsum@latest && for d in . webapi localcredmon; do (cd \$d && GOWORK=off gotestsum -- -v ./...) || exit 1; done"
 
     - name: Run build in Docker
       run: |
@@ -53,7 +53,7 @@ jobs:
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
           golang-htcondor:test-${{ matrix.tag }} \
-          /bin/sh -c "git config --global --add safe.directory /workspace && go build -v ./..."
+          /bin/sh -c "git config --global --add safe.directory /workspace && for d in . webapi localcredmon; do (cd \$d && GOWORK=off go build -v ./...) || exit 1; done"
 
   docker-integration-test:
     name: Integration Test in Docker
@@ -61,13 +61,13 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
     - name: Build Docker image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
       with:
         context: .
         platforms: linux/amd64
@@ -83,9 +83,9 @@ jobs:
           -w /workspace \
           golang-htcondor:integration-test \
           /bin/bash -c "
-            # Run integration tests
+            # Run integration tests (webapi module holds httpserver)
             go install gotest.tools/gotestsum@latest
-            gotestsum -- -tags=integration -timeout=10m ./httpserver/
+            cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
           "
 
   docker-verify-env:
@@ -94,7 +94,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Build Docker image
       run: docker build -t golang-htcondor:verify .

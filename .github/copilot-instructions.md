@@ -84,7 +84,10 @@ golang-htcondor is a Go implementation of HTCondor client functionality, designe
 - Include usage examples in godoc where helpful
 - Keep documentation in sync with implementation
 - Update README.md for significant API changes
-- If there are implementation or design notes, please put the `.md` files in `design_notes`.
+- Implementation, design, summary, and findings notes are project docs: put **all**
+  such `.md` files in `design_notes/` (tracked, kept in the repo) — never at the
+  repository root or inside a package directory. Only user-facing docs stay next to
+  code: package `README.md`, `docs/`, and usage/endpoint guides (e.g. QUICKSTART).
 
 ## Testing Guidelines
 

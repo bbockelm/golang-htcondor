@@ -11,8 +11,13 @@
 # Output of the go coverage tool
 *.out
 
-# Go workspace file
+# Go workspace files are developer-local, not committed. This is a multi-module
+# repo (core at ./, plus ./webapi and ./localcredmon); each nested module carries
+# a `replace ... => ../` so it builds standalone, and the Makefile/CI build each
+# module in its own directory. Create a local go.work if you want a workspace for
+# editor tooling — it stays out of the tree.
 go.work
+go.work.sum
 
 # Dependency directories
 vendor/
@@ -42,10 +47,11 @@ cmd/htcondor-api/tmp/
 # Command binaries
 /htcondor-api
 /htcondor-mcp
+/htcondor-jupyter-helper
 
 # Build output (Makefile `build-prod` writes here)
 /bin/
-/httpserver/jupyterhelperbin/dist/
+/webapi/httpserver/jupyterhelperbin/dist/
 
 # Go cache directories (when GOCACHE/GOTMPDIR point at the repo)
 /.gocache/
@@ -54,18 +60,20 @@ cmd/htcondor-api/tmp/
 # Web UI build artifacts. The Next.js export is staged into
 # httpserver/webui/dist before the embed_frontend build; only the
 # .keep placeholder is tracked so go:embed always finds something.
-/httpserver/webui/dist/*
-!/httpserver/webui/dist/.keep
+/webapi/httpserver/webui/dist/*
+!/webapi/httpserver/webui/dist/.keep
 
 # HTCondor docs embed dir, staged by `make stage-condor-docs` from
 # reference/htcondor/docs. Only the .keep placeholder is tracked so
 # go:embed always has a directory to walk under the no-tag build.
-/condordocs/dist/*
-!/condordocs/dist/.keep
+/webapi/condordocs/dist/*
+!/webapi/condordocs/dist/.keep
 
 # Runtime log files (job.log etc. from running jobs/demos in the repo)
 /job.log
 /test*.log
+/webapi/httpserver/job.log
+/webapi/httpserver/test*.log
 
 # Test databases
 oauth2.db

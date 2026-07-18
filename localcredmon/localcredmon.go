@@ -30,8 +30,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 // Config holds the configuration for the local credmon
@@ -49,7 +48,7 @@ type Config struct {
 	KeyID string
 
 	// Algorithm is the signing algorithm (RS256 or ES256)
-	Algorithm jwa.SignatureAlgorithm
+	Algorithm jwt.SigningMethod
 
 	// Issuer is the token issuer URL
 	Issuer string
@@ -430,48 +429,47 @@ func (lc *LocalCredmon) refreshAccessToken(username, _ /* tokenName */, useFile 
 	// Generate scopes from template
 	scopes := strings.ReplaceAll(lc.config.AuthzTemplate, "{username}", username)
 
-	// Create the token
+	// Create the token claims
 	now := time.Now()
-	token := jwt.New()
-
-	// Standard claims
-	_ = token.Set(jwt.SubjectKey, username)
-	_ = token.Set(jwt.IssuerKey, lc.config.Issuer)
-	_ = token.Set(jwt.IssuedAtKey, now.Unix())
-	_ = token.Set(jwt.ExpirationKey, now.Add(lc.config.TokenLifetime).Unix())
-
-	// SciToken-specific claims
-	_ = token.Set("scope", scopes)
-	_ = token.Set("ver", "scitoken:2.0")
+	claims := jwt.MapClaims{
+		// Standard claims
+		"sub": username,
+		"iss": lc.config.Issuer,
+		"iat": now.Unix(),
+		"exp": now.Add(lc.config.TokenLifetime).Unix(),
+		// SciToken-specific claims
+		"scope": scopes,
+		"ver":   "scitoken:2.0",
+	}
 
 	// Audience (required for scitoken:2.0)
 	if len(lc.config.Audience) > 0 {
 		if len(lc.config.Audience) == 1 {
-			_ = token.Set(jwt.AudienceKey, lc.config.Audience[0])
+			claims["aud"] = lc.config.Audience[0]
 		} else {
-			_ = token.Set(jwt.AudienceKey, lc.config.Audience)
+			claims["aud"] = lc.config.Audience
 		}
 	}
 
-	// Sign the token
-	var signed []byte
-	var err error
-
-	switch key := lc.config.PrivateKey.(type) {
+	// Select the signing method from the key type.
+	var method jwt.SigningMethod
+	switch lc.config.PrivateKey.(type) {
 	case *rsa.PrivateKey:
-		signed, err = jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
+		method = jwt.SigningMethodRS256
 	case *ecdsa.PrivateKey:
-		signed, err = jwt.Sign(token, jwt.WithKey(jwa.ES256, key))
+		method = jwt.SigningMethodES256
 	default:
 		return fmt.Errorf("unsupported key type: %T", lc.config.PrivateKey)
 	}
 
+	// Sign the token.
+	signed, err := jwt.NewWithClaims(method, claims).SignedString(lc.config.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Write the token to the .use file (atomically)
-	return lc.writeAccessToken(useFile, string(signed))
+	return lc.writeAccessToken(useFile, signed)
 }
 
 // writeAccessToken writes the serialized token to the .use file atomically
