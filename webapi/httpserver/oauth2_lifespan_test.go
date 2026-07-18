@@ -267,7 +267,7 @@ func TestDeviceCodeFlowSetsRefreshExpiryFromConfig(t *testing.T) {
 		t.Fatalf("GenerateRefreshToken: %v", err)
 	}
 	refreshSig := strategy.RefreshTokenSignature(ctx, refreshToken)
-	if err := provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSig, request); err != nil {
+	if err := provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSig, "", request); err != nil {
 		t.Fatalf("CreateRefreshTokenSession: %v", err)
 	}
 

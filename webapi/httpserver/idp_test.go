@@ -271,7 +271,7 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	}
 
 	refreshTokenSignature := "test-refresh-token-signature"
-	if err := server.idpProvider.storage.CreateRefreshTokenSession(ctx, refreshTokenSignature, ar); err != nil {
+	if err := server.idpProvider.storage.CreateRefreshTokenSession(ctx, refreshTokenSignature, accessTokenSignature, ar); err != nil {
 		t.Fatalf("Failed to create refresh token session: %v", err)
 	}
 

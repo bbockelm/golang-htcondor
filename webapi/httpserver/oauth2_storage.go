@@ -229,8 +229,10 @@ func (s *OAuth2Storage) DeleteAccessTokenSession(ctx context.Context, signature 
 	return s.deleteTokenSession(ctx, "oauth2_access_tokens", signature)
 }
 
-// CreateRefreshTokenSession stores a refresh token session
-func (s *OAuth2Storage) CreateRefreshTokenSession(ctx context.Context, signature string, request fosite.Requester) error {
+// CreateRefreshTokenSession stores a refresh token session. As of fosite v0.49
+// the signature carries the associated access token signature; we key sessions
+// off the refresh signature and revoke by request ID, so it is not stored.
+func (s *OAuth2Storage) CreateRefreshTokenSession(ctx context.Context, signature string, _ string, request fosite.Requester) error {
 	return s.createTokenSession(ctx, "oauth2_refresh_tokens", signature, request)
 }
 
@@ -242,6 +244,17 @@ func (s *OAuth2Storage) GetRefreshTokenSession(ctx context.Context, signature st
 // DeleteRefreshTokenSession deletes a refresh token session
 func (s *OAuth2Storage) DeleteRefreshTokenSession(ctx context.Context, signature string) error {
 	return s.deleteTokenSession(ctx, "oauth2_refresh_tokens", signature)
+}
+
+// RotateRefreshToken revokes the refresh token and its associated access token
+// for the request, mirroring fosite's reference rotation semantics (required by
+// the RefreshTokenStorage interface as of v0.49). The refresh token signature is
+// unused because revocation is keyed by request ID.
+func (s *OAuth2Storage) RotateRefreshToken(ctx context.Context, requestID string, _ string) error {
+	if err := s.RevokeRefreshToken(ctx, requestID); err != nil {
+		return err
+	}
+	return s.RevokeAccessToken(ctx, requestID)
 }
 
 // CreateAuthorizeCodeSession stores an authorization code session
