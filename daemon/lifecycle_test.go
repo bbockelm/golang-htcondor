@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,92 @@ import (
 
 	"github.com/bbockelm/golang-htcondor/config"
 )
+
+// newLocalListener returns a bound loopback TCP listener for the lifecycle tests.
+func newLocalListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+// TestServeListenersServesAllAndDrains verifies ServeListeners runs the handler on every
+// listener (both reachable) and that a graceful Shutdown drains all of them, returning nil.
+func TestServeListenersServesAllAndDrains(t *testing.T) {
+	d := newTestDaemon(t)
+	ln1, ln2 := newLocalListener(t), newLocalListener(t)
+
+	var started atomic.Int32
+	serve := func(ctx context.Context, ln net.Listener) error {
+		started.Add(1)
+		go func() { <-ctx.Done(); _ = ln.Close() }() // unblock Accept on shutdown
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return err
+			}
+			_ = c.Close() // prove reachability, then drop
+		}
+	}
+	served := make(chan error, 1)
+	go func() { served <- d.ServeListeners(context.Background(), serve, ln1, ln2) }()
+
+	for _, ln := range []net.Listener{ln1, ln2} {
+		c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial %s: %v", ln.Addr(), err)
+		}
+		_ = c.Close()
+	}
+	if got := started.Load(); got != 2 {
+		t.Fatalf("serve started on %d listeners, want 2", got)
+	}
+
+	d.Shutdown()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("ServeListeners returned %v after Shutdown, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeListeners did not return after Shutdown")
+	}
+}
+
+// TestServeListenersReturnsFirstError verifies that when one serve loop fails, ServeListeners
+// cancels the rest and surfaces that error.
+func TestServeListenersReturnsFirstError(t *testing.T) {
+	d := newTestDaemon(t)
+	ln1, ln2 := newLocalListener(t), newLocalListener(t)
+	defer func() { _ = ln1.Close() }()
+	defer func() { _ = ln2.Close() }()
+
+	boom := errors.New("boom")
+	serve := func(ctx context.Context, ln net.Listener) error {
+		if ln == ln1 {
+			return boom // one listener fails immediately
+		}
+		<-ctx.Done() // the other must be cancelled by ServeListeners
+		return ctx.Err()
+	}
+	err := d.ServeListeners(context.Background(), serve, ln1, ln2)
+	if !errors.Is(err, boom) {
+		t.Fatalf("ServeListeners returned %v, want %v", err, boom)
+	}
+}
+
+// TestServeListenersRequiresListener verifies the no-listener guard.
+func TestServeListenersRequiresListener(t *testing.T) {
+	d := newTestDaemon(t)
+	if err := d.ServeListeners(context.Background(), func(context.Context, net.Listener) error { return nil }); err == nil {
+		t.Fatal("ServeListeners with no listeners returned nil, want an error")
+	}
+}
 
 // newTestDaemon builds a Daemon with an empty config and a logger, suitable for
 // exercising the lifecycle methods without touching condor_master.

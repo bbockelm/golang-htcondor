@@ -68,10 +68,11 @@ type Daemon struct {
 	shutdownCh   chan struct{} // closed by Shutdown to request a graceful stop
 	shutdownOnce sync.Once
 
-	mu             sync.Mutex
-	sharedPortName string // shared-port "sock" id, set by Listener when adopted
-	stopAlive      func()
-	onReconfig     []func(*config.Config)
+	mu               sync.Mutex
+	sharedPortName   string // shared-port "sock" id, set by Listener when adopted
+	adoptedInherited bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
+	stopAlive        func()
+	onReconfig       []func(*config.Config)
 }
 
 // New constructs a Daemon: it loads configuration and logging, and — when
@@ -180,6 +181,7 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 	if spln != nil {
 		d.mu.Lock()
 		d.sharedPortName = endpoint
+		d.adoptedInherited = true
 		d.mu.Unlock()
 		return spln, nil
 	}
@@ -187,12 +189,28 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 	// and inherited to us, rather than binding our own (which would EADDRINUSE against the
 	// master's already-bound port). See issue #119.
 	if iln := resolveInheritedListener(d.log); iln != nil {
+		d.mu.Lock()
+		d.adoptedInherited = true
+		d.mu.Unlock()
 		return iln, nil
 	}
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
 	return fallback()
+}
+
+// AdoptedInheritedListener reports whether Listener returned a socket inherited from
+// condor_master (a shared-port endpoint or a pre-created command socket, issue #119)
+// rather than the caller's fallback bind. It lets a daemon that also wants its own
+// directly-dialable port (e.g. a CCB advertising a public address) decide whether to bind
+// that extra listener: under the master the inherited socket is the managed command port,
+// so the explicit -listen port is an *additional* listener; standalone, the fallback already
+// bound -listen, so binding it again would collide. Valid only after Listener has been called.
+func (d *Daemon) AdoptedInheritedListener() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.adoptedInherited
 }
 
 // SharedPortName returns the shared-port "sock" id this daemon listens on (the
@@ -251,6 +269,21 @@ func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
 // serve must honor ctx cancellation (return promptly once ctx is done); a
 // cedar/server Server.Serve and a wrapped http.Server both satisfy this.
 func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.Context, net.Listener) error) error {
+	return d.ServeListeners(ctx, serve, ln)
+}
+
+// ServeListeners is Serve generalized to more than one listener: it runs serve(ctx, ln)
+// concurrently on each listener, all sharing the same handler, and returns when the first
+// serve loop errors, when ctx is cancelled, or on a termination signal (draining every serve
+// loop within ShutdownGrace on the graceful paths). Use it when a daemon must accept on
+// several sockets at once — e.g. a CCB that inherits its managed command socket from
+// condor_master AND binds its own directly-dialable public port. serve must be safe to run
+// concurrently across listeners (a cedar/server Server is: its Serve is a stateless
+// accept-loop over a shared dispatcher). Requires at least one listener.
+func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context, net.Listener) error, lns ...net.Listener) error {
+	if len(lns) == 0 {
+		return fmt.Errorf("daemon: ServeListeners requires at least one listener")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -258,8 +291,11 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- serve(ctx, ln) }()
+	serveErr := make(chan error, len(lns))
+	for _, ln := range lns {
+		ln := ln
+		go func() { serveErr <- serve(ctx, ln) }()
+	}
 
 	d.signalReady(ctx)
 	d.startKeepAlive(ctx)
@@ -311,23 +347,27 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 	for {
 		select {
 		case err := <-serveErr:
+			// One serve loop exited (a listener failed). Cancel the rest, wait for them
+			// within grace, and surface the first error.
+			cancel()
+			d.waitServe(serveErr, len(lns)-1)
 			return err
 		case <-ctx.Done():
-			d.waitServe(serveErr)
+			d.waitServe(serveErr, len(lns))
 			return ctx.Err()
 		case <-d.shutdownCh:
 			// Shutdown() was called (e.g. by a DC_OFF command handler); treat it
 			// like a termination signal: graceful, returns nil.
 			d.log.Info(logging.DestinationGeneral, "shutdown requested; shutting down")
 			cancel()
-			d.waitServe(serveErr)
+			d.waitServe(serveErr, len(lns))
 			return nil
 		case <-masterGoneCh:
 			// The condor_master parent died without signaling us. Treat it like a
 			// termination signal: graceful, returns nil. (The monitor already
 			// logged the specifics.)
 			cancel()
-			d.waitServe(serveErr)
+			d.waitServe(serveErr, len(lns))
 			return nil
 		case sig := <-sigCh:
 			switch sig {
@@ -336,7 +376,7 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener, serve func(context.
 			default: // SIGTERM / SIGINT
 				d.log.Info(logging.DestinationGeneral, "received termination signal; shutting down", "signal", sig.String())
 				cancel()
-				d.waitServe(serveErr)
+				d.waitServe(serveErr, len(lns))
 				return nil
 			}
 		}
@@ -357,12 +397,18 @@ func (d *Daemon) Reconfigure() {
 	d.reconfigure()
 }
 
-// waitServe waits for the served handler to finish, bounded by ShutdownGrace.
-func (d *Daemon) waitServe(serveErr <-chan error) {
-	select {
-	case <-serveErr:
-	case <-time.After(d.grace):
-		d.log.Warn(logging.DestinationGeneral, "served handler did not stop within grace period", "grace", d.grace.String())
+// waitServe waits for n serve loops to finish, bounded (in total) by ShutdownGrace, so a
+// hung handler cannot delay shutdown past the grace period regardless of listener count.
+func (d *Daemon) waitServe(serveErr <-chan error, n int) {
+	deadline := time.After(d.grace)
+	for i := 0; i < n; i++ {
+		select {
+		case <-serveErr:
+		case <-deadline:
+			d.log.Warn(logging.DestinationGeneral, "served handler(s) did not stop within grace period",
+				"grace", d.grace.String(), "pending", n-i)
+			return
+		}
 	}
 }
 
