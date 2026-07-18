@@ -11,11 +11,13 @@
 # Output of the go coverage tool
 *.out
 
-# Go workspace: this is a committed multi-module monorepo workspace (core,
-# webapi, localcredmon). go.work + go.work.sum are tracked so a fresh checkout
-# and CI resolve the workspace the same way; the Makefile's build/test targets
-# depend on it. Local per-developer overrides go in go.work.local instead.
-go.work.local
+# Go workspace files are developer-local, not committed. This is a multi-module
+# repo (core at ./, plus ./webapi and ./localcredmon); each nested module carries
+# a `replace ... => ../` so it builds standalone, and the Makefile/CI build each
+# module in its own directory. Create a local go.work if you want a workspace for
+# editor tooling — it stays out of the tree.
+go.work
+go.work.sum
 
 # Dependency directories
 vendor/

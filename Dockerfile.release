@@ -44,14 +44,14 @@ RUN apk --no-cache add ca-certificates make
 
 WORKDIR /build
 
-# Copy go mod files first for better caching. This is a multi-module Go
-# workspace (see go.work): the core library at the root plus the webapi and
-# localcredmon modules. Copy every module's go.mod/go.sum and the go.work so
-# `go mod download` can populate the cache for the whole workspace.
-COPY go.work go.mod go.sum ./
+# Copy go mod files first for better caching. This is a multi-module repo (no
+# committed go.work): the core library at the root plus the webapi and
+# localcredmon modules, each building standalone via its `replace ... => ../`.
+# Download each module's dependencies for the layer cache.
+COPY go.mod go.sum ./
 COPY webapi/go.mod webapi/go.sum ./webapi/
 COPY localcredmon/go.mod localcredmon/go.sum ./localcredmon/
-RUN go mod download
+RUN for d in . webapi localcredmon; do (cd "$d" && GOWORK=off go mod download) || exit 1; done
 
 # Copy source code
 COPY . .
@@ -83,7 +83,7 @@ RUN make build-jupyter-helper
 # frontend, the helpers, and the HTCondor reference docs so a deploy
 # from this image needs no external assets.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o htcondor-api ./webapi/cmd/htcondor-api
+    sh -c 'cd webapi && GOWORK=off go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o /build/htcondor-api ./cmd/htcondor-api'
 
 # Stage 2: Create minimal runtime image
 FROM alpine:3.21

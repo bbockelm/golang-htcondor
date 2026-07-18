@@ -105,7 +105,7 @@ func TestCreddHTTPIntegration(t *testing.T) {
 	// Build localcredmon daemon binary
 	localCredmonBin := filepath.Join(tempDir, "htcondor-localcredmon")
 	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", localCredmonBin, "./cmd/htcondor-localcredmon")
-	buildCmd.Dir = ".." // Build from project root
+	buildCmd.Dir = "../../localcredmon" // localcredmon is its own module at the repo root
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build localcredmon: %v, output: %s", err, string(output))
 	}

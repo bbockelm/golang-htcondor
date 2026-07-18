@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # GitHub Actions. Every action in .github/workflows/ is pinned to a commit SHA
+  # (with a "# vX.Y.Z" comment). Dependabot bumps the SHA and the comment
+  # together, so we keep the security of SHA pinning without the staleness.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Go modules — one set of updates per module in this multi-module repo. The
+  # `replace ... => ../` self-references are local and ignored by Dependabot; it
+  # manages the external dependencies (classad, cedar, fosite, ...). Minor and
+  # patch bumps are grouped to cut PR noise; majors come as individual PRs.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/"
+      - "/webapi"
+      - "/localcredmon"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
