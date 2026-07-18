@@ -57,7 +57,7 @@ fmt.Printf("auth=%s user=%s encrypted=%v\n",
     ping.AuthMethod, ping.User, ping.Encryption)
 
 // Locate a specific daemon by type + name.
-where, err := collector.LocateDaemon(ctx, "Schedd", "myschedd")
+where, err := collector.LocateDaemon(ctx, htcondor.DaemonSchedd, "myschedd")
 if err != nil {
     log.Fatal(err)
 }
