@@ -40,13 +40,13 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: webapi/frontend/package-lock.json
 
       - name: Install frontend deps
-        run: cd frontend && npm ci
+        run: cd webapi/frontend && npm ci
 
       - name: Build frontend (static export)
-        run: cd frontend && NODE_ENV=production npm run build
+        run: cd webapi/frontend && NODE_ENV=production npm run build
 
       - name: Cross-compile JupyterLab helpers
         # Honours JUPYTER_HELPER_TARGETS in the Makefile (currently
@@ -59,9 +59,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: prepared-assets
+          # Both paths share webapi/ as their least-common-ancestor, so the
+          # uploaded artifact strips that prefix: it contains frontend/out and
+          # httpserver/jupyterhelperbin/dist (see the staging step below).
           path: |
-            frontend/out
-            httpserver/jupyterhelperbin/dist
+            webapi/frontend/out
+            webapi/httpserver/jupyterhelperbin/dist
           if-no-files-found: error
           retention-days: 1
 
@@ -97,15 +100,17 @@ jobs:
 
       - name: Stage assets into embed paths
         # Mirror what `make build-prod` does — copy the static export to
-        # httpserver/webui/dist where embed.go picks it up under the
+        # webapi/httpserver/webui/dist where embed.go picks it up under the
         # embed_frontend tag, and put the cross-compiled helpers back
-        # into httpserver/jupyterhelperbin/dist for embed_jupyter_helper.
+        # into webapi/httpserver/jupyterhelperbin/dist for embed_jupyter_helper.
+        # (The uploaded artifact stripped the webapi/ prefix, so the
+        # prepared-assets/ source paths are unprefixed.)
         run: |
-          rm -rf httpserver/webui/dist
-          cp -r prepared-assets/frontend/out httpserver/webui/dist
-          mkdir -p httpserver/jupyterhelperbin/dist
-          cp -r prepared-assets/httpserver/jupyterhelperbin/dist/. httpserver/jupyterhelperbin/dist/
-          ls httpserver/jupyterhelperbin/dist
+          rm -rf webapi/httpserver/webui/dist
+          cp -r prepared-assets/frontend/out webapi/httpserver/webui/dist
+          mkdir -p webapi/httpserver/jupyterhelperbin/dist
+          cp -r prepared-assets/httpserver/jupyterhelperbin/dist/. webapi/httpserver/jupyterhelperbin/dist/
+          ls webapi/httpserver/jupyterhelperbin/dist
 
       - name: Determine version
         id: ver
@@ -141,7 +146,7 @@ jobs:
               -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
               -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
             -o "dist/htcondor-api" \
-            ./cmd/htcondor-api
+            ./webapi/cmd/htcondor-api
 
       - name: Package
         id: package
