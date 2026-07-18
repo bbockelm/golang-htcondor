@@ -7,8 +7,8 @@ replace github.com/bbockelm/golang-htcondor => ../..
 require github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 
 require (
-	github.com/PelicanPlatform/classad v0.4.0 // indirect
-	github.com/bbockelm/cedar v0.5.2 // indirect
+	github.com/PelicanPlatform/classad v0.8.0 // indirect
+	github.com/bbockelm/cedar v0.5.5 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

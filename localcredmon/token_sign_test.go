@@ -66,6 +66,7 @@ func TestRefreshAccessTokenSigning(t *testing.T) {
 				t.Fatalf("refreshAccessToken: %v", err)
 			}
 
+			//nolint:gosec // useFile is a temp path this test just wrote
 			raw, err := os.ReadFile(useFile)
 			if err != nil {
 				t.Fatalf("read use file: %v", err)
