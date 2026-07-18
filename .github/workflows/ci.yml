@@ -47,10 +47,11 @@ jobs:
       run: go install gotest.tools/gotestsum@latest
 
     - name: Run go vet
-      run: go vet ./...
+      # Multi-module workspace (see go.work): core, webapi, localcredmon.
+      run: go vet ./... ./webapi/... ./localcredmon/...
 
     - name: Run tests
-      run: gotestsum --junitfile=test-results.xml -- -race -coverprofile=coverage.out -covermode=atomic ./...
+      run: gotestsum --junitfile=test-results.xml -- -race -coverprofile=coverage.out -covermode=atomic ./... ./webapi/... ./localcredmon/...
 
     - name: Upload coverage to Codecov
       if: matrix.go-version == '1.25'
@@ -94,9 +95,13 @@ jobs:
         cache: true
 
     - name: Build
-      run: go build -v ./...
+      run: go build -v ./... ./webapi/... ./localcredmon/...
 
     - name: Build examples
+      # Example modules are standalone (own go.mod + replace => ../..) and are
+      # not part of the root go.work, so build them with the workspace off.
+      env:
+        GOWORK: off
       run: |
         cd examples/basic && go build -v
         cd ../file_transfer_demo && go build -v

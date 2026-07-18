@@ -10,11 +10,12 @@ FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 WORKDIR /build/frontend
 
 # Install dependencies first (better layer caching when source changes).
-COPY frontend/package.json frontend/package-lock.json* ./
+# The Next.js app now lives in the webapi module at webapi/frontend/.
+COPY webapi/frontend/package.json webapi/frontend/package-lock.json* ./
 RUN npm ci || npm install
 
 # Copy frontend sources and produce the static export at /build/frontend/out.
-COPY frontend/. ./
+COPY webapi/frontend/. ./
 RUN NODE_ENV=production npm run build
 
 # --- Stage 1b: HTCondor docs ---
@@ -43,8 +44,13 @@ RUN apk --no-cache add ca-certificates make
 
 WORKDIR /build
 
-# Copy go mod files first for better caching
-COPY go.mod go.sum ./
+# Copy go mod files first for better caching. This is a multi-module Go
+# workspace (see go.work): the core library at the root plus the webapi and
+# localcredmon modules. Copy every module's go.mod/go.sum and the go.work so
+# `go mod download` can populate the cache for the whole workspace.
+COPY go.work go.mod go.sum ./
+COPY webapi/go.mod webapi/go.sum ./webapi/
+COPY localcredmon/go.mod localcredmon/go.sum ./localcredmon/
 RUN go mod download
 
 # Copy source code
@@ -53,7 +59,7 @@ COPY . .
 # Stage the frontend export into the embed directory expected by the
 # webui package, then build with -tags embed_frontend so go:embed picks
 # it up.
-COPY --from=frontend-builder /build/frontend/out /build/httpserver/webui/dist
+COPY --from=frontend-builder /build/frontend/out /build/webapi/httpserver/webui/dist
 
 # Stage the HTCondor source from the docs stage and run the Make
 # target that copies the curated RST files into condordocs/dist/. The
@@ -77,7 +83,7 @@ RUN make build-jupyter-helper
 # frontend, the helpers, and the HTCondor reference docs so a deploy
 # from this image needs no external assets.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o htcondor-api ./cmd/htcondor-api
+    go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o htcondor-api ./webapi/cmd/htcondor-api
 
 # Stage 2: Create minimal runtime image
 FROM alpine:3.21

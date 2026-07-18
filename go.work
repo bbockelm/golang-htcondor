@@ -1,0 +1,11 @@
+go 1.25.7
+
+// Multi-module monorepo. The core HTCondor library lives at the repo root;
+// the web/OAuth application (webapi) and the local credential monitor
+// (localcredmon) are separate modules so consumers of the core library do
+// not inherit their heavier dependency trees. See design_notes/API_MODULE_SPLIT.md.
+use (
+	.
+	./webapi
+	./localcredmon
+)
