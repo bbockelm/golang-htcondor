@@ -251,6 +251,17 @@ tidy-all: ## Run go mod tidy on EVERY module in the repo (app modules, examples,
 		(cd "$$dir" && GOWORK=off go mod tidy) || exit 1; \
 	done
 
+.PHONY: tidy-check
+tidy-check: ## Fail if any module's go.mod/go.sum is not tidy (run `make tidy-all` to fix)
+	@echo "Verifying every module is tidy..."
+	@$(MAKE) --no-print-directory tidy-all >/dev/null
+	@if ! git diff --quiet -- '*go.mod' '*go.sum'; then \
+		echo "ERROR: go.mod/go.sum is out of date. Run 'make tidy-all' and commit the result:"; \
+		git --no-pager diff --stat -- '*go.mod' '*go.sum'; \
+		exit 1; \
+	fi
+	@echo "All modules tidy."
+
 .PHONY: verify
 verify: ## Verify dependencies
 	@echo "Verifying dependencies..."
