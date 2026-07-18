@@ -57,9 +57,46 @@ func TestCollectorLocateDaemon(t *testing.T) {
 	collector := NewCollector("collector.example.com:9618")
 	ctx := context.Background()
 
-	_, err := collector.LocateDaemon(ctx, "Schedd", "test_schedd")
+	_, err := collector.LocateDaemon(ctx, DaemonSchedd, "test_schedd")
 	if err == nil {
 		t.Error("Expected error when connecting to non-existent collector")
+	}
+}
+
+// TestDaemonTypeAdType verifies each DaemonType translates to the collector-query
+// ad type LocateDaemon passes on, and that the resulting ad type resolves to the
+// correct query command and TargetType (i.e. locating a daemon type queries for
+// the right ad, not the daemon-type string used verbatim).
+func TestDaemonTypeAdType(t *testing.T) {
+	tests := []struct {
+		dt         DaemonType
+		wantAdType string
+		wantCmd    commands.CommandType
+		wantTarget string
+	}{
+		{DaemonSchedd, "ScheddAd", commands.QUERY_SCHEDD_ADS, "Scheduler"},
+		{DaemonStartd, "StartdAd", commands.QUERY_STARTD_ADS, "Machine"},
+		{DaemonMaster, "MasterAd", commands.QUERY_MASTER_ADS, "DaemonMaster"},
+		{DaemonCollector, "CollectorAd", commands.QUERY_COLLECTOR_ADS, "Collector"},
+		{DaemonNegotiator, "NegotiatorAd", commands.QUERY_NEGOTIATOR_ADS, "Negotiator"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.dt), func(t *testing.T) {
+			adType := tt.dt.adType()
+			if adType != tt.wantAdType {
+				t.Errorf("%s.adType() = %q, want %q", tt.dt, adType, tt.wantAdType)
+			}
+			if cmd := getCommandForAdType(adType); cmd != tt.wantCmd {
+				t.Errorf("getCommandForAdType(%q) = %v, want %v", adType, cmd, tt.wantCmd)
+			}
+			if tgt := getTargetTypeForAdType(adType); tgt != tt.wantTarget {
+				t.Errorf("getTargetTypeForAdType(%q) = %q, want %q", adType, tgt, tt.wantTarget)
+			}
+		})
+	}
+	// An unknown/custom daemon type passes through unchanged.
+	if got := DaemonType("Custom").adType(); got != "Custom" {
+		t.Errorf("DaemonType(\"Custom\").adType() = %q, want %q", got, "Custom")
 	}
 }
 
