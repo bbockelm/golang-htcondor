@@ -28,8 +28,10 @@ func TestServeListenersServesAllAndDrains(t *testing.T) {
 	ln1, ln2 := newLocalListener(t), newLocalListener(t)
 
 	var started atomic.Int32
+	entered := make(chan struct{}, 2)
 	serve := func(ctx context.Context, ln net.Listener) error {
 		started.Add(1)
+		entered <- struct{}{}
 		go func() { <-ctx.Done(); _ = ln.Close() }() // unblock Accept on shutdown
 		for {
 			c, err := ln.Accept()
@@ -45,8 +47,21 @@ func TestServeListenersServesAllAndDrains(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.ServeListeners(context.Background(), serve, ln1, ln2) }()
 
+	// Wait until the handler has actually been entered on both listeners before
+	// asserting the count. Dialing a bound listener succeeds via the kernel
+	// accept backlog even before serve()'s Accept runs, so a successful dial
+	// can't stand in for "the handler started" — only the entry signal can.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("serve entered on %d listeners, want 2", started.Load())
+		}
+	}
+
+	dialer := net.Dialer{Timeout: 2 * time.Second}
 	for _, ln := range []net.Listener{ln1, ln2} {
-		c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+		c, err := dialer.DialContext(context.Background(), "tcp", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("dial %s: %v", ln.Addr(), err)
 		}
