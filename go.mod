@@ -3,8 +3,8 @@ module github.com/bbockelm/golang-htcondor
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.4.0
-	github.com/bbockelm/cedar v0.5.2
+	github.com/PelicanPlatform/classad v0.8.0
+	github.com/bbockelm/cedar v0.5.5
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/stretchr/testify v1.11.1
@@ -14,7 +14,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.4.0
+	github.com/PelicanPlatform/classad/collections v0.8.0
 	github.com/pressly/goose/v3 v3.27.1
 )
 
@@ -28,6 +28,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
+	github.com/tidwall/btree v1.8.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )

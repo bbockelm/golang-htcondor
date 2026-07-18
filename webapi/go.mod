@@ -3,8 +3,8 @@ module github.com/bbockelm/golang-htcondor/webapi
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.4.0
-	github.com/bbockelm/cedar v0.5.2
+	github.com/PelicanPlatform/classad v0.8.0
+	github.com/bbockelm/cedar v0.5.5
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/glebarez/sqlite v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -17,7 +17,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.4.0
+	github.com/PelicanPlatform/classad/collections v0.8.0
 	github.com/hashicorp/yamux v0.1.2
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/prometheus/client_golang v1.13.0
@@ -36,6 +36,7 @@ require (
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
+	github.com/tidwall/btree v1.8.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 )

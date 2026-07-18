@@ -1,11 +1,11 @@
-github.com/PelicanPlatform/classad v0.4.0 h1:d409NSsyWQvMwBIPmwrX+6qTfWrDxlM6RdMIpP2uIWw=
-github.com/PelicanPlatform/classad v0.4.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/PelicanPlatform/classad/collections v0.4.0 h1:WJQE/QApsKqmXI5dkDZjHys4PgnDKwY0cCz4anQc7cw=
-github.com/PelicanPlatform/classad/collections v0.4.0/go.mod h1:fAh/iDJ+5wnWOSx229p4irWQu8y0fKcG/4L2LuskVYY=
+github.com/PelicanPlatform/classad v0.8.0 h1:U2CV/k2iE+8DkwbApTfOb8ue76/E/m0UBXlmUKwyQzU=
+github.com/PelicanPlatform/classad v0.8.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad/collections v0.8.0 h1:qlNkYij8O52beqb0ekrYKrCT1iirnzBY2y3hkfxXCdg=
+github.com/PelicanPlatform/classad/collections v0.8.0/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
 github.com/RoaringBitmap/roaring/v2 v2.19.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
-github.com/bbockelm/cedar v0.5.2 h1:OKbxiVD0zjXGgyoNELyIF5w1p9nrtQIm2y4Xwk1WWEk=
-github.com/bbockelm/cedar v0.5.2/go.mod h1:xzqomHCxjE/F9J5Wf6I/VJ/ZM6XHed4bhZEqhwlqCLY=
+github.com/bbockelm/cedar v0.5.5 h1:IWkP5DjKpcwayo/O+BV+yFUCaHV/Uo6g0huYYKNhRnI=
+github.com/bbockelm/cedar v0.5.5/go.mod h1:xzqomHCxjE/F9J5Wf6I/VJ/ZM6XHed4bhZEqhwlqCLY=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
 github.com/bbockelm/gosssd v0.0.1/go.mod h1:Hz8jIcIkQnFmA/ekP2ZWpnPqmyIxftPPFsi+Y3wqRL0=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
@@ -56,6 +56,8 @@ github.com/sethvargo/go-retry v0.3.0 h1:EEt31A35QhrcRZtrYFDTBg91cqZVnFL2navjDrah
 github.com/sethvargo/go-retry v0.3.0/go.mod h1:mNX17F0C/HguQMyMyJxcnU471gOZGxCLyYaFyAZraas=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+github.com/tidwall/btree v1.8.1 h1:27ehoXvm5AG/g+1VxLS1SD3vRhp/H7LuEfwNvddEdmA=
+github.com/tidwall/btree v1.8.1/go.mod h1:jBbTdUWhSZClZWoDg54VnvV7/54modSOzDN7VXftj1A=
 go.uber.org/multierr v1.11.0 h1:blXXJkSxSSfBVBlC76pxqeO+LN3aDfLQo+309xJstO0=
 go.uber.org/multierr v1.11.0/go.mod h1:20+QtiLqy0Nd6FdQB9TLXag12DsQkrbs3htMFfDN80Y=
 golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
