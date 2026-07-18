@@ -920,7 +920,7 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 	}
 
 	refreshSignature := strategy.RefreshTokenSignature(ctx, refreshToken)
-	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, request); err != nil {
+	if err := h.oauth2Provider.GetStorage().CreateRefreshTokenSession(ctx, refreshSignature, signature, request); err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to store refresh token", "error", err)
 		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return

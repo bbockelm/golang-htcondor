@@ -1408,8 +1408,15 @@ func (s *mockSSOStorage) GetAccessTokenSession(ctx context.Context, signature st
 	return nil, fosite.ErrNotFound
 }
 
-func (s *mockSSOStorage) CreateRefreshTokenSession(ctx context.Context, signature string, request fosite.Requester) error {
+func (s *mockSSOStorage) CreateRefreshTokenSession(ctx context.Context, signature string, _ string, request fosite.Requester) error {
 	return nil
+}
+
+func (s *mockSSOStorage) RotateRefreshToken(ctx context.Context, requestID string, _ string) error {
+	if err := s.RevokeRefreshToken(ctx, requestID); err != nil {
+		return err
+	}
+	return s.RevokeAccessToken(ctx, requestID)
 }
 
 func (s *mockSSOStorage) DeleteRefreshTokenSession(ctx context.Context, signature string) error {

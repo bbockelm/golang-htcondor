@@ -256,8 +256,17 @@ func (s *IDPStorage) DeleteAccessTokenSession(ctx context.Context, signature str
 }
 
 // CreateRefreshTokenSession stores a refresh token session
-func (s *IDPStorage) CreateRefreshTokenSession(ctx context.Context, signature string, request fosite.Requester) error {
+func (s *IDPStorage) CreateRefreshTokenSession(ctx context.Context, signature string, _ string, request fosite.Requester) error {
 	return s.createTokenSession(ctx, "idp_refresh_tokens", signature, request)
+}
+
+// RotateRefreshToken revokes the refresh token and its associated access token
+// for the request (required by fosite's RefreshTokenStorage as of v0.49).
+func (s *IDPStorage) RotateRefreshToken(ctx context.Context, requestID string, _ string) error {
+	if err := s.RevokeRefreshToken(ctx, requestID); err != nil {
+		return err
+	}
+	return s.RevokeAccessToken(ctx, requestID)
 }
 
 // GetRefreshTokenSession retrieves a refresh token session
