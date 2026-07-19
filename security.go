@@ -465,10 +465,10 @@ func isStaleAuthDefault(v string) bool {
 	return strings.EqualFold(strings.ReplaceAll(v, " ", ""), staleGeneratedAuthDefault)
 }
 
-// appendMethod appends name to a comma-separated method list if not already present.
+// appendMethod appends name to a method list if not already present.
 func appendMethod(list, name string) string {
-	for _, m := range strings.Split(list, ",") {
-		if strings.EqualFold(strings.TrimSpace(m), name) {
+	for _, m := range config.SplitConfigList(list) {
+		if strings.EqualFold(m, name) {
 			return list
 		}
 	}
@@ -547,8 +547,8 @@ func mapAuthMethods(methods string) []security.AuthMethod {
 	}
 
 	var result []security.AuthMethod
-	for _, method := range strings.Split(methods, ",") {
-		method = strings.ToUpper(strings.TrimSpace(method))
+	for _, method := range config.SplitConfigList(methods) {
+		method = strings.ToUpper(method)
 		switch method {
 		case "SSL":
 			result = append(result, security.AuthSSL)
@@ -593,8 +593,8 @@ func mapCryptoMethods(methods string) []security.CryptoMethod {
 	}
 
 	var result []security.CryptoMethod
-	for _, method := range strings.Split(methods, ",") {
-		method = strings.ToUpper(strings.TrimSpace(method))
+	for _, method := range config.SplitConfigList(methods) {
+		method = strings.ToUpper(method)
 		switch method {
 		case "AES":
 			result = append(result, security.CryptoAES)

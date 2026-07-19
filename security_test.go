@@ -331,6 +331,12 @@ func TestMapAuthMethods(t *testing.T) {
 		{"", 0, false, false},         // empty string
 		{"SSL,KERBEROS,PASSWORD,FS", 4, true, false},
 		{"ANONYMOUS", 1, false, false}, // ANONYMOUS maps to AuthNone
+		// HTCondor lists may be whitespace-separated (StringList delimiters are
+		// comma AND space). These are real deployed values that previously
+		// collapsed to one unrecognized token and dropped to NONE.
+		{"FS TOKEN SCITOKENS SSL", 4, true, true},         // SEC_DEFAULT_AUTHENTICATION_METHODS
+		{"FS SSL PASSWORD", 3, true, false},               // TOOL.SEC_CLIENT_AUTHENTICATION_METHODS
+		{"FS SSL PASSWORD,ANONYMOUS", 4, true, false},     // mixed space + appended comma
 	}
 
 	for _, tt := range tests {
@@ -369,6 +375,9 @@ func TestMapCryptoMethods(t *testing.T) {
 		{"AES,BLOWFISH", 2, []security.CryptoMethod{security.CryptoAES, security.CryptoBlowfish}},
 		{"aes,blowfish,3des", 3, []security.CryptoMethod{security.CryptoAES, security.CryptoBlowfish, security.Crypto3DES}},
 		{"", 0, []security.CryptoMethod{}},
+		// Whitespace-separated: the real deployed SEC_DEFAULT_CRYPTO_METHODS that
+		// previously collapsed to one unrecognized token and yielded NO crypto.
+		{"AES BLOWFISH 3DES", 3, []security.CryptoMethod{security.CryptoAES, security.CryptoBlowfish, security.Crypto3DES}},
 	}
 
 	for _, tt := range tests {
