@@ -965,6 +965,7 @@ func estimateClassAdSize(ad *classad.ClassAd) int {
 // "ScheddAd" ad type. LocateDaemon does that translation for you (see adType).
 type DaemonType string
 
+// Daemon types accepted by LocateDaemon.
 const (
 	DaemonSchedd     DaemonType = "Schedd"
 	DaemonStartd     DaemonType = "Startd"
