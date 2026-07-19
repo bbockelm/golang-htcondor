@@ -30,6 +30,7 @@ func newTestConfig(t *testing.T, params map[string]string) *config.Config {
 // readLog returns the contents of a logger's file output.
 func readLog(t *testing.T, path string) string {
 	t.Helper()
+	//nolint:gosec // G304: test-only, path is a t.TempDir() file
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read log: %v", err)

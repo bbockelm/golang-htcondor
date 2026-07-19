@@ -107,12 +107,12 @@ func NewEmpty() *Config {
 	return cfg
 }
 
-// NewWithOptions creates a new Config with specified options
 // Options returns the options this Config was constructed with. It lets a caller reload
 // (e.g. on condor_reconfig) while preserving subsystem and local-name prefix resolution —
 // a bare config.New() reload would drop them and stop resolving <SUBSYS>.PARAM overrides.
 func (c *Config) Options() ConfigOptions { return c.options }
 
+// NewWithOptions creates a new Config with specified options.
 func NewWithOptions(opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),

@@ -381,6 +381,7 @@ func New(config *Config) (*Logger, error) {
 		}
 
 		// 0644 to match C++ HTCondor's world-readable daemon logs.
+		//nolint:gosec // G302: daemon logs are intentionally world-readable, as in C++ HTCondor
 		f, err := os.OpenFile(config.OutputPath, flags, 0644)
 		if err != nil {
 			// If we can't open the log file (permission denied, etc.), fall back to stdout
@@ -712,18 +713,6 @@ func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
 func (l *Logger) buildFilteredLogger(w io.Writer) *slog.Logger {
 	base := slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
 	return slog.New(&filteringHandler{handler: base, levels: &l.levels})
-}
-
-// currentWriter returns the Logger's current output writer (the open log file, or
-// stdout/stderr), so a live handler rebuild targets the same destination.
-func (l *Logger) currentWriter() io.Writer {
-	if f := l.logFile.Load(); f != nil {
-		return f
-	}
-	if strings.EqualFold(l.config.OutputPath, "stdout") || l.config.OutputPath == "" {
-		return os.Stdout
-	}
-	return os.Stderr
 }
 
 // ApplyLevels replaces the live per-destination verbosity configuration. Because the

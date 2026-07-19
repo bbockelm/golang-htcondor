@@ -422,27 +422,60 @@ func getSecurityLevel(cfg *config.Config, context, feature string) string {
 // getSecurityMethods retrieves a comma-separated list of security methods
 // For example: SEC_CLIENT_AUTHENTICATION_METHODS, falling back to SEC_DEFAULT_AUTHENTICATION_METHODS
 func getSecurityMethods(cfg *config.Config, context, feature string) string {
-	// Try context-specific setting first
-	contextKey := fmt.Sprintf("SEC_%s_%s", context, feature)
-	if value, ok := cfg.Get(contextKey); ok {
+	// An operator's context-specific setting always wins.
+	if value, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", context, feature)); ok && value != "" {
 		return value
 	}
 
-	// Fall back to DEFAULT setting
-	defaultKey := fmt.Sprintf("SEC_DEFAULT_%s", feature)
-	if value, ok := cfg.Get(defaultKey); ok {
-		return value
-	}
-
-	// Return HTCondor's default based on platform
 	switch feature {
 	case "AUTHENTICATION_METHODS":
-		return getDefaultAuthMethods()
+		// An operator's SEC_DEFAULT_AUTHENTICATION_METHODS wins -- but ignore the stale
+		// generated-table value (staleGeneratedAuthDefault, from before TOKEN split into
+		// IDTOKENS/SCITOKENS) so it cannot shadow the programmatic default. There is no
+		// standalone param_info.in default for this key, so a resolved value is either the
+		// operator's or that one stale generated artifact.
+		methods := getDefaultAuthMethods()
+		if v, ok := cfg.Get("SEC_DEFAULT_AUTHENTICATION_METHODS"); ok && v != "" && !isStaleAuthDefault(v) {
+			methods = v
+		}
+		// CLIENT and READ contexts append ANONYMOUS (an auth method that does not actually
+		// authenticate) so an encrypted-but-unauthenticated READ works -- matching
+		// HTCondor's SEC_CLIENT/READ_AUTHENTICATION_METHODS = $(SEC_DEFAULT_...),ANONYMOUS.
+		if context == "CLIENT" || context == "READ" {
+			methods = appendMethod(methods, "ANONYMOUS")
+		}
+		return methods
 	case "CRYPTO_METHODS":
-		return "AES" // HTCondor 9.0+ default
+		if value, ok := cfg.Get("SEC_DEFAULT_CRYPTO_METHODS"); ok && value != "" {
+			return value
+		}
+		return "AES" // HTCondor 9.0+ default; cedar implements AES-GCM only
 	}
 
 	return ""
+}
+
+// staleGeneratedAuthDefault is the value the generated param table ships for
+// SEC_DEFAULT_AUTHENTICATION_METHODS (param_defaults.go). It predates HTCondor splitting
+// TOKEN into IDTOKENS/SCITOKENS and adding SSL, so it must not be treated as a configured
+// default; getSecurityMethods substitutes the programmatic default when it sees this value.
+const staleGeneratedAuthDefault = "FS,TOKEN"
+
+func isStaleAuthDefault(v string) bool {
+	return strings.EqualFold(strings.ReplaceAll(v, " ", ""), staleGeneratedAuthDefault)
+}
+
+// appendMethod appends name to a comma-separated method list if not already present.
+func appendMethod(list, name string) string {
+	for _, m := range strings.Split(list, ",") {
+		if strings.EqualFold(strings.TrimSpace(m), name) {
+			return list
+		}
+	}
+	if list == "" {
+		return name
+	}
+	return list + "," + name
 }
 
 // getDefaultAuthMethods returns the fallback authentication-methods
@@ -460,12 +493,39 @@ func getSecurityMethods(cfg *config.Config, context, feature string) string {
 // IDTOKENS were filtered by `iss`/`kid` mismatch, and the handshake
 // failed with "no compatible authentication methods found" even
 // though SSL was available on both sides.
+// authMethodStdOrder is HTCondor's standard authentication-method precedence, mirroring
+// the C++ SEC_STD_AUTH_METHOD_NAMES macro (condor_utils/param_info.cpp): FS, IDTOKENS,
+// PASSWORD, KERBEROS, SCITOKENS, SSL. cedar's negotiation walks the list in order, trying
+// each in turn (FS cheap-when-applicable first, SSL the broadest fallback last).
+var authMethodStdOrder = []string{"FS", "IDTOKENS", "PASSWORD", "KERBEROS", "SCITOKENS", "SSL"}
+
+// getDefaultAuthMethods builds the default authentication-method list programmatically: the
+// standard order above, filtered to the methods cedar actually implements. This is the Go
+// analogue of C++ building SEC_STD_AUTH_METHOD_NAMES from compile-time HAVE_EXT_* flags --
+// offering a method cedar cannot perform would just make negotiation fail. Today it yields
+// "FS,IDTOKENS,SCITOKENS,SSL"; PASSWORD and KERBEROS join automatically once cedar
+// implements them (see cedarImplementsAuthMethod).
 func getDefaultAuthMethods() string {
-	// Unix/Linux/macOS default. The order matters: cedar's
-	// negotiation walks the list and tries each method in turn, so
-	// FS goes first (cheap when applicable) and SSL last (more
-	// expensive but the broadest fallback).
-	return "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL"
+	var out []string
+	for _, m := range authMethodStdOrder {
+		if cedarImplementsAuthMethod(m) {
+			out = append(out, m)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// cedarImplementsAuthMethod reports whether cedar has a working handshake for the named
+// method. Mirrors golang-cedar's Authenticator.performAuthentication switch (security/
+// auth.go): FS, IDTOKENS, SCITOKENS, SSL have real implementations; KERBEROS and PASSWORD
+// are declared but return "not yet implemented". Update this when cedar implements more.
+func cedarImplementsAuthMethod(name string) bool {
+	switch strings.ToUpper(name) {
+	case "FS", "IDTOKENS", "TOKEN", "SCITOKENS", "SSL":
+		return true
+	default: // KERBEROS, PASSWORD (cedar stubs), and anything unknown
+		return false
+	}
 }
 
 // mapSecurityLevel converts HTCondor security level string to cedar SecurityLevel

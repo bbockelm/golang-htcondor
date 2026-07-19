@@ -91,6 +91,7 @@ func TestSlogBridgeRoutesDestination(t *testing.T) {
 
 func readFile(t *testing.T, path string) string {
 	t.Helper()
+	//nolint:gosec // G304: test-only, path is a t.TempDir() file
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)

@@ -32,26 +32,24 @@ func TestGetSecurityConfig_Defaults(t *testing.T) {
 		t.Errorf("Expected Integrity=SecurityOptional, got %v", secConfig.Integrity)
 	}
 
-	// Check default auth methods. The list comes from the
-	// param_overrides.go correction of the auto-generated paramDefaults
-	// (see config/param_overrides.go) and matches HTCondor's actual
-	// built-in default — FS, IDTOKENS, KERBEROS, SCITOKENS, SSL — not
-	// the older FS,IDTOKENS pair. The expanded set is what fixes the
-	// production "no compatible authentication methods found" failure
-	// when the operator hasn't overridden SEC_*_AUTHENTICATION_METHODS.
+	// Check default auth methods. With no operator override, the list is built
+	// programmatically (getDefaultAuthMethods) from the methods cedar actually
+	// implements, in HTCondor's standard order: FS, IDTOKENS, SCITOKENS, SSL. KERBEROS
+	// and PASSWORD are in HTCondor's standard order but cedar does not implement them
+	// (its handshakes return "not yet implemented"), so they are excluded — offering a
+	// method cedar cannot perform would just break negotiation. Because this is the
+	// CLIENT context, ANONYMOUS (cedar's AuthNone) is appended so an encrypted-but-
+	// unauthenticated READ works.
 	//
-	// Note that IDTOKENS in the *config language* maps to cedar's
-	// AuthToken (which serializes on the wire as "TOKEN") — that's
-	// the wire-name every HTCondor schedd / collector recognizes. See
-	// the doc comment on mapAuthMethods for the full rationale; this
-	// used to expect security.AuthIDTokens here, which made the
-	// schedd's SECMAN drop our offer.
+	// Note that IDTOKENS in the *config language* maps to cedar's AuthToken (which
+	// serializes on the wire as "TOKEN") — the wire-name every HTCondor schedd /
+	// collector recognizes. See the doc comment on mapAuthMethods.
 	wantMethods := []security.AuthMethod{
 		security.AuthFS,
 		security.AuthToken,
-		security.AuthKerberos,
 		security.AuthSciTokens,
 		security.AuthSSL,
+		security.AuthNone, // ANONYMOUS, appended for CLIENT/READ
 	}
 	if len(secConfig.AuthMethods) != len(wantMethods) {
 		t.Errorf("Expected %d default auth methods (FS,IDTOKENS→TOKEN,KERBEROS,SCITOKENS,SSL), got %d: %v",
@@ -152,9 +150,11 @@ SEC_DEFAULT_CRYPTO_METHODS = BLOWFISH,3DES
 		t.Errorf("Expected Encryption=SecurityNever from DEFAULT, got %v", secConfig.Encryption)
 	}
 
-	// Check auth methods from DEFAULT
-	if len(secConfig.AuthMethods) != 2 {
-		t.Errorf("Expected 2 auth methods from DEFAULT, got %d", len(secConfig.AuthMethods))
+	// Check auth methods from DEFAULT. CLIENT falls back to SEC_DEFAULT_AUTHENTICATION_METHODS
+	// (KERBEROS,SSL — an operator-set value is respected verbatim, not availability-filtered),
+	// then ANONYMOUS is appended for the CLIENT context: KERBEROS, SSL, ANONYMOUS.
+	if len(secConfig.AuthMethods) != 3 {
+		t.Errorf("Expected 3 auth methods from DEFAULT + ANONYMOUS, got %d: %v", len(secConfig.AuthMethods), secConfig.AuthMethods)
 	}
 
 	// Check crypto methods from DEFAULT
@@ -548,4 +548,52 @@ func TestNewClientSecurityConfig(t *testing.T) {
 			t.Errorf("expected empty context to default to CLIENT, got error: %v", err)
 		}
 	})
+}
+
+// TestGetDefaultAuthMethodsProgrammatic verifies the default auth-method list is built from
+// the methods cedar actually implements: KERBEROS and PASSWORD (cedar stubs) are excluded,
+// FS/IDTOKENS/SCITOKENS/SSL are kept, in HTCondor's standard order.
+func TestGetDefaultAuthMethodsProgrammatic(t *testing.T) {
+	got := getDefaultAuthMethods()
+	if got != "FS,IDTOKENS,SCITOKENS,SSL" {
+		t.Errorf("getDefaultAuthMethods() = %q, want FS,IDTOKENS,SCITOKENS,SSL", got)
+	}
+	if cedarImplementsAuthMethod("KERBEROS") || cedarImplementsAuthMethod("PASSWORD") {
+		t.Error("KERBEROS/PASSWORD are cedar stubs and must not be reported implemented")
+	}
+	for _, m := range []string{"FS", "IDTOKENS", "SCITOKENS", "SSL"} {
+		if !cedarImplementsAuthMethod(m) {
+			t.Errorf("%s should be reported implemented", m)
+		}
+	}
+}
+
+// TestGetSecurityMethodsAuth covers the resolution rules: the stale generated default is
+// ignored in favor of the programmatic one, an operator default is honored, and ANONYMOUS is
+// appended only for CLIENT/READ.
+func TestGetSecurityMethodsAuth(t *testing.T) {
+	prog := getDefaultAuthMethods()
+
+	// No config: stale generated "FS,TOKEN" must NOT surface; CLIENT gets programmatic+ANONYMOUS.
+	cfg, _ := config.NewFromReader(strings.NewReader(""))
+	if got := getSecurityMethods(cfg, "CLIENT", "AUTHENTICATION_METHODS"); got != prog+",ANONYMOUS" {
+		t.Errorf("CLIENT default = %q, want %q", got, prog+",ANONYMOUS")
+	}
+	// WRITE context gets no ANONYMOUS.
+	if got := getSecurityMethods(cfg, "WRITE", "AUTHENTICATION_METHODS"); got != prog {
+		t.Errorf("WRITE default = %q, want %q (no ANONYMOUS)", got, prog)
+	}
+	// An operator SEC_DEFAULT override is honored verbatim (WRITE), plus ANONYMOUS for CLIENT.
+	cfg2, _ := config.NewFromReader(strings.NewReader("SEC_DEFAULT_AUTHENTICATION_METHODS = SSL\n"))
+	if got := getSecurityMethods(cfg2, "WRITE", "AUTHENTICATION_METHODS"); got != "SSL" {
+		t.Errorf("operator WRITE = %q, want SSL", got)
+	}
+	if got := getSecurityMethods(cfg2, "READ", "AUTHENTICATION_METHODS"); got != "SSL,ANONYMOUS" {
+		t.Errorf("operator READ = %q, want SSL,ANONYMOUS", got)
+	}
+	// A context-specific operator setting wins outright (no append beyond what it lists).
+	cfg3, _ := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION_METHODS = FS\n"))
+	if got := getSecurityMethods(cfg3, "CLIENT", "AUTHENTICATION_METHODS"); got != "FS" {
+		t.Errorf("explicit SEC_CLIENT = %q, want FS", got)
+	}
 }

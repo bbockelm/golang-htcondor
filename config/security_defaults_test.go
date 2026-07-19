@@ -5,38 +5,18 @@ import (
 	"testing"
 )
 
-// TestSecurityMethodDefaults verifies the bootstrapped security defaults resolve even with
-// no operator config (the "missing bootstrapping" fix): these params live only inside
-// param_info.in metaknobs upstream, so without an override cfg.Get returns false and
-// encryption/auth negotiation has no configured basis.
-func TestSecurityMethodDefaults(t *testing.T) {
+// TestCryptoMethodDefault verifies the bootstrapped crypto default resolves with no operator
+// config. (The authentication-method defaults are built programmatically in the security
+// layer from cedar's implemented methods, not bootstrapped here — see the htcondor package's
+// security tests.)
+func TestCryptoMethodDefault(t *testing.T) {
 	cfg, err := NewFromReader(strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
-		key       string
-		want      string
-		substring bool
-	}{
-		{"SEC_DEFAULT_CRYPTO_METHODS", "AES", false},
-		{"SEC_CLIENT_CRYPTO_METHODS", "AES", false},              // $(SEC_DEFAULT_CRYPTO_METHODS)
-		{"SEC_CLIENT_AUTHENTICATION_METHODS", "ANONYMOUS", true}, // ...,ANONYMOUS for encrypted READ
-		{"SEC_DEFAULT_AUTHENTICATION_METHODS", "IDTOKENS", true}, // pre-existing override
-	}
-	for _, c := range cases {
-		got, ok := cfg.Get(c.key)
-		if !ok {
-			t.Errorf("%s: not set (bootstrap default missing)", c.key)
-			continue
-		}
-		if c.substring {
-			if !strings.Contains(got, c.want) {
-				t.Errorf("%s = %q, want it to contain %q", c.key, got, c.want)
-			}
-		} else if strings.TrimSpace(got) != c.want {
-			t.Errorf("%s = %q, want %q", c.key, got, c.want)
-		}
+	got, ok := cfg.Get("SEC_DEFAULT_CRYPTO_METHODS")
+	if !ok || strings.TrimSpace(got) != "AES" {
+		t.Errorf("SEC_DEFAULT_CRYPTO_METHODS = %q (ok=%v), want AES", got, ok)
 	}
 }
 
