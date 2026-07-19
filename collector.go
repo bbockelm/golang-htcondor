@@ -188,7 +188,8 @@ func (c *Collector) notePreferred(addr string) {
 }
 
 // QueryAds queries the collector for daemon advertisements
-// adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
+// adType selects the ad type to query — one of the *AdType constants (e.g.
+// ScheddAdType), or a daemon-type name like "Schedd"
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 //
 // Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
@@ -197,7 +198,8 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 }
 
 // QueryAdsWithProjection queries the collector for daemon advertisements with optional projection
-// adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
+// adType selects the ad type to query — one of the *AdType constants (e.g.
+// ScheddAdType), or a daemon-type name like "Schedd"
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 // projection is an optional list of attribute names to return (pass nil for all attributes)
 //
@@ -971,21 +973,39 @@ const (
 	DaemonNegotiator DaemonType = "Negotiator"
 )
 
+// Ad type names accepted as the adType argument by the collector query methods
+// (QueryAds, QueryAdsWithProjection, QueryAdsWithOptions, QueryAdsStream). Each
+// names the ad a daemon advertises — a schedd advertises a ScheddAd, whose MyType
+// is "Scheduler" — and selects the matching collector query. The daemon-type
+// spellings (e.g. "Schedd") are also accepted, but prefer these constants.
+//
+// They are plain string constants so they drop into the existing adType string
+// parameters without a conversion.
+const (
+	StartdAdType     = "StartdAd"
+	ScheddAdType     = "ScheddAd"
+	MasterAdType     = "MasterAd"
+	SubmitterAdType  = "SubmitterAd"
+	LicenseAdType    = "LicenseAd"
+	CollectorAdType  = "CollectorAd"
+	NegotiatorAdType = "NegotiatorAd"
+)
+
 // adType returns the collector-query ad type corresponding to the daemon type
-// (e.g. DaemonSchedd -> "ScheddAd"). An unknown/custom type is passed through
+// (e.g. DaemonSchedd -> ScheddAdType). An unknown/custom type is passed through
 // unchanged, for which the query maps fall back to QUERY_GENERIC_ADS.
 func (dt DaemonType) adType() string {
 	switch dt {
 	case DaemonSchedd:
-		return "ScheddAd"
+		return ScheddAdType
 	case DaemonStartd:
-		return "StartdAd"
+		return StartdAdType
 	case DaemonMaster:
-		return "MasterAd"
+		return MasterAdType
 	case DaemonCollector:
-		return "CollectorAd"
+		return CollectorAdType
 	case DaemonNegotiator:
-		return "NegotiatorAd"
+		return NegotiatorAdType
 	default:
 		return string(dt)
 	}

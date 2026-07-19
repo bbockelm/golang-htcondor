@@ -38,7 +38,7 @@ ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
 
 // Query advertisements with pagination / projection.
-ads, page, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", "",
+ads, page, err := collector.QueryAdsWithOptions(ctx, htcondor.ScheddAdType, "",
     &htcondor.QueryOptions{
         Limit:      50,
         Projection: []string{"Name", "Machine", "Cpus", "Memory"},
