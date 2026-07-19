@@ -20,22 +20,29 @@ var paramOverrides = []struct {
 	Default string
 }{
 	{
-		// Generated default in param_defaults.go is the very old
-		// "FS,TOKEN" pair, dating from before HTCondor split TOKEN
-		// into IDTOKENS/SCITOKENS and added SSL to its built-in
-		// fallback. Modern HTCondor (verified against 25.8 via
-		// `condor_config_val -v SEC_DEFAULT_AUTHENTICATION_METHODS`)
-		// uses the broader list below as its `<Default>` source.
+		// Encryption method default. In param_info.in this only appears
+		// inside the security:* metaknobs (recommended/strong/FIPS),
+		// never as a standalone param, so nothing bootstraps it unless a
+		// config does `use security:...`. Without it, cfg.Get(
+		// "SEC_DEFAULT_CRYPTO_METHODS") returns false and encryption
+		// negotiation survived only on a scattered "AES" string literal
+		// deep in getSecurityMethods — a workaround, not a real default,
+		// and invisible to condor_config_val or any direct cfg.Get.
+		// AES matches HTCondor 9.0+ (<Default> = AES); cedar only
+		// implements AES-GCM anyway. The CLIENT/READ/etc. contexts fall
+		// through to this via getSecurityMethods.
 		//
-		// The stale value caused a real production failure: a
-		// match-analysis collector query offered TOKEN only, the
-		// server's IDTOKENS were filtered by iss/kid mismatch, and
-		// the handshake errored out with "no compatible authentication
-		// methods found" even though SSL would have worked on both
-		// sides. Aligning with HTCondor's real default lets cedar
-		// negotiate SSL transparently when token auth fails.
-		Name:    "SEC_DEFAULT_AUTHENTICATION_METHODS",
-		Default: "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL",
+		// Note: the authentication-method defaults are NOT bootstrapped
+		// here. They are built programmatically in getSecurityMethods /
+		// getDefaultAuthMethods (security.go) from the methods cedar
+		// actually implements — the Go analogue of C++ building
+		// SEC_STD_AUTH_METHOD_NAMES from compile-time HAVE_EXT_* flags —
+		// so a static override cannot list a method (e.g. KERBEROS) that
+		// cedar cannot perform. The stale generated
+		// SEC_DEFAULT_AUTHENTICATION_METHODS = "FS,TOKEN" is handled
+		// there (isStaleAuthDefault), not overridden here.
+		Name:    "SEC_DEFAULT_CRYPTO_METHODS",
+		Default: "AES",
 	},
 	{
 		// HTTP_API_LOG follows HTCondor's per-daemon log convention:

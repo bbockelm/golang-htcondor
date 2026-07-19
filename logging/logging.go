@@ -92,6 +92,7 @@ type Config struct {
 // Logger wraps slog.Logger with destination and verbosity filtering
 type Logger struct {
 	config       *Config
+	levels       atomic.Pointer[levelSet]    // Live per-destination levels; swapped by ApplyLevels
 	logger       atomic.Pointer[slog.Logger] // Atomic pointer to allow handler updates
 	logFile      atomic.Pointer[os.File]     // Atomic pointer to current log file (nil for stdout/stderr)
 	currentSize  atomic.Int64                // Current size of log file
@@ -235,11 +236,32 @@ func sanitizeOutputPath(outputPath string) string {
 	return outputPath
 }
 
-// filteringHandler wraps an slog.Handler and filters messages based on destination attributes
-type filteringHandler struct {
-	handler           slog.Handler
+// levelSet is an immutable snapshot of the per-destination verbosity configuration.
+// It is swapped atomically (see Logger.levels) so log levels can be re-applied live on
+// condor_reconfig without racing concurrent log calls: readers Load() a consistent
+// snapshot, ApplyLevels Store()s a fresh one.
+type levelSet struct {
 	destinationLevels map[Destination]Verbosity
 	defaultLevel      Verbosity
+}
+
+// levelFor returns the configured verbosity for dest, falling back to the default.
+func (ls *levelSet) levelFor(dest Destination) Verbosity {
+	if ls.destinationLevels != nil {
+		if level, ok := ls.destinationLevels[dest]; ok {
+			return level
+		}
+	}
+	return ls.defaultLevel
+}
+
+// filteringHandler wraps an slog.Handler and filters messages based on destination attributes.
+// It reads the current levels through a shared atomic pointer so a level reconfig takes
+// effect for handlers already installed (including the process-global default and any
+// post-rotation handler).
+type filteringHandler struct {
+	handler slog.Handler
+	levels  *atomic.Pointer[levelSet]
 }
 
 // Enabled checks if a log level should be enabled based on destination filtering
@@ -266,12 +288,12 @@ func (h *filteringHandler) Handle(ctx context.Context, r slog.Record) error {
 		return true // Continue iteration
 	})
 
-	// Determine configured level for this destination
-	configuredLevel := h.defaultLevel
-	if found && h.destinationLevels != nil {
-		if level, ok := h.destinationLevels[dest]; ok {
-			configuredLevel = level
-		}
+	// Determine configured level for this destination (from the live snapshot). An
+	// unrecognized/absent destination attribute falls back to the default level.
+	ls := h.levels.Load()
+	configuredLevel := ls.defaultLevel
+	if found {
+		configuredLevel = ls.levelFor(dest)
 	}
 
 	// Convert slog level to our Verbosity
@@ -297,18 +319,16 @@ func (h *filteringHandler) Handle(ctx context.Context, r slog.Record) error {
 // WithAttrs returns a new handler with additional attributes
 func (h *filteringHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &filteringHandler{
-		handler:           h.handler.WithAttrs(attrs),
-		destinationLevels: h.destinationLevels,
-		defaultLevel:      h.defaultLevel,
+		handler: h.handler.WithAttrs(attrs),
+		levels:  h.levels,
 	}
 }
 
 // WithGroup returns a new handler with a group name
 func (h *filteringHandler) WithGroup(name string) slog.Handler {
 	return &filteringHandler{
-		handler:           h.handler.WithGroup(name),
-		destinationLevels: h.destinationLevels,
-		defaultLevel:      h.defaultLevel,
+		handler: h.handler.WithGroup(name),
+		levels:  h.levels,
 	}
 }
 
@@ -360,7 +380,9 @@ func New(config *Config) (*Logger, error) {
 			flags |= os.O_APPEND
 		}
 
-		f, err := os.OpenFile(config.OutputPath, flags, 0600)
+		// 0644 to match C++ HTCondor's world-readable daemon logs.
+		//nolint:gosec // G302: daemon logs are intentionally world-readable, as in C++ HTCondor
+		f, err := os.OpenFile(config.OutputPath, flags, 0644)
 		if err != nil {
 			// If we can't open the log file (permission denied, etc.), fall back to stdout
 			// This can happen if the directory doesn't exist or we don't have write permission
@@ -386,46 +408,26 @@ func New(config *Config) (*Logger, error) {
 		}
 	}
 
-	// Set slog handler to capture all log levels (Debug)
-	// Use filteringHandler for per-destination filtering
-	// This ensures both our Logger methods and direct slog calls get filtered
-	slogLevel := slog.LevelDebug
-
-	// Create slog handler with options
-	opts := &slog.HandlerOptions{
-		Level: slogLevel,
-	}
-
-	baseHandler := slog.NewTextHandler(writer, opts)
-	filtHandler := &filteringHandler{
-		handler:           baseHandler,
-		destinationLevels: config.DestinationLevels,
-		defaultLevel:      config.DefaultLevel,
-	}
-	logger := slog.New(filtHandler)
-
+	// Build the Logger and publish its initial level snapshot. Handlers reference
+	// &l.levels (not a copy), so ApplyLevels can swap levels live for handlers already
+	// installed -- including the process-global default below and any post-rotation one.
 	l := &Logger{
 		config: config,
 	}
-	l.logger.Store(logger)
+	l.levels.Store(&levelSet{
+		destinationLevels: config.DestinationLevels,
+		defaultLevel:      config.DefaultLevel,
+	})
+	l.logger.Store(l.buildFilteredLogger(writer))
 	l.logFile.Store(logFile)
 	l.currentSize.Store(currentSize)
 
 	// By default, set as global default so external dependencies (like Cedar) use our logger
 	// Skip if SkipGlobalInstall is true
 	if !config.SkipGlobalInstall {
-		// Use a filtering handler that accepts DEBUG level but filters based on destination
-		// This allows Cedar logs with destination=cedar to be filtered appropriately
-		globalOpts := &slog.HandlerOptions{
-			Level: slog.LevelDebug, // Accept all levels
-		}
-		globalBaseHandler := slog.NewTextHandler(writer, globalOpts)
-		globalFilteringHandler := &filteringHandler{
-			handler:           globalBaseHandler,
-			destinationLevels: config.DestinationLevels,
-			defaultLevel:      config.DefaultLevel,
-		}
-		slog.SetDefault(slog.New(globalFilteringHandler))
+		// A filtering handler that accepts DEBUG level but filters per destination, so Cedar
+		// logs tagged destination=cedar are filtered appropriately.
+		slog.SetDefault(l.buildFilteredLogger(writer))
 	}
 
 	return l, nil
@@ -457,6 +459,51 @@ func parseLevel(level string) Verbosity {
 
 	// Default to warn
 	return VerbosityWarn
+}
+
+// DefaultDaemonLevel is the fallback verbosity for destinations without an explicit
+// <DAEMON>_DEBUG entry, matching HTCondor's "D_ALWAYS shows up by default" baseline so an
+// unconfigured daemon still logs routine activity. Used by both startup and reconfig.
+const DefaultDaemonLevel = VerbosityInfo
+
+// ParseDestinationLevels parses a daemon's <DAEMON>_DEBUG configuration into a
+// per-destination verbosity map. The cedar destination defaults to Warn (its per-step Info
+// chatter logs sensitive session IDs and is very noisy; operators opt in via
+// <DAEMON>_DEBUG = cedar:debug). Shared by FromConfigWithDaemon (startup) and the daemon's
+// reconfig path so both derive levels identically from the same config.
+func ParseDestinationLevels(daemonName string, cfg *config.Config) map[Destination]Verbosity {
+	levels := map[Destination]Verbosity{
+		DestinationCedar: VerbosityWarn,
+	}
+	if cfg == nil {
+		return levels
+	}
+	debugParam := strings.ToUpper(daemonName) + "_DEBUG"
+	debugConfig, ok := cfg.Get(debugParam)
+	if !ok || debugConfig == "" {
+		return levels
+	}
+	// Split by comma or whitespace into destination:level pairs.
+	for _, pair := range strings.Fields(strings.ReplaceAll(debugConfig, ",", " ")) {
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 {
+			continue // Skip malformed pairs
+		}
+		dest, ok := parseDestination(parts[0])
+		if !ok {
+			continue // Skip unknown destinations
+		}
+		levels[dest] = parseLevel(parts[1])
+	}
+	return levels
+}
+
+// ParseDestination converts a destination string (e.g. "cedar", "general") to a
+// Destination. The bool is false for an empty or unknown string, in which case the
+// returned Destination is DestinationGeneral. Exported for the daemon slog bridge, which
+// routes a record to the destination its "destination" attribute names.
+func ParseDestination(dest string) (Destination, bool) {
+	return parseDestination(dest)
 }
 
 // parseDestination converts a destination string to a Destination constant.
@@ -555,31 +602,7 @@ func FromConfigWithDaemon(daemonName string, cfg *config.Config) (*Logger, error
 	// Operators who need cedar Info or Debug can opt in via
 	//   HTTP_API_DEBUG = cedar:debug
 	// in their condor config.
-	destinationLevels := map[Destination]Verbosity{
-		DestinationCedar: VerbosityWarn,
-	}
-	debugParam := strings.ToUpper(daemonName) + "_DEBUG"
-	if debugConfig, ok := cfg.Get(debugParam); ok && debugConfig != "" {
-		// Split by comma or whitespace
-		debugConfig = strings.ReplaceAll(debugConfig, ",", " ")
-		pairs := strings.Fields(debugConfig)
-
-		for _, pair := range pairs {
-			// Split by colon
-			parts := strings.SplitN(pair, ":", 2)
-			if len(parts) != 2 {
-				continue // Skip malformed pairs
-			}
-
-			dest, ok := parseDestination(parts[0])
-			if !ok {
-				continue // Skip unknown destinations
-			}
-
-			level := parseLevel(parts[1])
-			destinationLevels[dest] = level
-		}
-	}
+	destinationLevels := ParseDestinationLevels(daemonName, cfg)
 
 	// Parse rotation parameters
 	maxLogSize := int64(DefaultMaxLogSize)
@@ -668,18 +691,40 @@ func FromConfig(cfg *config.Config) (*Logger, error) {
 	})
 }
 
+// currentLevels returns the live level snapshot, falling back to the static config for a
+// Logger constructed as a struct literal (i.e. not via New(), so levels was never stored).
+func (l *Logger) currentLevels() *levelSet {
+	if ls := l.levels.Load(); ls != nil {
+		return ls
+	}
+	return &levelSet{destinationLevels: l.config.DestinationLevels, defaultLevel: l.config.DefaultLevel}
+}
+
 // shouldLog checks if a log should be written based on destination-specific verbosity level
 func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
-	// Get the configured level for this destination (use DefaultLevel if not configured)
-	configuredLevel := l.config.DefaultLevel
-	if l.config.DestinationLevels != nil {
-		if level, ok := l.config.DestinationLevels[dest]; ok {
-			configuredLevel = level
-		}
-	}
+	// Only log if message level is at or below the destination's configured level
+	// (from the live snapshot).
+	return msgLevel <= l.currentLevels().levelFor(dest)
+}
 
-	// Only log if message level is at or below configured level
-	return msgLevel <= configuredLevel
+// buildFilteredLogger wraps w in a per-destination filtering handler bound to this
+// Logger's live level snapshot (&l.levels). Used at construction, on log rotation, and
+// for the process-global default so every path shares one dynamically-updatable level set.
+func (l *Logger) buildFilteredLogger(w io.Writer) *slog.Logger {
+	base := slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
+	return slog.New(&filteringHandler{handler: base, levels: &l.levels})
+}
+
+// ApplyLevels replaces the live per-destination verbosity configuration. Because the
+// installed handlers (local, process-global, post-rotation) all read levels through the
+// shared atomic pointer, this single swap re-applies levels everywhere with no handler
+// rebuild -- the mechanism condor_reconfig uses to change log levels on a running daemon.
+// A nil destinationLevels means "all destinations use defaultLevel".
+func (l *Logger) ApplyLevels(destinationLevels map[Destination]Verbosity, defaultLevel Verbosity) {
+	l.levels.Store(&levelSet{
+		destinationLevels: destinationLevels,
+		defaultLevel:      defaultLevel,
+	})
 }
 
 // destinationString returns a string representation of the destination
@@ -771,9 +816,9 @@ func (l *Logger) rotateLogIfNeeded() error {
 		return fmt.Errorf("failed to rename current log to .old: %w", err)
 	}
 
-	// Create new log file
+	// Create new log file (0644 to match C++ HTCondor's world-readable daemon logs).
 	//nolint:gosec // G304 - logPath is internal to logger, not user-controlled
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create new log file: %w", err)
 	}
@@ -782,17 +827,9 @@ func (l *Logger) rotateLogIfNeeded() error {
 	l.logFile.Store(f)
 	l.currentSize.Store(0)
 
-	// Create new handler and logger with the new file
-	// Set slog handler to capture all log levels (Debug)
-	// Per-destination filtering happens in filteringHandler
-	slogLevel := slog.LevelDebug
-
-	opts := &slog.HandlerOptions{
-		Level: slogLevel,
-	}
-	handler := slog.NewTextHandler(f, opts)
-	newLogger := slog.New(handler)
-	l.logger.Store(newLogger)
+	// Rebuild through the per-destination filtering handler (bound to the live level
+	// snapshot) so post-rotation direct-slog calls stay filtered.
+	l.logger.Store(l.buildFilteredLogger(f))
 
 	return nil
 }
@@ -857,9 +894,9 @@ func (l *Logger) PerformMaintenance() error {
 func (l *Logger) reopenLogFile() error {
 	logPath := l.config.OutputPath
 
-	// Open new file
+	// Open new file (0644 to match C++ HTCondor's world-readable daemon logs).
 	//nolint:gosec // G304 - logPath is internal to logger, not user-controlled
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to reopen log file: %w", err)
 	}
@@ -880,17 +917,10 @@ func (l *Logger) reopenLogFile() error {
 	// Reset size to current file size
 	l.currentSize.Store(stat.Size())
 
-	// Create new handler and logger with the new file
-	// Set slog handler to capture all log levels (Debug)
-	// Per-destination filtering happens in filteringHandler
-	slogLevel := slog.LevelDebug
-
-	opts := &slog.HandlerOptions{
-		Level: slogLevel,
-	}
-	handler := slog.NewTextHandler(f, opts)
-	newLogger := slog.New(handler)
-	l.logger.Store(newLogger)
+	// Rebuild through the per-destination filtering handler (bound to the live level
+	// snapshot) so post-rotation direct-slog calls stay filtered -- a bare TextHandler
+	// here would bypass per-destination levels after every rotation.
+	l.logger.Store(l.buildFilteredLogger(f))
 
 	return nil
 }
