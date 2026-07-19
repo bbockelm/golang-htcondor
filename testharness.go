@@ -108,8 +108,29 @@ func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHar
 		}
 	}
 
-	// Create temporary directory structure
-	tmpDir := t.TempDir()
+	// Create a harness-owned temporary directory (deliberately NOT t.TempDir).
+	// An HTCondor daemon occasionally outlives Shutdown's process-group backstop
+	// for a moment (e.g. one that setsid'd out of the group, or is slow to die)
+	// and writes under log/ just as teardown removes the tree. t.TempDir would
+	// surface that race as a t.Errorf ("directory not empty") and fail the test;
+	// owning the removal lets us retry past the straggler instead.
+	tmpDir, err := os.MkdirTemp("", "condor-harness-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		// Register before Shutdown's cleanup so this runs after it (LIFO).
+		var rmErr error
+		for i := 0; i < 50; i++ {
+			if rmErr = os.RemoveAll(tmpDir); rmErr == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		// Best effort: a leftover temp dir the OS will reclaim is not a test
+		// failure — unlike a spurious teardown error would be.
+		t.Logf("temp dir cleanup gave up: %v (leaving %s)", rmErr, tmpDir)
+	})
 
 	h := &CondorTestHarness{
 		tmpDir:     tmpDir,
