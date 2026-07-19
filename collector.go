@@ -188,7 +188,8 @@ func (c *Collector) notePreferred(addr string) {
 }
 
 // QueryAds queries the collector for daemon advertisements
-// adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
+// adType selects the ad type to query — one of the *AdType constants (e.g.
+// ScheddAdType), or a daemon-type name like "Schedd"
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 //
 // Deprecated: Use QueryAdsWithOptions for pagination and default limits/projections
@@ -197,7 +198,8 @@ func (c *Collector) QueryAds(ctx context.Context, adType string, constraint stri
 }
 
 // QueryAdsWithProjection queries the collector for daemon advertisements with optional projection
-// adType specifies the type of ads to query (e.g., "StartdAd", "ScheddAd")
+// adType selects the ad type to query — one of the *AdType constants (e.g.
+// ScheddAdType), or a daemon-type name like "Schedd"
 // constraint is a ClassAd constraint expression string (pass empty string for no constraint)
 // projection is an optional list of attribute names to return (pass nil for all attributes)
 //
@@ -955,10 +957,71 @@ func estimateClassAdSize(ad *classad.ClassAd) int {
 	return len(attrs) * AvgBytesPerAttribute
 }
 
-// LocateDaemon locates a daemon by querying the collector
-// daemonType specifies the type of daemon to locate (e.g., "Schedd", "Startd", "Master")
-// name is the name of the daemon to locate (optional, pass empty string to find any)
-func (c *Collector) LocateDaemon(ctx context.Context, daemonType string, name string) (*DaemonLocation, error) {
+// DaemonType identifies a kind of HTCondor daemon for LocateDaemon. It mirrors
+// the daemon types used by the HTCondor Python bindings' Collector.locate().
+//
+// A daemon type is distinct from the collector-query ad type: a schedd, for
+// example, is DaemonSchedd but advertises a "Scheduler" ad queried as the
+// "ScheddAd" ad type. LocateDaemon does that translation for you (see adType).
+type DaemonType string
+
+// Daemon types accepted by LocateDaemon.
+const (
+	DaemonSchedd     DaemonType = "Schedd"
+	DaemonStartd     DaemonType = "Startd"
+	DaemonMaster     DaemonType = "Master"
+	DaemonCollector  DaemonType = "Collector"
+	DaemonNegotiator DaemonType = "Negotiator"
+)
+
+// Ad type names accepted as the adType argument by the collector query methods
+// (QueryAds, QueryAdsWithProjection, QueryAdsWithOptions, QueryAdsStream). Each
+// names the ad a daemon advertises — a schedd advertises a ScheddAd, whose MyType
+// is "Scheduler" — and selects the matching collector query. The daemon-type
+// spellings (e.g. "Schedd") are also accepted, but prefer these constants.
+//
+// They are plain string constants so they drop into the existing adType string
+// parameters without a conversion.
+const (
+	StartdAdType     = "StartdAd"
+	ScheddAdType     = "ScheddAd"
+	MasterAdType     = "MasterAd"
+	SubmitterAdType  = "SubmitterAd"
+	LicenseAdType    = "LicenseAd"
+	CollectorAdType  = "CollectorAd"
+	NegotiatorAdType = "NegotiatorAd"
+)
+
+// adType returns the collector-query ad type corresponding to the daemon type
+// (e.g. DaemonSchedd -> ScheddAdType). An unknown/custom type is passed through
+// unchanged, for which the query maps fall back to QUERY_GENERIC_ADS.
+func (dt DaemonType) adType() string {
+	switch dt {
+	case DaemonSchedd:
+		return ScheddAdType
+	case DaemonStartd:
+		return StartdAdType
+	case DaemonMaster:
+		return MasterAdType
+	case DaemonCollector:
+		return CollectorAdType
+	case DaemonNegotiator:
+		return NegotiatorAdType
+	default:
+		return string(dt)
+	}
+}
+
+// LocateDaemon locates a daemon by querying the collector.
+//
+// daemonType is the kind of daemon to locate — one of the DaemonType constants
+// (DaemonSchedd, DaemonStartd, DaemonMaster, DaemonCollector, DaemonNegotiator).
+// It is translated to the corresponding collector-query ad type internally, so
+// callers pass a daemon type (DaemonSchedd), not an ad type ("ScheddAd").
+//
+// name is the name of the daemon to locate (optional, pass empty string to find
+// any).
+func (c *Collector) LocateDaemon(ctx context.Context, daemonType DaemonType, name string) (*DaemonLocation, error) {
 	// Construct constraint to match the daemon name if provided
 	constraint := ""
 	if name != "" {
@@ -972,7 +1035,7 @@ func (c *Collector) LocateDaemon(ctx context.Context, daemonType string, name st
 		Projection: projection,
 	}
 
-	ads, _, err := c.QueryAdsWithOptions(ctx, daemonType, constraint, opts)
+	ads, _, err := c.QueryAdsWithOptions(ctx, daemonType.adType(), constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query collector for %s daemon: %w", daemonType, err)
 	}

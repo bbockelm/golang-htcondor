@@ -38,7 +38,7 @@ ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
 
 // Query advertisements with pagination / projection.
-ads, page, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", "",
+ads, page, err := collector.QueryAdsWithOptions(ctx, htcondor.ScheddAdType, "",
     &htcondor.QueryOptions{
         Limit:      50,
         Projection: []string{"Name", "Machine", "Cpus", "Memory"},
@@ -57,7 +57,7 @@ fmt.Printf("auth=%s user=%s encrypted=%v\n",
     ping.AuthMethod, ping.User, ping.Encryption)
 
 // Locate a specific daemon by type + name.
-where, err := collector.LocateDaemon(ctx, "Schedd", "myschedd")
+where, err := collector.LocateDaemon(ctx, htcondor.DaemonSchedd, "myschedd")
 if err != nil {
     log.Fatal(err)
 }
