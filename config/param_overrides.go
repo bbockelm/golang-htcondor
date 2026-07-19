@@ -38,6 +38,39 @@ var paramOverrides = []struct {
 		Default: "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL",
 	},
 	{
+		// Encryption method default. In param_info.in this only appears
+		// inside the security:* metaknobs (recommended/strong/FIPS),
+		// never as a standalone param, so nothing bootstraps it unless a
+		// config does `use security:...`. Without it, cfg.Get(
+		// "SEC_DEFAULT_CRYPTO_METHODS") returns false and encryption
+		// negotiation survived only on a scattered "AES" string literal
+		// deep in getSecurityMethods — a workaround, not a real default,
+		// and invisible to condor_config_val or any direct cfg.Get.
+		// AES matches HTCondor 9.0+ (<Default> = AES); cedar only
+		// implements AES-GCM anyway. The CLIENT/READ/etc. contexts fall
+		// through to this via getSecurityMethods.
+		Name:    "SEC_DEFAULT_CRYPTO_METHODS",
+		Default: "AES",
+	},
+	{
+		// Client context inherits the default crypto methods, matching
+		// param_info.in's SEC_CLIENT_CRYPTO_METHODS = $(SEC_DEFAULT_CRYPTO_METHODS).
+		Name:    "SEC_CLIENT_CRYPTO_METHODS",
+		Default: "$(SEC_DEFAULT_CRYPTO_METHODS)",
+	},
+	{
+		// Client auth methods = the default set plus ANONYMOUS, matching
+		// param_info.in (SEC_CLIENT_AUTHENTICATION_METHODS =
+		// $(SEC_DEFAULT_AUTHENTICATION_METHODS), ANONYMOUS). The trailing
+		// ANONYMOUS is what lets a client do an encrypted-but-
+		// unauthenticated READ (e.g. a collector query) when no stronger
+		// method succeeds. Operators can still override per subsystem
+		// (e.g. TOOL.SEC_CLIENT_AUTHENTICATION_METHODS); that resolves
+		// only when the caller sets its config Subsystem.
+		Name:    "SEC_CLIENT_AUTHENTICATION_METHODS",
+		Default: "$(SEC_DEFAULT_AUTHENTICATION_METHODS), ANONYMOUS",
+	},
+	{
 		// HTTP_API_LOG follows HTCondor's per-daemon log convention:
 		// every DC daemon's log path defaults to $(LOG)/<CamelCase>Log
 		// (see param_info.in's MASTER_LOG, NEGOTIATOR_LOG, etc.).

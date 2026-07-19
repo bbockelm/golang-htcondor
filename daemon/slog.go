@@ -39,17 +39,50 @@ func (h *slogBridge) Handle(_ context.Context, r slog.Record) error {
 		return true
 	})
 
+	// Honor the destination the record names (e.g. cedar tags its records
+	// destination=cedar) instead of forcing General, and drop that attribute so
+	// logging.Logger re-adds exactly one canonical destination rather than leaving the
+	// record with two (the bug that produced "destination=general destination=cedar" and
+	// bypassed the cedar destination's Warn-level suppression). Absent/unknown -> General.
+	dest, args := extractDestination(args)
+
 	switch {
 	case r.Level >= slog.LevelError:
-		h.log.Error(logging.DestinationGeneral, r.Message, args...)
+		h.log.Error(dest, r.Message, args...)
 	case r.Level >= slog.LevelWarn:
-		h.log.Warn(logging.DestinationGeneral, r.Message, args...)
+		h.log.Warn(dest, r.Message, args...)
 	case r.Level >= slog.LevelInfo:
-		h.log.Info(logging.DestinationGeneral, r.Message, args...)
+		h.log.Info(dest, r.Message, args...)
 	default:
-		h.log.Debug(logging.DestinationGeneral, r.Message, args...)
+		h.log.Debug(dest, r.Message, args...)
 	}
 	return nil
+}
+
+// extractDestination pulls a "destination" key/value pair out of a flat key,value arg
+// slice and maps it to a logging.Destination, returning the remaining args with that pair
+// removed. slog callers such as cedar tag records with destination="cedar"; the bridge
+// routes on that and removes it so logging.Logger stamps exactly one canonical destination.
+// Defaults to DestinationGeneral when the attribute is absent or unrecognized.
+func extractDestination(args []any) (logging.Destination, []any) {
+	dest := logging.DestinationGeneral
+	filtered := args[:0]
+	for i := 0; i < len(args); i += 2 {
+		if i+1 >= len(args) {
+			filtered = append(filtered, args[i]) // dangling key; preserve
+			break
+		}
+		if k, ok := args[i].(string); ok && k == "destination" {
+			if s, ok := args[i+1].(string); ok {
+				if d, ok := logging.ParseDestination(s); ok {
+					dest = d
+				}
+			}
+			continue // drop the destination pair
+		}
+		filtered = append(filtered, args[i], args[i+1])
+	}
+	return dest, filtered
 }
 
 func (h *slogBridge) WithAttrs(attrs []slog.Attr) slog.Handler {

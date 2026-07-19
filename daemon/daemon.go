@@ -415,12 +415,18 @@ func (d *Daemon) waitServe(serveErr <-chan error, n int) {
 // reconfigure reloads config from CONDOR_CONFIG and runs OnReconfig callbacks.
 func (d *Daemon) reconfigure() {
 	d.log.Info(logging.DestinationGeneral, "received SIGHUP; reloading configuration")
-	cfg, err := config.New()
+	// Reload preserving the original options (subsystem/local name) so <SUBSYS>.PARAM
+	// overrides still resolve after a reconfig; a bare config.New() would drop them.
+	cfg, err := config.NewWithOptions(d.cfg.Load().Options())
 	if err != nil {
 		d.log.Warn(logging.DestinationGeneral, "reconfigure: reloading config failed; keeping current", "error", err)
 		return
 	}
 	d.cfg.Store(cfg)
+	// Re-apply per-destination log levels from the reloaded config, so condor_reconfig
+	// changes log verbosity on the running daemon (the levels are held in a live atomic
+	// snapshot the installed handlers read).
+	d.log.ApplyLevels(logging.ParseDestinationLevels(d.subsys, cfg), logging.DefaultDaemonLevel)
 	d.mu.Lock()
 	cbs := append([]func(*config.Config){}, d.onReconfig...)
 	d.mu.Unlock()
