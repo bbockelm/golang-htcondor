@@ -1125,7 +1125,7 @@ func (c *Config) processLocalConfigDir() error {
 	}
 
 	// Split on comma and/or space
-	dirs := splitConfigList(dirList)
+	dirs := SplitConfigList(dirList)
 
 	// Files whose basename matches LOCAL_CONFIG_DIR_EXCLUDE_REGEXP are skipped --
 	// this is how HTCondor keeps editor backups, package leftovers (.rpmnew,
@@ -1204,7 +1204,7 @@ func (c *Config) processLocalConfigFile() error {
 	}
 
 	// Split on comma and/or space
-	files := splitConfigList(fileList)
+	files := SplitConfigList(fileList)
 
 	for _, file := range files {
 		file = strings.TrimSpace(file)
@@ -1249,8 +1249,11 @@ func (c *Config) processLocalConfigFile() error {
 	return nil
 }
 
-// splitConfigList splits a configuration list on commas and/or spaces
-func splitConfigList(list string) []string {
+// SplitConfigList splits a configuration list on commas and/or spaces -- the
+// delimiters of an HTCondor StringList. Use it for any config value that names a
+// list (auth/crypto methods, directories, ...), so "A,B", "A B", and "A, B" are
+// all equivalent.
+func SplitConfigList(list string) []string {
 	// Replace commas with spaces
 	list = strings.ReplaceAll(list, ",", " ")
 
