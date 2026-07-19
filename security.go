@@ -493,39 +493,20 @@ func appendMethod(list, name string) string {
 // IDTOKENS were filtered by `iss`/`kid` mismatch, and the handshake
 // failed with "no compatible authentication methods found" even
 // though SSL was available on both sides.
-// authMethodStdOrder is HTCondor's standard authentication-method precedence, mirroring
-// the C++ SEC_STD_AUTH_METHOD_NAMES macro (condor_utils/param_info.cpp): FS, IDTOKENS,
-// PASSWORD, KERBEROS, SCITOKENS, SSL. cedar's negotiation walks the list in order, trying
-// each in turn (FS cheap-when-applicable first, SSL the broadest fallback last).
-var authMethodStdOrder = []string{"FS", "IDTOKENS", "PASSWORD", "KERBEROS", "SCITOKENS", "SSL"}
-
-// getDefaultAuthMethods builds the default authentication-method list programmatically: the
-// standard order above, filtered to the methods cedar actually implements. This is the Go
-// analogue of C++ building SEC_STD_AUTH_METHOD_NAMES from compile-time HAVE_EXT_* flags --
-// offering a method cedar cannot perform would just make negotiation fail. Today it yields
-// "FS,IDTOKENS,SCITOKENS,SSL"; PASSWORD and KERBEROS join automatically once cedar
-// implements them (see cedarImplementsAuthMethod).
+// getDefaultAuthMethods returns the default authentication-method list: HTCondor's standard
+// precedence (SEC_STD_AUTH_METHOD_NAMES) filtered to the methods this build of cedar can
+// actually perform. cedar is the source of truth (security.DefaultAuthMethods), so a method
+// whose handshake is unimplemented (KERBEROS, PASSWORD today) is never offered -- offering it
+// would just make negotiation fail. Yields "FS,IDTOKENS,SCITOKENS,SSL" today; PASSWORD and
+// KERBEROS join automatically once cedar implements them. The names are cedar's config-
+// language spellings (IDTOKENS, not the wire name TOKEN); mapAuthMethods handles the mapping.
 func getDefaultAuthMethods() string {
-	var out []string
-	for _, m := range authMethodStdOrder {
-		if cedarImplementsAuthMethod(m) {
-			out = append(out, m)
-		}
+	methods := security.DefaultAuthMethods()
+	names := make([]string, len(methods))
+	for i, m := range methods {
+		names[i] = string(m)
 	}
-	return strings.Join(out, ",")
-}
-
-// cedarImplementsAuthMethod reports whether cedar has a working handshake for the named
-// method. Mirrors golang-cedar's Authenticator.performAuthentication switch (security/
-// auth.go): FS, IDTOKENS, SCITOKENS, SSL have real implementations; KERBEROS and PASSWORD
-// are declared but return "not yet implemented". Update this when cedar implements more.
-func cedarImplementsAuthMethod(name string) bool {
-	switch strings.ToUpper(name) {
-	case "FS", "IDTOKENS", "TOKEN", "SCITOKENS", "SSL":
-		return true
-	default: // KERBEROS, PASSWORD (cedar stubs), and anything unknown
-		return false
-	}
+	return strings.Join(names, ",")
 }
 
 // mapSecurityLevel converts HTCondor security level string to cedar SecurityLevel

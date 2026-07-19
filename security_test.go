@@ -558,11 +558,12 @@ func TestGetDefaultAuthMethodsProgrammatic(t *testing.T) {
 	if got != "FS,IDTOKENS,SCITOKENS,SSL" {
 		t.Errorf("getDefaultAuthMethods() = %q, want FS,IDTOKENS,SCITOKENS,SSL", got)
 	}
-	if cedarImplementsAuthMethod("KERBEROS") || cedarImplementsAuthMethod("PASSWORD") {
+	// The list is sourced from cedar's capability API: stubs excluded, implemented kept.
+	if security.AuthKerberos.Implemented() || security.AuthPassword.Implemented() {
 		t.Error("KERBEROS/PASSWORD are cedar stubs and must not be reported implemented")
 	}
-	for _, m := range []string{"FS", "IDTOKENS", "SCITOKENS", "SSL"} {
-		if !cedarImplementsAuthMethod(m) {
+	for _, m := range []security.AuthMethod{security.AuthFS, security.AuthIDTokens, security.AuthSciTokens, security.AuthSSL} {
+		if !m.Implemented() {
 			t.Errorf("%s should be reported implemented", m)
 		}
 	}
