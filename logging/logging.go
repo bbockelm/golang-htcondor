@@ -395,6 +395,7 @@ func New(config *Config) (*Logger, error) {
 		} else {
 			logFile = f
 			writer = f
+			forceLogPerm(f)
 
 			// Get current file size for rotation tracking
 			if !config.TruncateOnOpen {
@@ -822,6 +823,7 @@ func (l *Logger) rotateLogIfNeeded() error {
 	if err != nil {
 		return fmt.Errorf("failed to create new log file: %w", err)
 	}
+	forceLogPerm(f)
 
 	// Update file handle and reset size atomically
 	l.logFile.Store(f)
@@ -886,8 +888,24 @@ func (l *Logger) PerformMaintenance() error {
 	if err := os.Chtimes(logPath, now, now); err != nil {
 		return fmt.Errorf("failed to touch log file: %w", err)
 	}
+	// Re-assert 0644 on the heartbeat, as C++ HTCondor does (dprintf.cpp): keeps the log
+	// world-readable even if the file was recreated/chmod'd out from under us.
+	//nolint:gosec // G302: daemon logs are intentionally world-readable, as in C++ HTCondor
+	_ = os.Chmod(logPath, 0644)
 
 	return nil
+}
+
+// forceLogPerm sets a freshly opened log file to 0644 regardless of the process umask,
+// matching C++ HTCondor (which chmod's its logs to 0644; see dprintf.cpp). os.OpenFile's
+// create mode is masked by umask, so a daemon under a restrictive umask (e.g. 077) would
+// otherwise get 0600 despite the 0644 argument; an explicit fchmod is not umask-subject.
+// Best-effort, like C++'s (void) chmod.
+func forceLogPerm(f *os.File) {
+	if f != nil {
+		//nolint:gosec // G302: daemon logs are intentionally world-readable, as in C++ HTCondor
+		_ = f.Chmod(0644)
+	}
 }
 
 // reopenLogFile reopens the log file after external rotation or deletion.
@@ -900,6 +918,7 @@ func (l *Logger) reopenLogFile() error {
 	if err != nil {
 		return fmt.Errorf("failed to reopen log file: %w", err)
 	}
+	forceLogPerm(f)
 
 	// Get current file size
 	stat, err := f.Stat()
