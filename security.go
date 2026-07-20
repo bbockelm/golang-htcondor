@@ -496,10 +496,10 @@ func appendMethod(list, name string) string {
 // getDefaultAuthMethods returns the default authentication-method list: HTCondor's standard
 // precedence (SEC_STD_AUTH_METHOD_NAMES) filtered to the methods this build of cedar can
 // actually perform. cedar is the source of truth (security.DefaultAuthMethods), so a method
-// whose handshake is unimplemented (KERBEROS, PASSWORD today) is never offered -- offering it
-// would just make negotiation fail. Yields "FS,IDTOKENS,SCITOKENS,SSL" today; PASSWORD and
-// KERBEROS join automatically once cedar implements them. The names are cedar's config-
-// language spellings (IDTOKENS, not the wire name TOKEN); mapAuthMethods handles the mapping.
+// whose handshake is unimplemented (PASSWORD today) is never offered -- offering it would
+// just make negotiation fail. Yields "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL" today; PASSWORD
+// joins automatically once cedar implements it. The names are cedar's config-language
+// spellings (IDTOKENS, not the wire name TOKEN); mapAuthMethods handles the mapping.
 func getDefaultAuthMethods() string {
 	methods := security.DefaultAuthMethods()
 	names := make([]string, len(methods))

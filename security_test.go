@@ -34,11 +34,11 @@ func TestGetSecurityConfig_Defaults(t *testing.T) {
 
 	// Check default auth methods. With no operator override, the list is built
 	// programmatically (getDefaultAuthMethods) from the methods cedar actually
-	// implements, in HTCondor's standard order: FS, IDTOKENS, SCITOKENS, SSL. KERBEROS
-	// and PASSWORD are in HTCondor's standard order but cedar does not implement them
-	// (its handshakes return "not yet implemented"), so they are excluded — offering a
-	// method cedar cannot perform would just break negotiation. Because this is the
-	// CLIENT context, ANONYMOUS (cedar's AuthNone) is appended so an encrypted-but-
+	// implements, in HTCondor's standard order: FS, IDTOKENS, KERBEROS, SCITOKENS, SSL.
+	// PASSWORD is in HTCondor's standard order but cedar does not implement it (its
+	// handshake returns "not yet implemented"), so it is excluded — offering a method
+	// cedar cannot perform would just break negotiation. Because this is the CLIENT
+	// context, ANONYMOUS (cedar's AuthNone) is appended so an encrypted-but-
 	// unauthenticated READ works.
 	//
 	// Note that IDTOKENS in the *config language* maps to cedar's AuthToken (which
@@ -46,7 +46,8 @@ func TestGetSecurityConfig_Defaults(t *testing.T) {
 	// collector recognizes. See the doc comment on mapAuthMethods.
 	wantMethods := []security.AuthMethod{
 		security.AuthFS,
-		security.AuthToken,
+		security.AuthToken, // IDTOKENS -> TOKEN on the wire
+		security.AuthKerberos,
 		security.AuthSciTokens,
 		security.AuthSSL,
 		security.AuthNone, // ANONYMOUS, appended for CLIENT/READ
@@ -560,18 +561,18 @@ func TestNewClientSecurityConfig(t *testing.T) {
 }
 
 // TestGetDefaultAuthMethodsProgrammatic verifies the default auth-method list is built from
-// the methods cedar actually implements: KERBEROS and PASSWORD (cedar stubs) are excluded,
-// FS/IDTOKENS/SCITOKENS/SSL are kept, in HTCondor's standard order.
+// the methods cedar actually implements: PASSWORD (still a cedar stub) is excluded,
+// FS/IDTOKENS/KERBEROS/SCITOKENS/SSL are kept, in HTCondor's standard order.
 func TestGetDefaultAuthMethodsProgrammatic(t *testing.T) {
 	got := getDefaultAuthMethods()
-	if got != "FS,IDTOKENS,SCITOKENS,SSL" {
-		t.Errorf("getDefaultAuthMethods() = %q, want FS,IDTOKENS,SCITOKENS,SSL", got)
+	if got != "FS,IDTOKENS,KERBEROS,SCITOKENS,SSL" {
+		t.Errorf("getDefaultAuthMethods() = %q, want FS,IDTOKENS,KERBEROS,SCITOKENS,SSL", got)
 	}
 	// The list is sourced from cedar's capability API: stubs excluded, implemented kept.
-	if security.AuthKerberos.Implemented() || security.AuthPassword.Implemented() {
-		t.Error("KERBEROS/PASSWORD are cedar stubs and must not be reported implemented")
+	if security.AuthPassword.Implemented() {
+		t.Error("PASSWORD is a cedar stub and must not be reported implemented")
 	}
-	for _, m := range []security.AuthMethod{security.AuthFS, security.AuthIDTokens, security.AuthSciTokens, security.AuthSSL} {
+	for _, m := range []security.AuthMethod{security.AuthFS, security.AuthIDTokens, security.AuthKerberos, security.AuthSciTokens, security.AuthSSL} {
 		if !m.Implemented() {
 			t.Errorf("%s should be reported implemented", m)
 		}
