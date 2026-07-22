@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/PelicanPlatform/classad v0.8.0
-	github.com/bbockelm/cedar v0.6.0
+	github.com/bbockelm/cedar v0.6.3
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/glebarez/sqlite v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
