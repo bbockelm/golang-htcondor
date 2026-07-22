@@ -284,11 +284,14 @@ ENABLE_WEB_SERVER = False
 			// the config world-readable (written 0600). The daemons write their address files
 			// world-readable, so 0755 dirs are enough; their own files keep their modes.
 			for _, dir := range []string{h.tmpDir, h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
-				if cerr := os.Chmod(dir, 0o755); cerr != nil {
+				// 0755 is required: a non-root submitter must traverse these dirs to reach the
+				// config and the daemons' address files. Test scratch dirs, not secrets.
+				if cerr := os.Chmod(dir, 0o755); cerr != nil { //nolint:gosec // G302: world-traversable is intentional here
 					t.Logf("harness: chmod %s 0755 failed (continuing): %v", dir, cerr)
 				}
 			}
-			if cerr := os.Chmod(h.configFile, 0o644); cerr != nil {
+			// 0644 is required so the non-root submitter's condor_submit can read CONDOR_CONFIG.
+			if cerr := os.Chmod(h.configFile, 0o644); cerr != nil { //nolint:gosec // G302: world-readable config is intentional here
 				t.Logf("harness: chmod config 0644 failed (continuing): %v", cerr)
 			}
 		} else {
