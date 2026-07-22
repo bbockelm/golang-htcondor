@@ -151,27 +151,6 @@ func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHar
 		}
 	}
 
-	// When the test runs as root (e.g. a privilege-drop integration test), condor_master
-	// starts as root and drops its daemons to the condor user (CONDOR_IDS, auto-detected as
-	// the condor account). Those dropped daemons must be able to write their log/spool/
-	// execute/lock dirs, which we just created owned by root -- so hand the harness tree to
-	// the condor user. Without this the collector cannot write CollectorLog and startup
-	// times out. A no-op when not root or when there is no condor user (condor then runs as
-	// root and the root-owned dirs are already writable).
-	if os.Geteuid() == 0 {
-		if u, lerr := user.Lookup("condor"); lerr == nil {
-			uid, _ := strconv.Atoi(u.Uid)
-			gid, _ := strconv.Atoi(u.Gid)
-			for _, dir := range []string{h.tmpDir, h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
-				if cerr := os.Chown(dir, uid, gid); cerr != nil {
-					t.Logf("harness: chown %s to condor failed (continuing): %v", dir, cerr)
-				}
-			}
-		} else {
-			t.Logf("harness: running as root but no condor user (%v); daemons will run as root", lerr)
-		}
-	}
-
 	// Generate HTCondor configuration
 	h.collectorAddr = "127.0.0.1:0" // Use dynamic port
 	h.scheddName = fmt.Sprintf("test_schedd_%d", os.Getpid())
@@ -275,6 +254,33 @@ ENABLE_WEB_SERVER = False
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	// When the test runs as root (e.g. a privilege-drop integration test), condor_master
+	// starts as root and drops its daemons to the condor user (CONDOR_IDS, auto-detected as
+	// the condor account). Those dropped daemons must be able to read the config and write
+	// their log/spool/execute/lock dirs, all just created owned by root -- so hand the whole
+	// harness tree to the condor user now that the config is written. Without this the
+	// daemons can't read condor_config / write CollectorLog and startup times out. A no-op
+	// when not root or when there is no condor user (condor then runs as root and the
+	// root-owned tree is already accessible). condor_master itself still reads the config as
+	// root before dropping.
+	if os.Geteuid() == 0 {
+		if u, lerr := user.Lookup("condor"); lerr == nil {
+			uid, _ := strconv.Atoi(u.Uid)
+			gid, _ := strconv.Atoi(u.Gid)
+			werr := filepath.WalkDir(h.tmpDir, func(p string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				return os.Lchown(p, uid, gid) // Lchown: never follow a symlink out of the tree
+			})
+			if werr != nil {
+				t.Logf("harness: chowning tree to condor failed (continuing): %v", werr)
+			}
+		} else {
+			t.Logf("harness: running as root but no condor user (%v); daemons will run as root", lerr)
+		}
 	}
 
 	// Start condor_master
