@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -146,6 +148,27 @@ func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHar
 	for _, dir := range []string{h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			t.Fatalf("Failed to create directory %s: %v", dir, err)
+		}
+	}
+
+	// When the test runs as root (e.g. a privilege-drop integration test), condor_master
+	// starts as root and drops its daemons to the condor user (CONDOR_IDS, auto-detected as
+	// the condor account). Those dropped daemons must be able to write their log/spool/
+	// execute/lock dirs, which we just created owned by root -- so hand the harness tree to
+	// the condor user. Without this the collector cannot write CollectorLog and startup
+	// times out. A no-op when not root or when there is no condor user (condor then runs as
+	// root and the root-owned dirs are already writable).
+	if os.Geteuid() == 0 {
+		if u, lerr := user.Lookup("condor"); lerr == nil {
+			uid, _ := strconv.Atoi(u.Uid)
+			gid, _ := strconv.Atoi(u.Gid)
+			for _, dir := range []string{h.tmpDir, h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
+				if cerr := os.Chown(dir, uid, gid); cerr != nil {
+					t.Logf("harness: chown %s to condor failed (continuing): %v", dir, cerr)
+				}
+			}
+		} else {
+			t.Logf("harness: running as root but no condor user (%v); daemons will run as root", lerr)
 		}
 	}
 
