@@ -278,6 +278,12 @@ ENABLE_WEB_SERVER = False
 			if werr != nil {
 				t.Logf("harness: chowning tree to condor failed (continuing): %v", werr)
 			}
+			// A real HTCondor config is world-readable; make ours so too, so a normal user
+			// (e.g. a job submitter running condor_submit as themselves against this pool)
+			// can read CONDOR_CONFIG even though it is now owned by condor.
+			if cerr := os.Chmod(h.configFile, 0o644); cerr != nil {
+				t.Logf("harness: chmod config 0644 failed (continuing): %v", cerr)
+			}
 		} else {
 			t.Logf("harness: running as root but no condor user (%v); daemons will run as root", lerr)
 		}
