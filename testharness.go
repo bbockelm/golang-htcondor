@@ -279,11 +279,14 @@ ENABLE_WEB_SERVER = False
 				t.Logf("harness: chowning tree to condor failed (continuing): %v", werr)
 			}
 			// Let a normal user (e.g. a job submitter running condor_submit as themselves
-			// against this pool) reach CONDOR_CONFIG: the top dir must be traversable by
-			// others (os.MkdirTemp makes it 0700) and the config world-readable (it was
-			// written 0600). The log/spool/execute/lock subdirs stay condor-only.
-			if cerr := os.Chmod(h.tmpDir, 0o755); cerr != nil {
-				t.Logf("harness: chmod tmpDir 0755 failed (continuing): %v", cerr)
+			// against this pool) reach the config and the daemons' address files: the dirs
+			// must be traversable by others (os.MkdirTemp/MkdirAll made them 0700/0750) and
+			// the config world-readable (written 0600). The daemons write their address files
+			// world-readable, so 0755 dirs are enough; their own files keep their modes.
+			for _, dir := range []string{h.tmpDir, h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
+				if cerr := os.Chmod(dir, 0o755); cerr != nil {
+					t.Logf("harness: chmod %s 0755 failed (continuing): %v", dir, cerr)
+				}
 			}
 			if cerr := os.Chmod(h.configFile, 0o644); cerr != nil {
 				t.Logf("harness: chmod config 0644 failed (continuing): %v", cerr)
