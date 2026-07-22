@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -252,6 +254,49 @@ ENABLE_WEB_SERVER = False
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	// When the test runs as root (e.g. a privilege-drop integration test), condor_master
+	// starts as root and drops its daemons to the condor user (CONDOR_IDS, auto-detected as
+	// the condor account). Those dropped daemons must be able to read the config and write
+	// their log/spool/execute/lock dirs, all just created owned by root -- so hand the whole
+	// harness tree to the condor user now that the config is written. Without this the
+	// daemons can't read condor_config / write CollectorLog and startup times out. A no-op
+	// when not root or when there is no condor user (condor then runs as root and the
+	// root-owned tree is already accessible). condor_master itself still reads the config as
+	// root before dropping.
+	if os.Geteuid() == 0 {
+		if u, lerr := user.Lookup("condor"); lerr == nil {
+			uid, _ := strconv.Atoi(u.Uid)
+			gid, _ := strconv.Atoi(u.Gid)
+			werr := filepath.WalkDir(h.tmpDir, func(p string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				return os.Lchown(p, uid, gid) // Lchown: never follow a symlink out of the tree
+			})
+			if werr != nil {
+				t.Logf("harness: chowning tree to condor failed (continuing): %v", werr)
+			}
+			// Let a normal user (e.g. a job submitter running condor_submit as themselves
+			// against this pool) reach the config and the daemons' address files: the dirs
+			// must be traversable by others (os.MkdirTemp/MkdirAll made them 0700/0750) and
+			// the config world-readable (written 0600). The daemons write their address files
+			// world-readable, so 0755 dirs are enough; their own files keep their modes.
+			for _, dir := range []string{h.tmpDir, h.logDir, h.executeDir, h.spoolDir, h.lockDir} {
+				// 0755 is required: a non-root submitter must traverse these dirs to reach the
+				// config and the daemons' address files. Test scratch dirs, not secrets.
+				if cerr := os.Chmod(dir, 0o755); cerr != nil { //nolint:gosec // G302: world-traversable is intentional here
+					t.Logf("harness: chmod %s 0755 failed (continuing): %v", dir, cerr)
+				}
+			}
+			// 0644 is required so the non-root submitter's condor_submit can read CONDOR_CONFIG.
+			if cerr := os.Chmod(h.configFile, 0o644); cerr != nil { //nolint:gosec // G302: world-readable config is intentional here
+				t.Logf("harness: chmod config 0644 failed (continuing): %v", cerr)
+			}
+		} else {
+			t.Logf("harness: running as root but no condor user (%v); daemons will run as root", lerr)
+		}
 	}
 
 	// Start condor_master
