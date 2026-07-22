@@ -89,9 +89,12 @@ func TestParseDestinationLevels(t *testing.T) {
 }
 
 // TestLogFileMode0644 verifies daemon logs are created world-readable (matching C++
-// HTCondor), not 0600. Umask is cleared so the mode is deterministic.
+// HTCondor), not 0600 -- even under a restrictive umask. A daemon commonly inherits umask
+// 077; os.OpenFile's mode is masked by it, so without the explicit fchmod (forceLogPerm)
+// the file would come out 0600. Setting umask 077 here makes this a real regression for
+// the umask masking, not just the OpenFile mode argument.
 func TestLogFileMode0644(t *testing.T) {
-	old := syscall.Umask(0)
+	old := syscall.Umask(0o077)
 	defer syscall.Umask(old)
 
 	path := filepath.Join(t.TempDir(), "mode.log")
@@ -106,6 +109,38 @@ func TestLogFileMode0644(t *testing.T) {
 		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0644 {
-		t.Fatalf("log file mode = %o, want 0644", perm)
+		t.Fatalf("log file mode = %o under umask 077, want 0644 (explicit chmod should defeat umask)", perm)
+	}
+}
+
+// TestLogRotationMode0644 verifies the freshly-created log after a rotation is also 0644
+// under a restrictive umask (the rotate path recreates the file in production).
+func TestLogRotationMode0644(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	path := filepath.Join(t.TempDir(), "rot.log")
+	l, err := New(&Config{
+		OutputPath:        path,
+		SkipGlobalInstall: true,
+		DefaultLevel:      VerbosityInfo,
+		MaxLogSize:        200, // tiny, so a few lines trigger rotation
+		MaxNumLogs:        2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		l.Info(DestinationGeneral, "a message long enough to push the log past its rotation size")
+	}
+	if _, err := os.Stat(path + ".old"); err != nil {
+		t.Fatalf("expected a rotated .old log: %v", err)
+	}
+	info, err := os.Stat(path) // the post-rotation current log
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0644 {
+		t.Fatalf("post-rotation log mode = %o under umask 077, want 0644", perm)
 	}
 }
