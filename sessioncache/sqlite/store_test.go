@@ -218,3 +218,55 @@ func TestSessionStoreDeltaWrites(t *testing.T) {
 		t.Errorf("after delta, expected only sess-1, got %+v", got)
 	}
 }
+
+// TestOpenRestrictsFileMode verifies the session database and its WAL/shared
+// sidecars are created 0600 (not world/group readable), and that an existing
+// looser file is tightened on reopen. Contents are encrypted, but the metadata
+// should not be readable either.
+func TestOpenRestrictsFileMode(t *testing.T) {
+	// A permissive umask so the mode we assert is the store's doing, not the
+	// environment's -- without the fix SQLite would create the file 0666&~umask.
+	old := syscallUmask(0)
+	defer syscallUmask(old)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions_test.db")
+
+	st := openStore(t, path, []SigningKey{sk("POOL", 1)})
+	// A write plus a checkpoint materializes the -wal and -shm sidecars.
+	if err := st.Save(context.Background(), sampleRecords()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(context.Background(), `PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := path + suffix
+		info, err := os.Stat(p)
+		if err != nil {
+			if suffix != "" {
+				continue // sidecar may not exist on every platform/config
+			}
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %o, want 600", p, perm)
+		}
+	}
+	_ = st.Close()
+
+	// A pre-existing looser file must be tightened on reopen.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st2 := openStore(t, path, []SigningKey{sk("POOL", 1)})
+	defer st2.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("reopen did not tighten mode: %o, want 600", perm)
+	}
+}
