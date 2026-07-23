@@ -94,7 +94,9 @@ func Open(path string, keys []SigningKey, log *slog.Logger) (sessioncache.Sessio
 // (rather than letting SQLite create it under the umask) means SQLite opens an
 // existing file and propagates its permissions to the -wal/-shm sidecars.
 func ensureFileMode(path string, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_CREATE, mode)
+	// path is the configured session-database location, not attacker-controlled.
+	f, err := os.OpenFile(path, os.O_CREATE, mode) //nolint:gosec // G304: path is operator-configured
+
 	if err != nil {
 		return err
 	}

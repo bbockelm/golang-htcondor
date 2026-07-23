@@ -257,11 +257,11 @@ func TestOpenRestrictsFileMode(t *testing.T) {
 	_ = st.Close()
 
 	// A pre-existing looser file must be tightened on reopen.
-	if err := os.Chmod(path, 0o644); err != nil {
+	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // G302: deliberately loosening to test tightening
 		t.Fatal(err)
 	}
 	st2 := openStore(t, path, []SigningKey{sk("POOL", 1)})
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
