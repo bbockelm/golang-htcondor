@@ -101,56 +101,48 @@ func SessionDBFileName(subsys, localName string) string {
 	return name + ".db"
 }
 
-// autoSessionPersistence is the zero-wiring default every daemon gets from
-// Serve: persist the CEDAR session cache whenever the deployment makes that
-// possible, so clients resume sessions across a restart instead of landing on
-// SID_NOT_FOUND and re-authenticating in a thundering herd.
+// sessionPersistenceFromConfig is the single-knob session-persistence policy
+// every daemon gets from Serve, with no per-binary wiring:
 //
-// Policy, per the <SUBSYS>_PERSIST_SESSIONS knob:
-//   - unset (the default): AUTO -- enable when SPOOL is configured and pool
-//     signing keys are available (they encrypt the database at rest); log and
-//     continue unpersisted when either is missing.
-//   - false: off.
-//   - true: required -- a missing prerequisite is a fatal misconfiguration,
-//     never a silent fallback (in particular, never a plaintext session store).
+//	SEC_PERSIST_SESSIONS = true
 //
-// <SUBSYS>_SESSION_CACHE_FILE overrides the default
-// $(SPOOL)/SessionDBFileName(...) path; <SUBSYS>_SESSION_SNAPSHOT_INTERVAL
-// (seconds) the snapshot cadence. A binary that already called
+// turns on persistence of the CEDAR session cache (default OFF), so clients
+// resume sessions across this daemon's restarts instead of landing on
+// SID_NOT_FOUND and re-authenticating in a thundering herd. One unified knob
+// covers every daemon; HTCondor's standard subsystem scoping
+// (<SUBSYS>.SEC_PERSIST_SESSIONS) narrows it to one daemon when desired.
+//
+// When enabled, a missing prerequisite is a fatal misconfiguration, never a
+// quiet skip: SPOOL (or SEC_SESSION_CACHE_FILE) must be configured, and pool
+// signing keys must be available -- they encrypt the database at rest (read as
+// root via droppriv), so there is no plaintext fallback.
+// SEC_SESSION_CACHE_FILE overrides the default $(SPOOL)/SessionDBFileName(...)
+// path and SEC_SESSION_SNAPSHOT_INTERVAL (seconds) the snapshot cadence; both
+// scope per-subsystem the same way. A binary that already called
 // EnableSessionPersistence itself keeps its own arrangement (this is a no-op).
 // Returns a closer for the store (nil when not enabled).
-func (d *Daemon) autoSessionPersistence() (func(), error) {
+func (d *Daemon) sessionPersistenceFromConfig() (func(), error) {
 	if d.sessionStore != nil {
 		return nil, nil // the binary wired persistence itself
 	}
 	cfg := d.Config()
 
-	required := false
-	if v, ok := cfg.Get(d.subsys + "_PERSIST_SESSIONS"); ok && strings.TrimSpace(v) != "" {
-		on := configTruthy(v)
-		if !on {
-			return nil, nil
-		}
-		required = true
+	v, ok := cfg.Get("SEC_PERSIST_SESSIONS")
+	if !ok || !configTruthy(v) {
+		return nil, nil // default off
 	}
-	// skip: in AUTO mode a missing prerequisite just logs; when the knob demands
-	// persistence it is fatal.
-	skip := func(format string, args ...any) (func(), error) {
-		if required {
-			return nil, fmt.Errorf("daemon: "+d.subsys+"_PERSIST_SESSIONS is set but "+format, args...)
-		}
-		d.log.Info(logging.DestinationGeneral, "session persistence not enabled: "+fmt.Sprintf(format, args...))
-		return nil, nil
+	fail := func(format string, args ...any) (func(), error) {
+		return nil, fmt.Errorf("daemon: SEC_PERSIST_SESSIONS is set but "+format, args...)
 	}
 
 	dbPath := ""
-	if v, ok := cfg.Get(d.subsys + "_SESSION_CACHE_FILE"); ok {
+	if v, ok := cfg.Get("SEC_SESSION_CACHE_FILE"); ok {
 		dbPath = strings.TrimSpace(v)
 	}
 	if dbPath == "" {
 		spool, ok := cfg.Get("SPOOL")
 		if !ok || strings.TrimSpace(spool) == "" {
-			return skip("no SPOOL (nor %s_SESSION_CACHE_FILE) is configured", d.subsys)
+			return fail("no SPOOL (nor SEC_SESSION_CACHE_FILE) is configured")
 		}
 		dbPath = filepath.Join(strings.TrimSpace(spool), SessionDBFileName(d.subsys, d.localName))
 	}
@@ -159,10 +151,10 @@ func (d *Daemon) autoSessionPersistence() (func(), error) {
 	// 0600 files read back as root via droppriv.
 	rawKeys, err := htcondor.LoadSigningKeys(cfg)
 	if err != nil {
-		return skip("loading pool signing keys failed: %v", err)
+		return fail("loading pool signing keys failed: %v", err)
 	}
 	if len(rawKeys) == 0 {
-		return skip("no pool signing keys are available (set SEC_PASSWORD_DIRECTORY); the session database cannot be encrypted without one")
+		return fail("no pool signing keys are available (set SEC_PASSWORD_DIRECTORY); the session database cannot be encrypted without one")
 	}
 	keys := make([]sqlite.SigningKey, 0, len(rawKeys))
 	for id, material := range rawKeys {
@@ -171,18 +163,18 @@ func (d *Daemon) autoSessionPersistence() (func(), error) {
 
 	store, err := sqlite.Open(dbPath, keys, d.Slog())
 	if err != nil {
-		return skip("opening %s failed: %v", dbPath, err)
+		return fail("opening %s failed: %v", dbPath, err)
 	}
 
 	interval := time.Duration(0)
-	if v, ok := cfg.Get(d.subsys + "_SESSION_SNAPSHOT_INTERVAL"); ok {
+	if v, ok := cfg.Get("SEC_SESSION_SNAPSHOT_INTERVAL"); ok {
 		if secs, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && secs > 0 {
 			interval = time.Duration(secs) * time.Second
 		}
 	}
 	if err := d.EnableSessionPersistence(store, interval); err != nil {
 		_ = store.Close()
-		return skip("restoring persisted sessions from %s failed: %v", dbPath, err)
+		return fail("restoring persisted sessions from %s failed: %v", dbPath, err)
 	}
 	d.log.Info(logging.DestinationGeneral, "session persistence enabled",
 		"path", dbPath, "signing_keys", len(keys))

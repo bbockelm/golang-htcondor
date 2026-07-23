@@ -293,10 +293,11 @@ func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context,
 		return fmt.Errorf("daemon: ServeListeners requires at least one listener")
 	}
 
-	// Default-on session persistence: restore/persist the CEDAR session cache
-	// without any per-binary wiring (see autoSessionPersistence). Runs before
-	// the serve loops so the first request can already resume a session.
-	closeSessions, err := d.autoSessionPersistence()
+	// Single-knob session persistence (SEC_PERSIST_SESSIONS, default off):
+	// restore/persist the CEDAR session cache without any per-binary wiring (see
+	// sessionPersistenceFromConfig). Runs before the serve loops so the first
+	// request can already resume a session.
+	closeSessions, err := d.sessionPersistenceFromConfig()
 	if err != nil {
 		return err
 	}

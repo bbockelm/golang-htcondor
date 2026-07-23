@@ -15,6 +15,7 @@ require (
 
 require (
 	github.com/PelicanPlatform/classad/collections v0.8.0
+	github.com/glebarez/go-sqlite v1.21.2
 	github.com/pressly/goose/v3 v3.27.2
 )
 
@@ -53,5 +54,5 @@ require (
 	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.54.0 // indirect
 )

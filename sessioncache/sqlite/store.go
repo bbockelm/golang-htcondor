@@ -18,7 +18,12 @@ import (
 
 	"github.com/bbockelm/golang-htcondor/sessioncache"
 	"github.com/pressly/goose/v3"
-	_ "modernc.org/sqlite" // registers the pure-Go "sqlite" database/sql driver
+	// glebarez/go-sqlite is the modernc.org/sqlite-derived pure-Go engine that
+	// registers the "sqlite" database/sql driver. We use it (rather than modernc
+	// directly) because the webapi module's GORM driver links glebarez too --
+	// linking both libraries into one binary panics at init with
+	// "sql: Register called twice for driver sqlite".
+	_ "github.com/glebarez/go-sqlite"
 )
 
 //go:embed migrations/*.sql
