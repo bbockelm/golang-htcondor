@@ -37,6 +37,12 @@ type Options struct {
 	// names the address file (<Subsys>_ADDRESS_FILE).
 	Subsys string
 
+	// LocalName is the daemon's HTCondor local-name (-local-name), when running
+	// as a named instance of the subsystem. It scopes the default session-
+	// database file name (see SessionDBFileName), so several instances sharing
+	// a SPOOL keep separate session caches.
+	LocalName string
+
 	// Config is the HTCondor configuration. If nil, it is loaded from
 	// CONDOR_CONFIG.
 	Config *config.Config
@@ -53,7 +59,8 @@ type Options struct {
 // Daemon is an HTCondor daemon bootstrap. It is safe to construct once and use
 // from a single Run/Serve call.
 type Daemon struct {
-	subsys string
+	subsys    string
+	localName string
 	// cfg is swapped atomically on SIGHUP reconfigure; readers (Config) load it
 	// without locking, so a reconfigure never races a concurrent reader.
 	cfg   atomic.Pointer[config.Config]
@@ -124,6 +131,7 @@ func New(opts Options) (*Daemon, error) {
 
 	d := &Daemon{
 		subsys:     opts.Subsys,
+		localName:  opts.LocalName,
 		log:        logger,
 		grace:      grace,
 		shutdownCh: make(chan struct{}),
@@ -284,6 +292,18 @@ func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context,
 	if len(lns) == 0 {
 		return fmt.Errorf("daemon: ServeListeners requires at least one listener")
 	}
+
+	// Default-on session persistence: restore/persist the CEDAR session cache
+	// without any per-binary wiring (see autoSessionPersistence). Runs before
+	// the serve loops so the first request can already resume a session.
+	closeSessions, err := d.autoSessionPersistence()
+	if err != nil {
+		return err
+	}
+	if closeSessions != nil {
+		defer closeSessions()
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

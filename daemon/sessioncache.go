@@ -2,11 +2,17 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bbockelm/cedar/security"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/sessioncache"
+	"github.com/bbockelm/golang-htcondor/sessioncache/sqlite"
 )
 
 // defaultSessionSnapshotInterval is how often the session cache is persisted
@@ -78,4 +84,116 @@ func (d *Daemon) finalSessionSnapshot() {
 func (d *Daemon) snapshotSessions(ctx context.Context) error {
 	recs := sessioncache.Snapshot(security.GetSessionCache())
 	return d.sessionStore.Save(ctx, recs)
+}
+
+// SessionDBFileName is the default session-database file name for a daemon:
+// "sessions_<subsystem>[_<local-name>].db", lower-cased. The common "sessions_"
+// PREFIX gives administrators one glob for every daemon's session database --
+// e.g. a VALID_SPOOL_FILES exclusion of "sessions_*" -- while the subsystem
+// (plus any local-name) keeps the name per-daemon: several daemons, or several
+// instances of one under distinct local-names, may share a SPOOL, and two
+// daemons writing one session database would corrupt each other's caches.
+func SessionDBFileName(subsys, localName string) string {
+	name := "sessions_" + strings.ToLower(subsys)
+	if localName != "" {
+		name += "_" + strings.ToLower(localName)
+	}
+	return name + ".db"
+}
+
+// autoSessionPersistence is the zero-wiring default every daemon gets from
+// Serve: persist the CEDAR session cache whenever the deployment makes that
+// possible, so clients resume sessions across a restart instead of landing on
+// SID_NOT_FOUND and re-authenticating in a thundering herd.
+//
+// Policy, per the <SUBSYS>_PERSIST_SESSIONS knob:
+//   - unset (the default): AUTO -- enable when SPOOL is configured and pool
+//     signing keys are available (they encrypt the database at rest); log and
+//     continue unpersisted when either is missing.
+//   - false: off.
+//   - true: required -- a missing prerequisite is a fatal misconfiguration,
+//     never a silent fallback (in particular, never a plaintext session store).
+//
+// <SUBSYS>_SESSION_CACHE_FILE overrides the default
+// $(SPOOL)/SessionDBFileName(...) path; <SUBSYS>_SESSION_SNAPSHOT_INTERVAL
+// (seconds) the snapshot cadence. A binary that already called
+// EnableSessionPersistence itself keeps its own arrangement (this is a no-op).
+// Returns a closer for the store (nil when not enabled).
+func (d *Daemon) autoSessionPersistence() (func(), error) {
+	if d.sessionStore != nil {
+		return nil, nil // the binary wired persistence itself
+	}
+	cfg := d.Config()
+
+	required := false
+	if v, ok := cfg.Get(d.subsys + "_PERSIST_SESSIONS"); ok && strings.TrimSpace(v) != "" {
+		on := configTruthy(v)
+		if !on {
+			return nil, nil
+		}
+		required = true
+	}
+	// skip: in AUTO mode a missing prerequisite just logs; when the knob demands
+	// persistence it is fatal.
+	skip := func(format string, args ...any) (func(), error) {
+		if required {
+			return nil, fmt.Errorf("daemon: "+d.subsys+"_PERSIST_SESSIONS is set but "+format, args...)
+		}
+		d.log.Info(logging.DestinationGeneral, "session persistence not enabled: "+fmt.Sprintf(format, args...))
+		return nil, nil
+	}
+
+	dbPath := ""
+	if v, ok := cfg.Get(d.subsys + "_SESSION_CACHE_FILE"); ok {
+		dbPath = strings.TrimSpace(v)
+	}
+	if dbPath == "" {
+		spool, ok := cfg.Get("SPOOL")
+		if !ok || strings.TrimSpace(spool) == "" {
+			return skip("no SPOOL (nor %s_SESSION_CACHE_FILE) is configured", d.subsys)
+		}
+		dbPath = filepath.Join(strings.TrimSpace(spool), SessionDBFileName(d.subsys, d.localName))
+	}
+
+	// The pool signing key(s) encrypt the database at rest; they are root-owned
+	// 0600 files read back as root via droppriv.
+	rawKeys, err := htcondor.LoadSigningKeys(cfg)
+	if err != nil {
+		return skip("loading pool signing keys failed: %v", err)
+	}
+	if len(rawKeys) == 0 {
+		return skip("no pool signing keys are available (set SEC_PASSWORD_DIRECTORY); the session database cannot be encrypted without one")
+	}
+	keys := make([]sqlite.SigningKey, 0, len(rawKeys))
+	for id, material := range rawKeys {
+		keys = append(keys, sqlite.SigningKey{ID: id, Material: material})
+	}
+
+	store, err := sqlite.Open(dbPath, keys, d.Slog())
+	if err != nil {
+		return skip("opening %s failed: %v", dbPath, err)
+	}
+
+	interval := time.Duration(0)
+	if v, ok := cfg.Get(d.subsys + "_SESSION_SNAPSHOT_INTERVAL"); ok {
+		if secs, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && secs > 0 {
+			interval = time.Duration(secs) * time.Second
+		}
+	}
+	if err := d.EnableSessionPersistence(store, interval); err != nil {
+		_ = store.Close()
+		return skip("restoring persisted sessions from %s failed: %v", dbPath, err)
+	}
+	d.log.Info(logging.DestinationGeneral, "session persistence enabled",
+		"path", dbPath, "signing_keys", len(keys))
+	return func() { _ = store.Close() }, nil
+}
+
+// configTruthy interprets an HTCondor boolean knob value.
+func configTruthy(v string) bool {
+	switch strings.ToUpper(strings.TrimSpace(v)) {
+	case "TRUE", "YES", "1", "T", "ON":
+		return true
+	}
+	return false
 }
