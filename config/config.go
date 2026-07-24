@@ -863,9 +863,12 @@ func (c *Config) expandMacros(value string) (string, error) {
 
 		c.evaluating[varName] = true
 
-		// Get value
+		// Get value. Resolve through the subsystem/local-name scoping that Get()
+		// uses, so `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster,
+		// and any `$(KNOB)` picks up a `SUBSYS.KNOB` override -- matching HTCondor,
+		// where macro expansion is subsystem-scoped.
 		replacement := defaultVal
-		if val, ok := c.values[varName]; ok {
+		if val, ok := c.values[c.scopedLookupKey(varName)]; ok {
 			replacement = val
 		}
 

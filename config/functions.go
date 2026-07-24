@@ -304,7 +304,11 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 					}
 
 					c.evaluating[varName] = true
-					replacement, ok := c.values[varName]
+					// Resolve through subsystem/local-name scoping (as Get does), so
+					// `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster
+					// and any `$(KNOB)` honors a `SUBSYS.KNOB` override, matching
+					// HTCondor's subsystem-scoped macro expansion.
+					replacement, ok := c.values[c.scopedLookupKey(varName)]
 					if !ok {
 						replacement = defaultVal
 					}
