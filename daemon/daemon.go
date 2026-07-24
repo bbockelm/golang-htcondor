@@ -80,6 +80,11 @@ type Daemon struct {
 	adoptedInherited bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
 	stopAlive        func()
 	onReconfig       []func(*config.Config)
+
+	// startTime is the daemon's construction time (DaemonStartTime); lastReconfig is the last
+	// SIGHUP reconfigure (DaemonLastReconfigTime), 0 until the first. Both feed PublishAd.
+	startTime    time.Time
+	lastReconfig atomic.Int64
 }
 
 // New constructs a Daemon: it loads configuration and logging, and — when
@@ -135,6 +140,7 @@ func New(opts Options) (*Daemon, error) {
 		log:        logger,
 		grace:      grace,
 		shutdownCh: make(chan struct{}),
+		startTime:  time.Now(),
 	}
 	d.cfg.Store(cfg)
 
@@ -444,6 +450,7 @@ func (d *Daemon) reconfigure() {
 		return
 	}
 	d.cfg.Store(cfg)
+	d.lastReconfig.Store(time.Now().Unix())
 	// Re-apply per-destination log levels from the reloaded config, so condor_reconfig
 	// changes log verbosity on the running daemon (the levels are held in a live atomic
 	// snapshot the installed handlers read).
