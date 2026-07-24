@@ -4,8 +4,8 @@ github.com/PelicanPlatform/classad/collections v0.16.7 h1:WBpuw2mTUCmpOgd3kQFkKt
 github.com/PelicanPlatform/classad/collections v0.16.7/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
 github.com/RoaringBitmap/roaring/v2 v2.19.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
-github.com/bbockelm/cedar v0.6.3 h1:cxfoN/r5g/LpQmlYXvEqJ6kYgbF1icitiVwA9wcMPvw=
-github.com/bbockelm/cedar v0.6.3/go.mod h1:C4u6CKJoweg3LZniOi7Yh8avQv1KZjHs9k1vTGa1+2w=
+github.com/bbockelm/cedar v0.6.6 h1:yr8UsAxvOeni0YMjZjd3WED9fIxle8MLTPZSCX1bKsE=
+github.com/bbockelm/cedar v0.6.6/go.mod h1:C4u6CKJoweg3LZniOi7Yh8avQv1KZjHs9k1vTGa1+2w=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
 github.com/bbockelm/gosssd v0.0.1/go.mod h1:Hz8jIcIkQnFmA/ekP2ZWpnPqmyIxftPPFsi+Y3wqRL0=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
