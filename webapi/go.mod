@@ -24,6 +24,7 @@ require (
 )
 
 require (
+	github.com/PelicanPlatform/classad/db v0.16.7 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
@@ -128,6 +129,9 @@ require (
 	modernc.org/sqlite v1.54.0 // indirect
 )
 
-require github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+require (
+	github.com/PelicanPlatform/classad/dbrpc v0.16.7
+	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+)
 
 replace github.com/bbockelm/golang-htcondor => ../

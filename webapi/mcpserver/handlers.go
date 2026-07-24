@@ -128,6 +128,9 @@ var readOnlyMCPTools = map[string]bool{
 	"condor_doc_submit_syntax":      true,
 	"condor_doc_config_variables":   true,
 	"condor_doc_search":             true,
+	"query_history_db":              true,
+	"query_jobs_as_of":              true,
+	"aggregate_jobs":                true,
 }
 
 // handleListTools returns the list of available tools, filtered by
@@ -681,6 +684,50 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		)
 	}
 
+	// Add htcondordb-backed tools when a database is discoverable via the collector. These
+	// answer questions the live schedd is bad at: completed-job history, point-in-time
+	// (time-travel) state, and cheap server-side aggregates. All are read-only and owner-scoped.
+	if s.htcondordbEnabled() {
+		tools = append(tools,
+			Tool{
+				Name:        "query_history_db",
+				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Results are owner-scoped: you only see your own jobs. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint expression over completed-job attributes (e.g. 'ExitCode != 0'). Empty matches all your jobs."},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+					},
+				},
+			},
+			Tool{
+				Name:        "query_jobs_as_of",
+				Description: "TIME-TRAVEL: query the live-jobs table as it looked at a past instant (only if the database has time-travel enabled). Answers 'what did the queue look like at time T'. Owner-scoped.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"as_of":      map[string]interface{}{"type": "string", "description": "The point in time: an RFC3339 timestamp (2026-07-24T00:00:00Z) or a relative duration ago (e.g. '-1h', '-30m')."},
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint over job attributes. Empty matches all your jobs."},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+					},
+					"required": []string{"as_of"},
+				},
+			},
+			Tool{
+				Name:        "aggregate_jobs",
+				Description: "Server-side COUNT with optional GROUP BY over an htcondordb table (default 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad. Owner-scoped.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint to filter before grouping. Empty matches all your jobs."},
+						"group_by":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Attributes to group by, e.g. [\"JobStatus\"]. Empty returns a single total count."},
+						"table":      map[string]interface{}{"type": "string", "description": "Table to aggregate: 'jobs' (default, live) or 'history' (completed)."},
+					},
+				},
+			},
+		)
+	}
+
 	// Filter by caller's OAuth2 scopes if the HTTP transport
 	// supplied them. Read-only-token clients see only the
 	// read-safe subset; write-token and stdio (no scope info)
@@ -790,6 +837,12 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolStoreServiceCredential(ctx, request.Arguments)
 	case "delete_service_credential":
 		result, err = s.toolDeleteServiceCredential(ctx, request.Arguments)
+	case "query_history_db":
+		result, err = s.toolQueryHistoryDB(ctx, request.Arguments)
+	case "query_jobs_as_of":
+		result, err = s.toolQueryJobsAsOf(ctx, request.Arguments)
+	case "aggregate_jobs":
+		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	default:
 		// Doc tools all share one handler — dispatching them here as
 		// a single default-arm fallback means the switch's
