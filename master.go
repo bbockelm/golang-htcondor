@@ -135,6 +135,14 @@ func (m *Master) DaemonName() string {
 	return m.daemonName
 }
 
+// SetDaemonName sets the name reported to the master in DC_SET_READY (the
+// "DaemonName" attribute the master logs as "Setting ready state ... for <name>").
+// The master identifies the daemon by PID, so this is for its logging/bookkeeping;
+// callers use it to supply the subsystem name when _CONDOR_DAEMON_NAME is unset.
+func (m *Master) SetDaemonName(name string) {
+	m.daemonName = name
+}
+
 // SendKeepAlive transmits a DC_CHILDALIVE heartbeat to condor_master.
 func (m *Master) SendKeepAlive(ctx context.Context, opts *KeepAliveOptions) error {
 	if m.sender == nil {
