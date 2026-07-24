@@ -40,7 +40,7 @@ func TestPartialTrailingLineNotConsumed(t *testing.T) {
 	// A complete op, then a partial SetAttribute (op 103) with no value + no newline,
 	// exactly like the reported "103 16257.1830 RecentB".
 	complete := "103 1.0 Owner \"alice\"\n"
-	if err := os.WriteFile(path, []byte(complete+"103 1.0 RecentB"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(complete+"103 1.0 RecentB"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -57,7 +57,7 @@ func TestPartialTrailingLineNotConsumed(t *testing.T) {
 	}
 
 	// The schedd finishes the line (value + newline) and appends another op.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: test temp path
 	if err != nil {
 		t.Fatal(err)
 	}

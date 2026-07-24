@@ -2,6 +2,7 @@ package classadlog
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,7 +86,7 @@ func (p *Parser) ReadEntry() (*LogEntry, error) {
 			// schedd appends a transaction incrementally). Do NOT consume or parse it:
 			// return EOF and leave the bytes to be re-read, complete, on the next Open.
 			// Any other error is real.
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil, io.EOF
 			}
 			return nil, err
