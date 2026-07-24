@@ -76,20 +76,86 @@ func (c *Config) evalENV(args string) (string, error) {
 	return os.Getenv(varName), nil
 }
 
-// evalINT converts a value to an integer
+// evalINT implements HTCondor's $INT(name): the argument is a macro NAME. Look
+// it up, expand any macros in its value, then interpret it as an integer.
 func (c *Config) evalINT(args string) (string, error) {
+	return c.evalNumericMacro(args, true)
+}
+
+// evalNumericMacro implements $INT(name)/$REAL(name). Matching HTCondor's
+// string_is_long_param / string_is_double_param, the argument is treated as a
+// macro name (looked up, falling back to the literal) whose expanded value is
+// first tried as a plain numeric literal and, failing that, evaluated as a
+// ClassAd expression. This is what makes `$INT(HOSTCHECK)` work when HOSTCHECK
+// is a boolean expression like `"$(FULL_HOSTNAME)" == "a" || "..." == "b"`: it
+// yields 1 or 0 rather than erroring out (which silently turned `if $INT(...)`
+// false and skipped the block).
+func (c *Config) evalNumericMacro(args string, wantInt bool) (string, error) {
 	value := strings.TrimSpace(args)
 	if value == "" {
-		return "0", nil
+		if wantInt {
+			return "0", nil
+		}
+		return "0.0", nil
 	}
 
-	// Try to parse as float first (to handle "3.14" -> "3")
-	f, err := strconv.ParseFloat(value, 64)
+	// The argument is a macro name: look it up (scoped, as Get does) and fall
+	// back to the literal when it is not a defined macro.
+	if v, ok := c.values[c.scopedLookupKey(value)]; ok {
+		value = v
+	}
+	// Expand any macros in the resolved value ($(FULL_HOSTNAME), nested $INT, ...).
+	if strings.Contains(value, "$") {
+		expanded, err := c.expandMacrosWithFunctions(value)
+		if err != nil {
+			return "", err
+		}
+		value = expanded
+	}
+	value = strings.TrimSpace(value)
+
+	// Fast path: a plain numeric literal (int or real).
+	if f, err := strconv.ParseFloat(value, 64); err == nil {
+		if wantInt {
+			return strconv.FormatInt(int64(f), 10), nil
+		}
+		return strconv.FormatFloat(f, 'g', -1, 64), nil
+	}
+
+	// Otherwise evaluate it as a ClassAd expression. The value is already fully
+	// macro-expanded to literals, so an empty context suffices (matching
+	// HTCondor's me=NULL). A boolean result coerces to 1/0.
+	name := "INT"
+	if !wantInt {
+		name = "REAL"
+	}
+	expr, err := classad.ParseExpr(value)
 	if err != nil {
-		return "", fmt.Errorf("INT: cannot convert %q to integer", value)
+		return "", fmt.Errorf("%s: %q does not evaluate to a number", name, value)
 	}
-
-	return fmt.Sprintf("%d", int64(f)), nil
+	result := expr.Eval(classad.New())
+	switch {
+	case result.IsBool():
+		b, _ := result.BoolValue()
+		if b {
+			return "1", nil
+		}
+		return "0", nil
+	case result.IsInteger():
+		n, _ := result.IntValue()
+		if wantInt {
+			return strconv.FormatInt(n, 10), nil
+		}
+		return strconv.FormatFloat(float64(n), 'g', -1, 64), nil
+	case result.IsReal():
+		f, _ := result.RealValue()
+		if wantInt {
+			return strconv.FormatInt(int64(f), 10), nil
+		}
+		return strconv.FormatFloat(f, 'g', -1, 64), nil
+	default:
+		return "", fmt.Errorf("%s: %q does not evaluate to a number", name, value)
+	}
 }
 
 // evalSTRING converts a value to a string (essentially a no-op but validates)
@@ -181,18 +247,9 @@ func (c *Config) evalSUBSTR(args string) (string, error) {
 }
 
 // evalREAL converts a value to a real number
+// evalREAL implements HTCondor's $REAL(name): like $INT but yields a real.
 func (c *Config) evalREAL(args string) (string, error) {
-	value := strings.TrimSpace(args)
-	if value == "" {
-		return "0.0", nil
-	}
-
-	f, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return "", fmt.Errorf("REAL: cannot convert %q to real number", value)
-	}
-
-	return fmt.Sprintf("%g", f), nil
+	return c.evalNumericMacro(args, false)
 }
 
 // expandMacrosWithFunctions expands both regular and function macros
