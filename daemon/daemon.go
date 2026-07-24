@@ -164,6 +164,11 @@ func New(opts Options) (*Daemon, error) {
 		}
 	}
 
+	// A single daemon-level startup line so every Go HTCondor daemon logs that it is
+	// coming up (and whether under condor_master), without each main() reinventing it.
+	logger.Info(logging.DestinationGeneral, "daemon starting",
+		"subsystem", opts.Subsys, "pid", os.Getpid(), "under_master", UnderCondorMaster())
+
 	return d, nil
 }
 
@@ -435,6 +440,14 @@ func (d *Daemon) Reconfigure() {
 // waitServe waits for n serve loops to finish, bounded (in total) by ShutdownGrace, so a
 // hung handler cannot delay shutdown past the grace period regardless of listener count.
 func (d *Daemon) waitServe(serveErr <-chan error, n int) {
+	// Announce the drain so the (possibly long, possibly noisy) shutdown window has
+	// context in the log: a daemon draining active work -- e.g. a collector flushing
+	// ads to a database that may itself be down -- otherwise looks like an unexplained
+	// burst of errors after a silent stop.
+	if n > 0 {
+		d.log.Info(logging.DestinationGeneral, "draining active work before shutdown",
+			"grace", d.grace.String(), "pending", n)
+	}
 	deadline := time.After(d.grace)
 	for i := 0; i < n; i++ {
 		select {
@@ -444,6 +457,9 @@ func (d *Daemon) waitServe(serveErr <-chan error, n int) {
 				"grace", d.grace.String(), "pending", n-i)
 			return
 		}
+	}
+	if n > 0 {
+		d.log.Info(logging.DestinationGeneral, "shutdown drain complete")
 	}
 }
 
