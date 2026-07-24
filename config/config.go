@@ -38,6 +38,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ConfigOptions contains configuration parameters for creating a Config
@@ -279,10 +280,13 @@ func (c *Config) initBuiltins() {
 	c.Set("DAY", "86400")
 	c.Set("WEEK", "604800")
 
-	// Auto-detected values
-	hostname, _ := os.Hostname()
-	c.Set("HOSTNAME", strings.Split(hostname, ".")[0])
-	c.Set("FULL_HOSTNAME", hostname)
+	// Auto-detected values. FULL_HOSTNAME must be the fully-qualified name (as
+	// C++ HTCondor's get_local_fqdn produces), because configs routinely gate on
+	// it -- e.g. `"$(FULL_HOSTNAME)" == "host.example.org"`. os.Hostname() alone
+	// is often the short name, which would silently fail such comparisons.
+	short, fqdn := detectHostnames()
+	c.Set("HOSTNAME", short)
+	c.Set("FULL_HOSTNAME", fqdn)
 
 	// IP address detection
 	ipv4Addr, ipv6Addr, ipAddr := detectIPAddresses()
@@ -363,6 +367,66 @@ func (c *Config) initBuiltins() {
 // isWindows checks if running on Windows
 func isWindows() bool {
 	return os.PathSeparator == '\\'
+}
+
+// detectHostnames returns the short hostname and the fully-qualified domain
+// name, mirroring C++ HTCondor's init_local_hostname_impl: start from
+// os.Hostname(); if it carries no domain, resolve the canonical name via DNS;
+// then split the short name off before the first dot.
+func detectHostnames() (short, fqdn string) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return host, host
+	}
+	fqdn = host
+	// Only pay for a DNS lookup when the hostname is unqualified -- a dotted
+	// os.Hostname() is already the FQDN (matching the C++ "already has a dot"
+	// fast path).
+	if !strings.Contains(host, ".") {
+		if resolved := resolveFQDN(host); resolved != "" {
+			fqdn = resolved
+		}
+	}
+	return shortFromFQDN(fqdn), fqdn
+}
+
+// shortFromFQDN returns the first DNS label of a (possibly qualified) name --
+// "ap43.uw.osg-htc.org" -> "ap43", "ap43" -> "ap43".
+func shortFromFQDN(fqdn string) string {
+	if i := strings.IndexByte(fqdn, '.'); i >= 0 {
+		return fqdn[:i]
+	}
+	return fqdn
+}
+
+// resolveFQDN approximates getaddrinfo(AI_CANONNAME) for an unqualified host:
+// try the canonical (CNAME) name first, then the reverse-DNS name of a resolved
+// address. Returns "" if no qualified name can be found. Bounded by a short
+// timeout so config initialization never blocks on slow/absent DNS.
+func resolveFQDN(host string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	r := net.DefaultResolver
+
+	if cname, err := r.LookupCNAME(ctx, host); err == nil {
+		if c := strings.TrimSuffix(cname, "."); strings.Contains(c, ".") {
+			return c
+		}
+	}
+	if addrs, err := r.LookupHost(ctx, host); err == nil {
+		for _, addr := range addrs {
+			names, err := r.LookupAddr(ctx, addr)
+			if err != nil {
+				continue
+			}
+			for _, n := range names {
+				if name := strings.TrimSuffix(n, "."); strings.Contains(name, ".") {
+					return name
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // detectIPAddresses detects IP addresses from network interfaces
