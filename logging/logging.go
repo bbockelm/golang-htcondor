@@ -99,6 +99,35 @@ type Logger struct {
 	rotating     atomic.Int32                // Flag to indicate rotation in progress (0 or 1)
 	maintWg      sync.WaitGroup              // WaitGroup for maintenance goroutine
 	maintRunning atomic.Bool                 // Indicates if maintenance is running
+
+	rotMu    sync.Mutex       // guards onRotate
+	onRotate []func(*os.File) // called with the new file after each rotation/reopen
+}
+
+// File returns the current log output file, or nil when logging to a std stream
+// (stdout/stderr) or when open failed. The file changes on rotation, so a caller that
+// holds onto it (e.g. redirecting process stdout/stderr into the log) must also register
+// OnRotate to follow the new file.
+func (l *Logger) File() *os.File { return l.logFile.Load() }
+
+// OnRotate registers fn to be invoked with the new log file each time the log rotates or
+// is reopened. Used to re-point an external redirection (process stdout/stderr) at the new
+// file so it does not keep writing into the rotated-away one. fn must not block.
+func (l *Logger) OnRotate(fn func(*os.File)) {
+	l.rotMu.Lock()
+	l.onRotate = append(l.onRotate, fn)
+	l.rotMu.Unlock()
+}
+
+// fireRotate notifies OnRotate subscribers of the new file after a rotation/reopen.
+func (l *Logger) fireRotate(f *os.File) {
+	l.rotMu.Lock()
+	fns := make([]func(*os.File), len(l.onRotate))
+	copy(fns, l.onRotate)
+	l.rotMu.Unlock()
+	for _, fn := range fns {
+		fn(f)
+	}
 }
 
 // Default configuration values
@@ -828,6 +857,7 @@ func (l *Logger) rotateLogIfNeeded() error {
 	// Update file handle and reset size atomically
 	l.logFile.Store(f)
 	l.currentSize.Store(0)
+	l.fireRotate(f)
 
 	// Rebuild through the per-destination filtering handler (bound to the live level
 	// snapshot) so post-rotation direct-slog calls stay filtered.
@@ -932,6 +962,7 @@ func (l *Logger) reopenLogFile() error {
 	if oldFile != nil {
 		_ = oldFile.Close() // Ignore error, old file is being replaced
 	}
+	l.fireRotate(f)
 
 	// Reset size to current file size
 	l.currentSize.Store(stat.Size())

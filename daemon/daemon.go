@@ -122,6 +122,14 @@ func New(opts Options) (*Daemon, error) {
 			return nil, fmt.Errorf("daemon: building logger: %w", err)
 		}
 	}
+	// Under condor_master our stdout/stderr are wired to /dev/null, so anything that
+	// escapes the logger -- a panic stack, a library writing to stderr, a bare fmt.Print
+	// from a misconfiguration path -- vanishes. As soon as the log file exists, redirect
+	// the process's stdout/stderr fds into it (and re-point on rotation) so that output is
+	// captured. No-op when logging to a std stream or on a non-unix platform.
+	if UnderCondorMaster() {
+		captureStdoutStderr(logger)
+	}
 	switch {
 	case drop.dropped:
 		logger.Info(logging.DestinationGeneral, "dropped privileges", "euid", drop.uid, "egid", drop.gid)
