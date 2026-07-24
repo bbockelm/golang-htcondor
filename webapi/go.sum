@@ -43,6 +43,10 @@ github.com/PelicanPlatform/classad v0.18.0 h1:wUzVG0fLxQlMiPeZ3zMlhl1ifd3VpgDuQd
 github.com/PelicanPlatform/classad v0.18.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
 github.com/PelicanPlatform/classad/collections v0.18.0 h1:lmPnjBjOa676AJoeNqO9CTuH8j7EwKDu/bgAHg4utO4=
 github.com/PelicanPlatform/classad/collections v0.18.0/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
+github.com/PelicanPlatform/classad/db v0.18.0 h1:9E7nYy64lh/7/2nFPfQw5rQEd6Wiwvcs+adAHR0torA=
+github.com/PelicanPlatform/classad/db v0.18.0/go.mod h1:Haywg1w8LL5P1QteAi7pfX+H92k8Mceip1kyVli4ISs=
+github.com/PelicanPlatform/classad/dbrpc v0.18.0 h1:Sy4FQXjew2IV6mFxZbqj0O+g0kCzSmfqEU+u0p7pfuk=
+github.com/PelicanPlatform/classad/dbrpc v0.18.0/go.mod h1:g3RP3xaIv6lTfPRQ30a3jO7Mro1cc+DwqzGx15CJBg0=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
 github.com/RoaringBitmap/roaring/v2 v2.19.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=
