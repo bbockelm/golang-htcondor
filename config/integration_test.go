@@ -436,6 +436,48 @@ func TestIncludeCommand(t *testing.T) {
 			t.Errorf("CMD_VAR: got %q, want %q", val, "from_command")
 		}
 	})
+
+	// Unquoted command with arguments — the HTCondor-native form
+	// (`include command : /usr/bin/foo -a -b`), which motivated the fix.
+	t.Run("UnquotedCommandWithArgs", func(t *testing.T) {
+		rootConfig := filepath.Join(tmpDir, "root_unquoted_cmd.config")
+		content := "include command : /bin/echo UNQUOTED_VAR = from_unquoted\n"
+		if err := os.WriteFile(rootConfig, []byte(content), 0600); err != nil {
+			t.Fatalf("Failed to create root config: %v", err)
+		}
+
+		cfg, err := NewFromReaderWithOptions(mustOpen(t, rootConfig), ConfigOptions{})
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+
+		if val, ok := cfg.Get("UNQUOTED_VAR"); !ok || val != "from_unquoted" {
+			t.Errorf("UNQUOTED_VAR: got %q, want %q", val, "from_unquoted")
+		}
+	})
+}
+
+// TestIncludeUnquotedFile checks an unquoted `include : <path>` (HTCondor's
+// native form — no quotes, path runs to end of line).
+func TestIncludeUnquotedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	includedFile := filepath.Join(tmpDir, "included.config")
+	if err := os.WriteFile(includedFile, []byte("FROM_UNQUOTED_INCLUDE = yes\n"), 0600); err != nil {
+		t.Fatalf("Failed to create included file: %v", err)
+	}
+	rootConfig := filepath.Join(tmpDir, "root_unquoted.config")
+	content := fmt.Sprintf("ROOT_VAR = from_root\ninclude : %s\n", includedFile)
+	if err := os.WriteFile(rootConfig, []byte(content), 0600); err != nil {
+		t.Fatalf("Failed to create root config: %v", err)
+	}
+
+	cfg, err := NewFromReaderWithOptions(mustOpen(t, rootConfig), ConfigOptions{})
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if val, ok := cfg.Get("FROM_UNQUOTED_INCLUDE"); !ok || val != "yes" {
+		t.Errorf("FROM_UNQUOTED_INCLUDE: got %q, want %q", val, "yes")
+	}
 }
 
 // TestIncludeCommandWithCache tests "include command into <cache> : <cmdline>"

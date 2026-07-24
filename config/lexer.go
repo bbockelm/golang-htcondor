@@ -53,6 +53,15 @@ type Lexer struct {
 	afterIfOrElif       bool // True if the previous token was IF or ELIF
 	afterErrorOrWarning bool // True if the previous token was ERROR or WARNING
 
+	// inInclude is true while lexing an include directive's type keywords
+	// (INCLUDE, and any continuation COMMAND/IFEXIST) up to its ':'. It lets the
+	// ':' know it terminates an include type, so the path/command that follows is
+	// read as the rest of the line. afterIncludeColon carries that across to the
+	// next token: an include path or command is unquoted in HTCondor
+	// (`include command : /usr/bin/foo -a -b`), not an IDENT/STRING.
+	inInclude         bool
+	afterIncludeColon bool
+
 	// stmtStart is true when the next token begins a new statement (line).
 	// prevIdentAssignable is true when the immediately preceding token was a
 	// statement-start plain identifier — i.e. an assignment target — so a
@@ -472,6 +481,25 @@ func (l *Lexer) NextToken() *TokenInfo {
 		return tok
 	}
 
+	// Special handling after an include directive's ':' — the file path or
+	// command is unquoted and runs to end of line in HTCondor
+	// (`include : /etc/condor/foo`, `include command : /usr/bin/sudo ...`), so
+	// read it whole as a STRING. A quoted argument (`include : "..."`) falls
+	// through to normal string lexing, preserving quote stripping.
+	if l.afterIncludeColon {
+		l.afterIncludeColon = false
+		l.skipWhitespace()
+		if l.ch != '"' && l.ch != '\'' {
+			tok := &TokenInfo{
+				Line: l.line,
+				Col:  l.col,
+			}
+			tok.Token = STRING
+			tok.Lit = l.readUntilNewline()
+			return tok
+		}
+	}
+
 	l.skipWhitespace()
 
 	tok := &TokenInfo{
@@ -484,8 +512,10 @@ func (l *Lexer) NextToken() *TokenInfo {
 	// previous token a statement-start plain identifier (so ':' means assign)?
 	atStmtStart := l.stmtStart
 	colonAssignable := l.prevIdentAssignable
+	wasInInclude := l.inInclude
 	l.stmtStart = false
 	l.prevIdentAssignable = false
+	l.inInclude = false
 
 	switch l.ch {
 	case 0:
@@ -531,6 +561,10 @@ func (l *Lexer) NextToken() *TokenInfo {
 			tok.Token = COLON
 			tok.Lit = ":"
 			l.readChar()
+			// A ':' ending an include type introduces the (unquoted) path/command.
+			if wasInInclude {
+				l.afterIncludeColon = true
+			}
 		}
 
 	case '(':
@@ -596,6 +630,14 @@ func (l *Lexer) NextToken() *TokenInfo {
 				switch kw {
 				case USE:
 					l.afterUse = true
+				case INCLUDE:
+					l.inInclude = true
+				case COMMAND, IFEXIST:
+					// Continuation keywords of an include type: keep the flag alive
+					// so the terminating ':' still introduces the path/command.
+					if wasInInclude {
+						l.inInclude = true
+					}
 				case IF, ELIF:
 					l.afterIfOrElif = true
 				case ERROR, WARNING:

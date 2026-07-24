@@ -175,6 +175,33 @@ func TestParseIncludeDirectiveWithColon(t *testing.T) {
 			expectedType: "include_command",
 			expectedPath: "echo 'VAR = value'",
 		},
+		{
+			// HTCondor include paths are unquoted and run to end of line.
+			name:         "include unquoted path",
+			input:        `include : /etc/condor/config.d/00-common`,
+			expectedType: "include",
+			expectedPath: "/etc/condor/config.d/00-common",
+		},
+		{
+			// The real-world config that motivated this: an unquoted command
+			// with an absolute path, flags, and arguments.
+			name:         "include command unquoted with args",
+			input:        `include command : /usr/bin/sudo /usr/local/sbin/htcondor/config_sync.sh -d /usr/local/etc/condor -r origin -b master`,
+			expectedType: "include_command",
+			expectedPath: "/usr/bin/sudo /usr/local/sbin/htcondor/config_sync.sh -d /usr/local/etc/condor -r origin -b master",
+		},
+		{
+			name:         "include ifexist unquoted path",
+			input:        `include ifexist : /opt/condor/local.config`,
+			expectedType: "include_ifexist",
+			expectedPath: "/opt/condor/local.config",
+		},
+		{
+			name:         "include unquoted pipe command",
+			input:        `include : /usr/bin/generate-config |`,
+			expectedType: "include_command",
+			expectedPath: "/usr/bin/generate-config",
+		},
 	}
 
 	for _, tt := range tests {
