@@ -2,6 +2,7 @@ package classadlog
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +13,9 @@ import (
 type Parser struct {
 	filename   string
 	file       *os.File
-	scanner    *bufio.Scanner
-	nextOffset int64
+	reader     *bufio.Reader
+	nextOffset int64 // byte offset where the next unread line begins
+	consumed   int64 // bytes of complete (newline-terminated) lines read since Open
 	lastEntry  *LogEntry
 }
 
@@ -36,7 +38,6 @@ func (p *Parser) Open() error {
 	}
 
 	p.file = f
-	p.scanner = bufio.NewScanner(f)
 
 	// If we have a saved offset, seek to it
 	if p.nextOffset > 0 {
@@ -47,6 +48,8 @@ func (p *Parser) Open() error {
 		}
 	}
 
+	p.reader = bufio.NewReader(f)
+	p.consumed = 0
 	return nil
 }
 
@@ -56,14 +59,16 @@ func (p *Parser) Close() error {
 		return nil
 	}
 
-	// Save current offset before closing
-	if offset, err := p.file.Seek(0, io.SeekCurrent); err == nil {
-		p.nextOffset = offset
-	}
+	// Advance the resume offset by the bytes of the COMPLETE lines we consumed.
+	// A partial (not-yet-newline-terminated) trailing line is deliberately not
+	// counted, so the next Open re-reads it once the schedd finishes writing it --
+	// rather than reading past it (skipping the op) or parsing it truncated.
+	p.nextOffset += p.consumed
 
 	err := p.file.Close()
 	p.file = nil
-	p.scanner = nil
+	p.reader = nil
+	p.consumed = 0
 	return err
 }
 
@@ -74,27 +79,33 @@ func (p *Parser) ReadEntry() (*LogEntry, error) {
 		return nil, fmt.Errorf("file not open")
 	}
 
-	if !p.scanner.Scan() {
-		if err := p.scanner.Err(); err != nil {
+	for {
+		raw, err := p.reader.ReadString('\n')
+		if err != nil {
+			// A trailing chunk without a newline is a partial write in progress (the
+			// schedd appends a transaction incrementally). Do NOT consume or parse it:
+			// return EOF and leave the bytes to be re-read, complete, on the next Open.
+			// Any other error is real.
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
 			return nil, err
 		}
-		return nil, io.EOF
+		// A complete, newline-terminated line: count its bytes toward the resume offset.
+		p.consumed += int64(len(raw))
+
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // skip blank lines and comments
+		}
+
+		entry, perr := p.parseLine(line)
+		if perr != nil {
+			return nil, fmt.Errorf("failed to parse line %q: %w", line, perr)
+		}
+		p.lastEntry = entry
+		return entry, nil
 	}
-
-	line := strings.TrimSpace(p.scanner.Text())
-
-	// Skip empty lines and comments
-	if line == "" || strings.HasPrefix(line, "#") {
-		return p.ReadEntry() // Recursive call to get next non-empty line
-	}
-
-	entry, err := p.parseLine(line)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse line %q: %w", line, err)
-	}
-
-	p.lastEntry = entry
-	return entry, nil
 }
 
 // parseLine parses a single line into a LogEntry
