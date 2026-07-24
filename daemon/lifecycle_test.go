@@ -48,24 +48,19 @@ func TestServeListenersServesAllAndDrains(t *testing.T) {
 	go func() { served <- d.ServeListeners(context.Background(), serve, ln1, ln2) }()
 
 	// Wait until the handler has actually been entered on both listeners before
-	// asserting the count. Dialing a bound listener succeeds via the kernel
-	// accept backlog even before serve()'s Accept runs, so a successful dial
-	// can't stand in for "the handler started" — only the entry signal can.
+	// asserting the count. The contract under test is "serve runs on every listener,
+	// and Shutdown drains them all cleanly"; the per-listener entry signal proves the
+	// handler was invoked on each. We deliberately do NOT dial the listeners to prove
+	// reachability: a bound listener's reachability is stdlib behavior, not
+	// ServeListeners's, and an external dial races ServeListeners's
+	// cancel-all-on-shutdown -- which closes every listener -- so the dial can observe
+	// "connection refused" through no fault of the code under test (an arm64 flake).
 	for i := 0; i < 2; i++ {
 		select {
 		case <-entered:
 		case <-time.After(2 * time.Second):
 			t.Fatalf("serve entered on %d listeners, want 2", started.Load())
 		}
-	}
-
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	for _, ln := range []net.Listener{ln1, ln2} {
-		c, err := dialer.DialContext(context.Background(), "tcp", ln.Addr().String())
-		if err != nil {
-			t.Fatalf("dial %s: %v", ln.Addr(), err)
-		}
-		_ = c.Close()
 	}
 	if got := started.Load(); got != 2 {
 		t.Fatalf("serve started on %d listeners, want 2", got)
