@@ -69,6 +69,23 @@ func TestSendReadyDefaults(t *testing.T) {
 	assert.Equal(t, os.Getpid(), call.PID)
 }
 
+// TestSetDaemonName verifies SendReady reports a name set via SetDaemonName
+// (used to supply the subsystem when _CONDOR_DAEMON_NAME is unset, so the
+// master does not log an empty "Setting ready state ... for ").
+func TestSetDaemonName(t *testing.T) {
+	sender := &fakeMasterSender{}
+	master := &Master{address: "<127.0.0.1:9618>", sender: sender}
+	require.Empty(t, master.DaemonName())
+
+	master.SetDaemonName("HTCONDORDB")
+	assert.Equal(t, "HTCONDORDB", master.DaemonName())
+
+	require.NoError(t, master.SendReady(context.Background(), nil))
+	calls := sender.readyCallsSnapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "HTCONDORDB", calls[0].Name)
+}
+
 type fakeMasterSender struct {
 	mu             sync.Mutex
 	keepAliveCalls []keepAliveRequest

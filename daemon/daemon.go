@@ -144,6 +144,14 @@ func New(opts Options) (*Daemon, error) {
 		if err != nil {
 			logger.Warn(logging.DestinationGeneral, "running under condor_master but master env unusable; readiness/keepalive disabled", "error", err)
 		} else {
+			// The master learns the daemon's name from the DC_SET_READY ad's
+			// DaemonName. HTCondor does not export _CONDOR_DAEMON_NAME, so without
+			// this the master logs an empty name ("Setting ready state 'Ready' for
+			// "). Fall back to the subsystem, matching how C++ daemons name
+			// themselves (e.g. the startd sends DaemonName = "STARTD").
+			if master.DaemonName() == "" {
+				master.SetDaemonName(opts.Subsys)
+			}
 			d.master = master
 			logger.Info(logging.DestinationGeneral, "detected condor_master parent",
 				"parent_pid", master.ParentPID(), "master_addr", master.Address())
