@@ -39,10 +39,10 @@ dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/Masterminds/semver/v3 v3.1.1/go.mod h1:VPu/7SZ7ePZ3QOrcuXROw5FAcLl4a0cBrbBpGY/8hQs=
-github.com/PelicanPlatform/classad v0.8.0 h1:U2CV/k2iE+8DkwbApTfOb8ue76/E/m0UBXlmUKwyQzU=
-github.com/PelicanPlatform/classad v0.8.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/PelicanPlatform/classad/collections v0.8.0 h1:qlNkYij8O52beqb0ekrYKrCT1iirnzBY2y3hkfxXCdg=
-github.com/PelicanPlatform/classad/collections v0.8.0/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
+github.com/PelicanPlatform/classad v0.16.7 h1:z3a/UdRK+5H6K+X3eq9O7F823ZWjzZfISKkCiSrfWgc=
+github.com/PelicanPlatform/classad v0.16.7/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad/collections v0.16.7 h1:WBpuw2mTUCmpOgd3kQFkKt14FWMXnXDrquurdytzyLs=
+github.com/PelicanPlatform/classad/collections v0.16.7/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
 github.com/RoaringBitmap/roaring/v2 v2.19.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=
