@@ -3,9 +3,18 @@ package htcondor
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
+	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/golang-htcondor/droppriv"
+)
+
+// CredentialCache satisfies cedar's credential-reading hooks: ReadCredential for files
+// and ListCredentialDir for token directories, both privileged via droppriv.
+var (
+	_ security.CredentialReader    = (*CredentialCache)(nil)
+	_ security.CredentialDirLister = (*CredentialCache)(nil)
 )
 
 // CredentialCache reads credential files (the SSL server key/cert, token signing
@@ -53,6 +62,27 @@ func (c *CredentialCache) ReadCredential(path string) ([]byte, error) {
 	c.cache[path] = data
 	c.mu.Unlock()
 	return data, nil
+}
+
+// ListCredentialDir lists the entries of a credential directory as root (via
+// droppriv), so a daemon that has dropped privileges can still enumerate a
+// root-only, mode-0700 token directory such as SEC_TOKEN_SYSTEM_DIRECTORY
+// (/etc/condor/tokens.d). It satisfies cedar's security.CredentialDirLister.
+//
+// Unlike ReadCredential the listing is not cached: a token directory's contents
+// change as tokens are added, rotated, or removed, and the scan happens at most
+// once per handshake, so a stale cached listing would cost more than it saves.
+func (c *CredentialCache) ListCredentialDir(path string) ([]os.DirEntry, error) {
+	f, err := droppriv.OpenAsRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("listing credential directory %s: %w", path, err)
+	}
+	entries, err := f.ReadDir(-1)
+	_ = f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("listing credential directory %s: %w", path, err)
+	}
+	return entries, nil
 }
 
 // Reload drops all cached credentials so subsequent reads re-fetch the current

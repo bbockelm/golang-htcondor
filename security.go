@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -215,6 +216,25 @@ func getRateLimitManager() *ratelimit.Manager {
 	return manager
 }
 
+// daemonCredentialCache is the process-wide privileged credential reader shared by every
+// security config this package builds, inbound and outbound. Sharing one cache means
+// cached credentials (and a single SIGHUP-driven Reload) cover all connections, and it
+// gives outbound client configs -- which are rebuilt per call, e.g. the master's
+// DC_SET_READY -- the same root-capable reader the server side already had. On a process
+// that is not privileged, droppriv.OpenAsRoot degrades to reading as the current user, so
+// wiring it unconditionally is safe for user tools too.
+var daemonCredentialCache = NewCredentialCache()
+
+// runningAsDaemon reports whether this process is an HTCondor daemon that can read
+// root-only credentials (the SSL host key, the system token directory): it is running as
+// root, or it was launched by condor_master (CONDOR_INHERIT set) and therefore started as
+// root before dropping privilege. This mirrors the "is this a daemon" test HTCondor uses
+// to choose SEC_TOKEN_SYSTEM_DIRECTORY over the per-user token directory. It is a var so
+// tests can force the non-daemon path (unit tests frequently run as root under CI).
+var runningAsDaemon = func() bool {
+	return os.Geteuid() == 0 || os.Getenv("CONDOR_INHERIT") != ""
+}
+
 // GetSecurityConfig creates a SecurityConfig from HTCondor configuration.
 // It reads security-related parameters like SEC_CLIENT_AUTHENTICATION, SEC_DEFAULT_AUTHENTICATION,
 // SEC_CLIENT_AUTHENTICATION_METHODS, etc., and maps them to the cedar SecurityConfig struct.
@@ -236,8 +256,6 @@ func getRateLimitManager() *ratelimit.Manager {
 //   - error: Any configuration error encountered
 //
 // Deficiencies (to be addressed in follow-up):
-//   - SSL certificate paths (AUTH_SSL_CLIENT_CERTFILE, etc.) not yet mapped
-//   - Token directory locations (SEC_TOKEN_DIRECTORY, etc.) not yet mapped
 //   - Authorization settings (ALLOW_READ, DENY_WRITE, etc.) are separate from SecurityConfig
 //   - Context-specific overrides beyond CLIENT not yet fully implemented
 //   - NEGOTIATION security level not yet mapped
@@ -248,6 +266,13 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 
 	secConfig := &security.SecurityConfig{
 		Command: command,
+		// Read credentials (SSL key/cert, token files, and -- via
+		// CredentialCache.ListCredentialDir -- the token directory) through the
+		// privileged reader, so a daemon that dropped to a service account can still
+		// read root-owned 0600 credentials. Without this, an outbound auth (e.g. the
+		// master's DC_SET_READY) falls back to an unprivileged os.ReadFile and fails
+		// on /etc/grid-security/hostkey.pem and /etc/condor/tokens.d.
+		Credentials: daemonCredentialCache,
 	}
 
 	// Get authentication level
@@ -292,8 +317,17 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 	// on the wire as "TOKEN".
 	for _, method := range secConfig.AuthMethods {
 		if method == security.AuthToken || method == security.AuthSciTokens {
-			if tokenDir, ok := cfg.Get("SEC_TOKEN_DIRECTORY"); ok {
-				secConfig.TokenDir = tokenDir
+			if tokenDir, ok := cfg.Get("SEC_TOKEN_DIRECTORY"); ok && strings.TrimSpace(tokenDir) != "" {
+				// An explicit SEC_TOKEN_DIRECTORY always wins (daemon or tool).
+				secConfig.TokenDir = strings.TrimSpace(tokenDir)
+			} else if runningAsDaemon() {
+				// A daemon with no explicit token directory reads the system token
+				// directory (SEC_TOKEN_SYSTEM_DIRECTORY, default /etc/condor/tokens.d),
+				// matching HTCondor's daemon-vs-user selection in condor_auth_passwd.
+				// The privileged reader above makes this root-only directory readable.
+				if sysDir, ok := cfg.Get("SEC_TOKEN_SYSTEM_DIRECTORY"); ok && strings.TrimSpace(sysDir) != "" {
+					secConfig.TokenDir = strings.TrimSpace(sysDir)
+				}
 			}
 			// Note: TokenFile is typically used for single-token scenarios
 			// In practice, HTCondor usually uses TokenDir with multiple tokens
@@ -373,11 +407,12 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		}
 	}
 
-	// Read the server's credential files (SSL key/cert, token signing keys) as
+	// The server's credential files (SSL key/cert, token signing keys) are read as
 	// root via droppriv, so they remain readable after the daemon drops to the
-	// condor account. The cache supports reload-on-SIGHUP; callers wire its
-	// Reload via daemon.OnReconfig (see CredentialReloader).
-	sc.Credentials = NewCredentialCache()
+	// condor account. GetSecurityConfig already wired the shared, reload-aware
+	// daemonCredentialCache; keep it (a SIGHUP Reload then covers server and client
+	// reads alike). Callers wire Reload via daemon.OnReconfig (see CredentialReloader).
+	sc.Credentials = daemonCredentialCache
 
 	return sc, nil
 }
@@ -668,5 +703,6 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 		Encryption:     security.SecurityOptional,
 		Integrity:      security.SecurityOptional,
 		PeerName:       peerName,
+		Credentials:    daemonCredentialCache,
 	}, nil
 }
