@@ -75,11 +75,12 @@ type Daemon struct {
 	shutdownCh   chan struct{} // closed by Shutdown to request a graceful stop
 	shutdownOnce sync.Once
 
-	mu               sync.Mutex
-	sharedPortName   string // shared-port "sock" id, set by Listener when adopted
-	adoptedInherited bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
-	stopAlive        func()
-	onReconfig       []func(*config.Config)
+	mu                   sync.Mutex
+	sharedPortName       string // shared-port "sock" id, set by Listener when adopted or self-registered
+	sharedPortAdvertised string // advertised sinful when self-registered (master address unavailable)
+	adoptedInherited     bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
+	stopAlive            func()
+	onReconfig           []func(*config.Config)
 
 	// startTime is the daemon's construction time (DaemonStartTime); lastReconfig is the last
 	// SIGHUP reconfigure (DaemonLastReconfigTime), 0 until the first. Both feed PublishAd.
@@ -229,6 +230,22 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 		d.mu.Unlock()
 		return iln, nil
 	}
+	// No socket was inherited, but shared port may still be in use (e.g. started outside
+	// condor_master, or the master didn't pass a socket). Rather than a standalone bind
+	// that peers can't reach through the shared port, self-register our own named socket
+	// in the shared-port socket directory so the shared_port server routes to us.
+	if spln, sock, advertised, err := selfRegisterSharedPort(d.Config(), d.subsys, d.log); err != nil {
+		d.log.Warn(logging.DestinationGeneral,
+			"shared-port self-registration failed; falling back to standalone bind", "err", err.Error())
+	} else if spln != nil {
+		d.mu.Lock()
+		d.sharedPortName = sock
+		d.sharedPortAdvertised = advertised
+		d.mu.Unlock()
+		d.log.Info(logging.DestinationGeneral, "self-registered shared-port endpoint",
+			"sock", sock, "address", advertised)
+		return spln, nil
+	}
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
@@ -270,7 +287,19 @@ func (d *Daemon) SharedPortName() string {
 // TCP_FORWARDING_HOST), supply it explicitly rather than relying on this.
 func (d *Daemon) AdvertisedSinful() (string, bool) {
 	sock := d.SharedPortName()
-	if sock == "" || d.master == nil {
+	if sock == "" {
+		return "", false
+	}
+	// When we self-registered (no inherited socket), the reachable address was derived
+	// from the shared_port server's ad file at bind time; the master address may not be
+	// available. Prefer that.
+	d.mu.Lock()
+	advertised := d.sharedPortAdvertised
+	d.mu.Unlock()
+	if advertised != "" {
+		return advertised, true
+	}
+	if d.master == nil {
 		return "", false
 	}
 	return deriveAdvertisedSinful(d.master.Address(), sock)
