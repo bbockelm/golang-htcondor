@@ -128,13 +128,10 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 		return nil, false
 	}
 
-	// History defaults to unlimited on the schedd; the mirror read must be
-	// bounded, so cap it and note when the cap bit.
+	// History defaults to unlimited on the schedd; the mirror read must be bounded.
 	limit := opts.Limit
-	capped := false
 	if limit <= 0 || limit > dbMaxLimit {
 		limit = dbMaxLimit
-		capped = true
 	}
 
 	dbc, closer, _, err := s.dbClient(ctx)
@@ -143,9 +140,17 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 	}
 	defer closer()
 
-	rows, err := dbc.QueryRawProject(ctx, "history", constraint, opts.Projection, limit)
+	// Fetch one past the limit. The mirror has no global reverse-chron cursor, so
+	// it must fetch the FULL matching set to order it most-recent-first; if that
+	// set exceeds the limit, the fetched subset is not guaranteed to hold the
+	// newest records, so defer to the schedd's proper backwards scan instead of
+	// silently returning a wrong "recent N".
+	rows, err := dbc.QueryRawProject(ctx, "history", constraint, opts.Projection, limit+1)
 	if err != nil {
 		return nil, false // query failed -> schedd
+	}
+	if len(rows) > limit {
+		return nil, false // more matches than the cap -> schedd owns ordering
 	}
 
 	records := make([]*classad.ClassAd, 0, len(rows))
@@ -156,8 +161,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 		}
 		records = append(records, ad)
 	}
-	// The mirror has no global reverse-chron cursor, so order the fetched set
-	// most-recent-first ourselves (opts.Backwards is the default here).
+	// Order the complete matching set most-recent-first (opts.Backwards default).
 	sort.SliceStable(records, func(i, j int) bool {
 		return recencyKey(records[i]) > recencyKey(records[j])
 	})
@@ -169,11 +173,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 	if info.SecondsSinceSync > 0 {
 		note += fmt.Sprintf("; synced %ds ago", info.SecondsSinceSync)
 	}
-	note += "; " + reason
-	if capped && len(records) >= limit {
-		note += fmt.Sprintf("; capped at %d and ordered recent-first, so older matches beyond the cap are omitted -- narrow the constraint or set a limit for exact results", limit)
-	}
-	note += "]"
+	note += "; " + reason + "]"
 
 	return historyResult(records, typeName, constraint, "htcondordb", note), true
 }
@@ -211,13 +211,19 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if constraint == "" {
 		constraint = "true"
 	}
-	scoped := fmt.Sprintf("(%s) && Owner == %q", constraint, user)
+	// Owner-scope safely: AND the balanced, re-serialized constraint with the
+	// owner clause so a crafted constraint cannot escape the AND and widen the
+	// result past the caller's own jobs. An unparseable constraint falls back to
+	// the schedd (whose job path is structurally owner-scoped) rather than trust.
+	safeConstraint, err := classadBalanced(constraint)
+	if err != nil {
+		return nil, false
+	}
+	scoped := fmt.Sprintf("(%s) && (Owner == %s)", safeConstraint, classadStringLit(user))
 
 	effLimit := limit
-	capped := false
 	if effLimit <= 0 || effLimit > dbMaxLimit {
 		effLimit = dbMaxLimit
-		capped = true
 	}
 
 	dbc, closer, _, err := s.dbClient(ctx)
@@ -226,8 +232,15 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	}
 	defer closer()
 
-	rows, err := dbc.QueryRawProject(ctx, "jobs", scoped, projection, effLimit)
+	// Fetch one past the limit: if the full result exceeds what the caller asked
+	// for, defer to the schedd so pagination (and its cursor/ordering) stays on
+	// one backend -- the mirror only answers when it can answer completely, so it
+	// never silently truncates while reporting has_more=false.
+	rows, err := dbc.QueryRawProject(ctx, "jobs", scoped, projection, effLimit+1)
 	if err != nil {
+		return nil, false
+	}
+	if len(rows) > effLimit {
 		return nil, false
 	}
 	jobAds := make([]*classad.ClassAd, 0, len(rows))
@@ -248,11 +261,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if stale := jobQueueStaleness(info, nowUnix); stale > 0 {
 		note += fmt.Sprintf("; job queue synced %ds ago", stale)
 	}
-	note += "; " + reason
-	if capped && len(jobAds) >= effLimit {
-		note += fmt.Sprintf("; capped at %d -- narrow the constraint or set a limit for the full set", effLimit)
-	}
-	note += "]"
+	note += "; " + reason + "]"
 
 	text, metadata := renderJobsBase(jobAds, constraint, "htcondordb", note)
 	return map[string]interface{}{
