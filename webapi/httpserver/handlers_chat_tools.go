@@ -452,7 +452,10 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			if limit > 100 {
 				limit = 100
 			}
-			constraint := scopeToOwner(actor, args.Constraint)
+			constraint, err := scopeToOwner(actor, args.Constraint)
+			if err != nil {
+				return "", err
+			}
 
 			schedd := s.getSchedd()
 			ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
@@ -568,7 +571,10 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 			// pagination cursor. Same predicate the SPA uses on the
 			// archive page — kept consistent so the LLM and the user
 			// scrolling the table see the same record set.
-			constraint := scopeToOwner(actor, args.Constraint)
+			constraint, err := scopeToOwner(actor, args.Constraint)
+			if err != nil {
+				return "", err
+			}
 			if args.BeforeCluster > 0 {
 				cursorPredicate := fmt.Sprintf(
 					"(ClusterId < %d || (ClusterId == %d && ProcId < %d))",
@@ -767,7 +773,10 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 				return "", fmt.Errorf("either cluster_id or constraint is required (refusing to remove every job)")
 			}
 
-			constraint := scopeToOwner(actor, llmConstraint)
+			constraint, err := scopeToOwner(actor, llmConstraint)
+			if err != nil {
+				return "", err
+			}
 			schedd := s.getSchedd()
 
 			// Pre-count: query the matching set with a projection
@@ -984,19 +993,55 @@ func toolHighlightJob() chat.Tool {
 // scopeToOwner is the centerpiece of the chat layer's owner-scoping
 // guarantee. Whatever ClassAd expression the LLM passes, we wrap it
 // so the result evaluates to (Owner == "<actor>") AND (whatever the
-// LLM asked for). The LLM cannot remove or escape the leading clause
-// — the AND-wrapper is unconditional.
+// LLM asked for), and the LLM cannot escape the leading clause.
+//
+// The AND-wrapper alone is NOT sufficient: `&&` binds tighter than
+// `||`, so a raw `(owner) && (llm)` is defeated by an `llm` that
+// carries an unbalanced `)` and a top-level `||` (e.g. `true) || (true`
+// → `(owner) && (true) || (true)` = every job). The constraint is
+// therefore parsed and re-serialized (classadBalanced) before it is
+// wrapped: the round-tripped form is always balanced, so the wrapper
+// confines it — and an input that will not parse is rejected outright
+// rather than silently widened.
 //
 // Empty-string actor is rejected at the handler layer, not here, so
 // this function never produces a `Owner == ""` constraint that
 // matches everything.
-func scopeToOwner(actor, llmConstraint string) string {
+func scopeToOwner(actor, llmConstraint string) (string, error) {
 	owner := fmt.Sprintf("Owner == %s", classadStringLit(actor))
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
-		return owner
+		return owner, nil
 	}
-	return fmt.Sprintf("(%s) && (%s)", owner, c)
+	// The AND-wrapper only confines the LLM constraint if the constraint cannot
+	// escape it. Raw concatenation does NOT: because ClassAd `||` binds looser
+	// than `&&` and the constraint may carry unbalanced parentheses, an input like
+	// `true) || (true` yields `(Owner==actor) && (true) || (true)` — which parses
+	// as `... || true` and matches EVERY job, defeating the scope (and, via
+	// remove_jobs / edit_jobs_by_constraint, letting a jailbroken LLM touch other
+	// users' jobs). Re-serialize the constraint through the ClassAd parser: the
+	// round-tripped form is always balanced, so the wrapper confines it. Reject
+	// anything that will not parse rather than silently widening the scope — for a
+	// destructive tool, failing the call is far safer than falling back to
+	// "every job the user owns".
+	safe, err := classadBalanced(c)
+	if err != nil {
+		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
+	}
+	return fmt.Sprintf("(%s) && (%s)", owner, safe), nil
+}
+
+// classadBalanced parses an untrusted ClassAd boolean expression and returns its
+// re-serialized (balanced) form, safe to splice as one operand of a larger
+// expression. It errors on anything that does not parse as a single complete
+// expression — which is exactly how an owner-scope-bypass attempt (unbalanced
+// parentheses to escape an enclosing `&&`) is rejected.
+func classadBalanced(constraint string) (string, error) {
+	expr, err := classad.ParseExpr(constraint)
+	if err != nil {
+		return "", err
+	}
+	return expr.String(), nil
 }
 
 // classadStringLit quotes a value as a ClassAd string literal,
