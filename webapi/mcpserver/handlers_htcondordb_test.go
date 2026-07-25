@@ -41,6 +41,9 @@ func TestParseHTCondorDBAd(t *testing.T) {
 	ad.InsertAttrBool("TimeTravelEnabled", true)
 	ad.InsertAttrBool("HistoryGapDetected", true)
 	ad.InsertAttr("HistorySecondsSinceSync", 42)
+	ad.InsertAttrBool("JobQueueCaughtUp", true)
+	ad.InsertAttr("JobQueueLastSyncTime", 1700000000)
+	ad.InsertAttr("JobQueueSecondsSinceSync", 3)
 
 	info := parseHTCondorDBAd(ad)
 	if info.Name != "htcondordb@ap40" || info.Address != "<10.0.0.1:9619>" {
@@ -48,6 +51,9 @@ func TestParseHTCondorDBAd(t *testing.T) {
 	}
 	if !info.TimeTravelEnabled || !info.HistoryGap || info.SecondsSinceSync != 42 {
 		t.Errorf("capabilities/freshness wrong: %+v", info)
+	}
+	if !info.JobQueueCaughtUp || info.JobQueueLastSyncTime != 1700000000 || info.JobQueueSecondsSync != 3 {
+		t.Errorf("job-queue freshness wrong: %+v", info)
 	}
 }
 

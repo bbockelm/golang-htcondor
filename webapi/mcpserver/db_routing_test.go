@@ -125,6 +125,102 @@ func TestHistoryResultShape(t *testing.T) {
 	}
 }
 
+func TestJobsRouteDecision(t *testing.T) {
+	const now = 1_000_000
+	caughtUp := &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 10}
+
+	cases := []struct {
+		name    string
+		info    *htcondordbInfo
+		page    string
+		wantUse bool
+	}{
+		{"caught up, fresh", caughtUp, "", true},
+		{"no info", nil, "", false},
+		{"no address", &htcondordbInfo{JobQueueCaughtUp: true}, "", false},
+		{"not caught up", &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: false, JobQueueLastSyncTime: now}, "", false},
+		{"paginated", caughtUp, "tok", false},
+		{"too stale", &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 999}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			use, reason := jobsRouteDecision(c.info, c.page, now, jobsRouteToleranceSecs)
+			if use != c.wantUse {
+				t.Errorf("useDB = %v (%q), want %v", use, reason, c.wantUse)
+			}
+			if reason == "" {
+				t.Error("reason should never be empty")
+			}
+		})
+	}
+}
+
+func TestJobQueueStaleness(t *testing.T) {
+	const now = 1_000_000
+	// Absolute last-sync time wins (accurate regardless of ad age).
+	if got := jobQueueStaleness(&htcondordbInfo{JobQueueLastSyncTime: now - 30, JobQueueSecondsSync: 999}, now); got != 30 {
+		t.Errorf("absolute staleness = %d, want 30", got)
+	}
+	// A clock skew (future last-sync) clamps to 0 rather than going negative.
+	if got := jobQueueStaleness(&htcondordbInfo{JobQueueLastSyncTime: now + 5}, now); got != 0 {
+		t.Errorf("future last-sync should clamp to 0, got %d", got)
+	}
+	// Falls back to the frozen SecondsSinceSync when no absolute stamp.
+	if got := jobQueueStaleness(&htcondordbInfo{JobQueueSecondsSync: 42}, now); got != 42 {
+		t.Errorf("frozen fallback = %d, want 42", got)
+	}
+}
+
+func TestJobsRouteToleranceBoundary(t *testing.T) {
+	const now = 1_000_000
+	at := &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - jobsRouteToleranceSecs}
+	over := &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - jobsRouteToleranceSecs - 1}
+	if use, _ := jobsRouteDecision(at, "", now, jobsRouteToleranceSecs); !use {
+		t.Error("staleness exactly at tolerance should still route to the mirror")
+	}
+	if use, _ := jobsRouteDecision(over, "", now, jobsRouteToleranceSecs); use {
+		t.Error("staleness past tolerance should fall back to the schedd")
+	}
+}
+
+func TestJobKeyLess(t *testing.T) {
+	mk := func(c, p int64) *classad.ClassAd {
+		ad := classad.New()
+		ad.InsertAttr("ClusterId", c)
+		ad.InsertAttr("ProcId", p)
+		return ad
+	}
+	ads := []*classad.ClassAd{mk(5, 1), mk(3, 2), mk(3, 0), mk(5, 0)}
+	sort.SliceStable(ads, func(i, j int) bool { return jobKeyLess(ads[i], ads[j]) })
+	var got [][2]int64
+	for _, a := range ads {
+		c, _ := a.EvaluateAttrInt("ClusterId")
+		p, _ := a.EvaluateAttrInt("ProcId")
+		got = append(got, [2]int64{c, p})
+	}
+	want := [][2]int64{{3, 0}, {3, 2}, {5, 0}, {5, 1}}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRenderJobsBase(t *testing.T) {
+	ad := classad.New()
+	ad.InsertAttr("ClusterId", 7)
+	text, meta := renderJobsBase([]*classad.ClassAd{ad}, "Owner == \"alice\"", "htcondordb", "\n[source: htcondordb mirror]")
+	if meta["source"] != "htcondordb" || meta["count"] != 1 || meta["has_more"] != false {
+		t.Errorf("metadata wrong: %+v", meta)
+	}
+	if !strings.Contains(text, "Found 1 job(s)") || !strings.Contains(text, "JOB STATUS REFERENCE") {
+		t.Errorf("missing header or status guide: %q", text)
+	}
+	if !strings.Contains(text, "[source: htcondordb mirror]") {
+		t.Errorf("provenance note not appended: %q", text)
+	}
+}
+
 // TestHistoryResultSchedddPathNoNote confirms the schedd path (empty note) adds
 // no provenance line and labels the source with the record source.
 func TestHistoryResultScheddPathNoNote(t *testing.T) {
