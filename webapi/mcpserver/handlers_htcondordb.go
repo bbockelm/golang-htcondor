@@ -34,6 +34,14 @@ type htcondordbInfo struct {
 	TimeTravelEnabled bool
 	SecondsSinceSync  int64
 	HistoryGap        bool
+
+	// Job-queue mirror freshness, for routing live job queries (db_routing.go).
+	// CaughtUp means the syncer had drained job_queue.log to EOF at its last
+	// poll; LastSyncTime is that poll's absolute Unix time, so the CURRENT
+	// staleness can be computed as now-LastSyncTime independent of ad age.
+	JobQueueCaughtUp     bool
+	JobQueueLastSyncTime int64
+	JobQueueSecondsSync  int64
 }
 
 // discoverHTCondorDB finds the htcondordb database by querying the collector for its ad (result
@@ -74,6 +82,9 @@ func parseHTCondorDBAd(ad *classad.ClassAd) *htcondordbInfo {
 	info.TimeTravelEnabled, _ = ad.EvaluateAttrBool("TimeTravelEnabled")
 	info.HistoryGap, _ = ad.EvaluateAttrBool("HistoryGapDetected")
 	info.SecondsSinceSync, _ = ad.EvaluateAttrInt("HistorySecondsSinceSync")
+	info.JobQueueCaughtUp, _ = ad.EvaluateAttrBool("JobQueueCaughtUp")
+	info.JobQueueLastSyncTime, _ = ad.EvaluateAttrInt("JobQueueLastSyncTime")
+	info.JobQueueSecondsSync, _ = ad.EvaluateAttrInt("JobQueueSecondsSinceSync")
 	return info
 }
 
