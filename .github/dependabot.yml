@@ -16,11 +16,17 @@ updates:
   # `replace ... => ../` self-references are local and ignored by Dependabot; it
   # manages the external dependencies (classad, cedar, fosite, ...). Minor and
   # patch bumps are grouped to cut PR noise; majors come as individual PRs.
+  #
+  # Every module must be listed: a shared dependency bumped in one module makes the
+  # others' go.mod/go.sum stale, which the CI tidy-check (make tidy-all) fails. The
+  # examples/* modules pull the shared deps transitively through the local replace, so
+  # they need updating in the same grouped PR.
   - package-ecosystem: "gomod"
     directories:
       - "/"
       - "/webapi"
       - "/localcredmon"
+      - "/examples/*"
     schedule:
       interval: "weekly"
     groups:
