@@ -187,6 +187,25 @@ func (m *Manager) ChownAsRoot(path string, uid, gid int) error {
 	})
 }
 
+// RunAsCondor runs fn with the effective identity of the condor service account -- the
+// account a daemon drops to -- restoring the prior thread credentials afterward. It is the
+// condor-identity analogue of the *AsRoot helpers: an enabled manager switches per-thread
+// via runAsUser; a disabled (unprivileged) manager runs fn under the current identity.
+// cedar's FS-auth client uses this (through a hook) to create its marker owned by condor,
+// mirroring HTCondor's set_condor_priv() so a root daemon authenticates as condor.
+func (m *Manager) RunAsCondor(fn func() error) error {
+	if !m.enabled {
+		return fn()
+	}
+	if err := runAsUser(m.defaultIdentity, fn); err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			return fmt.Errorf("run as condor requested but unsupported: %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
 // Package-level root functions
 
 // OpenAsRoot opens a file as root using the default manager.
@@ -211,4 +230,9 @@ func MkdirAllAsRoot(path string, perm os.FileMode) error {
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func ChownAsRoot(path string, uid, gid int) error {
 	return DefaultManager().ChownAsRoot(path, uid, gid)
+}
+
+// RunAsCondor runs fn as the condor service account using the default manager.
+func RunAsCondor(fn func() error) error {
+	return DefaultManager().RunAsCondor(fn)
 }

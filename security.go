@@ -235,6 +235,41 @@ var runningAsDaemon = func() bool {
 	return os.Geteuid() == 0 || os.Getenv("CONDOR_INHERIT") != ""
 }
 
+// condorUsername returns the condor service account name (CONDOR_USER, default "condor"),
+// used by FS auth to map a root-owned marker to the condor identity.
+func condorUsername(cfg *config.Config) string {
+	if cfg != nil {
+		if v, ok := cfg.Get("CONDOR_USER"); ok {
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		}
+	}
+	return "condor"
+}
+
+// fsRootToCondor reads FS_ROOT_TO_CONDOR as a tri-state: nil (unset) leaves cedar's
+// default (enabled, matching HTCondor); an explicit value overrides it.
+func fsRootToCondor(cfg *config.Config) *bool {
+	if cfg == nil {
+		return nil
+	}
+	v, ok := cfg.Get("FS_ROOT_TO_CONDOR")
+	if !ok {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return nil
+	case "true", "t", "1", "yes", "y", "on":
+		b := true
+		return &b
+	default:
+		b := false
+		return &b
+	}
+}
+
 // GetSecurityConfig creates a SecurityConfig from HTCondor configuration.
 // It reads security-related parameters like SEC_CLIENT_AUTHENTICATION, SEC_DEFAULT_AUTHENTICATION,
 // SEC_CLIENT_AUTHENTICATION_METHODS, etc., and maps them to the cedar SecurityConfig struct.
@@ -273,6 +308,13 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		// master's DC_SET_READY) falls back to an unprivileged os.ReadFile and fails
 		// on /etc/grid-security/hostkey.pem and /etc/condor/tokens.d.
 		Credentials: daemonCredentialCache,
+		// FS auth: create the marker as condor (client, via droppriv) and map a
+		// root-owned marker to condor (server), so a tool or daemon run as root
+		// authenticates as condor rather than root -- mirroring C++ set_condor_priv()
+		// and FS_ROOT_TO_CONDOR. On an unprivileged process the runner is a no-op.
+		CondorUsername:   condorUsername(cfg),
+		CondorPrivRunner: daemonCondorPrivRunner,
+		FSRootToCondor:   fsRootToCondor(cfg),
 	}
 
 	// Get authentication level
