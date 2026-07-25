@@ -17,6 +17,18 @@ var (
 	_ security.CredentialDirLister = (*CredentialCache)(nil)
 )
 
+// condorPrivRunner adapts droppriv to cedar's security.CondorPrivRunner so cedar's FS-auth
+// client creates its marker directory as the condor service account -- droppriv switches
+// the effective identity for the mkdir, mirroring HTCondor's set_condor_priv(). Stateless.
+// On an unprivileged process droppriv runs the mkdir under the current identity, so this is
+// safe to wire onto every security config.
+type condorPrivRunner struct{}
+
+func (condorPrivRunner) RunAsCondor(fn func() error) error { return droppriv.RunAsCondor(fn) }
+
+// daemonCondorPrivRunner is the shared FS-auth marker runner wired onto security configs.
+var daemonCondorPrivRunner security.CondorPrivRunner = condorPrivRunner{}
+
 // CredentialCache reads credential files (the SSL server key/cert, token signing
 // keys) for a daemon that has dropped privileges to a service account. It reads
 // through droppriv as root — matching HTCondor's set_priv(PRIV_ROOT) — so
