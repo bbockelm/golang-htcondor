@@ -399,7 +399,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 		{
 			Name:        "query_job_archive",
-			Description: "Query archived job records from HTCondor (completed jobs)",
+			Description: "Query archived job records from HTCondor (completed jobs). When a synchronized htcondordb mirror is available this is served from the mirror instead of scanning the schedd's history file (transparently falling back to the schedd otherwise); the result notes which source answered.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1816,20 +1816,39 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		}
 	}
 
+	// Offload completed-job history to a synchronized htcondordb mirror when one
+	// is available (db_routing.go): condor_history scans the schedd's on-disk
+	// history file and competes with scheduling, so serving it from the mirror is
+	// a safe load win. Only the job-history source is mirrored; epochs and
+	// transfer history stay on the schedd. Any miss falls through transparently.
+	if source == htcondor.HistorySourceJobHistory {
+		if res, ok := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
+			return res, nil
+		}
+	}
+
 	// Execute query
 	records, err := s.schedd.QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
-	// Convert ClassAds to JSON
+	return historyResult(records, typeName, constraint, string(source), ""), nil
+}
+
+// historyResult renders history records into the tool result. Both the schedd
+// path and the htcondordb mirror path (tryHistoryFromDB) funnel through here so
+// the output contract is identical regardless of source; source names the
+// backend in the metadata and note is an optional trailing provenance line.
+func historyResult(records []*classad.ClassAd, typeName, constraint, source, note string) interface{} {
 	recordsJSON, err := json.Marshal(records)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize records: %w", err)
+		// Marshaling a slice of ClassAds does not realistically fail; degrade to
+		// an empty array rather than dropping the whole (already-fetched) result.
+		recordsJSON = []byte("[]")
 	}
-
-	resultText := fmt.Sprintf("Found %d %s record(s):\n%s",
-		len(records), typeName, string(recordsJSON))
+	resultText := fmt.Sprintf("Found %d %s record(s):\n%s%s",
+		len(records), typeName, string(recordsJSON), note)
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -1841,9 +1860,9 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		"metadata": map[string]interface{}{
 			"total_records": len(records),
 			"constraint":    constraint,
-			"source":        string(source),
+			"source":        source,
 		},
-	}, nil
+	}
 }
 
 // OutputFile represents a file from the job's output sandbox
