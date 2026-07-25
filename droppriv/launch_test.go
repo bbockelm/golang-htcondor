@@ -2,6 +2,7 @@ package droppriv
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"strconv"
@@ -11,7 +12,7 @@ import (
 // runIDU starts `id -u` as userName via StartAsUser and returns the child's printed uid.
 func runIDU(t *testing.T, userName string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("id", "-u")
+	cmd := exec.CommandContext(context.Background(), "id", "-u")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -35,10 +36,10 @@ func TestStartAsUserEmptyRunsAsSelf(t *testing.T) {
 }
 
 func TestStartAsUserRejectsPrivilegedNames(t *testing.T) {
-	if err := StartAsUser("root", exec.Command("true")); err == nil {
+	if err := StartAsUser("root", exec.CommandContext(context.Background(), "true")); err == nil {
 		t.Error("StartAsUser(\"root\") should be rejected")
 	}
-	if err := StartAsUser("condor", exec.Command("true")); err == nil {
+	if err := StartAsUser("condor", exec.CommandContext(context.Background(), "true")); err == nil {
 		t.Error("StartAsUser(\"condor\") should be rejected")
 	}
 }
