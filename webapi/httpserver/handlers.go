@@ -897,6 +897,30 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 }
 
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
+// bulkOwnerScope owner-scopes a destructive bulk operation's constraint so a
+// caller can only remove/edit their OWN jobs, unless they are a Web UI admin
+// (who may operate cross-user). This mirrors the read path's ownedByMe logic
+// (a Web UI session that is not an admin is confined to its own jobs), and uses
+// the same injection-safe wrapper as the chat tools (scopeToOwner: the untrusted
+// constraint is parsed and re-serialized before being AND-ed with the owner
+// clause, and rejected if it will not parse). The schedd ACL is still the
+// ultimate backstop; this just removes the footgun of a bulk delete/edit that
+// silently trusts an arbitrary caller-supplied constraint.
+//
+// Non-session (API-token) callers are left to the schedd ACL exactly as the read
+// path leaves them, so existing service integrations are unaffected.
+func (s *Handler) bulkOwnerScope(ctx context.Context, r *http.Request, raw string) (string, error) {
+	_, hasSession := s.getSessionFromRequest(r)
+	if !hasSession || s.isWebUIAdmin(r) {
+		return raw, nil
+	}
+	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if owner == "" {
+		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
+	}
+	return scopeToOwner(owner, raw)
+}
+
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
@@ -929,8 +953,16 @@ func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "Removed via HTTP API bulk operation"
 	}
 
+	// Owner-scope the constraint (non-admin Web UI callers can only remove their
+	// own jobs); rejects a constraint that will not parse.
+	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Remove jobs by constraint
-	results, err := s.getSchedd().RemoveJobs(ctx, req.Constraint, req.Reason)
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, req.Reason)
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -1022,8 +1054,16 @@ func (s *Handler) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 		opts.Force = req.Options.Force
 	}
 
+	// Owner-scope the constraint (non-admin Web UI callers can only edit their
+	// own jobs); rejects a constraint that will not parse.
+	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Edit jobs matching constraint
-	count, err := s.getSchedd().EditJobs(ctx, req.Constraint, attributes, opts)
+	count, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
 	if err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
