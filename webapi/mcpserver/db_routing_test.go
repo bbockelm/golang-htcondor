@@ -33,7 +33,7 @@ func TestHistoryRouteDecision(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			useDB, reason := historyRouteDecision(c.info, c.opts, historyRouteToleranceSecs)
+			useDB, reason := historyRouteDecision(c.info, c.opts)
 			if useDB != c.wantUse {
 				t.Errorf("useDB = %v (%q), want %v", useDB, reason, c.wantUse)
 			}
@@ -48,10 +48,10 @@ func TestHistoryRouteToleranceBoundary(t *testing.T) {
 	// Exactly at tolerance is still fresh; one past it is stale.
 	at := &htcondordbInfo{Address: "<a>", SecondsSinceSync: historyRouteToleranceSecs}
 	over := &htcondordbInfo{Address: "<a>", SecondsSinceSync: historyRouteToleranceSecs + 1}
-	if use, _ := historyRouteDecision(at, nil, historyRouteToleranceSecs); !use {
+	if use, _ := historyRouteDecision(at, nil); !use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
-	if use, _ := historyRouteDecision(over, nil, historyRouteToleranceSecs); use {
+	if use, _ := historyRouteDecision(over, nil); use {
 		t.Error("staleness past tolerance should fall back to the schedd")
 	}
 }
@@ -144,7 +144,7 @@ func TestJobsRouteDecision(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			use, reason := jobsRouteDecision(c.info, c.page, now, jobsRouteToleranceSecs)
+			use, reason := jobsRouteDecision(c.info, c.page, now)
 			if use != c.wantUse {
 				t.Errorf("useDB = %v (%q), want %v", use, reason, c.wantUse)
 			}
@@ -175,10 +175,10 @@ func TestJobsRouteToleranceBoundary(t *testing.T) {
 	const now = 1_000_000
 	at := &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - jobsRouteToleranceSecs}
 	over := &htcondordbInfo{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - jobsRouteToleranceSecs - 1}
-	if use, _ := jobsRouteDecision(at, "", now, jobsRouteToleranceSecs); !use {
+	if use, _ := jobsRouteDecision(at, "", now); !use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
-	if use, _ := jobsRouteDecision(over, "", now, jobsRouteToleranceSecs); use {
+	if use, _ := jobsRouteDecision(over, "", now); use {
 		t.Error("staleness past tolerance should fall back to the schedd")
 	}
 }

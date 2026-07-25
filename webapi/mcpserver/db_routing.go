@@ -31,15 +31,15 @@ const historyRouteToleranceSecs int64 = 300
 // mirror exists AND the request uses no schedd-specific scan semantics the mirror
 // cannot reproduce faithfully (a `since` stop-scan, a `scan_limit` budget, or a
 // forward/chronological scan). reason explains the choice for the provenance note.
-func historyRouteDecision(info *htcondordbInfo, opts *htcondor.HistoryQueryOptions, toleranceSecs int64) (useDB bool, reason string) {
+func historyRouteDecision(info *htcondordbInfo, opts *htcondor.HistoryQueryOptions) (useDB bool, reason string) {
 	if info == nil || info.Address == "" {
 		return false, "no htcondordb mirror is advertising"
 	}
 	if info.HistoryGap {
 		return false, "mirror reported a history durability gap"
 	}
-	if toleranceSecs > 0 && info.SecondsSinceSync > toleranceSecs {
-		return false, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", info.SecondsSinceSync, toleranceSecs)
+	if info.SecondsSinceSync > historyRouteToleranceSecs {
+		return false, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", info.SecondsSinceSync, historyRouteToleranceSecs)
 	}
 	if opts != nil {
 		if opts.Since != "" {
@@ -81,7 +81,7 @@ func jobQueueStaleness(info *htcondordbInfo, nowUnix int64) int64 {
 // tolerance, and it declines a paginated query (page_token) because the mirror
 // read has no matching cursor -- the schedd owns pagination so successive pages
 // stay on one backend with one ordering.
-func jobsRouteDecision(info *htcondordbInfo, pageToken string, nowUnix, toleranceSecs int64) (useDB bool, reason string) {
+func jobsRouteDecision(info *htcondordbInfo, pageToken string, nowUnix int64) (useDB bool, reason string) {
 	if info == nil || info.Address == "" {
 		return false, "no htcondordb mirror is advertising"
 	}
@@ -91,8 +91,8 @@ func jobsRouteDecision(info *htcondordbInfo, pageToken string, nowUnix, toleranc
 	if !info.JobQueueCaughtUp {
 		return false, "mirror's job queue is not caught up to the schedd"
 	}
-	if stale := jobQueueStaleness(info, nowUnix); toleranceSecs > 0 && stale > toleranceSecs {
-		return false, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, toleranceSecs)
+	if stale := jobQueueStaleness(info, nowUnix); stale > jobsRouteToleranceSecs {
+		return false, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, jobsRouteToleranceSecs)
 	}
 	return true, "served from the htcondordb mirror (job queue caught up)"
 }
@@ -123,7 +123,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 	if err != nil {
 		return nil, false // no mirror discoverable -> schedd
 	}
-	useDB, reason := historyRouteDecision(info, opts, historyRouteToleranceSecs)
+	useDB, reason := historyRouteDecision(info, opts)
 	if !useDB {
 		return nil, false
 	}
@@ -203,7 +203,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if err != nil {
 		return nil, false
 	}
-	useDB, reason := jobsRouteDecision(info, pageToken, nowUnix, jobsRouteToleranceSecs)
+	useDB, reason := jobsRouteDecision(info, pageToken, nowUnix)
 	if !useDB {
 		return nil, false
 	}

@@ -58,7 +58,7 @@ func (s *Server) discoverHTCondorDB(ctx context.Context) (*htcondordbInfo, error
 	}
 	s.dbMu.Unlock()
 
-	ads, err := s.collector.QueryAds(ctx, htcondordbAdType, "")
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, htcondordbAdType, "", &htcondor.QueryOptions{Limit: 64})
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
 	}
@@ -126,7 +126,7 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 	if constraint == "" {
 		constraint = "true"
 	}
-	limit := dbIntArg(args, "limit", dbDefaultLimit, dbMaxLimit)
+	limit := dbLimitArg(args)
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
@@ -156,7 +156,7 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 	if err != nil {
 		return nil, err
 	}
-	limit := dbIntArg(args, "limit", dbDefaultLimit, dbMaxLimit)
+	limit := dbLimitArg(args)
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
@@ -233,19 +233,21 @@ func stringArg(args map[string]interface{}, key string) string {
 	return strings.TrimSpace(v)
 }
 
-func dbIntArg(args map[string]interface{}, key string, def, max int) int {
-	n := def
-	switch v := args[key].(type) {
+// dbLimitArg reads the optional "limit" tool argument, defaulting to
+// dbDefaultLimit and clamping to dbMaxLimit.
+func dbLimitArg(args map[string]interface{}) int {
+	n := dbDefaultLimit
+	switch v := args["limit"].(type) {
 	case float64:
 		n = int(v)
 	case int:
 		n = v
 	}
 	if n <= 0 {
-		n = def
+		n = dbDefaultLimit
 	}
-	if n > max {
-		n = max
+	if n > dbMaxLimit {
+		n = dbMaxLimit
 	}
 	return n
 }

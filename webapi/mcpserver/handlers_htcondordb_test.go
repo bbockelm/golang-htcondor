@@ -58,16 +58,16 @@ func TestParseHTCondorDBAd(t *testing.T) {
 }
 
 func TestDBIntArg(t *testing.T) {
-	if got := dbIntArg(map[string]interface{}{}, "limit", 200, 2000); got != 200 {
+	if got := dbLimitArg(map[string]interface{}{}); got != 200 {
 		t.Errorf("default: got %d, want 200", got)
 	}
-	if got := dbIntArg(map[string]interface{}{"limit": float64(50)}, "limit", 200, 2000); got != 50 {
+	if got := dbLimitArg(map[string]interface{}{"limit": float64(50)}); got != 50 {
 		t.Errorf("explicit: got %d, want 50", got)
 	}
-	if got := dbIntArg(map[string]interface{}{"limit": float64(99999)}, "limit", 200, 2000); got != 2000 {
+	if got := dbLimitArg(map[string]interface{}{"limit": float64(99999)}); got != 2000 {
 		t.Errorf("clamp: got %d, want 2000", got)
 	}
-	if got := dbIntArg(map[string]interface{}{"limit": float64(-5)}, "limit", 200, 2000); got != 200 {
+	if got := dbLimitArg(map[string]interface{}{"limit": float64(-5)}); got != 200 {
 		t.Errorf("negative -> default: got %d, want 200", got)
 	}
 }
