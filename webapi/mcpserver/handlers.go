@@ -128,6 +128,9 @@ var readOnlyMCPTools = map[string]bool{
 	"condor_doc_submit_syntax":      true,
 	"condor_doc_config_variables":   true,
 	"condor_doc_search":             true,
+	"query_history_db":              true,
+	"query_jobs_as_of":              true,
+	"aggregate_jobs":                true,
 }
 
 // handleListTools returns the list of available tools, filtered by
@@ -156,7 +159,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 		{
 			Name:        "query_jobs",
-			Description: "Query HTCondor jobs with optional constraints, projections, and pagination",
+			Description: "Query HTCondor jobs with optional constraints, projections, and pagination. When a synchronized htcondordb mirror has a caught-up job queue this is served from the mirror to offload the schedd (transparently falling back to the schedd otherwise, e.g. when the mirror lags or the query is paginated); the result notes which source answered and how recently it synced.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -396,7 +399,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 		{
 			Name:        "query_job_archive",
-			Description: "Query archived job records from HTCondor (completed jobs)",
+			Description: "Query archived job records from HTCondor (completed jobs). When a synchronized htcondordb mirror is available this is served from the mirror instead of scanning the schedd's history file (transparently falling back to the schedd otherwise); the result notes which source answered.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -681,6 +684,50 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		)
 	}
 
+	// Add htcondordb-backed tools when a database is discoverable via the collector. These
+	// answer questions the live schedd is bad at: completed-job history, point-in-time
+	// (time-travel) state, and cheap server-side aggregates. All are read-only and owner-scoped.
+	if s.htcondordbEnabled() {
+		tools = append(tools,
+			Tool{
+				Name:        "query_history_db",
+				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Results are owner-scoped: you only see your own jobs. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint expression over completed-job attributes (e.g. 'ExitCode != 0'). Empty matches all your jobs."},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+					},
+				},
+			},
+			Tool{
+				Name:        "query_jobs_as_of",
+				Description: "TIME-TRAVEL: query the live-jobs table as it looked at a past instant (only if the database has time-travel enabled). Answers 'what did the queue look like at time T'. Owner-scoped.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"as_of":      map[string]interface{}{"type": "string", "description": "The point in time: an RFC3339 timestamp (2026-07-24T00:00:00Z) or a relative duration ago (e.g. '-1h', '-30m')."},
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint over job attributes. Empty matches all your jobs."},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+					},
+					"required": []string{"as_of"},
+				},
+			},
+			Tool{
+				Name:        "aggregate_jobs",
+				Description: "Server-side COUNT with optional GROUP BY over an htcondordb table (default 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad. Owner-scoped.",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint to filter before grouping. Empty matches all your jobs."},
+						"group_by":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Attributes to group by, e.g. [\"JobStatus\"]. Empty returns a single total count."},
+						"table":      map[string]interface{}{"type": "string", "description": "Table to aggregate: 'jobs' (default, live) or 'history' (completed)."},
+					},
+				},
+			},
+		)
+	}
+
 	// Filter by caller's OAuth2 scopes if the HTTP transport
 	// supplied them. Read-only-token clients see only the
 	// read-safe subset; write-token and stdio (no scope info)
@@ -790,6 +837,12 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolStoreServiceCredential(ctx, request.Arguments)
 	case "delete_service_credential":
 		result, err = s.toolDeleteServiceCredential(ctx, request.Arguments)
+	case "query_history_db":
+		result, err = s.toolQueryHistoryDB(ctx, request.Arguments)
+	case "query_jobs_as_of":
+		result, err = s.toolQueryJobsAsOf(ctx, request.Arguments)
+	case "aggregate_jobs":
+		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	default:
 		// Doc tools all share one handler — dispatching them here as
 		// a single default-arm fallback means the switch's
@@ -947,6 +1000,14 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// Get page token
 	pageToken, _ := args["page_token"].(string)
 
+	// Offload live job queries to a synchronized htcondordb mirror when its job
+	// queue is caught up (db_routing.go). Reproduces this path's self-scoping and
+	// falls through to the schedd on any miss, so the caller sees identical
+	// results plus a provenance note.
+	if res, ok := s.tryJobsFromDB(ctx, constraint, projection, limit, pageToken, time.Now().Unix()); ok {
+		return res, nil
+	}
+
 	// Build query options - filter by owner by default for security
 	opts := &htcondor.QueryOptions{
 		Limit:      limit,
@@ -980,48 +1041,17 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		jobAds = append(jobAds, result.Ad)
 	}
 
-	// Convert ClassAds to JSON
-	jobsJSON, err := json.Marshal(jobAds)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize jobs: %w", err)
-	}
+	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "")
 
-	// Build helpful status information
-	statusGuide := `
-
-JOB STATUS REFERENCE:
-- JobStatus=1: Idle (waiting for resources)
-- JobStatus=2: Running
-- JobStatus=3: Removed
-- JobStatus=4: Completed (retrieve output with get_job_stdout/get_job_stderr)
-- JobStatus=5: Held (may need input files uploaded or user action)
-
-TIPS:
-- Poll job status no more frequently than every 5 seconds
-- Use constraint queries instead of fetching many individual jobs (e.g., "ClusterId == 123")
-- For completed jobs (JobStatus=4), use get_job_stdout to retrieve output`
-
-	resultText := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s%s",
-		len(jobAds), constraint, string(jobsJSON), statusGuide)
-
-	// Build metadata
-	metadata := map[string]interface{}{
-		"count":      len(jobAds),
-		"constraint": constraint,
-		"has_more":   false,
-	}
-
-	// Check if we might have more results (got exactly the limit)
-	if limit > 0 && len(jobAds) >= limit {
-		// Generate page token from last job
-		if len(jobAds) > 0 {
-			lastJob := jobAds[len(jobAds)-1]
-			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
-				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
-					metadata["has_more"] = true
-					metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
-					resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
-				}
+	// Check if we might have more results (got exactly the limit) and, if so,
+	// hand back a page token built from the last job so the caller can continue.
+	if limit > 0 && len(jobAds) >= limit && len(jobAds) > 0 {
+		lastJob := jobAds[len(jobAds)-1]
+		if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
+			if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
+				metadata["has_more"] = true
+				metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
+				resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
 			}
 		}
 	}
@@ -1035,6 +1065,44 @@ TIPS:
 		},
 		"metadata": metadata,
 	}, nil
+}
+
+// jobStatusGuide is appended to every query_jobs result (both the schedd and the
+// htcondordb-mirror path) so the agent has the JobStatus legend and polling tips.
+const jobStatusGuide = `
+
+JOB STATUS REFERENCE:
+- JobStatus=1: Idle (waiting for resources)
+- JobStatus=2: Running
+- JobStatus=3: Removed
+- JobStatus=4: Completed (retrieve output with get_job_stdout/get_job_stderr)
+- JobStatus=5: Held (may need input files uploaded or user action)
+
+TIPS:
+- Poll job status no more frequently than every 5 seconds
+- Use constraint queries instead of fetching many individual jobs (e.g., "ClusterId == 123")
+- For completed jobs (JobStatus=4), use get_job_stdout to retrieve output`
+
+// renderJobsBase builds the shared query_jobs result body (count header + the
+// marshaled job ads + the status guide + an optional trailing provenance note)
+// and base metadata (count, constraint, source, has_more=false). Both the schedd
+// path and the mirror path (tryJobsFromDB) funnel through here so their output
+// contract is identical apart from the source label and note; the schedd path
+// then layers pagination onto the returned text/metadata.
+func renderJobsBase(jobAds []*classad.ClassAd, constraint, source, trailer string) (string, map[string]interface{}) {
+	jobsJSON, err := json.Marshal(jobAds)
+	if err != nil {
+		jobsJSON = []byte("[]")
+	}
+	text := fmt.Sprintf("Found %d job(s) matching constraint '%s':\n%s%s%s",
+		len(jobAds), constraint, string(jobsJSON), jobStatusGuide, trailer)
+	metadata := map[string]interface{}{
+		"count":      len(jobAds),
+		"constraint": constraint,
+		"source":     source,
+		"has_more":   false,
+	}
+	return text, metadata
 }
 
 // toolGetJob handles getting a specific job
@@ -1763,20 +1831,39 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		}
 	}
 
+	// Offload completed-job history to a synchronized htcondordb mirror when one
+	// is available (db_routing.go): condor_history scans the schedd's on-disk
+	// history file and competes with scheduling, so serving it from the mirror is
+	// a safe load win. Only the job-history source is mirrored; epochs and
+	// transfer history stay on the schedd. Any miss falls through transparently.
+	if source == htcondor.HistorySourceJobHistory {
+		if res, ok := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
+			return res, nil
+		}
+	}
+
 	// Execute query
 	records, err := s.schedd.QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
-	// Convert ClassAds to JSON
+	return historyResult(records, typeName, constraint, string(source), ""), nil
+}
+
+// historyResult renders history records into the tool result. Both the schedd
+// path and the htcondordb mirror path (tryHistoryFromDB) funnel through here so
+// the output contract is identical regardless of source; source names the
+// backend in the metadata and note is an optional trailing provenance line.
+func historyResult(records []*classad.ClassAd, typeName, constraint, source, note string) interface{} {
 	recordsJSON, err := json.Marshal(records)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize records: %w", err)
+		// Marshaling a slice of ClassAds does not realistically fail; degrade to
+		// an empty array rather than dropping the whole (already-fetched) result.
+		recordsJSON = []byte("[]")
 	}
-
-	resultText := fmt.Sprintf("Found %d %s record(s):\n%s",
-		len(records), typeName, string(recordsJSON))
+	resultText := fmt.Sprintf("Found %d %s record(s):\n%s%s",
+		len(records), typeName, string(recordsJSON), note)
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -1788,9 +1875,9 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		"metadata": map[string]interface{}{
 			"total_records": len(records),
 			"constraint":    constraint,
-			"source":        string(source),
+			"source":        source,
 		},
-	}, nil
+	}
 }
 
 // OutputFile represents a file from the job's output sandbox

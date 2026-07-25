@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -39,7 +41,31 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string) (string
 	if c == "" {
 		return owner, true
 	}
-	return fmt.Sprintf("(%s) && (%s)", owner, c), true
+	// Combine safely. Splicing the raw untrusted constraint into "(owner) && (c)"
+	// does NOT confine it: a crafted c escapes the AND via '||' precedence and
+	// unbalanced parentheses (e.g. c = `true) || (true` yields
+	// `(owner) && (true) || (true)`, which parses as `... || true` = every job).
+	// Re-serialize c through the ClassAd parser: the round-tripped form is always
+	// balanced, so the enclosing parens confine it. An input that will not parse
+	// is dropped (owner-only) rather than trusted -- fail closed.
+	safe, err := classadBalanced(c)
+	if err != nil {
+		return owner, true
+	}
+	return fmt.Sprintf("(%s) && (%s)", owner, safe), true
+}
+
+// classadBalanced parses an untrusted ClassAd boolean expression and returns its
+// re-serialized (fully parenthesized, balanced) form, so it can be safely spliced
+// as one operand of a larger expression. It errors on anything that does not
+// parse as a single complete expression -- which is exactly how an owner-scope
+// bypass attempt (unbalanced parens to escape an enclosing &&) is rejected.
+func classadBalanced(constraint string) (string, error) {
+	expr, err := classad.ParseExpr(constraint)
+	if err != nil {
+		return "", err
+	}
+	return expr.String(), nil
 }
 
 // isAdmin reports whether the given authenticated username is in the

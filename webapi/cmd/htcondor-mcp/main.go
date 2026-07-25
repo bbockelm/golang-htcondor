@@ -96,6 +96,9 @@ func runNormalMode() error {
 		Logger:         logger,
 		Stdin:          os.Stdin,
 		Stdout:         os.Stdout,
+		// Enables the htcondordb-backed tools: with a collector for discovery and this config
+		// for authentication, the server can find and query the database.
+		HTCondorConfig: cfg,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create MCP server: %w", err)

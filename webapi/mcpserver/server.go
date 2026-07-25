@@ -11,6 +11,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
@@ -48,6 +49,14 @@ type Server struct {
 	// Config.AdminUsers; nil/empty means no admin users (default —
 	// every authenticated caller is treated as a normal user).
 	adminUsers map[string]struct{}
+
+	// htcondorConfig is the ambient HTCondor configuration, used to build the CLIENT security
+	// config when dialing the htcondordb database for the DB-backed tools. nil disables them.
+	htcondorConfig *config.Config
+	// dbInfo caches the discovered htcondordb ad (address/capabilities/freshness) for dbInfoTTL.
+	dbMu     sync.Mutex
+	dbInfo   *htcondordbInfo
+	dbInfoAt time.Time
 }
 
 // TokenInfo stores information about a validated token
@@ -82,6 +91,12 @@ type Config struct {
 	// htcondor.GetAuthenticatedUserFromContext (typically
 	// "user@uid.domain"). Empty list = no admin users (default).
 	AdminUsers []string
+
+	// HTCondorConfig is the ambient HTCondor configuration. When set (together with a
+	// Collector), the htcondordb-backed tools are enabled: the server discovers the database
+	// via the collector and authenticates to it using this config's SEC_* knobs. nil disables
+	// those tools.
+	HTCondorConfig *config.Config
 }
 
 // NewServer creates a new MCP server
@@ -157,6 +172,7 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout:          stdout,
 		validatedTokens: make(map[string]TokenInfo),
 		adminUsers:      adminUsers,
+		htcondorConfig:  cfg.HTCondorConfig,
 	}
 
 	// Setup metrics if collector is provided
