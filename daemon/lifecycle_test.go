@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -38,6 +39,15 @@ func TestServeListenersServesAllAndDrains(t *testing.T) {
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
+				}
+				// The only thing that closes this listener is the ctx.Done() goroutine
+				// above, so an Accept error reporting a closed listener means shutdown is
+				// in flight -- even if ctx.Err() isn't yet observable on this goroutine, or
+				// the close races the accept syscall so the kernel reports EBADF ("bad file
+				// descriptor") instead of Go's net.ErrClosed. Treat any closed-listener
+				// error as a graceful stop rather than a serve failure.
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EBADF) {
+					return nil
 				}
 				return err
 			}
