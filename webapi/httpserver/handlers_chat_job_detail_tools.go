@@ -466,7 +466,10 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 				}
 			}
 
-			scoped := scopeToOwner(actor, args.Constraint)
+			scoped, err := scopeToOwner(actor, args.Constraint)
+			if err != nil {
+				return "", err
+			}
 			schedd := s.getSchedd()
 			count, err := schedd.EditJobs(ctx, scoped, args.Attributes,
 				&htcondor.EditJobOptions{})
