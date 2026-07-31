@@ -1182,83 +1182,108 @@ func (c *Config) parseConfigFile(path string) (err error) {
 	return c.parseReader(f, path)
 }
 
-// processLocalConfigDir processes directories listed in LOCAL_CONFIG_DIR
-// Directories are processed left-to-right, files within each directory are
-// processed in lexicographical order
+// processLocalConfigDir processes directories listed in LOCAL_CONFIG_DIR.
+// Directories are processed left-to-right, files within each directory in
+// lexicographic order.
+//
+// A config file inside a scanned directory may itself append to LOCAL_CONFIG_DIR
+// (for example LOCAL_CONFIG_DIR = $(LOCAL_CONFIG_DIR),/extra/dir). After each
+// pass we re-read the list and scan any directory not scanned yet, matching
+// condor_config's real_config, which re-processes LOCAL_CONFIG_DIR when a config
+// file changed it. Already-scanned directories are tracked so their files are
+// not re-parsed (which would re-apply a self-referential append), and the number
+// of passes is bounded so a config that keeps appending cannot loop forever.
 func (c *Config) processLocalConfigDir() error {
-	dirList, ok := c.Get("LOCAL_CONFIG_DIR")
-	if !ok || dirList == "" {
-		return nil
-	}
-
-	// Split on comma and/or space
-	dirs := SplitConfigList(dirList)
-
-	// Files whose basename matches LOCAL_CONFIG_DIR_EXCLUDE_REGEXP are skipped --
-	// this is how HTCondor keeps editor backups, package leftovers (.rpmnew,
-	// .dpkg-dist), and helper scripts (.py/.sh/.pl) out of config.d parsing. A
-	// config.d without this filter would try to parse those as config and fail or
-	// mis-set values.
-	var excludeRe *regexp.Regexp
-	if pat, ok := c.Get("LOCAL_CONFIG_DIR_EXCLUDE_REGEXP"); ok && pat != "" {
-		if re, err := regexp.Compile(pat); err == nil {
-			excludeRe = re
-		}
-	}
-
-	for _, dir := range dirs {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
+	scanned := make(map[string]bool)
+	// Real configurations converge in one or two passes; the bound only guards a
+	// pathological config that appends a fresh directory on every pass.
+	const maxPasses = 128
+	for pass := 0; pass < maxPasses; pass++ {
+		dirList, ok := c.Get("LOCAL_CONFIG_DIR")
+		if !ok || dirList == "" {
+			return nil
 		}
 
-		// Check if directory exists
-		info, err := os.Stat(dir)
+		// Files whose basename matches LOCAL_CONFIG_DIR_EXCLUDE_REGEXP are skipped --
+		// this is how HTCondor keeps editor backups, package leftovers (.rpmnew,
+		// .dpkg-dist), and helper scripts (.py/.sh/.pl) out of config.d parsing. A
+		// config.d without this filter would try to parse those as config and fail
+		// or mis-set values. Re-read each pass since a config file may set it.
+		var excludeRe *regexp.Regexp
+		if pat, ok := c.Get("LOCAL_CONFIG_DIR_EXCLUDE_REGEXP"); ok && pat != "" {
+			if re, err := regexp.Compile(pat); err == nil {
+				excludeRe = re
+			}
+		}
+
+		progressed := false
+		for _, dir := range SplitConfigList(dirList) {
+			dir = strings.TrimSpace(dir)
+			if dir == "" {
+				continue
+			}
+			dir = filepath.Clean(dir)
+			if scanned[dir] {
+				continue // already scanned on an earlier pass
+			}
+			scanned[dir] = true
+			progressed = true
+			if err := c.scanConfigDir(dir, excludeRe); err != nil {
+				return err
+			}
+		}
+		if !progressed {
+			// No directory appeared that we had not already scanned: converged.
+			return nil
+		}
+	}
+	return nil
+}
+
+// scanConfigDir parses every eligible configuration file in a single directory,
+// in lexicographic order. A non-existent directory or a non-directory path is
+// skipped; a file whose basename matches excludeRe is skipped.
+func (c *Config) scanConfigDir(dir string, excludeRe *regexp.Regexp) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // Skip non-existent directories
+		}
+		return fmt.Errorf("error accessing directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil // Skip non-directories
+	}
+
+	// os.ReadDir returns entries sorted by filename (lexicographic order).
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("error reading directory %s: %w", dir, err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip subdirectories
+		}
+		if excludeRe != nil && excludeRe.MatchString(entry.Name()) {
+			continue // Excluded by LOCAL_CONFIG_DIR_EXCLUDE_REGEXP
+		}
+
+		filePath := filepath.Join(dir, entry.Name())
+		// Open and parse the file
+		//nolint:gosec // G304: Config directory path comes from validated configuration
+		f, err := os.Open(filePath)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue // Skip non-existent directories
-			}
-			return fmt.Errorf("error accessing directory %s: %w", dir, err)
+			return fmt.Errorf("error opening %s: %w", filePath, err)
 		}
-
-		if !info.IsDir() {
-			continue // Skip non-directories
+		err = c.parseAndExecute(f)
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close file: %w", cerr)
 		}
-
-		// Read directory entries
-		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return fmt.Errorf("error reading directory %s: %w", dir, err)
-		}
-
-		// Sort entries lexicographically (ReadDir already returns sorted)
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue // Skip subdirectories
-			}
-			if excludeRe != nil && excludeRe.MatchString(entry.Name()) {
-				continue // Excluded by LOCAL_CONFIG_DIR_EXCLUDE_REGEXP
-			}
-
-			filePath := filepath.Join(dir, entry.Name())
-
-			// Open and parse the file
-			//nolint:gosec // G304: Config directory path comes from validated configuration
-			f, err := os.Open(filePath)
-			if err != nil {
-				return fmt.Errorf("error opening %s: %w", filePath, err)
-			}
-			err = c.parseAndExecute(f)
-			if cerr := f.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("failed to close file: %w", cerr)
-			}
-
-			if err != nil {
-				return fmt.Errorf("error parsing %s: %w", filePath, err)
-			}
+			return fmt.Errorf("error parsing %s: %w", filePath, err)
 		}
 	}
-
 	return nil
 }
 
