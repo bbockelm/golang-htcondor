@@ -1117,20 +1117,27 @@ func (c *Config) parseLine(line string) error {
 	return nil
 }
 
-// LoadFromEnvironment loads configuration from the process environment
+// LoadFromEnvironment loads configuration from the process environment.
+//
+// The configuration file chain is read first, then _CONDOR_<PARAM> environment
+// overrides are applied LAST so they win over any file value. This matches
+// condor_config's real_config, which inserts environment macros only after the
+// global config source, LOCAL_CONFIG_DIR (config.d), and LOCAL_CONFIG_FILE have
+// all been processed: an env var therefore overrides a configuration file, not
+// the other way around, and env vars do not influence which files are read.
 func (c *Config) LoadFromEnvironment() error {
-	// Look for _CONDOR_ prefixed environment variables
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "_CONDOR_") || strings.HasPrefix(env, "_condor_") {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) == 2 {
-				key := strings.TrimPrefix(parts[0], "_CONDOR_")
-				key = strings.TrimPrefix(key, "_condor_")
-				c.Set(key, parts[1])
-			}
-		}
+	if err := c.loadConfigFileChain(); err != nil {
+		return err
 	}
+	c.applyCondorEnvOverrides()
+	return nil
+}
 
+// loadConfigFileChain reads the root configuration file (CONDOR_CONFIG or a
+// default location) followed by the local configuration chain. It is a no-op
+// when CONDOR_CONFIG is "ONLY_ENV" or no root config file can be found; in both
+// cases the caller still applies the environment overrides afterward.
+func (c *Config) loadConfigFileChain() error {
 	// Locate the root configuration file: CONDOR_CONFIG, or a default location.
 	rootPath := os.Getenv("CONDOR_CONFIG")
 	if rootPath == "ONLY_ENV" {
@@ -1165,6 +1172,23 @@ func (c *Config) LoadFromEnvironment() error {
 		return err
 	}
 	return c.processLocalConfigFile()
+}
+
+// applyCondorEnvOverrides applies _CONDOR_<PARAM> (and _condor_<param>)
+// environment variables as configuration overrides. In HTCondor these have the
+// highest precedence -- they override values from every configuration file --
+// so this must run after the file chain has been read.
+func (c *Config) applyCondorEnvOverrides() {
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "_CONDOR_") || strings.HasPrefix(env, "_condor_") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimPrefix(parts[0], "_CONDOR_")
+				key = strings.TrimPrefix(key, "_condor_")
+				c.Set(key, parts[1])
+			}
+		}
+	}
 }
 
 // parseConfigFile opens and parses a single configuration file at path.
