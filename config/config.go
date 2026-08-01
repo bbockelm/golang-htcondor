@@ -78,6 +78,9 @@ type ConfigOptions struct {
 // Config represents an HTCondor configuration with key-value pairs
 type Config struct {
 	values map[string]string
+	// folded maps an upper-cased key to the spelling actually stored in values,
+	// so a lookup can match the way HTCondor does: case-insensitively.
+	folded map[string]string
 	// Track macro evaluation depth to detect loops
 	evaluating map[string]bool
 	// Track included files to prevent cycles
@@ -117,6 +120,7 @@ func (c *Config) Options() ConfigOptions { return c.options }
 func NewWithOptions(opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),
+		folded:        make(map[string]string),
 		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
@@ -158,6 +162,46 @@ func NewFromReaderWithOptions(r io.Reader, opts ConfigOptions) (*Config, error) 
 	return cfg, nil
 }
 
+// putValue stores a value, recording the key's spelling so it can later be
+// found case-insensitively.
+//
+// A knob redefined with different capitalization replaces the earlier spelling
+// rather than sitting beside it: HTCondor treats the two as one parameter, and
+// leaving both would make the winner depend on map iteration order.
+func (c *Config) putValue(key, value string) {
+	if c.folded == nil {
+		c.folded = make(map[string]string, len(c.values))
+	}
+	upper := strings.ToUpper(key)
+	if previous, ok := c.folded[upper]; ok && previous != key {
+		delete(c.values, previous)
+	}
+	c.folded[upper] = key
+	c.values[key] = value
+}
+
+// resolveKey returns the stored spelling of key, matching case-insensitively.
+//
+// HTCondor's configuration language does not distinguish case in parameter
+// names, so neither can this: a daemon given "-local-name cache_a" has to find
+// a CACHE_A.* definition, and a lookup of "pelican_port" has to find
+// PELICAN_PORT.
+func (c *Config) resolveKey(key string) (string, bool) {
+	if _, ok := c.values[key]; ok {
+		return key, true
+	}
+	if actual, ok := c.folded[strings.ToUpper(key)]; ok {
+		return actual, true
+	}
+	return "", false
+}
+
+// hasKey reports whether a parameter is defined, case-insensitively.
+func (c *Config) hasKey(key string) bool {
+	_, ok := c.resolveKey(key)
+	return ok
+}
+
 // Get retrieves a configuration value, honoring HTCondor's subsystem and
 // local-name prefix precedence. For a Config created with a Subsystem and/or
 // LocalName, a more specific definition overrides the bare parameter, most
@@ -180,10 +224,11 @@ func (c *Config) Get(key string) (string, bool) {
 
 	key = c.scopedLookupKey(key)
 
-	val, ok := c.values[key]
+	actual, ok := c.resolveKey(key)
 	if !ok {
 		return "", false
 	}
+	val := c.values[actual]
 
 	// Expand macros and function macros in the value
 	expanded, err := c.expandMacrosWithFunctions(val)
@@ -207,17 +252,17 @@ func (c *Config) scopedLookupKey(key string) string {
 	}
 	// Most specific first; only override when a scoped definition actually exists.
 	if subsys != "" && local != "" {
-		if _, ok := c.values[subsys+"."+local+"."+key]; ok {
+		if c.hasKey(subsys + "." + local + "." + key) {
 			return subsys + "." + local + "." + key
 		}
 	}
 	if local != "" {
-		if _, ok := c.values[local+"."+key]; ok {
+		if c.hasKey(local + "." + key) {
 			return local + "." + key
 		}
 	}
 	if subsys != "" {
-		if _, ok := c.values[subsys+"."+key]; ok {
+		if c.hasKey(subsys + "." + key) {
 			return subsys + "." + key
 		}
 	}
@@ -229,7 +274,8 @@ func (c *Config) Set(key, value string) {
 	// Check if this is a self-referential definition
 	if strings.Contains(value, "$("+key+")") {
 		// Expand the self-reference immediately
-		if oldVal, ok := c.values[key]; ok {
+		if actual, ok := c.resolveKey(key); ok {
+			oldVal := c.values[actual]
 			value = strings.ReplaceAll(value, "$("+key+")", oldVal)
 		} else {
 			// First definition, just remove the self-reference
@@ -237,7 +283,7 @@ func (c *Config) Set(key, value string) {
 		}
 	}
 
-	c.values[key] = value
+	c.putValue(key, value)
 }
 
 // Keys returns all configuration keys
@@ -260,7 +306,7 @@ func (c *Config) initBuiltins() {
 			defaultVal = pd.Win32Default
 		}
 		// Set the value (unexpanded - will be expanded on Get())
-		c.values[pd.Name] = defaultVal
+		c.putValue(pd.Name, defaultVal)
 	}
 
 	// Apply hand-curated overrides from param_overrides.go. These
@@ -270,7 +316,7 @@ func (c *Config) initBuiltins() {
 	// win, BEFORE any CONDOR_CONFIG file load so user values still win
 	// over them.
 	for _, po := range paramOverrides {
-		c.values[po.Name] = po.Default
+		c.putValue(po.Name, po.Default)
 	}
 
 	// Time constants (these override param defaults)
@@ -919,13 +965,13 @@ func (c *Config) expandMacros(value string) (string, error) {
 		}
 
 		// Check for circular reference
-		if c.evaluating[varName] {
+		if c.evaluating[strings.ToUpper(varName)] {
 			// Skip this macro to avoid infinite loop
 			result = result[:dollarIdx] + "$(" + varName + ")" + result[endIdx+1:]
 			break
 		}
 
-		c.evaluating[varName] = true
+		c.evaluating[strings.ToUpper(varName)] = true
 
 		// Get value. Resolve through the subsystem/local-name scoping that Get()
 		// uses, so `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster,
@@ -936,7 +982,7 @@ func (c *Config) expandMacros(value string) (string, error) {
 			replacement = val
 		}
 
-		delete(c.evaluating, varName)
+		delete(c.evaluating, strings.ToUpper(varName))
 
 		// Replace the macro with its value
 		result = result[:dollarIdx] + replacement + result[endIdx+1:]

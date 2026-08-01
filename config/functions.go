@@ -356,11 +356,11 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 					}
 
 					// Check for circular reference
-					if c.evaluating[varName] {
+					if c.evaluating[strings.ToUpper(varName)] {
 						return result, fmt.Errorf("circular reference detected: %s", varName)
 					}
 
-					c.evaluating[varName] = true
+					c.evaluating[strings.ToUpper(varName)] = true
 					// Resolve through subsystem/local-name scoping (as Get does), so
 					// `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster
 					// and any `$(KNOB)` honors a `SUBSYS.KNOB` override, matching
@@ -369,7 +369,7 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 					if !ok {
 						replacement = defaultVal
 					}
-					delete(c.evaluating, varName)
+					delete(c.evaluating, strings.ToUpper(varName))
 
 					result = result[:dollarIdx] + replacement + result[endIdx+1:]
 					changed = true
