@@ -54,14 +54,14 @@ func (c *Config) evaluateCondition(condition string) (bool, error) {
 	if strings.HasPrefix(condition, "defined(") && strings.HasSuffix(condition, ")") {
 		varName := condition[8 : len(condition)-1]
 		varName = strings.TrimSpace(varName)
-		_, ok := c.values[varName]
+		ok := c.hasKey(varName)
 		return ok, nil
 	}
 
 	// Handle "defined VAR" syntax (without parentheses)
 	if strings.HasPrefix(condition, "defined ") {
 		varName := strings.TrimSpace(condition[8:])
-		_, ok := c.values[varName]
+		ok := c.hasKey(varName)
 		return ok, nil
 	}
 
@@ -72,7 +72,11 @@ func (c *Config) evaluateCondition(condition string) (bool, error) {
 
 	// Handle boolean expressions and variable references
 	// Simple case: just a variable name that should evaluate to true/false/yes/no/1/0
-	value, ok := c.values[condition]
+	actual, ok := c.resolveKey(condition)
+	value := ""
+	if ok {
+		value = c.values[actual]
+	}
 	if ok {
 		return c.isTruthy(value), nil
 	}
