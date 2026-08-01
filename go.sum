@@ -1,7 +1,7 @@
-github.com/PelicanPlatform/classad v0.20.0 h1:DpBxGqYOrYhlpxhPYrG6KeDUVbAhwR0wwnkkqfRWbyY=
-github.com/PelicanPlatform/classad v0.20.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
-github.com/PelicanPlatform/classad/collections v0.20.0 h1:TV0A2M/2bdynhe6pGsIipOQ5QAuruq16n/FhrWk40QM=
-github.com/PelicanPlatform/classad/collections v0.20.0/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
+github.com/PelicanPlatform/classad v0.20.4 h1:TfRcPwOl+n5Vqzwi1hcM89eaFL0gb8jQC5PBhoCa5tM=
+github.com/PelicanPlatform/classad v0.20.4/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad/collections v0.20.4 h1:+HRyVb7n2+buSpLvCzGELEm+EoUcL2VqpLeOm/dz9gg=
+github.com/PelicanPlatform/classad/collections v0.20.4/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
 github.com/RoaringBitmap/roaring/v2 v2.19.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
 github.com/bbockelm/cedar v0.6.10 h1:LecrR3c38gT3WXmRvqHee+c1UdfUwJqZfkTtZmIRuA8=
