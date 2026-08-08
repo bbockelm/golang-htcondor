@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor/webapi
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.20.0
+	github.com/PelicanPlatform/classad v0.23.0
 	github.com/bbockelm/cedar v0.6.10
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/glebarez/sqlite v1.11.0
@@ -17,7 +17,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.20.0
+	github.com/PelicanPlatform/classad/collections v0.23.0
 	github.com/hashicorp/yamux v0.1.2
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/prometheus/client_golang v1.24.1
@@ -28,6 +28,7 @@ require (
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
@@ -129,7 +130,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/dbrpc v0.18.0
+	github.com/PelicanPlatform/classad/dbrpc v0.23.0
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 )
 

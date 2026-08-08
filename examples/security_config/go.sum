@@ -1,5 +1,5 @@
-github.com/PelicanPlatform/classad v0.20.0 h1:DpBxGqYOrYhlpxhPYrG6KeDUVbAhwR0wwnkkqfRWbyY=
-github.com/PelicanPlatform/classad v0.20.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad v0.23.0 h1:7EkUvOtfJ3b1U5DmJaaCzOLLrwlbSjKMZ1qaTHn3/f4=
+github.com/PelicanPlatform/classad v0.23.0/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
 github.com/bbockelm/cedar v0.6.10 h1:LecrR3c38gT3WXmRvqHee+c1UdfUwJqZfkTtZmIRuA8=
 github.com/bbockelm/cedar v0.6.10/go.mod h1:C4u6CKJoweg3LZniOi7Yh8avQv1KZjHs9k1vTGa1+2w=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
