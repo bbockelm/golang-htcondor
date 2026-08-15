@@ -3,19 +3,19 @@ module github.com/bbockelm/golang-htcondor
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.20.0
+	github.com/PelicanPlatform/classad v0.27.1
 	github.com/bbockelm/cedar v0.6.10
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.15.0
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.20.0
-	github.com/glebarez/go-sqlite v1.22.0
+	github.com/PelicanPlatform/classad/collections v0.27.1
+	github.com/glebarez/go-sqlite v1.23.0
 	github.com/pressly/goose/v3 v3.27.3
 )
 
@@ -42,7 +42,9 @@ require (
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.23 // indirect
@@ -54,5 +56,5 @@ require (
 	modernc.org/libc v1.74.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.54.0 // indirect
+	modernc.org/sqlite v1.55.0 // indirect
 )
