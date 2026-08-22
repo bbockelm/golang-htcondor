@@ -29,7 +29,7 @@ func loadOperatorChatInstructions(path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) //nolint:gosec // G703: operator-controlled path from config, read once at startup — same rationale as the ReadFile below
 	if err != nil {
 		return "", fmt.Errorf("stat %s: %w", path, err)
 	}

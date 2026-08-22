@@ -1220,8 +1220,20 @@ var jobInputSpoolProjection = []string{
 // copied in only where the proc didn't already define them — proc
 // wins on conflict, matching HTCondor's normal "cluster as defaults,
 // proc as overrides" semantics.
-func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int) (*classad.ClassAd, error) {
+// fetchProcAdForSpool looks up the proc ad (and its cluster ad) that a
+// spool upload writes into. ownerScope wraps the id predicate with the
+// caller's owner clause, so a non-admin session cannot spool files into
+// another user's sandbox; it is applied around the whole predicate
+// because the cluster ad (ProcId == -1) must stay reachable.
+func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, ownerScope func(string) (string, error)) (*classad.ClassAd, error) {
 	constraint := fmt.Sprintf("ClusterId == %d && (ProcId == %d || ProcId == -1)", cluster, proc)
+	if ownerScope != nil {
+		scoped, err := ownerScope(constraint)
+		if err != nil {
+			return nil, err
+		}
+		constraint = scoped
+	}
 	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: jobInputSpoolProjection,
 		FetchOpts:  htcondor.FetchIncludeClusterAd,
@@ -1348,7 +1360,9 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		return
 	}
 
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
+		return s.bulkOwnerScope(ctx, r, c)
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1414,7 +1428,9 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// fetchProcAdForSpool for why this is necessary (Cmd /
 	// TransferExecutable live on the cluster ad and the proc-only
 	// query strips them).
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
+		return s.bulkOwnerScope(ctx, r, c)
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
