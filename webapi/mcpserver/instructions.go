@@ -72,6 +72,18 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  queue 1\n\n")
 	b.WriteString("When transfer_executable = false AND no transfer_input_files are specified, " +
 		"the job does not need input spooling and will go directly to Idle.\n\n")
+	b.WriteString("Leaving it at the default with a system-path executable does not fail at submit time: " +
+		"HTCondor spool-copies the executable, the copy does not exist, and the job holds on file transfer " +
+		"(HoldReasonCode 13, HoldReasonSubCode 2). submit_job rejects that combination up front.\n\n")
+
+	// $(...) macro expansion
+	b.WriteString("## $(...) is macro expansion, not shell substitution\n\n")
+	b.WriteString("The submit parser expands every $(...) itself, so the shell never sees it; an undefined " +
+		"name expands to an empty string and the job runs with a corrupted command line:\n\n")
+	b.WriteString("  arguments = -c \"echo HOST:$(hostname)\"   # bash receives: -c \"echo HOST:\"\n\n")
+	b.WriteString("$(Cluster), $(Process), $(ProcId), $(ItemIndex), $(Step), $(Row) and submit-file macros " +
+		"are the intended use. To run shell commands, write a script, name it as the executable, and upload " +
+		"it with upload_job_input.\n\n")
 
 	// ClassAd essentials
 	b.WriteString("## Key job attributes (ClassAd)\n\n")
