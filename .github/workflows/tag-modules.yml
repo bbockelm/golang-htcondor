@@ -1,0 +1,151 @@
+# Mirror a release tag onto the per-module tags.
+#
+# This is a multi-module repo: consumers pin github.com/bbockelm/golang-htcondor (root)
+# and its submodules (.../webapi, .../localcredmon), and Go resolves a submodule version
+# from a <module>/vX.Y.Z tag -- not from the root tag. Without those tags a consumer has
+# no version to ask for and ends up pinning a pseudo-version (a bare commit), which is
+# how pelican-ap-manager came to depend on webapi v0.0.0-20260821164716-6b7cf547053d
+# while the root module was on a clean v0.12.5.
+#
+# So: publish a GitHub release as usual (which creates the root vX.Y.Z tag), and this
+# workflow mirrors that one commit to <module>/vX.Y.Z for every publishable submodule.
+# The submodule set is DISCOVERED from the tree, not hardcoded, so a newly added module
+# is tagged automatically with no edit here. The human picks exactly one commit; the
+# module tags are derived from it, never hand-entered.
+#
+# Adapted from PelicanPlatform/classad's workflow of the same name, where forgetting to
+# tag a submodule by hand was a recurring problem.
+
+name: Tag submodules on release
+
+on:
+  release:
+    types: [published]
+
+  # Backfill an already-published release. The trigger above only fires going forward,
+  # and every release up to v0.12.6 predates this workflow, so their submodule tags have
+  # to be created after the fact.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to mirror (e.g. v0.12.6)
+        required: true
+        type: string
+
+permissions:
+  contents: write # push the module tags
+
+jobs:
+  tag-submodules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0 # full history, so the default-branch ancestor check works
+
+      - name: Mirror the release tag to each module
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # Directories whose modules are not published. Everything else that follows the
+          # Go multi-module convention gets tagged, so this list -- not an allow-list of
+          # modules -- is the only thing to maintain when the tree changes.
+          #
+          #   examples/  demo programs; tagging them would imply an API commitment to
+          #              sample code and add tags nobody resolves.
+          #   reference/ gitignored local checkouts of other projects (cedar, swamp) kept
+          #              for comparison, so CI never sees them. Listed anyway so a tree
+          #              that does contain them cannot produce junk tags.
+          EXCLUDE_DIRS: examples reference
+        run: |
+          set -euo pipefail
+
+          # Only mirror semantic-version tags (v1.2.3, v1.2.3-rc1). A non-version tag
+          # (a doc snapshot, a one-off) is left alone.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
+            echo "release tag '$TAG' is not vMAJOR.MINOR.PATCH; not mirroring to modules"
+            exit 0
+          fi
+
+          sha="$(git rev-parse HEAD)"
+          echo "release $TAG is at $sha"
+
+          # Refuse to tag modules off a commit that isn't on the default branch -- e.g. a
+          # release accidentally cut from a topic branch. (The GitHub UI defaults a
+          # release's target to the default branch, so this only trips on a deliberate
+          # off-branch target.)
+          git fetch --quiet origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$sha" FETCH_HEAD; then
+            echo "::error::release commit $sha is not on '$DEFAULT_BRANCH'; refusing to tag modules"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Discover every publishable submodule: a go.mod below the root whose declared
+          # module path is exactly "<root module>/<dir>" (the Go multi-module convention),
+          # and which is not under an excluded directory. A stray or vendored go.mod whose
+          # path does not match its directory is skipped rather than mis-tagged.
+          root_mod="$(sed -n 's/^module //p' go.mod | head -1 | tr -d '[:space:]')"
+          mods=""
+          while IFS= read -r gm; do
+            dir="${gm#./}"; dir="${dir%/go.mod}"
+
+            excluded=""
+            for skip in $EXCLUDE_DIRS; do
+              if [[ "$dir" == "$skip" || "$dir" == "$skip"/* ]]; then
+                excluded="$skip"
+                break
+              fi
+            done
+            if [[ -n "$excluded" ]]; then
+              echo "skipping $gm: under excluded directory '$excluded'"
+              continue
+            fi
+
+            mp="$(sed -n 's/^module //p' "$gm" | head -1 | tr -d '[:space:]')"
+            if [[ "$mp" == "$root_mod/$dir" ]]; then
+              mods="$mods $dir"
+            else
+              echo "skipping $gm: module path '$mp' != '$root_mod/$dir' (not a mirror-tagged submodule)"
+            fi
+          done < <(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
+
+          if [[ -z "$mods" ]]; then
+            echo "::error::no publishable submodules found; the discovery rule or the tree layout changed"
+            exit 1
+          fi
+          echo "submodules to mirror:$mods"
+
+          failed=0
+          for mod in $mods; do
+            mtag="$mod/$TAG"
+
+            # Never move an existing tag. If it is already published, leave it untouched
+            # (git push would reject a move anyway); flag a mismatch so a bad prior tag is
+            # visible rather than silently tolerated.
+            if git ls-remote --exit-code --tags origin "refs/tags/$mtag" >/dev/null 2>&1; then
+              existing="$(git ls-remote --tags origin "refs/tags/$mtag^{}" | awk 'NR==1{print $1}')"
+              [[ -z "$existing" ]] && existing="$(git ls-remote --tags origin "refs/tags/$mtag" | awk 'NR==1{print $1}')"
+              if [[ "$existing" == "$sha" ]]; then
+                echo "$mtag already at $sha; nothing to do"
+              else
+                echo "::error::$mtag already exists at $existing, not the release commit $sha (a tag was moved or hand-created wrong); not touching it"
+                failed=1
+              fi
+              continue
+            fi
+
+            git tag -a "$mtag" -m "$mod $TAG (mirrored from release $TAG)" "$sha"
+            git push origin "refs/tags/$mtag"
+            echo "created $mtag -> $sha"
+          done
+
+          if [[ "$failed" -ne 0 ]]; then
+            echo "::error::one or more module tags did not match the release commit; see above"
+            exit 1
+          fi
+          echo "All module tags mirror $TAG at $sha."
