@@ -66,6 +66,17 @@ func TestGetDefaultDBPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The "empty config" case asserts what LOCAL_DIR's
+			// $(TILDE) default expands to, which is the condor
+			// user's home directory — so it only means anything on
+			// a host that has a condor user. On one that doesn't
+			// (a developer laptop), TILDE is unset, LOCAL_DIR
+			// expands to empty, and the expectation cannot hold.
+			if tt.cfg != nil {
+				if tilde, ok := tt.cfg.Get("TILDE"); tt.name == "empty config" && (!ok || tilde == "") {
+					t.Skip("no condor user on this host, so LOCAL_DIR's $(TILDE) default is empty")
+				}
+			}
 			result := getDefaultDBPath(tt.cfg, tt.filename)
 			if result != tt.expected {
 				t.Errorf("%s: expected %s, got %s", tt.description, tt.expected, result)
