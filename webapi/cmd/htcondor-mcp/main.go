@@ -48,6 +48,9 @@ func runNormalMode() error {
 
 	// Get schedd configuration
 	scheddName, _ := cfg.Get("SCHEDD_NAME")
+	// SCHEDD_HOST is undefined in most pools; when it is set it names
+	// the schedd to use, which beats picking one out of the collector.
+	scheddHost, _ := cfg.Get("SCHEDD_HOST")
 
 	// Get optional signing key path
 	signingKeyPath, ok := cfg.Get("SEC_TOKEN_POOL_SIGNING_KEY_FILE")
@@ -87,6 +90,7 @@ func runNormalMode() error {
 	// Create MCP server
 	server, err := mcpserver.NewServer(mcpserver.Config{
 		ScheddName:     scheddName,
+		ScheddHost:     scheddHost,
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
