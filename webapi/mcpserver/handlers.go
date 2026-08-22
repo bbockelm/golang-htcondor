@@ -1584,12 +1584,20 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Query the job to get the output filename
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
-
-	opts := &htcondor.QueryOptions{
-		Projection: projection,
+	// Query the job to get the output filename. Confined to the
+	// caller's own jobs: this tool goes on to read the file out of the
+	// job's sandbox, so an unconfined lookup would hand another user's
+	// output to whoever asked for their job id.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "JobStatus", attributeName},
+	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
 	}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
@@ -1916,12 +1924,22 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Query for the job to get its proc ad with transfer attributes
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: projection,
+	// Query for the job to get its proc ad with transfer attributes.
+	// Confined to the caller's own jobs: the ads returned here are what
+	// the spool writes into, so an unconfined lookup would let a caller
+	// drop files into another user's sandbox.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
 	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
@@ -2052,8 +2070,14 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build the constraint for this job, confined to the caller's own:
+	// the schedd hands back the whole sandbox for whatever the
+	// constraint matches.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 
 	// Download the job sandbox into a buffer
 	sandboxCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
