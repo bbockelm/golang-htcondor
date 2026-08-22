@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.27.1
+	github.com/PelicanPlatform/classad v0.29.0
 	github.com/bbockelm/cedar v0.6.11
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
@@ -14,7 +14,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.27.1
+	github.com/PelicanPlatform/classad/collections v0.29.0
 	github.com/glebarez/go-sqlite v1.22.0
 	github.com/pressly/goose/v3 v3.27.3
 )
