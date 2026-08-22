@@ -156,3 +156,46 @@ func TestScopeToOwnerQualifiedActor(t *testing.T) {
 		t.Errorf("admin scopeToOwner = %q, %v; want the constraint unchanged", got, ok)
 	}
 }
+
+// TestSelfScopedQueryOptions covers the schedd-enforced confinement used
+// by the job-ad queries: an authenticated non-admin gets FetchMyJobs
+// (which sends QUERY_JOB_ADS_WITH_AUTH, so the schedd filters on the
+// identity it authenticated), an admin does not, and an unauthenticated
+// caller gets refused.
+func TestSelfScopedQueryOptions(t *testing.T) {
+	base := &htcondor.QueryOptions{Projection: []string{"ClusterId"}, Limit: 1}
+
+	s := &Server{}
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
+	opts, ok := s.selfScopedQueryOptions(ctx, base)
+	if !ok {
+		t.Fatal("expected an authenticated caller to be accepted")
+	}
+	if opts.FetchOpts&htcondor.FetchMyJobs == 0 {
+		t.Error("expected FetchMyJobs so the schedd confines the query")
+	}
+	if opts.Owner != "alice" {
+		t.Errorf("Owner hint = %q, want the bare username", opts.Owner)
+	}
+	// The caller's options must survive, and the caller's copy must not
+	// be modified.
+	if opts.Limit != 1 || len(opts.Projection) != 1 {
+		t.Errorf("base options were not carried through: %+v", opts)
+	}
+	if base.FetchOpts != 0 || base.Owner != "" {
+		t.Errorf("base options were mutated: %+v", base)
+	}
+
+	admin := &Server{adminUsers: map[string]struct{}{"alice@uid.domain": {}}}
+	opts, ok = admin.selfScopedQueryOptions(ctx, base)
+	if !ok {
+		t.Fatal("expected the admin caller to be accepted")
+	}
+	if opts.FetchOpts&htcondor.FetchMyJobs != 0 {
+		t.Error("an admin must not be confined to their own jobs")
+	}
+
+	if _, ok := s.selfScopedQueryOptions(context.Background(), base); ok {
+		t.Error("an unauthenticated caller must be refused")
+	}
+}

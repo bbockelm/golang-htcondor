@@ -68,6 +68,43 @@ func classadBalanced(constraint string) (string, error) {
 	return expr.String(), nil
 }
 
+// selfScopedQueryOptions returns the query options that confine a schedd
+// query to the caller's own jobs, and false when there is no
+// authenticated caller to confine it to.
+//
+// The confinement is the schedd's, not ours: FetchMyJobs sends
+// QUERY_JOB_ADS_WITH_AUTH, and the schedd filters on the identity it
+// authenticated rather than on any owner name we supply. That is the
+// only reliable answer, because the identity a caller ends up with on
+// the AP is not necessarily the name we know them by — an OAuth2
+// username claim, a UID_DOMAIN mapping and a job's Owner attribute can
+// all differ. A client-side `Owner == "<actor>"` constraint gets that
+// wrong in both directions: it hides the caller's own jobs when the
+// names differ, and it would name somebody else's jobs if a mapping
+// ever made the strings collide. The actor still travels as the `Me`
+// hint for schedds that use it.
+//
+// Admins are exempt, as with scopeToOwner: no self-scoping, so
+// cross-user troubleshooting still works.
+func (s *Server) selfScopedQueryOptions(ctx context.Context, base *htcondor.QueryOptions) (*htcondor.QueryOptions, bool) {
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return nil, false
+	}
+
+	opts := &htcondor.QueryOptions{}
+	if base != nil {
+		copied := *base
+		opts = &copied
+	}
+	if s.isAdmin(actor) {
+		return opts, true
+	}
+	opts.FetchOpts |= htcondor.FetchMyJobs
+	opts.Owner = ownerFromActor(actor)
+	return opts, true
+}
+
 // ownerFromActor maps an authenticated actor to the value HTCondor
 // stores in a job's Owner attribute: the bare username. An actor is
 // often fully qualified — "alice@uid.domain" is what the schedd maps a
