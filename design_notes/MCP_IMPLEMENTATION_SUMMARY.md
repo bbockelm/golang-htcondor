@@ -186,7 +186,7 @@ curl -X POST http://localhost:8080/mcp/message \
     "params": {
       "name": "submit_job",
       "arguments": {
-        "submit_file": "executable=/bin/echo\narguments=Hello World\nqueue"
+        "submit_file": "executable = /bin/echo\ntransfer_executable = False\narguments = Hello World\nqueue"
       }
     }
   }'

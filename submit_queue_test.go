@@ -157,7 +157,7 @@ arguments = $(color)
 queue color from "` + dataFile + `"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}
@@ -195,7 +195,7 @@ arguments = $(name)
 queue 3 name from "` + dataFile + `"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}
@@ -245,7 +245,7 @@ arguments = $(ITEM)
 queue matching "test*.txt"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}
@@ -294,7 +294,7 @@ arguments = $(ITEM)
 queue 2 matching "data*.dat"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}
@@ -366,7 +366,7 @@ arguments = "$(color) $(shape)"
 queue color, shape from "` + dataFile + `"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}
@@ -406,7 +406,7 @@ executable = /bin/echo
 queue matching "nonexistent*.txt"
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
 	if err != nil {
 		t.Fatalf("Failed to parse submit file: %v", err)
 	}

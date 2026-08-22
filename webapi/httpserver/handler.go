@@ -43,6 +43,7 @@ type Handler struct {
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
 	scheddDiscovered bool         // Whether schedd address was discovered from collector
+	scheddHost       string       // SCHEDD_HOST, consulted when no address/name is configured
 	// scheddAddrSetAt is the timestamp at which h.schedd was last replaced
 	// with a new address (initial discovery, manual UpdateSchedd, or an
 	// updater tick that found a different address). It does NOT update on
@@ -192,6 +193,12 @@ type Handler struct {
 type HandlerConfig struct {
 	ScheddName string // Schedd name
 	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// ScheddHost is the SCHEDD_HOST setting: the host (optionally
+	// "name@host", optionally with a port) whose schedd to talk to.
+	// Consulted when neither ScheddAddr nor ScheddName is set; it picks
+	// that host's schedd rather than whichever one the collector
+	// happens to list first.
+	ScheddHost string
 	// InteractiveExtraSubmit holds extra HTCondor submit-file
 	// directives merged into the submit file produced for each
 	// interactive-terminal and JupyterLab job. The string value is
@@ -391,7 +398,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
 		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
+		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover schedd: %w", err)
 		}
@@ -441,6 +448,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h := &Handler{
 		schedd:                    schedd,
 		scheddName:                cfg.ScheddName,
+		scheddHost:                cfg.ScheddHost,
 		scheddDiscovered:          scheddDiscovered,
 		scheddAddrSetAt:           now,
 		scheddAddrLastConfirmedAt: now,
@@ -1736,7 +1744,7 @@ func (h *Handler) startScheddAddressUpdater(ctx context.Context) {
 			select {
 			case <-ticker.C:
 				// Query collector for updated schedd address
-				newAddr, err := discoverSchedd(h.collector, h.scheddName, 5*time.Second, h.logger)
+				newAddr, err := discoverSchedd(h.collector, h.scheddName, h.scheddHost, 5*time.Second, h.logger)
 				if err != nil {
 					h.logger.Warn(logging.DestinationSchedd, "Failed to discover schedd address",
 						"error", err,
@@ -2049,7 +2057,7 @@ func (h *Handler) refreshScheddAddressNow(reason string) {
 		"reason", reason,
 		"schedd_name", h.scheddName,
 		"current_address", h.getSchedd().Address())
-	newAddr, err := discoverSchedd(h.collector, h.scheddName, 5*time.Second, h.logger)
+	newAddr, err := discoverSchedd(h.collector, h.scheddName, h.scheddHost, 5*time.Second, h.logger)
 	if err != nil {
 		h.logger.Warn(logging.DestinationSchedd, "Forced schedd address refresh failed",
 			"error", err,

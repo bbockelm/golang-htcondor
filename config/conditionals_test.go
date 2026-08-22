@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -194,5 +197,76 @@ func TestCompareVersions(t *testing.T) {
 		if result != tt.expected {
 			t.Errorf("compareVersions(%q, %q): expected %d, got %d", tt.v1, tt.v2, tt.expected, result)
 		}
+	}
+}
+
+// TestElifBranches covers `elif`, which did not parse at all until the
+// conditional keywords were removed from the identifier rule: goyacc
+// reported elif_clause as "never reduced", so every configuration
+// containing an elif was a syntax error. Each case checks which branch
+// actually ran, not merely that the input parses.
+func TestElifBranches(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"elif taken when if is false",
+			"if false\nbranch = if\nelif true\nbranch = elif\nendif\n",
+			"elif",
+		},
+		{
+			"elif skipped when if is true",
+			"if true\nbranch = if\nelif true\nbranch = elif\nendif\n",
+			"if",
+		},
+		{
+			"second elif taken",
+			"if false\nbranch = if\nelif false\nbranch = elif1\nelif true\nbranch = elif2\nendif\n",
+			"elif2",
+		},
+		{
+			"else after elif",
+			"if false\nbranch = if\nelif false\nbranch = elif\nelse\nbranch = else\nendif\n",
+			"else",
+		},
+		{
+			"no branch taken",
+			"branch = none\nif false\nbranch = if\nelif false\nbranch = elif\nendif\n",
+			"none",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := NewFromReader(strings.NewReader(tc.input))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got, _ := cfg.Get("branch"); got != tc.want {
+				t.Errorf("branch = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestElifInRootConfigFile is the same thing through the root
+// configuration file, which is where an unparseable elif would stop a
+// daemon from starting.
+func TestElifInRootConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "condor_config")
+	body := "if false\nBRANCH = if\nelif true\nBRANCH = elif\nendif\n"
+	if err := os.WriteFile(root, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDOR_CONFIG", root)
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, _ := cfg.Get("BRANCH"); got != "elif" {
+		t.Errorf("Get(BRANCH) = %q, want elif", got)
 	}
 }

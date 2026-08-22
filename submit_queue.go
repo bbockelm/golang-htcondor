@@ -313,8 +313,32 @@ func (m *matchingIterator) Count() int {
 	return len(m.files) * m.count
 }
 
+// queueFileAccess says which local paths a queue statement may read.
+// An itemdata file or a `matching` glob reads the filesystem of
+// whatever process is parsing, which is not the submitter when the
+// submit file arrived over an API — so the default is nothing, plus the
+// temp files ParseSubmitFile wrote itself for the inline
+// `from ((rows))` form.
+type queueFileAccess struct {
+	allowAny   bool
+	allowPaths []string
+}
+
+func (a queueFileAccess) permit(path string) error {
+	if a.allowAny {
+		return nil
+	}
+	for _, allowed := range a.allowPaths {
+		if allowed == path {
+			return nil
+		}
+	}
+	return fmt.Errorf("queue statement may not read %q: this submit file is parsed without access to the local host; "+
+		"use the inline form (queue vars from ((rows))) or an explicit item list instead", path)
+}
+
 // createIteratorFromQueue creates an appropriate iterator from a QueueStatement
-func createIteratorFromQueue(qs *config.QueueStatement) (SubmitIterator, error) {
+func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) (SubmitIterator, error) {
 	count := qs.Count
 	if count == 0 {
 		count = 1
@@ -341,6 +365,10 @@ func createIteratorFromQueue(qs *config.QueueStatement) (SubmitIterator, error) 
 		// Actually, both can have VarNames. The distinction is in how the parser
 		// set up the QueueStatement. For "matching", File contains the pattern.
 		// For "from", File contains the filename.
+
+		if err := access.permit(qs.File); err != nil {
+			return nil, err
+		}
 
 		// Let's check if the File looks like a glob pattern
 		if strings.ContainsAny(qs.File, "*?[]") {

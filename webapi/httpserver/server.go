@@ -111,6 +111,7 @@ type Config struct {
 	MCPAccessGroup             string   // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup               string   // Group required for read operations (empty = all have read)
 	MCPWriteGroup              string   // Group required for write operations (empty = all have write)
+	ScheddHost                 string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
 	MCPInstructions            string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	MCPAdminUsers              []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	WebUIAdminGroup            string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
@@ -164,6 +165,7 @@ func NewServer(cfg Config) (*Server, error) {
 	// Convert Config to HandlerConfig
 	handlerCfg := HandlerConfig{
 		ScheddName:                  cfg.ScheddName,
+		ScheddHost:                  cfg.ScheddHost,
 		ScheddAddr:                  cfg.ScheddAddr,
 		UserHeader:                  cfg.UserHeader,
 		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
@@ -917,7 +919,16 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 }
 
 // discoverSchedd discovers the schedd address from the collector
-func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout time.Duration, logger *logging.Logger) (string, error) {
+func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string, timeout time.Duration, logger *logging.Logger) (string, error) {
+	// SCHEDD_HOST names the schedd this pool wants us to talk to. With a
+	// port it is already an address; without one it selects that host's
+	// ScheddAd instead of whichever the collector lists first.
+	target := htcondor.ParseScheddHost(scheddHost)
+	if scheddName == "" && target.Address() != "" {
+		logger.Info(logging.DestinationSchedd, "Using the address in SCHEDD_HOST", "address", target.Address())
+		return target.Address(), nil
+	}
+
 	deadline := time.Now().Add(timeout)
 	pollInterval := 1 * time.Second
 
@@ -926,8 +937,11 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 
 		// Query collector for schedd ads
 		constraint := ""
-		if scheddName != "" {
+		switch {
+		case scheddName != "":
 			constraint = fmt.Sprintf("Name == \"%s\"", scheddName)
+		case target.IsSet():
+			constraint = target.CollectorConstraint()
 		}
 
 		ads, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
@@ -942,8 +956,10 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 		if err == nil && len(ads) > 0 {
 			var selectedAd *classad.ClassAd
 
-			// If scheddName is empty, try to match hostname or use first schedd
-			if scheddName == "" {
+			// If neither a name nor a SCHEDD_HOST was requested, try to
+			// match this host's own schedd before settling for the
+			// first one the collector returned.
+			if scheddName == "" && !target.IsSet() {
 				hostname, _ := os.Hostname()
 				// Try to find a schedd whose name matches the hostname
 				for _, ad := range ads {
