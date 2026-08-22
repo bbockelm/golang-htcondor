@@ -96,8 +96,34 @@ const (
 	UniverseDocker    = 14 // Deprecated, use Vanilla + container
 )
 
-// ParseSubmitFile parses a submit file from a reader
+// SubmitParseOptions controls what a submit-file parse is allowed to do
+// besides reading the text it was handed.
+type SubmitParseOptions struct {
+	// AllowLocalAccess lets the parse reach the host it runs on:
+	// `include` and `include command` directives (the latter runs a
+	// shell command), the $ENV() macro function, `queue ... from
+	// <itemdata file>` and `queue ... matching <glob>`.
+	//
+	// Off by default, which is the setting a daemon parsing a submit
+	// file it received over the network wants: none of these should
+	// run with the daemon's identity on a remote caller's behalf —
+	// `include command` alone would be command execution as the daemon
+	// user. Set it for a submit file the local user wrote and that the
+	// parse runs on that user's behalf, which is how condor_submit
+	// reads one.
+	AllowLocalAccess bool
+}
+
+// ParseSubmitFile parses a submit file from a reader. The parse cannot
+// reach the local host: see SubmitParseOptions.AllowLocalAccess and
+// ParseSubmitFileWithOptions for a parse on behalf of the local user.
 func ParseSubmitFile(r io.Reader) (*SubmitFile, error) {
+	return ParseSubmitFileWithOptions(r, SubmitParseOptions{})
+}
+
+// ParseSubmitFileWithOptions parses a submit file from a reader with
+// explicit parse options.
+func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFile, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read submit file: %w", err)
@@ -149,7 +175,7 @@ func ParseSubmitFile(r io.Reader) (*SubmitFile, error) {
 	}
 
 	// Create config and execute non-queue statements
-	cfg := config.NewEmpty()
+	cfg := config.NewEmptyWithOptions(config.ConfigOptions{NoLocalAccess: !opts.AllowLocalAccess})
 	if err := cfg.ExecuteStatements(configStmts); err != nil {
 		return nil, fmt.Errorf("failed to execute submit file: %w", err)
 	}
@@ -167,7 +193,13 @@ func ParseSubmitFile(r io.Reader) (*SubmitFile, error) {
 
 	// Create iterator from queue statement
 	if queueStmt != nil {
-		iterator, err := createIteratorFromQueue(queueStmt)
+		// The itemdata rewrite above wrote the inline `from ((rows))`
+		// form to temp files this call created, so those stay readable
+		// even when the submit file itself may not name a local file.
+		iterator, err := createIteratorFromQueue(queueStmt, queueFileAccess{
+			allowAny:   opts.AllowLocalAccess,
+			allowPaths: tempFiles,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create queue iterator: %w", err)
 		}

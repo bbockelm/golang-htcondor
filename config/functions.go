@@ -73,6 +73,11 @@ func (c *Config) evalENV(args string) (string, error) {
 	if varName == "" {
 		return "", fmt.Errorf("ENV requires variable name")
 	}
+	// The environment belongs to the process doing the parsing, which
+	// is not the caller when the text came in over an API.
+	if c.options.NoLocalAccess {
+		return "", fmt.Errorf("$ENV() is not allowed here: this text is parsed without access to the local host")
+	}
 	return os.Getenv(varName), nil
 }
 
