@@ -172,15 +172,21 @@ assignment:
 		}
 	}
 
+// identifier lets most keywords double as macro names, since HTCondor
+// configurations do define knobs spelled like them. The conditional
+// keywords ELIF, ELSE and ENDIF are deliberately absent: allowing them
+// here made each of them ambiguous with the start of an assignment
+// inside a conditional block, yacc resolved every such conflict by
+// shifting, and the result was that elif_clause could never be reduced
+// — an `elif` branch did not parse at all. A configuration that wants a
+// macro literally named "elif", "else" or "endif" is not a trade worth
+// making.
 identifier:
 	IDENT
 	{
 		$$ = $1
 	}
 	| IF      { $$ = $1 }
-	| ELIF    { $$ = $1 }
-	| ELSE    { $$ = $1 }
-	| ENDIF   { $$ = $1 }
 	| DEFINED { $$ = $1 }
 	| VERSION { $$ = $1 }
 	| INCLUDE { $$ = $1 }
