@@ -40,7 +40,12 @@ type CondorTestHarness struct {
 	masterCmd     *exec.Cmd
 	collectorAddr string
 	scheddName    string
-	t             TestingT
+	// expectSchedd is whether the effective DAEMON_LIST runs a schedd.
+	// Most harness users do, and locate it as their first act; a few
+	// (the shared-port test) deliberately run without one, and must not
+	// be made to wait for an ad that will never appear.
+	expectSchedd bool
+	t            TestingT
 }
 
 // SetupCondorHarness creates and starts a mini HTCondor instance
@@ -251,6 +256,7 @@ ENABLE_WEB_SERVER = False
 	if extraConfig != "" {
 		configContent += "\n" + extraConfig + "\n"
 	}
+	h.expectSchedd = daemonListHasSchedd(configContent)
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
@@ -376,13 +382,95 @@ func (h *CondorTestHarness) WaitForDaemons() error {
 
 				h.t.Logf("Collector started at: %s", h.collectorAddr)
 
-				// Give a bit more time for other daemons to start
-				time.Sleep(2 * time.Second)
-
+				// The collector being up says nothing about the other
+				// daemons. Wait for the schedd to actually advertise:
+				// nearly every test that uses this harness locates the
+				// schedd as its first act, and waiting a fixed period
+				// instead is a race that shows up on a loaded CI runner
+				// as "no daemon of type Schedd found".
+				started := time.Now()
+				if h.expectSchedd {
+					if err := h.WaitForSchedd(30 * time.Second); err != nil {
+						return err
+					}
+				}
+				// Then hold the floor this function has always given
+				// the rest of the pool. The schedd usually advertises
+				// well inside it, and other tests depend on that slack
+				// for the daemons they use (the collector's own ad, the
+				// negotiator): finishing early would trade one race for
+				// another.
+				if remaining := 2*time.Second - time.Since(started); remaining > 0 {
+					time.Sleep(remaining)
+				}
 				return nil
 			}
 		}
 	}
+}
+
+// daemonListHasSchedd reports whether a generated harness config ends up
+// running a schedd. The last DAEMON_LIST assignment wins, as in
+// HTCondor; a value that references $(DAEMON_LIST) extends the previous
+// one rather than replacing it, so the earlier lines still count.
+func daemonListHasSchedd(configContent string) bool {
+	has := false
+	for _, line := range strings.Split(configContent, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, found := strings.Cut(line, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(name), "DAEMON_LIST") {
+			continue
+		}
+		mentions := strings.Contains(strings.ToUpper(value), "SCHEDD")
+		if strings.Contains(strings.ToUpper(value), "$(DAEMON_LIST)") {
+			has = has || mentions
+			continue
+		}
+		has = mentions
+	}
+	return has
+}
+
+// WaitForSchedd waits for the schedd to advertise to the collector, which
+// is what makes it locatable by the tests. Separate from the address
+// file the schedd writes: a test reaches the schedd through the
+// collector, so the ad is the readiness signal that matters.
+func (h *CondorTestHarness) WaitForSchedd(timeout time.Duration) error {
+	collector := NewCollector(h.collectorAddr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			h.printScheddLog()
+			return fmt.Errorf("timeout waiting for schedd to advertise to collector")
+		case <-ticker.C:
+			location, err := collector.LocateDaemon(ctx, "Schedd", "")
+			if err == nil && location != nil && location.Address != "" {
+				h.t.Logf("Schedd advertised at: %s", location.Address)
+				return nil
+			}
+		}
+	}
+}
+
+// printScheddLog prints the schedd log contents for debugging.
+func (h *CondorTestHarness) printScheddLog() {
+	scheddLog := filepath.Join(h.logDir, "SchedLog")
+	data, err := os.ReadFile(scheddLog) //nolint:gosec // Test code reading test logs
+	if err != nil {
+		h.t.Logf("Failed to read SchedLog: %v", err)
+		return
+	}
+	h.t.Logf("=== SchedLog contents ===\n%s\n=== End SchedLog ===", string(data))
 }
 
 // WaitForStartd waits for the startd daemon to advertise to the collector.
