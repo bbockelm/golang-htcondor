@@ -142,21 +142,11 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		{
 			Name: "submit_job",
 			Description: "Submit an HTCondor job using a submit file. After submission, use upload_job_input to upload the executable and any input files (<100KB total recommended). " +
-				"For large input files (>100KB), use HTTP/HTTPS URLs in transfer_input_files instead of uploading via upload_job_input.\n\n" +
-				"Two submit-language rules cause jobs that are accepted but do not work, so check both before submitting:\n" +
-				"1. HTCondor's submit parser expands every $(...) in the submit file itself, so $(...) is NOT shell command substitution. " +
-				"'arguments = -c \"echo $(hostname)\"' submits without error, but $(hostname) is expanded to an empty string (no such submit variable) " +
-				"before bash ever sees it, silently corrupting the command line (and unbalancing quotes when the substitution sat inside quotes). " +
-				"To run shell commands, put them in a script, upload it with upload_job_input, and name the script as the executable — " +
-				"this is the recommended pattern for anything beyond a fixed argument list. " +
-				"$(Cluster), $(Process), $(ItemIndex) and macros the submit file itself defines are the intended use of $(...).\n" +
-				"2. If executable is a system path (/bin/bash, /usr/bin/python3, ...), you MUST set 'transfer_executable = False'. " +
-				"It defaults to True, which makes HTCondor spool-copy the executable from the submit directory; that copy does not exist, " +
-				"so the job goes on hold with \"Transfer input files failure ... No such file or directory\" (HoldReasonCode 13, HoldReasonSubCode 2). " +
-				"With transfer_executable = False and no transfer_input_files, no upload_job_input call is needed and the job goes straight to Idle. " +
-				"To run your own program instead, set executable to a bare filename and upload it with upload_job_input.\n\n" +
-				"Recommended shape for a shell-command job — upload run.sh via upload_job_input after submitting:\n" +
-				"  executable = run.sh\n  output = out.txt\n  error = err.txt\n  log = job.log\n  queue 1",
+				"For large input files (>100KB), use HTTP/HTTPS URLs in transfer_input_files instead of uploading via upload_job_input.\n" +
+				"Two rules this tool checks: (1) $(...) is HTCondor macro expansion, not shell substitution: $(hostname) becomes \"\" before bash sees it. " +
+				"To run shell commands, upload a script and name it as the executable. $(Cluster)/$(Process)/$(ItemIndex) and submit-file macros are fine. " +
+				"(2) A system-path executable (/bin/bash, /usr/bin/python3, ...) requires transfer_executable = False, or the job holds on file transfer; " +
+				"with it set, no upload_job_input call is needed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
