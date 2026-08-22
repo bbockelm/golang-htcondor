@@ -246,6 +246,20 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		Owner:      owner,
 	}
 
+	// Offload the queue walk to a synchronized htcondordb mirror when
+	// one is current (handlers_dbroute.go). Only an owner-scoped,
+	// unpaginated request qualifies: the mirror connection authenticates
+	// as this daemon, so a read that is not already confined to the
+	// caller would not have the schedd's per-caller ACL behind it. Any
+	// miss falls through to the schedd below with no visible difference
+	// beyond the "source" field.
+	if ownedByMe && pageToken == "" {
+		if ads, note, routed := s.jobsFromMirror(ctx, constraint, projection, limit, pageToken, owner); routed {
+			s.writeMirrorJobs(w, ads, note)
+			return
+		}
+	}
+
 	// Start streaming query
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
@@ -360,7 +374,9 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		metadata += `,"has_more":false`
 	}
 
-	metadata += "}"
+	// Name the backend that answered, so a caller can tell a live schedd
+	// read from a mirror-served one (see handlers_dbroute.go).
+	metadata += `,"source":"schedd"}`
 
 	if _, err := w.Write([]byte(metadata)); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)

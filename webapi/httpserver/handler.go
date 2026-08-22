@@ -24,6 +24,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/jobqueue"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
@@ -137,15 +138,19 @@ type Handler struct {
 	webuiAdminGroup     string            // Group required for Web UI admin pages (empty = no admin UI)
 	metricsPublic       bool              // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
 	htcondorConfig      *config.Config    // HTCondor config snapshot, surfaced read-only on the admin info page
-	shareSecret         []byte            // Random 32-byte HMAC key for short-lived signed URLs
-	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
-	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
-	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
-	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
-	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
-	pingHealth          *pingHealth       // Recent ping outcomes per daemon, drives /readyz
+	// dbMirror routes heavy job and history reads to a synchronized
+	// htcondordb mirror when one is current (handlers_dbroute.go). It
+	// shares its freshness policy with the MCP tools via webapi/dbmirror.
+	dbMirror           *dbmirror.Locator
+	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
+	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
+	idpProvider        *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter    *LoginRateLimiter // Rate limiter for IDP login attempts
+	streamBufferSize   int               // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout time.Duration     // Write timeout for streaming queries (default: 5s)
+	wg                 sync.WaitGroup    // WaitGroup to track background goroutines
+	pingInterval       time.Duration     // Interval for periodic daemon pings (0 = disabled)
+	pingHealth         *pingHealth       // Recent ping outcomes per daemon, drives /readyz
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
 	// Lazily initialized so a Handler with no collector configured pays
@@ -448,6 +453,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		webuiAdminGroup:    cfg.WebUIAdminGroup,
 		metricsPublic:      cfg.MetricsPublic,
 		htcondorConfig:     cfg.HTCondorConfig,
+		dbMirror:           dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
 		token:              cfg.Token,
 	}
 

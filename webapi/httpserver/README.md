@@ -213,6 +213,41 @@ Returns Prometheus-formatted metrics about the HTCondor pool and the server proc
 
 See [../metricsd/README.md](../metricsd/README.md) for complete metrics documentation.
 
+## Offloading heavy reads to an htcondordb mirror
+
+`GET /api/v1/jobs` and `GET /api/v1/jobs/archive` are the two heaviest things
+this API asks of a schedd: the archive read scans the on-disk history file and a
+broad job query walks the queue, both competing with scheduling and negotiation.
+When a synchronized [htcondordb](https://github.com/bbockelm/htcondordb) mirror
+is advertising to the collector and is current, those reads are served from it
+instead. The response says which backend answered:
+
+```json
+{ "jobs": [ ... ], "total_returned": 12, "has_more": false, "source": "htcondordb",
+  "source_note": "[source: htcondordb mirror \"db@ap40\"; synced 4s ago; served from the htcondordb mirror (job queue caught up)]" }
+```
+
+Routing needs no configuration beyond what the API already has (a collector to
+discover the mirror, and the HTCondor config to authenticate to it), and it is
+always best-effort: no mirror, a stale one, a durability gap, a dial or query
+error, or a result larger than the request's limit all fall back to the schedd
+with no visible difference other than `"source": "schedd"`.
+
+Freshness rules (shared with the MCP tools, in `webapi/dbmirror`):
+
+- **Live jobs** need a job queue the mirror reports caught up and synced within
+  60s — job state is latency-sensitive. A paginated request (`page_token`) stays
+  on the schedd so successive pages keep one ordering.
+- **Archived jobs** tolerate 300s of lag, because history is append-only. A
+  request using schedd-specific scan semantics (`since`, `scan_limit`, or a
+  forward scan) stays on the schedd, the only backend that reproduces them.
+- Only **owner-scoped** reads are routed. The mirror connection authenticates as
+  this daemon rather than as the caller, so the schedd's per-caller ACL is not
+  behind it; confining the query to the caller's own records is what keeps
+  routing from widening access. `/api/v1/jobs` is owner-scoped by default;
+  `/api/v1/jobs/archive` takes `owned_by_me=true`, and always applies it to a
+  browser session that is not a Web UI admin.
+
 ## Authentication
 
 The server supports multiple authentication methods:
