@@ -366,6 +366,14 @@ HTTP_API_MCP_READ_GROUP = mcp-read
 # Required group for mcp:write scope (if not set, no users get write access by default)
 # Users in this group will receive both mcp:read and mcp:write scopes
 HTTP_API_MCP_WRITE_GROUP = mcp-write
+
+# MCP admin users (optional, comma-separated)
+# These subjects skip the owner-scope wrapper the MCP tools otherwise apply, so
+# they can query and act on other users' jobs. Matched exactly against the
+# authenticated actor: the OAuth2 username claim for an OAuth2 caller, or the
+# identity the schedd maps the caller to for a forwarded HTCondor IDTOKEN
+# (typically user@uid.domain). Unset = every caller is scoped to their own jobs.
+MCP_ADMIN_USERS = alice@example.edu, ops@example.edu
 ```
 
 **OIDC Discovery:**

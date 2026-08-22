@@ -37,8 +37,8 @@ func TestScopeToOwnerNoBypass(t *testing.T) {
 		`true) || (true`,
 		`Owner == "bob") || (true`,
 		`1) || (JobStatus =?= JobStatus`,
-		`true || Owner == "bob"`,     // balanced but tautological
-		`JobStatus == 2 || 1 == 1`,   // balanced tautology
+		`true || Owner == "bob"`,   // balanced but tautological
+		`JobStatus == 2 || 1 == 1`, // balanced tautology
 	}
 	for _, c := range bypassAttempts {
 		scoped, ok := s.scopeToOwner(ctx, c)
@@ -112,5 +112,47 @@ func TestJobsMirrorScopeNoBypass(t *testing.T) {
 		if admits(t, scoped, "bob") {
 			t.Errorf("BYPASS in jobs mirror scope: %q -> %q admits bob", c, scoped)
 		}
+	}
+}
+
+// TestOwnerFromActor covers the actor→Owner mapping: the schedd maps a
+// CEDAR peer to a qualified identity ("alice@uid.domain") and an
+// IDTOKEN's sub looks the same, but a job's Owner is the bare username,
+// so an unmapped actor would match no jobs.
+func TestOwnerFromActor(t *testing.T) {
+	cases := map[string]string{
+		"alice":               "alice",
+		"alice@uid.domain":    "alice",
+		"alice@a@b":           "alice",
+		"":                    "",
+		"condor@pool.example": "condor",
+	}
+	for actor, want := range cases {
+		if got := ownerFromActor(actor); got != want {
+			t.Errorf("ownerFromActor(%q) = %q, want %q", actor, got, want)
+		}
+	}
+}
+
+// TestScopeToOwnerQualifiedActor is the same mapping at the level that
+// matters: the constraint a tool sends to the schedd.
+func TestScopeToOwnerQualifiedActor(t *testing.T) {
+	s := &Server{}
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
+
+	got, ok := s.scopeToOwner(ctx, "")
+	if !ok {
+		t.Fatal("expected a qualified actor to be accepted")
+	}
+	if got != `Owner == "alice"` {
+		t.Errorf("scopeToOwner = %q, want %q", got, `Owner == "alice"`)
+	}
+
+	// An admin is matched on the qualified identity and keeps the
+	// constraint unscoped.
+	admin := &Server{adminUsers: map[string]struct{}{"alice@uid.domain": {}}}
+	got, ok = admin.scopeToOwner(ctx, "JobStatus == 5")
+	if !ok || got != "JobStatus == 5" {
+		t.Errorf("admin scopeToOwner = %q, %v; want the constraint unchanged", got, ok)
 	}
 }

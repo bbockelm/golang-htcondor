@@ -103,6 +103,15 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
+		// Owner-scoped tools need to know who the caller is. Ask the
+		// schedd rather than the token: this branch forwards the token
+		// precisely because the schedd is what verifies it, so the
+		// identity it maps the caller to is the only trustworthy answer
+		// available here.
+		if actor := h.actorForForwardedToken(ctx, htcToken); actor != "" {
+			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		}
+
 		// For HTCondor tokens, we don't validate scopes here - HTCondor does that
 		// Just process the MCP message
 	} else {
@@ -173,6 +182,11 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		// with.
 		ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
 
+		// The same actor the generated HTCondor token names, so
+		// owner-scoped tools scope to the caller rather than refusing
+		// the call outright.
+		ctx = htcondor.WithAuthenticatedUser(ctx, username)
+
 		// Restore the body for later reading
 		r.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
@@ -193,41 +207,14 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a temporary MCP server to handle this request
-	// IMPORTANT: Reuse the HTTP server's schedd connection to avoid redundant
-	// authentication and key exchange on every MCP request
-	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		Schedd:         h.schedd,
-		Credd:          h.credd,
-		Instructions:   h.mcpInstructions,
-		SigningKeyPath: h.signingKeyPath,
-		TrustDomain:    h.trustDomain,
-		UIDDomain:      h.uidDomain,
-		HTTPBaseURL:    h.httpBaseURL,
-		Logger:         h.logger,
-	})
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
+	if h.mcpServer == nil {
+		h.logger.Error(logging.DestinationHTTP, "MCP server not initialized")
 		h.writeError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
-	// Create pipes for stdin/stdout simulation
-	var responseBuffer bytes.Buffer
-
-	// Write the request to a buffer that the MCP server can read
-	requestBuffer := bytes.NewBuffer(body)
-
-	// Temporarily replace the server's stdin/stdout
-	originalStdin := mcpServer.SetStdin(requestBuffer)
-	originalStdout := mcpServer.SetStdout(&responseBuffer)
-	defer func() {
-		mcpServer.SetStdin(originalStdin)
-		mcpServer.SetStdout(originalStdout)
-	}()
-
 	// Handle the message directly using the MCP server's handler
-	response := mcpServer.HandleMessage(ctx, &mcpRequest)
+	response := h.mcpServer.HandleMessage(ctx, &mcpRequest)
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")

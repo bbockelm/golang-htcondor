@@ -1018,7 +1018,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 
 	// Get authenticated user from context if available
 	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
-		opts.Owner = user
+		opts.Owner = ownerFromActor(user)
 	}
 
 	// Use streaming query

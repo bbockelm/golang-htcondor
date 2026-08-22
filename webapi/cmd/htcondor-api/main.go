@@ -127,6 +127,7 @@ type mcpConfig struct {
 	mcpReadGroup        string
 	mcpWriteGroup       string
 	instructions        string
+	adminUsers          []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -836,6 +837,15 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		logger.Info(logging.DestinationHTTP, "OAuth2 refresh token lifespan", "duration", config.oauth2RefreshTokenLifespan)
 	}
 
+	// Load the MCP admin list. These subjects skip the owner-scope
+	// wrapper on MCP tools, so they can query and act on other users'
+	// jobs — comma- or space-separated, matched exactly against the
+	// authenticated actor.
+	if admins, ok := cfg.Get("MCP_ADMIN_USERS"); ok && admins != "" {
+		config.adminUsers = splitCommaList(admins)
+		logger.Info(logging.DestinationMCP, "MCP admin users configured", "count", len(config.adminUsers))
+	}
+
 	// Load server-level instructions for MCP agents
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
@@ -1013,6 +1023,18 @@ func loadUserHeaderTrustedProxies(cfg *config.Config) []string {
 	for _, p := range strings.Split(v, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitCommaList parses a comma-separated config value into trimmed,
+// non-empty entries.
+func splitCommaList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}
@@ -1250,6 +1272,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPReadGroup:               mcpCfg.mcpReadGroup,
 		MCPWriteGroup:              mcpCfg.mcpWriteGroup,
 		MCPInstructions:            mcpCfg.instructions,
+		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
 		EnableIDP:                  enableIDP,
 		IDPIssuer:                  idpIssuer,

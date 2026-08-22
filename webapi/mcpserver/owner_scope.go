@@ -36,7 +36,7 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string) (string
 	if s.isAdmin(actor) {
 		return strings.TrimSpace(llmConstraint), true
 	}
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(actor))
+	owner := fmt.Sprintf("Owner == %s", classadStringLit(ownerFromActor(actor)))
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
 		return owner, true
@@ -66,6 +66,21 @@ func classadBalanced(constraint string) (string, error) {
 		return "", err
 	}
 	return expr.String(), nil
+}
+
+// ownerFromActor maps an authenticated actor to the value HTCondor
+// stores in a job's Owner attribute: the bare username. An actor is
+// often fully qualified — "alice@uid.domain" is what the schedd maps a
+// CEDAR peer to, and what an IDTOKEN's `sub` looks like — while Owner
+// never is, so comparing the two verbatim would match no jobs at all.
+// Admin matching deliberately keeps the qualified form (see isAdmin):
+// it is an identity check, not a job-ownership one.
+func ownerFromActor(actor string) string {
+	name, _, found := strings.Cut(actor, "@")
+	if !found {
+		return actor
+	}
+	return name
 }
 
 // isAdmin reports whether the given authenticated username is in the
