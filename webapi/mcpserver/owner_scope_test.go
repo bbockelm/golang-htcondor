@@ -121,9 +121,12 @@ func TestJobsMirrorScopeNoBypass(t *testing.T) {
 // so an unmapped actor would match no jobs.
 func TestOwnerFromActor(t *testing.T) {
 	cases := map[string]string{
-		"alice":               "alice",
-		"alice@uid.domain":    "alice",
-		"alice@a@b":           "alice",
+		"alice":            "alice",
+		"alice@uid.domain": "alice",
+		// "@" is legal in a Linux username and SSSD issues names that
+		// contain one, so the domain is whatever follows the LAST "@":
+		// this is the user "foo@bar", not "foo".
+		"foo@bar@uid.domain":  "foo@bar",
 		"":                    "",
 		"condor@pool.example": "condor",
 	}

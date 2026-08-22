@@ -72,3 +72,57 @@ func TestMCPActorKeyIsADigest(t *testing.T) {
 		t.Error("different tokens must get different keys")
 	}
 }
+
+// TestMCPActorCacheRemembersFailures checks the negative entry: a token
+// the schedd would not accept must be answered from cache rather than
+// costing another handshake on every retry.
+func TestMCPActorCacheRemembersFailures(t *testing.T) {
+	var c mcpActorCache
+	c.put("bad", "", time.Minute)
+
+	actor, ok := c.get("bad")
+	if !ok {
+		t.Fatal("a remembered failure must answer from the cache")
+	}
+	if actor != "" {
+		t.Errorf("a remembered failure must resolve to no actor, got %q", actor)
+	}
+}
+
+// TestMCPActorResolveRateLimit is the anti-amplification guard: a forged
+// JWT carrying the pool's issuer classifies as a forwarded IDTOKEN, so
+// every distinct one is a cache miss. Only a bounded number may reach
+// the schedd.
+func TestMCPActorResolveRateLimit(t *testing.T) {
+	var c mcpActorCache
+
+	allowed := 0
+	for i := 0; i < 500; i++ {
+		if c.allowResolve() {
+			allowed++
+		}
+	}
+	if allowed == 0 {
+		t.Fatal("the limiter must allow the first resolutions through")
+	}
+	// Burst is 2x the per-second rate; a tight loop takes well under a
+	// second, so anything near 500 means the limiter is not limiting.
+	if allowed > mcpActorResolveRate*2+2 {
+		t.Errorf("limiter allowed %d resolutions in a burst, want about %d", allowed, mcpActorResolveRate*2)
+	}
+}
+
+// TestMCPActorKeyIsUsableAsASecurityTag pins the property the session
+// isolation depends on: the tag is derived from the whole bearer, so two
+// callers can never share one — including when an attacker copies a
+// victim's `sub` claim into their own token.
+func TestMCPActorKeyIsUsableAsASecurityTag(t *testing.T) {
+	alice := "header.eyJzdWIiOiJhbGljZSJ9.alice-signature"
+	forged := "header.eyJzdWIiOiJhbGljZSJ9.attacker-signature" // same claims, different token
+	if mcpActorKey(alice) == mcpActorKey(forged) {
+		t.Error("tokens sharing a sub claim must not share a session tag")
+	}
+	if mcpActorKey(alice) == "" {
+		t.Error("tag must not be empty: cedar falls back to keying sessions by address alone")
+	}
+}

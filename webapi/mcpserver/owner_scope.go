@@ -72,17 +72,14 @@ func classadBalanced(constraint string) (string, error) {
 // query to the caller's own jobs, and false when there is no
 // authenticated caller to confine it to.
 //
-// The confinement is the schedd's, not ours: FetchMyJobs sends
-// QUERY_JOB_ADS_WITH_AUTH, and the schedd filters on the identity it
-// authenticated rather than on any owner name we supply. That is the
-// only reliable answer, because the identity a caller ends up with on
-// the AP is not necessarily the name we know them by — an OAuth2
-// username claim, a UID_DOMAIN mapping and a job's Owner attribute can
-// all differ. A client-side `Owner == "<actor>"` constraint gets that
-// wrong in both directions: it hides the caller's own jobs when the
-// names differ, and it would name somebody else's jobs if a mapping
-// ever made the strings collide. The actor still travels as the `Me`
-// hint for schedds that use it.
+// The primary confinement is the schedd's: FetchMyJobs sends
+// QUERY_JOB_ADS_WITH_AUTH, so the schedd filters on the identity it
+// authenticated rather than on any owner name we supply. Callers pair it
+// with scopeToOwner's constraint, which confines the same query
+// client-side. Two mechanisms for one rule is deliberate — this one was
+// silently doing nothing until ApplyDefaults stopped dropping FetchOpts,
+// and a confinement that can degrade to "no filter" without a symptom
+// wants a second one behind it that fails closed instead.
 //
 // Admins are exempt, as with scopeToOwner: no self-scoping, so
 // cross-user troubleshooting still works.
@@ -110,14 +107,21 @@ func (s *Server) selfScopedQueryOptions(ctx context.Context, base *htcondor.Quer
 // often fully qualified — "alice@uid.domain" is what the schedd maps a
 // CEDAR peer to, and what an IDTOKEN's `sub` looks like — while Owner
 // never is, so comparing the two verbatim would match no jobs at all.
+//
+// The split is at the LAST "@", because "@" is legal in a Linux
+// username and SSSD hands out names that contain one:
+// "foo@bar@uid.domain" is the user "foo@bar" in the domain
+// "uid.domain". Splitting at the first "@" would scope that user's
+// queries to the non-existent owner "foo".
+//
 // Admin matching deliberately keeps the qualified form (see isAdmin):
 // it is an identity check, not a job-ownership one.
 func ownerFromActor(actor string) string {
-	name, _, found := strings.Cut(actor, "@")
-	if !found {
+	i := strings.LastIndex(actor, "@")
+	if i < 0 {
 		return actor
 	}
-	return name
+	return actor[:i]
 }
 
 // isAdmin reports whether the given authenticated username is in the

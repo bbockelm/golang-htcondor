@@ -1119,10 +1119,15 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 
 	// Confine the query to the caller's own jobs, so asking for
 	// cluster.proc X.Y that belongs to someone else reports "not found"
-	// rather than leaking their full ad. The schedd does the confining
-	// (see selfScopedQueryOptions); admins are exempt for cross-user
-	// troubleshooting.
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// rather than leaking their full ad. Confined twice: the schedd
+	// filters on the authenticated identity (selfScopedQueryOptions) and
+	// the constraint carries an owner clause (scopeToOwner). Admins are
+	// exempt from both for cross-user troubleshooting.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	opts, ok := s.selfScopedQueryOptions(ctx, nil)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
@@ -1200,7 +1205,11 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	// — the analyzer doesn't read other attributes off the job.
 	// Owner-scope so a non-admin caller can't analyze another user's
 	// job and harvest its Requirements expression.
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
 		Limit:      1,
