@@ -611,7 +611,7 @@ curl -X POST https://htcondor.example.com/mcp \
     "jsonrpc": "2.0",
     "method": "job.submit",
     "params": {
-      "submit_file": "executable=/bin/echo\narguments=Hello from MCP\nqueue"
+      "submit_file": "executable = /bin/echo\ntransfer_executable = False\narguments = Hello from MCP\nqueue"
     },
     "id": 1
   }'

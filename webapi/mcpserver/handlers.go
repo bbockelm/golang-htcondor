@@ -140,8 +140,23 @@ var readOnlyMCPTools = map[string]bool{
 func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interface{} {
 	tools := []Tool{
 		{
-			Name:        "submit_job",
-			Description: "Submit an HTCondor job using a submit file. After submission, use upload_job_input to upload the executable and any input files (<100KB total recommended). For large input files (>100KB), use HTTP/HTTPS URLs in transfer_input_files instead of uploading via upload_job_input.",
+			Name: "submit_job",
+			Description: "Submit an HTCondor job using a submit file. After submission, use upload_job_input to upload the executable and any input files (<100KB total recommended). " +
+				"For large input files (>100KB), use HTTP/HTTPS URLs in transfer_input_files instead of uploading via upload_job_input.\n\n" +
+				"Two submit-language rules cause jobs that are accepted but do not work, so check both before submitting:\n" +
+				"1. HTCondor's submit parser expands every $(...) in the submit file itself, so $(...) is NOT shell command substitution. " +
+				"'arguments = -c \"echo $(hostname)\"' submits without error, but $(hostname) is expanded to an empty string (no such submit variable) " +
+				"before bash ever sees it, silently corrupting the command line (and unbalancing quotes when the substitution sat inside quotes). " +
+				"To run shell commands, put them in a script, upload it with upload_job_input, and name the script as the executable — " +
+				"this is the recommended pattern for anything beyond a fixed argument list. " +
+				"$(Cluster), $(Process), $(ItemIndex) and macros the submit file itself defines are the intended use of $(...).\n" +
+				"2. If executable is a system path (/bin/bash, /usr/bin/python3, ...), you MUST set 'transfer_executable = False'. " +
+				"It defaults to True, which makes HTCondor spool-copy the executable from the submit directory; that copy does not exist, " +
+				"so the job goes on hold with \"Transfer input files failure ... No such file or directory\" (HoldReasonCode 13, HoldReasonSubCode 2). " +
+				"With transfer_executable = False and no transfer_input_files, no upload_job_input call is needed and the job goes straight to Idle. " +
+				"To run your own program instead, set executable to a bare filename and upload it with upload_job_input.\n\n" +
+				"Recommended shape for a shell-command job — upload run.sh via upload_job_input after submitting:\n" +
+				"  executable = run.sh\n  output = out.txt\n  error = err.txt\n  log = job.log\n  queue 1",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -872,6 +887,16 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("submit_file is required")
 	}
 
+	// Read the submit file before handing it to the schedd: some
+	// submit-file mistakes produce a job that cannot run but that the
+	// schedd accepts without complaint (see issue #183), and an error
+	// here is far cheaper for the caller than a submit/hold/diagnose
+	// cycle.
+	insp := inspectSubmitFile(submitFile)
+	if insp.fatal != nil {
+		return nil, insp.fatal
+	}
+
 	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("job submission failed: %w", err)
@@ -885,38 +910,8 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
-	// Determine if job likely needs input file spooling by parsing the submit file
-	// and checking the generated ClassAd attributes directly
-	needsSpooling := true // Default to true for safety
-	if sf, err := htcondor.ParseSubmitFile(strings.NewReader(submitFile)); err == nil {
-		// Generate a job ad to check transfer attributes
-		jobID := htcondor.JobID{Cluster: clusterID, Proc: 0}
-		if ad, err := sf.MakeJobAd(jobID, nil); err == nil {
-			// Check TransferExecutable - defaults to true
-			transferExec := true
-			if val, ok := ad.EvaluateAttrBool("TransferExecutable"); ok {
-				transferExec = val
-			}
-
-			// Check TransferInput - if set, files need to be spooled
-			hasInputFiles := false
-			if val, _ := ad.EvaluateAttrString("TransferInput"); val != "" {
-				hasInputFiles = true
-			}
-
-			// Check Input (stdin redirection) - if set, the input file needs to be spooled
-			hasStdinFile := false
-			if val, _ := ad.EvaluateAttrString("Input"); val != "" {
-				hasStdinFile = true
-			}
-
-			// Spooling is needed if executable will be transferred OR input files are specified
-			needsSpooling = transferExec || hasInputFiles || hasStdinFile
-		}
-	}
-
 	var nextSteps string
-	if needsSpooling {
+	if insp.needsSpooling {
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
@@ -960,18 +955,28 @@ First job ID for status checks: %s`, jobIDs[0])
 	// Job transforms may add this attribute after the job is committed.
 	oauthNote := s.checkOAuthServicesNeeded(ctx, clusterID)
 
+	// Diagnostics for submit-file constructs that parse cleanly but
+	// probably do not mean what the caller intended. These go first in
+	// the response text: the job is already submitted, so the caller
+	// has to decide whether to remove and resubmit it.
+	metadata := map[string]interface{}{
+		"cluster_id": clusterID,
+		"job_ids":    jobIDs,
+	}
+	if len(insp.warnings) > 0 {
+		metadata["warnings"] = insp.warnings
+	}
+	warningNote := formatSubmitWarnings(insp.warnings)
+
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Successfully submitted job cluster %d with %d proc(s): %s%s%s",
-					clusterID, len(jobIDs), strings.Join(jobIDs, ", "), nextSteps, oauthNote),
+				"text": fmt.Sprintf("%sSuccessfully submitted job cluster %d with %d proc(s): %s%s%s",
+					warningNote, clusterID, len(jobIDs), strings.Join(jobIDs, ", "), nextSteps, oauthNote),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"cluster_id": clusterID,
-			"job_ids":    jobIDs,
-		},
+		"metadata": metadata,
 	}, nil
 }
 

@@ -72,6 +72,21 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  queue 1\n\n")
 	b.WriteString("When transfer_executable = false AND no transfer_input_files are specified, " +
 		"the job does not need input spooling and will go directly to Idle.\n\n")
+	b.WriteString("Leaving transfer_executable at its default of true with a system-path executable does not " +
+		"fail at submit time: HTCondor spool-copies the executable from the submit directory, that copy does " +
+		"not exist, and the job goes on hold with \"Transfer input files failure ... No such file or " +
+		"directory\" (HoldReasonCode 13, HoldReasonSubCode 2). submit_job rejects that combination up front.\n\n")
+
+	// $(...) macro expansion
+	b.WriteString("## $(...) is submit-file macro expansion, not shell command substitution\n\n")
+	b.WriteString("HTCondor's submit parser expands every $(...) in every submit-file line before the job is " +
+		"created, so the shell never sees it. A reference to something the submit file does not define " +
+		"expands to an empty string, and the job runs with a silently corrupted command line:\n\n")
+	b.WriteString("  arguments = -c \"echo HOST:$(hostname)\"   # bash receives: -c \"echo HOST:\"\n\n")
+	b.WriteString("$(Cluster), $(Process), $(ProcId), $(ItemIndex), $(Step), $(Row) and macros the submit " +
+		"file itself defines are the intended use of $(...). To run shell commands — command substitution, " +
+		"pipelines, several statements — write a script, name it as the executable, and upload it with " +
+		"upload_job_input. That is the recommended pattern for anything beyond a fixed argument list.\n\n")
 
 	// ClassAd essentials
 	b.WriteString("## Key job attributes (ClassAd)\n\n")

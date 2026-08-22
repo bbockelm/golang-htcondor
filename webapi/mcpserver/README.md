@@ -67,10 +67,25 @@ Submit an HTCondor job using a submit file.
 {
   "name": "submit_job",
   "arguments": {
-    "submit_file": "executable=/bin/echo\narguments=Hello World\nqueue"
+    "submit_file": "executable = /bin/echo\ntransfer_executable = False\narguments = Hello World\nqueue"
   }
 }
 ```
+
+**Two submit-language rules the tool enforces or warns about:**
+
+- A system-path executable (`/bin/bash`, `/usr/bin/python3`, ...) needs
+  `transfer_executable = False`. The default is `True`, which makes HTCondor
+  spool-copy the executable from the submit directory; that copy does not
+  exist, so the job goes on hold with "Transfer input files failure ... No
+  such file or directory" (`HoldReasonCode` 13, `HoldReasonSubCode` 2).
+  `submit_job` rejects that combination before submitting.
+- `$(...)` in a submit file is HTCondor macro expansion, not shell command
+  substitution. `arguments = -c "echo $(hostname)"` submits and runs, but the
+  submit parser expands `$(hostname)` to an empty string before bash sees it.
+  `submit_job` warns about `$(...)` references that nothing defines. To run
+  shell commands, upload a script with `upload_job_input` and name it as the
+  `executable`.
 
 ### query_jobs
 
