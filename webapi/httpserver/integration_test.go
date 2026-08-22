@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1092,6 +1093,29 @@ func getScheddAddress(localDir string, timeout time.Duration) (string, error) {
 }
 
 // waitForServer waits for the HTTP server to be ready
+// reserveLocalAddr returns a loopback address whose port the kernel just
+// handed out, for a server whose configuration needs its own URL before
+// it binds (an OAuth2 issuer, say). A hardcoded port fails whenever
+// anything else on the machine holds it — another suite, a parallel run,
+// a leftover process — and that failure looks like a product bug.
+//
+// The listener is closed before returning, so there is a moment in which
+// something else could claim the port. Prefer ListenAddr "127.0.0.1:0"
+// plus Server.GetAddr for tests that do not need the URL up front; this
+// exists for the ones that do.
+func reserveLocalAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not reserve a local port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("could not release the reserved port: %v", err)
+	}
+	return addr
+}
+
 func waitForServer(baseURL string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}

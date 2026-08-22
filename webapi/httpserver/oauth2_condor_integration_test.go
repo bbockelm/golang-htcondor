@@ -23,6 +23,7 @@ import (
 )
 
 // TestCondorScopesIntegration tests the condor:/* scope functionality with a real HTCondor setup
+
 func TestCondorScopesIntegration(t *testing.T) {
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -107,7 +108,7 @@ func TestCondorScopesIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
 	// Start HTTP server
-	serverAddr := "127.0.0.1:18082"
+	serverAddr := reserveLocalAddr(t)
 	baseURL := "http://" + serverAddr
 
 	server, err := NewServer(Config{
@@ -256,7 +257,7 @@ func getOAuth2TokenWithCondorScopes(t *testing.T, httpClient *http.Client, baseU
 	scopeStr := strings.Join(scopesWithOffline, "+")
 
 	// Step 1: Create authorization request
-	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18082/callback&scope=%s&state=teststate&username=%s",
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri="+testRedirectURI+"&scope=%s&state=teststate&username=%s",
 		baseURL, clientID, scopeStr, username)
 
 	req, err := http.NewRequest("GET", authURL, nil)
@@ -352,7 +353,7 @@ func getOAuth2TokenWithCondorScopes(t *testing.T, httpClient *http.Client, baseU
 
 	// Step 2: Exchange authorization code for access token
 	tokenReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
-		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18082/callback&client_id=%s&client_secret=%s",
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri="+testRedirectURI+"&client_id=%s&client_secret=%s",
 			code, clientID, clientSecret),
 	))
 	if err != nil {
@@ -457,7 +458,7 @@ func registerOAuth2ClientWithCondorScopes(t *testing.T, storage *OAuth2Storage) 
 	client := &fosite.DefaultClient{
 		ID:            clientID,
 		Secret:        hashedSecret,
-		RedirectURIs:  []string{"http://localhost:18082/callback"},
+		RedirectURIs:  []string{testRedirectURI},
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
 		Scopes:        []string{"openid", "offline_access", "mcp:read", "mcp:write", "condor:/READ", "condor:/WRITE", "condor:/ADVERTISE_STARTD"},
