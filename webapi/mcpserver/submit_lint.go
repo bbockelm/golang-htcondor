@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // submitInspection is what a pre-submit read of a submit file tells us:
@@ -150,10 +151,6 @@ func isSystemExecutablePath(cmd string) bool {
 	return false
 }
 
-// submitAssignment matches a submit-file assignment line: `key = value`,
-// including the `+Attr = value` and `MY.Attr = value` spellings.
-var submitAssignment = regexp.MustCompile(`^\s*([+A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$`)
-
 // macroReference matches a `$(NAME)` or `$(NAME:default)` submit-file
 // macro reference. `$$(...)` (deferred until matchmaking) is excluded by
 // the check on the preceding byte in findMacroReferences, not here.
@@ -174,64 +171,106 @@ var liveSubmitMacros = map[string]bool{
 	"dollar":    true,
 }
 
-// queueVarNames matches the variable list of a `queue VARS in|from ...`
-// statement; those names are defined per-row by the queue iterator.
-var queueVarNames = regexp.MustCompile(`(?i)^\s*queue\s+(?:\d+\s+)?([A-Za-z_][A-Za-z0-9_,\s]*?)\s+(?:in|from)\b`)
-
 // warnUndefinedMacros reports `$(NAME)` references that no macro
 // defines, which HTCondor silently expands to the empty string. The
 // common way to hit this is writing shell command substitution —
 // `arguments = -c "echo $(hostname)"` — which the submit parser eats
 // before bash sees it, leaving a corrupted command line and, when the
 // substitution sat inside quotes, unbalanced quoting.
+//
+// All such references collapse into a single warning: an agent that
+// wrote one $(...) by mistake usually wrote several, and the
+// explanation only needs saying once.
 func warnUndefinedMacros(raw string) []string {
-	lines := logicalLines(raw)
-
-	defined := map[string]bool{}
-	for _, line := range lines {
-		if m := submitAssignment.FindStringSubmatch(line); m != nil {
-			defined[strings.ToLower(strings.TrimPrefix(m[1], "+"))] = true
-		}
-		if m := queueVarNames.FindStringSubmatch(line); m != nil {
-			for _, name := range strings.Split(m[1], ",") {
-				if name = strings.TrimSpace(name); name != "" {
-					defined[strings.ToLower(name)] = true
-				}
-			}
-		}
+	// Read the submit file with the config grammar that parses it for
+	// real, so line continuations, comments and `queue VARS from`
+	// variable lists need no second implementation here. An
+	// unparseable file yields no statements and no diagnostics; the
+	// schedd is the authority on what it accepts.
+	stmts, err := config.Parse(config.NewLexer(strings.NewReader(raw)))
+	if err != nil {
+		return nil
 	}
+	assignments, defined := collectSubmitAssignments(stmts)
 
-	var warnings []string
+	// Group the undefined references by the submit command that
+	// referenced them, in the order they appear.
+	var keys []string
+	byKey := map[string][]string{}
 	seen := map[string]bool{}
-	for _, line := range lines {
-		m := submitAssignment.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		key, value := m[1], m[2]
-		for _, ref := range findMacroReferences(value) {
+	for _, a := range assignments {
+		key := strings.ToLower(a.Name)
+		for _, ref := range findMacroReferences(a.Value) {
 			// A `$(NAME:default)` reference expands to the default
 			// rather than to nothing, so it is not this mistake.
 			if strings.Contains(ref, ":") {
 				continue
 			}
 			lowered := strings.ToLower(strings.TrimSpace(ref))
-			if defined[lowered] || liveSubmitMacros[lowered] {
-				continue
-			}
-			if seen[lowered] {
+			if defined[lowered] || liveSubmitMacros[lowered] || seen[lowered] {
 				continue
 			}
 			seen[lowered] = true
-			warnings = append(warnings, fmt.Sprintf("%s references $(%s), which is not a submit variable: "+
-				"HTCondor's submit parser expanded it to an empty string before the job was created. "+
-				"HTCondor expands every $(...) in a submit file itself, so $(...) cannot be used for shell "+
-				"command substitution — the shell never sees it. Put the commands in a script file, upload it "+
-				"with upload_job_input, and name it as the executable; or define %s in the submit file.",
-				strings.ToLower(key), ref, ref))
+			if _, ok := byKey[key]; !ok {
+				keys = append(keys, key)
+			}
+			byKey[key] = append(byKey[key], "$("+ref+")")
 		}
 	}
-	return warnings
+	if len(keys) == 0 {
+		return nil
+	}
+
+	refs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		refs = append(refs, key+" references "+strings.Join(byKey[key], ", "))
+	}
+	return []string{fmt.Sprintf("%s. No submit variable defines %s, so HTCondor's submit parser expanded each "+
+		"to an empty string before the job was created. HTCondor expands every $(...) in a submit file itself, "+
+		"so $(...) cannot be used for shell command substitution — the shell never sees it. Put the commands in "+
+		"a script file, upload it with upload_job_input, and name it as the executable; or define the "+
+		"variables in the submit file.", strings.Join(refs, "; "), pluralizeRefs(len(seen)))}
+}
+
+// pluralizeRefs keeps the one-reference case from reading as a plural.
+func pluralizeRefs(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// collectSubmitAssignments walks the parsed submit file and returns its
+// assignments in order plus the set of names something defines: an
+// assignment (`+Attr` included), or a `queue VARS in|from` variable
+// list, whose names the queue iterator supplies per row. Conditional
+// branches are walked because the submit parser executes one of them.
+func collectSubmitAssignments(stmts []config.Statement) ([]*config.Assignment, map[string]bool) {
+	var assignments []*config.Assignment
+	defined := map[string]bool{}
+
+	var walk func([]config.Statement)
+	walk = func(in []config.Statement) {
+		for _, stmt := range in {
+			switch v := stmt.(type) {
+			case *config.Assignment:
+				assignments = append(assignments, v)
+				defined[strings.ToLower(v.Name)] = true
+			case *config.QueueStatement:
+				for _, name := range v.VarNames {
+					defined[strings.ToLower(name)] = true
+				}
+			case *config.Conditional:
+				walk(v.ThenBlock)
+				for _, elif := range v.ElseIfBlock {
+					walk(elif.Block)
+				}
+				walk(v.ElseBlock)
+			}
+		}
+	}
+	walk(stmts)
+	return assignments, defined
 }
 
 // findMacroReferences returns the macro names referenced by a submit
@@ -246,35 +285,4 @@ func findMacroReferences(value string) []string {
 		names = append(names, value[loc[2]:loc[3]])
 	}
 	return names
-}
-
-// logicalLines splits a submit file into logical lines: comments and
-// blanks dropped, backslash continuations joined, so an assignment
-// spread over several physical lines is linted as one value.
-func logicalLines(raw string) []string {
-	var out []string
-	var pending strings.Builder
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if pending.Len() == 0 {
-			if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-		}
-		if strings.HasSuffix(line, `\`) {
-			pending.WriteString(strings.TrimSuffix(line, `\`))
-			continue
-		}
-		if pending.Len() > 0 {
-			pending.WriteString(line)
-			out = append(out, pending.String())
-			pending.Reset()
-			continue
-		}
-		out = append(out, line)
-	}
-	if pending.Len() > 0 {
-		out = append(out, pending.String())
-	}
-	return out
 }

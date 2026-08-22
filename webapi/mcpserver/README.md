@@ -72,20 +72,12 @@ Submit an HTCondor job using a submit file.
 }
 ```
 
-**Two submit-language rules the tool enforces or warns about:**
-
-- A system-path executable (`/bin/bash`, `/usr/bin/python3`, ...) needs
-  `transfer_executable = False`. The default is `True`, which makes HTCondor
-  spool-copy the executable from the submit directory; that copy does not
-  exist, so the job goes on hold with "Transfer input files failure ... No
-  such file or directory" (`HoldReasonCode` 13, `HoldReasonSubCode` 2).
-  `submit_job` rejects that combination before submitting.
-- `$(...)` in a submit file is HTCondor macro expansion, not shell command
-  substitution. `arguments = -c "echo $(hostname)"` submits and runs, but the
-  submit parser expands `$(hostname)` to an empty string before bash sees it.
-  `submit_job` warns about `$(...)` references that nothing defines. To run
-  shell commands, upload a script with `upload_job_input` and name it as the
-  `executable`.
+**Two submit-language rules:** a system-path executable requires
+`transfer_executable = False` (submit_job rejects it otherwise, since HTCondor
+would spool-copy an executable that is not there and the job would hold), and
+`$(...)` is macro expansion, not shell substitution — to run shell commands,
+upload a script with `upload_job_input` and name it as the `executable`.
+submit_job warns about `$(...)` references nothing defines.
 
 ### query_jobs
 
