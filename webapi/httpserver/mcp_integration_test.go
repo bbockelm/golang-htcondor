@@ -658,7 +658,11 @@ func testMCPToolsList(t *testing.T, client *http.Client, baseURL, accessToken st
 
 // testMCPSubmitJob tests submitting a job via MCP
 func testMCPSubmitJob(t *testing.T, client *http.Client, baseURL, accessToken string) int {
+	// transfer_executable = False is required for a system-path
+	// executable: submit_job rejects the combination otherwise, because
+	// HTCondor would spool-copy an executable that is not there.
 	submitFile := `executable = /bin/echo
+transfer_executable = False
 arguments = "Hello from MCP!"
 output = mcp-test.out
 error = mcp-test.err
@@ -687,6 +691,10 @@ queue`
 		t.Fatalf("MCP submit_job failed: %v", mcpResp.Error.Message)
 	}
 
+	// The same submit file without transfer_executable must come back as
+	// an error rather than a job that can only hold.
+	testMCPSubmitJobRejectsSystemExecutable(t, client, baseURL, accessToken)
+
 	result, ok := mcpResp.Result.(map[string]interface{})
 	if !ok {
 		t.Fatal("submit_job result is not a map")
@@ -707,6 +715,31 @@ queue`
 }
 
 // testMCPQueryJobs tests querying jobs via MCP
+// testMCPSubmitJobRejectsSystemExecutable checks the pre-submit
+// diagnostic reaches an MCP-over-HTTP caller: a system-path executable
+// with transfer_executable left at its default is refused, with the fix
+// in the message.
+func testMCPSubmitJobRejectsSystemExecutable(t *testing.T, client *http.Client, baseURL, accessToken string) {
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "submit_job",
+		"arguments": map[string]interface{}{
+			"submit_file": "executable = /bin/echo\narguments = nope\nqueue",
+		},
+	})
+	resp := sendMCPRequest(t, client, baseURL, accessToken, mcpserver.MCPMessage{
+		JSONRPC: "2.0",
+		ID:      33,
+		Method:  "tools/call",
+		Params:  json.RawMessage(params),
+	})
+	if resp.Error == nil {
+		t.Fatalf("expected submit_job to reject a system-path executable, got result: %v", resp.Result)
+	}
+	if !strings.Contains(resp.Error.Message, "transfer_executable = False") {
+		t.Errorf("expected the fix in the error message, got: %s", resp.Error.Message)
+	}
+}
+
 func testMCPQueryJobs(t *testing.T, client *http.Client, baseURL, accessToken string, clusterID int) {
 	params := map[string]interface{}{
 		"name": "query_jobs",
