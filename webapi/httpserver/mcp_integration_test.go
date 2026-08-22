@@ -116,8 +116,11 @@ func TestMCPHTTPIntegration(t *testing.T) {
 
 	// An ephemeral port: this test's OAuth2 issuer and redirect URIs are
 	// built from the address, so it needs to know it before binding.
-	serverAddr := reserveLocalAddr(t)
-	baseURL := "http://" + serverAddr
+	// Hold the listener from the moment the kernel assigns the port and
+	// hand it to the server, so the address in the OAuth2 issuer below
+	// is one nothing else can claim in the meantime.
+	listener, baseURL := listenLocal(t)
+	serverAddr := listener.Addr().String()
 
 	// OAuth2 database path
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
@@ -143,7 +146,7 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	// Start server in background
 	serverErrChan := make(chan error, 1)
 	go func() {
-		serverErrChan <- server.Start()
+		serverErrChan <- server.ServeListener(listener, "http")
 	}()
 
 	// Wait for server to be ready

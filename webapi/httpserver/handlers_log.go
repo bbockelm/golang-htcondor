@@ -52,7 +52,13 @@ func (s *Handler) handleJobLog(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Confined to the caller's own job: this reads the user log out of
+	// the job's sandbox.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", "UserLog", "Iwd"},
 	})

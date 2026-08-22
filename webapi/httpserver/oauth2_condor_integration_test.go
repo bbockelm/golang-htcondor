@@ -108,8 +108,11 @@ func TestCondorScopesIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
 
 	// Start HTTP server
-	serverAddr := reserveLocalAddr(t)
-	baseURL := "http://" + serverAddr
+	// Hold the listener from the moment the kernel assigns the port and
+	// hand it to the server, so the address in the OAuth2 issuer below
+	// is one nothing else can claim in the meantime.
+	listener, baseURL := listenLocal(t)
+	serverAddr := listener.Addr().String()
 
 	server, err := NewServer(Config{
 		ListenAddr:               serverAddr,
@@ -129,7 +132,7 @@ func TestCondorScopesIntegration(t *testing.T) {
 	}
 
 	go func() {
-		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+		if err := server.ServeListener(listener, "http"); err != nil && err != http.ErrServerClosed {
 			t.Logf("Server error: %v", err)
 		}
 	}()

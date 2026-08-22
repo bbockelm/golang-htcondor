@@ -77,7 +77,11 @@ func (s *Handler) handleJobMatchAnalysis(w http.ResponseWriter, r *http.Request,
 	// analyzer doesn't care that the job no longer exists in the
 	// queue. Default behavior (no source param, or "live") still hits
 	// the live schedd query.
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, scopeErr := s.jobOwnerScope(ctx, r, cluster, proc)
+	if scopeErr != nil {
+		s.writeError(w, http.StatusBadRequest, scopeErr.Error())
+		return
+	}
 	source := r.URL.Query().Get("source")
 	projection := []string{"ClusterId", "ProcId", "Requirements", "Owner"}
 	var jobAds []*classad.ClassAd

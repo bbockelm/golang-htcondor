@@ -601,8 +601,15 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own
+	// unless they are an API-token caller or a Web UI admin. Job ad
+	// reads are gated only by the pool's READ policy, which is broad on
+	// most pools, so the schedd is not a backstop here.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Single-record GET returns the full ClassAd. The default
 	// projection is fine for the listing view, but detail pages need
@@ -659,8 +666,12 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Remove the job using the schedd RemoveJobs method
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
@@ -918,7 +929,37 @@ func (s *Handler) bulkOwnerScope(ctx context.Context, r *http.Request, raw strin
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 	}
-	return scopeToOwner(owner, raw)
+	return scopeToOwner(ownerFromActor(owner), raw)
+}
+
+// ownerFromActor maps an authenticated actor to the value HTCondor
+// stores in a job's Owner attribute: the bare username. An actor can
+// arrive qualified — a JWT subject is "user@domain" — while Owner never
+// is, so comparing them verbatim matches no jobs.
+//
+// The split is at the LAST "@", because "@" is legal in a Linux username
+// and SSSD issues names containing one: "foo@bar@uid.domain" is the user
+// "foo@bar".
+func ownerFromActor(actor string) string {
+	i := strings.LastIndex(actor, "@")
+	if i < 0 {
+		return actor
+	}
+	return actor[:i]
+}
+
+// jobOwnerScope confines a single-job request to the caller's own job,
+// under the same rule bulkOwnerScope applies to the bulk endpoints: a
+// browser session that is not a Web UI admin is scoped, an API-token
+// caller is left to the schedd's ACL, and an unparseable owner is an
+// error rather than a widening.
+//
+// Every endpoint that addresses a job by id goes through this, so a
+// non-admin session cannot read or act on another user's job by
+// guessing its cluster.proc — the listing endpoint has always enforced
+// that, and the by-id endpoints had not.
+func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
+	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
@@ -1552,8 +1593,13 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own:
+	// this streams the job's whole sandbox back.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Set up response as tar stream
 	w.Header().Set("Content-Type", "application/x-tar")
@@ -2026,7 +2072,11 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
@@ -2491,9 +2541,6 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-
 	// Now authenticate. We deliberately defer this until after the
 	// pure-input validation above so unauthenticated callers still
 	// get the more useful 400 for bad input. requireAuthentication
@@ -2506,6 +2553,15 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 			return
 		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Build constraint for specific job, confined to the caller's own:
+	// this reads a file out of the job's sandbox. Needs the actor, so
+	// it follows authentication.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -2545,7 +2601,11 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	}
 
 	// Query the job to get the output filename
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
 
 	opts := &htcondor.QueryOptions{

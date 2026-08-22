@@ -1093,27 +1093,23 @@ func getScheddAddress(localDir string, timeout time.Duration) (string, error) {
 }
 
 // waitForServer waits for the HTTP server to be ready
-// reserveLocalAddr returns a loopback address whose port the kernel just
-// handed out, for a server whose configuration needs its own URL before
-// it binds (an OAuth2 issuer, say). A hardcoded port fails whenever
-// anything else on the machine holds it — another suite, a parallel run,
-// a leftover process — and that failure looks like a product bug.
+// listenLocal binds a loopback listener on a kernel-assigned port and
+// returns it with the base URL it is reachable at. The listener is
+// handed to Server.ServeListener, so the port is held continuously from
+// the moment it is assigned: nothing else can take it in between, which
+// is the flaw in "bind, read the port, close, reconfigure, rebind".
 //
-// The listener is closed before returning, so there is a moment in which
-// something else could claim the port. Prefer ListenAddr "127.0.0.1:0"
-// plus Server.GetAddr for tests that do not need the URL up front; this
-// exists for the ones that do.
-func reserveLocalAddr(t *testing.T) string {
+// Tests need the URL before the server runs because it goes into the
+// configuration — the OAuth2 issuer is derived from it — and a
+// hardcoded port fails whenever anything else on the machine holds it.
+func listenLocal(t *testing.T) (net.Listener, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("could not reserve a local port: %v", err)
+		t.Fatalf("could not listen on a local port: %v", err)
 	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("could not release the reserved port: %v", err)
-	}
-	return addr
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln, "http://" + ln.Addr().String()
 }
 
 func waitForServer(baseURL string, timeout time.Duration) error {
