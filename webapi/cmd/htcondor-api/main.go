@@ -257,7 +257,28 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 // Priority order:
 // 1. Check local schedd address file (SCHEDD_ADDRESS_FILE)
 // 2. Query collector for schedds and use the first one (or filter by requestedName if provided)
-func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *logging.Logger, requestedName string) (addr, name string) {
+func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *logging.Logger, requestedName, requestedHost string) (addr, name string) {
+	target := htcondor.ParseScheddHost(requestedHost)
+
+	// SCHEDD_HOST points at a specific schedd, which is not necessarily
+	// the one whose address file is sitting on this machine — so when it
+	// is set, the local address files are not the answer.
+	if requestedName == "" && target.IsSet() {
+		if a := target.Address(); a != "" {
+			logger.Info(logging.DestinationSchedd, "Using the address in SCHEDD_HOST", "address", a)
+			return a, target.Name
+		}
+		if collector != nil {
+			logger.Info(logging.DestinationSchedd, "Querying collector for the schedd named by SCHEDD_HOST", "schedd_host", requestedHost)
+			return scheddFromCollector(collector, logger, target.CollectorConstraint(), requestedHost)
+		}
+		// Without a collector there is no way to turn a bare hostname
+		// into an address, so fall through to the local knobs rather
+		// than fail outright — and say why.
+		logger.Warn(logging.DestinationSchedd, "SCHEDD_HOST is set but no collector is configured; falling back to local schedd discovery",
+			"schedd_host", requestedHost)
+	}
+
 	// Try to find local schedd address file
 	if spoolDir, ok := cfg.Get("SPOOL"); ok && spoolDir != "" {
 		scheddAddrFile := filepath.Join(spoolDir, ".schedd_address")
@@ -296,62 +317,49 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 	if collector != nil {
 		if requestedName != "" {
 			logger.Info(logging.DestinationSchedd, "Querying collector for schedd", "name", requestedName)
-		} else {
-			logger.Info(logging.DestinationSchedd, "Querying collector for schedds")
+			return scheddFromCollector(collector, logger, fmt.Sprintf("Name == %q", requestedName), requestedName)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// Build constraint to filter by name if requested
-		constraint := ""
-		if requestedName != "" {
-			constraint = fmt.Sprintf("Name == \"%s\"", requestedName)
-		}
-
-		schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
-		if err != nil {
-			logger.Error(logging.DestinationSchedd, "Failed to query collector for schedds", "error", err)
-			return "", ""
-		}
-
-		if len(schedds) == 0 && requestedName != "" {
-			logger.Error(logging.DestinationSchedd, "Schedd not found in collector", "name", requestedName)
-			return "", ""
-		}
-
-		if len(schedds) > 0 {
-			// Use the first schedd
-			scheddAd := schedds[0]
-
-			// Extract MyAddress
-			if myAddr, ok := scheddAd.Lookup("MyAddress"); ok {
-				addrStr := myAddr.String()
-				// Remove quotes if present
-				addrStr = strings.Trim(addrStr, "\"")
-				if addrStr != "" {
-					addr = addrStr
-				}
-			}
-
-			// Extract Name
-			if nameExpr, ok := scheddAd.Lookup("Name"); ok {
-				nameStr := nameExpr.String()
-				// Remove quotes if present
-				nameStr = strings.Trim(nameStr, "\"")
-				if nameStr != "" {
-					name = nameStr
-				}
-			}
-
-			if addr != "" {
-				logger.Info(logging.DestinationSchedd, "Found schedd from collector", "name", name, "address", addr)
-				return addr, name
-			}
-		}
+		logger.Info(logging.DestinationSchedd, "Querying collector for schedds")
+		return scheddFromCollector(collector, logger, "", "")
 	}
 
 	logger.Warn(logging.DestinationSchedd, "Could not discover schedd - no local address file and no collector available")
 	return "", ""
+}
+
+// scheddFromCollector returns the address and name of the first ScheddAd
+// matching constraint. want describes what was asked for, for the
+// not-found log line; an empty want means "any schedd", which is not an
+// error worth logging as one.
+func scheddFromCollector(collector *htcondor.Collector, logger *logging.Logger, constraint, want string) (addr, name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
+	if err != nil {
+		logger.Error(logging.DestinationSchedd, "Failed to query collector for schedds", "error", err)
+		return "", ""
+	}
+	if len(schedds) == 0 {
+		if want != "" {
+			logger.Error(logging.DestinationSchedd, "Schedd not found in collector", "requested", want)
+		}
+		return "", ""
+	}
+
+	scheddAd := schedds[0]
+	if myAddr, ok := scheddAd.Lookup("MyAddress"); ok {
+		addr = strings.Trim(myAddr.String(), "\"")
+	}
+	if nameExpr, ok := scheddAd.Lookup("Name"); ok {
+		name = strings.Trim(nameExpr.String(), "\"")
+	}
+	if addr == "" {
+		logger.Error(logging.DestinationSchedd, "Schedd ad has no usable MyAddress", "name", name)
+		return "", ""
+	}
+	logger.Info(logging.DestinationSchedd, "Found schedd from collector", "name", name, "address", addr)
+	return addr, name
 }
 
 // discoverOIDCEndpoints performs OIDC discovery to find authorization, token, and userinfo endpoints
@@ -928,14 +936,19 @@ func dropPrivilegesIfRoot(cfg *config.Config) error {
 	return nil
 }
 
-// getScheddConfig extracts schedd configuration from CLI flags and config
-func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue string) {
+// getScheddConfig extracts schedd configuration from CLI flags and
+// config. SCHEDD_HOST is returned separately: HTCondor leaves it
+// undefined in most pools, so a value there is a deliberate instruction
+// to use that host's schedd, which outranks the local address file the
+// discovery below would otherwise prefer.
+func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue, scheddHostValue string) {
 	scheddNameValue = *scheddName
 	if scheddNameValue == "" {
 		scheddNameValue, _ = cfg.Get("SCHEDD_NAME")
 	}
 	scheddAddrValue = *scheddAddr
-	return scheddNameValue, scheddAddrValue
+	scheddHostValue, _ = cfg.Get("SCHEDD_HOST")
+	return scheddNameValue, scheddAddrValue, scheddHostValue
 }
 
 // getHTTPConfig extracts HTTP API configuration from config
@@ -1105,7 +1118,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	}
 
 	// Get schedd configuration
-	scheddNameValue, scheddAddrValue := getScheddConfig(cfg)
+	scheddNameValue, scheddAddrValue, scheddHostValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
 	listenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
@@ -1157,7 +1170,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
 		}
 		var discoveredName string
-		scheddAddrValue, discoveredName = discoverSchedd(cfg, collector, logger, scheddNameValue)
+		scheddAddrValue, discoveredName = discoverSchedd(cfg, collector, logger, scheddNameValue, scheddHostValue)
 		// If we discovered a name and didn't have one before, use it
 		if scheddNameValue == "" && discoveredName != "" {
 			scheddNameValue = discoveredName
@@ -1214,6 +1227,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ListenAddr:               listenAddrFromConfig,
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
+		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,
 		UserHeaderTrustedProxies: loadUserHeaderTrustedProxies(cfg),
 		UserHeaderTrustAnyUnsafe: loadUserHeaderTrustAnyUnsafe(cfg),
