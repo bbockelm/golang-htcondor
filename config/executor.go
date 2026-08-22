@@ -112,6 +112,13 @@ func (c *Config) executeConditional(cond *Conditional) error {
 
 // executeInclude executes an include directive
 func (c *Config) executeInclude(inc *IncludeDirective) error {
+	// Every form of include reads a file or runs a command on the host
+	// doing the parsing, so all of them are off when the text being
+	// parsed is not this host's own configuration.
+	if c.options.NoLocalAccess {
+		return fmt.Errorf("%q directives are not allowed here: this text is parsed without access to the local host", inc.Type)
+	}
+
 	// Expand macros in the path
 	path, err := c.expandMacrosWithFunctions(inc.Path)
 	if err != nil {

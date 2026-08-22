@@ -64,6 +64,17 @@ type ConfigOptions struct {
 	// tracked as intentional divergences.)
 	HTCondorCompat bool
 
+	// NoLocalAccess, when true, refuses every parse-time construct that
+	// touches the host doing the parsing: `include` and `include
+	// command` directives (the latter runs a shell command) and the
+	// $ENV() macro function. Set it when parsing configuration text
+	// that arrived from somewhere else — a submit file posted to an API
+	// daemon, say — so a remote caller cannot make the parse read the
+	// daemon's files or environment, or run commands as the daemon's
+	// user. Off by default: loading a real configuration chain needs
+	// all three.
+	NoLocalAccess bool
+
 	// SkipDefaults, when true, suppresses initBuiltins(): no param_info
 	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
 	// no auto-detected macros (FULL_HOSTNAME, DETECTED_CPUS, TILDE, ...). The
@@ -99,10 +110,17 @@ func New() (*Config, error) {
 // NewEmpty creates a new empty Config without loading from environment
 // This is useful for submit files where we want to parse explicitly
 func NewEmpty() *Config {
+	return NewEmptyWithOptions(ConfigOptions{})
+}
+
+// NewEmptyWithOptions is NewEmpty with parse options — notably
+// NoLocalAccess, for parsing text that came from a remote caller.
+func NewEmptyWithOptions(opts ConfigOptions) *Config {
 	cfg := &Config{
 		values:        make(map[string]string),
 		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
+		options:       opts,
 	}
 
 	// Initialize with built-in macros and param defaults
