@@ -254,8 +254,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// miss falls through to the schedd below with no visible difference
 	// beyond the "source" field.
 	if ownedByMe && pageToken == "" {
-		if ads, note, routed := s.jobsFromMirror(ctx, constraint, projection, limit, pageToken, owner); routed {
-			s.writeMirrorJobs(w, ads, note)
+		if s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, owner) {
 			return
 		}
 	}

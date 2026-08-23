@@ -170,3 +170,28 @@ func TestParseAd(t *testing.T) {
 		t.Errorf("job-queue freshness wrong: %+v", info)
 	}
 }
+
+// TestHistoryDecisionPaginationAndScanLimit covers the two cases the
+// REST archive endpoint actually produces. A keyset-paginated request
+// carries its cursor inside the constraint, so nothing about pagination
+// should keep it off the mirror — the archive scans newest-first, which
+// is the order that cursor walks. An explicit scan_limit does keep it
+// off, because that budget describes the schedd's scan of the history
+// file and the archive has no equivalent.
+func TestHistoryDecisionPaginationAndScanLimit(t *testing.T) {
+	fresh := &Info{Address: "<10.0.0.1:9619>", SecondsSinceSync: 5}
+
+	paged := &htcondor.HistoryQueryOptions{
+		Backwards: true,
+		// What handleHistoryQuery builds from before_cluster/before_proc.
+		Projection: []string{"ClusterId", "ProcId"},
+	}
+	if use, reason := HistoryDecision(fresh, paged); !use {
+		t.Errorf("a paginated archive request must be served from the mirror, got: %s", reason)
+	}
+
+	budgeted := &htcondor.HistoryQueryOptions{Backwards: true, ScanLimit: 10000}
+	if use, _ := HistoryDecision(fresh, budgeted); use {
+		t.Error("an explicit scan_limit must keep the query on the schedd")
+	}
+}

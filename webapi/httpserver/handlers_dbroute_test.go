@@ -2,13 +2,10 @@ package httpserver
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -38,16 +35,16 @@ func TestMirrorRoutingDisabledFallsThrough(t *testing.T) {
 	h := &Handler{dbMirror: dbmirror.NewLocator(nil, nil)}
 	ctx := context.Background()
 
-	if _, _, ok := h.jobsFromMirror(ctx, "true", nil, 50, "", "alice"); ok {
+	if h.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice") {
 		t.Error("jobs routing must decline when no mirror is configured")
 	}
-	if _, _, ok := h.historyFromMirror(ctx, "true", &htcondor.HistoryQueryOptions{Backwards: true}); ok {
+	if h.historyFromMirror(ctx, httptest.NewRecorder(), "true", &htcondor.HistoryQueryOptions{Backwards: true}) {
 		t.Error("history routing must decline when no mirror is configured")
 	}
 
 	// A Handler that never got a locator at all (zero value) must not panic.
 	var bare Handler
-	if _, _, ok := bare.jobsFromMirror(ctx, "true", nil, 50, "", "alice"); ok {
+	if bare.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice") {
 		t.Error("jobs routing must decline with no locator")
 	}
 }
@@ -64,45 +61,33 @@ func TestMirrorJobsRoutingRequiresAnOwner(t *testing.T) {
 	if !h.dbMirror.Enabled() {
 		t.Fatal("expected the locator to report enabled")
 	}
-	if _, _, ok := h.jobsFromMirror(context.Background(), "true", nil, 50, "", ""); ok {
+	if h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "") {
 		t.Error("jobs routing must decline without an authenticated owner")
 	}
 }
 
-// TestWriteMirrorJobsShape pins the response a mirror-served job listing
-// produces: the same envelope the streaming schedd path writes, plus the
-// provenance fields, and never has_more (routing declines paginated or
-// oversized results upstream).
-func TestWriteMirrorJobsShape(t *testing.T) {
-	h := &Handler{}
-	ad := classad.New()
-	ad.InsertAttr("ClusterId", 12)
-	ad.InsertAttr("ProcId", 0)
+// TestMirrorDeclineWritesNothing is what makes the schedd fallback safe:
+// a routing decision that declines must leave the response untouched, or
+// the caller would append a second body to a half-written one.
+func TestMirrorDeclineWritesNothing(t *testing.T) {
+	h := &Handler{dbMirror: dbmirror.NewLocator(nil, nil)}
+	ctx := context.Background()
 
 	rec := httptest.NewRecorder()
-	h.writeMirrorJobs(rec, []*classad.ClassAd{ad}, "[source: htcondordb mirror \"db\"]")
+	if h.jobsFromMirror(ctx, rec, "true", nil, 50, "", "alice") {
+		t.Fatal("expected the jobs route to decline")
+	}
+	if rec.Body.Len() != 0 || rec.Flushed {
+		t.Errorf("declining wrote %d bytes (flushed=%v); the schedd fallback would corrupt the response",
+			rec.Body.Len(), rec.Flushed)
+	}
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	rec = httptest.NewRecorder()
+	if h.historyFromMirror(ctx, rec, "true", &htcondor.HistoryQueryOptions{Backwards: true}) {
+		t.Fatal("expected the history route to decline")
 	}
-	var got struct {
-		Jobs          []map[string]interface{} `json:"jobs"`
-		TotalReturned int                      `json:"total_returned"`
-		HasMore       bool                     `json:"has_more"`
-		Source        string                   `json:"source"`
-		SourceNote    string                   `json:"source_note"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("response is not the documented shape: %v (%s)", err, rec.Body.String())
-	}
-	if len(got.Jobs) != 1 || got.TotalReturned != 1 {
-		t.Errorf("jobs=%d total_returned=%d, want 1 and 1", len(got.Jobs), got.TotalReturned)
-	}
-	if got.HasMore {
-		t.Error("has_more must be false on a mirror-served listing")
-	}
-	if got.Source != "htcondordb" || got.SourceNote == "" {
-		t.Errorf("provenance missing: source=%q note=%q", got.Source, got.SourceNote)
+	if rec.Body.Len() != 0 {
+		t.Errorf("declining wrote %d bytes", rec.Body.Len())
 	}
 }
 

@@ -149,7 +149,9 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// Parse scan_limit parameter
 	// Default to 10k to prevent timeouts on large pools
 	scanLimit := 10000
+	scanLimitExplicit := false
 	if scanLimitStr := r.URL.Query().Get("scan_limit"); scanLimitStr != "" {
+		scanLimitExplicit = true
 		if scanLimitStr == "*" {
 			scanLimit = -1 // unlimited
 		} else {
@@ -251,8 +253,17 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// job-history source is mirrored, and only an owner-scoped query is
 	// routed. Any miss falls through to the schedd.
 	if scoped && baseOpts.Source == htcondor.HistorySourceJobHistory {
-		if ads, note, routed := s.historyFromMirror(ctx, constraint, opts); routed {
-			s.writeJSON(w, http.StatusOK, HistoryListResponse{Ads: ads, Source: "htcondordb", SourceNote: note})
+		// scan_limit is a budget for the schedd's backwards scan of the
+		// history FILE; the archive prunes by zone map and has no
+		// equivalent, so HistoryDecision treats it as a reason to stay
+		// on the schedd. Only an explicit one should count: this
+		// endpoint defaults it to 10k, and passing that default through
+		// would mean the mirror never served an archive request at all.
+		mirrorOpts := *opts
+		if !scanLimitExplicit {
+			mirrorOpts.ScanLimit = 0
+		}
+		if s.historyFromMirror(ctx, w, constraint, &mirrorOpts) {
 			return
 		}
 	}

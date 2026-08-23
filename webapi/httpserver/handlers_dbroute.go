@@ -2,8 +2,9 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -32,27 +33,33 @@ import (
 // caller can see.
 
 // jobsFromMirror tries to serve a live job listing from the mirror's
-// "jobs" table (the mirrored job_queue.log). owner must be the
-// authenticated caller, and the result is confined to their jobs.
+// "jobs" table (the mirrored job_queue.log), writing the response
+// itself. owner must be the authenticated caller; the result is
+// confined to their jobs.
 //
-// A paginated request is left to the schedd today (JobsDecision
-// declines on a page token), and a result larger than the caller's
-// limit falls back too. Both are the same missing piece: an ordered
-// scan the client can resume. The database has one — dbrpc's Ordered
-// says so outright, "the server-side resume cursor is not carried over
-// the wire" — so pagination is the case the mirror should be BEST at,
-// not the case it declines. See the note on mirrorQuery.
-func (s *Handler) jobsFromMirror(ctx context.Context, constraint string, projection []string, limit int, pageToken, owner string) (ads []*classad.ClassAd, note string, ok bool) {
+// Returns false only while nothing has been written, so the caller can
+// still fall back to the schedd. Once the first row is on the wire the
+// mirror owns the response, and a failure after that is reported the
+// way the schedd path reports one: the JSON footer carries an "error"
+// field and the array stops there. Buffering a whole result to preserve
+// a fallback that a half-written response has already forfeited buys
+// nothing.
+//
+// Still declined: a paginated request (JobsDecision), because the
+// mutable "jobs" table has no documented scan order, so a keyset cursor
+// over it would silently repeat or skip rows if that order ever
+// changed. The archive path below has no such problem.
+func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, projection []string, limit int, pageToken, owner string) bool {
 	if !s.dbMirror.Enabled() || owner == "" {
-		return nil, "", false
+		return false
 	}
 	info, err := s.dbMirror.Discover(ctx)
 	if err != nil {
-		return nil, "", false
+		return false
 	}
 	useDB, reason := dbmirror.JobsDecision(info, pageToken, time.Now().Unix())
 	if !useDB {
-		return nil, "", false
+		return false
 	}
 
 	// Confine to the caller's own jobs. scopeToOwner re-serializes the
@@ -61,99 +68,151 @@ func (s *Handler) jobsFromMirror(ctx context.Context, constraint string, project
 	// widened.
 	scoped, err := scopeToOwner(ownerFromActor(owner), constraint)
 	if err != nil {
-		return nil, "", false
+		return false
 	}
 
-	ads, ok = s.mirrorQuery(ctx, "jobs", scoped, projection, limit)
-	if !ok {
-		return nil, "", false
-	}
-	return ads, dbmirror.Provenance(info, reason), true
+	return s.streamMirrorRows(ctx, w, "jobs", scoped, projection, limit,
+		"jobs", dbmirror.Provenance(info, reason))
 }
 
-// historyFromMirror tries to serve a completed-job (archive) listing
-// from the mirror's "history" table. constraint must already be
-// confined to the caller's own records; see the package comment.
-func (s *Handler) historyFromMirror(ctx context.Context, constraint string, opts *htcondor.HistoryQueryOptions) (ads []*classad.ClassAd, note string, ok bool) {
+// historyFromMirror tries to serve a completed-job listing from the
+// mirror's "history" archive, writing the response itself. constraint
+// must already be confined to the caller's own records; see the package
+// comment.
+//
+// The archive returns matches newest first with the limit pushed down
+// (ArchiveTable.QueryRawProjected), which is exactly condor_history's
+// "last K" contract — so this path neither sorts nor over-fetches, and
+// the keyset cursor the endpoint already accepts (before_cluster /
+// before_proc) rides in the constraint. A paginated archive request is
+// therefore one the mirror serves rather than declines.
+func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, opts *htcondor.HistoryQueryOptions) bool {
 	if !s.dbMirror.Enabled() {
-		return nil, "", false
+		return false
 	}
 	info, err := s.dbMirror.Discover(ctx)
 	if err != nil {
-		return nil, "", false
+		return false
 	}
 	useDB, reason := dbmirror.HistoryDecision(info, opts)
 	if !useDB {
-		return nil, "", false
+		return false
 	}
 
-	ads, ok = s.mirrorQuery(ctx, "history", constraint, opts.Projection, opts.Limit)
-	if !ok {
-		return nil, "", false
-	}
-	// The mirror has no reverse-chronological cursor, so ordering is
-	// applied here over the complete matching set (mirrorQuery declines
-	// anything larger than the limit for exactly this reason).
-	sort.SliceStable(ads, func(i, j int) bool {
-		return dbmirror.RecencyKey(ads[i]) > dbmirror.RecencyKey(ads[j])
-	})
-	return ads, dbmirror.Provenance(info, reason), true
+	return s.streamMirrorRows(ctx, w, "history", constraint, opts.Projection, opts.Limit,
+		"ads", dbmirror.Provenance(info, reason))
 }
 
-// mirrorQuery runs one bounded read against a mirror table and parses
-// the rows. It declines (ok=false) when the matching set is larger than
-// the limit: a mirror read has no cursor, so the fetched subset is not
-// guaranteed to be the newest or the "first" rows by any ordering the
-// caller asked for — the schedd owns that case.
-func (s *Handler) mirrorQuery(ctx context.Context, table, constraint string, projection []string, limit int) ([]*classad.ClassAd, bool) {
+// streamMirrorRows runs one bounded read against a mirror table and
+// writes the rows out as they arrive, under the JSON key the endpoint
+// uses ("jobs" or "ads").
+//
+// It returns false only if it gave up before writing anything, which is
+// the caller's signal to use the schedd. After the first row it always
+// returns true: the response is committed, and any later failure is
+// reported inside it.
+func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, table, constraint string, projection []string, limit int, key, note string) bool {
 	effLimit := dbmirror.ClampLimit(limit)
 
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {
 		s.logger.Debug(logging.DestinationHTTP, "htcondordb mirror unavailable; using the schedd", "table", table, "error", err)
-		return nil, false
+		return false
 	}
 	defer closer()
 
-	// Stream the rows and decode as they arrive, rather than taking the
-	// whole result as a []string and converting it afterwards: that
-	// held two copies of every row, and the decode could not start
-	// until the last one landed.
-	//
-	// Ask for one past the limit to detect the truncation case above.
-	// The response is still assembled before anything is written to the
-	// client, because until the stream ends we do not know whether the
-	// mirror can answer completely — and once a byte is on the wire the
-	// fallback to the schedd is gone. Bounded by MaxLimit either way.
-	ads := make([]*classad.ClassAd, 0, min(effLimit+1, 256))
-	overflow := false
-	var parseErr error
+	var (
+		written  int
+		hasMore  bool
+		streamed bool
+		failure  string
+	)
+	// One past the limit, so a full page can report whether more
+	// matched without a second round trip. The extra row is not written.
 	err = dbc.QueryRawProjectStream(ctx, table, constraint, projection, effLimit+1, func(row string) bool {
-		if len(ads) >= effLimit {
-			overflow = true
-			return false // stop the stream; the schedd will answer
+		if written >= effLimit {
+			hasMore = true
+			return false
 		}
 		ad, perr := classad.ParseOld(row)
 		if perr != nil {
-			// A corrupt row means falling back, not silently dropping
-			// records from the caller's result.
-			parseErr = perr
+			failure = "unparseable row from the htcondordb mirror"
+			s.logger.Warn(logging.DestinationHTTP, failure, "table", table, "error", perr)
 			return false
 		}
-		ads = append(ads, ad)
+		adJSON, jerr := json.Marshal(ad)
+		if jerr != nil {
+			failure = "could not encode a row from the htcondordb mirror"
+			s.logger.Error(logging.DestinationHTTP, failure, "table", table, "error", jerr)
+			return false
+		}
+
+		if !streamed {
+			// First row: the mirror owns this response from here on.
+			streamed = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if _, werr := fmt.Fprintf(w, `{%q:[`, key); werr != nil {
+				failure = "write failed"
+				return false
+			}
+		} else if _, werr := w.Write([]byte(",")); werr != nil {
+			failure = "write failed"
+			return false
+		}
+		if _, werr := w.Write(adJSON); werr != nil {
+			failure = "write failed"
+			return false
+		}
+		written++
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
 		return true
 	})
+
 	switch {
-	case err != nil:
-		s.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed; using the schedd", "table", table, "error", err)
-		return nil, false
-	case parseErr != nil:
-		s.logger.Warn(logging.DestinationHTTP, "unparseable row from the htcondordb mirror; using the schedd", "table", table, "error", parseErr)
-		return nil, false
-	case overflow:
-		return nil, false
+	case !streamed && (err != nil || failure != ""):
+		// Nothing written, so the schedd can still answer.
+		s.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed before any row; using the schedd",
+			"table", table, "error", err, "failure", failure)
+		return false
+	case !streamed:
+		// A complete, empty answer is still an answer.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, werr := fmt.Fprintf(w, `{%q:[`, key); werr != nil {
+			s.logger.Error(logging.DestinationHTTP, "failed to write the mirror response header", "error", werr)
+			return true
+		}
 	}
-	return ads, true
+
+	if err != nil && failure == "" {
+		failure = err.Error()
+	}
+	// Build the footer through the JSON encoder rather than by
+	// formatting strings: the provenance note and any failure text come
+	// from the mirror, and hand-quoting values into a response body is
+	// how escaping bugs start. Marshal an object, then splice it in
+	// after the array by dropping its opening brace.
+	tail := map[string]interface{}{
+		"total_returned": written,
+		"has_more":       hasMore,
+		"source":         "htcondordb",
+		"source_note":    note,
+	}
+	if failure != "" {
+		tail["error"] = failure
+	}
+	tailJSON, mErr := json.Marshal(tail)
+	if mErr != nil || len(tailJSON) < 2 {
+		s.logger.Error(logging.DestinationHTTP, "failed to encode the mirror response footer", "error", mErr)
+		tailJSON = []byte(`{"source":"htcondordb"}`)
+	}
+	if _, werr := w.Write(append([]byte("],"), tailJSON[1:]...)); werr != nil {
+		s.logger.Error(logging.DestinationHTTP, "failed to write the mirror response footer", "error", werr)
+	}
+	return true
 }
 
 // ownerFromActor maps an authenticated actor to the value HTCondor
@@ -165,20 +224,4 @@ func ownerFromActor(actor string) string {
 		return actor
 	}
 	return name
-}
-
-// writeMirrorJobs writes a mirror-served job listing in the same shape
-// the streaming schedd path produces, plus the provenance fields. There
-// is no pagination: routing only happens for an unpaginated request, and
-// a result larger than the limit is declined upstream, so has_more is
-// always false here.
-func (s *Handler) writeMirrorJobs(w http.ResponseWriter, ads []*classad.ClassAd, note string) {
-	payload := map[string]interface{}{
-		"jobs":           ads,
-		"total_returned": len(ads),
-		"has_more":       false,
-		"source":         "htcondordb",
-		"source_note":    note,
-	}
-	s.writeJSON(w, http.StatusOK, payload)
 }
