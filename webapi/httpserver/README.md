@@ -387,6 +387,13 @@ HTTP_API_OAUTH2_USERINFO_URL = https://idp.example.com/userinfo
 # The groups can be returned as either a JSON array or space-delimited string
 HTTP_API_OAUTH2_GROUPS_CLAIM = groups
 
+# Schedd selection (optional)
+# SCHEDD_HOST names the schedd to talk to when neither -schedd nor SCHEDD_NAME
+# is set: "hostname", "name@hostname", or either with a ":port". HTCondor leaves
+# it undefined in most pools, so a value here is taken as deliberate and beats
+# both the local schedd address file and picking one out of the collector.
+SCHEDD_HOST = submit@ap1.example.edu
+
 # Group-Based Access Control (optional)
 # Control access to MCP endpoints and scope granting based on group membership
 
@@ -646,7 +653,7 @@ curl -X POST https://htcondor.example.com/mcp \
     "jsonrpc": "2.0",
     "method": "job.submit",
     "params": {
-      "submit_file": "executable=/bin/echo\narguments=Hello from MCP\nqueue"
+      "submit_file": "executable = /bin/echo\ntransfer_executable = False\narguments = Hello from MCP\nqueue"
     },
     "id": 1
   }'

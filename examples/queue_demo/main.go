@@ -37,7 +37,9 @@ queue item in (alpha, beta, gamma)
 	result2, _ := sf2.Submit(1001)
 	fmt.Printf("Created %d jobs (Cluster %d)\n\n", result2.NumProcs, result2.ClusterID)
 
-	// Example 3: Queue from file
+	// Example 3: Queue from file. Reading an itemdata file (and the
+	// glob in example 4) needs AllowLocalAccess: this demo is the local
+	// user, unlike a daemon parsing a submit file it received.
 	fmt.Println("Example 3: Queue from file")
 	fmt.Println("==========================")
 
@@ -60,7 +62,7 @@ output = result_$(datafile).out
 queue datafile from "%s"
 `, tmpFile.Name())
 
-	sf3, _ := htcondor.ParseSubmitFile(strings.NewReader(submit3))
+	sf3, _ := htcondor.ParseSubmitFileWithOptions(strings.NewReader(submit3), htcondor.SubmitParseOptions{AllowLocalAccess: true})
 	result3, _ := sf3.Submit(1002)
 	fmt.Printf("Created %d jobs (Cluster %d)\n\n", result3.NumProcs, result3.ClusterID)
 
@@ -89,7 +91,7 @@ arguments = $(ITEM)
 output = processed_$(ITEM).out
 queue matching "data*.txt"
 `
-	sf4, _ := htcondor.ParseSubmitFile(strings.NewReader(submit4))
+	sf4, _ := htcondor.ParseSubmitFileWithOptions(strings.NewReader(submit4), htcondor.SubmitParseOptions{AllowLocalAccess: true})
 	result4, _ := sf4.Submit(1003)
 	fmt.Printf("Created %d jobs (Cluster %d)\n\n", result4.NumProcs, result4.ClusterID)
 

@@ -750,27 +750,24 @@ A = yyy
 	}
 }
 
+// TestCircularIncludeDetection covers the guard on the root
+// configuration file: a file that includes itself must be reported
+// rather than recursed. Exercised through parseConfigFile, which is the
+// path loadConfigFileChain uses.
 func TestCircularIncludeDetection(t *testing.T) {
-	cfg := &Config{
-		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
-		includedFiles: make(map[string]bool),
+	dir := t.TempDir()
+	root := filepath.Join(dir, "condor_config")
+	if err := os.WriteFile(root, []byte("FOO = bar\ninclude : "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	// Simulate including the same file twice
-	err := cfg.parseReader(strings.NewReader("FOO=bar"), "/test/config")
-	if err != nil {
-		t.Fatalf("First include failed: %v", err)
-	}
-
-	// Second include should fail
-	err = cfg.parseReader(strings.NewReader("BAZ=qux"), "/test/config")
+	cfg := NewEmpty()
+	err := cfg.parseConfigFile(root)
 	if err == nil {
-		t.Error("Expected error for circular include, got nil")
+		t.Fatal("expected a circular include error")
 	}
-
 	if !strings.Contains(err.Error(), "circular include") {
-		t.Errorf("Expected 'circular include' error, got: %v", err)
+		t.Errorf("expected 'circular include', got: %v", err)
 	}
 }
 

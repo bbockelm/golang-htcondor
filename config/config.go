@@ -24,7 +24,6 @@ package config
 //go:generate go run ../param/generate.go
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -64,6 +63,17 @@ type ConfigOptions struct {
 	// tracked as intentional divergences.)
 	HTCondorCompat bool
 
+	// NoLocalAccess, when true, refuses every parse-time construct that
+	// touches the host doing the parsing: `include` and `include
+	// command` directives (the latter runs a shell command) and the
+	// $ENV() macro function. Set it when parsing configuration text
+	// that arrived from somewhere else — a submit file posted to an API
+	// daemon, say — so a remote caller cannot make the parse read the
+	// daemon's files or environment, or run commands as the daemon's
+	// user. Off by default: loading a real configuration chain needs
+	// all three.
+	NoLocalAccess bool
+
 	// SkipDefaults, when true, suppresses initBuiltins(): no param_info
 	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
 	// no auto-detected macros (FULL_HOSTNAME, DETECTED_CPUS, TILDE, ...). The
@@ -99,10 +109,17 @@ func New() (*Config, error) {
 // NewEmpty creates a new empty Config without loading from environment
 // This is useful for submit files where we want to parse explicitly
 func NewEmpty() *Config {
+	return NewEmptyWithOptions(ConfigOptions{})
+}
+
+// NewEmptyWithOptions is NewEmpty with parse options — notably
+// NoLocalAccess, for parsing text that came from a remote caller.
+func NewEmptyWithOptions(opts ConfigOptions) *Config {
 	cfg := &Config{
 		values:        make(map[string]string),
 		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
+		options:       opts,
 	}
 
 	// Initialize with built-in macros and param defaults
@@ -1094,75 +1111,6 @@ func (c *Config) expandMetaknobParam(param string) string {
 	}
 }
 
-// parseReader parses configuration from an io.Reader
-func (c *Config) parseReader(r io.Reader, filename string) error {
-	if filename != "" {
-		// Track included file to prevent cycles
-		if c.includedFiles[filename] {
-			return fmt.Errorf("circular include detected: %s", filename)
-		}
-		c.includedFiles[filename] = true
-	}
-
-	scanner := bufio.NewScanner(r)
-	var currentLine string
-	lineNum := 0
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-
-		// Handle line continuation
-		if strings.HasSuffix(strings.TrimSpace(line), "\\") {
-			currentLine += strings.TrimSuffix(strings.TrimRight(line, " \t"), "\\")
-			continue
-		}
-
-		currentLine += line
-
-		// Process the complete line
-		if err := c.parseLine(currentLine); err != nil {
-			return fmt.Errorf("line %d: %w", lineNum, err)
-		}
-
-		currentLine = ""
-	}
-
-	return scanner.Err()
-}
-
-// parseLine parses a single configuration line
-//
-//nolint:unparam // Returns error for interface consistency with other parse functions
-func (c *Config) parseLine(line string) error {
-	// Trim whitespace
-	line = strings.TrimSpace(line)
-
-	// Skip empty lines and comments
-	if line == "" || strings.HasPrefix(line, "#") {
-		return nil
-	}
-
-	// Skip [Section] headers
-	if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-		return nil
-	}
-
-	// Find the = operator
-	eqIdx := strings.Index(line, "=")
-	if eqIdx == -1 {
-		return nil // Not an assignment, skip
-	}
-
-	key := strings.TrimSpace(line[:eqIdx])
-	value := strings.TrimSpace(line[eqIdx+1:])
-
-	// Store the value
-	c.Set(key, value)
-
-	return nil
-}
-
 // LoadFromEnvironment loads configuration from the process environment.
 //
 // The configuration file chain is read first, then _CONDOR_<PARAM> environment
@@ -1238,6 +1186,13 @@ func (c *Config) applyCondorEnvOverrides() {
 }
 
 // parseConfigFile opens and parses a single configuration file at path.
+//
+// The root file gets the same grammar as every other configuration
+// source (parseAndExecute): include, include command, use, if/else and
+// heredocs all work here. It used to be read by a KEY = VALUE scanner
+// instead, which silently dropped all of that — a root file that was a
+// thin wrapper around `include : <real config>` came up with nothing
+// but defaults and no diagnostic.
 func (c *Config) parseConfigFile(path string) (err error) {
 	//nolint:gosec // G304: config path comes from CONDOR_CONFIG / known defaults
 	f, err := os.Open(path)
@@ -1249,7 +1204,21 @@ func (c *Config) parseConfigFile(path string) (err error) {
 			err = fmt.Errorf("failed to close config file: %w", cerr)
 		}
 	}()
-	return c.parseReader(f, path)
+
+	// Cycle guard, keyed the way includeFile keys it, so a root file
+	// that includes itself (directly or around a chain) is reported
+	// rather than recursed.
+	absPath, absErr := filepath.Abs(path)
+	if absErr != nil {
+		absPath = path
+	}
+	if c.includedFiles[absPath] {
+		return fmt.Errorf("circular include detected: %s", path)
+	}
+	c.includedFiles[absPath] = true
+	defer delete(c.includedFiles, absPath)
+
+	return c.parseAndExecute(f)
 }
 
 // processLocalConfigDir processes directories listed in LOCAL_CONFIG_DIR.

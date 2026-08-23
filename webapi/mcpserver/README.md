@@ -67,10 +67,17 @@ Submit an HTCondor job using a submit file.
 {
   "name": "submit_job",
   "arguments": {
-    "submit_file": "executable=/bin/echo\narguments=Hello World\nqueue"
+    "submit_file": "executable = /bin/echo\ntransfer_executable = False\narguments = Hello World\nqueue"
   }
 }
 ```
+
+**Two submit-language rules:** a system-path executable requires
+`transfer_executable = False` (submit_job rejects it otherwise, since HTCondor
+would spool-copy an executable that is not there and the job would hold), and
+`$(...)` is macro expansion, not shell substitution — to run shell commands,
+upload a script with `upload_job_input` and name it as the `executable`.
+submit_job warns about `$(...)` references nothing defines.
 
 ### query_jobs
 

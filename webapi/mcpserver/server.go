@@ -68,8 +68,14 @@ type TokenInfo struct {
 
 // Config holds server configuration
 type Config struct {
-	ScheddName      string               // Schedd name
-	ScheddAddr      string               // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	ScheddName string // Schedd name
+	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// ScheddHost is the SCHEDD_HOST setting: the host (optionally
+	// "name@host", optionally with a port) whose schedd this server
+	// should talk to. Consulted when neither ScheddAddr nor ScheddName
+	// is set, and it selects that host's schedd rather than whichever
+	// one the collector lists first.
+	ScheddHost      string
 	Schedd          *htcondor.Schedd     // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
 	SigningKeyPath  string               // Path to token signing key (optional, for token generation)
 	TrustDomain     string               // Trust domain for token issuer (optional)
@@ -130,7 +136,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 			logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
 			var err error
-			scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, 10*time.Second, logger)
+			scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
 			if err != nil {
 				return nil, fmt.Errorf("failed to discover schedd: %w", err)
 			}
@@ -197,13 +203,23 @@ func NewServer(cfg Config) (*Server, error) {
 }
 
 // discoverSchedd discovers a schedd from the collector
-func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout time.Duration, _ *logging.Logger) (string, error) {
+func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string, timeout time.Duration, _ *logging.Logger) (string, error) {
+	// A SCHEDD_HOST carrying a port is already an address; nothing to
+	// look up.
+	target := htcondor.ParseScheddHost(scheddHost)
+	if scheddName == "" && target.Address() != "" {
+		return target.Address(), nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	constraint := "true"
-	if scheddName != "" {
+	switch {
+	case scheddName != "":
 		constraint = fmt.Sprintf("Name == %q", scheddName)
+	case target.IsSet():
+		constraint = target.CollectorConstraint()
 	}
 
 	ads, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
@@ -212,8 +228,11 @@ func discoverSchedd(collector *htcondor.Collector, scheddName string, timeout ti
 	}
 
 	if len(ads) == 0 {
-		if scheddName != "" {
+		switch {
+		case scheddName != "":
 			return "", fmt.Errorf("schedd '%s' not found in collector", scheddName)
+		case target.IsSet():
+			return "", fmt.Errorf("no schedd for SCHEDD_HOST %q found in collector", scheddHost)
 		}
 		return "", fmt.Errorf("no schedds found in collector")
 	}

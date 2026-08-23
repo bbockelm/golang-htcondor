@@ -107,3 +107,82 @@ func describeSource(path, host string) string {
 		return host
 	}
 }
+
+// ScheddTarget is what a SCHEDD_HOST setting points at. HTCondor
+// documents the knob as "the host name of the machine where the
+// condor_schedd is running for your pool", with the name included as
+// name@hostname when that host sets SCHEDD_NAME or MASTER_NAME. It is
+// undefined in most pools, so a defined value is a deliberate
+// instruction to talk to that schedd rather than whichever one happens
+// to be local or first in the collector.
+type ScheddTarget struct {
+	// Name is the schedd's name when SCHEDD_HOST was written as
+	// name@hostname, otherwise empty.
+	Name string
+	// Host is the machine the schedd runs on. May carry a ":port"
+	// suffix, in which case Address reports it as a directly dialable
+	// address and no collector lookup is needed.
+	Host string
+}
+
+// ParseScheddHost splits a SCHEDD_HOST value into its parts. An empty or
+// whitespace-only value yields the zero ScheddTarget, whose IsSet
+// reports false.
+func ParseScheddHost(value string) ScheddTarget {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ScheddTarget{}
+	}
+	// Rightmost '@' wins: a schedd name may itself contain one
+	// ("submit@cluster@host" is not valid HTCondor, but splitting from
+	// the right is the reading that keeps the host intact).
+	if i := strings.LastIndex(value, "@"); i >= 0 {
+		return ScheddTarget{Name: strings.TrimSpace(value[:i]), Host: strings.TrimSpace(value[i+1:])}
+	}
+	return ScheddTarget{Host: value}
+}
+
+// IsSet reports whether the target names anything.
+func (t ScheddTarget) IsSet() bool { return t.Name != "" || t.Host != "" }
+
+// Address returns a directly dialable address when SCHEDD_HOST included
+// a port, and "" when the target still has to be looked up in the
+// collector.
+func (t ScheddTarget) Address() string {
+	if t.Host == "" {
+		return ""
+	}
+	// A bracketed IPv6 literal with a port ("[::1]:9618") or a
+	// host:port pair. A bare IPv6 literal has more than one colon and
+	// no brackets, which is not a port.
+	if strings.HasPrefix(t.Host, "[") {
+		if i := strings.LastIndex(t.Host, "]:"); i >= 0 {
+			return t.Host
+		}
+		return ""
+	}
+	if strings.Count(t.Host, ":") == 1 {
+		return t.Host
+	}
+	return ""
+}
+
+// CollectorConstraint returns the ClassAd constraint that selects this
+// target's ScheddAd in the collector, or "" when the target names
+// nothing to constrain on.
+func (t ScheddTarget) CollectorConstraint() string {
+	switch {
+	case t.Name != "" && t.Host != "":
+		// Both known: the name identifies the schedd, and HTCondor
+		// spells a named schedd's Name as "name@hostname".
+		return fmt.Sprintf("Name == %q || Name == %q", t.Name+"@"+t.Host, t.Name)
+	case t.Name != "":
+		return fmt.Sprintf("Name == %q", t.Name)
+	case t.Host != "":
+		// Match the machine, and also the common case of an unnamed
+		// schedd whose Name is just the hostname.
+		return fmt.Sprintf("Machine == %q || Name == %q", t.Host, t.Host)
+	default:
+		return ""
+	}
+}
