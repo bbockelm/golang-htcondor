@@ -17,9 +17,8 @@ func newDocTestServer(t *testing.T) *Server {
 		t.Fatalf("logging.New: %v", err)
 	}
 	return &Server{
-		schedd:          htcondor.NewSchedd("test_schedd", "localhost:9618"),
-		logger:          logger,
-		validatedTokens: make(map[string]TokenInfo),
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		logger: logger,
 	}
 }
 

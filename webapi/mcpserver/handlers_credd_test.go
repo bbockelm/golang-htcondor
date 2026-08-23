@@ -18,10 +18,9 @@ func newTestServerWithCredd(t *testing.T) *Server {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 	return &Server{
-		schedd:          htcondor.NewSchedd("test_schedd", "localhost:9618"),
-		credd:           htcondor.NewInMemoryCredd(),
-		logger:          logger,
-		validatedTokens: make(map[string]TokenInfo),
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		credd:  htcondor.NewInMemoryCredd(),
+		logger: logger,
 	}
 }
 
@@ -240,10 +239,9 @@ func TestToolDeleteServiceCredential_NotFound(t *testing.T) {
 func TestCredentialToolsNilCredd(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
 	s := &Server{
-		schedd:          htcondor.NewSchedd("test_schedd", "localhost:9618"),
-		credd:           nil,
-		logger:          logger,
-		validatedTokens: make(map[string]TokenInfo),
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		credd:  nil,
+		logger: logger,
 	}
 	ctx := context.Background()
 
@@ -294,10 +292,9 @@ func TestHandleListTools_IncludesCredentialTools(t *testing.T) {
 func TestHandleListTools_ExcludesCredentialToolsWithoutCredd(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
 	s := &Server{
-		schedd:          htcondor.NewSchedd("test_schedd", "localhost:9618"),
-		credd:           nil,
-		logger:          logger,
-		validatedTokens: make(map[string]TokenInfo),
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		credd:  nil,
+		logger: logger,
 	}
 	result := s.handleListTools(context.Background(), nil)
 

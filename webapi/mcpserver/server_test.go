@@ -283,3 +283,79 @@ func TestParseJobID(t *testing.T) {
 		})
 	}
 }
+
+// TestNoToolAdvertisesATokenArgument is the contract from issue #192: a
+// credential must never be a tool argument. Advertising one invites an
+// LLM client to ask its user for a token, and honoring one would let a
+// call switch identity away from the caller the transport
+// authenticated.
+func TestNoToolAdvertisesATokenArgument(t *testing.T) {
+	s := &Server{}
+	result := s.handleListTools(context.Background(), nil)
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal tools/list: %v", err)
+	}
+	var listing struct {
+		Tools []struct {
+			Name        string `json:"name"`
+			InputSchema struct {
+				Properties map[string]interface{} `json:"properties"`
+				Required   []string               `json:"required"`
+			} `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(payload, &listing); err != nil {
+		t.Fatalf("tools/list is not the documented shape: %v", err)
+	}
+	if len(listing.Tools) == 0 {
+		t.Fatal("no tools advertised; the assertion below would be vacuous")
+	}
+
+	for _, tool := range listing.Tools {
+		if _, ok := tool.InputSchema.Properties["token"]; ok {
+			t.Errorf("%s advertises a token argument", tool.Name)
+		}
+		for _, req := range tool.InputSchema.Required {
+			if req == "token" {
+				t.Errorf("%s requires a token argument", tool.Name)
+			}
+		}
+	}
+
+	// Nested schemas too: a token property one level down is just as
+	// visible to a client as a top-level one.
+	if bytes.Contains(payload, []byte(`"token"`)) {
+		t.Errorf("a token property survives somewhere in the tool schemas: %s", payload)
+	}
+}
+
+// TestTokenArgumentIsIgnored checks the other half: a caller that sends
+// one anyway does not get an identity from it. The server has no schedd,
+// so a tool that reached the schedd would fail differently — this
+// asserts on the owner-scoped refusal, which is what an unauthenticated
+// caller gets.
+func TestTokenArgumentIsIgnored(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	s := &Server{schedd: htcondor.NewSchedd("test", "127.0.0.1:1"), logger: logger}
+
+	// A syntactically valid JWT whose sub claims to be someone.
+	const forged = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+		"eyJzdWIiOiJhbGljZUB1aWQuZG9tYWluIiwiZXhwIjo0MTAyNDQ0ODAwfQ.sig"
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "get_job",
+		"arguments": map[string]interface{}{"job_id": "1.0", "token": forged},
+	})
+	_, err = s.handleCallTool(context.Background(), params)
+	if err == nil {
+		t.Fatal("expected the call to be refused for want of an authenticated caller")
+	}
+	if !strings.Contains(err.Error(), "authentication required") {
+		t.Errorf("expected the owner-scope refusal, got: %v", err)
+	}
+}
