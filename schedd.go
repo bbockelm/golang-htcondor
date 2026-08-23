@@ -119,8 +119,14 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 		}
 	}
 
-	// Query with the effective options
-	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, false, &effectiveOpts)
+	// Query with the effective options. As on the streaming path, a
+	// request to see only the caller's own jobs must go out as
+	// QUERY_JOB_ADS_WITH_AUTH so the schedd derives the owner from the
+	// authenticated identity: with the plain command it applies no
+	// owner filter and returns every job the caller may READ, which for
+	// a pool whose READ policy is broad is every job in the queue.
+	useAuth := effectiveOpts.FetchOpts&FetchMyJobs != 0
+	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, useAuth, &effectiveOpts)
 	if err != nil {
 		return nil, nil, err
 	}

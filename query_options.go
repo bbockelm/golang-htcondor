@@ -80,13 +80,15 @@ func DefaultCollectorProjection() []string {
 	}
 }
 
-// ApplyDefaults applies default values to QueryOptions
+// ApplyDefaults applies default values to QueryOptions.
+//
+// It copies EVERY field. It used to rebuild the struct from Limit,
+// Projection and PageToken alone, which silently dropped FetchOpts and
+// Owner — so a caller asking to see only its own jobs got a query with
+// no owner filter at all, on both the streaming and buffered paths.
+// Adding a field to QueryOptions means adding it here too.
 func (opts *QueryOptions) ApplyDefaults() QueryOptions {
-	result := QueryOptions{
-		Limit:      opts.Limit,
-		Projection: opts.Projection,
-		PageToken:  opts.PageToken,
-	}
+	result := *opts
 
 	// Apply default limit if not set
 	if result.Limit == 0 {

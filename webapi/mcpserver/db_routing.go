@@ -219,7 +219,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if err != nil {
 		return nil, false
 	}
-	scoped := fmt.Sprintf("(%s) && (Owner == %s)", safeConstraint, classadStringLit(user))
+	scoped := fmt.Sprintf("(%s) && (Owner == %s)", safeConstraint, classadStringLit(ownerFromActor(user)))
 
 	effLimit := limit
 	if effLimit <= 0 || effLimit > dbMaxLimit {

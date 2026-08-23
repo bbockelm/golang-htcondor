@@ -108,13 +108,14 @@ type Config struct {
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
 	OAuth2AccessTokenLifespan  time.Duration
 	OAuth2RefreshTokenLifespan time.Duration
-	MCPAccessGroup             string // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup               string // Group required for read operations (empty = all have read)
-	MCPWriteGroup              string // Group required for write operations (empty = all have write)
-	ScheddHost                 string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
-	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
+	MCPAccessGroup             string   // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup               string   // Group required for read operations (empty = all have read)
+	MCPWriteGroup              string   // Group required for write operations (empty = all have write)
+	ScheddHost                 string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
+	MCPInstructions            string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	MCPAdminUsers              []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	WebUIAdminGroup            string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	EnableIDP                  bool     // Enable built-in IDP (always enabled in demo mode)
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -203,6 +204,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
 		MCPInstructions:             cfg.MCPInstructions,
+		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		EnableIDP:                   cfg.EnableIDP,
 		IDPIssuer:                   cfg.IDPIssuer,

@@ -1013,7 +1013,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 
 	// Get authenticated user from context if available
 	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
-		opts.Owner = user
+		opts.Owner = ownerFromActor(user)
 	}
 
 	// Use streaming query
@@ -1112,16 +1112,22 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Owner-scope the query: a non-admin caller asking for cluster.proc
-	// X.Y must own that job (or get a "not found" rather than a leak
-	// of someone else's full ad). Admins skip the wrapper for
-	// cross-user troubleshooting.
+	// Confine the query to the caller's own jobs, so asking for
+	// cluster.proc X.Y that belongs to someone else reports "not found"
+	// rather than leaking their full ad. Confined twice: the schedd
+	// filters on the authenticated identity (selfScopedQueryOptions) and
+	// the constraint carries an owner clause (scopeToOwner). Admins are
+	// exempt from both for cross-user troubleshooting.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 	constraint, ok := s.scopeToOwner(ctx, idClause)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
+	opts, ok := s.selfScopedQueryOptions(ctx, nil)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -1199,10 +1205,14 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
 		Limit:      1,
 	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query job: %w", err)
 	}

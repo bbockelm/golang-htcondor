@@ -189,6 +189,13 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	t.Log("Step 6: Testing MCP job query...")
 	testMCPQueryJobs(t, client, baseURL, accessToken, clusterID)
 
+	// Step 6b: An owner-scoped tool must work over HTTP. get_job runs
+	// the submitted job through scopeToOwner, which refuses the call
+	// outright when the transport did not put the authenticated actor on
+	// the context — the failure mode this guards against.
+	t.Log("Step 6b: Testing an owner-scoped MCP tool (get_job)...")
+	testMCPOwnerScopedTool(t, client, baseURL, accessToken, clusterID)
+
 	// Step 7: Test the forward path — a raw HTCondor IDTOKEN (as a CLI
 	// user's condor_token_create / condor_token_fetch produces: pool-
 	// signed, iss=TRUST_DOMAIN, no OAuth2/token_use marker) presented
@@ -370,6 +377,48 @@ func testMCPForwardRawCondorToken(t *testing.T, client *http.Client, baseURL, pa
 		t.Fatalf("query_jobs via raw IDTOKEN returned no result map: %+v", mcpResp.Result)
 	}
 	t.Log("Raw HTCondor IDTOKEN was forwarded to the schedd and authenticated successfully")
+
+	// An owner-scoped tool on this path needs an actor too, and the only
+	// trustworthy source for a forwarded token is the schedd's own view
+	// of who authenticated.
+	testMCPOwnerScopedTool(t, client, baseURL, rawToken, clusterID)
+	t.Log("Owner-scoped tool worked over a forwarded raw IDTOKEN")
+}
+
+// testMCPOwnerScopedTool calls get_job, which owner-scopes its query, and
+// fails if the server refused for want of an authenticated actor.
+func testMCPOwnerScopedTool(t *testing.T, client *http.Client, baseURL, bearer string, clusterID int) {
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "get_job",
+		"arguments": map[string]interface{}{
+			"job_id": fmt.Sprintf("%d.0", clusterID),
+		},
+	})
+	resp := sendMCPRequest(t, client, baseURL, bearer, mcpserver.MCPMessage{
+		JSONRPC: "2.0",
+		ID:      61,
+		Method:  "tools/call",
+		Params:  json.RawMessage(params),
+	})
+	if resp.Error != nil {
+		t.Fatalf("get_job failed: %v", resp.Error.Message)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("get_job returned no result map: %+v", resp.Result)
+	}
+	// The refusal comes back as a JSON-RPC error, caught above; check the
+	// content too in case a future handler reports it as tool output.
+	body, _ := json.Marshal(result)
+	if strings.Contains(string(body), "authentication required") {
+		t.Fatalf("get_job refused for want of an authenticated actor: %s", body)
+	}
+	// The job must actually come back, not an empty owner-scoped result:
+	// a mis-mapped actor (qualified identity compared against a bare
+	// Owner) shows up here as "job not found".
+	if !strings.Contains(string(body), fmt.Sprintf("%d", clusterID)) {
+		t.Fatalf("get_job returned no job for cluster %d: %s", clusterID, body)
+	}
 }
 
 // createOAuth2Client creates a new OAuth2 client in the storage
