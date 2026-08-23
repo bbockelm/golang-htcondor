@@ -101,7 +101,27 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
 			return
 		}
+		// Key this caller's CEDAR sessions to this caller's credential.
+		// cedar's client session cache is keyed {SecurityTag, address,
+		// command} — and with an empty tag, {address, command} alone.
+		// Every forwarded-token caller talks to the same schedd address
+		// with the same commands, so without a tag one user's request
+		// resumes a session another user authenticated, and runs as
+		// them. The tag is a digest of the bearer rather than a claim
+		// out of it: a claim is attacker-chosen, so a forged `sub`
+		// would let an attacker land on a victim's session, which is
+		// the very thing being prevented.
+		secConfig.SecurityTag = mcpActorKey(htcToken)
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+		// Owner-scoped tools need to know who the caller is. Ask the
+		// schedd rather than the token: this branch forwards the token
+		// precisely because the schedd is what verifies it, so the
+		// identity it maps the caller to is the only trustworthy answer
+		// available here.
+		if actor := h.actorForSession(ctx, htcToken); actor != "" {
+			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		}
 
 		// For HTCondor tokens, we don't validate scopes here - HTCondor does that
 		// Just process the MCP message
@@ -173,6 +193,18 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		// with.
 		ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
 
+		// Owner-scoping needs the identity the SCHEDD attributes this
+		// connection to, which is not always the username claim we
+		// authenticated: a pool that prefers FS over TOKEN attributes
+		// it to the process user. Ask the schedd, keyed by this bearer.
+		// Falling back to the claim would scope queries by a name the
+		// schedd never uses, hiding the caller's own jobs.
+		if actor := h.actorForSession(ctx, bearerFromRequest(r)); actor != "" {
+			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		} else {
+			h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)
+		}
+
 		// Restore the body for later reading
 		r.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
@@ -193,41 +225,14 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a temporary MCP server to handle this request
-	// IMPORTANT: Reuse the HTTP server's schedd connection to avoid redundant
-	// authentication and key exchange on every MCP request
-	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		Schedd:         h.schedd,
-		Credd:          h.credd,
-		Instructions:   h.mcpInstructions,
-		SigningKeyPath: h.signingKeyPath,
-		TrustDomain:    h.trustDomain,
-		UIDDomain:      h.uidDomain,
-		HTTPBaseURL:    h.httpBaseURL,
-		Logger:         h.logger,
-	})
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Failed to create MCP server", "error", err)
+	if h.mcpServer == nil {
+		h.logger.Error(logging.DestinationHTTP, "MCP server not initialized")
 		h.writeError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
-	// Create pipes for stdin/stdout simulation
-	var responseBuffer bytes.Buffer
-
-	// Write the request to a buffer that the MCP server can read
-	requestBuffer := bytes.NewBuffer(body)
-
-	// Temporarily replace the server's stdin/stdout
-	originalStdin := mcpServer.SetStdin(requestBuffer)
-	originalStdout := mcpServer.SetStdout(&responseBuffer)
-	defer func() {
-		mcpServer.SetStdin(originalStdin)
-		mcpServer.SetStdout(originalStdout)
-	}()
-
 	// Handle the message directly using the MCP server's handler
-	response := mcpServer.HandleMessage(ctx, &mcpRequest)
+	response := h.mcpServer.HandleMessage(ctx, &mcpRequest)
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -2246,4 +2251,17 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 	}
 
 	return token, nil
+}
+
+// bearerFromRequest returns the raw bearer credential presented on this
+// request, used only as a cache key for identity resolution. Empty when
+// the caller authenticated some other way, which simply means their
+// identity is resolved per request rather than cached.
+func bearerFromRequest(r *http.Request) string {
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if len(auth) > len(prefix) && strings.EqualFold(auth[:len(prefix)], prefix) {
+		return auth[len(prefix):]
+	}
+	return ""
 }

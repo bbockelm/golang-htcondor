@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -213,15 +212,4 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 		s.logger.Error(logging.DestinationHTTP, "failed to write the mirror response footer", "error", werr)
 	}
 	return true
-}
-
-// ownerFromActor maps an authenticated actor to the value HTCondor
-// stores in a job's Owner attribute: the bare username. The actor is
-// often qualified ("alice@uid.domain"), a job's Owner never is.
-func ownerFromActor(actor string) string {
-	name, _, found := strings.Cut(actor, "@")
-	if !found {
-		return actor
-	}
-	return name
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1092,6 +1093,25 @@ func getScheddAddress(localDir string, timeout time.Duration) (string, error) {
 }
 
 // waitForServer waits for the HTTP server to be ready
+// listenLocal binds a loopback listener on a kernel-assigned port and
+// returns it with the base URL it is reachable at. The listener is
+// handed to Server.ServeListener, so the port is held continuously from
+// the moment it is assigned: nothing else can take it in between, which
+// is the flaw in "bind, read the port, close, reconfigure, rebind".
+//
+// Tests need the URL before the server runs because it goes into the
+// configuration — the OAuth2 issuer is derived from it — and a
+// hardcoded port fails whenever anything else on the machine holds it.
+func listenLocal(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not listen on a local port: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln, "http://" + ln.Addr().String()
+}
+
 func waitForServer(baseURL string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}

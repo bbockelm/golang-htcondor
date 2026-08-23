@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"encoding/base64"
+	"reflect"
 	"testing"
 )
 
@@ -273,5 +274,67 @@ func TestDecodePageTokenErrors(t *testing.T) {
 				t.Error("DecodePageToken() expected error, got nil")
 			}
 		})
+	}
+}
+
+// TestApplyDefaultsCarriesEveryField is the regression guard for a
+// silent confinement failure: ApplyDefaults used to rebuild the struct
+// from three fields, dropping FetchOpts and Owner. A caller asking for
+// "my jobs only" therefore issued a query with no owner filter — the
+// schedd was never asked to confine anything, and every job the caller
+// could read came back.
+//
+// Compares against the whole struct rather than field by field, so a
+// field added later without being copied fails here.
+func TestApplyDefaultsCarriesEveryField(t *testing.T) {
+	opts := &QueryOptions{
+		Limit:      25,
+		Projection: []string{"ClusterId", "Owner"},
+		PageToken:  "tok",
+		FetchOpts:  FetchMyJobs | FetchIncludeClusterAd,
+		Owner:      "alice",
+	}
+
+	got := opts.ApplyDefaults()
+
+	want := *opts
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ApplyDefaults() = %+v, want every field carried through: %+v", got, want)
+	}
+}
+
+// TestApplyDefaultsOnlyDefaultsTheLimit checks the one field it is
+// supposed to fill in, and that it does not invent a fetch option.
+func TestApplyDefaultsOnlyDefaultsTheLimit(t *testing.T) {
+	got := (&QueryOptions{}).ApplyDefaults()
+	if got.Limit != 50 {
+		t.Errorf("Limit = %d, want the default 50", got.Limit)
+	}
+	if got.FetchOpts != FetchNormal {
+		t.Errorf("FetchOpts = %d, want FetchNormal", got.FetchOpts)
+	}
+	if got.Owner != "" {
+		t.Errorf("Owner = %q, want empty", got.Owner)
+	}
+
+	// An explicit unlimited limit must survive.
+	if unlimited := (&QueryOptions{Limit: -1}).ApplyDefaults(); unlimited.Limit != -1 {
+		t.Errorf("Limit = %d, want -1 preserved", unlimited.Limit)
+	}
+}
+
+// TestFetchMyJobsSurvivesIntoTheQueryAd ties the option to the wire: the
+// request ad must carry the Me/MyJobs filter, since that is what a
+// schedd honoring the client hint applies.
+func TestFetchMyJobsSurvivesIntoTheQueryAd(t *testing.T) {
+	opts := (&QueryOptions{FetchOpts: FetchMyJobs, Owner: "alice"}).ApplyDefaults()
+
+	ad := createJobQueryAd("true", &opts)
+	me, ok := ad.EvaluateAttrString("Me")
+	if !ok || me != "alice" {
+		t.Errorf("query ad Me = %q (present=%v), want alice", me, ok)
+	}
+	if _, ok := ad.Lookup("MyJobs"); !ok {
+		t.Error("query ad has no MyJobs filter")
 	}
 }

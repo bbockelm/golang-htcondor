@@ -30,6 +30,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -136,9 +137,19 @@ type Handler struct {
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
 	mcpInstructions     string            // Server-level instructions provided to agents via MCP initialize
-	webuiAdminGroup     string            // Group required for Web UI admin pages (empty = no admin UI)
-	metricsPublic       bool              // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
-	htcondorConfig      *config.Config    // HTCondor config snapshot, surfaced read-only on the admin info page
+	mcpAdminUsers       []string          // Authenticated subjects exempt from the MCP owner-scope wrapper
+	// mcpServer handles /mcp/message. One long-lived instance: it holds
+	// the validated-token cache and the collector-backed metrics/DB
+	// wiring, all of which a per-request server would throw away. Every
+	// per-request input (authenticated actor, granted scopes, security
+	// config) travels on the context instead.
+	mcpServer *mcpserver.Server
+	// mcpActors caches the schedd-verified identity of forwarded
+	// HTCondor IDTOKENs presented to /mcp/message.
+	mcpActors       mcpActorCache
+	webuiAdminGroup string         // Group required for Web UI admin pages (empty = no admin UI)
+	metricsPublic   bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	htcondorConfig  *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
 	// dbMirror routes heavy job and history reads to a synchronized
 	// htcondordb mirror when one is current (handlers_dbroute.go). It
 	// shares its freshness policy with the MCP tools via webapi/dbmirror.
@@ -298,8 +309,14 @@ type HandlerConfig struct {
 	MCPReadGroup               string // Group required for read operations (empty = all have read)
 	MCPWriteGroup              string // Group required for write operations (empty = all have write)
 	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
+	// MCPAdminUsers lists authenticated subjects that MCP tool
+	// dispatch treats as admins — most importantly they are exempt
+	// from the owner-scope wrapper, so they can query and act on other
+	// users' jobs. Match is exact against the authenticated actor
+	// (typically "user@uid.domain"). Empty = no admins (default).
+	MCPAdminUsers   []string
+	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	EnableIDP       bool   // Enable built-in IDP (always enabled in demo mode)
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	// Retained as an unused field so existing callers keep compiling
 	// during the transition.
@@ -732,6 +749,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpReadGroup = cfg.MCPReadGroup
 		h.mcpWriteGroup = cfg.MCPWriteGroup
 		h.mcpInstructions = cfg.MCPInstructions
+		h.mcpAdminUsers = cfg.MCPAdminUsers
 
 		if h.mcpAccessGroup != "" {
 			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_group", h.mcpAccessGroup)
@@ -891,6 +909,29 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.pingHealth = newPingHealth(pingInterval)
 		h.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
 	}
+
+	// Build the MCP server now that the schedd, credd and collector are
+	// resolved. Created unconditionally: /mcp/message is reachable
+	// whenever the route is installed, and gating on EnableMCP here
+	// would leave the handler with a nil server on paths that install
+	// it anyway.
+	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		Schedd:         h.schedd,
+		Credd:          h.credd,
+		Collector:      h.collector,
+		HTCondorConfig: h.htcondorConfig,
+		AdminUsers:     h.mcpAdminUsers,
+		Instructions:   h.mcpInstructions,
+		SigningKeyPath: h.signingKeyPath,
+		TrustDomain:    h.trustDomain,
+		UIDDomain:      h.uidDomain,
+		HTTPBaseURL:    h.httpBaseURL,
+		Logger:         h.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create MCP server: %w", err)
+	}
+	h.mcpServer = mcpServer
 
 	// Note: Routes will be set up by the Server or by the user calling SetupRoutes
 	h.mux = http.NewServeMux()
@@ -1284,6 +1325,12 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Start credd address updater if credd was discovered (or discovery failed but should retry)
 	if h.creddDiscovered && h.collector != nil {
 		h.startCreddAddressUpdater(ctx)
+	}
+
+	// The MCP server is long-lived now, so its validated-token cache
+	// needs the same expiry sweep the stdio transport's Run() does.
+	if h.mcpServer != nil {
+		h.mcpServer.StartMaintenance(ctx)
 	}
 
 	// Start session cleanup goroutine

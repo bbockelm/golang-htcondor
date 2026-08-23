@@ -37,8 +37,8 @@ func TestScopeToOwnerNoBypass(t *testing.T) {
 		`true) || (true`,
 		`Owner == "bob") || (true`,
 		`1) || (JobStatus =?= JobStatus`,
-		`true || Owner == "bob"`,     // balanced but tautological
-		`JobStatus == 2 || 1 == 1`,   // balanced tautology
+		`true || Owner == "bob"`,   // balanced but tautological
+		`JobStatus == 2 || 1 == 1`, // balanced tautology
 	}
 	for _, c := range bypassAttempts {
 		scoped, ok := s.scopeToOwner(ctx, c)
@@ -112,5 +112,93 @@ func TestJobsMirrorScopeNoBypass(t *testing.T) {
 		if admits(t, scoped, "bob") {
 			t.Errorf("BYPASS in jobs mirror scope: %q -> %q admits bob", c, scoped)
 		}
+	}
+}
+
+// TestOwnerFromActor covers the actor→Owner mapping: the schedd maps a
+// CEDAR peer to a qualified identity ("alice@uid.domain") and an
+// IDTOKEN's sub looks the same, but a job's Owner is the bare username,
+// so an unmapped actor would match no jobs.
+func TestOwnerFromActor(t *testing.T) {
+	cases := map[string]string{
+		"alice":            "alice",
+		"alice@uid.domain": "alice",
+		// "@" is legal in a Linux username and SSSD issues names that
+		// contain one, so the domain is whatever follows the LAST "@":
+		// this is the user "foo@bar", not "foo".
+		"foo@bar@uid.domain":  "foo@bar",
+		"":                    "",
+		"condor@pool.example": "condor",
+	}
+	for actor, want := range cases {
+		if got := ownerFromActor(actor); got != want {
+			t.Errorf("ownerFromActor(%q) = %q, want %q", actor, got, want)
+		}
+	}
+}
+
+// TestScopeToOwnerQualifiedActor is the same mapping at the level that
+// matters: the constraint a tool sends to the schedd.
+func TestScopeToOwnerQualifiedActor(t *testing.T) {
+	s := &Server{}
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
+
+	got, ok := s.scopeToOwner(ctx, "")
+	if !ok {
+		t.Fatal("expected a qualified actor to be accepted")
+	}
+	if got != `Owner == "alice"` {
+		t.Errorf("scopeToOwner = %q, want %q", got, `Owner == "alice"`)
+	}
+
+	// An admin is matched on the qualified identity and keeps the
+	// constraint unscoped.
+	admin := &Server{adminUsers: map[string]struct{}{"alice@uid.domain": {}}}
+	got, ok = admin.scopeToOwner(ctx, "JobStatus == 5")
+	if !ok || got != "JobStatus == 5" {
+		t.Errorf("admin scopeToOwner = %q, %v; want the constraint unchanged", got, ok)
+	}
+}
+
+// TestSelfScopedQueryOptions covers the schedd-enforced confinement used
+// by the job-ad queries: an authenticated non-admin gets FetchMyJobs
+// (which sends QUERY_JOB_ADS_WITH_AUTH, so the schedd filters on the
+// identity it authenticated), an admin does not, and an unauthenticated
+// caller gets refused.
+func TestSelfScopedQueryOptions(t *testing.T) {
+	base := &htcondor.QueryOptions{Projection: []string{"ClusterId"}, Limit: 1}
+
+	s := &Server{}
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
+	opts, ok := s.selfScopedQueryOptions(ctx, base)
+	if !ok {
+		t.Fatal("expected an authenticated caller to be accepted")
+	}
+	if opts.FetchOpts&htcondor.FetchMyJobs == 0 {
+		t.Error("expected FetchMyJobs so the schedd confines the query")
+	}
+	if opts.Owner != "alice" {
+		t.Errorf("Owner hint = %q, want the bare username", opts.Owner)
+	}
+	// The caller's options must survive, and the caller's copy must not
+	// be modified.
+	if opts.Limit != 1 || len(opts.Projection) != 1 {
+		t.Errorf("base options were not carried through: %+v", opts)
+	}
+	if base.FetchOpts != 0 || base.Owner != "" {
+		t.Errorf("base options were mutated: %+v", base)
+	}
+
+	admin := &Server{adminUsers: map[string]struct{}{"alice@uid.domain": {}}}
+	opts, ok = admin.selfScopedQueryOptions(ctx, base)
+	if !ok {
+		t.Fatal("expected the admin caller to be accepted")
+	}
+	if opts.FetchOpts&htcondor.FetchMyJobs != 0 {
+		t.Error("an admin must not be confined to their own jobs")
+	}
+
+	if _, ok := s.selfScopedQueryOptions(context.Background(), base); ok {
+		t.Error("an unauthenticated caller must be refused")
 	}
 }

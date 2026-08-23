@@ -108,13 +108,14 @@ type Config struct {
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
 	OAuth2AccessTokenLifespan  time.Duration
 	OAuth2RefreshTokenLifespan time.Duration
-	MCPAccessGroup             string // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup               string // Group required for read operations (empty = all have read)
-	MCPWriteGroup              string // Group required for write operations (empty = all have write)
-	ScheddHost                 string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
-	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	WebUIAdminGroup            string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP                  bool   // Enable built-in IDP (always enabled in demo mode)
+	MCPAccessGroup             string   // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup               string   // Group required for read operations (empty = all have read)
+	MCPWriteGroup              string   // Group required for write operations (empty = all have write)
+	ScheddHost                 string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
+	MCPInstructions            string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	MCPAdminUsers              []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	WebUIAdminGroup            string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	EnableIDP                  bool     // Enable built-in IDP (always enabled in demo mode)
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -203,6 +204,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
 		MCPInstructions:             cfg.MCPInstructions,
+		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		EnableIDP:                   cfg.EnableIDP,
 		IDPIssuer:                   cfg.IDPIssuer,
@@ -798,19 +800,27 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 
 	// Determine which session cache to use based on authentication mode
 	var sessionCache *security.SessionCache
+	// sessionTag isolates this caller's cedar sessions when they land in
+	// the process-wide cache. Left empty for a per-token cache, which is
+	// private to one credential already.
+	var sessionTag string
 
 	// Check if we're using user header mode (generated token)
 	if s.userHeader != "" {
 		// Try to extract bearer token to see if this is a real JWT
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
-			// No bearer token, so we generated one from user header
-			// In user header mode, tokens are regenerated per request (with new jti, iat)
-			// So we can't use token as cache key. Instead, use global cache which
-			// supports tagging by username in cedar's session cache implementation.
-			username := r.Header.Get(s.userHeader)
+			// No bearer token, so we generated one from user header.
+			// In user header mode, tokens are regenerated per request
+			// (new jti, iat), so the token cannot be the cache key: use
+			// the global cache, tagged with the user so one caller's
+			// sessions are not reachable by another's request. cedar
+			// keys the global cache by {SecurityTag, address, command}
+			// and, with no tag, by {address, command} alone — which
+			// every user of this mode would share.
+			sessionTag = r.Header.Get(s.userHeader)
 			sessionCache = nil // nil means use global cache
-			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", username)
+			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", sessionTag)
 		} else {
 			// Real bearer token provided even though user header is configured
 			// Use per-token cache
@@ -876,6 +886,9 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, allowFSFallback)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
+	}
+	if sessionTag != "" {
+		secConfig.SecurityTag = sessionTag
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 

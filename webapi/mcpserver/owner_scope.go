@@ -36,7 +36,7 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string) (string
 	if s.isAdmin(actor) {
 		return strings.TrimSpace(llmConstraint), true
 	}
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(actor))
+	owner := fmt.Sprintf("Owner == %s", classadStringLit(ownerFromActor(actor)))
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
 		return owner, true
@@ -66,6 +66,62 @@ func classadBalanced(constraint string) (string, error) {
 		return "", err
 	}
 	return expr.String(), nil
+}
+
+// selfScopedQueryOptions returns the query options that confine a schedd
+// query to the caller's own jobs, and false when there is no
+// authenticated caller to confine it to.
+//
+// The primary confinement is the schedd's: FetchMyJobs sends
+// QUERY_JOB_ADS_WITH_AUTH, so the schedd filters on the identity it
+// authenticated rather than on any owner name we supply. Callers pair it
+// with scopeToOwner's constraint, which confines the same query
+// client-side. Two mechanisms for one rule is deliberate — this one was
+// silently doing nothing until ApplyDefaults stopped dropping FetchOpts,
+// and a confinement that can degrade to "no filter" without a symptom
+// wants a second one behind it that fails closed instead.
+//
+// Admins are exempt, as with scopeToOwner: no self-scoping, so
+// cross-user troubleshooting still works.
+func (s *Server) selfScopedQueryOptions(ctx context.Context, base *htcondor.QueryOptions) (*htcondor.QueryOptions, bool) {
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return nil, false
+	}
+
+	opts := &htcondor.QueryOptions{}
+	if base != nil {
+		copied := *base
+		opts = &copied
+	}
+	if s.isAdmin(actor) {
+		return opts, true
+	}
+	opts.FetchOpts |= htcondor.FetchMyJobs
+	opts.Owner = ownerFromActor(actor)
+	return opts, true
+}
+
+// ownerFromActor maps an authenticated actor to the value HTCondor
+// stores in a job's Owner attribute: the bare username. An actor is
+// often fully qualified — "alice@uid.domain" is what the schedd maps a
+// CEDAR peer to, and what an IDTOKEN's `sub` looks like — while Owner
+// never is, so comparing the two verbatim would match no jobs at all.
+//
+// The split is at the LAST "@", because "@" is legal in a Linux
+// username and SSSD hands out names that contain one:
+// "foo@bar@uid.domain" is the user "foo@bar" in the domain
+// "uid.domain". Splitting at the first "@" would scope that user's
+// queries to the non-existent owner "foo".
+//
+// Admin matching deliberately keeps the qualified form (see isAdmin):
+// it is an identity check, not a job-ownership one.
+func ownerFromActor(actor string) string {
+	i := strings.LastIndex(actor, "@")
+	if i < 0 {
+		return actor
+	}
+	return actor[:i]
 }
 
 // isAdmin reports whether the given authenticated username is in the

@@ -398,6 +398,15 @@ func (s *Server) getValidatedUsername(token string) string {
 	return info.Username
 }
 
+// StartMaintenance starts the background upkeep a long-lived server
+// needs — currently expiring entries out of the validated-token cache.
+// Run() does this itself for the stdio transport; a server driven only
+// through HandleMessage (the HTTP transport) has to be told, or its
+// caches grow for the process's lifetime.
+func (s *Server) StartMaintenance(ctx context.Context) {
+	s.startTokenCleanup(ctx)
+}
+
 // startTokenCleanup starts a goroutine that periodically removes expired tokens from cache
 func (s *Server) startTokenCleanup(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)

@@ -1013,7 +1013,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 
 	// Get authenticated user from context if available
 	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
-		opts.Owner = user
+		opts.Owner = ownerFromActor(user)
 	}
 
 	// Use streaming query
@@ -1112,16 +1112,32 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Owner-scope the query: a non-admin caller asking for cluster.proc
-	// X.Y must own that job (or get a "not found" rather than a leak
-	// of someone else's full ad). Admins skip the wrapper for
-	// cross-user troubleshooting.
+	// Confine the query to the caller's own jobs, so asking for
+	// cluster.proc X.Y that belongs to someone else reports "not found"
+	// rather than returning their full ad.
+	//
+	// Two layers, and the order matters for reasoning about them.
+	// selfScopedQueryOptions is the enforcement: it sends
+	// QUERY_JOB_ADS_WITH_AUTH, so the SCHEDD filters on the identity it
+	// authenticated and a wrong owner name cannot widen anything. The
+	// scopeToOwner clause is the layer behind it, for the case that
+	// mechanism stops working — it silently did until ApplyDefaults
+	// stopped dropping FetchOpts, and the failure had no symptom. Note
+	// that a plain job-ad read is NOT ownership-checked by the schedd
+	// (READ authz governs it, and most pools allow anyone), so unlike
+	// the sandbox paths there is no third layer underneath.
+	//
+	// Admins are exempt from both for cross-user troubleshooting.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
 	constraint, ok := s.scopeToOwner(ctx, idClause)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, nil)
+	opts, ok := s.selfScopedQueryOptions(ctx, nil)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -1199,10 +1215,14 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
 		Limit:      1,
 	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query job: %w", err)
 	}
@@ -1574,12 +1594,24 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Query the job to get the output filename
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
-
-	opts := &htcondor.QueryOptions{
-		Projection: projection,
+	// Query the job to get the output filename, confined to the
+	// caller's own jobs. The schedd is the enforcement: it refuses a
+	// sandbox transfer to anyone but the job's owner, and it filters
+	// the query itself on the authenticated identity
+	// (selfScopedQueryOptions). This adds the owner clause on top, so a
+	// caller asking for someone else's job id gets "not found" here
+	// instead of a schedd-side refusal after we have already disclosed
+	// which attributes their job has.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "JobStatus", attributeName},
+	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
 	}
 	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
@@ -1906,12 +1938,24 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Query for the job to get its proc ad with transfer attributes
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	projection := []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: projection,
+	// Query for the job to get its proc ad with transfer attributes,
+	// confined to the caller's own jobs. Writing into another user's
+	// sandbox is refused by the schedd, which checks ownership on
+	// SPOOL_JOB_FILES; this keeps the attempt from getting that far and
+	// keeps the failure legible ("not found" rather than a transfer
+	// error from the peer).
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
 	})
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
@@ -2042,8 +2086,15 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build the constraint for this job, confined to the caller's own.
+	// The schedd will not hand another user's sandbox to a caller it
+	// authenticated as someone else — that check is its, not ours. The
+	// owner clause means we do not ask.
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, ok := s.scopeToOwner(ctx, idClause)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
 
 	// Download the job sandbox into a buffer
 	sandboxCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

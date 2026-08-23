@@ -616,8 +616,15 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own
+	// unless they are an API-token caller or a Web UI admin. Job ad
+	// reads are gated only by the pool's READ policy, which is broad on
+	// most pools, so the schedd is not a backstop here.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Single-record GET returns the full ClassAd. The default
 	// projection is fine for the listing view, but detail pages need
@@ -674,8 +681,12 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Remove the job using the schedd RemoveJobs method
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
@@ -933,7 +944,47 @@ func (s *Handler) bulkOwnerScope(ctx context.Context, r *http.Request, raw strin
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 	}
-	return scopeToOwner(owner, raw)
+	return scopeToOwner(ownerFromActor(owner), raw)
+}
+
+// ownerFromActor maps an authenticated actor to the value HTCondor
+// stores in a job's Owner attribute: the bare username. An actor can
+// arrive qualified — a JWT subject is "user@domain" — while Owner never
+// is, so comparing them verbatim matches no jobs.
+//
+// The split is at the LAST "@", because "@" is legal in a Linux username
+// and SSSD issues names containing one: "foo@bar@uid.domain" is the user
+// "foo@bar".
+func ownerFromActor(actor string) string {
+	i := strings.LastIndex(actor, "@")
+	if i < 0 {
+		return actor
+	}
+	return actor[:i]
+}
+
+// jobOwnerScope confines a single-job request to the caller's own job,
+// under the same rule bulkOwnerScope applies to the bulk endpoints: a
+// browser session that is not a Web UI admin is scoped, an API-token
+// caller is left to the schedd's ACL, and an unparseable owner is an
+// error rather than a widening.
+//
+// How much this is doing depends on the endpoint, and it is worth being
+// precise because "we scope it" reads like a guarantee:
+//
+//   - Sandbox transfers and job actions (remove, hold, release) are
+//     ownership-checked by the SCHEDD. The clause here is a second
+//     layer: it turns an attempt into "not found" before the peer has
+//     to refuse it, and it holds if a future schedd is laxer.
+//   - Job-ad reads are NOT ownership-checked by the schedd — READ
+//     authz governs them and most pools allow anyone — so for those
+//     this clause, plus FetchMyJobs where the caller uses it, is what
+//     keeps a non-admin session out of another user's ad.
+//
+// Either way the by-id endpoints now match the listing endpoint, which
+// has always applied the filter.
+func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
+	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
@@ -1194,8 +1245,20 @@ var jobInputSpoolProjection = []string{
 // copied in only where the proc didn't already define them — proc
 // wins on conflict, matching HTCondor's normal "cluster as defaults,
 // proc as overrides" semantics.
-func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int) (*classad.ClassAd, error) {
+// fetchProcAdForSpool looks up the proc ad (and its cluster ad) that a
+// spool upload writes into. ownerScope wraps the id predicate with the
+// caller's owner clause, so a non-admin session cannot spool files into
+// another user's sandbox; it is applied around the whole predicate
+// because the cluster ad (ProcId == -1) must stay reachable.
+func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, ownerScope func(string) (string, error)) (*classad.ClassAd, error) {
 	constraint := fmt.Sprintf("ClusterId == %d && (ProcId == %d || ProcId == -1)", cluster, proc)
+	if ownerScope != nil {
+		scoped, err := ownerScope(constraint)
+		if err != nil {
+			return nil, err
+		}
+		constraint = scoped
+	}
 	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: jobInputSpoolProjection,
 		FetchOpts:  htcondor.FetchIncludeClusterAd,
@@ -1322,7 +1385,9 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		return
 	}
 
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
+		return s.bulkOwnerScope(ctx, r, c)
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1388,7 +1453,9 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// fetchProcAdForSpool for why this is necessary (Cmd /
 	// TransferExecutable live on the cluster ad and the proc-only
 	// query strips them).
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc)
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
+		return s.bulkOwnerScope(ctx, r, c)
+	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -1567,8 +1634,14 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	// Build constraint for specific job, confined to the caller's own.
+	// The schedd refuses a sandbox transfer to anyone but the owner;
+	// this keeps us from asking on someone else's behalf.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Set up response as tar stream
 	w.Header().Set("Content-Type", "application/x-tar")
@@ -2041,7 +2114,11 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
@@ -2506,9 +2583,6 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 		return
 	}
 
-	// Build constraint for specific job
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-
 	// Now authenticate. We deliberately defer this until after the
 	// pure-input validation above so unauthenticated callers still
 	// get the more useful 400 for bad input. requireAuthentication
@@ -2521,6 +2595,16 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 			return
 		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Build constraint for specific job, confined to the caller's own.
+	// As with the whole-sandbox download, the schedd is what refuses a
+	// non-owner; this is the layer in front of it. Needs the actor, so
+	// it follows authentication.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -2560,7 +2644,11 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	}
 
 	// Query the job to get the output filename
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	projection := []string{"ClusterId", "ProcId", "JobStatus", attributeName}
 
 	opts := &htcondor.QueryOptions{
