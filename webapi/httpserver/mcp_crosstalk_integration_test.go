@@ -122,12 +122,12 @@ QUEUE_ALL_USERS_TRUSTED = True
 		t.Fatalf("Failed to get schedd address: %v", err)
 	}
 
-	// Port 0: the kernel picks a free port and GetAddr reports it once
-	// the listener is up. A fixed port makes the test fail when
-	// something else on the machine (or a parallel run of this suite)
-	// already holds it.
+	// Hold a kernel-assigned port and hand the listener to the server,
+	// the same pattern the other integration tests use. A fixed port
+	// fails whenever anything else on the machine holds it.
+	listener, baseURL := listenLocal(t)
 	server, err := NewServer(Config{
-		ListenAddr:     "127.0.0.1:0",
+		ListenAddr:     listener.Addr().String(),
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
 		SigningKeyPath: poolKeyPath,
@@ -140,10 +140,9 @@ QUEUE_ALL_USERS_TRUSTED = True
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	serverErr := make(chan error, 1)
-	go func() { serverErr <- server.Start() }()
+	go func() { serverErr <- server.ServeListener(listener, "http") }()
 	defer server.Shutdown(context.Background())
 
-	baseURL := waitForServerAddr(t, server, 15*time.Second)
 	if err := waitForServer(baseURL, 15*time.Second); err != nil {
 		t.Fatalf("server did not start: %v", err)
 	}
@@ -188,22 +187,6 @@ QUEUE_ALL_USERS_TRUSTED = True
 	t.Run("alice still sees only her own job after bob's request", func(t *testing.T) {
 		assertOwnJobsOnly(t, client, baseURL, aliceToken, aliceCluster, bobCluster)
 	})
-}
-
-// waitForServerAddr blocks until the server has bound its listener and
-// returns its base URL. Start() binds asynchronously, so GetAddr is
-// empty for a moment after the goroutine is launched.
-func waitForServerAddr(t *testing.T, server *Server, timeout time.Duration) string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if addr := server.GetAddr(); addr != "" {
-			return "http://" + addr
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("server did not bind a listener within %s", timeout)
-	return ""
 }
 
 // submitJobAsUser submits a trivial job through submit_job with the

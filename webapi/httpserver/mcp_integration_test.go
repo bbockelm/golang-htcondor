@@ -25,6 +25,12 @@ import (
 )
 
 // TestMCPHTTPIntegration tests the MCP protocol via HTTP with OAuth2 authentication
+// testRedirectURI is the OAuth2 redirect the test registers and echoes
+// back. Nothing ever listens on it — the test reads the redirect out of
+// the 302 rather than following it — so it is deliberately not the
+// server's own (now ephemeral) address.
+const testRedirectURI = "http://localhost:18081/callback"
+
 func TestMCPHTTPIntegration(t *testing.T) {
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -108,10 +114,13 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	}
 	t.Logf("Using schedd address: %s", scheddAddr)
 
-	// Use a fixed port for testing
-	serverPort := 18081
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
-	baseURL := fmt.Sprintf("http://%s", serverAddr)
+	// An ephemeral port: this test's OAuth2 issuer and redirect URIs are
+	// built from the address, so it needs to know it before binding.
+	// Hold the listener from the moment the kernel assigns the port and
+	// hand it to the server, so the address in the OAuth2 issuer below
+	// is one nothing else can claim in the meantime.
+	listener, baseURL := listenLocal(t)
+	serverAddr := listener.Addr().String()
 
 	// OAuth2 database path
 	oauth2DBPath := filepath.Join(tempDir, "oauth2.db")
@@ -137,7 +146,7 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	// Start server in background
 	serverErrChan := make(chan error, 1)
 	go func() {
-		serverErrChan <- server.Start()
+		serverErrChan <- server.ServeListener(listener, "http")
 	}()
 
 	// Wait for server to be ready
@@ -224,7 +233,7 @@ func TestMCPHTTPIntegration(t *testing.T) {
 // token could ever be issued to this client.
 func registerDCRClient(t *testing.T, httpClient *http.Client, baseURL string) (string, string) {
 	regBody, _ := json.Marshal(map[string]interface{}{
-		"redirect_uris":  []string{"http://localhost:18081/callback"},
+		"redirect_uris":  []string{testRedirectURI},
 		"grant_types":    []string{"authorization_code", "refresh_token"},
 		"response_types": []string{"code"},
 		"scope":          "openid profile email offline_access mcp:read mcp:write",
@@ -261,7 +270,7 @@ func registerDCRClient(t *testing.T, httpClient *http.Client, baseURL string) (s
 // the regression this whole change guards against.
 func getRefreshTokenViaAuthCode(t *testing.T, httpClient *http.Client, baseURL, clientID, clientSecret, username string) string {
 	const scope = "openid profile email offline_access mcp:read mcp:write"
-	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18081/callback&scope=%s&state=teststate&username=%s",
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri="+testRedirectURI+"&scope=%s&state=teststate&username=%s",
 		baseURL, clientID, url.QueryEscape(scope), username)
 	req, _ := http.NewRequest("GET", authURL, nil)
 	req.Header.Set("X-Test-User", username)
@@ -308,7 +317,7 @@ func getRefreshTokenViaAuthCode(t *testing.T, httpClient *http.Client, baseURL, 
 	}
 
 	tokenReq, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
-		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18081/callback&client_id=%s&client_secret=%s",
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri="+testRedirectURI+"&client_id=%s&client_secret=%s",
 			code, clientID, clientSecret)))
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenResp, err := httpClient.Do(tokenReq)
@@ -438,7 +447,7 @@ func createOAuth2Client(t *testing.T, server *Server, username string) (string, 
 	client := &fosite.DefaultClient{
 		ID:            clientID,
 		Secret:        hashedSecret,
-		RedirectURIs:  []string{"http://localhost:18081/callback"},
+		RedirectURIs:  []string{testRedirectURI},
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
 		Scopes:        []string{"openid", "profile", "email", "mcp:read", "mcp:write"},
@@ -455,7 +464,7 @@ func createOAuth2Client(t *testing.T, server *Server, username string) (string, 
 // getOAuth2TokenAuthCode obtains an OAuth2 access token using authorization code flow
 func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clientID, clientSecret, username string) string {
 	// Step 1: Create authorization request
-	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=http://localhost:18081/callback&scope=openid+profile+email+mcp:read+mcp:write&state=teststate&username=%s",
+	authURL := fmt.Sprintf("%s/mcp/oauth2/authorize?response_type=code&client_id=%s&redirect_uri="+testRedirectURI+"&scope=openid+profile+email+mcp:read+mcp:write&state=teststate&username=%s",
 		baseURL, clientID, username)
 
 	req, err := http.NewRequest("GET", authURL, nil)
@@ -558,7 +567,7 @@ func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clie
 
 	// Step 2: Exchange authorization code for access token
 	tokenReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/token", bytes.NewBufferString(
-		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost:18081/callback&client_id=%s&client_secret=%s",
+		fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri="+testRedirectURI+"&client_id=%s&client_secret=%s",
 			code, clientID, clientSecret),
 	))
 	if err != nil {

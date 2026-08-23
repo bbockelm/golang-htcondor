@@ -800,19 +800,27 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 
 	// Determine which session cache to use based on authentication mode
 	var sessionCache *security.SessionCache
+	// sessionTag isolates this caller's cedar sessions when they land in
+	// the process-wide cache. Left empty for a per-token cache, which is
+	// private to one credential already.
+	var sessionTag string
 
 	// Check if we're using user header mode (generated token)
 	if s.userHeader != "" {
 		// Try to extract bearer token to see if this is a real JWT
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
-			// No bearer token, so we generated one from user header
-			// In user header mode, tokens are regenerated per request (with new jti, iat)
-			// So we can't use token as cache key. Instead, use global cache which
-			// supports tagging by username in cedar's session cache implementation.
-			username := r.Header.Get(s.userHeader)
+			// No bearer token, so we generated one from user header.
+			// In user header mode, tokens are regenerated per request
+			// (new jti, iat), so the token cannot be the cache key: use
+			// the global cache, tagged with the user so one caller's
+			// sessions are not reachable by another's request. cedar
+			// keys the global cache by {SecurityTag, address, command}
+			// and, with no tag, by {address, command} alone — which
+			// every user of this mode would share.
+			sessionTag = r.Header.Get(s.userHeader)
 			sessionCache = nil // nil means use global cache
-			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", username)
+			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", sessionTag)
 		} else {
 			// Real bearer token provided even though user header is configured
 			// Use per-token cache
@@ -878,6 +886,9 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, allowFSFallback)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
+	}
+	if sessionTag != "" {
+		secConfig.SecurityTag = sessionTag
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
