@@ -5,10 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PelicanPlatform/classad/classad"
-
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
 func TestParseAsOf(t *testing.T) {
@@ -34,29 +33,6 @@ func TestParseAsOf(t *testing.T) {
 	}
 }
 
-func TestParseHTCondorDBAd(t *testing.T) {
-	ad := classad.New()
-	ad.InsertAttrString("Name", "htcondordb@ap40")
-	ad.InsertAttrString("MyAddress", "<10.0.0.1:9619>")
-	ad.InsertAttrBool("TimeTravelEnabled", true)
-	ad.InsertAttrBool("HistoryGapDetected", true)
-	ad.InsertAttr("HistorySecondsSinceSync", 42)
-	ad.InsertAttrBool("JobQueueCaughtUp", true)
-	ad.InsertAttr("JobQueueLastSyncTime", 1700000000)
-	ad.InsertAttr("JobQueueSecondsSinceSync", 3)
-
-	info := parseHTCondorDBAd(ad)
-	if info.Name != "htcondordb@ap40" || info.Address != "<10.0.0.1:9619>" {
-		t.Errorf("identity wrong: %+v", info)
-	}
-	if !info.TimeTravelEnabled || !info.HistoryGap || info.SecondsSinceSync != 42 {
-		t.Errorf("capabilities/freshness wrong: %+v", info)
-	}
-	if !info.JobQueueCaughtUp || info.JobQueueLastSyncTime != 1700000000 || info.JobQueueSecondsSync != 3 {
-		t.Errorf("job-queue freshness wrong: %+v", info)
-	}
-}
-
 func TestDBIntArg(t *testing.T) {
 	if got := dbLimitArg(map[string]interface{}{}); got != 200 {
 		t.Errorf("default: got %d, want 200", got)
@@ -73,7 +49,7 @@ func TestDBIntArg(t *testing.T) {
 }
 
 func TestFreshnessNote(t *testing.T) {
-	note := freshnessNote(&htcondordbInfo{Name: "db", SecondsSinceSync: 5, HistoryGap: true})
+	note := freshnessNote(&dbmirror.Info{Name: "db", SecondsSinceSync: 5, HistoryGap: true})
 	if !strings.Contains(note, "last synced 5s ago") {
 		t.Errorf("missing sync age: %q", note)
 	}
@@ -101,10 +77,11 @@ func TestHTCondorDBEnabled(t *testing.T) {
 		s    *Server
 		want bool
 	}{
-		{"both set", &Server{collector: coll, htcondorConfig: cfg}, true},
-		{"no collector", &Server{htcondorConfig: cfg}, false},
-		{"no config", &Server{collector: coll}, false},
-		{"neither", &Server{}, false},
+		{"both set", &Server{dbMirror: dbmirror.NewLocator(coll, cfg)}, true},
+		{"no collector", &Server{dbMirror: dbmirror.NewLocator(nil, cfg)}, false},
+		{"no config", &Server{dbMirror: dbmirror.NewLocator(coll, nil)}, false},
+		{"neither", &Server{dbMirror: dbmirror.NewLocator(nil, nil)}, false},
+		{"no locator at all", &Server{}, false},
 	}
 	for _, c := range cases {
 		if got := c.s.htcondordbEnabled(); got != c.want {

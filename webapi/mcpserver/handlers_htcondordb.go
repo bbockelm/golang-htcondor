@@ -6,114 +6,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
-// dbSessionCommand is htcondordb's DBSession CEDAR command
-// (github.com/bbockelm/htcondordb/command.DBSession = 74000). It is duplicated here so webapi
-// need not depend on the htcondordb module, matching how htcondordb/kafkasync duplicates it.
-const dbSessionCommand = 74000
-
-// htcondordbAdType is the MyType an htcondordb daemon advertises to the collector.
-const htcondordbAdType = "HTCondorDB"
-
-const (
-	dbDefaultLimit = 200
-	dbMaxLimit     = 2000
-	dbInfoTTL      = 30 * time.Second
-)
-
-// htcondordbInfo is a discovered database's location, capabilities, and freshness, parsed from
-// its collector advertisement.
-type htcondordbInfo struct {
-	Name              string
-	Address           string
-	TimeTravelEnabled bool
-	SecondsSinceSync  int64
-	HistoryGap        bool
-
-	// Job-queue mirror freshness, for routing live job queries (db_routing.go).
-	// CaughtUp means the syncer had drained job_queue.log to EOF at its last
-	// poll; LastSyncTime is that poll's absolute Unix time, so the CURRENT
-	// staleness can be computed as now-LastSyncTime independent of ad age.
-	JobQueueCaughtUp     bool
-	JobQueueLastSyncTime int64
-	JobQueueSecondsSync  int64
-}
-
-// discoverHTCondorDB finds the htcondordb database by querying the collector for its ad (result
-// cached for dbInfoTTL). It errors when no collector is configured or nothing is advertising.
-func (s *Server) discoverHTCondorDB(ctx context.Context) (*htcondordbInfo, error) {
-	if s.collector == nil {
-		return nil, fmt.Errorf("htcondordb tools unavailable: no collector configured for discovery")
-	}
-	s.dbMu.Lock()
-	if s.dbInfo != nil && time.Since(s.dbInfoAt) < dbInfoTTL {
-		info := s.dbInfo
-		s.dbMu.Unlock()
-		return info, nil
-	}
-	s.dbMu.Unlock()
-
-	ads, _, err := s.collector.QueryAdsWithOptions(ctx, htcondordbAdType, "", &htcondor.QueryOptions{Limit: 64})
-	if err != nil {
-		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
-	}
-	if len(ads) == 0 {
-		return nil, fmt.Errorf("no htcondordb database is advertising to the collector")
-	}
-	info := parseHTCondorDBAd(ads[0])
-	if info.Address == "" {
-		return nil, fmt.Errorf("the htcondordb ad has no MyAddress; cannot connect")
-	}
-	s.dbMu.Lock()
-	s.dbInfo, s.dbInfoAt = info, time.Now()
-	s.dbMu.Unlock()
-	return info, nil
-}
-
-func parseHTCondorDBAd(ad *classad.ClassAd) *htcondordbInfo {
-	info := &htcondordbInfo{}
-	info.Name, _ = ad.EvaluateAttrString("Name")
-	info.Address, _ = ad.EvaluateAttrString("MyAddress")
-	info.TimeTravelEnabled, _ = ad.EvaluateAttrBool("TimeTravelEnabled")
-	info.HistoryGap, _ = ad.EvaluateAttrBool("HistoryGapDetected")
-	info.SecondsSinceSync, _ = ad.EvaluateAttrInt("HistorySecondsSinceSync")
-	info.JobQueueCaughtUp, _ = ad.EvaluateAttrBool("JobQueueCaughtUp")
-	info.JobQueueLastSyncTime, _ = ad.EvaluateAttrInt("JobQueueLastSyncTime")
-	info.JobQueueSecondsSync, _ = ad.EvaluateAttrInt("JobQueueSecondsSinceSync")
-	return info
-}
-
-// dbClient dials the discovered htcondordb over an authenticated DBSession and returns a dbrpc
-// client, a closer the caller must invoke, and the discovered info (for freshness annotation).
-func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *htcondordbInfo, error) {
-	info, err := s.discoverHTCondorDB(ctx)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if s.htcondorConfig == nil {
-		return nil, nil, nil, fmt.Errorf("htcondordb tools unavailable: no HTCondor config for authentication")
-	}
-	sec, err := htcondor.GetSecurityConfig(s.htcondorConfig, dbSessionCommand, "CLIENT")
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building htcondordb security config: %w", err)
-	}
-	sec.Command = dbSessionCommand
-	cl, err := htcondor.DialSinful(ctx, info.Address, sec, nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
-	}
-	dbc := dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream()))
-	return dbc, func() { _ = cl.Close() }, info, nil
-}
-
-// htcondordbEnabled reports whether the DB-backed tools can run (collector + config present).
+// htcondordbEnabled reports whether the DB-backed tools can run
+// (collector + config present, so the mirror can be discovered and
+// authenticated to).
 func (s *Server) htcondordbEnabled() bool {
-	return s.collector != nil && s.htcondorConfig != nil
+	return s.dbMirror.Enabled()
+}
+
+// discoverHTCondorDB finds the mirror through the collector.
+func (s *Server) discoverHTCondorDB(ctx context.Context) (*dbmirror.Info, error) {
+	if !s.htcondordbEnabled() {
+		return nil, fmt.Errorf("htcondordb tools unavailable: no collector or HTCondor config configured")
+	}
+	return s.dbMirror.Discover(ctx)
+}
+
+// dbClient dials the mirror over an authenticated DBSession.
+func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error) {
+	if !s.htcondordbEnabled() {
+		return nil, nil, nil, fmt.Errorf("htcondordb tools unavailable: no collector or HTCondor config configured")
+	}
+	return s.dbMirror.Client(ctx)
 }
 
 // toolQueryHistoryDB queries completed jobs from the htcondordb "history" archive. Owner-scoped:
@@ -234,9 +152,9 @@ func stringArg(args map[string]interface{}, key string) string {
 }
 
 // dbLimitArg reads the optional "limit" tool argument, defaulting to
-// dbDefaultLimit and clamping to dbMaxLimit.
+// dbmirror.DefaultLimit and clamping to dbmirror.MaxLimit.
 func dbLimitArg(args map[string]interface{}) int {
-	n := dbDefaultLimit
+	n := dbmirror.DefaultLimit
 	switch v := args["limit"].(type) {
 	case float64:
 		n = int(v)
@@ -244,10 +162,10 @@ func dbLimitArg(args map[string]interface{}) int {
 		n = v
 	}
 	if n <= 0 {
-		n = dbDefaultLimit
+		n = dbmirror.DefaultLimit
 	}
-	if n > dbMaxLimit {
-		n = dbMaxLimit
+	if n > dbmirror.MaxLimit {
+		n = dbmirror.MaxLimit
 	}
 	return n
 }
@@ -271,7 +189,7 @@ func parseAsOf(s string) (time.Time, error) {
 
 // dbTextResult formats query rows (each an old-ClassAd text blob) into a text tool result with
 // a count, truncation note, and freshness annotation.
-func dbTextResult(title string, rows []string, limit int, info *htcondordbInfo) interface{} {
+func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info) interface{} {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s", len(rows), title)
 	if len(rows) >= limit {
@@ -287,7 +205,7 @@ func dbTextResult(title string, rows []string, limit int, info *htcondordbInfo) 
 
 // freshnessNote annotates a result with the mirror's staleness and any durability gap, so an
 // agent can weigh how current the DB-backed answer is.
-func freshnessNote(info *htcondordbInfo) string {
+func freshnessNote(info *dbmirror.Info) string {
 	if info == nil {
 		return ""
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 )
 
@@ -53,10 +54,10 @@ type Server struct {
 	// htcondorConfig is the ambient HTCondor configuration, used to build the CLIENT security
 	// config when dialing the htcondordb database for the DB-backed tools. nil disables them.
 	htcondorConfig *config.Config
-	// dbInfo caches the discovered htcondordb ad (address/capabilities/freshness) for dbInfoTTL.
-	dbMu     sync.Mutex
-	dbInfo   *htcondordbInfo
-	dbInfoAt time.Time
+	// dbMirror discovers and dials the synchronized htcondordb mirror, and owns the
+	// policy for when a read may be served from it (webapi/dbmirror). Shared with the
+	// REST API so both surfaces route on the same freshness rules.
+	dbMirror *dbmirror.Locator
 }
 
 // TokenInfo stores information about a validated token
@@ -179,6 +180,7 @@ func NewServer(cfg Config) (*Server, error) {
 		validatedTokens: make(map[string]TokenInfo),
 		adminUsers:      adminUsers,
 		htcondorConfig:  cfg.HTCondorConfig,
+		dbMirror:        dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
 	}
 
 	// Setup metrics if collector is provided

@@ -24,6 +24,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/jobqueue"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
@@ -145,10 +146,14 @@ type Handler struct {
 	mcpServer *mcpserver.Server
 	// mcpActors caches the schedd-verified identity of forwarded
 	// HTCondor IDTOKENs presented to /mcp/message.
-	mcpActors          mcpActorCache
-	webuiAdminGroup    string            // Group required for Web UI admin pages (empty = no admin UI)
-	metricsPublic      bool              // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
-	htcondorConfig     *config.Config    // HTCondor config snapshot, surfaced read-only on the admin info page
+	mcpActors       mcpActorCache
+	webuiAdminGroup string         // Group required for Web UI admin pages (empty = no admin UI)
+	metricsPublic   bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	htcondorConfig  *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+	// dbMirror routes heavy job and history reads to a synchronized
+	// htcondordb mirror when one is current (handlers_dbroute.go). It
+	// shares its freshness policy with the MCP tools via webapi/dbmirror.
+	dbMirror           *dbmirror.Locator
 	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
@@ -473,6 +478,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		webuiAdminGroup:    cfg.WebUIAdminGroup,
 		metricsPublic:      cfg.MetricsPublic,
 		htcondorConfig:     cfg.HTCondorConfig,
+		dbMirror:           dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
 		token:              cfg.Token,
 	}
 
