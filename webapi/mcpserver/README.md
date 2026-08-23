@@ -52,14 +52,6 @@ Demo mode will:
 
 ## MCP Tools
 
-**Authentication is never a tool argument.** The transport authenticates the
-caller — a bearer token over HTTP, ambient HTCondor configuration and
-filesystem auth on stdio — and the server puts that identity on the request
-before any tool runs. Tools take no `token` parameter, and one sent anyway is
-ignored: a credential in an argument invites an LLM client to ask its user for
-one, and lets a single call switch identity away from the authenticated caller.
-
-
 The server provides the following MCP tools:
 
 ### submit_job
@@ -215,10 +207,10 @@ Add to your Claude Desktop configuration:
 
 ## Authentication
 
-The MCP server authenticates callers at the transport, not per tool call: an
-HTTP caller presents a bearer token (an OAuth2 token from the built-in issuer,
-or a pool IDTOKEN that the schedd verifies), and a stdio caller is whoever the
-process runs as, using ambient HTCondor configuration and filesystem auth.
+The MCP server authenticates callers at the transport: an HTTP caller presents
+a bearer token (an OAuth2 token from the built-in issuer, or a pool IDTOKEN that
+the schedd verifies), and a stdio caller is whoever the process runs as, using
+ambient HTCondor configuration and filesystem auth.
 
 In demo mode, the server uses a signing key for token generation. In normal mode, it uses the HTCondor configuration to locate tokens and signing keys.
 

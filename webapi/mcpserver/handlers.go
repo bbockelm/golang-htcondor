@@ -685,16 +685,6 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		return nil, fmt.Errorf("invalid tool call params: %w", err)
 	}
 
-	// Credentials do not travel in tool arguments. The transport
-	// authenticates the caller — a bearer over HTTP, ambient config and
-	// filesystem auth on stdio — and puts the security config and the
-	// authenticated actor on the context before dispatch. A `token`
-	// argument used to be advertised on every tool and honored here,
-	// which invited an LLM client to ask its user for a credential and
-	// let any call switch identity away from the authenticated caller.
-	// An argument by that name is now ignored like any other unknown
-	// field.
-
 	// Route to appropriate handler
 	var result interface{}
 	var err error
