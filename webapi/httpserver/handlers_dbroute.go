@@ -34,6 +34,14 @@ import (
 // jobsFromMirror tries to serve a live job listing from the mirror's
 // "jobs" table (the mirrored job_queue.log). owner must be the
 // authenticated caller, and the result is confined to their jobs.
+//
+// A paginated request is left to the schedd today (JobsDecision
+// declines on a page token), and a result larger than the caller's
+// limit falls back too. Both are the same missing piece: an ordered
+// scan the client can resume. The database has one — dbrpc's Ordered
+// says so outright, "the server-side resume cursor is not carried over
+// the wire" — so pagination is the case the mirror should be BEST at,
+// not the case it declines. See the note on mirrorQuery.
 func (s *Handler) jobsFromMirror(ctx context.Context, constraint string, projection []string, limit int, pageToken, owner string) (ads []*classad.ClassAd, note string, ok bool) {
 	if !s.dbMirror.Enabled() || owner == "" {
 		return nil, "", false
@@ -107,26 +115,43 @@ func (s *Handler) mirrorQuery(ctx context.Context, table, constraint string, pro
 	}
 	defer closer()
 
-	// Fetch one past the limit to detect the truncation case above.
-	rows, err := dbc.QueryRawProject(ctx, table, constraint, projection, effLimit+1)
-	if err != nil {
-		s.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed; using the schedd", "table", table, "error", err)
-		return nil, false
-	}
-	if len(rows) > effLimit {
-		return nil, false
-	}
-
-	ads := make([]*classad.ClassAd, 0, len(rows))
-	for _, row := range rows {
+	// Stream the rows and decode as they arrive, rather than taking the
+	// whole result as a []string and converting it afterwards: that
+	// held two copies of every row, and the decode could not start
+	// until the last one landed.
+	//
+	// Ask for one past the limit to detect the truncation case above.
+	// The response is still assembled before anything is written to the
+	// client, because until the stream ends we do not know whether the
+	// mirror can answer completely — and once a byte is on the wire the
+	// fallback to the schedd is gone. Bounded by MaxLimit either way.
+	ads := make([]*classad.ClassAd, 0, min(effLimit+1, 256))
+	overflow := false
+	var parseErr error
+	err = dbc.QueryRawProjectStream(ctx, table, constraint, projection, effLimit+1, func(row string) bool {
+		if len(ads) >= effLimit {
+			overflow = true
+			return false // stop the stream; the schedd will answer
+		}
 		ad, perr := classad.ParseOld(row)
 		if perr != nil {
 			// A corrupt row means falling back, not silently dropping
 			// records from the caller's result.
-			s.logger.Warn(logging.DestinationHTTP, "unparseable row from the htcondordb mirror; using the schedd", "table", table, "error", perr)
-			return nil, false
+			parseErr = perr
+			return false
 		}
 		ads = append(ads, ad)
+		return true
+	})
+	switch {
+	case err != nil:
+		s.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed; using the schedd", "table", table, "error", err)
+		return nil, false
+	case parseErr != nil:
+		s.logger.Warn(logging.DestinationHTTP, "unparseable row from the htcondordb mirror; using the schedd", "table", table, "error", parseErr)
+		return nil, false
+	case overflow:
+		return nil, false
 	}
 	return ads, true
 }
