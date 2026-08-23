@@ -954,10 +954,20 @@ func ownerFromActor(actor string) string {
 // caller is left to the schedd's ACL, and an unparseable owner is an
 // error rather than a widening.
 //
-// Every endpoint that addresses a job by id goes through this, so a
-// non-admin session cannot read or act on another user's job by
-// guessing its cluster.proc — the listing endpoint has always enforced
-// that, and the by-id endpoints had not.
+// How much this is doing depends on the endpoint, and it is worth being
+// precise because "we scope it" reads like a guarantee:
+//
+//   - Sandbox transfers and job actions (remove, hold, release) are
+//     ownership-checked by the SCHEDD. The clause here is a second
+//     layer: it turns an attempt into "not found" before the peer has
+//     to refuse it, and it holds if a future schedd is laxer.
+//   - Job-ad reads are NOT ownership-checked by the schedd — READ
+//     authz governs them and most pools allow anyone — so for those
+//     this clause, plus FetchMyJobs where the caller uses it, is what
+//     keeps a non-admin session out of another user's ad.
+//
+// Either way the by-id endpoints now match the listing endpoint, which
+// has always applied the filter.
 func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
 	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
 }
@@ -1609,8 +1619,9 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Build constraint for specific job, confined to the caller's own:
-	// this streams the job's whole sandbox back.
+	// Build constraint for specific job, confined to the caller's own.
+	// The schedd refuses a sandbox transfer to anyone but the owner;
+	// this keeps us from asking on someone else's behalf.
 	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
@@ -2572,8 +2583,9 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 		return
 	}
 
-	// Build constraint for specific job, confined to the caller's own:
-	// this reads a file out of the job's sandbox. Needs the actor, so
+	// Build constraint for specific job, confined to the caller's own.
+	// As with the whole-sandbox download, the schedd is what refuses a
+	// non-owner; this is the layer in front of it. Needs the actor, so
 	// it follows authentication.
 	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
 	if err != nil {

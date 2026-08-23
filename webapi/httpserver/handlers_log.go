@@ -52,8 +52,9 @@ func (s *Handler) handleJobLog(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
-	// Confined to the caller's own job: this reads the user log out of
-	// the job's sandbox.
+	// Confined to the caller's own job. The user log comes out of the
+	// job's sandbox, which the schedd will not transfer to a non-owner;
+	// this is the layer in front of that.
 	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
