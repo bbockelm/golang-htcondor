@@ -21,7 +21,6 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // Tool represents an MCP tool definition
@@ -154,10 +153,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "HTCondor submit file content",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"submit_file"},
 			},
@@ -187,10 +182,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "Page token for pagination. When a query returns 'has_more': true, use the 'next_page_token' value from the response to fetch the next page of results. The token encodes the position (ClusterId.ProcId) of the last job in the current page, and subsequent queries will return jobs that come after this position. Leave empty for the first page.",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 			},
 		},
@@ -203,10 +194,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"job_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"job_id"},
@@ -221,10 +208,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"job_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"job_id"},
@@ -244,10 +227,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "Reason for removal (optional)",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"job_id"},
 			},
@@ -265,10 +244,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"reason": map[string]interface{}{
 						"type":        "string",
 						"description": "Reason for removal (optional)",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"constraint"},
@@ -288,10 +263,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "object",
 						"description": "Attributes to update as key-value pairs",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"job_id", "attributes"},
 			},
@@ -309,10 +280,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"reason": map[string]interface{}{
 						"type":        "string",
 						"description": "Reason for holding (optional)",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"job_id"},
@@ -332,10 +299,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "Reason for release (optional)",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"job_id"},
 			},
@@ -350,10 +313,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"job_id"},
 			},
@@ -367,10 +326,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"job_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"job_id"},
@@ -393,10 +348,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"with_ack": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Request acknowledgment from collector (default: false)",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"ad"},
@@ -435,10 +386,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"type":        "string",
 						"description": "Only return records after this timestamp (ISO8601 format)",
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 			},
 		},
@@ -474,10 +421,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"since": map[string]interface{}{
 						"type":        "string",
 						"description": "Only return records after this timestamp (ISO8601 format)",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 			},
@@ -522,10 +465,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 							"type": "string",
 						},
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 			},
 		},
@@ -565,10 +504,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 							"required": []string{"filename", "data"},
 						},
 					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
-					},
 				},
 				"required": []string{"job_id", "files"},
 			},
@@ -582,10 +517,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					"job_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
-					},
-					"token": map[string]interface{}{
-						"type":        "string",
-						"description": "Authentication token (optional)",
 					},
 				},
 				"required": []string{"job_id"},
@@ -607,13 +538,8 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 				Name:        "list_service_credentials",
 				Description: "List all OAuth service credentials stored in the credential daemon. Use this to check which services have credentials configured.",
 				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"token": map[string]interface{}{
-							"type":        "string",
-							"description": "Authentication token (optional)",
-						},
-					},
+					"type":       "object",
+					"properties": map[string]interface{}{},
 				},
 			},
 			Tool{
@@ -629,10 +555,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"handle": map[string]interface{}{
 							"type":        "string",
 							"description": "Optional handle to distinguish multiple credentials for the same service",
-						},
-						"token": map[string]interface{}{
-							"type":        "string",
-							"description": "Authentication token (optional)",
 						},
 					},
 					"required": []string{"service"},
@@ -656,10 +578,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 							"type":        "string",
 							"description": "The credential value (e.g., a refresh token). Can be plain text or base64-encoded.",
 						},
-						"token": map[string]interface{}{
-							"type":        "string",
-							"description": "Authentication token (optional)",
-						},
 					},
 					"required": []string{"service", "credential"},
 				},
@@ -677,10 +595,6 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"handle": map[string]interface{}{
 							"type":        "string",
 							"description": "Optional handle identifying a specific credential for the service",
-						},
-						"token": map[string]interface{}{
-							"type":        "string",
-							"description": "Authentication token (optional)",
 						},
 					},
 					"required": []string{"service"},
@@ -771,31 +685,6 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		return nil, fmt.Errorf("invalid tool call params: %w", err)
 	}
 
-	// Create context with security config if token provided. We use
-	// the shared NewClientSecurityConfig builder so the AuthMethods
-	// list comes from SEC_CLIENT_AUTHENTICATION_METHODS / the
-	// configured fallback — locking this to TOKEN-only (the previous
-	// behavior) broke pools whose collector also offers SSL but not
-	// our token's iss/kid.
-	token, _ := request.Arguments["token"].(string)
-	var username string
-	if token != "" {
-		secConfig, err := htcondor.NewClientSecurityConfig(ctx, token, "", 0, "CLIENT", nil)
-		if err != nil {
-			return nil, fmt.Errorf("build security config: %w", err)
-		}
-		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
-
-		// Check if token is already validated
-		username = s.getValidatedUsername(token)
-		if username != "" {
-			// Use cached validated username for rate limiting
-			ctx = htcondor.WithAuthenticatedUser(ctx, username)
-		}
-		// If not validated, treat as unauthenticated for rate limiting
-		// Token will be validated on first successful operation
-	}
-
 	// Route to appropriate handler
 	var result interface{}
 	var err error
@@ -857,14 +746,6 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			return nil, fmt.Errorf("unknown tool: %s", request.Name)
 		}
 		result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
-	}
-
-	// If operation succeeded and token was provided but not yet validated, mark it as validated
-	if err == nil && token != "" && username == "" {
-		// Parse username and expiration from token in a single call
-		if extractedUsername, expiration, parseErr := parseJWTClaims(token); parseErr == nil {
-			s.markTokenValidated(token, extractedUsername, expiration)
-		}
 	}
 
 	return result, err
@@ -1541,35 +1422,6 @@ func parseJobID(jobID string) (cluster int, proc int, err error) {
 	}
 
 	return cluster, proc, nil
-}
-
-// parseJWTClaims extracts username and expiration from a JWT token using the JWT library
-// Returns the username, expiration time, or an error if parsing fails
-func parseJWTClaims(token string) (username string, expiration time.Time, err error) {
-	// Parse the token without verification (we just need to read claims)
-	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-	parsedToken, _, parseErr := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
-	if parseErr != nil {
-		return "", time.Time{}, fmt.Errorf("failed to parse JWT: %w", parseErr)
-	}
-
-	// Extract standard claims
-	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
-	if !ok {
-		return "", time.Time{}, fmt.Errorf("failed to extract JWT claims")
-	}
-
-	// Check if subject is set
-	if claims.Subject == "" {
-		return "", time.Time{}, fmt.Errorf("JWT missing sub claim")
-	}
-
-	// Check if expiration is set
-	if claims.ExpiresAt == nil {
-		return "", time.Time{}, fmt.Errorf("JWT missing exp claim")
-	}
-
-	return claims.Subject, claims.ExpiresAt.Time, nil
 }
 
 // toolGetJobStdout handles retrieving stdout from a job

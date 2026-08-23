@@ -33,8 +33,6 @@ type Server struct {
 	prometheusExporter *metricsd.PrometheusExporter
 	stdin              io.Reader
 	stdout             io.Writer
-	validatedTokens    map[string]TokenInfo // Cache of validated tokens
-	tokenMutex         sync.RWMutex
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by the analyze_job_match tool. Same
 	// motivation as the httpserver Handler equivalent: keep the slot
@@ -58,12 +56,6 @@ type Server struct {
 	// policy for when a read may be served from it (webapi/dbmirror). Shared with the
 	// REST API so both surfaces route on the same freshness rules.
 	dbMirror *dbmirror.Locator
-}
-
-// TokenInfo stores information about a validated token
-type TokenInfo struct {
-	Username   string
-	Expiration time.Time
 }
 
 // Config holds server configuration
@@ -166,21 +158,20 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		schedd:          schedd,
-		collector:       cfg.Collector,
-		credd:           cfg.Credd,
-		instructions:    buildInstructions(schedd.Name(), cfg.Instructions),
-		trustDomain:     cfg.TrustDomain,
-		uidDomain:       cfg.UIDDomain,
-		signingKeyPath:  cfg.SigningKeyPath,
-		httpBaseURL:     cfg.HTTPBaseURL,
-		logger:          logger,
-		stdin:           stdin,
-		stdout:          stdout,
-		validatedTokens: make(map[string]TokenInfo),
-		adminUsers:      adminUsers,
-		htcondorConfig:  cfg.HTCondorConfig,
-		dbMirror:        dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
+		schedd:         schedd,
+		collector:      cfg.Collector,
+		credd:          cfg.Credd,
+		instructions:   buildInstructions(schedd.Name(), cfg.Instructions),
+		trustDomain:    cfg.TrustDomain,
+		uidDomain:      cfg.UIDDomain,
+		signingKeyPath: cfg.SigningKeyPath,
+		httpBaseURL:    cfg.HTTPBaseURL,
+		logger:         logger,
+		stdin:          stdin,
+		stdout:         stdout,
+		adminUsers:     adminUsers,
+		htcondorConfig: cfg.HTCondorConfig,
+		dbMirror:       dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
 	}
 
 	// Setup metrics if collector is provided
@@ -266,9 +257,6 @@ type MCPError struct {
 // Run starts the MCP server and processes messages
 func (s *Server) Run(ctx context.Context) error {
 	s.logger.Info(logging.DestinationGeneral, "Starting MCP server")
-
-	// Start token cleanup goroutine
-	s.startTokenCleanup(ctx)
 
 	decoder := json.NewDecoder(s.stdin)
 	encoder := json.NewEncoder(s.stdout)
@@ -367,73 +355,6 @@ func (s *Server) SetStdout(stdout io.Writer) io.Writer {
 	old := s.stdout
 	s.stdout = stdout
 	return old
-}
-
-// markTokenValidated adds a token to the validated cache after successful authentication
-func (s *Server) markTokenValidated(token, username string, expiration time.Time) {
-	s.tokenMutex.Lock()
-	defer s.tokenMutex.Unlock()
-	s.validatedTokens[token] = TokenInfo{
-		Username:   username,
-		Expiration: expiration,
-	}
-}
-
-// getValidatedUsername returns the username if the token is in the validated cache and not expired
-// Returns empty string if token is not validated or expired
-func (s *Server) getValidatedUsername(token string) string {
-	s.tokenMutex.RLock()
-	defer s.tokenMutex.RUnlock()
-
-	info, exists := s.validatedTokens[token]
-	if !exists {
-		return ""
-	}
-
-	// Check if token is expired
-	if time.Now().After(info.Expiration) {
-		return ""
-	}
-
-	return info.Username
-}
-
-// StartMaintenance starts the background upkeep a long-lived server
-// needs — currently expiring entries out of the validated-token cache.
-// Run() does this itself for the stdio transport; a server driven only
-// through HandleMessage (the HTTP transport) has to be told, or its
-// caches grow for the process's lifetime.
-func (s *Server) StartMaintenance(ctx context.Context) {
-	s.startTokenCleanup(ctx)
-}
-
-// startTokenCleanup starts a goroutine that periodically removes expired tokens from cache
-func (s *Server) startTokenCleanup(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.cleanupExpiredTokens()
-			}
-		}
-	}()
-}
-
-// cleanupExpiredTokens removes expired tokens from the cache
-func (s *Server) cleanupExpiredTokens() {
-	s.tokenMutex.Lock()
-	defer s.tokenMutex.Unlock()
-
-	now := time.Now()
-	for token, info := range s.validatedTokens {
-		if now.After(info.Expiration) {
-			delete(s.validatedTokens, token)
-		}
-	}
 }
 
 // handleInitialize handles the initialize request

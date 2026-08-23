@@ -60,7 +60,6 @@ Submit an HTCondor job using a submit file.
 
 **Input:**
 - `submit_file` (string, required): HTCondor submit file content
-- `token` (string, optional): Authentication token
 
 **Example:**
 ```json
@@ -86,7 +85,6 @@ Query HTCondor jobs with optional constraints and projections.
 **Input:**
 - `constraint` (string, optional): ClassAd constraint expression (default: 'true')
 - `projection` (array of strings, optional): Attributes to include in results
-- `token` (string, optional): Authentication token
 
 **Example:**
 ```json
@@ -105,7 +103,6 @@ Get details of a specific HTCondor job by ID.
 
 **Input:**
 - `job_id` (string, required): Job ID in format 'cluster.proc' (e.g., '123.0')
-- `token` (string, optional): Authentication token
 
 **Example:**
 ```json
@@ -124,7 +121,6 @@ Remove (delete) a specific HTCondor job.
 **Input:**
 - `job_id` (string, required): Job ID in format 'cluster.proc'
 - `reason` (string, optional): Reason for removal
-- `token` (string, optional): Authentication token
 
 ### remove_jobs
 
@@ -133,7 +129,6 @@ Remove multiple HTCondor jobs matching a constraint.
 **Input:**
 - `constraint` (string, required): ClassAd constraint to select jobs
 - `reason` (string, optional): Reason for removal
-- `token` (string, optional): Authentication token
 
 ### edit_job
 
@@ -142,7 +137,6 @@ Edit attributes of a specific HTCondor job.
 **Input:**
 - `job_id` (string, required): Job ID in format 'cluster.proc'
 - `attributes` (object, required): Attributes to update as key-value pairs
-- `token` (string, optional): Authentication token
 
 **Example:**
 ```json
@@ -165,7 +159,6 @@ Hold a specific HTCondor job.
 **Input:**
 - `job_id` (string, required): Job ID in format 'cluster.proc'
 - `reason` (string, optional): Reason for holding
-- `token` (string, optional): Authentication token
 
 ### release_job
 
@@ -174,7 +167,6 @@ Release a held HTCondor job.
 **Input:**
 - `job_id` (string, required): Job ID in format 'cluster.proc'
 - `reason` (string, optional): Reason for release
-- `token` (string, optional): Authentication token
 
 ## MCP Resources
 
@@ -215,7 +207,10 @@ Add to your Claude Desktop configuration:
 
 ## Authentication
 
-The MCP server supports HTCondor TOKEN authentication. Tokens can be provided in the `token` argument of each tool call.
+The MCP server authenticates callers at the transport: an HTTP caller presents
+a bearer token (an OAuth2 token from the built-in issuer, or a pool IDTOKEN that
+the schedd verifies), and a stdio caller is whoever the process runs as, using
+ambient HTCondor configuration and filesystem auth.
 
 In demo mode, the server uses a signing key for token generation. In normal mode, it uses the HTCondor configuration to locate tokens and signing keys.
 

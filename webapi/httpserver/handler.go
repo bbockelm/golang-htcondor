@@ -1327,12 +1327,6 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 		h.startCreddAddressUpdater(ctx)
 	}
 
-	// The MCP server is long-lived now, so its validated-token cache
-	// needs the same expiry sweep the stdio transport's Run() does.
-	if h.mcpServer != nil {
-		h.mcpServer.StartMaintenance(ctx)
-	}
-
 	// Start session cleanup goroutine
 	h.startSessionCleanup(ctx)
 
