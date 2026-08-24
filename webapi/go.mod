@@ -17,14 +17,14 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.29.0
+	github.com/PelicanPlatform/classad/collections v0.29.5-0.20260823221749-76f16bfd10bb
 	github.com/hashicorp/yamux v0.1.2
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/prometheus/client_golang v1.24.1
 )
 
 require (
-	github.com/PelicanPlatform/classad/db v0.29.0 // indirect
+	github.com/PelicanPlatform/classad/db v0.29.5-0.20260823221749-76f16bfd10bb // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
@@ -129,7 +129,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/dbrpc v0.29.0
+	github.com/PelicanPlatform/classad/dbrpc v0.29.5-0.20260823221749-76f16bfd10bb
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 )
 

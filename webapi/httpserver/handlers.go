@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -247,14 +248,30 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Offload the queue walk to a synchronized htcondordb mirror when
-	// one is current (handlers_dbroute.go). Only an owner-scoped,
-	// unpaginated request qualifies: the mirror connection authenticates
-	// as this daemon, so a read that is not already confined to the
-	// caller would not have the schedd's per-caller ACL behind it. Any
-	// miss falls through to the schedd below with no visible difference
-	// beyond the "source" field.
-	if ownedByMe && pageToken == "" {
+	// one is current (handlers_dbroute.go). Only an owner-scoped request
+	// qualifies: the mirror connection authenticates as this daemon, so
+	// a read that is not already confined to the caller would not have
+	// the schedd's per-caller ACL behind it. Any miss falls through to
+	// the schedd below with no visible difference beyond the "source"
+	// field.
+	//
+	// Pagination stays with whichever backend started the walk: each
+	// issues a page token only it can read, and each declines the
+	// other's, so a resumed page is never silently restarted from the
+	// beginning of a different scan.
+	if ownedByMe {
 		if s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, owner) {
+			return
+		}
+		if dbmirror.IsCursor(pageToken) {
+			// The mirror issued this token and can no longer honor it —
+			// it went away, fell behind, or the scan it names has been
+			// compacted out from under the cursor. The schedd cannot
+			// resume someone else's walk, and restarting from the top
+			// would hand back rows the caller already has as if they
+			// were new.
+			s.writeError(w, http.StatusBadRequest,
+				"This page token is no longer valid. Retry the query without a page token.")
 			return
 		}
 	}

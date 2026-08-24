@@ -14,7 +14,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.29.0
+	github.com/PelicanPlatform/classad/collections v0.29.5-0.20260823221749-76f16bfd10bb
 	github.com/glebarez/go-sqlite v1.23.0
 	github.com/pressly/goose/v3 v3.27.3
 )

@@ -4,8 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/PelicanPlatform/classad/dbrpc"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -158,4 +164,53 @@ func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 			t.Errorf("BYPASS: scope admits bob: %q", scoped)
 		}
 	})
+}
+
+// TestStaleMirrorPageTokenIsRejected covers the failure mode that
+// pagination across two backends makes possible: the mirror hands out a
+// page token, then goes away (or falls behind, or compacts the scan the
+// cursor names). The schedd cannot resume someone else's walk, and
+// restarting from the top would re-serve rows the caller already has as
+// if they were new — so the request must fail loudly instead.
+func TestStaleMirrorPageTokenIsRejected(t *testing.T) {
+	signingKeyPath := filepath.Join(t.TempDir(), "POOL")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
+		t.Fatalf("writing the signing key: %v", err)
+	}
+
+	// No collector, so no mirror: whatever issued this token, nothing
+	// here can honor it.
+	server, err := NewServer(Config{
+		ScheddName:               "test-schedd",
+		ScheddAddr:               "127.0.0.1:0",
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           signingKeyPath,
+		TrustDomain:              "test.htcondor.org",
+		UIDDomain:                "test.htcondor.org",
+		OAuth2DBPath:             filepath.Join(t.TempDir(), "sessions.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	token := dbmirror.EncodeCursor(dbrpc.SeqCursor{Shard: 1, Snapshot: 7, Seq: 3, Key: "12.0"})
+	req := httptest.NewRequestWithContext(context.Background(), "GET",
+		"/api/v1/jobs?page_token="+url.QueryEscape(token), nil)
+	req.Header.Set("X-Test-User", "alice")
+	rec := httptest.NewRecorder()
+	server.handleListJobs(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	// The message has to tell the caller what to do, since the token
+	// they hold will never work again.
+	if !strings.Contains(rec.Body.String(), "without a page token") {
+		t.Errorf("body does not say how to recover: %s", rec.Body.String())
+	}
 }
