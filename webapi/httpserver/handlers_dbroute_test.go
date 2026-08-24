@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -41,16 +42,16 @@ func TestMirrorRoutingDisabledFallsThrough(t *testing.T) {
 	h := &Handler{dbMirror: dbmirror.NewLocator(nil, nil)}
 	ctx := context.Background()
 
-	if h.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice") {
+	if served, _ := h.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
 		t.Error("jobs routing must decline when no mirror is configured")
 	}
-	if h.historyFromMirror(ctx, httptest.NewRecorder(), "true", &htcondor.HistoryQueryOptions{Backwards: true}) {
+	if served, _ := h.historyFromMirror(ctx, httptest.NewRecorder(), "true", &htcondor.HistoryQueryOptions{Backwards: true}); served {
 		t.Error("history routing must decline when no mirror is configured")
 	}
 
 	// A Handler that never got a locator at all (zero value) must not panic.
 	var bare Handler
-	if bare.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice") {
+	if served, _ := bare.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
 		t.Error("jobs routing must decline with no locator")
 	}
 }
@@ -67,7 +68,7 @@ func TestMirrorJobsRoutingRequiresAnOwner(t *testing.T) {
 	if !h.dbMirror.Enabled() {
 		t.Fatal("expected the locator to report enabled")
 	}
-	if h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "") {
+	if served, _ := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", ""); served {
 		t.Error("jobs routing must decline without an authenticated owner")
 	}
 }
@@ -80,7 +81,7 @@ func TestMirrorDeclineWritesNothing(t *testing.T) {
 	ctx := context.Background()
 
 	rec := httptest.NewRecorder()
-	if h.jobsFromMirror(ctx, rec, "true", nil, 50, "", "alice") {
+	if served, _ := h.jobsFromMirror(ctx, rec, "true", nil, 50, "", "alice"); served {
 		t.Fatal("expected the jobs route to decline")
 	}
 	if rec.Body.Len() != 0 || rec.Flushed {
@@ -89,7 +90,7 @@ func TestMirrorDeclineWritesNothing(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	if h.historyFromMirror(ctx, rec, "true", &htcondor.HistoryQueryOptions{Backwards: true}) {
+	if served, _ := h.historyFromMirror(ctx, rec, "true", &htcondor.HistoryQueryOptions{Backwards: true}); served {
 		t.Fatal("expected the history route to decline")
 	}
 	if rec.Body.Len() != 0 {
@@ -212,5 +213,106 @@ func TestStaleMirrorPageTokenIsRejected(t *testing.T) {
 	// they hold will never work again.
 	if !strings.Contains(rec.Body.String(), "without a page token") {
 		t.Errorf("body does not say how to recover: %s", rec.Body.String())
+	}
+}
+
+// TestMirrorRequiredFailsInsteadOfFallingBack is the point of
+// HTTP_API_DBMIRROR_REQUIRED: the operator has said the access point
+// must not absorb this load, so a read the mirror cannot serve has to
+// fail loudly rather than quietly become schedd load — the failure mode
+// the default best-effort path is designed to avoid.
+func TestMirrorRequiredFailsInsteadOfFallingBack(t *testing.T) {
+	h := &Handler{
+		logger: testLogger(t),
+		dbMirror: dbmirror.NewLocatorWithOptions(
+			htcondor.NewCollector("collector.invalid"), config.NewEmpty(),
+			dbmirror.Options{Required: true}),
+	}
+	if !h.dbMirror.Required() {
+		t.Fatal("expected the locator to report required")
+	}
+
+	cases := []struct {
+		name       string
+		decision   dbmirror.Decision
+		wantStatus int
+	}{
+		{
+			// The mirror is behind or gone: retrying may work, and it is
+			// the deployment's problem, not the caller's.
+			name:       "unavailable is a 503",
+			decision:   dbmirror.Decision{Reason: dbmirror.ReasonStale, Note: "mirror is stale"},
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			// No amount of waiting makes the mirror able to serve this
+			// query, so the caller has to change it.
+			name:       "query shape is a 400",
+			decision:   dbmirror.Decision{Reason: dbmirror.ReasonUnsupportedQuery, Note: "query sets scan_limit"},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if !h.mirrorRequiredError(rec, c.decision) {
+				t.Fatal("expected the required-mirror path to write a response")
+			}
+			if rec.Code != c.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, c.wantStatus)
+			}
+			// The reason has to reach the caller; "service unavailable"
+			// alone leaves an operator with nothing to act on.
+			if !strings.Contains(rec.Body.String(), c.decision.Note) {
+				t.Errorf("body does not carry the reason %q: %s", c.decision.Note, rec.Body.String())
+			}
+		})
+	}
+
+	// A served decision writes nothing: it is not an error.
+	rec := httptest.NewRecorder()
+	if h.mirrorRequiredError(rec, dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed}) {
+		t.Error("a served decision must not be turned into an error")
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("wrote a body for a served decision: %s", rec.Body.String())
+	}
+}
+
+// TestMirrorNotRequiredStaysSilent is the default: a decline is a
+// fallback, invisible to the caller. If this ever wrote a response the
+// schedd path would append a second body to it.
+func TestMirrorNotRequiredStaysSilent(t *testing.T) {
+	h := &Handler{
+		logger:   testLogger(t),
+		dbMirror: dbmirror.NewLocator(htcondor.NewCollector("collector.invalid"), config.NewEmpty()),
+	}
+	rec := httptest.NewRecorder()
+	if h.mirrorRequiredError(rec, dbmirror.Decision{Reason: dbmirror.ReasonStale, Note: "stale"}) {
+		t.Fatal("best-effort routing must not turn a decline into an error")
+	}
+	if rec.Body.Len() != 0 || rec.Code != http.StatusOK {
+		t.Errorf("wrote to the response: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMirrorDecisionsAreCounted checks the metric an operator watches to
+// answer "is the integration working?". A decline that is not counted is
+// indistinguishable from one that never happened.
+func TestMirrorDecisionsAreCounted(t *testing.T) {
+	h := &Handler{
+		logger:           testLogger(t),
+		httpMetricsState: newHTTPMetrics(),
+		dbMirror:         dbmirror.NewLocator(nil, nil),
+	}
+	// Routing is not configured, so this declines before any I/O.
+	if served, _ := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
+		t.Fatal("expected the jobs route to decline")
+	}
+
+	got := testutil.ToFloat64(h.httpMetricsState.mirror.decisions.WithLabelValues(
+		"jobs", "declined", string(dbmirror.ReasonNotConfigured)))
+	if got != 1 {
+		t.Errorf("decisions_total{table=jobs,decision=declined,reason=not_configured} = %v, want 1", got)
 	}
 }

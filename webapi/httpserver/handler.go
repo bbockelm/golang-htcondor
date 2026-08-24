@@ -246,9 +246,18 @@ type HandlerConfig struct {
 	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
 	Collector                *htcondor.Collector // Collector for metrics (optional)
-	JobQueueLogPath          string              // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
-	EnableMetrics            bool                // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL          time.Duration       // Metrics cache TTL (default: 10s)
+
+	// htcondordb mirror routing. Empty/false is the default: discover
+	// whatever htcondordb advertises to the collector and use it as an
+	// optional accelerator. See dbmirror.Options for what each does and
+	// when an operator needs it.
+	DBMirrorName     string // HTTP_API_DBMIRROR_NAME: pin routing to this mirror
+	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS: dial this sinful instead of the advertised one
+	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED: fail rather than fall back to the schedd
+
+	JobQueueLogPath string        // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
+	EnableMetrics   bool          // Enable /metrics endpoint (default: true if Collector is set)
+	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
 	// only when network ACLs already isolate the endpoint (e.g. a
 	// private listening address or a sidecar proxy). Default: false
@@ -478,8 +487,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		webuiAdminGroup:    cfg.WebUIAdminGroup,
 		metricsPublic:      cfg.MetricsPublic,
 		htcondorConfig:     cfg.HTCondorConfig,
-		dbMirror:           dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
-		token:              cfg.Token,
+		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
+			Name:     cfg.DBMirrorName,
+			Address:  cfg.DBMirrorAddress,
+			Required: cfg.DBMirrorRequired,
+		}),
+		token: cfg.Token,
 	}
 
 	if h.webuiAdminGroup != "" {
@@ -567,6 +580,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// disabled (no Collector configured). The metricsdAdapter is
 	// registered later, after metricsRegistry is built.
 	h.httpMetricsState = newHTTPMetrics()
+	// The mirror's own state is exported at scrape time from whatever
+	// discovery last saw, so /metrics answers "is the htcondordb
+	// integration working?" without a request having to exercise it.
+	h.httpMetricsState.registry.MustRegister(newMirrorCollector(h.dbMirror))
 
 	// Discover credd if not provided
 	if h.credd == nil {
@@ -927,6 +944,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		UIDDomain:      h.uidDomain,
 		HTTPBaseURL:    h.httpBaseURL,
 		Logger:         h.logger,
+		// The MCP tools and the REST endpoints must route identically —
+		// one daemon, one policy — so the same options reach both.
+		DBMirrorName:     cfg.DBMirrorName,
+		DBMirrorAddress:  cfg.DBMirrorAddress,
+		DBMirrorRequired: cfg.DBMirrorRequired,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)

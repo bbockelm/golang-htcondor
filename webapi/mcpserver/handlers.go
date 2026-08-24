@@ -880,8 +880,10 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// queue is caught up (db_routing.go). Reproduces this path's self-scoping and
 	// falls through to the schedd on any miss, so the caller sees identical
 	// results plus a provenance note.
-	if res, ok := s.tryJobsFromDB(ctx, constraint, projection, limit, pageToken, time.Now().Unix()); ok {
+	if res, ok, decision := s.tryJobsFromDB(ctx, constraint, projection, limit, pageToken, time.Now().Unix()); ok {
 		return res, nil
+	} else if err := s.mirrorRequiredError(decision); err != nil {
+		return nil, err
 	}
 
 	// Build query options - filter by owner by default for security
@@ -1716,8 +1718,10 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// a safe load win. Only the job-history source is mirrored; epochs and
 	// transfer history stay on the schedd. Any miss falls through transparently.
 	if source == htcondor.HistorySourceJobHistory {
-		if res, ok := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
+		if res, ok, decision := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
 			return res, nil
+		} else if err := s.mirrorRequiredError(decision); err != nil {
+			return nil, err
 		}
 	}
 

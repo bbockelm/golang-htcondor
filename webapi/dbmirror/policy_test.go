@@ -14,29 +14,35 @@ func TestHistoryRouteDecision(t *testing.T) {
 	plain := &htcondor.HistoryQueryOptions{Backwards: true}
 
 	cases := []struct {
-		name    string
-		info    *Info
-		opts    *htcondor.HistoryQueryOptions
-		wantUse bool
+		name       string
+		info       *Info
+		opts       *htcondor.HistoryQueryOptions
+		wantUse    bool
+		wantReason Reason
 	}{
-		{"fresh mirror, plain query", fresh, plain, true},
-		{"no info", nil, plain, false},
-		{"no address", &Info{SecondsSinceSync: 10}, plain, false},
-		{"history gap", &Info{Address: "<a>", HistoryGap: true}, plain, false},
-		{"too stale", &Info{Address: "<a>", SecondsSinceSync: 999}, plain, false},
-		{"since stop-scan", fresh, &htcondor.HistoryQueryOptions{Backwards: true, Since: "2026-01-01"}, false},
-		{"scan_limit budget", fresh, &htcondor.HistoryQueryOptions{Backwards: true, ScanLimit: 5000}, false},
-		{"forward scan", fresh, &htcondor.HistoryQueryOptions{Backwards: false}, false},
-		{"nil opts ok", fresh, nil, true},
+		{"fresh mirror, plain query", fresh, plain, true, ReasonServed},
+		{"no info", nil, plain, false, ReasonNoMirror},
+		{"no address", &Info{SecondsSinceSync: 10}, plain, false, ReasonNoMirror},
+		{"history gap", &Info{Address: "<a>", HistoryGap: true}, plain, false, ReasonHistoryGap},
+		{"too stale", &Info{Address: "<a>", SecondsSinceSync: 999}, plain, false, ReasonStale},
+		{"since stop-scan", fresh, &htcondor.HistoryQueryOptions{Backwards: true, Since: "2026-01-01"}, false, ReasonUnsupportedQuery},
+		{"scan_limit budget", fresh, &htcondor.HistoryQueryOptions{Backwards: true, ScanLimit: 5000}, false, ReasonUnsupportedQuery},
+		{"forward scan", fresh, &htcondor.HistoryQueryOptions{Backwards: false}, false, ReasonUnsupportedQuery},
+		{"nil opts ok", fresh, nil, true, ReasonServed},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			useDB, reason := HistoryDecision(c.info, c.opts)
-			if useDB != c.wantUse {
-				t.Errorf("useDB = %v (%q), want %v", useDB, reason, c.wantUse)
+			d := HistoryDecision(c.info, c.opts)
+			if d.Use != c.wantUse {
+				t.Errorf("Use = %v (%q), want %v", d.Use, d.Note, c.wantUse)
 			}
-			if reason == "" {
-				t.Error("reason should never be empty")
+			// The Reason is a metric label and drives the status code in
+			// required mode, so pin it rather than only checking Use.
+			if d.Reason != c.wantReason {
+				t.Errorf("Reason = %q, want %q", d.Reason, c.wantReason)
+			}
+			if d.Note == "" {
+				t.Error("Note should never be empty")
 			}
 		})
 	}
@@ -46,10 +52,10 @@ func TestHistoryRouteToleranceBoundary(t *testing.T) {
 	// Exactly at tolerance is still fresh; one past it is stale.
 	at := &Info{Address: "<a>", SecondsSinceSync: HistoryToleranceSecs}
 	over := &Info{Address: "<a>", SecondsSinceSync: HistoryToleranceSecs + 1}
-	if use, _ := HistoryDecision(at, nil); !use {
+	if d := HistoryDecision(at, nil); !d.Use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
-	if use, _ := HistoryDecision(over, nil); use {
+	if d := HistoryDecision(over, nil); d.Use {
 		t.Error("staleness past tolerance should fall back to the schedd")
 	}
 }
@@ -95,26 +101,30 @@ func TestJobsRouteDecision(t *testing.T) {
 	caughtUp := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 10}
 
 	cases := []struct {
-		name    string
-		info    *Info
-		page    string
-		wantUse bool
+		name       string
+		info       *Info
+		page       string
+		wantUse    bool
+		wantReason Reason
 	}{
-		{"caught up, fresh", caughtUp, "", true},
-		{"no info", nil, "", false},
-		{"no address", &Info{JobQueueCaughtUp: true}, "", false},
-		{"not caught up", &Info{Address: "<a>", JobQueueCaughtUp: false, JobQueueLastSyncTime: now}, "", false},
-		{"paginated", caughtUp, "tok", false},
-		{"too stale", &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 999}, "", false},
+		{"caught up, fresh", caughtUp, "", true, ReasonServed},
+		{"no info", nil, "", false, ReasonNoMirror},
+		{"no address", &Info{JobQueueCaughtUp: true}, "", false, ReasonNoMirror},
+		{"not caught up", &Info{Address: "<a>", JobQueueCaughtUp: false, JobQueueLastSyncTime: now}, "", false, ReasonNotCaughtUp},
+		{"paginated", caughtUp, "tok", false, ReasonPageToken},
+		{"too stale", &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 999}, "", false, ReasonStale},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			use, reason := JobsDecision(c.info, c.page, now)
-			if use != c.wantUse {
-				t.Errorf("useDB = %v (%q), want %v", use, reason, c.wantUse)
+			d := JobsDecision(c.info, c.page, now)
+			if d.Use != c.wantUse {
+				t.Errorf("Use = %v (%q), want %v", d.Use, d.Note, c.wantUse)
 			}
-			if reason == "" {
-				t.Error("reason should never be empty")
+			if d.Reason != c.wantReason {
+				t.Errorf("Reason = %q, want %q", d.Reason, c.wantReason)
+			}
+			if d.Note == "" {
+				t.Error("Note should never be empty")
 			}
 		})
 	}
@@ -140,10 +150,10 @@ func TestJobsRouteToleranceBoundary(t *testing.T) {
 	const now = 1_000_000
 	at := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - JobsToleranceSecs}
 	over := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - JobsToleranceSecs - 1}
-	if use, _ := JobsDecision(at, "", now); !use {
+	if d := JobsDecision(at, "", now); !d.Use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
-	if use, _ := JobsDecision(over, "", now); use {
+	if d := JobsDecision(over, "", now); d.Use {
 		t.Error("staleness past tolerance should fall back to the schedd")
 	}
 }
@@ -186,12 +196,12 @@ func TestHistoryDecisionPaginationAndScanLimit(t *testing.T) {
 		// What handleHistoryQuery builds from before_cluster/before_proc.
 		Projection: []string{"ClusterId", "ProcId"},
 	}
-	if use, reason := HistoryDecision(fresh, paged); !use {
-		t.Errorf("a paginated archive request must be served from the mirror, got: %s", reason)
+	if d := HistoryDecision(fresh, paged); !d.Use {
+		t.Errorf("a paginated archive request must be served from the mirror, got: %s", d.Note)
 	}
 
 	budgeted := &htcondor.HistoryQueryOptions{Backwards: true, ScanLimit: 10000}
-	if use, _ := HistoryDecision(fresh, budgeted); use {
+	if d := HistoryDecision(fresh, budgeted); d.Use {
 		t.Error("an explicit scan_limit must keep the query on the schedd")
 	}
 }

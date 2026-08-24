@@ -263,7 +263,11 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		if !scanLimitExplicit {
 			mirrorOpts.ScanLimit = 0
 		}
-		if s.historyFromMirror(ctx, w, constraint, &mirrorOpts) {
+		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts)
+		if served {
+			return
+		}
+		if s.mirrorRequiredError(w, decision) {
 			return
 		}
 	}

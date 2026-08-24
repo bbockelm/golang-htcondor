@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1245,6 +1246,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	}
 
 	// Create and start server
+	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
+
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
 		ScheddName:               scheddNameValue,
@@ -1305,6 +1308,9 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		LLMModel:                    llmModel,
 		LLMOperatorInstructionsFile: llmOperatorInstructions,
 		MetricsPublic:               metricsPublic,
+		DBMirrorName:                dbMirrorName,
+		DBMirrorAddress:             dbMirrorAddress,
+		DBMirrorRequired:            dbMirrorRequired,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -2070,4 +2076,41 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 	}
 
 	return token, nil
+}
+
+// loadDBMirrorConfig reads the htcondordb routing knobs.
+//
+// None of them are needed for the common deployment: the mirror is
+// found through the pool's collector, which spans hosts, so an API
+// server on a different machine than the schedd (or than the database)
+// needs no configuration beyond the COLLECTOR_HOST it already has.
+// These cover what the collector alone cannot decide.
+//
+//	HTTP_API_DBMIRROR_NAME     pin routing to one advertised mirror, for a
+//	                           pool running more than one htcondordb
+//	HTTP_API_DBMIRROR_ADDRESS  dial this sinful string instead of the
+//	                           advertised MyAddress, for a mirror behind
+//	                           NAT or reachable only over a tunnel
+//	HTTP_API_DBMIRROR_REQUIRED never fall back to the schedd; a read the
+//	                           mirror cannot serve fails instead
+func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, address string, required bool) {
+	name, _ = cfg.Get("HTTP_API_DBMIRROR_NAME")
+	address, _ = cfg.Get("HTTP_API_DBMIRROR_ADDRESS")
+	if raw, ok := cfg.Get("HTTP_API_DBMIRROR_REQUIRED"); ok && raw != "" {
+		v, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			// Fatal rather than defaulting: an operator who set this
+			// meant to change the failure mode, and silently ignoring a
+			// typo would leave reads quietly falling back to the very
+			// schedd they were trying to protect.
+			log.Fatalf("invalid HTTP_API_DBMIRROR_REQUIRED=%q: must be a boolean", raw)
+		}
+		required = v
+	}
+	if required {
+		logger.Info(logging.DestinationHTTP,
+			"htcondordb mirror is REQUIRED: job and history reads that the mirror cannot serve will fail instead of using the schedd",
+			"name", name, "address", address)
+	}
+	return name, address, required
 }

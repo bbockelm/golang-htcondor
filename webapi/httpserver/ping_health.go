@@ -3,6 +3,8 @@ package httpserver
 import (
 	"sync"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
 // pingHealth tracks recent ping outcomes for the collector and schedd so
@@ -160,6 +162,90 @@ type healthSnapshot struct {
 	Status    string             `json:"status"` // overall: "ok" | "warning" | "down"
 	Collector daemonHealthStatus `json:"collector"`
 	Schedd    daemonHealthStatus `json:"schedd"`
+
+	// DBMirror is present only when htcondordb routing is configured, so
+	// a deployment that does not use it sees no change.
+	DBMirror *dbMirrorHealthStatus `json:"dbmirror,omitempty"`
+}
+
+// dbMirrorHealthStatus answers "is the htcondordb integration working?"
+// in one place. A Prometheus scrape answers it over time (see
+// mirrorCollector); this is the version an operator can curl on one host
+// while setting the integration up, which is when the question is
+// hardest to answer and the metrics have no history yet.
+type dbMirrorHealthStatus struct {
+	// Status is "ok" when a mirror was discovered and is fresh enough to
+	// serve, "warning" when it was discovered but reads are currently
+	// falling back (stale, behind, or a history gap), "down" when
+	// discovery is failing, and "disabled" when routing is not
+	// configured. Required routing turns "warning" and "down" into
+	// errors for callers, so they are worth alerting on there.
+	Status string `json:"status"`
+	// Required reflects HTTP_API_DBMIRROR_REQUIRED: when true, a read
+	// this mirror cannot serve fails instead of using the schedd.
+	Required bool `json:"required"`
+	// Name and Address are the mirror actually in use, which is what an
+	// operator needs when several advertise or when an address override
+	// is configured.
+	Name    string `json:"name,omitempty"`
+	Address string `json:"address,omitempty"`
+	// PinnedName / PinnedAddress echo the configured targeting so a typo
+	// in either is visible next to the empty result it produced.
+	PinnedName    string `json:"pinned_name,omitempty"`
+	PinnedAddress string `json:"pinned_address,omitempty"`
+
+	JobQueueCaughtUp      bool  `json:"job_queue_caught_up"`
+	JobQueueStalenessSecs int64 `json:"job_queue_staleness_seconds"`
+	HistoryStalenessSecs  int64 `json:"history_staleness_seconds"`
+	HistoryGap            bool  `json:"history_gap"`
+	JobsToleranceSecs     int64 `json:"jobs_tolerance_seconds"`
+	HistoryToleranceSecs  int64 `json:"history_tolerance_seconds"`
+
+	LastError   string `json:"last_error,omitempty"`
+	LastSuccess string `json:"last_success,omitempty"` // RFC3339; when discovery last found a mirror
+}
+
+// mirrorHealth renders the Locator's view for /readyz. Returns nil when
+// routing is not configured at all.
+func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
+	h := l.Health()
+	if !h.Enabled {
+		return nil
+	}
+	out := &dbMirrorHealthStatus{
+		Status:               "down",
+		Required:             h.Required,
+		PinnedName:           h.Name,
+		PinnedAddress:        h.Address,
+		LastError:            h.LastError,
+		JobsToleranceSecs:    dbmirror.JobsToleranceSecs,
+		HistoryToleranceSecs: dbmirror.HistoryToleranceSecs,
+	}
+	if !h.LastSuccess.IsZero() {
+		out.LastSuccess = h.LastSuccess.Format(time.RFC3339)
+	}
+	if h.Info == nil {
+		return out
+	}
+	out.Name, out.Address = h.Info.Name, h.Info.Address
+	out.JobQueueCaughtUp = h.Info.JobQueueCaughtUp
+	out.JobQueueStalenessSecs = dbmirror.JobQueueStaleness(h.Info, now.Unix())
+	out.HistoryStalenessSecs = h.Info.SecondsSinceSync
+	out.HistoryGap = h.Info.HistoryGap
+
+	// "ok" means reads are actually routing right now, which is the
+	// question being asked — a mirror that is up but too far behind to
+	// serve is not working, it is just running.
+	switch {
+	case !h.Info.JobQueueCaughtUp,
+		out.JobQueueStalenessSecs > dbmirror.JobsToleranceSecs,
+		h.Info.HistoryGap,
+		out.HistoryStalenessSecs > dbmirror.HistoryToleranceSecs:
+		out.Status = "warning"
+	default:
+		out.Status = "ok"
+	}
+	return out
 }
 
 // snapshot computes the current health view at this moment. Reading is

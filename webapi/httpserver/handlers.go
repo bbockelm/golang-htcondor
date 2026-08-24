@@ -260,7 +260,15 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// other's, so a resumed page is never silently restarted from the
 	// beginning of a different scan.
 	if ownedByMe {
-		if s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, owner) {
+		served, decision := s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, owner)
+		if served {
+			return
+		}
+		// With HTTP_API_DBMIRROR_REQUIRED set, a decline is an error
+		// rather than schedd load. Nothing has been written yet, so the
+		// error is the whole response, and its reason is more specific
+		// than the stale-token message below.
+		if s.mirrorRequiredError(w, decision) {
 			return
 		}
 		if dbmirror.IsCursor(pageToken) {
@@ -1949,6 +1957,12 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	// the operator having to grep logs for the last "Updating schedd
 	// address" line. Skipped when the schedd entry is "disabled" because in
 	// that case there's no meaningful schedd state to attach age to.
+	// Attach the htcondordb mirror's state when routing is configured.
+	// It rides on /readyz rather than a new endpoint because "is the
+	// mirror working?" is asked in the same breath as "is the schedd
+	// reachable?", and one curl should answer both.
+	snap.DBMirror = mirrorHealth(s.dbMirror, time.Now())
+
 	if snap.Schedd.Status != "disabled" {
 		sinceSet, sinceConfirmed := s.scheddAddrAges()
 		if sinceSet > 0 {
@@ -1957,6 +1971,15 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		if sinceConfirmed > 0 {
 			snap.Schedd.AddressLastConfirmedAge = sinceConfirmed.Truncate(time.Second).String()
 		}
+	}
+
+	// A mirror that cannot serve only degrades readiness when it is
+	// required — that is the mode where a failing mirror means failing
+	// requests. On the default best-effort path a lagging mirror costs
+	// nothing but a fallback to the schedd, and pulling the daemon out
+	// of rotation for it would turn an optimization into an outage.
+	if snap.DBMirror != nil && snap.DBMirror.Required && snap.DBMirror.Status != "ok" {
+		snap.Status = "down"
 	}
 
 	statusCode := http.StatusOK

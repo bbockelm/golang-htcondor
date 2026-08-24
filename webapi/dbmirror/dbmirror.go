@@ -95,22 +95,71 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	return info
 }
 
+// Options tunes which mirror is used and how hard routing tries.
+//
+// The zero value is the default deployment: discover whatever htcondordb
+// is advertising to the pool's collector, and treat it as an optional
+// accelerator. A mirror on a different host than the schedd needs no
+// option at all — the collector is pool-wide, so the API daemon finds it
+// wherever it runs, as long as that daemon's COLLECTOR_HOST is the
+// pool's. The options exist for the cases the collector alone cannot
+// settle.
+type Options struct {
+	// Name pins routing to the mirror advertising this Name. Set it when
+	// more than one htcondordb advertises to the pool — say one syncing
+	// this access point and one syncing another — because the mirror for
+	// somebody else's schedd does not hold this schedd's jobs. Without
+	// it, several advertisers mean the freshest is chosen, which is a
+	// guess.
+	Name string
+
+	// Address overrides the sinful string to dial, for a mirror whose
+	// advertised MyAddress is not reachable from this daemon (NAT, a
+	// split network, an SSH tunnel). Freshness still comes from the
+	// collector ad — this changes where to connect, not whether the
+	// mirror is current enough to trust.
+	Address string
+
+	// Required turns routing from an optimization into a requirement: a
+	// read that would have fallen back to the schedd fails instead, with
+	// the reason. Use it when the whole point of the deployment is to
+	// keep load off the access point — the default silently protects
+	// availability at the cost of the load guarantee, and an operator
+	// who wants the opposite trade cannot otherwise get it. Note that a
+	// required mirror makes the API's availability depend on the
+	// mirror's.
+	Required bool
+}
+
 // Locator discovers the mirror through the collector and dials it. Safe
 // for concurrent use; the discovered ad is cached for InfoTTL.
 type Locator struct {
 	collector *htcondor.Collector
 	cfg       *config.Config
+	opts      Options
 
 	mu     sync.Mutex
 	info   *Info
 	infoAt time.Time
+	// lastErr is why the most recent discovery failed, for the
+	// readiness snapshot. Operators debugging "why is nothing routing"
+	// need the error, and it is otherwise only visible at debug level.
+	lastErr string
+	lastTry time.Time
+	lastOK  time.Time
 }
 
-// NewLocator returns a Locator. Either argument may be nil, in which
-// case Enabled reports false: discovery needs the collector and
-// authenticating to the mirror needs the HTCondor config's SEC_* knobs.
+// NewLocator returns a Locator with default options.
 func NewLocator(collector *htcondor.Collector, cfg *config.Config) *Locator {
-	return &Locator{collector: collector, cfg: cfg}
+	return NewLocatorWithOptions(collector, cfg, Options{})
+}
+
+// NewLocatorWithOptions returns a Locator. Either of collector and cfg
+// may be nil, in which case Enabled reports false: discovery needs the
+// collector and authenticating to the mirror needs the HTCondor config's
+// SEC_* knobs.
+func NewLocatorWithOptions(collector *htcondor.Collector, cfg *config.Config, opts Options) *Locator {
+	return &Locator{collector: collector, cfg: cfg, opts: opts}
 }
 
 // Enabled reports whether mirror routing can run at all.
@@ -118,9 +167,61 @@ func (l *Locator) Enabled() bool {
 	return l != nil && l.collector != nil && l.cfg != nil
 }
 
+// Required reports whether a declined read must fail rather than fall
+// back to the schedd. False for a Locator that cannot route at all —
+// "required" describes routing that is on, and demanding a mirror from a
+// daemon with no collector configured would break every read.
+func (l *Locator) Required() bool {
+	return l.Enabled() && l.opts.Required
+}
+
+// Options returns the configured targeting, for status reporting.
+func (l *Locator) Options() Options {
+	if l == nil {
+		return Options{}
+	}
+	return l.opts
+}
+
+// Health is a point-in-time view of discovery, for /readyz and metrics.
+// Info is nil when nothing has been discovered.
+type Health struct {
+	Enabled   bool
+	Required  bool
+	Name      string
+	Address   string
+	Info      *Info
+	LastError string
+	// LastSuccess is when discovery last found a mirror; zero if never.
+	LastSuccess time.Time
+}
+
+// Health reports what discovery last saw. It never dials and never
+// blocks on the collector: it is meant to be safe to call from a
+// health endpoint or a metrics scrape.
+func (l *Locator) Health() Health {
+	if l == nil {
+		return Health{}
+	}
+	h := Health{
+		Enabled:  l.Enabled(),
+		Required: l.Required(),
+		Name:     l.opts.Name,
+		Address:  l.opts.Address,
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	h.Info, h.LastError, h.LastSuccess = l.info, l.lastErr, l.lastOK
+	return h
+}
+
 // Discover finds the mirror by querying the collector for its ad,
 // reusing the last answer for InfoTTL. It errors when no collector is
-// configured or nothing is advertising.
+// configured or nothing usable is advertising.
+//
+// The collector is the only source of a mirror's freshness, which is
+// what every routing decision turns on, so discovery goes through it
+// even when Options.Address pins where to connect.
 func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 	if l == nil || l.collector == nil {
 		return nil, fmt.Errorf("no collector configured for htcondordb discovery")
@@ -133,22 +234,104 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 	}
 	l.mu.Unlock()
 
-	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, "", &htcondor.QueryOptions{Limit: 64})
+	info, err := l.discover(ctx)
+
+	l.mu.Lock()
+	l.lastTry = time.Now()
+	if err != nil {
+		// Keep the previous ad out of the cache on failure: a stale
+		// "everything is fine" would be worse than no answer, since the
+		// freshness gate is the whole safety story. lastErr is kept for
+		// the readiness snapshot.
+		l.lastErr = err.Error()
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.info, l.infoAt, l.lastErr, l.lastOK = info, time.Now(), "", time.Now()
+	l.mu.Unlock()
+	return info, nil
+}
+
+func (l *Locator) discover(ctx context.Context) (*Info, error) {
+	constraint := ""
+	if l.opts.Name != "" {
+		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
+	}
+	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, &htcondor.QueryOptions{Limit: 64})
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
 	}
 	if len(ads) == 0 {
+		if l.opts.Name != "" {
+			return nil, fmt.Errorf("no htcondordb database named %q is advertising to the collector", l.opts.Name)
+		}
 		return nil, fmt.Errorf("no htcondordb database is advertising to the collector")
 	}
-	info := ParseAd(ads[0])
-	if info.Address == "" {
+
+	info := pickMirror(ads)
+	if info == nil {
 		return nil, fmt.Errorf("the htcondordb ad has no MyAddress; cannot connect")
 	}
-
-	l.mu.Lock()
-	l.info, l.infoAt = info, time.Now()
-	l.mu.Unlock()
+	if l.opts.Address != "" {
+		// The operator says the advertised address is not the one to
+		// dial. Everything else about the ad — freshness, gap, table
+		// coverage — still describes this mirror.
+		info.Address = l.opts.Address
+	}
 	return info, nil
+}
+
+// pickMirror chooses among the advertised mirrors. One is the normal
+// case. Several means the pool runs more than one htcondordb, and
+// nothing in the ad says which schedd each one mirrors, so the choice is
+// a guess either way — take the freshest job queue, which is the one
+// most likely to be this access point's, and let an operator who knows
+// better pin it by Name. Ads with no address are skipped rather than
+// chosen and failed on.
+func pickMirror(ads []*classad.ClassAd) *Info {
+	var best *Info
+	for _, ad := range ads {
+		info := ParseAd(ad)
+		if info.Address == "" {
+			continue
+		}
+		if best == nil || fresherJobQueue(info, best) {
+			best = info
+		}
+	}
+	return best
+}
+
+// fresherJobQueue reports whether a's job queue is more current than
+// b's. A caught-up mirror beats one that is not, regardless of clock
+// readings; among equals, the more recent sync wins.
+func fresherJobQueue(a, b *Info) bool {
+	if a.JobQueueCaughtUp != b.JobQueueCaughtUp {
+		return a.JobQueueCaughtUp
+	}
+	return a.JobQueueLastSyncTime > b.JobQueueLastSyncTime
+}
+
+// classadStringLit quotes a value for use in a collector constraint.
+// Escaping matters even though the input is an operator's config value:
+// an unescaped quote would silently change the constraint's meaning
+// rather than fail.
+func classadStringLit(v string) string {
+	out := make([]byte, 0, len(v)+2)
+	out = append(out, '"')
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case '"', '\\':
+			out = append(out, '\\', c)
+		case '\n':
+			out = append(out, '\\', 'n')
+		case '\t':
+			out = append(out, '\\', 't')
+		default:
+			out = append(out, c)
+		}
+	}
+	return string(append(out, '"'))
 }
 
 // Client dials the discovered mirror over an authenticated DBSession and
@@ -176,33 +359,34 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 
 // HistoryDecision decides whether a completed-job query may be served
 // from the mirror. Pure, so the policy is unit-tested without I/O.
-// useDB is true only when a fresh, gap-free mirror exists AND the
-// request uses no schedd-specific scan semantics the mirror cannot
-// reproduce faithfully (a `since` stop-scan, a `scan_limit` budget, or a
-// forward/chronological scan). reason explains the choice for the
-// provenance note callers surface.
-func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) (useDB bool, reason string) {
+// Use is true only when a fresh, gap-free mirror exists AND the request
+// uses no schedd-specific scan semantics the mirror cannot reproduce
+// faithfully (a `since` stop-scan, a `scan_limit` budget, or a
+// forward/chronological scan). Note explains the choice for the
+// provenance callers surface; Reason is the stable code they label
+// metrics and readiness output with.
+func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 	if info == nil || info.Address == "" {
-		return false, "no htcondordb mirror is advertising"
+		return decline(ReasonNoMirror, "no htcondordb mirror is advertising")
 	}
 	if info.HistoryGap {
-		return false, "mirror reported a history durability gap"
+		return decline(ReasonHistoryGap, "mirror reported a history durability gap")
 	}
 	if info.SecondsSinceSync > HistoryToleranceSecs {
-		return false, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", info.SecondsSinceSync, HistoryToleranceSecs)
+		return decline(ReasonStale, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", info.SecondsSinceSync, HistoryToleranceSecs))
 	}
 	if opts != nil {
 		if opts.Since != "" {
-			return false, "query uses a 'since' stop-scan the mirror cannot reproduce"
+			return decline(ReasonUnsupportedQuery, "query uses a 'since' stop-scan the mirror cannot reproduce")
 		}
 		if opts.ScanLimit > 0 {
-			return false, "query sets scan_limit (a schedd scan budget)"
+			return decline(ReasonUnsupportedQuery, "query sets scan_limit (a schedd scan budget)")
 		}
 		if !opts.Backwards {
-			return false, "query requests a forward scan; the mirror serves recent-first only"
+			return decline(ReasonUnsupportedQuery, "query requests a forward scan; the mirror serves recent-first only")
 		}
 	}
-	return true, "served from the htcondordb mirror"
+	return serve("served from the htcondordb mirror")
 }
 
 // JobQueueStaleness is the mirror's CURRENT job-queue staleness in
@@ -232,23 +416,23 @@ func JobQueueStaleness(info *Info, nowUnix int64) int64 {
 // continuing a SCHEDD-issued token here: the two cursors mean different
 // things, so a caller holding one stays where it started (see
 // EncodeCursor).
-func JobsDecision(info *Info, pageToken string, nowUnix int64) (useDB bool, reason string) {
+func JobsDecision(info *Info, pageToken string, nowUnix int64) Decision {
 	if info == nil || info.Address == "" {
-		return false, "no htcondordb mirror is advertising"
+		return decline(ReasonNoMirror, "no htcondordb mirror is advertising")
 	}
 	if pageToken != "" && !IsCursor(pageToken) {
-		return false, "the page token came from the schedd, which owns the rest of that walk"
+		return decline(ReasonPageToken, "the page token came from the schedd, which owns the rest of that walk")
 	}
 	if !info.JobQueueCaughtUp {
-		return false, "mirror's job queue is not caught up to the schedd"
+		return decline(ReasonNotCaughtUp, "mirror's job queue is not caught up to the schedd")
 	}
 	if stale := JobQueueStaleness(info, nowUnix); stale > JobsToleranceSecs {
-		return false, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, JobsToleranceSecs)
+		return decline(ReasonStale, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, JobsToleranceSecs))
 	}
 	if pageToken != "" {
-		return true, "resumed from the htcondordb mirror's cursor"
+		return serve("resumed from the htcondordb mirror's cursor")
 	}
-	return true, "served from the htcondordb mirror (job queue caught up)"
+	return serve("served from the htcondordb mirror (job queue caught up)")
 }
 
 // RecencyKey ranks a completed-job ad for reverse-chronological
