@@ -28,17 +28,17 @@ import (
 // shares toolQueryHistory's exact shape (marshaled []*classad.ClassAd) so the
 // caller cannot tell the source apart except via the provenance note and the
 // "source" metadata.
-func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *htcondor.HistoryQueryOptions, typeName string) (interface{}, bool) {
+func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *htcondor.HistoryQueryOptions, typeName string) (interface{}, bool, dbmirror.Decision) {
 	if !s.htcondordbEnabled() {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonNotConfigured, "htcondordb routing is not configured")
 	}
 	info, err := s.discoverHTCondorDB(ctx)
 	if err != nil {
-		return nil, false // no mirror discoverable -> schedd
+		return nil, false, decline(dbmirror.ReasonNoMirror, err.Error()) // no mirror discoverable -> schedd
 	}
-	useDB, reason := dbmirror.HistoryDecision(info, opts)
-	if !useDB {
-		return nil, false
+	d := dbmirror.HistoryDecision(info, opts)
+	if !d.Use {
+		return nil, false, d
 	}
 
 	// History defaults to unlimited on the schedd; the mirror read must be bounded.
@@ -49,7 +49,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 
 	dbc, closer, _, err := s.dbClient(ctx)
 	if err != nil {
-		return nil, false // dial failed -> schedd
+		return nil, false, decline(dbmirror.ReasonDialFailed, err.Error()) // dial failed -> schedd
 	}
 	defer closer()
 
@@ -60,17 +60,20 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 	// silently returning a wrong "recent N".
 	rows, err := dbc.QueryRawProject(ctx, "history", constraint, opts.Projection, limit+1)
 	if err != nil {
-		return nil, false // query failed -> schedd
+		return nil, false, decline(dbmirror.ReasonQueryFailed, err.Error()) // query failed -> schedd
 	}
 	if len(rows) > limit {
-		return nil, false // more matches than the cap -> schedd owns ordering
+		// more matches than the cap -> schedd owns ordering
+		return nil, false, decline(dbmirror.ReasonOversized,
+			fmt.Sprintf("more than %d matches; the schedd's backwards scan owns ordering beyond that", limit))
 	}
 
 	records := make([]*classad.ClassAd, 0, len(rows))
 	for _, r := range rows {
 		ad, perr := classad.ParseOld(r)
 		if perr != nil {
-			return nil, false // a corrupt row -> fall back rather than drop records
+			// a corrupt row -> fall back rather than drop records
+			return nil, false, decline(dbmirror.ReasonBadRow, perr.Error())
 		}
 		records = append(records, ad)
 	}
@@ -79,7 +82,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 		return dbmirror.RecencyKey(records[i]) > dbmirror.RecencyKey(records[j])
 	})
 
-	return historyResult(records, typeName, constraint, "htcondordb", "\n"+dbmirror.Provenance(info, reason)), true
+	return historyResult(records, typeName, constraint, "htcondordb", "\n"+dbmirror.Provenance(info, d.Note)), true, d
 }
 
 // tryJobsFromDB attempts to serve a live job query (query_jobs) from the
@@ -93,23 +96,24 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 // bypass, so this does the same via an Owner constraint -- routing must not widen
 // what a caller sees. The result shares toolQueryJobs' shape (renderJobsBase) so
 // only the provenance note and "source" metadata reveal the backend.
-func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projection []string, limit int, pageToken string, nowUnix int64) (interface{}, bool) {
+func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projection []string, limit int, pageToken string, nowUnix int64) (interface{}, bool, dbmirror.Decision) {
 	if !s.htcondordbEnabled() {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonNotConfigured, "htcondordb routing is not configured")
 	}
 	// toolQueryJobs self-scopes to the authenticated user; without one we cannot
 	// safely bound the mirror read, so leave it to the schedd.
 	user := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if user == "" {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonNoOwnerScope,
+			"the mirror serves only owner-scoped job queries and this call has no authenticated user")
 	}
 	info, err := s.discoverHTCondorDB(ctx)
 	if err != nil {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonNoMirror, err.Error())
 	}
-	useDB, reason := dbmirror.JobsDecision(info, pageToken, nowUnix)
-	if !useDB {
-		return nil, false
+	d := dbmirror.JobsDecision(info, pageToken, nowUnix)
+	if !d.Use {
+		return nil, false, d
 	}
 
 	if constraint == "" {
@@ -121,7 +125,8 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	// the schedd (whose job path is structurally owner-scoped) rather than trust.
 	safeConstraint, err := classadBalanced(constraint)
 	if err != nil {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonUnsupportedQuery,
+			fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err))
 	}
 	scoped := fmt.Sprintf("(%s) && (Owner == %s)", safeConstraint, classadStringLit(ownerFromActor(user)))
 
@@ -132,7 +137,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 
 	dbc, closer, _, err := s.dbClient(ctx)
 	if err != nil {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonDialFailed, err.Error())
 	}
 	defer closer()
 
@@ -142,16 +147,17 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	// never silently truncates while reporting has_more=false.
 	rows, err := dbc.QueryRawProject(ctx, "jobs", scoped, projection, effLimit+1)
 	if err != nil {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonQueryFailed, err.Error())
 	}
 	if len(rows) > effLimit {
-		return nil, false
+		return nil, false, decline(dbmirror.ReasonOversized,
+			fmt.Sprintf("more than %d matches; pagination stays on the schedd", effLimit))
 	}
 	jobAds := make([]*classad.ClassAd, 0, len(rows))
 	for _, r := range rows {
 		ad, perr := classad.ParseOld(r)
 		if perr != nil {
-			return nil, false
+			return nil, false, decline(dbmirror.ReasonBadRow, perr.Error())
 		}
 		jobAds = append(jobAds, ad)
 	}
@@ -165,13 +171,21 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if stale := dbmirror.JobQueueStaleness(info, nowUnix); stale > 0 {
 		note += fmt.Sprintf("; job queue synced %ds ago", stale)
 	}
-	note += "; " + reason + "]"
+	note += "; " + d.Note + "]"
 
 	text, metadata := renderJobsBase(jobAds, constraint, "htcondordb", note)
 	return map[string]interface{}{
 		"content":  []map[string]interface{}{{"type": "text", "text": text}},
 		"metadata": metadata,
-	}, true
+	}, true, d
+}
+
+// decline builds a Decision for a miss that happens outside the pure
+// policy functions — discovery, dialing, or a result the mirror cannot
+// answer completely. Same shape as a policy decline so the caller need
+// not care which layer said no.
+func decline(r dbmirror.Reason, note string) dbmirror.Decision {
+	return dbmirror.Decision{Reason: r, Note: note}
 }
 
 // jobKeyLess orders two job ads by (ClusterId, ProcId) ascending.
@@ -184,4 +198,18 @@ func jobKeyLess(a, b *classad.ClassAd) bool {
 	ap, _ := a.EvaluateAttrInt("ProcId")
 	bp, _ := b.EvaluateAttrInt("ProcId")
 	return ap < bp
+}
+
+// mirrorRequiredError turns a decline into a tool error when the mirror
+// is mandatory (HTTP_API_DBMIRROR_REQUIRED). The operator has said the
+// access point must not absorb this load even if that costs
+// availability, so the tool reports why the mirror could not answer
+// instead of quietly becoming schedd load. Returns nil on the default
+// best-effort path, where the caller falls back.
+func (s *Server) mirrorRequiredError(d dbmirror.Decision) error {
+	if d.Use || !s.dbMirror.Required() {
+		return nil
+	}
+	return fmt.Errorf("this query must be served from the htcondordb mirror "+
+		"(HTTP_API_DBMIRROR_REQUIRED is set) and could not be: %s", d.Note)
 }

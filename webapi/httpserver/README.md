@@ -236,8 +236,10 @@ with no visible difference other than `"source": "schedd"`.
 Freshness rules (shared with the MCP tools, in `webapi/dbmirror`):
 
 - **Live jobs** need a job queue the mirror reports caught up and synced within
-  60s — job state is latency-sensitive. A paginated request (`page_token`) stays
-  on the schedd so successive pages keep one ordering.
+  60s — job state is latency-sensitive. A paginated request prefers the mirror,
+  which resumes its own scan from the cursor the previous page returned rather
+  than re-walking the queue; each backend issues a page token only it can read
+  and declines the other's, so a walk stays where it started.
 - **Archived jobs** tolerate 300s of lag, because history is append-only. A
   request using schedd-specific scan semantics (`since`, `scan_limit`, or a
   forward scan) stays on the schedd, the only backend that reproduces them.
@@ -247,6 +249,79 @@ Freshness rules (shared with the MCP tools, in `webapi/dbmirror`):
   routing from widening access. `/api/v1/jobs` is owner-scoped by default;
   `/api/v1/jobs/archive` takes `owned_by_me=true`, and always applies it to a
   browser session that is not a Web UI admin.
+
+### Is it working?
+
+Three answers, in increasing order of how much history they carry.
+
+**Per response.** Every routed response carries `"source"` and
+`"source_note"`, as above. Good for "did *this* query use the mirror?"
+
+**Right now.** `GET /readyz` grows a `dbmirror` block whenever routing is
+configured. `status` is `ok` only when reads are actually routing — a mirror
+that is up but too far behind the tolerance is `warning`, because it is running
+without doing its job:
+
+```json
+{ "status": "ok",
+  "dbmirror": { "status": "ok", "required": false, "name": "db@ap40",
+                "address": "<10.0.0.5:9619>", "job_queue_caught_up": true,
+                "job_queue_staleness_seconds": 4, "history_staleness_seconds": 21,
+                "history_gap": false, "jobs_tolerance_seconds": 60,
+                "history_tolerance_seconds": 300 } }
+```
+
+Nothing discovered yet shows `"status": "down"` with `last_error` and the
+`pinned_name` / `pinned_address` that were configured — which is how a typo in
+either becomes visible next to the empty result it produced.
+
+**Over time.** `/metrics` exports:
+
+| Metric | Meaning |
+| --- | --- |
+| `htcondor_api_dbmirror_decisions_total{table,decision,reason}` | Every routing decision. The `served` / `declined` ratio is how much load actually moved off the access point; `reason` says what to fix when it is not moving. |
+| `htcondor_api_dbmirror_up` | 1 when a mirror was discovered. |
+| `htcondor_api_dbmirror_job_queue_caught_up` | 1 when the mirror had drained `job_queue.log` at its last poll. |
+| `htcondor_api_dbmirror_job_queue_staleness_seconds` | Compare against `jobs_tolerance_seconds` (60): above it, live job reads silently go back to the schedd. |
+| `htcondor_api_dbmirror_history_staleness_seconds` | Same for history (tolerance 300). |
+| `htcondor_api_dbmirror_history_gap` | 1 when the mirror reported a durability gap, which stops all history routing. |
+
+The `reason` label is a closed set — `stale`, `not_caught_up`, `no_mirror`,
+`history_gap`, `unsupported_query`, `dial_failed`, and so on — so it is safe to
+alert on. `stale` and `not_caught_up` mean the syncer is behind; `no_mirror`
+means discovery is failing; `unsupported_query` means callers are asking for
+something the mirror structurally cannot serve, and no tuning changes that.
+
+The staleness gauges are **absent**, not zero, when no mirror has been
+discovered: a zero would read as perfectly fresh.
+
+### Configuration
+
+Routing needs no configuration in the common case, including when the API server
+and the database run on different hosts from the schedd — discovery goes through
+the pool's collector, which spans hosts, so the daemon finds the mirror wherever
+it runs. These knobs cover what the collector alone cannot decide:
+
+| Config | Effect |
+| --- | --- |
+| `HTTP_API_DBMIRROR_NAME` | Pin routing to the mirror advertising this `Name`. Set it when more than one htcondordb advertises to the pool: nothing in the ad says which schedd each one mirrors, so without a pin the freshest is chosen, which is a guess. |
+| `HTTP_API_DBMIRROR_ADDRESS` | Dial this sinful string instead of the advertised `MyAddress`, for a mirror reachable only over NAT or a tunnel. Freshness still comes from the collector ad — this changes where to connect, not whether the mirror is current enough to trust. |
+| `HTTP_API_DBMIRROR_REQUIRED` | Never fall back. A read the mirror cannot serve fails instead of becoming schedd load. |
+
+`HTTP_API_DBMIRROR_REQUIRED` inverts the default trade. Best-effort routing
+protects availability at the cost of the load guarantee: when the mirror lags,
+the queries quietly go back to the access point you were trying to protect.
+Required routing protects the load guarantee at the cost of availability — and
+makes the API's availability depend on the mirror's. A declined read becomes:
+
+- **503** when the mirror is absent, lagging, or unreachable. Worth retrying, and
+  `/readyz` reports `down` so a load balancer sees it too.
+- **400** when the query itself cannot be served from the mirror (`scan_limit`, a
+  `since` stop-scan, a forward scan, an unscoped query). Retrying changes
+  nothing; the caller has to ask differently.
+
+Both carry the reason in the error text. The setting applies to the MCP tools as
+well as these endpoints — one daemon, one policy.
 
 ## Authentication
 

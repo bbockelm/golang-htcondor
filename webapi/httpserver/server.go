@@ -68,9 +68,14 @@ type Config struct {
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
-	MetricsPublic  bool
-	Logger         *logging.Logger // Logger instance (optional, creates default if nil)
-	JupyterWorkDir string          // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
+	MetricsPublic bool
+
+	// htcondordb mirror routing; see HandlerConfig for what each does.
+	DBMirrorName     string          // HTTP_API_DBMIRROR_NAME
+	DBMirrorAddress  string          // HTTP_API_DBMIRROR_ADDRESS
+	DBMirrorRequired bool            // HTTP_API_DBMIRROR_REQUIRED
+	Logger           *logging.Logger // Logger instance (optional, creates default if nil)
+	JupyterWorkDir   string          // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
 
 	// InteractiveExtraSubmit is an optional verbatim block of extra
 	// HTCondor submit-file directives merged into every
@@ -179,6 +184,9 @@ func NewServer(cfg Config) (*Server, error) {
 		JobQueueLogPath:             cfg.JobQueueLogPath,
 		EnableMetrics:               cfg.EnableMetrics,
 		MetricsPublic:               cfg.MetricsPublic,
+		DBMirrorName:                cfg.DBMirrorName,
+		DBMirrorAddress:             cfg.DBMirrorAddress,
+		DBMirrorRequired:            cfg.DBMirrorRequired,
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,
 		Logger:                      cfg.Logger,
 		EnableMCP:                   cfg.EnableMCP,

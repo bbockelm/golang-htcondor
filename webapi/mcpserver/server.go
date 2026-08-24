@@ -96,6 +96,13 @@ type Config struct {
 	// via the collector and authenticates to it using this config's SEC_* knobs. nil disables
 	// those tools.
 	HTCondorConfig *config.Config
+
+	// htcondordb mirror routing, mirroring the REST handler's config of
+	// the same name so one daemon routes both surfaces identically. See
+	// dbmirror.Options.
+	DBMirrorName     string // HTTP_API_DBMIRROR_NAME
+	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS
+	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED
 }
 
 // NewServer creates a new MCP server
@@ -171,7 +178,11 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout:         stdout,
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
-		dbMirror:       dbmirror.NewLocator(cfg.Collector, cfg.HTCondorConfig),
+		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
+			Name:     cfg.DBMirrorName,
+			Address:  cfg.DBMirrorAddress,
+			Required: cfg.DBMirrorRequired,
+		}),
 	}
 
 	// Setup metrics if collector is provided

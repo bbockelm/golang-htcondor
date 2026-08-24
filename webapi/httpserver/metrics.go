@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
@@ -34,6 +35,7 @@ type httpMetrics struct {
 	scheddQueryTotal  *prometheus.CounterVec
 	scheddQueryDur    prometheus.Histogram
 	authFailuresTotal *prometheus.CounterVec
+	mirror            *mirrorMetrics
 }
 
 // newHTTPMetrics constructs a fresh metrics state. Each Handler owns
@@ -97,6 +99,8 @@ func newHTTPMetrics() *httpMetrics {
 			Buckets:   prometheus.DefBuckets,
 		}),
 
+		mirror: newMirrorMetrics(),
+
 		authFailuresTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: metricsNamespace,
@@ -115,6 +119,7 @@ func newHTTPMetrics() *httpMetrics {
 		m.scheddQueryTotal,
 		m.scheddQueryDur,
 		m.authFailuresTotal,
+		m.mirror.decisions,
 		// The standard Go runtime + process collectors give us GC,
 		// goroutines, FD count, RSS — table stakes for any Go service.
 		collectors.NewGoCollector(),
@@ -406,4 +411,129 @@ func (a *metricsdAdapter) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- pm
 	}
+}
+
+// --- htcondordb mirror routing -------------------------------------
+//
+// The question these answer is the one every operator of the mirror
+// integration asks first: is it actually working? Before this, the only
+// evidence was the "source" field on individual responses, which tells
+// you about one request and nothing about the deployment.
+//
+// mirrorDecisions is the primary signal. The ratio of decision="served"
+// to everything else is how much load actually moved off the access
+// point, and the reason label says what to fix when it is not moving:
+// "stale"/"not_caught_up" means the syncer is behind, "no_mirror" means
+// discovery is failing, "unsupported_query" means callers are asking
+// for something the mirror cannot serve and no amount of tuning will
+// change that.
+//
+// The gauges describe the mirror itself, refreshed on scrape from the
+// last discovery. They are what an alert rule watches, since staleness
+// crossing the routing tolerance is exactly when serving silently moves
+// back to the schedd.
+
+// mirrorMetrics is the mirror-routing half of httpMetrics, kept
+// separate so a Handler with routing disabled still exports the series
+// (as zeros) rather than making dashboards handle missing metrics.
+type mirrorMetrics struct {
+	decisions *prometheus.CounterVec
+}
+
+func newMirrorMetrics() *mirrorMetrics {
+	return &mirrorMetrics{
+		decisions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "dbmirror",
+				Name:      "decisions_total",
+				Help: "Routing decisions for reads that may be served from the htcondordb mirror, " +
+					"by table (jobs/history), whether the mirror served it, and why.",
+			},
+			[]string{"table", "decision", "reason"},
+		),
+	}
+}
+
+// recordMirrorDecision counts one routing decision.
+func (m *httpMetrics) recordMirrorDecision(table string, d dbmirror.Decision) {
+	if m == nil || m.mirror == nil {
+		return
+	}
+	decision := "declined"
+	if d.Use {
+		decision = "served"
+	}
+	m.mirror.decisions.WithLabelValues(table, decision, string(d.Reason)).Inc()
+}
+
+// mirrorCollector exports the mirror's state at scrape time rather than
+// on a timer: the values come from the Locator's cached discovery, so a
+// scrape costs nothing and can never block on the collector.
+//
+// Implemented as a custom collector because these are properties of an
+// external system observed at a point in time, not events this process
+// accumulates — a Gauge that some background goroutine has to remember
+// to refresh would go stale silently, which is precisely the failure
+// this metric exists to detect.
+type mirrorCollector struct {
+	locator *dbmirror.Locator
+
+	up           *prometheus.Desc
+	required     *prometheus.Desc
+	caughtUp     *prometheus.Desc
+	jobsStale    *prometheus.Desc
+	historyStale *prometheus.Desc
+	historyGap   *prometheus.Desc
+}
+
+func newMirrorCollector(l *dbmirror.Locator) *mirrorCollector {
+	n := func(name, help string) *prometheus.Desc {
+		return prometheus.NewDesc(metricsNamespace+"_dbmirror_"+name, help, nil, nil)
+	}
+	return &mirrorCollector{
+		locator:      l,
+		up:           n("up", "1 if an htcondordb mirror was discovered and is usable, 0 otherwise."),
+		required:     n("required", "1 if reads must be served from the mirror (no schedd fallback), 0 otherwise."),
+		caughtUp:     n("job_queue_caught_up", "1 if the mirror had drained the schedd's job_queue.log at its last poll."),
+		jobsStale:    n("job_queue_staleness_seconds", "Seconds since the mirror last synced the job queue. Live job reads route to the mirror only below the routing tolerance."),
+		historyStale: n("history_staleness_seconds", "Seconds since the mirror last synced job history."),
+		historyGap:   n("history_gap", "1 if the mirror reported a history durability gap, which stops all history routing."),
+	}
+}
+
+func (c *mirrorCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.up
+	ch <- c.required
+	ch <- c.caughtUp
+	ch <- c.jobsStale
+	ch <- c.historyStale
+	ch <- c.historyGap
+}
+
+func (c *mirrorCollector) Collect(ch chan<- prometheus.Metric) {
+	h := c.locator.Health()
+	g := func(d *prometheus.Desc, v float64) {
+		ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v)
+	}
+	g(c.required, b2f(h.Required))
+	if !h.Enabled || h.Info == nil {
+		// Routing off, or discovery has never succeeded. Report up=0 and
+		// stop: emitting zero staleness here would read as "perfectly
+		// fresh" on a dashboard, which is the opposite of the truth.
+		g(c.up, 0)
+		return
+	}
+	g(c.up, 1)
+	g(c.caughtUp, b2f(h.Info.JobQueueCaughtUp))
+	g(c.jobsStale, float64(dbmirror.JobQueueStaleness(h.Info, time.Now().Unix())))
+	g(c.historyStale, float64(h.Info.SecondsSinceSync))
+	g(c.historyGap, b2f(h.Info.HistoryGap))
+}
+
+func b2f(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }

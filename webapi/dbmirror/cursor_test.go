@@ -71,13 +71,20 @@ func TestJobsDecisionOwnsItsOwnTokens(t *testing.T) {
 	now := int64(1_700_000_000)
 	fresh := &Info{Name: "db", Address: "<1.2.3.4:9618>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 5}
 
-	if ok, _ := JobsDecision(fresh, "", now); !ok {
+	if d := JobsDecision(fresh, "", now); !d.Use {
 		t.Error("a first page should route to a current mirror")
 	}
-	if ok, _ := JobsDecision(fresh, EncodeCursor(dbrpc.SeqCursor{Shard: 2, Seq: 9}), now); !ok {
+	if d := JobsDecision(fresh, EncodeCursor(dbrpc.SeqCursor{Shard: 2, Seq: 9}), now); !d.Use {
 		t.Error("a mirror-issued token should resume on the mirror")
 	}
-	if ok, why := JobsDecision(fresh, "MTIzLjQ=", now); ok {
-		t.Errorf("a schedd-issued token must stay with the schedd, got ok (%s)", why)
+	// A schedd-issued token is a query-shape decline, not an
+	// availability one: retrying will not help, the caller has to drop
+	// the token.
+	d := JobsDecision(fresh, "MTIzLjQ=", now)
+	if d.Use {
+		t.Errorf("a schedd-issued token must stay with the schedd, got ok (%s)", d.Note)
+	}
+	if d.Reason != ReasonPageToken {
+		t.Errorf("Reason = %q, want %q", d.Reason, ReasonPageToken)
 	}
 }
