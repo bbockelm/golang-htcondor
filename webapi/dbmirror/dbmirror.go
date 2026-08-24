@@ -222,22 +222,31 @@ func JobQueueStaleness(info *Info, nowUnix int64) int64 {
 
 // JobsDecision decides whether a live job query may be served from the
 // mirror's "jobs" table (the mirrored job_queue.log). Pure. It requires
-// a caught-up mirror whose current staleness is within tolerance, and it
-// declines a paginated query because the mirror read has no matching
-// cursor — the schedd owns pagination so successive pages stay on one
-// backend with one ordering.
+// a caught-up mirror whose current staleness is within tolerance.
+//
+// Pagination is a reason to PREFER the mirror, not to decline it. The
+// mirror resumes an ordered scan from a cursor that names a snapshot, so
+// page two reads the queue as page one saw it, and the walk costs a
+// resume rather than another pass over the whole queue — which is the
+// part a busy schedd feels. The one thing that cannot work is
+// continuing a SCHEDD-issued token here: the two cursors mean different
+// things, so a caller holding one stays where it started (see
+// EncodeCursor).
 func JobsDecision(info *Info, pageToken string, nowUnix int64) (useDB bool, reason string) {
 	if info == nil || info.Address == "" {
 		return false, "no htcondordb mirror is advertising"
 	}
-	if pageToken != "" {
-		return false, "a paginated query continues on the schedd"
+	if pageToken != "" && !IsCursor(pageToken) {
+		return false, "the page token came from the schedd, which owns the rest of that walk"
 	}
 	if !info.JobQueueCaughtUp {
 		return false, "mirror's job queue is not caught up to the schedd"
 	}
 	if stale := JobQueueStaleness(info, nowUnix); stale > JobsToleranceSecs {
 		return false, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, JobsToleranceSecs)
+	}
+	if pageToken != "" {
+		return true, "resumed from the htcondordb mirror's cursor"
 	}
 	return true, "served from the htcondordb mirror (job queue caught up)"
 }
