@@ -116,19 +116,14 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 		return nil, false, d
 	}
 
-	if constraint == "" {
-		constraint = "true"
-	}
-	// Owner-scope safely: AND the balanced, re-serialized constraint with the
-	// owner clause so a crafted constraint cannot escape the AND and widen the
-	// result past the caller's own jobs. An unparseable constraint falls back to
-	// the schedd (whose job path is structurally owner-scoped) rather than trust.
-	safeConstraint, err := classadBalanced(constraint)
+	// Owner-scope through the same helper the schedd path uses, so the
+	// two backends cannot drift on what "my jobs" means. An unparseable
+	// constraint declines to the schedd rather than being trusted.
+	scoped, err := ownerScopedConstraint(ownerFromActor(user), constraint)
 	if err != nil {
 		return nil, false, decline(dbmirror.ReasonUnsupportedQuery,
 			fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err))
 	}
-	scoped := fmt.Sprintf("(%s) && (Owner == %s)", safeConstraint, classadStringLit(ownerFromActor(user)))
 
 	effLimit := limit
 	if effLimit <= 0 || effLimit > dbmirror.MaxLimit {

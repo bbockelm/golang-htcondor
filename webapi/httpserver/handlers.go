@@ -236,6 +236,33 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		fetchOpts |= htcondor.FetchMyJobs
 		// Extract owner from authenticated user in context
 		owner = htcondor.GetAuthenticatedUserFromContext(ctx)
+
+		// No identity means nothing to scope to, and an unscoped
+		// listing here is the whole queue. createAuthenticatedContext
+		// resolves the caller even for a bearer it has not yet marked
+		// validated, so reaching this is a genuine failure to identify
+		// them rather than a first-request artifact.
+		if owner == "" {
+			s.writeError(w, http.StatusUnauthorized,
+				"Authentication required: this listing returns only your own jobs, and the caller's identity could not be established")
+			return
+		}
+
+		// FetchMyJobs above is not a filter the schedd is obliged to
+		// honor: it overrides the request ad's "Me" with whoever it
+		// authenticated the CONNECTION as, and drops owner filtering
+		// entirely when that identity is a queue superuser — which an
+		// access-point service account normally is. Left at that, an
+		// owner-scoped listing silently returns every user's jobs. The
+		// constraint is the one thing the schedd can only evaluate, so
+		// the restriction goes there; FetchMyJobs stays as defense in
+		// depth.
+		scoped, serr := scopeToOwner(ownerFromActor(owner), constraint)
+		if serr != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
+			return
+		}
+		constraint = scoped
 	}
 
 	// Build query options with limit

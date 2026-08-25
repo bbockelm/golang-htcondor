@@ -156,3 +156,44 @@ func classadStringLit(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+// ownerScopedConstraint ANDs an owner restriction onto a caller-supplied
+// constraint, unconditionally and with no admin exemption.
+//
+// This is the only owner scoping that actually binds a job query. The
+// obvious-looking alternative — QueryOptions.FetchOpts = FetchMyJobs
+// with QueryOptions.Owner set — does not, because it delegates the
+// decision to the schedd, which is free to ignore it:
+//
+//   - "Me" on the request ad is a suggestion. The schedd overrides it
+//     with the identity it authenticated the CONNECTION as, which for a
+//     service acting on behalf of users is the service account.
+//   - A queue superuser gets owner filtering dropped altogether:
+//     "if (owner.empty() || isQueueSuperUser(...)) my_jobs_expr = NULL"
+//     (condor_schedd.V6/schedd.cpp). Access-point service accounts are
+//     routinely superusers, and a submit portal has to be one to submit
+//     for other users — so this is the normal deployment, not an edge.
+//
+// Both leave "show me my jobs" meaning "show me everything", which is
+// fail-open. A constraint the schedd merely evaluates cannot be
+// reinterpreted that way. FetchMyJobs stays set alongside this as
+// defense in depth.
+func ownerScopedConstraint(owner, constraint string) (string, error) {
+	if owner == "" {
+		return "", fmt.Errorf("no authenticated owner to scope to")
+	}
+	scope := fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	c := strings.TrimSpace(constraint)
+	if c == "" || strings.EqualFold(c, "true") {
+		return scope, nil
+	}
+	// Re-serialize the caller's constraint before splicing it in: raw
+	// concatenation does not confine it, since `||` binds looser than
+	// `&&` and an unbalanced input like `true) || (true` escapes the
+	// enclosing AND and matches every job.
+	safe, err := classadBalanced(c)
+	if err != nil {
+		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
+	}
+	return fmt.Sprintf("(%s) && (%s)", scope, safe), nil
+}

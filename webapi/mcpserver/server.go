@@ -31,6 +31,7 @@ type Server struct {
 	logger             *logging.Logger
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
+	delegated          bool
 	stdin              io.Reader
 	stdout             io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
@@ -96,6 +97,15 @@ type Config struct {
 	// via the collector and authenticates to it using this config's SEC_* knobs. nil disables
 	// those tools.
 	HTCondorConfig *config.Config
+
+	// Delegated marks a server that acts on behalf of remote callers
+	// rather than running as the user, which is the case when webapi
+	// embeds it behind HTTP. It changes what an unknown caller means:
+	// a delegated server must refuse an owner-scoped tool it cannot
+	// confine, while a server run from a user's shell over stdio is
+	// already confined by being that user's process. Default false, so
+	// the stdio CLI keeps working exactly as before.
+	Delegated bool
 
 	// htcondordb mirror routing, mirroring the REST handler's config of
 	// the same name so one daemon routes both surfaces identically. See
@@ -178,6 +188,7 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout:         stdout,
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
+		delegated:      cfg.Delegated,
 		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
