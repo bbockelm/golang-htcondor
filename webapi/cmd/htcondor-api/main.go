@@ -1247,6 +1247,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	// Create and start server
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
+	pingInterval := loadPingInterval(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1311,6 +1312,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
+		PingInterval:                pingInterval,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -2113,4 +2115,57 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 			"name", name, "address", address)
 	}
 	return name, address, required
+}
+
+// defaultPingInterval is the cadence used when HTTP_API_PING_INTERVAL is
+// not set. Passed explicitly rather than left to the library so the
+// library's zero value can mean "disabled", as its field documents.
+const defaultPingInterval = 1 * time.Minute
+
+// loadPingInterval reads HTTP_API_PING_INTERVAL, the cadence of the
+// periodic collector/schedd ping behind /readyz.
+//
+//	unset      the default, 1m
+//	0          disabled
+//	a duration that cadence, e.g. 30s
+//
+// Disabling is what a deployment holding no local HTCondor credential
+// needs — where every request authenticates with a forwarded token and
+// the daemon itself has nothing to ping with, the ping can only fail and
+// drag /readyz down with it. Until now there was no way to ask for that
+// from the shipped binary at all: nothing read this setting, and the
+// library coerced its documented "off" value back to the default.
+func loadPingInterval(cfg *config.Config, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get("HTTP_API_PING_INTERVAL")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return defaultPingInterval
+	}
+	raw = strings.TrimSpace(raw)
+
+	// "0" alone is the documented way to disable, and is exempt from the
+	// units rule below: there is no ambiguity in zero.
+	if raw == "0" {
+		logger.Info(logging.DestinationHTTP, "Periodic daemon ping disabled by HTTP_API_PING_INTERVAL = 0")
+		return 0
+	}
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_PING_INTERVAL: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_PING_INTERVAL=%q: %v", raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse HTTP_API_PING_INTERVAL: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_PING_INTERVAL=%q: %v", raw, err)
+	}
+	if d < 0 {
+		// A negative interval is a typo, not a way to disable: say so
+		// rather than quietly behaving like 0, which is the documented
+		// spelling.
+		logger.Error(logging.DestinationHTTP, "HTTP_API_PING_INTERVAL must be positive, or 0 to disable: refusing to start",
+			"value", raw)
+		log.Fatalf("invalid HTTP_API_PING_INTERVAL=%q: must be positive, or 0 to disable", raw)
+	}
+	return d
 }

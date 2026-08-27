@@ -335,13 +335,19 @@ type HandlerConfig struct {
 	// uses the same defaults (1h / 30d).
 	IDPAccessTokenLifespan  time.Duration
 	IDPRefreshTokenLifespan time.Duration
-	SessionTTL              time.Duration        // HTTP session TTL (default: 24h)
-	HTCondorConfig          *config.Config       // HTCondor configuration (optional, used for LOCAL_DIR default)
-	PingInterval            time.Duration        // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
-	StreamBufferSize        int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token                   string               // Token for daemon authentication (optional)
-	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	SessionTTL              time.Duration  // HTTP session TTL (default: 24h)
+	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
+	// PingInterval is the cadence of the periodic collector/schedd ping
+	// that feeds /readyz. Zero or negative disables it, which is what a
+	// deployment with no local HTCondor credential wants: the ping has
+	// nothing to authenticate with there and can only fail. There is no
+	// implicit default — the shipped daemon sets this from
+	// HTTP_API_PING_INTERVAL (default 1m, 0 to disable).
+	PingInterval       time.Duration
+	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token              string               // Token for daemon authentication (optional)
+	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key used by the chat endpoint at /api/v1/chat. Empty disables
@@ -917,14 +923,26 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 
 	// Setup periodic ping if configured
-	pingInterval := cfg.PingInterval
-	if pingInterval == 0 {
-		pingInterval = 1 * time.Minute // Default to 1 minute
-	}
-	if pingInterval > 0 {
-		h.pingInterval = pingInterval
-		h.pingHealth = newPingHealth(pingInterval)
-		h.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", pingInterval)
+	// Zero means disabled, as the field documents. It used to be
+	// coerced to a default first, which made the documented "off" value
+	// identical to the default cadence and left no way to turn pinging
+	// off at all: only a negative duration reached the else branch, and
+	// nothing sets one. A deployment holding no local HTCondor
+	// credential — per-request auth from a forwarded token — has nothing
+	// for the ping to authenticate with, so it can only fail, and take
+	// /readyz down with it.
+	//
+	// The shipped daemon passes an explicit interval (see
+	// cmd/htcondor-api), so honoring zero does not silently stop its
+	// pinging. Both states are logged, because an embedder that relied
+	// on the coercion should be able to see which one it got.
+	if cfg.PingInterval > 0 {
+		h.pingInterval = cfg.PingInterval
+		h.pingHealth = newPingHealth(cfg.PingInterval)
+		h.logger.Info(logging.DestinationHTTP, "Periodic daemon ping enabled", "interval", cfg.PingInterval)
+	} else {
+		h.logger.Info(logging.DestinationHTTP,
+			"Periodic daemon ping disabled; /readyz will report what it can check without it")
 	}
 
 	// Build the MCP server now that the schedd, credd and collector are
