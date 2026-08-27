@@ -104,22 +104,38 @@ func NewClientSecurityConfig(
 		return nil, err
 	}
 	if token != "" {
-		// Ensure cedar's AuthToken is at the FRONT of the method
-		// list so the supplied token actually goes on the wire as
-		// "TOKEN" first. mapAuthMethods folds the IDTOKENS config
-		// string into AuthToken, so an operator with
-		// SEC_*_AUTHENTICATION_METHODS = FS,IDTOKENS,SSL ends up
-		// with AuthFS first and would silently authenticate via FS
-		// before TOKEN was even tried — that defeats the purpose of
-		// supplying a token (production deployments lose the FS
-		// shortcut anyway, so callers passing a token are explicitly
-		// asking for token-based identity). We move AuthToken to
-		// position 0 unconditionally and preserve the rest as
-		// fallback order.
+		// A supplied token means this connection acts on behalf of
+		// whoever holds it, so it must not be able to authenticate as
+		// the process running this code instead.
+		//
+		// Ordering alone does not achieve that, and the earlier version
+		// of this code — which merely moved AuthToken to the front —
+		// did not work: the two sides negotiate in the SERVER's
+		// preference order, so a schedd
+		// configured SEC_DEFAULT_AUTHENTICATION_METHODS = FS,TOKEN —
+		// the ordinary access-point setting — picks FS and maps the
+		// connection to the daemon's own account while the forwarded
+		// token sits unused on the wire. Everything downstream that
+		// asks "who is this connection?" then answers with the service
+		// account, and on an AP that account is a queue superuser, so
+		// the schedd drops owner filtering entirely and a "my jobs"
+		// query returns every user's jobs.
+		//
+		// So FS — the method that identifies us by the OS process — is
+		// removed outright, and TOKEN moved to the front of what is
+		// left. SSL stays: some pools need it alongside IDTOKENS (a
+		// collector query whose token kid does not match), and unlike
+		// FS it is not a silent same-host shortcut.
+		//
+		// webapi/httpserver has carried this same rule for its session
+		// path since jobs submitted through a session cookie came out
+		// owned by the OS user instead of the JWT subject. That fix
+		// never reached here, so every other delegated caller — the MCP
+		// tools among them — kept authenticating as the daemon.
 		filtered := make([]security.AuthMethod, 0, len(secConfig.AuthMethods)+1)
 		filtered = append(filtered, security.AuthToken)
 		for _, m := range secConfig.AuthMethods {
-			if m != security.AuthToken {
+			if m != security.AuthToken && m != security.AuthFS {
 				filtered = append(filtered, m)
 			}
 		}

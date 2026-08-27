@@ -944,6 +944,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		UIDDomain:      h.uidDomain,
 		HTTPBaseURL:    h.httpBaseURL,
 		Logger:         h.logger,
+		// Behind HTTP every call is on behalf of somebody else, so an
+		// owner-scoped tool that cannot identify its caller must refuse
+		// rather than fall back to whoever this daemon authenticates as.
+		Delegated: true,
 		// The MCP tools and the REST endpoints must route identically —
 		// one daemon, one policy — so the same options reach both.
 		DBMirrorName:     cfg.DBMirrorName,

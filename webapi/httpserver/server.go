@@ -928,6 +928,25 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		username = s.tokenCache.ValidatedUsername(token)
 	}
 
+	// A bearer that has not yet been marked Validated leaves username
+	// empty above, by design — the unverified `sub` claim must not drive
+	// authz. But "unauthenticated" is only a safe default for checks
+	// that fail closed, and owner scoping does not: a query that cannot
+	// name its owner is a query for the whole queue. Resolve the
+	// identity the same way the MCP path does, by asking the schedd who
+	// this connection is, which is authoritative because the caller's
+	// own credential is what authenticates it.
+	//
+	// Without this the first request from every new bearer would have no
+	// identity, and an owner-scoped endpoint would have to choose
+	// between refusing it (a deadlock — the token is only promoted to
+	// Validated by a 2xx) and widening it.
+	if username == "" {
+		if bearer, err := extractBearerToken(r); err == nil && bearer != "" {
+			username = s.actorForSession(ctx, bearer)
+		}
+	}
+
 	// Set username in context for rate limiting only if from validated token
 	// Otherwise treated as "unauthenticated"
 	if username != "" {

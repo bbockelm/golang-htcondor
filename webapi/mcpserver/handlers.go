@@ -886,17 +886,41 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		return nil, err
 	}
 
+	// Owner scoping goes in the CONSTRAINT. FetchMyJobs alone is not a
+	// filter the schedd is obliged to honor — see ownerScopedConstraint
+	// — and when it declines to, "my jobs" silently becomes every
+	// user's jobs. It stays set below as defense in depth.
+	//
+	// A delegated server (behind HTTP) has no business querying without
+	// knowing whose jobs to return: unscoped here means the whole queue.
+	// Refuse, the same fail-closed answer get_job and remove_jobs give.
+	//
+	// Run directly over stdio the situation is the opposite — the
+	// process IS the user, the schedd sees them on the connection, and
+	// FetchMyJobs alone means what condor_q means by it. Refusing there
+	// would break the CLI to fix a problem it does not have.
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" && s.delegated {
+		return nil, fmt.Errorf("authentication required: query_jobs returns only your own jobs, " +
+			"and the caller's identity could not be established")
+	}
+
+	owner := ownerFromActor(actor)
+	scoped := constraint
+	if owner != "" {
+		var err error
+		if scoped, err = ownerScopedConstraint(owner, constraint); err != nil {
+			return nil, err
+		}
+	}
+
 	// Build query options - filter by owner by default for security
 	opts := &htcondor.QueryOptions{
 		Limit:      limit,
 		Projection: projection,
 		PageToken:  pageToken,
 		FetchOpts:  htcondor.FetchMyJobs, // Only query jobs owned by the authenticated user
-	}
-
-	// Get authenticated user from context if available
-	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
-		opts.Owner = ownerFromActor(user)
+		Owner:      owner,
 	}
 
 	// Use streaming query
@@ -904,7 +928,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
 	}
-	resultCh, err := s.schedd.QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.schedd.QueryStreamWithOptions(ctx, scoped, opts, streamOpts)
 	if err != nil {
 		// Pre-request error
 		return nil, fmt.Errorf("failed to start query: %w", err)
