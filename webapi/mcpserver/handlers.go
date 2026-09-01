@@ -169,7 +169,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Use ['*'] for all attributes. Default is a limited set of common attributes.",
+						"description": describeProjection(defaultJobAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
@@ -367,7 +367,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, Owner, JobStatus, EnteredCurrentStatus, CompletionDate, RemoveReason",
+						"description": describeProjection(defaultHistoryAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
@@ -403,7 +403,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, EpochNumber, Owner, JobStartDate, JobCurrentStartDate, RemoteHost",
+						"description": describeProjection(defaultEpochAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
@@ -439,7 +439,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, TransferType, TransferStartTime, TransferEndTime, TransferSuccess, TransferFileBytes",
+						"description": describeProjection(defaultTransferAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
@@ -868,6 +868,9 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 			projection[i], _ = p.(string)
 		}
 	}
+	// Unprojected queries return the whole ad, which is 71 attributes
+	// even for a trivial job. See projection.go.
+	projection, projectionNote := projectionOrDefault(projection, defaultJobAttrs)
 
 	// Parse limit parameter (default 50)
 	limit := 50
@@ -965,6 +968,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		metadata["has_more"] = true
 		resultText += truncationNote(len(jobAds), limit, limitCapped)
 	}
+	resultText += projectionNote
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -1686,7 +1690,8 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		constraint = "true"
 	}
 
-	// Parse projection
+	// Parse projection. Unprojected queries return the whole ad; see
+	// projection.go for why that is not a usable default here.
 	var projection []string
 	if projArray, ok := args["projection"].([]interface{}); ok {
 		projection = make([]string, len(projArray))
@@ -1694,6 +1699,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 			projection[i], _ = p.(string)
 		}
 	}
+	projection, projectionNote := projectionOrDefault(projection, defaultAttrsFor(source))
 
 	// Build query options
 	opts := &htcondor.HistoryQueryOptions{
@@ -1767,9 +1773,9 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
-	note := ""
+	note := projectionNote
 	if len(records) >= effectiveLimit {
-		note = truncationNote(len(records), effectiveLimit, limitCapped)
+		note = truncationNote(len(records), effectiveLimit, limitCapped) + projectionNote
 	}
 	return historyResult(records, typeName, constraint, string(source), note), nil
 }
