@@ -244,13 +244,40 @@ func TestTokenCache(t *testing.T) {
 		}
 	})
 
+	// Expiry is two behaviors, and testing them together is what made
+	// this flaky. Add has to read exp off the token, and the cache has
+	// to drop the entry when that time arrives. Only the second one
+	// needs the clock to move.
+	t.Run("AddReadsTheExpirationFromTheToken", func(t *testing.T) {
+		cache := NewTokenCache()
+		entry, err := cache.Add(createTestJWTToken(3600))
+		if err != nil {
+			t.Fatalf("Failed to add token: %v", err)
+		}
+		// An hour out, give or take the second exp is truncated to.
+		if d := time.Until(entry.Expiration); d < 59*time.Minute || d > time.Hour+time.Second {
+			t.Errorf("entry expires in %v, want about an hour", d)
+		}
+	})
+
 	t.Run("AutomaticExpiration", func(t *testing.T) {
 		cache := NewTokenCache()
-		// Create token that expires in 1 second
-		token := createTestJWTToken(1)
 
-		_, err := cache.Add(token)
-		if err != nil {
+		// The expiration is passed in rather than parsed out of a
+		// token, because a JWT's exp is whole seconds: exp is stamped
+		// as time.Now().Unix()+n, and Unix() truncates, so a token
+		// minted at .998 of a second and asked to live "1 second" lives
+		// 2ms. On a loaded CI runner even a few milliseconds between
+		// minting and adding it are enough for Add to reject it as
+		// "token is already expired" -- which is what failed on the
+		// arm64 job, and reproduces locally by minting just before a
+		// second boundary and pausing 3ms.
+		//
+		// AddValidated takes the expiration directly, so this asks for
+		// exactly the window it wants and is done in under a second.
+		const validity = 300 * time.Millisecond
+		if _, err := cache.AddValidated(createTestJWTToken(3600), "alice@test.domain",
+			time.Now().Add(validity)); err != nil {
 			t.Fatalf("Failed to add token: %v", err)
 		}
 
@@ -258,10 +285,9 @@ func TestTokenCache(t *testing.T) {
 			t.Errorf("Expected cache size 1, got %d", cache.Size())
 		}
 
-		// Wait for expiration + a bit of time for cleanup
-		time.Sleep(1500 * time.Millisecond)
+		// Removal is an exact time.AfterFunc, so a modest margin does.
+		time.Sleep(validity + 300*time.Millisecond)
 
-		// Token should be automatically removed
 		if cache.Size() != 0 {
 			t.Errorf("Expected cache size 0 after expiration, got %d", cache.Size())
 		}
