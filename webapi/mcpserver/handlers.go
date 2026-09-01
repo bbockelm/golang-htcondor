@@ -176,7 +176,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of results to return (default: 50). Use -1 for unlimited.",
+						"description": "Maximum number of results to return (default 50, hard ceiling 500). More than that does not fit a useful answer; narrow the query or use aggregate_jobs to count instead.",
 					},
 					"page_token": map[string]interface{}{
 						"type": "string",
@@ -374,7 +374,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of archived records to return. Use -1 for unlimited.",
+						"description": "Maximum number of archived records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -410,7 +410,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of epoch records to return. Use -1 for unlimited.",
+						"description": "Maximum number of epoch records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -446,7 +446,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of transfer records to return. Use -1 for unlimited.",
+						"description": "Maximum number of transfer records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -874,6 +874,9 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	if limitVal, ok := args["limit"].(float64); ok {
 		limit = int(limitVal)
 	}
+	// Bounded by what a model can actually use, not by what the schedd
+	// will send. See maxToolResults.
+	limit, limitCapped := clampToolLimit(limit)
 
 	// Get page token
 	pageToken, _ := args["page_token"].(string)
@@ -958,11 +961,9 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// The answer may be cut short, but there is no token to continue
 	// with: the schedd has no cursor to resume from. Say what to do
 	// instead rather than leave the caller to guess.
-	if limit > 0 && len(jobAds) >= limit {
+	if len(jobAds) >= limit {
 		metadata["has_more"] = true
-		resultText += fmt.Sprintf("\n\nStopped at the limit of %d; more jobs match. This schedd cannot be paged "+
-			"through — its job queue is unordered and each page would cost a full scan of it. Raise limit to read "+
-			"more at once, narrow the constraint, or use aggregate_jobs for counts.", limit)
+		resultText += truncationNote(len(jobAds), limit, limitCapped)
 	}
 
 	return map[string]interface{}{
@@ -1701,10 +1702,14 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		Backwards:  true, // Default to backwards
 	}
 
-	// Parse limit (default: no limit for history queries)
+	// Parse limit. "No limit" is not an option here: these results go
+	// into a model's context, so the ceiling applies whether or not the
+	// caller named one. See maxToolResults.
 	if limitVal, ok := args["limit"].(float64); ok {
 		opts.Limit = int(limitVal)
 	}
+	effectiveLimit, limitCapped := clampToolLimit(opts.Limit)
+	opts.Limit = effectiveLimit
 
 	// Parse scan_limit
 	if scanLimitVal, ok := args["scan_limit"].(float64); ok {
@@ -1762,7 +1767,11 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
-	return historyResult(records, typeName, constraint, string(source), ""), nil
+	note := ""
+	if len(records) >= effectiveLimit {
+		note = truncationNote(len(records), effectiveLimit, limitCapped)
+	}
+	return historyResult(records, typeName, constraint, string(source), note), nil
 }
 
 // historyResult renders history records into the tool result. Both the schedd

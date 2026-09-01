@@ -175,10 +175,23 @@ TRUST_DOMAIN = %s
 		}
 		// A dead end with no explanation is how the reported bug felt
 		// from the outside. The response has to say what to do instead.
-		for _, want := range []string{"limit", "aggregate_jobs"} {
+		for _, want := range []string{"limit", "aggregate_jobs", "arrow"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("truncated answer does not mention %q:\n%s", want, text)
 			}
+		}
+	})
+
+	// The tool answers into a model's context, so a caller asking for
+	// everything gets the ceiling rather than everything.
+	t.Run("an unlimited request is capped, not obeyed", func(t *testing.T) {
+		clusters, _, _ := queryJobsPage(t, client, baseURL, token, -1, "")
+		if len(clusters) > mcpserver.MaxToolResults {
+			t.Errorf("unlimited request returned %d jobs, past the ceiling of %d",
+				len(clusters), mcpserver.MaxToolResults)
+		}
+		if len(clusters) != jobCount {
+			t.Errorf("unlimited request returned %d of the %d queued jobs", len(clusters), jobCount)
 		}
 	})
 
