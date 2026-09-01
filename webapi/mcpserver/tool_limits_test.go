@@ -38,7 +38,7 @@ func TestClampToolLimitCeiling(t *testing.T) {
 // circle. A caller who set a small limit can raise it; a caller who hit
 // the ceiling cannot, and has to narrow the query or ask for a count.
 func TestTruncationNoteAdvisesWhatWillHelp(t *testing.T) {
-	capped := truncationNote(maxToolResults, maxToolResults, true)
+	capped := truncationNote(maxToolResults, true)
 	if !strings.Contains(capped, "not return more") {
 		t.Errorf("a capped answer must say raising the limit will not help:\n%s", capped)
 	}
@@ -46,7 +46,7 @@ func TestTruncationNoteAdvisesWhatWillHelp(t *testing.T) {
 		t.Errorf("a capped answer must name the tool that can answer instead:\n%s", capped)
 	}
 
-	own := truncationNote(50, 50, false)
+	own := truncationNote(50, false)
 	if !strings.Contains(own, "Raise limit") {
 		t.Errorf("a self-limited answer should say the limit can be raised:\n%s", own)
 	}

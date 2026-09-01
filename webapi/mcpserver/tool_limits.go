@@ -39,7 +39,7 @@ func clampToolLimit(requested int) (effective int, capped bool) {
 // truncationNote explains an answer that stopped short, and what to do
 // about it. The two cases need different advice: a caller who set a
 // small limit can raise it, and a caller who hit the ceiling cannot.
-func truncationNote(returned, effective int, capped bool) string {
+func truncationNote(effective int, capped bool) string {
 	if capped {
 		return fmt.Sprintf("\n\nStopped at %d results, the most this tool returns in one call — more match. "+
 			"Raising the limit will not return more. Narrow the query instead (Owner, JobStatus, a ClusterId "+

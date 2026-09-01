@@ -966,7 +966,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// instead rather than leave the caller to guess.
 	if len(jobAds) >= limit {
 		metadata["has_more"] = true
-		resultText += truncationNote(len(jobAds), limit, limitCapped)
+		resultText += truncationNote(limit, limitCapped)
 	}
 	resultText += projectionNote
 
@@ -1775,7 +1775,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 
 	note := projectionNote
 	if len(records) >= effectiveLimit {
-		note = truncationNote(len(records), effectiveLimit, limitCapped) + projectionNote
+		note = truncationNote(effectiveLimit, limitCapped) + projectionNote
 	}
 	return historyResult(records, typeName, constraint, string(source), note), nil
 }
