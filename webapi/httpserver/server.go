@@ -127,13 +127,15 @@ type Config struct {
 	// IDPAccessTokenLifespan / IDPRefreshTokenLifespan: see OAuth2*Lifespan above.
 	IDPAccessTokenLifespan  time.Duration
 	IDPRefreshTokenLifespan time.Duration
-	SessionTTL              time.Duration        // HTTP session TTL (default: 24h)
-	HTCondorConfig          *config.Config       // HTCondor configuration (optional, used for LOCAL_DIR default)
-	PingInterval            time.Duration        // Interval for periodic daemon pings (default: 1 minute, 0 = disabled)
-	StreamBufferSize        int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout      time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token                   string               // Token for daemon authentication (optional)
-	Credd                   htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	SessionTTL              time.Duration  // HTTP session TTL (default: 24h)
+	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
+	// PingInterval is the periodic collector/schedd ping cadence; zero
+	// or negative disables it. See HandlerConfig.PingInterval.
+	PingInterval       time.Duration
+	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token              string               // Token for daemon authentication (optional)
+	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key. Empty disables the chat endpoint. See HandlerConfig.
