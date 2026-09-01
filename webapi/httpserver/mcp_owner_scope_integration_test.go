@@ -19,6 +19,8 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
+
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
@@ -122,7 +124,13 @@ SCHEDD_DEBUG = D_COMMAND D_VERBOSE
 	t.Logf("daemon runs as %q; PERSONAL_CONDOR_IS_SUPER_USER makes that a queue superuser", me.Username)
 
 	os.Setenv("CONDOR_CONFIG", configFile)
+	// Bind the process-global rate limiter to this test's config, so a
+	// limiter cached by an earlier test cannot fail these queries for a
+	// reason unrelated to owner scoping. Reload defer registered first
+	// so LIFO runs it after the environment is restored.
+	defer htcondor.ReloadDefaultConfig()
 	defer os.Unsetenv("CONDOR_CONFIG")
+	htcondor.ReloadDefaultConfig()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -239,14 +247,14 @@ SCHEDD_DEBUG = D_COMMAND D_VERBOSE
 // faithful stand-in for how a submit portal creates a job on someone
 // else's behalf. +Owner is honored because QUEUE_ALL_USERS_TRUSTED is
 // set and the submitting identity is a queue superuser.
-func submitJobOwnedBy(t *testing.T, dir, configFile, owner string) int {
+func submitJobOwnedBy(t *testing.T, dir, configFile, owner string, procs ...int) int {
 	t.Helper()
 	subFile := filepath.Join(dir, owner+".sub")
 	body := "executable = /bin/sleep\narguments = 600\n" +
 		"transfer_executable = False\n" +
 		"+Owner = \"" + owner + "\"\n" +
 		"log = " + filepath.Join(dir, owner+".log") + "\n" +
-		"queue\n"
+		queueLine(procs)
 	if err := os.WriteFile(subFile, []byte(body), 0600); err != nil {
 		t.Fatalf("writing %s: %v", subFile, err)
 	}

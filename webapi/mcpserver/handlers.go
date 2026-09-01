@@ -179,8 +179,10 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"description": "Maximum number of results to return (default: 50). Use -1 for unlimited.",
 					},
 					"page_token": map[string]interface{}{
-						"type":        "string",
-						"description": "Page token for pagination. When a query returns 'has_more': true, use the 'next_page_token' value from the response to fetch the next page of results. The token encodes the position (ClusterId.ProcId) of the last job in the current page, and subsequent queries will return jobs that come after this position. Leave empty for the first page.",
+						"type": "string",
+						"description": "Continue a previous listing. Available only when an htcondordb mirror is serving the query: " +
+							"a schedd cannot be paged, because its job queue is unordered and each page would cost a full scan of it. " +
+							"Without a mirror, raise limit to read more at once, narrow the constraint, or use aggregate_jobs for counts.",
 					},
 				},
 			},
@@ -876,6 +878,10 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// Get page token
 	pageToken, _ := args["page_token"].(string)
 
+	// Walking the queue is opt-in: it makes the schedd serialize every
+	// match so the page can be ordered, which a caller who just wants
+	// some jobs should not pay for. A page token means a walk is
+	// already underway.
 	// Offload live job queries to a synchronized htcondordb mirror when its job
 	// queue is caught up (db_routing.go). Reproduces this path's self-scoping and
 	// falls through to the schedd on any miss, so the caller sees identical
@@ -923,7 +929,6 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		Owner:      owner,
 	}
 
-	// Use streaming query
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
@@ -945,17 +950,19 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 
 	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "")
 
-	// Check if we might have more results (got exactly the limit) and, if so,
-	// hand back a page token built from the last job so the caller can continue.
-	if limit > 0 && len(jobAds) >= limit && len(jobAds) > 0 {
-		lastJob := jobAds[len(jobAds)-1]
-		if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
-			if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
-				metadata["has_more"] = true
-				metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
-				resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
-			}
-		}
+	// The token comes from the walk, not from the last ad: a page may
+	// end short of the window it covered, so its last row is not always
+	// where the next page starts. An empty token means there is nowhere
+	// valid to continue from — either the walk is done, or this page is
+	// not a position that can be continued.
+	// The answer may be cut short, but there is no token to continue
+	// with: the schedd has no cursor to resume from. Say what to do
+	// instead rather than leave the caller to guess.
+	if limit > 0 && len(jobAds) >= limit {
+		metadata["has_more"] = true
+		resultText += fmt.Sprintf("\n\nStopped at the limit of %d; more jobs match. This schedd cannot be paged "+
+			"through — its job queue is unordered and each page would cost a full scan of it. Raise limit to read "+
+			"more at once, narrow the constraint, or use aggregate_jobs for counts.", limit)
 	}
 
 	return map[string]interface{}{

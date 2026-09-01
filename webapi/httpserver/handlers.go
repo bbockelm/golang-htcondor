@@ -210,6 +210,12 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Get page token
 	pageToken := r.URL.Query().Get("page_token")
 
+	// A page token can only come from an htcondordb mirror, which
+	// resumes a real storage cursor. The schedd cannot be paged, so if
+	// the mirror did not serve this request there is nothing that can
+	// honor the token — say so rather than silently restarting the
+	// listing from the top (handlers_dbroute.go returns the 400).
+
 	// Parse owned_by_me parameter (defaults to true).
 	// Server-side enforcement: a browser session that isn't in the
 	// admin group cannot escape the my-jobs filter — overriding any
@@ -342,7 +348,6 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream job ads as they arrive
 	jobCount := 0
-	var lastClusterID, lastProcID int64
 	var errorMsg string
 	for result := range resultCh {
 		if result.Err != nil {
@@ -391,14 +396,6 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Track last job for pagination
-		if clusterID, ok := result.Ad.EvaluateAttrInt("ClusterId"); ok {
-			lastClusterID = clusterID
-		}
-		if procID, ok := result.Ad.EvaluateAttrInt("ProcId"); ok {
-			lastProcID = procID
-		}
-
 		jobCount++
 
 		// Flush after each ad for true streaming
@@ -416,11 +413,13 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
 	}
 
-	// Add pagination info if we hit the limit and no error occurred
+	// The answer may be cut short, but no token is issued: the schedd
+	// has no cursor to resume from, and one that restarted the listing
+	// would hand back rows the caller already has. Pagination is
+	// available when an htcondordb mirror serves the query.
 	if errorMsg == "" && limit > 0 && jobCount >= limit {
-		// Generate next page token
-		nextPageToken := htcondor.EncodePageToken(lastClusterID, lastProcID)
-		metadata += fmt.Sprintf(`,"has_more":true,"next_page_token":%q`, nextPageToken)
+		metadata += `,"has_more":true,"pagination_unavailable":` +
+			`"more jobs match; this schedd cannot be paged through, so raise limit or narrow the constraint"`
 	} else {
 		metadata += `,"has_more":false`
 	}
