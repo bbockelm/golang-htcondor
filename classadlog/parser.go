@@ -72,6 +72,19 @@ func (p *Parser) Close() error {
 	return err
 }
 
+// StatOpen returns os.FileInfo for the currently-open file by fstat of the file descriptor being
+// read -- so a caller can identify the exact file it read (device + inode) atomically with the
+// resume offset, which is relative to that same descriptor. This differs from stat by path
+// (GetFilename + os.Stat): a rotation that replaces the path between the read and a path stat would
+// bind the read's offset to the new file's identity, which is exactly the compaction race a job
+// queue tailer must avoid. Returns an error when no file is open (call it between Open and Close).
+func (p *Parser) StatOpen() (os.FileInfo, error) {
+	if p.file == nil {
+		return nil, errors.New("classadlog: StatOpen called with no file open")
+	}
+	return p.file.Stat()
+}
+
 // ReadEntry reads the next log entry from the file
 // Returns io.EOF when end of file is reached
 func (p *Parser) ReadEntry() (*LogEntry, error) {
