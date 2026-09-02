@@ -1655,6 +1655,17 @@ func TestHTTPAPIRateLimiting(t *testing.T) {
 	if err := os.Setenv("CONDOR_CONFIG", configFile); err != nil {
 		t.Fatalf("Failed to set CONDOR_CONFIG: %v", err)
 	}
+	// The rate limiter this installs is process-global and outlives the
+	// test: unsetting CONDOR_CONFIG does not clear the manager already
+	// cached from it. Left behind, this test's deliberately tiny limits
+	// throttle every test that runs after it, which shows up as an
+	// unrelated test failing with "rate limit exceeded" depending on run
+	// order.
+	//
+	// Registered BEFORE the unsetenv so it runs AFTER it: defers are
+	// LIFO, and reloading while CONDOR_CONFIG still points at this
+	// test's config would just cache the restrictive limiter again.
+	defer htcondor.ReloadDefaultConfig()
 	defer os.Unsetenv("CONDOR_CONFIG")
 	htcondor.ReloadDefaultConfig()
 	t.Logf("Loaded rate limiting config from %s", configFile)

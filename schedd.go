@@ -98,25 +98,13 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 	}
 	effectiveOpts := opts.ApplyDefaults()
 
-	// If a page token is provided, modify the constraint to skip earlier jobs
-	effectiveConstraint := constraint
+	// A page token cannot be honored here. See ErrPaginationUnsupported:
+	// the schedd returns job ads in hash order and has no index to seek
+	// with, so a cursor over them would either repeat the same page
+	// forever or silently skip the jobs a page did not happen to
+	// include.
 	if effectiveOpts.PageToken != "" {
-		clusterID, procID, err := DecodePageToken(effectiveOpts.PageToken)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid page token: %w", err)
-		}
-
-		// Add constraint to select jobs after the page token
-		// Jobs come in ClusterId.ProcId order, so we want:
-		// (ClusterId > pageClusterId) OR (ClusterId == pageClusterId AND ProcId > pageProcId)
-		pageConstraint := fmt.Sprintf("(ClusterId > %d || (ClusterId == %d && ProcId > %d))",
-			clusterID, clusterID, procID)
-
-		if constraint == "" || constraint == "true" {
-			effectiveConstraint = pageConstraint
-		} else {
-			effectiveConstraint = fmt.Sprintf("(%s) && (%s)", constraint, pageConstraint)
-		}
+		return nil, nil, ErrPaginationUnsupported
 	}
 
 	// Query with the effective options. As on the streaming path, a
@@ -126,7 +114,7 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 	// owner filter and returns every job the caller may READ, which for
 	// a pool whose READ policy is broad is every job in the queue.
 	useAuth := effectiveOpts.FetchOpts&FetchMyJobs != 0
-	jobAds, err := s.queryWithAuth(ctx, effectiveConstraint, useAuth, &effectiveOpts)
+	jobAds, err := s.queryWithAuth(ctx, constraint, useAuth, &effectiveOpts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -138,18 +126,13 @@ func (s *Schedd) QueryWithOptions(ctx context.Context, constraint string, opts *
 		NextPageToken:  "",
 	}
 
-	// If we got the limit or more results, there might be more available
+	// Report that the answer was cut short, but issue no token to
+	// continue with: there is nowhere valid to continue from. A caller
+	// wanting the rest raises the limit, narrows the constraint, or
+	// reads from an htcondordb mirror, which paginates from a real
+	// storage cursor.
 	if !effectiveOpts.IsUnlimited() && len(jobAds) >= effectiveOpts.Limit {
-		// Generate page token from the last job's ClusterId and ProcId
-		if len(jobAds) > 0 {
-			lastJob := jobAds[len(jobAds)-1]
-			if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
-				if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
-					pageInfo.NextPageToken = EncodePageToken(clusterID, procID)
-					pageInfo.HasMoreResults = true
-				}
-			}
-		}
+		pageInfo.HasMoreResults = true
 	}
 
 	return jobAds, pageInfo, nil
@@ -198,6 +181,11 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	}
 	effectiveOptsValue := effectiveOpts.ApplyDefaults()
 	effectiveOpts = &effectiveOptsValue
+
+	// See QueryWithOptions: there is no cursor the schedd can honor.
+	if effectiveOpts.PageToken != "" {
+		return nil, ErrPaginationUnsupported
+	}
 
 	// Create channel for results
 	ch := make(chan JobAdResult, streamOptsApplied.BufferSize)

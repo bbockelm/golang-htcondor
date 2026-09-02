@@ -169,18 +169,20 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Use ['*'] for all attributes. Default is a limited set of common attributes.",
+						"description": describeProjection(defaultJobAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of results to return (default: 50). Use -1 for unlimited.",
+						"description": "Maximum number of results to return (default 50, hard ceiling 500). More than that does not fit a useful answer; narrow the query or use aggregate_jobs to count instead.",
 					},
 					"page_token": map[string]interface{}{
-						"type":        "string",
-						"description": "Page token for pagination. When a query returns 'has_more': true, use the 'next_page_token' value from the response to fetch the next page of results. The token encodes the position (ClusterId.ProcId) of the last job in the current page, and subsequent queries will return jobs that come after this position. Leave empty for the first page.",
+						"type": "string",
+						"description": "Continue a previous listing. Available only when an htcondordb mirror is serving the query: " +
+							"a schedd cannot be paged, because its job queue is unordered and each page would cost a full scan of it. " +
+							"Without a mirror, raise limit to read more at once, narrow the constraint, or use aggregate_jobs for counts.",
 					},
 				},
 			},
@@ -365,14 +367,14 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, Owner, JobStatus, EnteredCurrentStatus, CompletionDate, RemoveReason",
+						"description": describeProjection(defaultHistoryAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of archived records to return. Use -1 for unlimited.",
+						"description": "Maximum number of archived records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -401,14 +403,14 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, EpochNumber, Owner, JobStartDate, JobCurrentStartDate, RemoteHost",
+						"description": describeProjection(defaultEpochAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of epoch records to return. Use -1 for unlimited.",
+						"description": "Maximum number of epoch records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -437,14 +439,14 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 					},
 					"projection": map[string]interface{}{
 						"type":        "array",
-						"description": "List of attributes to include in results. Default: ClusterId, ProcId, TransferType, TransferStartTime, TransferEndTime, TransferSuccess, TransferFileBytes",
+						"description": describeProjection(defaultTransferAttrs),
 						"items": map[string]interface{}{
 							"type": "string",
 						},
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of transfer records to return. Use -1 for unlimited.",
+						"description": "Maximum number of transfer records to return (hard ceiling 500). Past that, narrow the query or use aggregate_jobs to count instead.",
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
@@ -866,16 +868,26 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 			projection[i], _ = p.(string)
 		}
 	}
+	// Unprojected queries return the whole ad, which is 71 attributes
+	// even for a trivial job. See projection.go.
+	projection, projectionNote := projectionOrDefault(projection, defaultJobAttrs)
 
 	// Parse limit parameter (default 50)
 	limit := 50
 	if limitVal, ok := args["limit"].(float64); ok {
 		limit = int(limitVal)
 	}
+	// Bounded by what a model can actually use, not by what the schedd
+	// will send. See maxToolResults.
+	limit, limitCapped := clampToolLimit(limit)
 
 	// Get page token
 	pageToken, _ := args["page_token"].(string)
 
+	// Walking the queue is opt-in: it makes the schedd serialize every
+	// match so the page can be ordered, which a caller who just wants
+	// some jobs should not pay for. A page token means a walk is
+	// already underway.
 	// Offload live job queries to a synchronized htcondordb mirror when its job
 	// queue is caught up (db_routing.go). Reproduces this path's self-scoping and
 	// falls through to the schedd on any miss, so the caller sees identical
@@ -923,7 +935,6 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		Owner:      owner,
 	}
 
-	// Use streaming query
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
@@ -945,18 +956,19 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 
 	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "")
 
-	// Check if we might have more results (got exactly the limit) and, if so,
-	// hand back a page token built from the last job so the caller can continue.
-	if limit > 0 && len(jobAds) >= limit && len(jobAds) > 0 {
-		lastJob := jobAds[len(jobAds)-1]
-		if clusterID, ok := lastJob.EvaluateAttrInt("ClusterId"); ok {
-			if procID, ok := lastJob.EvaluateAttrInt("ProcId"); ok {
-				metadata["has_more"] = true
-				metadata["next_page_token"] = htcondor.EncodePageToken(clusterID, procID)
-				resultText += fmt.Sprintf("\n\nMore results available. Use page_token: %s", metadata["next_page_token"])
-			}
-		}
+	// The token comes from the walk, not from the last ad: a page may
+	// end short of the window it covered, so its last row is not always
+	// where the next page starts. An empty token means there is nowhere
+	// valid to continue from — either the walk is done, or this page is
+	// not a position that can be continued.
+	// The answer may be cut short, but there is no token to continue
+	// with: the schedd has no cursor to resume from. Say what to do
+	// instead rather than leave the caller to guess.
+	if len(jobAds) >= limit {
+		metadata["has_more"] = true
+		resultText += truncationNote(limit, limitCapped)
 	}
+	resultText += projectionNote
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -1678,7 +1690,8 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		constraint = "true"
 	}
 
-	// Parse projection
+	// Parse projection. Unprojected queries return the whole ad; see
+	// projection.go for why that is not a usable default here.
 	var projection []string
 	if projArray, ok := args["projection"].([]interface{}); ok {
 		projection = make([]string, len(projArray))
@@ -1686,6 +1699,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 			projection[i], _ = p.(string)
 		}
 	}
+	projection, projectionNote := projectionOrDefault(projection, defaultAttrsFor(source))
 
 	// Build query options
 	opts := &htcondor.HistoryQueryOptions{
@@ -1694,10 +1708,14 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		Backwards:  true, // Default to backwards
 	}
 
-	// Parse limit (default: no limit for history queries)
+	// Parse limit. "No limit" is not an option here: these results go
+	// into a model's context, so the ceiling applies whether or not the
+	// caller named one. See maxToolResults.
 	if limitVal, ok := args["limit"].(float64); ok {
 		opts.Limit = int(limitVal)
 	}
+	effectiveLimit, limitCapped := clampToolLimit(opts.Limit)
+	opts.Limit = effectiveLimit
 
 	// Parse scan_limit
 	if scanLimitVal, ok := args["scan_limit"].(float64); ok {
@@ -1755,7 +1773,11 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
-	return historyResult(records, typeName, constraint, string(source), ""), nil
+	note := projectionNote
+	if len(records) >= effectiveLimit {
+		note = truncationNote(effectiveLimit, limitCapped) + projectionNote
+	}
+	return historyResult(records, typeName, constraint, string(source), note), nil
 }
 
 // historyResult renders history records into the tool result. Both the schedd
