@@ -250,13 +250,17 @@ func TestTokenCache(t *testing.T) {
 	// needs the clock to move.
 	t.Run("AddReadsTheExpirationFromTheToken", func(t *testing.T) {
 		cache := NewTokenCache()
-		entry, err := cache.Add(createTestJWTToken(3600))
+		// Deliberately not the hour every other case uses: the point is
+		// that the entry's expiration comes from THIS token, and a
+		// distinctive validity is what tells that apart from a default.
+		const validity = 2 * time.Hour
+		entry, err := cache.Add(createTestJWTToken(int(validity.Seconds())))
 		if err != nil {
 			t.Fatalf("Failed to add token: %v", err)
 		}
-		// An hour out, give or take the second exp is truncated to.
-		if d := time.Until(entry.Expiration); d < 59*time.Minute || d > time.Hour+time.Second {
-			t.Errorf("entry expires in %v, want about an hour", d)
+		// Give or take the whole second exp is truncated to.
+		if d := time.Until(entry.Expiration); d < validity-time.Minute || d > validity+time.Second {
+			t.Errorf("entry expires in %v, want about %v", d, validity)
 		}
 	})
 
