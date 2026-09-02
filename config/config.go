@@ -219,6 +219,35 @@ func (c *Config) hasKey(key string) bool {
 	return ok
 }
 
+// forExpansion returns a Config that shares this one's parsed values but
+// carries its own cycle-detection state.
+//
+// Macro expansion records the variables it is part-way through
+// resolving so it can spot a circular reference. That bookkeeping used
+// to live on the shared Config, which made Get — a read, called
+// per-connection from whatever goroutine is dialing — a concurrent
+// writer. Two callers expanding at once produced
+// "fatal error: concurrent map writes": not a panic, so nothing
+// recovers and the daemon simply dies. It was reported from a collector
+// after a dependency upgrade, and the same path is reachable from any
+// daemon that builds a security config per request.
+//
+// Locking would fix the crash and introduce a subtler bug: one
+// goroutine's in-progress marks would look like circular references to
+// another's unrelated expansion. The state has to be per-resolution,
+// not merely serialized.
+//
+// The copy is shallow on purpose. Expansion only ever writes
+// `evaluating`; `values` and the rest are read-only for its duration,
+// so sharing them costs nothing and the maps are pointers. Recursion
+// then inherits the fresh state for free, because every nested call is
+// a method on this copy.
+func (c *Config) forExpansion() *Config {
+	ec := *c
+	ec.evaluating = make(map[string]bool, 4)
+	return &ec
+}
+
 // Get retrieves a configuration value, honoring HTCondor's subsystem and
 // local-name prefix precedence. For a Config created with a Subsystem and/or
 // LocalName, a more specific definition overrides the bare parameter, most
@@ -247,8 +276,10 @@ func (c *Config) Get(key string) (string, bool) {
 	}
 	val := c.values[actual]
 
-	// Expand macros and function macros in the value
-	expanded, err := c.expandMacrosWithFunctions(val)
+	// Expand macros and function macros in the value. Started from a
+	// per-call copy so concurrent Gets do not share cycle-detection
+	// state; see forExpansion.
+	expanded, err := c.forExpansion().expandMacrosWithFunctions(val)
 	if err != nil {
 		return val, true // Return unexpanded on error
 	}
