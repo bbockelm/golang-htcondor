@@ -122,7 +122,7 @@ func buildPassSockFrame(cmd uint64) []byte {
 // connection; the http.Server end-to-end check lives in the integration
 // test against condor_shared_port.
 func TestListenerForwardsFD(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketDir(t)
 	socket := filepath.Join(dir, "ep.sock")
 
 	spListener, err := Listen(socket, Options{
@@ -230,7 +230,7 @@ func mustSocketpair(t *testing.T) (net.Conn, *os.File) {
 // loops on Accept until it returns an error; if we forget to unblock
 // it on Close, the daemon never exits cleanly.
 func TestListenerCloseUnblocksAccept(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketDir(t)
 	socket := filepath.Join(dir, "ep.sock")
 	l, err := Listen(socket, Options{Logf: t.Logf})
 	if err != nil {
@@ -272,7 +272,7 @@ func TestListenerCloseUnblocksAccept(t *testing.T) {
 // listener drops it without affecting subsequent valid handshakes —
 // otherwise a misbehaved peer could DoS the daemon.
 func TestListenerHandlesGarbage(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketDir(t)
 	socket := filepath.Join(dir, "ep.sock")
 	l, err := Listen(socket, Options{Logf: t.Logf})
 	if err != nil {
@@ -345,7 +345,7 @@ func TestListenerHandlesGarbage(t *testing.T) {
 // Without the WaitGroup wait in Close, step 3 fails — Close returns
 // while the handler is still parked in logf.
 func TestListenerCloseWaitsForHandlers(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketDir(t)
 	socket := filepath.Join(dir, "ep.sock")
 
 	logfEntered := make(chan struct{})
@@ -433,4 +433,27 @@ func acceptWithTimeout(l *Listener, d time.Duration) (net.Conn, error) {
 	case <-time.After(d):
 		return nil, fmt.Errorf("Accept timed out after %v", d)
 	}
+}
+
+// socketDir returns a directory short enough to hold a unix socket path.
+//
+// t.TempDir() on macOS yields something like
+// /var/folders/3r/xl19t4ks0.../T/TestListenerCloseWaitsForHandlers1546069045/001,
+// and a socket under it exceeds sun_path, which is 104 bytes there
+// (108 on Linux). The bind then fails with "invalid argument". The
+// random component varies in length, so the same test passes or fails
+// depending on how many digits it drew -- which reads like flakiness
+// and is really a path-length limit. Linux CI never sees it: its temp
+// paths are short and its limit is larger.
+//
+// Same reason the shared-port tests elsewhere in this repo reach for a
+// short /tmp path instead.
+func socketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "sp") //nolint:usetesting // t.TempDir() is too long for sun_path
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
