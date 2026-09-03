@@ -166,3 +166,62 @@ func TestShortRevisionIsReadable(t *testing.T) {
 		t.Errorf("absent revision became %q", got)
 	}
 }
+
+// TestUnstampedBuildSaysSo is the case a unit test can cover for the
+// VCS-detection problem, and the reason a unit test cannot cover the
+// rest of it.
+//
+// VCS stamping needs a .git directory at build time. A container build
+// often has none -- this repository's own .dockerignore excludes .git --
+// and the toolchain then omits the stamps SILENTLY rather than failing,
+// leaving Main.Version as "(devel)" and no vcs.revision. With no ldflags
+// either, the binary cannot say what it is.
+//
+// A test binary cannot verify that real builds get stamped: `go test`
+// records no VCS settings at all, so asserting "revision is non-empty"
+// would fail on every ordinary run. What is testable, and what matters
+// to whoever reads the log, is that this state announces itself instead
+// of printing a bare "dev" that reads like a release name.
+func TestUnstampedBuildSaysSo(t *testing.T) {
+	savedVersion, savedCommit := Version, Commit
+	defer func() { Version, Commit = savedVersion, savedCommit }()
+	Version, Commit = "dev", "unknown" // the package defaults
+
+	b := buildFrom(&debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor", Version: "(devel)"},
+		// No vcs.* settings: exactly what a build without .git produces.
+	}, true)
+
+	if b.Stamped() {
+		t.Error("a build with no linked version and no VCS metadata claims to be stamped")
+	}
+	got := b.Describe()
+	if !strings.Contains(got, "unstamped") {
+		t.Errorf("Describe() = %q; an unidentifiable build must say so, not read like a release named dev", got)
+	}
+}
+
+// TestStampedBuildsDoNotApologize: the notice above must appear only
+// when there is genuinely nothing to report. A build carrying either a
+// linked version or a revision is identified, and saying "unstamped"
+// there would be noise in every log line of every release.
+func TestStampedBuildsDoNotApologize(t *testing.T) {
+	savedVersion, savedCommit := Version, Commit
+	defer func() { Version, Commit = savedVersion, savedCommit }()
+
+	cases := map[string]Build{
+		"linked version only": {Version: "v1.2.3"},
+		"revision only":       {Version: "dev", Revision: "3954b36e31f7c1c2a017d9ff32171bb0666bf683"},
+		"both":                {Version: "v1.2.3", Revision: "3954b36e31f7c1c2a017d9ff32171bb0666bf683"},
+	}
+	for name, b := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !b.Stamped() {
+				t.Error("an identified build reports itself unstamped")
+			}
+			if strings.Contains(b.Describe(), "unstamped") {
+				t.Errorf("Describe() = %q, which apologizes for a build that is identified", b.Describe())
+			}
+		})
+	}
+}

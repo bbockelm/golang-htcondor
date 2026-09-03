@@ -73,6 +73,21 @@ type Build struct {
 	Stack    Stack  `json:"stack"`
 }
 
+// Stamped reports whether this binary carries any identity at all: a
+// version somebody chose, or a revision the toolchain recorded.
+//
+// It can be false, and that is worth saying out loud rather than
+// printing a bare "dev". VCS stamping needs a .git directory at build
+// time, which a container build does not necessarily have -- this
+// repository's own .dockerignore excludes it -- and Go omits the stamps
+// silently in that case rather than failing. Without ldflags to fall
+// back on, the result is a binary that cannot say what it is. An
+// operator reading "dev" cannot tell that apart from a release actually
+// named dev; reading "unstamped build" they can.
+func (b Build) Stamped() bool {
+	return b.Revision != "" || (b.Version != "" && b.Version != "dev")
+}
+
 // module paths whose versions are worth reporting.
 const (
 	pathGolangHTCondor = "github.com/bbockelm/golang-htcondor"
@@ -180,6 +195,12 @@ func (b Build) Describe() string {
 			out += ", dirty"
 		}
 		out += ")"
+		return out
+	}
+	if !b.Stamped() {
+		// Name the reason, because the fix is in the build rather than
+		// anywhere an operator can reach at runtime.
+		out += " (unstamped build: no version linked in and no VCS metadata)"
 	}
 	return out
 }
