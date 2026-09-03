@@ -1,5 +1,11 @@
 name: CI
 
+# Tests, lint and build read the checkout and nothing else. Declared
+# rather than inherited so a widened org default cannot silently hand
+# these jobs a writable token.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main ]

@@ -1,5 +1,11 @@
 name: Docker Tests
 
+# The token needs nothing beyond reading the checkout. The repository
+# default is already read-only, but declaring it here keeps that true if
+# the org default is ever widened, and documents the intent.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main ]
@@ -55,6 +61,36 @@ jobs:
           golang-htcondor:test-${{ matrix.tag }} \
           /bin/sh -c "git config --global --add safe.directory /workspace && for d in . webapi localcredmon; do (cd \$d && GOWORK=off go build -v ./...) || exit 1; done"
 
+    # The image these steps check is the one just tested, rather than a
+    # second build of it. A separate job used to rebuild the whole image
+    # -- HTCondor, Go toolchain, gopls, delve -- to run these four
+    # commands, taking 3m45s to 8m58s. Layer caching could not fix that:
+    # every job in this workflow starts within a second of the others, so
+    # the cache the test build writes does not exist yet when a parallel
+    # job wants to read it.
+    #
+    # Running here also checks both platform images; the old job only
+    # ever built amd64.
+    - name: Verify image toolchain
+      run: |
+        docker run --rm --platform ${{ matrix.platform }} \
+          golang-htcondor:test-${{ matrix.tag }} /bin/bash -c "
+            set -e
+            go version
+            condor_version
+            gopls version
+            dlv version
+            staticcheck -version
+          "
+
+    - name: Verify module download works in the image
+      run: |
+        docker run --rm --platform ${{ matrix.platform }} \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          golang-htcondor:test-${{ matrix.tag }} \
+          go mod download
+
   docker-integration-test:
     name: Integration Test in Docker
     runs-on: ubuntu-latest
@@ -87,41 +123,3 @@ jobs:
             go install gotest.tools/gotestsum@latest
             cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
           "
-
-  docker-verify-env:
-    name: Verify Docker Environment
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-    - name: Build Docker image
-      run: docker build -t golang-htcondor:verify .
-
-    - name: Verify Go installation
-      run: |
-        docker run --rm golang-htcondor:verify go version
-
-    - name: Verify HTCondor installation
-      run: |
-        docker run --rm golang-htcondor:verify condor_version
-
-    - name: Verify development tools
-      run: |
-        docker run --rm golang-htcondor:verify /bin/bash -c "
-          echo 'Checking gopls...'
-          gopls version
-          echo 'Checking delve...'
-          dlv version
-          echo 'Checking staticcheck...'
-          staticcheck -version
-        "
-
-    - name: Test module download
-      run: |
-        docker run --rm \
-          -v ${{ github.workspace }}:/workspace \
-          -w /workspace \
-          golang-htcondor:verify \
-          go mod download
