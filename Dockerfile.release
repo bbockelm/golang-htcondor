@@ -82,8 +82,21 @@ RUN make build-jupyter-helper
 # Build the api binary itself for the requested target. We embed the
 # frontend, the helpers, and the HTCondor reference docs so a deploy
 # from this image needs no external assets.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    sh -c 'cd webapi && GOWORK=off go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" -ldflags="-w -s" -o /build/htcondor-api ./cmd/htcondor-api'
+# Version and commit are passed in rather than discovered, because this
+# build cannot discover them: .dockerignore excludes .git, so the Go
+# toolchain finds no VCS metadata and silently omits the stamps it would
+# otherwise embed. Without these the image reports
+# "$CondorVersion: dev BuildID: golang-htcondor-unknown $" in every ad
+# and log banner, which is what a published image was doing.
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} VERSION=${VERSION} COMMIT=${COMMIT} \
+    sh -c 'cd webapi && GOWORK=off go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" \
+      -ldflags="-w -s \
+        -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
+        -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
+      -o /build/htcondor-api ./cmd/htcondor-api'
 
 # Stage 2: Create minimal runtime image
 FROM alpine:3.21

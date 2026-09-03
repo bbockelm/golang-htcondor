@@ -742,7 +742,14 @@ func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
 // for the process-global default so every path shares one dynamically-updatable level set.
 func (l *Logger) buildFilteredLogger(w io.Writer) *slog.Logger {
 	base := slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
-	return slog.New(&filteringHandler{handler: base, levels: &l.levels})
+	// Every line carries the emitting process's pid, the way a C++ daemon's
+	// dprintf does. Several HTCondor daemons commonly share one log file --
+	// and a daemon can fork -- so without it there is no way to tell which
+	// process wrote a line, which is exactly when the log matters most.
+	// Attached here rather than at each call site so it cannot be forgotten,
+	// and re-attached on rotation because this runs there too.
+	withPID := base.WithAttrs([]slog.Attr{slog.Int("pid", os.Getpid())})
+	return slog.New(&filteringHandler{handler: withPID, levels: &l.levels})
 }
 
 // ApplyLevels replaces the live per-destination verbosity configuration. Because the

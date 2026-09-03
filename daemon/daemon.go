@@ -18,6 +18,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -28,6 +30,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/sessioncache"
+	"github.com/bbockelm/golang-htcondor/version"
 )
 
 // Options configures a Daemon.
@@ -173,10 +176,54 @@ func New(opts Options) (*Daemon, error) {
 		}
 	}
 
-	// A single daemon-level startup line so every Go HTCondor daemon logs that it is
-	// coming up (and whether under condor_master), without each main() reinventing it.
-	logger.Info(logging.DestinationGeneral, "daemon starting",
-		"subsystem", opts.Subsys, "pid", os.Getpid(), "under_master", UnderCondorMaster())
+	// The startup banner every Go HTCondor daemon logs, without each
+	// main() reinventing it. Modeled on what a C++ daemon writes through
+	// dprintf at startup (daemon_core_main.cpp): subsystem, version,
+	// platform, pid and uid. That banner is the first thing anyone looks
+	// for when asking "what is actually running here", and answering it
+	// from the log beats going to find the binary.
+	//
+	// Emitted as separate lines rather than one, because each carries
+	// structured attributes a log consumer can filter on; the "**"
+	// prefix keeps it recognizable to eyes trained on condor logs.
+	// Apply the configured log levels BEFORE the banner, so the banner
+	// is subject to the same levels every later line is.
+	//
+	// This used to happen only in reconfigure(), which meant a daemon
+	// ran at whatever level its caller happened to put in the
+	// logging.Config until something sent it a SIGHUP. A Config built
+	// without an explicit DefaultLevel gets the zero value, which is
+	// VerbosityError -- so every Info line, this banner included, was
+	// discarded on a daemon that had never been reconfigured. Startup
+	// now matches the steady state instead of differing from it.
+	logger.ApplyLevels(logging.ParseDestinationLevels(opts.Subsys, cfg), logging.DefaultDaemonLevel)
+
+	b := version.GetBuild()
+	logger.Info(logging.DestinationGeneral, "** "+strings.ToUpper(opts.Subsys)+" starting",
+		"subsystem", opts.Subsys, "module", b.Module)
+	logger.Info(logging.DestinationGeneral, "** "+CondorVersion(),
+		"version", b.Version, "revision", b.ShortRevision(), "dirty", b.Dirty)
+	logger.Info(logging.DestinationGeneral, "** "+CondorPlatform(),
+		"goos", runtime.GOOS, "goarch", runtime.GOARCH)
+	// Only the components actually linked in: an empty version reads as
+	// "this is broken" rather than "not part of this build".
+	stackAttrs := []any{"go", b.Stack.Go}
+	if v := b.Stack.GolangHTCondor; v != "" {
+		stackAttrs = append(stackAttrs, "golang_htcondor", v)
+	}
+	if v := b.Stack.ClassAd; v != "" {
+		stackAttrs = append(stackAttrs, "classad", v)
+	}
+	if v := b.Stack.Cedar; v != "" {
+		stackAttrs = append(stackAttrs, "cedar", v)
+	}
+	logger.Info(logging.DestinationGeneral, "** Go stack: "+b.Stack.String(), stackAttrs...)
+	// pid is on every line already (see logging.buildFilteredLogger), so
+	// it is in the message here for the benefit of eyes scanning for the
+	// familiar C++ banner, not repeated as an attribute.
+	logger.Info(logging.DestinationGeneral,
+		fmt.Sprintf("** PID = %d RealUID = %d", os.Getpid(), os.Getuid()),
+		"uid", os.Getuid(), "under_master", UnderCondorMaster())
 
 	return d, nil
 }
@@ -438,6 +485,7 @@ func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context,
 			d.log.Info(logging.DestinationGeneral, "shutdown requested; shutting down")
 			cancel()
 			d.waitServe(serveErr, len(lns))
+			d.logStopped("shutdown requested")
 			return nil
 		case <-masterGoneCh:
 			// The condor_master parent died without signaling us. Treat it like a
@@ -454,6 +502,7 @@ func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context,
 				d.log.Info(logging.DestinationGeneral, "received termination signal; shutting down", "signal", sig.String())
 				cancel()
 				d.waitServe(serveErr, len(lns))
+				d.logStopped("signal " + sig.String())
 				return nil
 			}
 		}
@@ -632,4 +681,17 @@ func (d *Daemon) stopKeepAlive() {
 	if stop != nil {
 		stop()
 	}
+}
+
+// logStopped closes the banner the daemon opened at startup.
+//
+// A daemon that stops without saying so is indistinguishable in the log
+// from one that was killed, crashed, or is still running and merely
+// quiet -- and the uptime is the first thing asked when something
+// restarted unexpectedly.
+func (d *Daemon) logStopped(reason string) {
+	up := time.Since(d.startTime).Round(time.Second)
+	d.log.Info(logging.DestinationGeneral,
+		fmt.Sprintf("** %s stopped after %s (%s)", strings.ToUpper(d.subsys), up, reason),
+		"subsystem", d.subsys, "uptime", up.String(), "reason", reason)
 }

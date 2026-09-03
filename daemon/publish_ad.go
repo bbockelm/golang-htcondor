@@ -29,6 +29,27 @@ func (d *Daemon) PublishAd(ad *classad.ClassAd) {
 	ad.InsertAttr("MyCurrentTime", now.Unix())
 	ad.InsertAttrString("CondorVersion", CondorVersion())
 	ad.InsertAttrString("CondorPlatform", CondorPlatform())
+
+	// The Go component versions, both as one readable string and
+	// individually so a pool can be filtered on them --
+	// `-constraint 'ClassAdVersion =!= "v0.29.7"'` is the query an
+	// operator actually wants when chasing a bad release through a
+	// fleet, and that cannot be done against a combined string.
+	b := version.GetBuild()
+	ad.InsertAttrString("GoStack", b.Stack.String())
+	if v := b.Stack.GolangHTCondor; v != "" {
+		ad.InsertAttrString("GolangHTCondorVersion", v)
+	}
+	if v := b.Stack.ClassAd; v != "" {
+		ad.InsertAttrString("ClassAdVersion", v)
+	}
+	if v := b.Stack.Cedar; v != "" {
+		ad.InsertAttrString("CedarVersion", v)
+	}
+	ad.InsertAttrString("GoVersion", b.Stack.Go)
+	if b.Module != "" {
+		ad.InsertAttrString("DaemonModule", b.Module)
+	}
 	ad.InsertAttr("DaemonStartTime", d.startTime.Unix())
 	if r := d.lastReconfig.Load(); r > 0 {
 		ad.InsertAttr("DaemonLastReconfigTime", r)
@@ -52,8 +73,31 @@ func (d *Daemon) PublishAd(ad *classad.ClassAd) {
 // "$CondorVersion: ... $" / "$CondorPlatform: ... $" shapes (BuildID marks golang-htcondor), the
 // values a C++ daemon publishes via CondorVersion()/CondorPlatform().
 func CondorVersion() string {
-	return "$CondorVersion: " + version.Version + " BuildID: golang-htcondor-" + version.Commit + " $"
+	b := version.GetBuild()
+	ver := b.Version
+	if ver == "" {
+		ver = "dev"
+	}
+	build := b.ShortRevision()
+	if build == "" {
+		build = "unknown"
+	}
+	if b.Dirty {
+		build += "-dirty"
+	}
+	return "$CondorVersion: " + ver + " BuildID: golang-htcondor-" + build + " $"
 }
+
+// GoStack is the versions of the Go components this daemon is built
+// from, published alongside CondorVersion.
+//
+// CondorVersion answers "which release of this daemon", which for a
+// daemon assembled from several independently-versioned Go modules is
+// only part of the question. A bug in ClassAd evaluation or a CEDAR
+// protocol change is not visible in the daemon's own version, and a
+// pool running a mix of builds is exactly where an operator needs to
+// know which ones carry it.
+func GoStack() string { return version.GetBuild().Stack.String() }
 
 // CondorPlatform returns the "$CondorPlatform: <arch>_<os> $" string a C++ daemon publishes.
 func CondorPlatform() string {
