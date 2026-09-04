@@ -33,6 +33,10 @@
 ## metaknob names always start with $ and a category name.
 ##
 
+[CHECK_REACTIVATE_AFTER_CHECKPOINT]
+default=true
+type=bool
+
 [STARTER_DIAGNOSTIC_send_ep_logs]
 default=$(LIBEXEC)/condor_diagnostic_send_ep_logs
 
@@ -445,6 +449,31 @@ default=
 type=string
 tags=starter
 
+[ASSIGN_CPU_AFFINITY]
+default=false
+type=bool
+tags=starter
+
+[ENABLE_CHIRP]
+default=true
+type=bool
+tags=starter
+
+[ENABLE_SSH_TO_JOB]
+default=true
+type=bool
+tags=starter
+
+[ENABLE_URL_TRANSFERS]
+default=true
+type=bool
+tags=starter
+
+[MOUNT_PRIVATE_DEV_SHM]
+default=true
+type=bool
+tags=starter
+
 [DAGMAN_LOG_ON_NFS_IS_ERROR]
 default=false
 type=bool
@@ -603,13 +632,6 @@ restart=never
 [DAGMAN_ALWAYS_RUN_POST]
 default=false
 type=bool
-tags=dagman,dagman_main
-restart=never
-
-[DAGMAN_COPY_TO_SPOOL]
-default=false
-type=bool
-customization=expert
 tags=dagman,dagman_main
 restart=never
 
@@ -1065,6 +1087,17 @@ description=Slots above this number do not have KeyboardIdle updated
 tags=startd
 restart=true
 
+[STARTD_ENFORCE_DISK_LIMITS]
+default=false
+type=bool
+tags=startd
+
+[STARTD_REBOOT_COMMAND]
+# Command the startd runs to reboot the host on "condor_ep rehome --reboot" (gated by STARTD_REHOME_ALLOW_REBOOT)
+default=/sbin/reboot
+type=string
+tags=startd
+
 [STARTD_HAS_BAD_UTMP]
 # XXX This should be a bool
 default=0
@@ -1128,7 +1161,7 @@ type=string
 tags=had,AbstractReplicatorStateMachine
 
 [TRANSFER_JOB_ATTRS]
-default=ClusterID, ProcID, NumShadowStarts
+default=NumShadowStarts
 type=string
 
 [MAX_TRANSFER_LIFETIME]
@@ -1289,11 +1322,6 @@ type=string
 tags=daemon_core
 
 [USE_CLONE_TO_CREATE_PROCESSES]
-default=true
-type=bool
-tags=daemon_core
-
-[SEC_INVALIDATE_SESSIONS_VIA_TCP]
 default=true
 type=bool
 tags=daemon_core
@@ -1857,22 +1885,21 @@ customization=seldom
 friendly_name=Ask Singularity to contain pid namespace
 tags=starter
 
+[STARTER_SETS_HOME_ENV]
+default=true
+type=bool
+tags=starter
+
+[SINGULARITY_ADD_ROCM_FLAG]
+default=true
+type=bool
+tags=starter
+
 [UPDATE_INTERVAL]
 default=300
 type=int
 tags=startd
 description=Rate at which the Startd sends updates to the Collector
-
-[STARTD_SENDS_ALIVES]
-default=peer
-type=string
-tags=startd,command
-
-[STARTER_HANDLES_ALIVES]
-default=true
-type=bool
-description=Startd should only send alives when slot idle
-tags=schedd,claim
 
 [VM_GAHP_CONFIG]
 default=
@@ -2596,6 +2623,10 @@ default=
 type=string
 tags=email
 
+[SEC_USE_LOW_DATA_MODE]
+default=false
+type=bool
+
 [SEC_TCP_SESSION_TIMEOUT]
 default=20
 type=int
@@ -2746,6 +2777,10 @@ default=false
 type=bool
 tags=io,condor_auth_fs
 
+[FS_ROOT_TO_CONDOR]
+default=true
+type=bool
+
 [KERBEROS_MAP_FILE]
 default=
 type=string
@@ -2797,7 +2832,7 @@ type=string
 tags=starter
 
 [STARTER_NESTED_SCRATCH]
-default=false
+default=true
 type=bool
 tags=starter
 
@@ -3020,6 +3055,18 @@ tags=negotiator,matchmaker
 default=
 type=string
 
+[REMOVE_SIGNIFICANT_ATTRIBUTES]
+default=CpusUsage,DiskUsage,GPUsUsage,MemoryUsage,ResidentSetSize
+type=string
+description=Attributes that the Negotiator should assume are slot attributes
+tags=negotiator,matchmaker,schedd
+
+[REMOVE_SIGNIFICANT_ATTRIBUTES_REGEX]
+default=^Slot[0-9]*_
+type=string
+description=Regular expression pattern that the Negotiator should assume identifies slot attributes
+tags=negotiator,matchmaker
+
 [GROUP_AUTOREGROUP]
 default=false
 type=bool
@@ -3034,6 +3081,12 @@ tags=negotiator,matchmaker
 default=true
 type=bool
 description=Negotiator should use slot weights
+tags=negotiator,matchmaker
+
+[FORCE_NEGOTIATOR_SLOT_WEIGHT]
+default=false
+type=bool
+description=Negotiator should ignore the slot value for SLOT_WEIGHT and use its own value
 tags=negotiator,matchmaker
 
 [NEGOTIATOR_ALLOW_QUOTA_OVERSUBSCRIPTION]
@@ -3136,7 +3189,7 @@ type=string
 tags=tools,preen
 
 [SYSTEM_VALID_SPOOL_FILES]
-default=job_queue.log, job_queue.log.tmp, history, Accountant.log, Accountantnew.log, local_univ_execute, .pgpass, .schedd_address, .schedd_address.super, .schedd_classad, OfflineLog, startd_disk.img, checkpoint-cleanup
+default=job_queue.log, job_queue.log.tmp, history, Accountant.log, Accountantnew.log, local_univ_execute, .pgpass, .schedd_address, .schedd_address.super, .schedd_classad, OfflineLog, startd_disk.img, checkpoint-cleanup, TokensDatabase
 type=string
 customization=const
 description=List of files in the SPOOL directory needed by HTCondor
@@ -3220,7 +3273,7 @@ tags=schedd,qmgmt
 description=All users can edit other users jobs
 
 [SYSTEM_SECURE_JOB_ATTRS]
-default=x509userProxySubject x509UserProxyEmail x509UserProxyVOName x509UserProxyFirstFQAN x509UserProxyFQAN TotalSubmitProcs AuthTokenSubject AuthTokenIssuer AuthTokenGroups AuthTokenId AuthTokenScopes OsUser
+default=x509userProxySubject x509UserProxyEmail x509UserProxyVOName x509UserProxyFirstFQAN x509UserProxyFQAN TotalSubmitProcs AuthTokenSubject AuthTokenIssuer AuthTokenGroups AuthTokenId AuthTokenScopes AuthTokenProject OsUser
 type=string
 customization=devel
 description=System defined list of job attributes that only the Schedd can change
@@ -3240,7 +3293,7 @@ description=Silently ignore attempts to set SECURE_JOB_ATTRS
 Usage=Set this to false if you want submits to fail rather than have attempts to set SECURE_JOB_ATTRS be ignored
 
 [SYSTEM_IMMUTABLE_JOB_ATTRS]
-default=Owner ClusterId ProcId MyType TargetType User OsUser
+default=Owner ClusterId JobUniverse ProcId MyType TargetType User OsUser
 type=string
 customization=devel
 description=System defined list of job attributes that may not change once set
@@ -3281,6 +3334,11 @@ default=600
 type=int
 tags=schedd,dedicated_scheduler
 
+[ALIVE_INTERVAL]
+default=300
+type=int
+tags=schedd
+
 [SCHEDD_PREEMPTION_REQUIREMENTS]
 default=
 type=string
@@ -3314,6 +3372,11 @@ type=bool
 tags=schedd
 customization=devel
 description=Set to false to use slow but durable transaction semantics for each materialized job.
+
+[QUEUE_CLEAN_INTERVAL]
+default=28800
+type=int
+tags=Schedd
 
 [SCHEDD_SEND_RESCHEDULE]
 default=true
@@ -3429,6 +3492,12 @@ tags=schedd
 default=TotalSchedulerJobsRunning < 500
 description=expression that, when TRUE allows a Scheduler universe job to start
 type=string
+tags=schedd
+
+[SCHEDULER_UNIVERSE_COOL_DOWN_DURATION]
+default=300
+description=Time in seconds to put scheduler universe job in cool down when exited with non-zero exit code.
+type=int
 tags=schedd
 
 [MAX_JOBS_SUBMITTED]
@@ -3563,6 +3632,12 @@ type=int
 description=Maximum number of schedd forked workers
 tags=schedd
 
+[SCHEDD_NOW_JOB_VACATE_TIMEOUT]
+default=20
+type=int
+description=Number of seconds the schedd will wait for the targeted job(s) of a condor_now (coalesce) request to vacate before giving up on the now job
+tags=schedd
+
 [HA_LOCK_URL]
 default=
 type=string
@@ -3654,6 +3729,12 @@ type=path
 description=Path to log file for KBDD
 tags=kbdd,log
 
+[LIBRARIAN_LOG]
+default=$(LOG)/LibrarianLog
+type=path
+description=Path to log file for the archive Librarian
+tags=librarian,log
+
 [MASTER_LOG]
 default=$(LOG)/MasterLog
 type=path
@@ -3676,6 +3757,11 @@ tags=negotiator,log
 default=$(LOG)/SchedLog
 type=path
 description=Path to log file for the Schedd
+tags=sched,log
+
+[SCHEDD_AUDIT_LOG]
+default=$(LOG)/SchedAuditLog
+type=path
 tags=sched,log
 
 [SHADOW_LOG]
@@ -4272,6 +4358,41 @@ type=int
 description=Interval between CCB protocol heartbeats
 tags=ccb
 
+[CCB_SERVER_STREAMING]
+default=true
+version=25.12.0
+type=bool
+description=When true, a CCB server (broker) will proxy private-to-private connections: if a requester that is itself behind a CCB asks to reach another CCB-routed daemon, the broker has the target reverse-connect to the broker and splices the two sockets into a transparent relay.
+tags=ccb
+
+[CCB_SERVER_STREAMING_HANDSHAKE_TIMEOUT]
+default=300
+version=25.12.0
+type=int
+description=How long (in seconds) a CCB server (broker) waits for the target of a streaming (proxy) request to connect back and be spliced before abandoning the half-open session, freeing the requester's socket, and reporting a failure. This bounds only the handshake; once the relay is established it has no idle timeout. Set to 0 to disable handshake reaping.
+tags=ccb
+
+[CCB_SERVER_MAX_STREAMING_SESSIONS]
+default=0
+version=25.12.0
+type=int
+description=The maximum number of concurrent CCB streaming (proxy) sessions a broker will maintain, counting both in-progress handshakes and established relays. Requests beyond the limit are rejected with a clear failure. The default of 0 means unlimited.
+tags=ccb
+
+[CCB_SERVER_MAX_STREAMING_HANDSHAKES]
+default=0
+version=25.12.0
+type=int
+description=The maximum number of CCB streaming (proxy) sessions a broker will keep in the handshake state (waiting for the target to connect back) at once. This bounds the more easily abused, never-completing requests separately from established relays; requests beyond the limit are rejected. The default of 0 means unlimited.
+tags=ccb
+
+[CCB_CLIENT_STREAMING]
+default=true
+version=25.12.0
+type=bool
+description=When true, a daemon that is itself behind a CCB will attempt to reach another CCB-routed (private) peer by asking a streaming-capable broker to proxy the connection, instead of giving up. The attempt is only made when the broker advertises support, so this is safe to leave enabled.
+tags=ccb
+
 [ROOSTER_INTERVAL]
 default=300
 version=7.4.0
@@ -4608,12 +4729,6 @@ version=7.7.5
 type=string
 tags=starter
 
-[NAMED_CHROOT]
-default=
-version=7.7.5
-type=string
-tags=starter
-
 [MEMORY_USAGE_METRIC]
 default=((ResidentSetSize+1023)/1024)
 version=7.7.6
@@ -4684,9 +4799,33 @@ type=string
 description=Default modification to a memory resource request
 tags=startd
 
+[SUM_OF_CATALOGS]
+default : @fin
+    ifthenelse(
+        RequestedCatalogs is undefined || catalogs is undefined,
+        0,
+        sum(
+            evalInEachContext(
+                member(CatalogID, RequestedCatalogIDs)
+                ? CatalogSize : 0,
+                catalogs
+            )
+        )
+    )
+@fin
+
+[CATALOG_SPACE]
+default : @fin
+    ifthenelse(
+        MappingMethod ?: "" != "Copy",
+        $(SUM_OF_CATALOGS),
+        0
+)
+@fin
+
 [MODIFY_REQUEST_EXPR_REQUESTDISK]
-default=quantize(RequestDisk,{1024})
-version=7.7.6
+default=quantize(RequestDisk - $(CATALOG_SPACE),{Target.DiskQuantum?:1024})
+version=24.12.18
 type=string
 description=Default modification to a disk resource request
 tags=startd
@@ -4826,6 +4965,12 @@ default=72000
 version=10.2.0
 type=int
 description=Maximum number of seconds to wait for a file-transfer plug-in to finish.
+tags=file_transfer
+
+[STARTER_DISABLE_USER_SUPPLIED_TRANSFER_PLUGINS]
+default=
+version=25.11
+description=Conditionally disable user-supplied transfer plugins, MY is slot and TARGET is job.
 tags=file_transfer
 
 [TRANSFER_IO_REPORT_INTERVAL]
@@ -5057,6 +5202,12 @@ range=0,
 default=100
 type=int
 range=0,
+
+[MAX_CONCURRENT_UPLOADS_PER_USER]
+default=$(MAX_CONCURRENT_UPLOADS:100)/5
+type=int
+range=0,
+
 
 [FILE_TRANSFER_DISK_LOAD_THROTTLE]
 default=2.0
@@ -5365,6 +5516,36 @@ type=int
 default=false
 type=bool
 
+[DOCKER_EXTRA_ARGUMENTS]
+default=
+type=string
+tags=starter
+
+[DOCKER_LOG_DRIVER_NAME]
+default=true
+type=bool
+tags=starter
+
+[DOCKER_MOUNT_VOLUMES]
+default=
+type=string
+tags=starter
+
+[DOCKER_NETWORKS]
+default=
+type=string
+tags=starter
+
+[DOCKER_SKIP_IMAGE_ARCH_CHECK]
+default=false
+type=bool
+tags=starter
+
+[DOCKER_VOLUMES]
+default=
+type=string
+tags=starter
+
 [OPENMPI_INSTALL_PATH]
 default=/usr/lib64/openmpi
 type=string
@@ -5388,8 +5569,13 @@ version=8.2.8
 type=string
 description=When a slot should be in Owner state
 
+[STASH_PLUGIN]
+default=$(LIBEXEC)/stash_plugin
+description=Full path to the stash/osdf/Pelican plugin
+type=path
+
 [FILETRANSFER_PLUGINS]
-default=$(LIBEXEC)/curl_plugin, $(LIBEXEC)/data_plugin, $(LIBEXEC)/box_plugin.py, $(LIBEXEC)/gdrive_plugin.py, $(LIBEXEC)/onedrive_plugin.py
+default=$(LIBEXEC)/curl_plugin, $(LIBEXEC)/data_plugin, $(LIBEXEC)/box_plugin.py, $(LIBEXEC)/gdrive_plugin.py, $(LIBEXEC)/onedrive_plugin.py, $(STASH_PLUGIN)
 win32_default=$(LIBEXEC)\curl_plugin.exe, $(LIBEXEC)\data_plugin.exe, $(LIBEXEC)\box_plugin.py, $(LIBEXEC)/gdrive_plugin.py, $(LIBEXEC)/onedrive_plugin.py
 description=List of paths to installed file transfer plugins
 tags=startd
@@ -5555,6 +5741,12 @@ description=Debug logging options for the kbdd
 [MAX_KBDD_LOG]
 default=$(MAX_DEFAULT_LOG)
 
+[LIBRARIAN_DEBUG]
+default=
+description=Debug logging options for the archive librarian
+[MAX_LIBRARIAN_LOG]
+default=$(MAX_DEFAULT_LOG)
+
 [NEGOTIATOR_DEBUG]
 default=D_MATCH
 description=Debug logging options for the negotiator
@@ -5567,6 +5759,7 @@ default=$(MAX_DEFAULT_LOG)
 [SCHEDD_DEBUG]
 default=D_PID
 description=Debug logging options for the schedd
+
 [MAX_SCHEDD_LOG]
 default=$(MAX_DEFAULT_LOG)
 
@@ -5746,6 +5939,88 @@ type=string
 [TRUSTED_VAULT_HOSTS]
 default=
 type=string
+
+[CREDMON_ALLOW_SPECIAL_CHAR_NAMES]
+default=false
+type=bool
+description=Allow underscores and other non-alphanumeric/hyphen characters in token provider names (disables user-supplied credential handles)
+
+# Archive librarian configuration options
+[LIBRARIAN]
+default=$(SBIN)/condor_librarian
+win32_default=$(SBIN)\condor_librarian.exe
+type=path
+customization=devel
+description=Path to the HTCondor archive librarian daemon binary
+tags=master
+
+[LIBRARIAN_UPDATE_INTERVAL]
+default=5
+type=int
+description=Archive librarians update interval in seconds
+tags=librarian
+
+[LIBRARIAN_DATABASE]
+default=$(SPOOL)/library.db
+type=path
+description=Path to the archive librarians SQLite3 database
+tags=librarian
+
+[LIBRARIAN_MAX_JOBS_CACHED]
+default=10000
+type=int
+description=Maximum number of cached job entries within the archive librarian
+tags=librarian
+
+[LIBRARIAN_STATUS_RETENTION_SECONDS]
+default=300
+type=int
+description=Time in seconds per update status rows will stay in the archive librarians database
+tags=librarian
+
+[LIBRARIAN_MAX_UPDATES_PER_CYCLE]
+default=100000
+#type=longlong
+description=The upper limit of records indexed in one update interval for the archive librarian.
+tags=librarian
+
+[LIBRARIAN_GC_BACKOFF_SECONDS]
+default=1800
+type=int
+range=0,
+description=How long, in seconds, the archive librarian waits before retrying garbage collection after a pass that did not shrink the database file.
+tags=librarian
+
+[LIBRARIAN_MAX_DATABASE_SIZE]
+default=2 * 1024 * 1024 * 1024
+#type=longlong
+description=Maximum size of the archive librarians indexing SQLite3 database
+tags=librarian
+
+[LIBRARIAN_HIGH_WATER_MARK]
+default=0.97
+type=double
+description=The percentage of the database size to use as the upper threshold to trigger garbage collection.
+tags=librarian
+
+[LIBRARIAN_LOW_WATER_MARK]
+default=0.8
+type=double
+description=The percentage of the database size that the librarian aims to reduce to during garbage collection.
+tags=librarian
+
+[LIBRARIAN_DATABASE_BUSY_TIMEOUT_MS]
+default=30000
+type=int
+range=0,
+description=How long, in milliseconds, the archive librarian will wait on a locked SQLite3 database before giving up.
+tags=librarian
+
+[USING_LIBRARIAN]
+default=False
+type=bool
+description=Boolean to denote archive librarian indexing in use for tools to utilize for quick reference.
+tags=librarian
 
 # standard API endpoints for common OAuth token providers
 [BOX_AUTHORIZATION_URL]
@@ -6117,6 +6392,44 @@ type=path
 description=Should countainer images be treated as common files by default?
 type=bool
 default=false
+
+[CONTAINER_REGEX_COMMON_BY_DEFAULT]
+description=Container images matching this regex  will be treated as common files by default.
+type=string
+default=
+
+[PLACEMENTD]
+default=$(SBIN)/condor_placementd
+type=path
+
+[PLACEMENTD_LOG]
+default=$(LOG)/PlacementdLog
+type=path
+
+[PLACEMENTD_MAPFILE]
+default=$(ETC)/placementd_mapfile
+type=path
+
+[PLACEMENTD_AUTHORIZATIONS_MAPFILE]
+default=$(ETC)/placementd_authorizations_mapfile
+type=path
+
+[TOKENS_DATABASE]
+default=$(SPOOL)/TokensDatabase
+type=path
+
+[SEC_USE_TOKENS_DATABASE]
+default=false
+type=bool
+
+[SEC_ACCEPT_CAPABILITY_TOKENS]
+default=false
+type=bool
+
+[KEEP_DATA_CLAIM_IDLE]
+default=300
+type=int
+description=How long should a common object catalog persiste after its last use?
 
 ######
 ## add metaknobs below this banner
@@ -6620,6 +6933,14 @@ default : @fin
 	SUBMIT_REQUIREMENT_AssignAccountingGroup_REASON = strcat("Submit requirement AssignAccountingGroup not met - Could not map '", Owner, "' to an accounting group ", RequestedAcctGroup)
 @fin
 
+[$FEATURE.AssignProjectName]
+description=Set the ProjectName of the job by mapping the job's Owner attribute args:(map_name [, map_file])
+default : @fin
+	if ! $(1?)
+	  error : use FEATURE : AssignProjectName requires a map_name argument
+	endif
+	use FEATURE : SetJobAttrFromUsermap(ProjectName, Owner, $(1+))
+@fin
 
 [$FEATURE.SetJobAttrFromUsermap]
 description=Set a job attribute from a usermap of another job attribute args:(dest_attr, src_attr, map_name [, map_file])
@@ -6630,9 +6951,9 @@ default : @fin
 	if $(4?)
 	   use FEATURE : ScheddUsermapFile($(3), $(4))
 	endif
-	JOB_TRANSFORM_NAMES = $(JOB_TRANSFORM_NAMES) Set$(1)
-	JOB_TRANSFORM_Set$(1) = [ eval_set_$(1)=usermap("$(3)",$(2),$(1)); ]
-	SUBMIT_REQUIREMENT_NAMES = $(SUBMIT_REQUIREMENT_NAMES) Require$(1)
+	JOB_TRANSFORM_NAMES += Set$(1)
+	JOB_TRANSFORM_Set$(1) = EVALSET $(1) usermap("$(3)",$(2),$(1))
+	SUBMIT_REQUIREMENT_NAMES += Require$(1)
 	SUBMIT_REQUIREMENT_Require$(1) = $(1) isnt undefined
 	SUBMIT_REQUIREMENT_Require$(1)_REASON = strcat("Submit requirement Require$(1) not met - Could not map '", $(2)?:"undefined", "' to a $(1)")
 @fin
@@ -7093,14 +7414,28 @@ win32_default : @end
 @end
 
 
+[$FEATURE.LIBRARIAN]
+description=Enable a database that indexes historical archive records args:(max_size, file_path).
+default : @end
+	DAEMON_LIST=$(DAEMON_LIST) LIBRARIAN
+	USING_LIBRARIAN=True
+	if $(1?)
+		LIBRARIAN_MAX_DATABASE_SIZE=$(1)
+	endif
+	if $(2?)
+		LIBRARIAN_DATABASE=$(2)
+	endif
+@end
+
+
 [$FEATURE.KRB]
 description=Enable the daemons and features need to support running jobs with krb tickets and AFS tokens.
 default : @end
 	SEC_CREDENTIAL_DIRECTORY_KRB=/var/lib/condor/krb_credentials
-	DAEMON_LIST=$(DAEMON_LIST),CREDMON_KRB
+	DAEMON_LIST=$(DAEMON_LIST) CREDMON_KRB
 	SEC_CREDENTIAL_PRODUCER=$(LIBEXEC)/cred_producer_krb
 	SEC_CREDENTIAL_MONITOR_KRB_LOG=$(LOG)/CredMonKrbLog
-	AUTO_INCLUDE_CREDD_IN_DAEMON_LIST = True
+	AUTO_INCLUDE_CREDD_IN_DAEMON_LIST=True
 	USE_KEYRING_SESSIONS=True
 @end
 
@@ -7110,7 +7445,7 @@ description=Enable the daemons and features need to support running jobs with OA
 default : @end
 	SEC_CREDENTIAL_DIRECTORY_OAUTH=/var/lib/condor/oauth_credentials
 	CREDMON_OAUTH_LOG=$(LOG)/CredMonOAuthLog
-	DAEMON_LIST=$(DAEMON_LIST),CREDMON_OAUTH
+	DAEMON_LIST=$(DAEMON_LIST) CREDMON_OAUTH
 	AUTO_INCLUDE_CREDD_IN_DAEMON_LIST=True
 	TRUST_CREDENTIAL_DIRECTORY=True
 @end
@@ -7119,7 +7454,7 @@ default : @end
 description=Enable sending of schedd job history ads to unauthenticated Elasticsearch on localhost
 default : @end
 	ADSTASH_SCHEDD_HISTORY=True
-	DAEMON_LIST=$(DAEMON_LIST),ADSTASH
+	DAEMON_LIST=$(DAEMON_LIST) ADSTASH
 @end
 
 [$FEATURE.CommonCloudAttributesGoogle]
@@ -7237,6 +7572,35 @@ default : @fin
 	endif
 @fin
 
+[AUTO_USE_FEATURE_PelicanRetryPolicy]
+description=Enable AP policies for improved handling of Pelican file transfer failures
+default=$(IsSchedd)
+type=bool
+tags=schedd
+[$FEATURE.PelicanRetryPolicy]
+description=Pelican file transfer failures that are not permanent result in jobs going into cool down
+default : @fin
+	# These are the default values; they can be overridden later.
+	PelicanRetry_MaxRetries = 4
+	# Delay at least 300 seconds ...
+	PelicanRetry_MinimumDelay = 300
+	# ... and up to 300 more seconds, before retrying.
+	PelicanRetry_RandomDelay = 300
+	# pelican plugin uses 11 for retriable failures (11 << 8 == 2816)
+	pelican_error_subcode_retriable = 2816
+	# pelican plugin uses 5 for a stopped transfer (we're considering it retryable right now (OSPOOL-74)) (5 << 8 == 1280)
+	pelican_error_subcode_stopped = 1280
+	PelicanRetryCondition = ((VacateReasonCode == 12 || VacateReasonCode == 13) && ((VacateReasonSubCode == $(pelican_error_subcode_retriable)) || (VacateReasonSubCode == $(pelican_error_subcode_stopped)))) ?: false
+	JOB_TRANSFORM_NAMES = $(JOB_TRANSFORM_NAMES) PelicanRetry
+	JOB_TRANSFORM_PelicanRetry @=jt
+		REQUIREMENTS (stringListIMember("pelican",WantTransferPluginMethods) || stringListIMember("osdf",WantTransferPluginMethods) || stringListIMember("stash",WantTransferPluginMethods)) && isUndefined(PelicanRetryEnabled)
+		EVALMACRO retry_delay = $(PelicanRetry_MinimumDelay) + random($(PelicanRetry_RandomDelay))
+		SET PelicanRetryEnabled true
+		SET PelicanRetryDelay $(retry_delay)
+	@jt
+	SYSTEM_ON_VACATE_COOL_DOWN = ((PelicanRetryEnabled?:false) && $(PelicanRetryCondition) && ((NumJobCoolDowns?:0) < $(PelicanRetry_MaxRetries)) ? PelicanRetryDelay : ($(SYSTEM_ON_VACATE_COOL_DOWN:0)))
+@fin
+
 [$POLICY.OnlyRegisteredCheckpointDestinations]
 description=Use submit requirement to reject jobs whose checkpoint destination is not registered.
 default : @fin
@@ -7260,7 +7624,7 @@ default : @fin
 [$FEATURE.GANGLIA]
 description=Enable condor_gangliad daemon
 default : @end
-	DAEMON_LIST=$(DAEMON_LIST),GANGLIAD
+	DAEMON_LIST=$(DAEMON_LIST) GANGLIAD
 @end
 
 [$FEATURE.DefaultCheckpointDestination]

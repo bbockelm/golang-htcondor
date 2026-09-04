@@ -270,6 +270,10 @@ func fsRootToCondor(cfg *config.Config) *bool {
 	if cfg == nil {
 		return nil
 	}
+	// A nil return leaves cedar's default (enabled) in place. Since the
+	// v25.13.2 param_info.in refresh this is mostly unreachable: HTCondor now
+	// publishes default=true for this knob, so Get resolves it from the
+	// generated table even when no operator set it. Both paths mean enabled.
 	v, ok := cfg.Get("FS_ROOT_TO_CONDOR")
 	if !ok {
 		return nil
