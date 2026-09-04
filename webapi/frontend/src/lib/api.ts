@@ -123,6 +123,65 @@ export interface DashboardStats {
   jobs_total: number;
 }
 
+// --- Placement (condor_placementd) ---
+//
+// The placementd issues IDTokens to "foreign" identities -- users who
+// authenticate somewhere else (a campus IdP, a course roster) and need a
+// credential for THIS access point. Its map file decides which foreign
+// identity becomes which local AP account, which authorizations that
+// account may hold, and which projects it may charge to.
+//
+// Every one of these endpoints is admin-only: the daemon registers its
+// commands at ADMINISTRATOR, and issuing a token means minting a bearer
+// credential for someone else's identity.
+
+// PlacementStatus answers "should the placement page exist at all?".
+// available=false is the normal case for a pool that runs no placementd.
+export interface PlacementStatus {
+  available: boolean;
+  address?: string;
+  reason?: string;
+}
+
+// PlacementUser is a foreign identity, merged with its newest live token.
+// `authorized: false` means the identity dropped out of the map file but
+// still holds an unexpired token: it keeps working until it expires, and
+// cannot be renewed.
+export interface PlacementUser {
+  username: string;
+  ap_user_id?: string;
+  token_expiration?: string;
+  mapping_expiration?: string;
+  projects?: string[];
+  authorizations?: string[];
+  authorized: boolean;
+}
+
+// PlacementToken is an issued token's record. The token string itself is
+// never stored by the daemon and never comes back from the API -- only
+// the login response carries it, once.
+export interface PlacementToken {
+  token_id: string;
+  username: string;
+  ap_user_id?: string;
+  requester?: string;
+  authorizations?: string[];
+  project?: string;
+  expiration?: string;
+  expired: boolean;
+}
+
+// PlacementAuthorization carries display metadata straight from the
+// daemon's authorizations map file, so the operator controls the label
+// and color a badge renders with. `color` is free-form -- assume nothing
+// beyond "a CSS color, maybe" and keep a fallback.
+export interface PlacementAuthorization {
+  name: string;
+  label?: string;
+  color?: string;
+  description?: string;
+}
+
 // HTCondor returns ClassAds as JSON objects with arbitrary attributes.
 // We model them loosely and pull common fields out at the call site.
 export type ClassAd = Record<string, unknown>;
@@ -893,6 +952,49 @@ export const api = {
     deleteAPIKey: (keyID: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
         method: 'DELETE',
+      }),
+  },
+
+  placement: {
+    // Probe first: a pool with no placementd returns available=false
+    // rather than an error, and the nav entry is hidden on that.
+    status: (): Promise<PlacementStatus> => fetchJSON(`${BASE}/placement/status`),
+    listUsers: (username?: string): Promise<{ users: PlacementUser[] }> =>
+      fetchJSON(
+        `${BASE}/placement/users${username ? `?username=${encodeURIComponent(username)}` : ''}`,
+      ),
+    listTokens: (params?: {
+      username?: string;
+      token_id?: string;
+      valid_only?: boolean;
+    }): Promise<{ tokens: PlacementToken[] }> => {
+      const qs = new URLSearchParams();
+      if (params?.username) qs.set('username', params.username);
+      if (params?.token_id) qs.set('token_id', params.token_id);
+      if (params?.valid_only) qs.set('valid_only', 'true');
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/placement/tokens${q ? '?' + q : ''}`);
+    },
+    // Omitting username lists every defined authorization; passing one
+    // narrows to what that user may request (and 403s if unmapped).
+    listAuthorizations: (
+      username?: string,
+    ): Promise<{ authorizations: PlacementAuthorization[] }> =>
+      fetchJSON(
+        `${BASE}/placement/authorizations${username ? `?username=${encodeURIComponent(username)}` : ''}`,
+      ),
+    // The response is the ONLY time the token exists in a form anyone
+    // can copy. Show it, then let it go.
+    login: (req: {
+      username: string;
+      authorizations?: string[];
+      project?: string;
+      requester?: string;
+    }): Promise<{ token: string }> =>
+      fetchJSON(`${BASE}/placement/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
       }),
   },
 
