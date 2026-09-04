@@ -12,8 +12,14 @@ func TestCondorUsername(t *testing.T) {
 }
 
 func TestFSRootToCondor(t *testing.T) {
-	if fsRootToCondor(mustConfig(t, "")) != nil {
-		t.Error("unset should be nil (leave cedar's default)")
+	// Unset must resolve to enabled. Which layer supplies that is an
+	// implementation detail and it has already moved once: before the
+	// v25.13.2 param_info.in refresh HTCondor published no default here, so
+	// this returned nil and cedar's own "nil means enabled" applied. Upstream
+	// now documents default=true, so the generated table answers instead.
+	// Assert the effective answer, not the layer.
+	if p := fsRootToCondor(mustConfig(t, "")); p != nil && !*p {
+		t.Error("unset should resolve to enabled")
 	}
 	if p := fsRootToCondor(mustConfig(t, "FS_ROOT_TO_CONDOR = false\n")); p == nil || *p {
 		t.Errorf("false should be &false, got %v", p)
