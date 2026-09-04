@@ -117,6 +117,70 @@ plain `queue`, count form `queue 5`, parameter form
 `QueryWithOptions` is the preferred entry point; `Query` (the older
 form) stays for back-compatibility but applies no limits.
 
+## Placementd
+
+`*htcondor.Placementd` talks to `condor_placementd`, the daemon that
+issues access-point credentials to identities that authenticate
+somewhere else — a campus IdP account, a course roster entry. Its map
+file decides which foreign identity becomes which local AP account,
+which authorizations that account may hold, and which projects it may
+charge to.
+
+```go
+// Locate one through the collector, or construct with a sinful string.
+collector := htcondor.NewCollector("collector.example.com:9618")
+loc, err := collector.LocateDaemon(ctx, htcondor.DaemonPlacementd, "")
+if err != nil {
+    log.Fatal(err)
+}
+p := htcondor.NewPlacementd(loc.Address)
+
+// Mint a token. An empty Authorizations means "everything this user is
+// entitled to"; naming any authorization the user lacks refuses the
+// whole request rather than silently dropping it.
+result, err := p.Login(ctx, htcondor.PlacementLoginRequest{
+    UserName:       "student1@example.edu",
+    Authorizations: []string{"READ", "WRITE"},
+    Project:        "Chem101",
+})
+if err != nil {
+    var perr *htcondor.PlacementError
+    if errors.As(err, &perr) && perr.Code == htcondor.PlacementErrProjectNotAuthorized {
+        log.Fatalf("not authorized for that project")
+    }
+    log.Fatal(err)
+}
+fmt.Println(result.Token) // shown once; the daemon stores only its jti
+
+// Audit what exists.
+users, err := p.QueryUsers(ctx, "")                                  // "" = all
+tokens, err := p.QueryTokens(ctx, htcondor.PlacementTokenQuery{ValidOnly: true})
+authz, err := p.QueryAuthorizations(ctx, "")                         // with labels/colors
+```
+
+Three things to know:
+
+- **Every command needs ADMINISTRATOR.** The daemon registers all four
+  at that level with forced authentication, and refuses to mint a token
+  over an unencrypted channel. The client demands authentication and
+  encryption on every connection rather than letting configuration
+  weaken them.
+- **A login has a side effect.** Beyond returning the token, the
+  placementd creates the AP user record — and the project record, when
+  a project is named — on the schedd if they do not exist. A login
+  against a *disabled* user or project fails instead of re-enabling it.
+- **Errors carry the daemon's own reason.** `errors.As` to
+  `*htcondor.PlacementError` and switch on `Code` against the
+  `PlacementErr*` constants to tell "this user may not have that
+  authorization" from "the schedd is down". Codes outside that set are
+  ones the daemon forwards verbatim from the schedd.
+
+`QueryUsers` returns everyone in the map file plus anyone still holding
+an unexpired token — the latter with `Authorized: false`, meaning their
+existing tokens work until they expire but they cannot log in again.
+`QueryTokens` is unfiltered by default and the daemon never deletes
+rows, so pass `ValidOnly: true` for live tokens only.
+
 ## Sandbox handling
 
 The `sandbox` package creates and extracts job sandboxes at the
