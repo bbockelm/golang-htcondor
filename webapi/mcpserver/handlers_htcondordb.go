@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
+
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -118,7 +120,20 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
-		return nil, err
+		// No mirror. The schedd can group live jobs itself, which is
+		// the whole point of preferring a count over a listing: without
+		// this, a pool with no htcondordb had no counting tool at all
+		// and the advice everywhere else -- "use aggregate_jobs rather
+		// than walking the queue" -- pointed at something that did not
+		// work for them.
+		//
+		// Only the live queue, though. history and the other tables
+		// exist in the mirror alone; the schedd has no such thing to
+		// group over, and saying so beats a confusing empty result.
+		if table != "jobs" {
+			return nil, fmt.Errorf("aggregating %q needs an htcondordb mirror, which is not available: %w", table, err)
+		}
+		return s.aggregateJobsFromSchedd(ctx, constraint, groupBy)
 	}
 	defer closer()
 
@@ -230,4 +245,42 @@ func textResult(text string) interface{} {
 			{"type": "text", "text": text},
 		},
 	}
+}
+
+// aggregateJobsFromSchedd counts live jobs with the schedd doing the
+// grouping, for deployments with no htcondordb mirror.
+//
+// The schedd walks its queue once and returns one row per group rather
+// than one ad per job (ProjectionIsGroupBy; see
+// Schedd.AggregateJobs). That is the difference between an answer and
+// a transfer: counting by listing would move every matching ad here
+// only to discard it.
+func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string, groupBy []string) (interface{}, error) {
+	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, &htcondor.QueryOptions{
+		FetchOpts: htcondor.FetchMyJobs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("aggregate query failed: %w", err)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Aggregate COUNT over live jobs (%d group(s))", len(rows))
+	if len(groupBy) > 0 {
+		fmt.Fprintf(&b, " by %s", strings.Join(groupBy, ", "))
+	}
+	b.WriteString(":\n")
+	var total int64
+	for _, r := range rows {
+		total += r.Count
+		if len(groupBy) > 0 {
+			fmt.Fprintf(&b, "  %s = %d\n", strings.Join(r.Group, "/"), r.Count)
+		} else {
+			fmt.Fprintf(&b, "  count = %d\n", r.Count)
+		}
+	}
+	// Name the backend, as the job and history tools do, and say what it
+	// does not cover: a schedd knows nothing about completed jobs.
+	fmt.Fprintf(&b, "\n[source: schedd; %d job(s) in the live queue. Completed jobs are not included -- "+
+		"history lives in an htcondordb mirror, which this pool does not have.]", total)
+	return textResult(b.String()), nil
 }

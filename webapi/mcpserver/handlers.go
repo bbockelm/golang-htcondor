@@ -636,7 +636,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			},
 			Tool{
 				Name:        "aggregate_jobs",
-				Description: "Server-side COUNT with optional GROUP BY over an htcondordb table (default 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad. Owner-scoped.",
+				Description: "Server-side COUNT with optional GROUP BY (default table 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad, so prefer it over listing jobs to count them. Uses an htcondordb mirror when one is available; otherwise the schedd groups live jobs itself. Other tables (history, epochs) need the mirror. Owner-scoped.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
