@@ -29,6 +29,12 @@ const openAPISchema = `{
       "oauth2": ["openid", "profile", "email"]
     }
   ],
+  "tags": [
+    {
+      "name": "placement",
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503."
+    }
+  ],
   "components": {
     "securitySchemes": {
       "bearerAuth": {
@@ -304,10 +310,159 @@ const openAPISchema = `{
             "description": "OAuth credential payload"
           }
         }
+      },
+      "PlacementUser": {
+        "type": "object",
+        "description": "A foreign identity known to the placementd, merged with its newest live token.",
+        "properties": {
+          "username": {"type": "string", "description": "Foreign identity, as it appears in the placementd map file."},
+          "ap_user_id": {"type": "string", "description": "Local AP account the identity maps to; the token subject."},
+          "token_expiration": {"type": "string", "format": "date-time", "description": "Expiration of this user's newest unexpired token. Absent when they hold none."},
+          "mapping_expiration": {"type": "string", "format": "date-time", "description": "When the map-file entry stops being honored. Absent means never."},
+          "projects": {"type": "array", "items": {"type": "string"}, "description": "AP projects the user may bind a token to."},
+          "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Authorizations the map file grants."},
+          "authorized": {"type": "boolean", "description": "False for a user who still holds a live token but is no longer in the map file: existing tokens keep working, but they cannot log in again."}
+        }
+      },
+      "PlacementToken": {
+        "type": "object",
+        "description": "An issued token as recorded by the placementd. The token string itself is not stored and is never returned here.",
+        "properties": {
+          "token_id": {"type": "string", "description": "The token's jti claim."},
+          "username": {"type": "string", "description": "Foreign identity the token was issued for."},
+          "ap_user_id": {"type": "string", "description": "Local AP account named in the token's subject."},
+          "requester": {"type": "string", "description": "Who asked for the token; differs from username only for instructor-issued tokens."},
+          "authorizations": {"type": "array", "items": {"type": "string"}, "description": "The token's bounding set."},
+          "project": {"type": "string", "description": "The token's project claim, if any."},
+          "expiration": {"type": "string", "format": "date-time"},
+          "expired": {"type": "boolean", "description": "Whether the expiration is already in the past, computed server-side."}
+        }
+      },
+      "PlacementAuthorization": {
+        "type": "object",
+        "description": "An authorization the placementd can grant, with the display metadata from its authorizations map file.",
+        "properties": {
+          "name": {"type": "string", "description": "The authorization as it appears in a token's bounding set."},
+          "label": {"type": "string", "description": "Human-readable name to display instead of the raw name."},
+          "color": {"type": "string", "description": "Operator-supplied display color. Whatever the map file says, so treat it as a hint and keep a fallback."},
+          "description": {"type": "string"}
+        }
+      },
+      "PlacementLoginRequest": {
+        "type": "object",
+        "required": ["username"],
+        "properties": {
+          "username": {"type": "string", "description": "Foreign identity to log in. Must appear in the placementd map file."},
+          "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Narrows the token's bounding set. EVERY entry must be one the user is entitled to, or the whole request is refused. Omit for the user's full set."},
+          "project": {"type": "string", "description": "Ties the token, and the jobs submitted with it, to an AP project the user is authorized for."},
+          "requester": {"type": "string", "description": "Identity asking on the user's behalf. Must itself be mapped and hold the INSTRUCTOR authorization."}
+        }
+      },
+      "PlacementLoginResponse": {
+        "type": "object",
+        "properties": {
+          "token": {"type": "string", "description": "The signed IDToken. A bearer credential for the AP identity it names: it is returned exactly once and is not recoverable afterwards."}
+        }
+      },
+      "PlacementStatus": {
+        "type": "object",
+        "properties": {
+          "available": {"type": "boolean"},
+          "address": {"type": "string", "description": "Sinful string of the placementd in use."},
+          "reason": {"type": "string", "description": "Why the placementd is unavailable, when it is."}
+        }
       }
     }
   },
   "paths": {
+    "/placement/status": {
+      "get": {
+        "summary": "Placement feature status",
+        "description": "Whether a condor_placementd was found, so a UI can decide whether to offer the placement pages. Unlike the other placement endpoints this one answers even when no daemon is available. Requires membership in the web UI admin group.",
+        "operationId": "placementStatus",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementStatus"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Admin UI is not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/users": {
+      "get": {
+        "summary": "List placement users",
+        "description": "Everyone in the placementd map file, plus anyone still holding an unexpired token even if their mapping is gone (those come back with authorized=false). Requires membership in the web UI admin group.",
+        "operationId": "listPlacementUsers",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one foreign identity. An unknown identity yields an empty list, not an error."}
+        ],
+        "responses": {
+          "200": {"description": "Users", "content": {"application/json": {"schema": {"type": "object", "properties": {"users": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementUser"}}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/tokens": {
+      "get": {
+        "summary": "List issued placement tokens",
+        "description": "Tokens the placementd has issued. It never deletes rows, so an unfiltered query includes expired tokens; pass valid_only=true for live ones. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementTokens",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one foreign identity."},
+          {"name": "token_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to a single jti. Takes precedence over the other filters."},
+          {"name": "valid_only", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Drop tokens that have already expired."}
+        ],
+        "responses": {
+          "200": {"description": "Tokens", "content": {"application/json": {"schema": {"type": "object", "properties": {"tokens": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementToken"}}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/authorizations": {
+      "get": {
+        "summary": "List grantable authorizations",
+        "description": "The authorizations the placementd can put in a token's bounding set, with the label, color and description its map file carries for display. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementAuthorizations",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Narrow the list to what one user may request. Fails with 403 if that user is not mapped."}
+        ],
+        "responses": {
+          "200": {"description": "Authorizations", "content": {"application/json": {"schema": {"type": "object", "properties": {"authorizations": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAuthorization"}}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator, or the named user is not authorized", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/login": {
+      "post": {
+        "summary": "Mint a placement token",
+        "description": "Ask the placementd for an IDToken for a foreign identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
+        "operationId": "placementLogin",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementLoginRequest"}}}},
+        "responses": {
+          "201": {"description": "Token issued", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementLoginResponse"}}}},
+          "400": {"description": "Malformed request or missing username", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "The placementd refused: unknown or expired user, an authorization or project the user is not entitled to, or a requester lacking INSTRUCTOR", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "The placementd could not record the token, or the connection was not encrypted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached, or its schedd leg failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/creds/user": {
       "get": {
         "summary": "Query user credential",

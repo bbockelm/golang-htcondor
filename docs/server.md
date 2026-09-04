@@ -134,6 +134,24 @@ at `/openapi.json`.
 - `/api/v1/admin/api-keys`, `/api/v1/admin/api-keys/{key_id}`
 - `/api/v1/admin/logs`, `/api/v1/admin/condor-config`
 
+**Placement** (admin-gated; only when a `condor_placementd` is reachable)
+- `GET /api/v1/placement/status` — feature probe; answers even with no
+  daemon, so the UI can hide the page instead of erroring
+- `GET /api/v1/placement/users` — mapped identities + their live tokens
+- `GET /api/v1/placement/tokens` — issued tokens (`valid_only=true` for
+  unexpired ones)
+- `GET /api/v1/placement/authorizations` — grantable authorizations,
+  with the label/color/description from the daemon's map file
+- `POST /api/v1/placement/login` — mint an IDToken. The response is the
+  only time the token exists in retrievable form.
+
+  These are admin-only on purpose: the placementd registers its commands
+  at ADMINISTRATOR and this server talks to it as the AP's own identity,
+  so an endpoint any signed-in user could reach would let them mint a
+  bearer token for anyone in the map file. The server finds the daemon
+  via `PLACEMENTD_ADDRESS_FILE` (or `$(LOG)/.placementd_address`), then
+  the collector; finding none simply disables the group.
+
 **Chat assistant** (when `HTTP_API_LLM_API_KEY_FILE` is set)
 - `POST /api/v1/chat` — AI-SDK v6 UI-message stream
 - `GET /api/v1/chat/info` — feature probe

@@ -77,6 +77,11 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(h.handleServiceCredentialCollection)))
 	mux.Handle("/api/v1/creds/service/", cors(http.HandlerFunc(h.handleServiceCredentialItem)))
 
+	// Placement endpoints (condor_placementd). Catch-all under the
+	// prefix so handlePlacementPath can route on the last segment; all
+	// of them are admin-gated inside the handlers.
+	mux.Handle("/api/v1/placement/", cors(http.HandlerFunc(h.handlePlacementPath)))
+
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
 
