@@ -3,6 +3,8 @@ package htcondor
 import (
 	"strings"
 	"testing"
+
+	"github.com/bbockelm/golang-htcondor/version"
 )
 
 func TestParseSimpleSubmitFile(t *testing.T) {
@@ -301,4 +303,30 @@ request_arch = "X86_64"
 	}
 
 	// Verify the job ad was created successfully with enhanced requirements
+}
+
+// TestSubmitVersionIsParseableByCondor guards the SubmitVersion stamped
+// onto every job ad. condor_q, condor_history and log tooling parse it
+// with CondorVersionInfo, which requires a three-part HTCondor version;
+// this module's own version does not qualify.
+func TestSubmitVersionIsParseableByCondor(t *testing.T) {
+	wantPrefix := "$CondorVersion: " + version.HTCondorCompat + " "
+	if !strings.HasPrefix(submitVersionString, wantPrefix) {
+		t.Errorf("submitVersionString = %q, want prefix %q", submitVersionString, wantPrefix)
+	}
+	if !strings.HasSuffix(submitVersionString, " $") {
+		t.Errorf("submitVersionString = %q, must end in %q", submitVersionString, " $")
+	}
+	if !strings.Contains(submitVersionString, "golang-htcondor") {
+		t.Errorf("submitVersionString = %q, loses the golang-htcondor marker", submitVersionString)
+	}
+}
+
+// TestWireVersionStringMatchesSubmit keeps the file-transfer/peek streams
+// on the same announced version as job ads; they used to carry an
+// unrelated hardcoded literal.
+func TestWireVersionStringMatchesSubmit(t *testing.T) {
+	if got, want := wireVersionString(), submitVersionString; got != want {
+		t.Errorf("wireVersionString() = %q, submitVersionString = %q; these must agree", got, want)
+	}
 }

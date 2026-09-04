@@ -26,21 +26,20 @@ import (
 // supply SubmitVersion so downstream tooling — condor_q, history,
 // log forensics — can identify which client minted the job).
 //
-// Format follows the literal "$CondorVersion: <ver> <stuff> $" and
-// "$CondorPlatform: <stuff> $" shapes that CondorVersionInfo
-// (condor_ver_info.cpp) parses by stripping the prefix. We include
-// "golang-htcondor" in the BuildID-style segment so an operator
-// reading a job log can immediately tell the submission came from
-// this library, not from condor_submit.
+// The version number is version.HTCondorCompat rather than this
+// module's own version, because CondorVersionInfo
+// (condor_ver_info.cpp) requires a three-part HTCondor version and
+// rejects anything below 6.x -- a "v0.18.7" here parses as "older
+// than everything". We include "golang-htcondor" plus our real
+// version in the BuildID segment so an operator reading a job log
+// can still tell the submission came from this library, not from
+// condor_submit.
 //
 // Computed once at package init from the linker-injected version
 // values; recomputing per submission would waste CPU and the values
 // can't change at runtime anyway.
 var (
-	submitVersionString = fmt.Sprintf(
-		"$CondorVersion: %s BuildID: golang-htcondor-%s $",
-		version.Version, version.Commit,
-	)
+	submitVersionString  = version.CondorVersionString(version.GetBuild().BuildID())
 	condorPlatformString = fmt.Sprintf(
 		"$CondorPlatform: %s_%s $",
 		runtime.GOARCH, runtime.GOOS,
