@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
 	"github.com/bbockelm/golang-htcondor/filetransfer"
+	"github.com/bbockelm/golang-htcondor/version"
 )
 
 // ftOpts is the shared file-transfer wire configuration for the tool-side
@@ -94,7 +95,7 @@ func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w i
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutString(ctx, "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $"); err != nil {
+	if err := msg.PutString(ctx, wireVersionString()); err != nil {
 		return fmt.Errorf("failed to send version string: %w", err)
 	}
 
@@ -442,8 +443,7 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)
-	// Use a fixed version string for now; in real usage this would be CondorVersion()
-	if err := msg.PutString(ctx, "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $"); err != nil {
+	if err := msg.PutString(ctx, wireVersionString()); err != nil {
 		return fmt.Errorf("failed to send version string: %w", err)
 	}
 
@@ -588,7 +588,7 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 
 	// 3. Send version string
 	msg := message.NewMessageForStream(cedarStream)
-	if err := msg.PutString(ctx, "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $"); err != nil {
+	if err := msg.PutString(ctx, wireVersionString()); err != nil {
 		return fmt.Errorf("failed to send version string: %w", err)
 	}
 
@@ -1210,4 +1210,12 @@ func applyOutputRemap(fileName string, remaps map[string]OutputRemap) (string, O
 	}
 
 	return fileName, OutputRemap{}, false
+}
+
+// wireVersionString is the CondorVersion this library announces on
+// file-transfer and peek streams. It reports version.HTCondorCompat --
+// the C++ release whose protocol we implement -- because the peer parses
+// it to choose protocol behavior; see version.CondorVersionString.
+func wireVersionString() string {
+	return version.CondorVersionString(version.GetBuild().BuildID())
 }

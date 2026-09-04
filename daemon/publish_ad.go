@@ -73,19 +73,13 @@ func (d *Daemon) PublishAd(ad *classad.ClassAd) {
 // "$CondorVersion: ... $" / "$CondorPlatform: ... $" shapes (BuildID marks golang-htcondor), the
 // values a C++ daemon publishes via CondorVersion()/CondorPlatform().
 func CondorVersion() string {
-	b := version.GetBuild()
-	ver := b.Version
-	if ver == "" {
-		ver = "dev"
-	}
-	build := b.ShortRevision()
-	if build == "" {
-		build = "unknown"
-	}
-	if b.Dirty {
-		build += "-dirty"
-	}
-	return "$CondorVersion: " + ver + " BuildID: golang-htcondor-" + build + " $"
+	// The version number here is version.HTCondorCompat, not this
+	// daemon's own version: C++ peers parse this string to decide which
+	// protocol features to use with us, and a Go module version does not
+	// parse at all. Our identity rides in the BuildID segment, and the
+	// GolangHTCondorVersion / GoStack attributes published alongside
+	// carry it in a form that is actually machine-readable.
+	return version.CondorVersionString(version.GetBuild().BuildID())
 }
 
 // GoStack is the versions of the Go components this daemon is built

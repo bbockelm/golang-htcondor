@@ -175,7 +175,7 @@ func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*P
 	_ = reqAd.Set("Err", req.Stderr)
 	_ = reqAd.Set("ErrOffset", req.StderrOffset)
 	_ = reqAd.Set("MaxTransferBytes", req.MaxBytes)
-	_ = reqAd.Set("CondorVersion", "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $")
+	_ = reqAd.Set("CondorVersion", wireVersionString())
 
 	reqMsg := message.NewMessageForStream(stream)
 	if err := reqMsg.PutClassAd(ctx, reqAd); err != nil {

@@ -8,6 +8,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/version"
 )
 
 func TestPublishAd(t *testing.T) {
@@ -73,5 +74,24 @@ func TestPublishAdNameOverride(t *testing.T) {
 	d.PublishAd(ad)
 	if v, _ := ad.EvaluateAttrString("Name"); v != "primary-db" {
 		t.Errorf("Name = %q, want primary-db", v)
+	}
+}
+
+// TestCondorVersionAnnouncesCompatVersion pins what goes on the wire:
+// the CondorVersion attribute must report version.HTCondorCompat, not
+// this module's own version, because C++ peers parse it to select
+// protocol behavior and reject anything that is not a three-part
+// HTCondor version. See version.CondorVersionString.
+func TestCondorVersionAnnouncesCompatVersion(t *testing.T) {
+	got := CondorVersion()
+	wantPrefix := "$CondorVersion: " + version.HTCondorCompat + " "
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("CondorVersion() = %q, want prefix %q", got, wantPrefix)
+	}
+	if !strings.HasSuffix(got, " $") {
+		t.Errorf("CondorVersion() = %q, must end in %q (the C++ parser throws without it)", got, " $")
+	}
+	if !strings.Contains(got, "golang-htcondor") {
+		t.Errorf("CondorVersion() = %q, loses the golang-htcondor BuildID marker", got)
 	}
 }
