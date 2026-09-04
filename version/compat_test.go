@@ -62,12 +62,18 @@ func firstField(s string) string {
 // run below means something.
 func TestParseLikeCondorRejectsWhatCppRejects(t *testing.T) {
 	bad := map[string]string{
-		"go module version":  "$CondorVersion: v0.18.7 BuildID: golang-htcondor-dd1334bc $",
-		"unstamped build":    "$CondorVersion: dev BuildID: golang-htcondor-unknown $",
-		"semver without v":   "$CondorVersion: 0.18.7 BuildID: golang-htcondor-dd1334bc $",
-		"two-part version":   "$CondorVersion: 25.4 BuildID: x $",
-		"no trailing dollar": "$CondorVersion: 25.4.0 BuildID: x",
-		"wrong prefix":       "$CondorVer: 25.4.0 BuildID: x $",
+		"go module version": "$CondorVersion: v0.18.7 BuildID: golang-htcondor-dd1334bc $",
+		"unstamped build":   "$CondorVersion: dev BuildID: golang-htcondor-unknown $",
+		"semver without v":  "$CondorVersion: 0.18.7 BuildID: golang-htcondor-dd1334bc $",
+		// The container workflow stamps untagged main builds as
+		// 0.0.0-<branch>-<timestamp>, which is what the deployed API daemon
+		// reported. It is the subtlest shape here: sscanf converts three
+		// integers from it, so it clears the cfld != 3 check and only the
+		// Major < 6 sanity check rejects it.
+		"untagged main build": "$CondorVersion: 0.0.0-main-20260904002529 BuildID: golang-htcondor-abc1234 $",
+		"two-part version":    "$CondorVersion: 25.4 BuildID: x $",
+		"no trailing dollar":  "$CondorVersion: 25.4.0 BuildID: x",
+		"wrong prefix":        "$CondorVer: 25.4.0 BuildID: x $",
 	}
 	for name, s := range bad {
 		if _, _, _, err := parseLikeCondor(s); err == nil {
