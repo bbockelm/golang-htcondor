@@ -348,8 +348,11 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		ar.GrantScope(scope)
 	}
 
-	// Create session with the authenticated user
-	session := DefaultOpenIDConnectSession(userInfo.Subject)
+	// Create session with the authenticated user. The IDP-asserted groups
+	// are persisted with the grant so reauthorizeRefreshGrant can re-run
+	// getScopesForGroups when the grant is refreshed — this is the only
+	// place they are ever read, and they would otherwise be dropped here.
+	session := DefaultOpenIDConnectSession(userInfo.Subject).WithGroups(userGroups)
 
 	// Generate OAuth2 response
 	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)

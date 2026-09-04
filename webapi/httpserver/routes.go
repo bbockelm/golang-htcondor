@@ -99,6 +99,7 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
 	mux.Handle("/api/v1/admin/oauth2/clients/", cors(http.HandlerFunc(h.handleAdminDeleteClient)))
 	mux.Handle("/api/v1/admin/oauth2/tokens", cors(http.HandlerFunc(h.handleAdminListTokens)))
+	mux.Handle("/api/v1/admin/oauth2/revoke", cors(http.HandlerFunc(h.handleAdminRevokeTokens)))
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
 	mux.Handle("/api/v1/admin/condor-config", cors(http.HandlerFunc(h.handleAdminCondorConfig)))
 	// API key management (admin-only). The collection path covers

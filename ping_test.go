@@ -126,3 +126,40 @@ func TestLooksLikeConnReset(t *testing.T) {
 		t.Error("refused must not be classified as reset")
 	}
 }
+
+// TestDCNopConstantsMatchWireValues pins the DC_NOP_* permission constants to
+// the values HTCondor actually assigns them (condor_commands.h: DC_BASE is
+// 60000 and DC_NOP_READ is DC_BASE+20, with no gaps).
+//
+// These were hardcoded and shifted by one for as long as they existed, because
+// DC_NOP_OWNER was omitted from the middle of the list. Nothing caught it:
+// PingWithOptions asks the daemon a DC_SEC_QUERY question and then ignores the
+// answer, so asking about the wrong permission level produced an identical
+// result. Anything that starts trusting PingResult.Authorized depends on these
+// being right.
+func TestDCNopConstantsMatchWireValues(t *testing.T) {
+	const dcBase = 60000
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"READ", DCNopRead, dcBase + 20},
+		{"WRITE", DCNopWrite, dcBase + 21},
+		{"NEGOTIATOR", DCNopNegotiator, dcBase + 22},
+		{"ADMINISTRATOR", DCNopAdministrator, dcBase + 23},
+		{"OWNER", DCNopOwner, dcBase + 24},
+		{"CONFIG", DCNopConfig, dcBase + 25},
+		{"DAEMON", DCNopDaemon, dcBase + 26},
+		{"ADVERTISE_STARTD", DCNopAdvertiseStartd, dcBase + 27},
+		{"ADVERTISE_SCHEDD", DCNopAdvertiseSchedd, dcBase + 28},
+		{"ADVERTISE_MASTER", DCNopAdvertiseMaster, dcBase + 29},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("DC_NOP_%s = %d, want %d", tc.name, tc.got, tc.want)
+		}
+		if got := permissionName(tc.got); got != tc.name {
+			t.Errorf("permissionName(%d) = %q, want %q", tc.got, got, tc.name)
+		}
+	}
+}

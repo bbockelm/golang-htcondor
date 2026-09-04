@@ -113,14 +113,23 @@ type Config struct {
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
 	OAuth2AccessTokenLifespan  time.Duration
 	OAuth2RefreshTokenLifespan time.Duration
-	MCPAccessGroup             string   // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup               string   // Group required for read operations (empty = all have read)
-	MCPWriteGroup              string   // Group required for write operations (empty = all have write)
-	ScheddHost                 string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
-	MCPInstructions            string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	MCPAdminUsers              []string // Authenticated subjects exempt from the MCP owner-scope wrapper
-	WebUIAdminGroup            string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP                  bool     // Enable built-in IDP (always enabled in demo mode)
+	// OAuth2MaxGrantLifetime caps the total age of a grant measured from
+	// the consent that created it, regardless of how often it is
+	// refreshed. Defaults to DefaultMaxGrantLifetime (30 days) if zero.
+	// See HandlerConfig.OAuth2MaxGrantLifetime.
+	OAuth2MaxGrantLifetime time.Duration
+	// OAuth2RevocationOracles selects the refresh-time revocation oracles.
+	// Nil selects the default set; see HandlerConfig.OAuth2RevocationOracles
+	// for the recognized names.
+	OAuth2RevocationOracles []string
+	MCPAccessGroup          string   // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup            string   // Group required for read operations (empty = all have read)
+	MCPWriteGroup           string   // Group required for write operations (empty = all have write)
+	ScheddHost              string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
+	MCPInstructions         string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	MCPAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	WebUIAdminGroup         string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	EnableIDP               bool     // Enable built-in IDP (always enabled in demo mode)
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -210,6 +219,8 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
+		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,
+		OAuth2RevocationOracles:     cfg.OAuth2RevocationOracles,
 		MCPAccessGroup:              cfg.MCPAccessGroup,
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
