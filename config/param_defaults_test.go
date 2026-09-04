@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -129,5 +131,22 @@ func TestDefaultSubsystem(t *testing.T) {
 		t.Error("SUBSYSTEM not set")
 	} else if val != "TOOL" {
 		t.Errorf("SUBSYSTEM = %q, want 'TOOL'", val)
+	}
+}
+
+// TestParamInfoSourceMatchesSnapshot guards against the vendored snapshot and
+// the generated code drifting apart: editing param/SOURCE_VERSION without
+// re-running "go generate" leaves ParamInfoSource claiming the old release.
+func TestParamInfoSourceMatchesSnapshot(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "param", "SOURCE_VERSION"))
+	if err != nil {
+		t.Fatalf("reading param/SOURCE_VERSION: %v", err)
+	}
+	want := strings.TrimSpace(string(data))
+	if want == "" {
+		t.Fatal("param/SOURCE_VERSION is empty")
+	}
+	if ParamInfoSource != want {
+		t.Errorf("ParamInfoSource = %q, but param/SOURCE_VERSION says %q; re-run go generate ./config/", ParamInfoSource, want)
 	}
 }
