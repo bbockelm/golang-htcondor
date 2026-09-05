@@ -1,20 +1,21 @@
-'use client';
+"use client";
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type AdminClient } from '@/lib/api';
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type AdminClient } from "@/lib/api";
+import { ChipList } from "@/components/ChipList";
 
 export default function AdminClientsPage() {
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', 'clients'],
+    queryKey: ["admin", "clients"],
     queryFn: api.admin.listClients,
   });
 
   const remove = useMutation({
     mutationFn: (id: string) => api.admin.deleteClient(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['admin', 'clients'] });
-      qc.invalidateQueries({ queryKey: ['admin', 'tokens'] });
+      qc.invalidateQueries({ queryKey: ["admin", "clients"] });
+      qc.invalidateQueries({ queryKey: ["admin", "tokens"] });
     },
   });
 
@@ -30,9 +31,7 @@ export default function AdminClientsPage() {
 
       {isLoading && <p className="text-gray-400">Loading...</p>}
       {error && (
-        <p className="text-red-600 text-sm">
-          {(error as Error).message}
-        </p>
+        <p className="text-red-600 text-sm">{(error as Error).message}</p>
       )}
 
       {data && data.clients.length === 0 && (
@@ -58,7 +57,11 @@ export default function AdminClientsPage() {
                   key={c.id}
                   client={c}
                   onDelete={() => {
-                    if (confirm(`Delete client "${c.id}"? This revokes all tokens.`)) {
+                    if (
+                      confirm(
+                        `Delete client "${c.id}"? This revokes all tokens.`,
+                      )
+                    ) {
                       remove.mutate(c.id);
                     }
                   }}
@@ -95,18 +98,18 @@ function ClientRow({
         <span
           className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
             client.public
-              ? 'bg-amber-100 text-amber-800'
-              : 'bg-gray-100 text-gray-700'
+              ? "bg-amber-100 text-amber-800"
+              : "bg-gray-100 text-gray-700"
           }`}
         >
-          {client.public ? 'public' : 'confidential'}
+          {client.public ? "public" : "confidential"}
         </span>
       </td>
       <td className="px-3 py-2 text-xs text-gray-700">
-        {client.grant_types?.join(', ') || '—'}
+        <ChipList items={client.grant_types} max={4} />
       </td>
       <td className="px-3 py-2 text-xs text-gray-700">
-        {client.scopes?.join(' ') || '—'}
+        <ChipList items={client.scopes} tone="blue" />
       </td>
       <td className="px-3 py-2 text-xs text-gray-500">
         {new Date(client.created_at).toLocaleString()}
@@ -117,7 +120,7 @@ function ClientRow({
           disabled={busy}
           className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
         >
-          {busy ? 'Deleting...' : 'Delete'}
+          {busy ? "Deleting..." : "Delete"}
         </button>
       </td>
     </tr>

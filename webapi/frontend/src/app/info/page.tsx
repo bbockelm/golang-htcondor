@@ -1,22 +1,28 @@
-'use client';
+"use client";
 
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 
 export default function InfoPage() {
-  const { data: session, isLoading: sessionLoading, error: sessionError } =
-    useQuery({ queryKey: ['session'], queryFn: api.auth.me });
-  const { data: version, isLoading: versionLoading, error: versionError } =
-    useQuery({ queryKey: ['version'], queryFn: api.version });
+  const {
+    data: session,
+    isLoading: sessionLoading,
+    error: sessionError,
+  } = useQuery({ queryKey: ["session"], queryFn: api.auth.me });
+  const {
+    data: version,
+    isLoading: versionLoading,
+    error: versionError,
+  } = useQuery({ queryKey: ["version"], queryFn: api.version });
 
   return (
     <div className="space-y-6 max-w-4xl">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Info</h1>
         <p className="text-sm text-gray-500">
-          Build information for this access point and details about your
-          current session.
+          Build information for this access point and details about your current
+          session.
         </p>
       </div>
 
@@ -29,8 +35,8 @@ export default function InfoPage() {
         )}
         {version && (
           <DefList>
-            <Row label="Version" value={version.version || '(unset)'} />
-            <Row label="Commit" mono value={version.commit || '(unset)'} />
+            <Row label="Version" value={version.version || "(unset)"} />
+            <Row label="Commit" mono value={version.commit || "(unset)"} />
           </DefList>
         )}
       </Section>
@@ -44,7 +50,7 @@ export default function InfoPage() {
         )}
         {session && !session.authenticated && (
           <p className="text-sm text-gray-500">
-            Not signed in.{' '}
+            Not signed in.{" "}
             <a
               href="/login"
               className="text-brand-700 hover:text-brand-900 underline"
@@ -56,11 +62,8 @@ export default function InfoPage() {
         )}
         {session?.authenticated && (
           <DefList>
-            <Row label="Username" value={session.username ?? '(unknown)'} />
-            <Row
-              label="Admin"
-              value={session.is_admin ? 'Yes' : 'No'}
-            />
+            <Row label="Username" value={session.username ?? "(unknown)"} />
+            <Row label="Admin" value={session.is_admin ? "Yes" : "No"} />
             <Row
               label="Groups"
               value={
@@ -97,13 +100,18 @@ export default function InfoPage() {
 // container so it stays reachable without backtracking.
 function CondorConfigSection() {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin-condor-config'],
+    queryKey: ["admin-condor-config"],
     queryFn: api.admin.condorConfig,
     // Config doesn't change at runtime; cache for the tab's lifetime.
     staleTime: Infinity,
     retry: false,
   });
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState("");
+  // Default to hiding untouched parameters. A stock config carries on
+  // the order of a thousand built-in defaults against a handful the
+  // deployment actually set, so showing everything by default buries
+  // the interesting rows in noise.
+  const [modifiedOnly, setModifiedOnly] = useState(true);
 
   // Filter on every render — the entry count is a few thousand, the
   // user's filter text is short, substring match is cheap. Memoize
@@ -112,20 +120,26 @@ function CondorConfigSection() {
   const filtered = useMemo(() => {
     if (!data?.entries) return [];
     const q = filter.trim().toLowerCase();
-    if (!q) return data.entries;
-    return data.entries.filter(
-      (e) =>
+    return data.entries.filter((e) => {
+      if (modifiedOnly && e.is_default) return false;
+      if (!q) return true;
+      return (
         e.key.toLowerCase().includes(q) ||
-        (e.value ? e.value.toLowerCase().includes(q) : false),
-    );
-  }, [data, filter]);
+        (e.value ? e.value.toLowerCase().includes(q) : false)
+      );
+    });
+  }, [data, filter, modifiedOnly]);
 
   const total = data?.entries?.length ?? 0;
+  // Prefer the server's count: it is computed over the whole readout
+  // rather than the current filter, so the label stays stable while
+  // the user types.
+  const modifiedCount = data?.modified_count ?? 0;
 
   return (
     <Section title="HTCondor configuration (admin)">
       <p className="text-xs text-gray-500 mb-3">
-        Running config of this access point. Equivalent to{' '}
+        Running config of this access point. Equivalent to{" "}
         <code className="font-mono">condor_config_val -dump</code>. Values for
         keys that look like secrets (PASSWORD / SECRET / API_KEY / TOKEN / …)
         are redacted server-side; the key still appears so you can confirm
@@ -157,11 +171,21 @@ function CondorConfigSection() {
               aria-label="Filter HTCondor config"
             />
             <span className="text-[11px] text-gray-500 tabular-nums shrink-0">
-              {filter
-                ? `${filtered.length.toLocaleString()} / ${total.toLocaleString()}`
-                : total.toLocaleString()}
+              {`${filtered.length.toLocaleString()} / ${total.toLocaleString()}`}
             </span>
           </div>
+
+          <label className="mb-2 flex items-center gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={modifiedOnly}
+              onChange={(e) => setModifiedOnly(e.target.checked)}
+            />
+            Only show values changed from their default
+            <span className="text-gray-400">
+              ({modifiedCount.toLocaleString()} of {total.toLocaleString()})
+            </span>
+          </label>
 
           {/* Inner scroll container caps the table height so the
               admin readout never displaces the rest of the page.
@@ -170,7 +194,9 @@ function CondorConfigSection() {
           <div className="overflow-y-auto rounded border border-gray-200 max-h-[28rem]">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-xs text-gray-500">
-                No matches.
+                {modifiedOnly
+                  ? "No matches among changed values — untick the box above to search the built-in defaults too."
+                  : "No matches."}
               </p>
             ) : (
               <table className="min-w-full text-xs">
@@ -248,7 +274,7 @@ function Row({
     <>
       <dt className="text-gray-500">{label}</dt>
       <dd
-        className={`text-gray-900 break-all ${mono ? 'font-mono text-xs' : ''}`}
+        className={`text-gray-900 break-all ${mono ? "font-mono text-xs" : ""}`}
       >
         {value}
       </dd>

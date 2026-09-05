@@ -546,6 +546,10 @@ export interface AdminCondorConfigEntry {
   // Empty string when redacted=true (server scrubbed an apparent secret).
   value?: string;
   redacted?: boolean;
+  // True when the key still holds HTCondor's compiled-in value — nothing
+  // in this deployment's config files or environment touched it. Omitted
+  // (so undefined, i.e. falsy) for keys the deployment did set.
+  is_default?: boolean;
 }
 
 export interface AdminCondorConfigResponse {
@@ -553,6 +557,9 @@ export interface AdminCondorConfigResponse {
   // — typically only the demo path. Treat as "feature unavailable".
   configured: boolean;
   entries?: AdminCondorConfigEntry[];
+  // How many entries differ from their built-in default, counted over the
+  // whole readout rather than the client's current filter.
+  modified_count?: number;
 }
 
 // AdminAPIKey is the metadata-only DTO the list endpoint returns.

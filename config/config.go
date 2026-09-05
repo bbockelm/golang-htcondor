@@ -99,6 +99,13 @@ type Config struct {
 	options ConfigOptions
 	// Track if we're executing inside a metaknob template
 	inMetaknob bool
+	// builtinDefaults is a snapshot of values as they stood at the end of
+	// initBuiltins — HTCondor's compiled-in param defaults plus the
+	// auto-detected macros. Anything differing from it afterwards came
+	// from the deployment: a config file, the environment, or Set.
+	// nil when the Config was built with SkipDefaults, in which case
+	// "is this a default?" has no meaning and IsDefault reports false.
+	builtinDefaults map[string]string
 }
 
 // New creates a new Config from the runtime environment
@@ -456,6 +463,69 @@ func (c *Config) initBuiltins() {
 	if c.options.LocalName != "" {
 		c.Set("LOCAL_NAME", c.options.LocalName)
 	}
+
+	// Everything set above is a built-in. Snapshot it before any config
+	// file, environment variable, or caller Set can land, so IsDefault can
+	// later separate "HTCondor ships this" from "this site chose this".
+	c.snapshotBuiltins()
+}
+
+// snapshotBuiltins records the current values as the built-in baseline.
+// Called at the end of initBuiltins, which runs before the config file chain
+// and LoadFromEnvironment.
+func (c *Config) snapshotBuiltins() {
+	c.builtinDefaults = make(map[string]string, len(c.values))
+	for k, v := range c.values {
+		c.builtinDefaults[k] = v
+	}
+}
+
+// DefaultValue returns the built-in default for key — the value it held
+// before any config file, environment variable, or Set touched it — and
+// whether such a default exists.
+//
+// The value is returned unexpanded, exactly as stored, so that it can be
+// compared like-for-like against the stored current value. Expanding either
+// side would make a knob whose default is "$(SOMETHING)" look modified
+// whenever SOMETHING is defined.
+func (c *Config) DefaultValue(key string) (string, bool) {
+	if c.builtinDefaults == nil {
+		return "", false
+	}
+	if actual, ok := c.resolveKey(key); ok {
+		if v, ok := c.builtinDefaults[actual]; ok {
+			return v, true
+		}
+	}
+	// The key may have been removed or re-spelled since; fall back to a
+	// case-insensitive sweep of the snapshot.
+	upper := strings.ToUpper(key)
+	for k, v := range c.builtinDefaults {
+		if strings.ToUpper(k) == upper {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// IsDefault reports whether key still holds the value HTCondor built in.
+//
+// False means the deployment set it: a config file, the environment, or a
+// caller. A key with no built-in default at all is also "not default" — it
+// exists only because someone defined it.
+//
+// Both sides of the comparison are the raw stored strings, not expanded
+// values; see DefaultValue.
+func (c *Config) IsDefault(key string) bool {
+	def, ok := c.DefaultValue(key)
+	if !ok {
+		return false
+	}
+	actual, ok := c.resolveKey(key)
+	if !ok {
+		return false
+	}
+	return c.values[actual] == def
 }
 
 // isWindows checks if running on Windows
