@@ -102,10 +102,28 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-    # Same image and same gha cache the Docker Tests workflow populates,
-    # so this usually restores layers rather than rebuilding HTCondor
-    # and the Go toolchain. cache-to is deliberately omitted: this job
-    # is a consumer, and writing from here would race the producers.
+    # Must match docker-test.yml's key exactly, character for character:
+    # a gha cache entry is addressed by scope, so reading a different
+    # scope than the producer wrote is not a miss to be retried, it is a
+    # different cache. This step existing as a copy is the price of
+    # `uses:` not being available for a fragment; if the derivation in
+    # docker-test.yml changes, change it here too.
+    - name: Derive the image cache key
+      id: imgcache
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
+    # Reads the layers docker-test.yml deposited on main. This job used
+    # to read a bare `type=gha`, which is a DIFFERENT scope from the one
+    # that workflow writes -- so it never hit, and rebuilt HTCondor and
+    # the Go toolchain from scratch on every run: 289s against the 61-77s
+    # the scoped jobs take.
+    #
+    # cache-to stays omitted on purpose. This job is a consumer; only
+    # main writes, for the reason docker-test.yml records -- a pull
+    # request's cache is readable by that pull request alone, so writing
+    # here would deposit ~500MB nobody else can use and evict the entry
+    # everybody can.
     - name: Build dev image
       uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
       with:
@@ -113,7 +131,7 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: golang-htcondor:e2e
-        cache-from: type=gha
+        cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
 
     - name: Set up Node
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
