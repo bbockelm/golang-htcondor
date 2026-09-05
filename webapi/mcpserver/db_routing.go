@@ -101,21 +101,22 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 // schedd for every reason: DB tools disabled, no mirror, the freshness gate
 // declined, no authenticated user to scope by, or a dial/query/parse error.
 //
-// It reproduces toolQueryJobs' scoping exactly: that path self-scopes to the
-// authenticated user unconditionally (FetchMyJobs + Owner), with NO admin
-// bypass, so this does the same via an Owner constraint -- routing must not widen
-// what a caller sees. The result shares toolQueryJobs' shape (renderJobsBase) so
-// only the provenance note and "source" metadata reveal the backend.
+// It reproduces toolQueryJobs' scoping exactly, which is the point: routing must
+// change where an answer comes from and never what it covers. Both paths take the
+// scope from Server.ownerScope, so a confined call is confined identically here
+// and an admin's unconfined one stays unconfined. The result shares
+// toolQueryJobs' shape (renderJobsBase) so only the provenance note and "source"
+// metadata reveal the backend.
 func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projection []string, limit int, pageToken string) (interface{}, bool, dbmirror.Decision) {
 	if !s.htcondordbEnabled() {
 		return nil, false, decline(dbmirror.ReasonNotConfigured, "htcondordb routing is not configured")
 	}
-	// toolQueryJobs self-scopes to the authenticated user; without one we cannot
-	// safely bound the mirror read, so leave it to the schedd.
-	user := htcondor.GetAuthenticatedUserFromContext(ctx)
-	if user == "" {
+	// Without an identity we cannot tell whether this call is confined or
+	// deliberately unconfined, so the mirror must not answer it.
+	scope, ok := s.ownerScope(ctx)
+	if !ok {
 		return nil, false, decline(dbmirror.ReasonNoOwnerScope,
-			"the mirror serves only owner-scoped job queries and this call has no authenticated user")
+			"the caller could not be identified, so the mirror cannot tell whose jobs to return")
 	}
 	info, err := s.discoverHTCondorDB(ctx)
 	if err != nil {
@@ -129,10 +130,13 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	// Owner-scope through the same helper the schedd path uses, so the
 	// two backends cannot drift on what "my jobs" means. An unparseable
 	// constraint declines to the schedd rather than being trusted.
-	scoped, err := ownerScopedConstraint(ownerFromActor(user), constraint)
-	if err != nil {
-		return nil, false, decline(dbmirror.ReasonUnsupportedQuery,
-			fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err))
+	scoped := constraint
+	if !scope.AllUsers {
+		var err error
+		if scoped, err = ownerScopedConstraint(scope.Owner, constraint); err != nil {
+			return nil, false, decline(dbmirror.ReasonUnsupportedQuery,
+				fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err))
+		}
 	}
 
 	effLimit := limit
@@ -177,6 +181,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 		note += fmt.Sprintf("; job queue synced %ds ago", stale)
 	}
 	note += "; " + d.Note + "]"
+	note += "\n" + scope.Note()
 
 	text, metadata := renderJobsBase(jobAds, constraint, "htcondordb", note)
 	return map[string]interface{}{

@@ -4,9 +4,10 @@ import (
 	"context"
 
 	"fmt"
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"strings"
 	"time"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
@@ -39,6 +40,7 @@ func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *dbmirror
 // toolQueryHistoryDB queries completed jobs from the htcondordb "history" archive. Owner-scoped:
 // a non-admin caller only ever sees their own completed jobs.
 func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	scope, _ := s.ownerScope(ctx)
 	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
@@ -58,13 +60,14 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
-	return dbTextResult("completed jobs (history archive)", rows, limit, info), nil
+	return dbTextResult("completed jobs (history archive)", rows, limit, info, scope), nil
 }
 
 // toolQueryJobsAsOf queries the live-jobs table as it was at a past instant (time-travel). Gated
 // on the database having time-travel enabled. as_of accepts RFC3339 or a negative Go duration
 // ("-1h") relative to now.
 func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	scope, _ := s.ownerScope(ctx)
 	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
@@ -91,13 +94,14 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 	if err != nil {
 		return nil, fmt.Errorf("time-travel query failed: %w", err)
 	}
-	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, info), nil
+	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, info, scope), nil
 }
 
 // toolAggregateJobs runs a server-side GROUP BY over a table (default "jobs"), returning counts
 // per group -- the right tool for "how many jobs are idle/held/running", cheap because only the
 // grouped result crosses the wire.
 func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	scope, _ := s.ownerScope(ctx)
 	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
@@ -133,7 +137,7 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 		if table != "jobs" {
 			return nil, fmt.Errorf("aggregating %q needs an htcondordb mirror, which is not available: %w", table, err)
 		}
-		return s.aggregateJobsFromSchedd(ctx, constraint, groupBy)
+		return s.aggregateJobsFromSchedd(ctx, constraint, groupBy, scope)
 	}
 	defer closer()
 
@@ -156,6 +160,7 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 		}
 	}
 	b.WriteString(freshnessNote(info))
+	b.WriteString("\n" + scope.Note())
 	return textResult(b.String()), nil
 }
 
@@ -204,7 +209,7 @@ func parseAsOf(s string) (time.Time, error) {
 
 // dbTextResult formats query rows (each an old-ClassAd text blob) into a text tool result with
 // a count, truncation note, and freshness annotation.
-func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info) interface{} {
+func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, scope OwnerScope) interface{} {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s", len(rows), title)
 	if len(rows) >= limit {
@@ -215,6 +220,7 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info) i
 		fmt.Fprintf(&b, "--- record %d ---\n%s\n", i+1, strings.TrimSpace(r))
 	}
 	b.WriteString(freshnessNote(info))
+	b.WriteString("\n" + scope.Note())
 	return textResult(b.String())
 }
 
@@ -257,7 +263,8 @@ func textResult(text string) interface{} {
 // Schedd.AggregateJobs). That is the difference between an answer and
 // a transfer: counting by listing would move every matching ad here
 // only to discard it.
-func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string, groupBy []string) (interface{}, error) {
+func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string, groupBy []string,
+	scope OwnerScope) (interface{}, error) {
 	// selfScopedQueryOptions rather than a hardcoded FetchMyJobs, so an
 	// admin is exempt here as everywhere else. Note this is consistency
 	// rather than a behaviour fix on its own: the schedd routes a
@@ -307,7 +314,8 @@ func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string,
 		}
 	}
 
-	return textResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal)), nil
+	return textResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal) +
+		"\n" + scope.Note()), nil
 }
 
 // aggregateGroupLimit bounds how many groups an aggregate returns. It is

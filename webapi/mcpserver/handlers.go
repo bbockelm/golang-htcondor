@@ -167,7 +167,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 		{
 			Name:        "query_jobs",
-			Description: "Query HTCondor jobs with optional constraints, projections, and pagination. When a synchronized htcondordb mirror has a caught-up job queue this is served from the mirror to offload the schedd (transparently falling back to the schedd otherwise, e.g. when the mirror lags or the query is paginated); the result notes which source answered and how recently it synced.",
+			Description: "Query HTCondor jobs with optional constraints, projections, and pagination. Returns YOUR OWN jobs; MCP admins get every user's. Each answer states which scope it used. When a synchronized htcondordb mirror has a caught-up job queue this is served from the mirror to offload the schedd (transparently falling back to the schedd otherwise, e.g. when the mirror lags or the query is paginated); the result notes which source answered and how recently it synced.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -626,7 +626,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		tools = append(tools,
 			Tool{
 				Name:        "query_history_db",
-				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Results are owner-scoped: you only see your own jobs. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
+				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -637,7 +637,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			},
 			Tool{
 				Name:        "query_jobs_as_of",
-				Description: "TIME-TRAVEL: query the live-jobs table as it looked at a past instant (only if the database has time-travel enabled). Answers 'what did the queue look like at time T'. Owner-scoped.",
+				Description: "TIME-TRAVEL: query the live-jobs table as it looked at a past instant (only if the database has time-travel enabled). Answers 'what did the queue look like at time T'. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -650,7 +650,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			},
 			Tool{
 				Name:        "aggregate_jobs",
-				Description: "Server-side COUNT with optional GROUP BY (default table 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad, so prefer it over listing jobs to count them. Uses an htcondordb mirror when one is available; otherwise the schedd groups live jobs itself. Other tables (history, epochs) need the mirror. Owner-scoped.",
+				Description: "Server-side COUNT with optional GROUP BY (default table 'jobs'). The right tool for 'how many jobs are idle/held/running' — only the small grouped result crosses the wire, not every ad, so prefer it over listing jobs to count them. Uses an htcondordb mirror when one is available; otherwise the schedd groups live jobs itself. Other tables (history, epochs) need the mirror. Counts YOUR OWN jobs; MCP admins get every user's. Each answer states which scope it used.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -993,7 +993,18 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 			"and the caller's identity could not be established")
 	}
 
-	owner := ownerFromActor(actor)
+	// The same scoping policy as every other tool. query_jobs used to
+	// scope unconditionally while the rest let an admin through, so an
+	// admin session was told it owned nothing by this tool while
+	// aggregate_jobs counted the whole pool and hold_job could act on
+	// any of it. Two tools cannot disagree about whose jobs a session is
+	// looking at; the answer that gets doubted is whichever one the
+	// model happens to read second.
+	scope, ok := s.ownerScope(ctx)
+	if !ok && s.delegated {
+		return nil, fmt.Errorf("authentication required: the caller's identity could not be established")
+	}
+	owner := scope.Owner
 	scoped := constraint
 	if owner != "" {
 		var err error
@@ -1007,8 +1018,13 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		Limit:      limit,
 		Projection: projection,
 		PageToken:  pageToken,
-		FetchOpts:  htcondor.FetchMyJobs, // Only query jobs owned by the authenticated user
-		Owner:      owner,
+		// FetchMyJobs is defence in depth behind the Owner constraint, not
+		// the filter itself (the schedd may ignore it -- see
+		// ownerScopedConstraint). It must be off for an admin call, or it
+		// would silently re-narrow a listing the constraint deliberately
+		// left wide.
+		FetchOpts: fetchOptsFor(scope),
+		Owner:     owner,
 	}
 
 	streamOpts := &htcondor.StreamOptions{
@@ -1030,7 +1046,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		jobAds = append(jobAds, result.Ad)
 	}
 
-	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "")
+	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "\n"+scope.Note())
 
 	// The token comes from the walk, not from the last ad: a page may
 	// end short of the window it covered, so its last row is not always
