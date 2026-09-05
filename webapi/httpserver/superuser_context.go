@@ -161,3 +161,83 @@ func (h *Handler) auditSuperuserAction(r *http.Request, imp *Impersonation, acti
 	}
 	h.logger.Info(logging.DestinationSecurity, "Superuser action", fields...)
 }
+
+// jobOwner looks up the Owner of a single job.
+//
+// The target of an impersonation is derived from the job, never from the
+// request: a caller-supplied target would let an admin name any identity they
+// liked and have the server authenticate as a superuser on its behalf, which
+// is a different and much larger capability than "fix this job".
+func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, error) {
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	ads, err := h.getSchedd().Query(ctx, constraint, []string{"Owner", "User", "ClusterId", "ProcId"})
+	if err != nil {
+		return "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
+	}
+	if len(ads) == 0 {
+		return "", fmt.Errorf("job %d.%d not found", cluster, proc)
+	}
+	if owner, ok := ads[0].EvaluateAttrString("Owner"); ok && owner != "" {
+		return owner, nil
+	}
+	// Older ads may only carry User ("owner@domain").
+	if user, ok := ads[0].EvaluateAttrString("User"); ok && user != "" {
+		return ownerFromActor(user), nil
+	}
+	return "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
+}
+
+// superuserActionContext decides whether a single-job action should run as
+// somebody else, and if so prepares the context for it.
+//
+// Returns the original context and a nil Impersonation when the action should
+// proceed normally: superuser mode off, not armed, caller not permitted, or
+// the job already belongs to the caller. Acting on your own job is never an
+// impersonation even with the mode armed -- routing it through one would
+// muddy the audit trail with entries that record no privilege being used.
+//
+// An error means the action must not proceed. In particular a failure to
+// determine the owner is fatal rather than a fallback to acting as the
+// caller, because "we could not tell whose job this is" is not a good reason
+// to try it as somebody.
+func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, cluster, proc int) (context.Context, *Impersonation, error) {
+	if !h.superuserModeAvailable() || !h.mayUseSuperuserMode(r) {
+		return ctx, nil, nil
+	}
+	sessionID, err := getSessionCookie(r)
+	if err != nil {
+		return ctx, nil, nil
+	}
+	if armed, _ := h.superuserArmed.Armed(sessionID); !armed {
+		return ctx, nil, nil
+	}
+	session, ok := h.getSessionFromRequest(r)
+	if !ok {
+		return ctx, nil, nil
+	}
+
+	owner, err := h.jobOwner(ctx, cluster, proc)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.EqualFold(ownerFromActor(owner), ownerFromActor(session.Username)) {
+		// The caller's own job. No impersonation, no audit entry.
+		return ctx, nil, nil
+	}
+
+	impCtx, imp, err := h.impersonate(ctx, session.Username, owner)
+	if err != nil {
+		return nil, nil, err
+	}
+	return impCtx, imp, nil
+}
+
+// superuserReason returns the reason string to send with an action, and the
+// impersonation it belongs to. When imp is nil the caller's own reason is
+// used unchanged.
+func superuserReason(imp *Impersonation, what, fallback string) string {
+	if imp == nil {
+		return fallback
+	}
+	return imp.Reason(what)
+}

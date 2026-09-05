@@ -715,8 +715,21 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate as an identity the schedd will accept for it. The
+	// target comes from the job, never from the request.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	// Remove the job using the schedd RemoveJobs method
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
+	reason := superuserReason(imp, "Removed", "Removed via HTTP API")
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	if imp != nil {
+		s.auditSuperuserAction(r, imp, "remove", fmt.Sprintf("%d.%d", cluster, proc), err)
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -2162,8 +2175,26 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate as an identity the schedd will accept for it. The
+	// target is derived from the job, never from the request.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	// actionName is the past-tense verb ("Held", "Released"), which is
+	// what the reason should lead with. A caller-supplied reason is
+	// replaced rather than appended to: the reason is the durable record
+	// of who did this to somebody else's job, and letting arbitrary text
+	// lead would bury it.
+	reason = superuserReason(imp, actionName, reason)
+
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
+	if imp != nil {
+		s.auditSuperuserAction(r, imp, actionVerb, jobID, err)
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {

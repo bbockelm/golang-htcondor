@@ -1,12 +1,18 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { api } from '@/lib/api';
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 
 interface SidebarProps {
   userName?: string;
   isAdmin?: boolean;
+  // May this session arm superuser mode, and is it armed? Distinct from
+  // isAdmin: reading the admin pages and acting as other users are separate
+  // privileges gated on separate groups.
+  superuserAllowed?: boolean;
+  superuserActive?: boolean;
   // Mobile drawer state. On lg+ the sidebar is always visible and these
   // are ignored.
   open: boolean;
@@ -14,23 +20,30 @@ interface SidebarProps {
 }
 
 const NAV = [
-  { href: '/', label: 'Dashboard' },
-  { href: '/jobs', label: 'Jobs' },
-  { href: '/archive', label: 'Archive' },
-  { href: '/submit', label: 'Submit' },
-  { href: '/interactive', label: 'Interactive' },
-  { href: '/info', label: 'Info' },
+  { href: "/", label: "Dashboard" },
+  { href: "/jobs", label: "Jobs" },
+  { href: "/archive", label: "Archive" },
+  { href: "/submit", label: "Submit" },
+  { href: "/interactive", label: "Interactive" },
+  { href: "/info", label: "Info" },
 ];
 
 const ADMIN_NAV = [
-  { href: '/admin/placement', label: 'Placement' },
-  { href: '/admin/clients', label: 'OAuth2 Clients' },
-  { href: '/admin/tokens', label: 'OAuth2 Tokens' },
-  { href: '/admin/api-keys', label: 'API Keys' },
-  { href: '/admin/logs', label: 'Logs' },
+  { href: "/admin/placement", label: "Placement" },
+  { href: "/admin/clients", label: "OAuth2 Clients" },
+  { href: "/admin/tokens", label: "OAuth2 Tokens" },
+  { href: "/admin/api-keys", label: "API Keys" },
+  { href: "/admin/logs", label: "Logs" },
 ];
 
-export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
+export function Sidebar({
+  userName,
+  isAdmin,
+  superuserAllowed,
+  superuserActive,
+  open,
+  onClose,
+}: SidebarProps) {
   const pathname = usePathname();
 
   return (
@@ -39,7 +52,7 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
           flow and nothing dims behind it. */}
       <div
         className={`fixed inset-0 z-30 bg-black/50 transition-opacity lg:hidden ${
-          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+          open ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
         aria-hidden="true"
         onClick={onClose}
@@ -47,7 +60,7 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
 
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r bg-ink-950 text-gray-100 transition-transform lg:static lg:translate-x-0 ${
-          open ? 'translate-x-0' : '-translate-x-full'
+          open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-5">
@@ -108,6 +121,8 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
           )}
         </nav>
 
+        {superuserAllowed && <SuperuserToggle active={!!superuserActive} />}
+
         <div className="border-t border-white/10 px-4 py-3 text-xs">
           {userName ? (
             <>
@@ -127,7 +142,7 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
                     // wants to leave; the next /auth/me will fail
                     // and the SPA will redirect them to /login.
                   }
-                  window.location.href = '/';
+                  window.location.href = "/";
                 }}
                 className="text-left text-gray-400 hover:text-white"
               >
@@ -162,11 +177,66 @@ function NavLink({
       onClick={onNavigate}
       className={`block rounded px-3 py-2 text-sm transition ${
         active
-          ? 'bg-white/10 text-white'
-          : 'text-gray-300 hover:bg-white/5 hover:text-white'
+          ? "bg-white/10 text-white"
+          : "text-gray-300 hover:bg-white/5 hover:text-white"
       }`}
     >
       {children}
     </Link>
+  );
+}
+
+// SuperuserToggle arms superuser mode. Only rendered for sessions that are
+// permitted to use it.
+//
+// Arming asks for confirmation; disarming does not. The asymmetry is the
+// point: taking on the ability to act as anyone deserves a deliberate moment,
+// while giving it up should never be discouraged by friction.
+function SuperuserToggle({ active }: { active: boolean }) {
+  const qc = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => api.auth.setSuperuserMode(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["session"] }),
+  });
+
+  return (
+    <div className="border-t border-white/10 px-4 py-3">
+      <button
+        type="button"
+        disabled={toggle.isPending}
+        onClick={() => {
+          if (active) {
+            toggle.mutate(false);
+            return;
+          }
+          if (
+            confirm(
+              "Turn on superuser mode?\n\n" +
+                "While it is on, actions you take can apply to other users' jobs. " +
+                "Every action is logged against your name and recorded in the job.\n\n" +
+                "It turns itself off after 30 minutes.",
+            )
+          ) {
+            toggle.mutate(true);
+          }
+        }}
+        className={`w-full rounded px-3 py-2 text-left text-xs font-medium transition ${
+          active
+            ? "bg-red-600 text-white hover:bg-red-500"
+            : "bg-white/5 text-gray-300 hover:bg-white/10 hover:text-white"
+        }`}
+      >
+        {toggle.isPending
+          ? "Working…"
+          : active
+            ? "Superuser mode: ON"
+            : "Superuser mode: off"}
+      </button>
+      {toggle.isError && (
+        <p className="mt-1 text-[11px] text-red-300">
+          {(toggle.error as Error).message}
+        </p>
+      )}
+    </div>
   );
 }

@@ -2,6 +2,8 @@ package httpserver
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -154,5 +156,65 @@ func TestSuperuserSessionArmAndExpiry(t *testing.T) {
 
 	if armed, _ := s.Armed(""); armed {
 		t.Errorf("an empty session id must never be armed")
+	}
+}
+
+// TestSuperuserReasonReplacesCallerText: the reason is the durable record of
+// who acted on somebody else's job, so it must lead with that rather than
+// with whatever the caller typed.
+func TestSuperuserReasonReplacesCallerText(t *testing.T) {
+	imp := &Impersonation{Actor: "bob@example.org", Target: "alice@example.org"}
+
+	got := superuserReason(imp, "Held", "because I felt like it")
+	if strings.Contains(got, "because I felt like it") {
+		t.Errorf("caller text survived into a superuser reason: %q", got)
+	}
+	if !strings.Contains(got, "bob@example.org") || !strings.Contains(got, "alice@example.org") {
+		t.Errorf("reason must name both parties: %q", got)
+	}
+
+	// Without an impersonation the caller's own reason is untouched.
+	if got := superuserReason(nil, "Held", "because I felt like it"); got != "because I felt like it" {
+		t.Errorf("non-superuser reason was modified: %q", got)
+	}
+}
+
+// TestSuperuserActionContextInertWhenDisabled pins that none of this engages
+// on a server where the feature is off: no job lookup, no identity swap.
+func TestSuperuserActionContextInertWhenDisabled(t *testing.T) {
+	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
+	h := &Handler{logger: logger, uidDomain: "example.org"} // feature off
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/1.0", nil)
+	ctx := context.Background()
+	gotCtx, imp, err := h.superuserActionContext(ctx, req, 1, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if imp != nil {
+		t.Errorf("impersonation created with the feature disabled")
+	}
+	if gotCtx != ctx {
+		t.Errorf("context was replaced with the feature disabled")
+	}
+}
+
+// TestSuperuserActionContextNeedsArming: being in the group is not enough.
+// The mode has to have been turned on, which is what makes it a deliberate
+// posture rather than an ambient capability of every admin request.
+func TestSuperuserActionContextNeedsArming(t *testing.T) {
+	h := superuserTestHandler(t, []string{"condor@example.org"})
+	h.superuserArmed = newSuperuserSessions(time.Hour)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/1.0", nil)
+	// No session cookie at all: cannot be armed, so nothing happens and no
+	// job lookup is attempted (which would fail without a live schedd).
+	ctx := context.Background()
+	gotCtx, imp, err := h.superuserActionContext(ctx, req, 1, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if imp != nil || gotCtx != ctx {
+		t.Errorf("unarmed request produced an impersonation")
 	}
 }
