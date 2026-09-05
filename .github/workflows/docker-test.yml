@@ -12,17 +12,6 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-  # The image cache key rotates at 00:00 UTC (see "Derive the image
-  # cache key"), so without this the first person to push each day pays
-  # the full ~5 minute rebuild in all three jobs. This run happens on
-  # main, so it is the one that writes the day's cache; everything after
-  # it reads.
-  #
-  # If the daily Actions minutes are not worth it, delete this trigger:
-  # the caching still works, the first push of each day just pays for
-  # the rebuild instead.
-  schedule:
-    - cron: '20 0 * * *'
 
 jobs:
   docker-test:
@@ -53,6 +42,12 @@ jobs:
       # -- the Dockerfile runs `dnf update -y` and installs an unpinned
       # `condor >= 25.7.2`, so a layer cached indefinitely would drift
       # arbitrarily far from what those lines mean today.
+      #
+      # The rotation is not warmed by a scheduled run, deliberately: the
+      # nightly Actions minutes cost more than the rebuild they save.
+      # The first push to main each day therefore pays for that day's
+      # image, and everything after it -- including every pull request
+      # -- reads the result.
       run: |
         echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
 
@@ -137,6 +132,12 @@ jobs:
       # -- the Dockerfile runs `dnf update -y` and installs an unpinned
       # `condor >= 25.7.2`, so a layer cached indefinitely would drift
       # arbitrarily far from what those lines mean today.
+      #
+      # The rotation is not warmed by a scheduled run, deliberately: the
+      # nightly Actions minutes cost more than the rebuild they save.
+      # The first push to main each day therefore pays for that day's
+      # image, and everything after it -- including every pull request
+      # -- reads the result.
       run: |
         echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
 
