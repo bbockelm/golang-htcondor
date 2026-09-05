@@ -98,6 +98,13 @@ type Info struct {
 	JobQueueCaughtUp     bool
 	JobQueueLastSyncTime int64
 	JobQueueSecondsSync  int64
+	// JobQueueReported is whether the ad carried live-queue sync
+	// information at all. A mirror that syncs only history advertises no
+	// JobQueueCaughtUp attribute, which parses to the zero value -- so
+	// without this flag "the ad said nothing about the live queue" and
+	// "the live queue is caught up with 0s of lag" are the same false/0,
+	// and the panel renders the second when it means the first.
+	JobQueueReported bool
 }
 
 // ParseAd reads a mirror's collector advertisement.
@@ -109,9 +116,14 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	info.HistoryGap, _ = ad.EvaluateAttrBool("HistoryGapDetected")
 	info.HistoryLastSyncTime, _ = ad.EvaluateAttrInt("HistoryLastSyncTime")
 	info.SecondsSinceSync, _ = ad.EvaluateAttrInt("HistorySecondsSinceSync")
-	info.JobQueueCaughtUp, _ = ad.EvaluateAttrBool("JobQueueCaughtUp")
+	var caughtUpOK bool
+	info.JobQueueCaughtUp, caughtUpOK = ad.EvaluateAttrBool("JobQueueCaughtUp")
 	info.JobQueueLastSyncTime, _ = ad.EvaluateAttrInt("JobQueueLastSyncTime")
 	info.JobQueueSecondsSync, _ = ad.EvaluateAttrInt("JobQueueSecondsSinceSync")
+	// A mirror that syncs the live queue advertises JobQueueCaughtUp; a
+	// history-only mirror does not. That attribute's presence is the
+	// signal for whether the live-queue numbers above mean anything.
+	info.JobQueueReported = caughtUpOK
 	return info
 }
 

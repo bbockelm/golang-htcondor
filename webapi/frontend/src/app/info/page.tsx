@@ -276,13 +276,27 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
           <Row
             label="Job queue"
             value={
-              <StalenessValue
-                ok={health.job_queue_caught_up}
-                okText="caught up"
-                notOkText="behind the schedd's job_queue.log"
-                seconds={health.job_queue_staleness_seconds}
-                tolerance={health.jobs_tolerance_seconds}
-              />
+              health.job_queue_reported === false ? (
+                // The mirror advertised no live-queue sync -- it mirrors
+                // history only. This is not "0s behind": it never
+                // carried the live queue, so live job reads always use
+                // the schedd. Saying "0s behind ... behind" here (the
+                // old zero-value rendering) read as a fresh mirror that
+                // was somehow also stale.
+                <span className="text-gray-600">
+                  not reported — this mirror does not advertise live-queue
+                  sync (it may mirror history only), so live job reads use
+                  the schedd
+                </span>
+              ) : (
+                <StalenessValue
+                  ok={health.job_queue_caught_up}
+                  okText="caught up"
+                  notOkText="behind the schedd's job_queue.log"
+                  seconds={health.job_queue_staleness_seconds}
+                  tolerance={health.jobs_tolerance_seconds}
+                />
+              )
             }
           />
           <Row
