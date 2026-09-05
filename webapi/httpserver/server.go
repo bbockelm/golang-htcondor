@@ -89,6 +89,10 @@ type Config struct {
 	// interactive, Jupyter and MCP alike. Defaults apply only where the
 	// submit file is silent; overrides win over it. See
 	// HandlerConfig for the trust model.
+	// DBMirrorTokenSubject overrides the identity the htcondordb token
+	// asserts. See HandlerConfig.
+	DBMirrorTokenSubject string
+
 	SubmitFileDefaults  string
 	SubmitFileOverrides string
 
@@ -223,6 +227,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
+		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,
 		SubmitFileDefaults:          cfg.SubmitFileDefaults,
 		SubmitFileOverrides:         cfg.SubmitFileOverrides,
 		TemplateGlobalPath:          cfg.TemplateGlobalPath,
