@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Paging, and the honesty of a truncated answer.
 //
@@ -16,7 +15,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 //                     not drop or repeat records.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 type Ad = Record<string, unknown>;

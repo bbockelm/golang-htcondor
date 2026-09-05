@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // The real two-step submit: POST the job, then upload its input.
 //
@@ -17,7 +16,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // running after upload.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 const SCRIPT = '#!/bin/sh\necho uploaded-and-ran\n';
