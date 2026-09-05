@@ -1333,6 +1333,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		UserHeaderTrustAnyUnsafe: loadUserHeaderTrustAnyUnsafe(cfg),
 		SigningKeyPath:           signingKeyPath,
 		HTTPBaseURL:              httpBaseURL,
+		HTTPBaseURLExplicit:      httpBaseURLExplicit(cfg),
 		TLSCertFile:              tlsCertFile,
 		TLSKeyFile:               tlsKeyFile,
 		TLSCACertFile:            tlsCACertFile,
@@ -1650,6 +1651,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		TrustDomain:              trustDomain,
 		UIDDomain:                uidDomain,
 		HTTPBaseURL:              httpBaseURL,
+		HTTPBaseURLExplicit:      httpBaseURLExplicit(cfg),
 		TLSCertFile:              certPath,
 		TLSKeyFile:               keyPath,
 		TLSCACertFile:            caPath,
@@ -2248,4 +2250,19 @@ func loadPingInterval(cfg *config.Config, logger *logging.Logger) time.Duration 
 		log.Fatalf("invalid HTTP_API_PING_INTERVAL=%q: must be positive, or 0 to disable", raw)
 	}
 	return d
+}
+
+// httpBaseURLExplicit reports whether the operator configured
+// HTTP_API_BASE_URL, as opposed to loadHTTPBaseURL guessing one from
+// FULL_HOSTNAME and the listen port.
+//
+// The distinction matters for any URL a caller has to be able to open.
+// Inside a container FULL_HOSTNAME is the pod name, so the guess is
+// something like http://htcondor-api-6f9c86677f-sg8cj:8080 -- correct
+// for the server talking to itself, useless to anyone else. Code that
+// builds shareable links checks this before preferring the base URL
+// over the requesting client's own Host header.
+func httpBaseURLExplicit(cfg *config.Config) bool {
+	v, ok := cfg.Get("HTTP_API_BASE_URL")
+	return ok && v != ""
 }

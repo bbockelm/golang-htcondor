@@ -49,17 +49,23 @@ type Config struct {
 	// HandlerConfig.UserHeaderTrustAnyUnsafe. Configurable via
 	// HTTP_API_USER_HEADER_TRUST_ANY.
 	UserHeaderTrustAnyUnsafe bool
-	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
-	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	TLSCertFile              string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile               string              // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout              time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout             time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout              time.Duration       // HTTP idle timeout (default: 120s)
-	Collector                *htcondor.Collector // Collector for metrics (optional)
+	SigningKeyPath           string // Path to token signing key (optional, for token generation)
+	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	// HTTPBaseURLExplicit distinguishes a base URL the operator set
+	// (HTTP_API_BASE_URL) from one this server guessed off FULL_HOSTNAME
+	// and the listen port. Only the first is authoritative for links a
+	// caller has to be able to open: inside a container the guess is the
+	// pod name, which resolves nowhere outside the cluster.
+	HTTPBaseURLExplicit bool
+	TLSCertFile         string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile          string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout         time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout        time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout         time.Duration       // HTTP idle timeout (default: 120s)
+	Collector           *htcondor.Collector // Collector for metrics (optional)
 	// JobQueueLogPath, if set, is the path to the schedd's job_queue.log; the
 	// server mirrors it into a watch-enabled collection and serves
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
