@@ -135,7 +135,9 @@ function StatCard({
       }`}
     >
       <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-gray-900">{value}</div>
+      <div className="mt-1 text-2xl font-semibold text-gray-900">
+        {value.toLocaleString()}
+      </div>
     </div>
   );
 }
@@ -164,7 +166,7 @@ function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }) {
         {extras.map(([key, n]) => (
           <li key={key} className="flex justify-between">
             <span>{STATUS_LABEL_BY_KEY[key] ?? key}</span>
-            <span className="font-medium">{n}</span>
+            <span className="font-medium">{n.toLocaleString()}</span>
             {!known.has(key) && (
               <span className="ml-2 text-gray-400 text-xs">(unmapped)</span>
             )}
