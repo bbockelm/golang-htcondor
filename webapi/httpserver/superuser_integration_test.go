@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,27 +38,109 @@ import (
 // The pool is configured with QUEUE_SUPER_USERS = root, condor, superadmin, so
 // one web admin (superadmin) is a queue superuser and another (plainadmin) is
 // not. That is what lets a single pool cover both identity branches.
+// Identities used by both runs. Named at package scope because the root
+// variant has to create them as OS accounts before the pool will accept
+// submissions from them.
+const (
+	jobOwnerUser   = "jobowner"
+	superAdminUser = "superadmin"
+	plainAdminUser = "plainadmin"
+)
+
 func TestSuperuserModeEndToEnd(t *testing.T) {
+	// Personal condor only. Started by root the pool's daemons drop to the
+	// condor account and this arrangement stops making sense -- directory
+	// ownership, the OS accounts submitters resolve to, and which identity
+	// counts as "condor" all change. TestSuperuserModeEndToEndAsCondor is
+	// that environment's test; running both would not add coverage, it
+	// would just fail here for reasons that variant exists to handle.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: see TestSuperuserModeEndToEndAsCondor")
+	}
+
+	// The fallback identity is pointed at the user the pool runs as,
+	// because in a personal condor "condor@UID_DOMAIN" is not recognised --
+	// see superuserPolicy.fallback.
+	me, err := user.Current()
+	if err != nil {
+		t.Fatalf("could not determine the current user: %v", err)
+	}
+	runSuperuserEndToEnd(t, superuserPoolOpts{fallbackIdentity: me.Username})
+}
+
+// TestSuperuserModeEndToEndAsCondor is TestSuperuserModeEndToEnd with the
+// DEFAULT fallback identity, against a pool whose daemons run as the condor
+// user.
+//
+// That is the arrangement the default assumes and the only one where it can
+// be checked: real_owner_is_condor recognises the daemon's own OS user only
+// when personal_condor is false, which requires the pool to have been started
+// by root. Everything else about superuser mode is covered by the test above;
+// this one exists solely to keep the shipped default honest.
+//
+// Requires root AND a condor account, so it skips almost everywhere. The
+// root-integration-test CI job is where it actually runs.
+func TestSuperuserModeEndToEndAsCondor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: HTCondor only treats the daemon's own OS user as the condor identity when it was started by root")
+	}
+	condorUser, err := user.Lookup("condor")
+	if err != nil {
+		t.Skipf("no condor account on this host: %v", err)
+	}
+	// A root schedd resolves every submitter to a real OS account before it
+	// will create a cluster (solidify_os_user); a personal condor never has
+	// to, because everything is the one user. So these identities must
+	// exist as accounts.
+	//
+	// They are created in the test image rather than here: a test that adds
+	// and removes system users is a test that can damage the machine it
+	// runs on, and leave it damaged when it fails part way. Skipping when
+	// they are absent keeps that decision with whoever built the image.
+	for _, name := range []string{jobOwnerUser, superAdminUser, plainAdminUser} {
+		if _, err := user.Lookup(name); err != nil {
+			t.Skipf("no OS account %q: this test needs the accounts created in the "+
+				"integration image (see Dockerfile)", name)
+		}
+	}
+
+	runSuperuserEndToEnd(t, superuserPoolOpts{
+		// Empty selects condor@$(UID_DOMAIN) -- the default under test.
+		fallbackIdentity: "",
+		runAs:            condorUser,
+	})
+}
+
+// superuserPoolOpts varies the two things that differ between the two runs.
+type superuserPoolOpts struct {
+	// fallbackIdentity is passed through to SuperuserFallbackIdentity.
+	// Empty selects the package default.
+	fallbackIdentity string
+	// runAs, when set, owns the pool's directories so daemons started by
+	// root can drop to that account and still write to them.
+	runAs *user.User
+}
+
+func runSuperuserEndToEnd(t *testing.T, opts superuserPoolOpts) {
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
 
 	const (
 		trustDomain = "test.htcondor.org"
-		jobOwner    = "jobowner"
-		superAdmin  = "superadmin" // in QUEUE_SUPER_USERS
-		plainAdmin  = "plainadmin" // NOT in QUEUE_SUPER_USERS
+		jobOwner    = jobOwnerUser
+		superAdmin  = superAdminUser // in QUEUE_SUPER_USERS
+		plainAdmin  = plainAdminUser // NOT in QUEUE_SUPER_USERS
 		suGroup     = "condor-webadmins"
 	)
 
-	// The user this pool runs as. PERSONAL_CONDOR_IS_SUPER_USER (default
-	// true) already makes them a queue superuser, and submitting below
-	// gives them a UserRec, so they are a usable fallback identity.
-	me, err := user.Current()
-	if err != nil {
-		t.Fatalf("could not determine the current user: %v", err)
+	// poolUser is the identity the schedd will attribute a fallback action
+	// to. With an explicit override that is the override; with the default
+	// it is "condor", which is who the daemons run as under runAs.
+	poolUser := opts.fallbackIdentity
+	if poolUser == "" {
+		poolUser = "condor"
 	}
-	poolUser := me.Username
 
 	tempDir, err := os.MkdirTemp("", "htcondor-superuser-test-*")
 	if err != nil {
@@ -85,6 +168,16 @@ func TestSuperuserModeEndToEnd(t *testing.T) {
 			printHTCondorLogs(tempDir, t)
 		}
 	}()
+
+	// Create the pool's directories up front. HTCondor will make them
+	// itself when it can, but a master started by root and dropping to the
+	// condor account cannot, and dies with "Cannot open log file" before it
+	// writes anything explaining why.
+	for _, d := range []string{"log", "spool", "execute"} {
+		if err := os.MkdirAll(filepath.Join(tempDir, d), 0o755); err != nil {
+			t.Fatalf("Failed to create %s: %v", d, err)
+		}
+	}
 
 	passwordsDir := filepath.Join(tempDir, "passwords.d")
 	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
@@ -119,6 +212,38 @@ QUEUE_SUPER_USERS = root, condor, %s
 		t.Fatalf("Failed to append config: %v", err)
 	}
 	f.Close()
+
+	// Daemons started by root drop to the condor account, which then has to
+	// be able to write the pool's log and spool. MkdirTemp leaves a
+	// root-owned 0700 directory, so hand the tree over -- without this the
+	// master dies before it writes a single log line.
+	if opts.runAs != nil {
+		uid, _ := strconv.Atoi(opts.runAs.Uid)
+		gid, _ := strconv.Atoi(opts.runAs.Gid)
+		// The socket directory too: it lives outside tempDir and the
+		// shared-port daemon has to bind in it.
+		for _, root := range []string{tempDir, socketDir} {
+			if err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				// Everything except the signing key. HTCondor's
+				// read_secure_file insists the pool key is owned by uid
+				// 0 and refuses to read it otherwise -- handing it to
+				// condor along with the rest makes every token this
+				// server mints fail to verify.
+				if strings.HasPrefix(path, passwordsDir) {
+					return nil
+				}
+				return os.Chown(path, uid, gid)
+			}); err != nil {
+				t.Fatalf("could not hand %s to %s: %v", root, opts.runAs.Username, err)
+			}
+			if err := os.Chmod(root, 0o755); err != nil {
+				t.Fatalf("chmod %s: %v", root, err)
+			}
+		}
+	}
 
 	os.Setenv("CONDOR_CONFIG", configFile)
 	defer os.Unsetenv("CONDOR_CONFIG")
@@ -166,7 +291,7 @@ QUEUE_SUPER_USERS = root, condor, %s
 		// already made a queue superuser. Without this the fallback path
 		// could only be tested as root, i.e. nowhere: CI's integration
 		// container runs as "vscode".
-		SuperuserFallbackIdentity: poolUser,
+		SuperuserFallbackIdentity: opts.fallbackIdentity,
 		OAuth2DBPath:              filepath.Join(tempDir, "sessions.db"),
 	})
 	if err != nil {
