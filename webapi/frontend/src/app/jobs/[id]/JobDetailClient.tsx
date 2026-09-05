@@ -1614,7 +1614,7 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     {
       label: 'Memory',
       requested: fmtMiB(job.RequestMemory),
-      used: fmtMiB(job.MemoryUsage ?? job.ResidentSetSize_RAW),
+      used: fmtMemoryUsed(job),
     },
     {
       label: 'Disk',
@@ -1760,6 +1760,23 @@ function fmtUsage(v: unknown): string {
 }
 
 // Memory request lands in MiB on HTCondor's wire; same for usage.
+// fmtMemoryUsed renders the memory a job actually used.
+//
+// MemoryUsage is the attribute to prefer, but it needs two guards. The schedd
+// stores it as an expression over ResidentSetSize, and an expression the server
+// could not evaluate arrives as the string "/Expr(...)/" -- num() rejects that,
+// but `MemoryUsage ?? ResidentSetSize` would not, because ?? only falls back on
+// null and undefined. A present-but-unusable value would silently win.
+//
+// And the units differ: MemoryUsage is MB while ResidentSetSize is KB, so the
+// old fallback rendered "64,380 MiB" for a job using 63. Convert rather than
+// pass it straight to fmtMiB.
+function fmtMemoryUsed(job: ClassAd): string {
+  const direct = num(job.MemoryUsage);
+  if (direct !== undefined) return `${direct.toLocaleString()} MiB`;
+  return fmtKiBAsMiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
+}
+
 function fmtMiB(v: unknown): string {
   const n = num(v);
   if (n === undefined) return '—';
@@ -1949,6 +1966,11 @@ export function humanDuration(seconds: number): string {
 function num(v: unknown): number | undefined {
   if (typeof v === 'number') return v;
   if (typeof v === 'string') {
+    // A ClassAd expression the server did not evaluate serialises as
+    // "/Expr(...)/". Number() would return NaN and we would fall through
+    // anyway, but rejecting it by name says what it is, and keeps a future
+    // Number("...") quirk from turning an expression into a plausible value.
+    if (v.startsWith('/Expr(')) return undefined;
     const n = Number(v);
     if (!Number.isNaN(n)) return n;
   }
