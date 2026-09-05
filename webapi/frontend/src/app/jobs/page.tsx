@@ -584,12 +584,17 @@ function useInfiniteList<T>(
   const [count, setCount] = useState(pageSize);
 
   // Snap back to one page when the caller signals a fresh context.
-  // We deliberately do NOT include `items` here — we don't want a
-  // poll-driven array identity change to scroll the user back to
-  // the top mid-read.
-  useEffect(() => {
+  // We deliberately do NOT key on `items` — a poll-driven array
+  // identity change must not scroll the user back to the top mid-read.
+  //
+  // Compared during render rather than assigned from an effect, so the
+  // list never paints one frame at the old length before snapping back.
+  const resetSignal = `${pageSize}\u0000${String(resetKey)}`;
+  const [prevResetSignal, setPrevResetSignal] = useState(resetSignal);
+  if (prevResetSignal !== resetSignal) {
+    setPrevResetSignal(resetSignal);
     setCount(pageSize);
-  }, [pageSize, resetKey]);
+  }
 
   // Clamp when the source list shrinks below the visible window
   // (e.g., the filter narrowed) — without this, hasMore would

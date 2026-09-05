@@ -96,7 +96,10 @@ export default function JupyterDetailClient() {
     staleTime: 0,
   });
 
-  const [status, setStatus] = useState<Status>('loading');
+  // `closed` is the only part of the view state that is not a function
+  // of the fetched data: the SSE teardown event latches it, and it must
+  // survive subsequent polls. Everything else is derived below.
+  const [closed, setClosed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   // jupyterReady = "we've successfully reached jupyter-lab through the
@@ -112,39 +115,31 @@ export default function JupyterDetailClient() {
     helperConnected: data?.connected === true,
   });
 
-  useEffect(() => {
+  // Derived during render rather than assigned from an effect. Every
+  // input here is already state or query data, so writing the result
+  // into another piece of state only bought an extra render pass --
+  // which is what react-hooks/set-state-in-effect flags -- and risked
+  // painting a stale status for one frame.
+  const status: Status = (() => {
+    if (closed) return 'closed';
     if (error) {
-      if (error instanceof ApiError && error.status === 404) {
-        setStatus('gone');
-      } else {
-        setStatus('error');
-      }
-      return;
+      return error instanceof ApiError && error.status === 404 ? 'gone' : 'error';
     }
-    if (!data) {
-      setStatus('loading');
-      return;
-    }
+    if (!data) return 'loading';
     if (data.connected) {
       // Helper is up; mount the iframe only once we've also confirmed
-      // jupyter-lab itself is responding (see the probe effect below).
+      // jupyter-lab itself is responding (see the probe hook above).
       // Until then, sit in "launching" with a banner so the user knows
       // why nothing's appearing.
-      setStatus((s) => {
-        if (s === 'closed') return s;
-        return jupyterReady ? 'ready' : 'launching';
-      });
-      return;
+      return jupyterReady ? 'ready' : 'launching';
     }
     // Not yet connected: derive a more specific in-progress status
     // (idle / transferring_input / executing / spooling / held / ...).
-    setStatus(
-      interpretJobStatus({
-        job: jobQuery.data,
-        helperConnected: data.connected,
-      }),
-    );
-  }, [data, error, jobQuery.data, jupyterReady]);
+    return interpretJobStatus({
+      job: jobQuery.data,
+      helperConnected: data.connected,
+    });
+  })();
 
   useEffect(() => {
     if (!data) return;
@@ -160,7 +155,7 @@ export default function JupyterDetailClient() {
       refetch();
     });
     es.addEventListener('closed', () => {
-      setStatus('closed');
+      setClosed(true);
       es.close();
     });
     es.onerror = () => {
