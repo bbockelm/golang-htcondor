@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { Sidebar } from './Sidebar';
+import { SuperuserBanner } from './SuperuserBanner';
 import { Footer } from './Footer';
 
 // Pages that render without an authenticated session. The dashboard ('/')
@@ -59,6 +60,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <Sidebar
         userName={session?.username}
         isAdmin={session?.is_admin}
+        superuserAllowed={session?.superuser_allowed}
+        superuserActive={session?.superuser_active}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -67,6 +70,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           short pages while keeping it scroll-along on long pages. */}
       <div className="flex min-w-0 flex-1 flex-col overflow-auto">
         <MobileTopBar onOpen={() => setSidebarOpen(true)} />
+        {/* Above <main> and inside the scroll container, so the warning is
+            the first thing on every page and stays pinned while scrolling.
+            Renders nothing unless the mode is armed. */}
+        <SuperuserBanner session={session} />
         <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
         <Footer />
       </div>

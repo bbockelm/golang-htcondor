@@ -103,6 +103,23 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 		maxBytes = peekHardMaxBytes
 	}
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate for it.
+	//
+	// Tail works under superuser mode without any starter-side change,
+	// which is worth recording because the starter's peek handler checks
+	// the caller's identity against the job owner with no superuser
+	// exemption. It passes anyway: the schedd gates GET_JOB_CONNECT_INFO
+	// with UserCheck2 (which a queue superuser satisfies), and the starter
+	// then mints the session with getJobOwnerFQUOrDummy -- as the JOB
+	// OWNER, not as whoever asked. So by the time peek checks, the
+	// session identity is the owner's by construction.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	// Bound the whole round-trip — it includes a schedd RPC + a
 	// starter session resume. 30s leaves slack for a busy schedd
 	// without making the SPA wait forever on a hung starter.
@@ -116,6 +133,9 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 		StderrOffset: stderrOffset,
 		MaxBytes:     maxBytes,
 	})
+	if imp != nil {
+		s.auditSuperuserAction(r, imp, "peek", fmt.Sprintf("%d.%d", cluster, proc), err)
+	}
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))

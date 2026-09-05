@@ -2,11 +2,17 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 
 interface SidebarProps {
   userName?: string;
   isAdmin?: boolean;
+  // May this session arm superuser mode, and is it armed? Distinct from
+  // isAdmin: reading the admin pages and acting as other users are separate
+  // privileges gated on separate groups.
+  superuserAllowed?: boolean;
+  superuserActive?: boolean;
   // Mobile drawer state. On lg+ the sidebar is always visible and these
   // are ignored.
   open: boolean;
@@ -30,7 +36,14 @@ const ADMIN_NAV = [
   { href: '/admin/logs', label: 'Logs' },
 ];
 
-export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
+export function Sidebar({
+  userName,
+  isAdmin,
+  superuserAllowed,
+  superuserActive,
+  open,
+  onClose,
+}: SidebarProps) {
   const pathname = usePathname();
 
   return (
@@ -108,6 +121,8 @@ export function Sidebar({ userName, isAdmin, open, onClose }: SidebarProps) {
           )}
         </nav>
 
+        {superuserAllowed && <SuperuserToggle active={!!superuserActive} />}
+
         <div className="border-t border-white/10 px-4 py-3 text-xs">
           {userName ? (
             <>
@@ -168,5 +183,60 @@ function NavLink({
     >
       {children}
     </Link>
+  );
+}
+
+// SuperuserToggle arms superuser mode. Only rendered for sessions that are
+// permitted to use it.
+//
+// Arming asks for confirmation; disarming does not. The asymmetry is the
+// point: taking on the ability to act as anyone deserves a deliberate moment,
+// while giving it up should never be discouraged by friction.
+function SuperuserToggle({ active }: { active: boolean }) {
+  const qc = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => api.auth.setSuperuserMode(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['session'] }),
+  });
+
+  return (
+    <div className="border-t border-white/10 px-4 py-3">
+      <button
+        type="button"
+        disabled={toggle.isPending}
+        onClick={() => {
+          if (active) {
+            toggle.mutate(false);
+            return;
+          }
+          if (
+            confirm(
+              'Turn on superuser mode?\n\n' +
+                "While it is on, actions you take can apply to other users' jobs. " +
+                'Every action is logged against your name and recorded in the job.\n\n' +
+                'It turns itself off after 30 minutes.',
+            )
+          ) {
+            toggle.mutate(true);
+          }
+        }}
+        className={`w-full rounded px-3 py-2 text-left text-xs font-medium transition ${
+          active
+            ? 'bg-red-600 text-white hover:bg-red-500'
+            : 'bg-white/5 text-gray-300 hover:bg-white/10 hover:text-white'
+        }`}
+      >
+        {toggle.isPending
+          ? 'Working…'
+          : active
+            ? 'Superuser mode: ON'
+            : 'Superuser mode: off'}
+      </button>
+      {toggle.isError && (
+        <p className="mt-1 text-[11px] text-red-300">
+          {(toggle.error as Error).message}
+        </p>
+      )}
+    </div>
   );
 }

@@ -88,6 +88,9 @@ func (h *Handler) setupRoutes() {
 	// Web UI session endpoints (browser-session aware; cookie-only)
 	mux.Handle("/api/v1/auth/me", cors(http.HandlerFunc(h.handleAuthMe)))
 	mux.Handle("/api/v1/auth/logout", cors(http.HandlerFunc(h.handleAuthLogout)))
+	// Superuser mode toggle. Gated inside the handler on the dedicated
+	// superuser group -- NOT the admin-UI group.
+	mux.Handle("/api/v1/admin/superuser", cors(http.HandlerFunc(h.handleSuperuserMode)))
 
 	// Web UI dashboard summary
 	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))

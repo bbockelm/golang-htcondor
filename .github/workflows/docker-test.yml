@@ -263,3 +263,54 @@ jobs:
             # restored caches under the bind-mounted workspace.
             cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
           "
+
+  # Superuser mode's fallback identity is condor@$(UID_DOMAIN), and that
+  # default can only be checked against a pool whose daemons actually run as
+  # the condor user -- which requires the pool to have been started by root.
+  # HTCondor only treats the daemon's own OS user as the condor identity when
+  # personal_condor is false, and personal_condor is simply !is_root().
+  #
+  # The ordinary integration job cannot cover it: its container runs as
+  # "vscode" (USER vscode in the Dockerfile), so every pool it starts is a
+  # personal condor. This job exists solely to keep that one shipped default
+  # honest, and runs only the tests that need root -- everything else is
+  # already covered above, and re-running it here would cost minutes without
+  # adding coverage.
+  docker-root-integration-test:
+    name: Root Integration Test in Docker
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+    - name: Build Docker image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        tags: golang-htcondor:integration-test
+        # Reads the same cache the integration job writes; identical image.
+        cache-from: type=gha
+
+    - name: Run the root-only integration tests
+      run: |
+        # --user 0:0 overrides the image's USER vscode. The pool's daemons
+        # then drop to the condor account, which is the arrangement under
+        # test. The submitter accounts the test needs are created in the
+        # image; the test skips rather than creating them itself.
+        docker run --rm --privileged --user 0:0 \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          golang-htcondor:integration-test \
+          /bin/bash -c "
+            go install gotest.tools/gotestsum@latest
+            cd webapi && GOWORK=off gotestsum -- \
+              -tags=integration -timeout=10m \
+              -run 'AsCondor$' \
+              ./httpserver/
+          "
