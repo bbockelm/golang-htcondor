@@ -109,7 +109,13 @@ export default function TerminalDetailClient() {
           ← Interactive
         </Link>
         <h1 className="text-2xl font-bold text-gray-900">Terminal</h1>
-        <span className="text-xs text-gray-500 font-mono">{id}</span>
+        <Link
+          href={`/jobs/${encodeURIComponent(id)}`}
+          className="text-xs text-gray-500 font-mono underline hover:text-gray-700"
+          title="Job details"
+        >
+          {id}
+        </Link>
         <div className="ml-auto flex items-center gap-3">
           {/* visualStatus remaps 'executing' → 'ready' for the pill
               presentation: a running terminal IS usable (the SSH
