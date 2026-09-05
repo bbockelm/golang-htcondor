@@ -73,8 +73,8 @@ func (p *Prober) Probe(filename string, currentOffset int64) (ProbeResult, error
 	if p.lastSize == 0 && p.lastModTime.IsZero() {
 		p.lastSize = size
 		p.lastModTime = modTime
-		// If file is not empty, there are entries to read
-		if size > 0 {
+		// Unread data exists when the file extends past what the reader has consumed.
+		if size > currentOffset {
 			return ProbeAddition, nil
 		}
 		return ProbeNoChange, nil
@@ -86,8 +86,13 @@ func (p *Prober) Probe(filename string, currentOffset int64) (ProbeResult, error
 		return ProbeCompressed, nil
 	}
 
-	// Check if file grew
-	if size > p.lastSize {
+	// Check for unread data: the file has bytes beyond what the reader has CONSUMED.
+	// Compared against currentOffset, NOT p.lastSize (the file size at the last Update). Update
+	// stats the path AFTER a read, so if the writer appended during the read, lastSize gets
+	// AHEAD of currentOffset; keying the append check on lastSize then reports NoChange for the
+	// un-consumed tail and wedges the reader until the file next shrinks (a compaction forcing a
+	// reload). Keying on currentOffset cannot wedge -- it keeps reading until offset == size.
+	if size > currentOffset {
 		return ProbeAddition, nil
 	}
 
