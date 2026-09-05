@@ -256,7 +256,6 @@ jobs:
           -w /workspace \
           -e GOCACHE=/workspace/.gocache/build \
           -e GOMODCACHE=/workspace/.gocache/mod \
-          golang-htcondor:integration-test \
           -e HTCONDORDB_BINARY=/workspace/.gocache/htcondordb \
           golang-htcondor:integration-test \
           /bin/bash -c "
