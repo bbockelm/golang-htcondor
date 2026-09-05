@@ -46,8 +46,14 @@ type superuserPolicy struct {
 	source    queueSuperUserSource
 	uidDomain string
 	// fallback is the identity used when the actor is not a known queue
-	// superuser, or when the set could not be read. Conventionally
-	// "condor@<UID_DOMAIN>".
+	// superuser, or when the set could not be read.
+	//
+	// "condor@<UID_DOMAIN>" is the right answer for a schedd running as the
+	// condor user, because real_owner_is_condor recognises the daemon's own
+	// OS user. It is only right for THAT arrangement: a personal condor
+	// disables that branch entirely (personal_condor = !is_root()), so the
+	// equivalent identity there is the user the pool runs as. Hence the
+	// knob -- see HandlerConfig.SuperuserFallbackIdentity.
 	fallback string
 	refresh  time.Duration
 	logger   *logging.Logger
@@ -60,14 +66,19 @@ type superuserPolicy struct {
 
 // newSuperuserPolicy builds a policy. A zero refresh interval selects
 // defaultSuperuserRefresh.
-func newSuperuserPolicy(source queueSuperUserSource, uidDomain string, refresh time.Duration, logger *logging.Logger) *superuserPolicy {
+func newSuperuserPolicy(source queueSuperUserSource, uidDomain, fallback string, refresh time.Duration, logger *logging.Logger) *superuserPolicy {
 	if refresh <= 0 {
 		refresh = defaultSuperuserRefresh
+	}
+	if strings.TrimSpace(fallback) == "" {
+		fallback = qualifyUser("condor", uidDomain)
+	} else {
+		fallback = qualifyUser(strings.TrimSpace(fallback), uidDomain)
 	}
 	return &superuserPolicy{
 		source:    source,
 		uidDomain: uidDomain,
-		fallback:  qualifyUser("condor", uidDomain),
+		fallback:  fallback,
 		refresh:   refresh,
 		logger:    logger,
 	}
@@ -201,11 +212,13 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	h.superuserPolicy = newSuperuserPolicy(
 		scheddSuperUserSource{get: h.getSchedd},
 		h.uidDomain,
+		cfg.SuperuserFallbackIdentity,
 		cfg.SuperuserRefreshInterval,
 		logger,
 	)
 	logger.Info(logging.DestinationHTTP, "Superuser mode enabled",
 		"superuser_group", group,
+		"fallback_identity", h.superuserPolicy.fallback,
 		"queue_superuser_refresh", h.superuserPolicy.refresh,
 		"arm_ttl", h.superuserArmed.ttl)
 }

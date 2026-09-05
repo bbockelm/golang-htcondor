@@ -1208,6 +1208,9 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// reading the admin pages and acting as any user on the access point are
 	// different privileges and an operator has to opt into the second one.
 	superuserGroup, _ := cfg.Get("HTTP_API_SUPERUSER_GROUP")
+	// Only needed where the schedd does not run as "condor" -- see
+	// HandlerConfig.SuperuserFallbackIdentity.
+	superuserFallback, _ := cfg.Get("HTTP_API_SUPERUSER_FALLBACK_IDENTITY")
 	if strings.TrimSpace(superuserGroup) != "" {
 		log.Printf("Superuser mode gated on group %q", strings.TrimSpace(superuserGroup))
 	}
@@ -1346,6 +1349,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
 		SuperuserGroup:             strings.TrimSpace(superuserGroup),
+		SuperuserFallbackIdentity:  strings.TrimSpace(superuserFallback),
 		EnableIDP:                  enableIDP,
 		IDPIssuer:                  idpIssuer,
 		IDPAccessTokenLifespan:     idpAccessLifespan,

@@ -28,7 +28,7 @@ func superuserTestHandler(t *testing.T, superUsers []string) *Handler {
 		superuserGroup: "condor-webadmins",
 	}
 	h.superuserPolicy = newSuperuserPolicy(
-		&fakeSuperUsers{users: superUsers}, "example.org", time.Hour, logger)
+		&fakeSuperUsers{users: superUsers}, "example.org", "", time.Hour, logger)
 	if err := h.superuserPolicy.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}

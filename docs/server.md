@@ -113,6 +113,7 @@ hold, release, tail output, and ssh-to-job. Off unless configured.
 | Config | Default | Effect |
 | --- | --- | --- |
 | `HTTP_API_SUPERUSER_GROUP` | *(unset)* | Group whose members may use superuser mode. Unset disables the feature. |
+| `HTTP_API_SUPERUSER_FALLBACK_IDENTITY` | `condor@$(UID_DOMAIN)` | Identity used when the operator is not themselves a usable queue superuser. Only needs setting where the schedd does not run as `condor`. |
 
 Two things must both be true or the feature stays off, and the server logs
 which one is missing:
@@ -141,7 +142,19 @@ log records
 QmgmtSetEffectiveOwner real=<operator> ... effective to <owner>
 ```
 
-Otherwise it falls back to `condor@$(UID_DOMAIN)`. The set is read from the
+Otherwise it falls back to `condor@$(UID_DOMAIN)`, or to
+`HTTP_API_SUPERUSER_FALLBACK_IDENTITY` where that is set. The default suits a
+schedd running as the `condor` user, because HTCondor recognises the daemon's
+own OS user as the condor identity — but only when it is not a personal
+condor, where that check is disabled entirely. Point the knob at whoever the
+pool runs as in that case.
+
+Being listed in `QUEUE_SUPER_USERS` is necessary but not sufficient: the
+schedd resolves the caller to a user record *first* and refuses one it cannot
+resolve, so an operator who has never submitted a job cannot act. That is
+checked when the mode is armed, and the operator is told to run
+`condor_qusers -add <user>` rather than left with an action that silently does
+nothing. The set is read from the
 schedd with `DC_CONFIG_VAL` at startup and every 15 minutes — never per
 action — so adding an operator to `QUEUE_SUPER_USERS` takes effect within one
 refresh.

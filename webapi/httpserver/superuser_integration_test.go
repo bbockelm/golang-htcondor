@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,15 @@ func TestSuperuserModeEndToEnd(t *testing.T) {
 		plainAdmin  = "plainadmin" // NOT in QUEUE_SUPER_USERS
 		suGroup     = "condor-webadmins"
 	)
+
+	// The user this pool runs as. PERSONAL_CONDOR_IS_SUPER_USER (default
+	// true) already makes them a queue superuser, and submitting below
+	// gives them a UserRec, so they are a usable fallback identity.
+	me, err := user.Current()
+	if err != nil {
+		t.Fatalf("could not determine the current user: %v", err)
+	}
+	poolUser := me.Username
 
 	tempDir, err := os.MkdirTemp("", "htcondor-superuser-test-*")
 	if err != nil {
@@ -148,7 +158,16 @@ QUEUE_SUPER_USERS = root, condor, %s
 		// the schedd's own authorization, which is what we want to test.
 		WebUIAdminGroup: suGroup,
 		SuperuserGroup:  suGroup,
-		OAuth2DBPath:    filepath.Join(tempDir, "sessions.db"),
+		// The pool here is a personal condor running as the test user, so
+		// "condor@UID_DOMAIN" is not recognised as the condor identity --
+		// real_owner_is_condor only matches the daemon's own OS user when
+		// personal_condor is false. Point the fallback at the user the
+		// pool actually runs as, which PERSONAL_CONDOR_IS_SUPER_USER has
+		// already made a queue superuser. Without this the fallback path
+		// could only be tested as root, i.e. nowhere: CI's integration
+		// container runs as "vscode".
+		SuperuserFallbackIdentity: poolUser,
+		OAuth2DBPath:              filepath.Join(tempDir, "sessions.db"),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -287,23 +306,6 @@ queue`
 	})
 
 	t.Run("armed, a non-queue-superuser admin acts via condor", func(t *testing.T) {
-		// The condor@UID_DOMAIN fallback cannot be exercised in a personal
-		// condor. real_owner_is_condor recognises condor@family,
-		// condor@child, condor@password, an owner of "root", or -- only
-		// when NOT a personal condor -- the daemon's own OS user via
-		// is_same_user(get_condor_username(), ...). A pool started by an
-		// unprivileged test process is a personal condor running as that
-		// user, so "condor@<UID_DOMAIN>" matches none of them and the
-		// action fails with "anonymous user not permitted".
-		//
-		// In a system install the schedd runs as condor and is_root() is
-		// true, so the last branch matches and the fallback works. That is
-		// the configuration this needs to be verified in; skipping is
-		// honest, quietly passing would not be.
-		if os.Geteuid() != 0 {
-			t.Skip("personal condor: condor@UID_DOMAIN is not recognised as the condor identity; " +
-				"run as root against a system install to exercise the fallback")
-		}
 		jobID := submitIdleJob(t, client, baseURL, ownerSID, submitFile)
 		sid := newAdminSession(t, server, plainAdmin, suGroup)
 		armSuperuser(t, client, baseURL, sid, true)
@@ -322,29 +324,16 @@ queue`
 		if !strings.Contains(reason, plainAdmin) {
 			t.Errorf("HoldReason does not name the acting admin: %s", reason)
 		}
-		if !strings.Contains(reason, "by user condor") {
-			t.Errorf("expected the schedd to attribute this to condor: %s", reason)
+		// The schedd attributes the action to the fallback identity, not
+		// to the human -- which is exactly why the human's name has to be
+		// in the reason text we send.
+		if !strings.Contains(reason, "by user "+poolUser) {
+			t.Errorf("expected the schedd to attribute this to the fallback identity %q: %s",
+				poolUser, reason)
 		}
 	})
 
 	t.Run("armed, remove works too", func(t *testing.T) {
-		// The condor@UID_DOMAIN fallback cannot be exercised in a personal
-		// condor. real_owner_is_condor recognises condor@family,
-		// condor@child, condor@password, an owner of "root", or -- only
-		// when NOT a personal condor -- the daemon's own OS user via
-		// is_same_user(get_condor_username(), ...). A pool started by an
-		// unprivileged test process is a personal condor running as that
-		// user, so "condor@<UID_DOMAIN>" matches none of them and the
-		// action fails with "anonymous user not permitted".
-		//
-		// In a system install the schedd runs as condor and is_root() is
-		// true, so the last branch matches and the fallback works. That is
-		// the configuration this needs to be verified in; skipping is
-		// honest, quietly passing would not be.
-		if os.Geteuid() != 0 {
-			t.Skip("personal condor: condor@UID_DOMAIN is not recognised as the condor identity; " +
-				"run as root against a system install to exercise the fallback")
-		}
 		jobID := submitIdleJob(t, client, baseURL, ownerSID, submitFile)
 		sid := newAdminSession(t, server, plainAdmin, suGroup)
 		armSuperuser(t, client, baseURL, sid, true)

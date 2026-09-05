@@ -26,7 +26,7 @@ func newTestPolicy(t *testing.T, src queueSuperUserSource) *superuserPolicy {
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
-	return newSuperuserPolicy(src, "example.org", time.Hour, logger)
+	return newSuperuserPolicy(src, "example.org", "", time.Hour, logger)
 }
 
 // TestImpersonationIdentityPrefersTheActor is the point of the whole policy:
@@ -152,7 +152,7 @@ func TestEmptySetIsNotAnError(t *testing.T) {
 
 func TestPolicyWithoutUIDDomain(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
-	p := newSuperuserPolicy(&fakeSuperUsers{users: []string{"bob"}}, "", time.Hour, logger)
+	p := newSuperuserPolicy(&fakeSuperUsers{users: []string{"bob"}}, "", "", time.Hour, logger)
 	if err := p.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -219,4 +219,52 @@ func TestSuperuserGroupIsNotTheAdminGroup(t *testing.T) {
 	if h.superuserModeAvailable() {
 		t.Errorf("configuring only the admin group enabled superuser mode")
 	}
+}
+
+// TestFallbackIdentityIsConfigurable covers the knob that lets the fallback
+// match how the pool actually runs.
+//
+// "condor@$(UID_DOMAIN)" is only correct for a schedd running as the condor
+// user: real_owner_is_condor recognises the daemon's own OS user, but ONLY
+// when personal_condor is false. A personal condor disables that branch, so
+// the equivalent identity there is whoever the pool runs as -- and without
+// this knob the fallback path could not be exercised outside a system install.
+func TestFallbackIdentityIsConfigurable(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	src := &fakeSuperUsers{users: []string{"condor@example.org"}}
+
+	t.Run("empty selects condor", func(t *testing.T) {
+		p := newSuperuserPolicy(src, "example.org", "", time.Hour, logger)
+		if p.fallback != "condor@example.org" {
+			t.Errorf("fallback = %q, want condor@example.org", p.fallback)
+		}
+	})
+
+	t.Run("a bare name is qualified with the uid domain", func(t *testing.T) {
+		p := newSuperuserPolicy(src, "example.org", "poolrunner", time.Hour, logger)
+		if p.fallback != "poolrunner@example.org" {
+			t.Errorf("fallback = %q, want poolrunner@example.org", p.fallback)
+		}
+	})
+
+	t.Run("an already-qualified name is left alone", func(t *testing.T) {
+		p := newSuperuserPolicy(src, "example.org", "svc@other.org", time.Hour, logger)
+		if p.fallback != "svc@other.org" {
+			t.Errorf("fallback = %q", p.fallback)
+		}
+	})
+
+	t.Run("it is what a non-superuser actor gets", func(t *testing.T) {
+		p := newSuperuserPolicy(src, "example.org", "poolrunner", time.Hour, logger)
+		if err := p.Refresh(context.Background()); err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
+		id, isSuper := p.ImpersonationIdentity("carol")
+		if id != "poolrunner@example.org" || isSuper {
+			t.Errorf("got (%q, %v), want the configured fallback", id, isSuper)
+		}
+	})
 }

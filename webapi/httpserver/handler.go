@@ -396,6 +396,19 @@ type HandlerConfig struct {
 	// SuperuserRefreshInterval is how often the schedd's QUEUE_SUPER_USERS
 	// set is re-read. Zero selects defaultSuperuserRefresh.
 	SuperuserRefreshInterval time.Duration
+	// SuperuserFallbackIdentity is the identity used when the operator is
+	// not themselves a usable queue superuser. Empty selects
+	// "condor@$(UID_DOMAIN)".
+	//
+	// That default suits a schedd running as the condor user, where
+	// real_owner_is_condor matches the daemon's own OS user. It does NOT
+	// suit a personal condor: there personal_condor is true, that branch is
+	// disabled, and the equivalent identity is the user the pool runs as.
+	// Deployments that run the schedd as something else need this knob, and
+	// so does any test that wants to exercise the fallback without root.
+	//
+	// Configurable via HTTP_API_SUPERUSER_FALLBACK_IDENTITY.
+	SuperuserFallbackIdentity string
 	// SuperuserArmTTL is how long superuser mode stays on before disarming
 	// itself. Zero selects defaultSuperuserArmTTL.
 	SuperuserArmTTL time.Duration
