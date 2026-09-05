@@ -889,6 +889,16 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	}
 	h.logger.Info(logging.DestinationHTTP, "Successfully created access response")
 
+	// Note the issuance for the admin client list. Recorded after the
+	// response was built successfully, so a client that only ever fails
+	// to get a token does not look active. The write itself is debounced
+	// -- a client refreshing on a timer must not turn this into a
+	// steady write load on the session database.
+	h.clientUsage.Record(
+		accessRequest.GetClient().GetID(),
+		accessRequest.GetSession().GetSubject(),
+		time.Now())
+
 	// Always return fosite's own access token — even for condor:/*
 	// scopes. The client uses this token against THIS server's MCP
 	// endpoint; we mint a short-lived HTCondor IDTOKEN on demand,
@@ -973,6 +983,10 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
+
+	// Same issuance record as the standard token path; the device-code
+	// flow bypasses fosite's pipeline, so it needs its own call.
+	h.clientUsage.Record(request.GetClient().GetID(), request.GetSession().GetSubject(), time.Now())
 
 	// Build response
 	response := map[string]interface{}{
@@ -1157,6 +1171,18 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error(logging.DestinationHTTP, "Failed to create client", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
 		return
+	}
+
+	// Keep the name the client registered under. RFC 7591 defines it and
+	// clients do send it, but until now it was echoed back in the
+	// response and dropped, which left the admin list showing nothing
+	// but generated ids. Not fatal if it fails: the client is already
+	// registered and usable, and refusing the registration over a
+	// display field would be the worse outcome.
+	if err := setClientProvenance(ctx, h.oauth2Provider.GetStorage().GetDB(),
+		clientID, regReq.ClientName, ClientOriginDynamic); err != nil {
+		h.logger.Warn(logging.DestinationHTTP, "Failed to record client provenance",
+			"client_id", clientID, "error", err)
 	}
 
 	// Return registration response

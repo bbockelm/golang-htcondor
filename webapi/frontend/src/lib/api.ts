@@ -572,6 +572,12 @@ export interface MatchAnalysisAttributeDistribution {
   error_example?: string;
 }
 
+// AdminClientUse is one entry of a client's recent-users sample.
+export interface AdminClientUse {
+  subject: string;
+  at: string;
+}
+
 export interface AdminClient {
   id: string;
   redirect_uris?: string[];
@@ -580,6 +586,24 @@ export interface AdminClient {
   scopes?: string[];
   public: boolean;
   created_at: string;
+
+  // What the client called itself at registration (RFC 7591
+  // client_name). Absent for seeded clients and for anything registered
+  // before the server started keeping it.
+  name?: string;
+  // Operator annotation. Often the only identifying information for a
+  // client that predates provenance tracking.
+  notes?: string;
+  // 'dynamic' registered itself, 'seeded' was created by this server.
+  // ABSENT MEANS UNKNOWN, not "not dynamic" — the row predates the
+  // field, so rendering it as a negative would assert something nobody
+  // checked.
+  origin?: 'dynamic' | 'seeded' | string;
+  // When this client last obtained a token; absent means never. Written
+  // on a debounced background flush, so treat it as "roughly when".
+  last_used_at?: string;
+  // Last few distinct subjects to obtain a token here, newest first.
+  recent_users?: AdminClientUse[];
 }
 
 export interface AdminToken {
@@ -980,6 +1004,15 @@ export const api = {
     deleteClient: (id: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+      }),
+    // Notes are the only editable field on a client: everything else is
+    // either the client's own assertion at registration or something the
+    // server derived.
+    updateClientNotes: (id: string, notes: string): Promise<{ notes: string }> =>
+      fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
       }),
     listTokens: (params?: {
       client_id?: string;

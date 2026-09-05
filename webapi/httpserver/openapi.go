@@ -364,6 +364,32 @@ const openAPISchema = `{
           "token": {"type": "string", "description": "The signed IDToken. A bearer credential for the AP identity it names: it is returned exactly once and is not recoverable afterwards."}
         }
       },
+      "AdminClientUse": {
+        "type": "object",
+        "description": "One entry of a client's recent-users sample.",
+        "properties": {
+          "subject": {"type": "string"},
+          "at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "AdminClient": {
+        "type": "object",
+        "description": "An OAuth2 client as the admin UI sees it. Secrets are never returned.",
+        "properties": {
+          "id": {"type": "string", "description": "Client id. A dynamically registered one looks like \"client_<unixnano>\" and says nothing about the app -- which is what name, notes and origin are for."},
+          "name": {"type": "string", "description": "What the client called itself at registration (RFC 7591 client_name). Absent for seeded clients and for anything registered before this was kept."},
+          "notes": {"type": "string", "description": "Operator annotation, editable via PATCH. Often the only identifying information for a client that predates provenance tracking."},
+          "origin": {"type": "string", "enum": ["dynamic", "seeded", ""], "description": "How the client came to exist: \"dynamic\" registered itself through /mcp/oauth2/register, \"seeded\" was created by this server. EMPTY MEANS UNKNOWN, not \"not dynamic\" -- the row predates the field and nobody recorded the answer."},
+          "last_used_at": {"type": "string", "format": "date-time", "description": "When this client last obtained a token. Absent means never. Written on a debounced background flush, so it may lag real usage; it is a \"roughly when\", not an audit record."},
+          "recent_users": {"type": "array", "items": {"$ref": "#/components/schemas/AdminClientUse"}, "description": "Rolling sample of the last few distinct subjects to obtain a token through this client, newest first."},
+          "redirect_uris": {"type": "array", "items": {"type": "string"}},
+          "grant_types": {"type": "array", "items": {"type": "string"}},
+          "response_types": {"type": "array", "items": {"type": "string"}},
+          "scopes": {"type": "array", "items": {"type": "string"}},
+          "public": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      },
       "DBMirrorRoutingCount": {
         "type": "object",
         "description": "One routing tally since process start.",
@@ -414,6 +440,48 @@ const openAPISchema = `{
     }
   },
   "paths": {
+    "/admin/oauth2/clients": {
+      "get": {
+        "summary": "List OAuth2 clients",
+        "description": "Every registered OAuth2 client, newest first, with the provenance fields that make the list readable: the name the client registered under, the operator's notes, how it came to exist, when it last obtained a token, and who for. Requires membership in the web UI admin group.",
+        "operationId": "listAdminClients",
+        "responses": {
+          "200": {"description": "Clients", "content": {"application/json": {"schema": {"type": "object", "properties": {"clients": {"type": "array", "items": {"$ref": "#/components/schemas/AdminClient"}}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/admin/oauth2/clients/{id}": {
+      "patch": {
+        "summary": "Annotate an OAuth2 client",
+        "description": "Set the operator's note for a client. The note is the ONLY editable field: everything else is either the client's own assertion at registration or something this server derived, and letting an admin rewrite those would turn the provenance columns into a record of a belief rather than a fact. Requires membership in the web UI admin group.",
+        "operationId": "updateAdminClient",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"notes": {"type": "string", "maxLength": 4096}}}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"type": "object", "properties": {"notes": {"type": "string"}}}}}},
+          "400": {"description": "Malformed body or notes over the length limit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Delete an OAuth2 client",
+        "description": "Removes the client and every token issued under it. Useful for clearing dynamic-registration churn. Requires membership in the web UI admin group.",
+        "operationId": "deleteAdminClient",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Deleted"},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/dbmirror/status": {
       "get": {
         "summary": "htcondordb mirror routing status",
