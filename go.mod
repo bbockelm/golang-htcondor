@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/PelicanPlatform/classad v0.29.6
-	github.com/bbockelm/cedar v0.6.12
+	github.com/bbockelm/cedar v0.6.13
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/stretchr/testify v1.12.1
