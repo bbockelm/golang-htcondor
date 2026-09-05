@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // API keys: mint -> authenticate -> revoke -> refused.
 //
@@ -12,7 +11,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // word that quietly becomes "once some cache expires".
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 // A READ-scoped endpoint the key is expected to reach.

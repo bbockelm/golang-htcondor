@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Share URLs must be built from how the caller reached us, never from
 // the server's own hostname.
@@ -21,7 +20,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // request-derived branch, which is the one that broke.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 test.beforeEach(async ({ page }) => {
@@ -41,7 +40,7 @@ async function submitJob(page: import('@playwright/test').Page): Promise<string>
   return `${cluster}.0`;
 }
 
-test('a share URL uses the host the caller reached us at', async ({ page }) => {
+test('a share URL uses the host the caller reached us at', async ({ page, baseURL }) => {
   const jobID = await submitJob(page);
 
   const res = await page.request.post(`/api/v1/jobs/${jobID}/output/share`, { data: {} });
@@ -52,8 +51,12 @@ test('a share URL uses the host the caller reached us at', async ({ page }) => {
   const { url } = await res.json();
   const parsed = new URL(url);
 
+  // Compared against the base URL the run actually used, not a literal:
+  // the harness picks a free port per run so two of them can share a
+  // host, and a hardcoded one turns this into a test of the harness.
+  expect(baseURL, 'the suite needs a base URL to compare against').toBeTruthy();
   expect(parsed.host, `share URL should use the request host, got ${url}`).toBe(
-    'localhost:8080',
+    new URL(baseURL!).host,
   );
   expect(parsed.protocol).toBe('https:');
   expect(parsed.pathname).toBe('/api/v1/share/output');

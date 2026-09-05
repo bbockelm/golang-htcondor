@@ -175,32 +175,61 @@ jobs:
       run: |
         mkdir -p webapi/httpserver/webui/dist
         cp -r webapi/frontend/out/* webapi/httpserver/webui/dist/
-        # -h localhost so the base URL the server derives from
-        # FULL_HOSTNAME resolves from the runner. Without it the OAuth
-        # redirect targets the container's own name and the browser
-        # cannot follow it.
-        docker run -d --name e2e --privileged \
-          -h localhost \
-          -p 8080:8080 \
-          -v "${{ github.workspace }}:/workspace" \
-          -w /workspace \
-          golang-htcondor:e2e \
-          /bin/bash -c "scripts/e2e-server.sh"
+        # Pick a free port and a private directory per run, so two
+        # harnesses can share a host and neither depends on a name
+        # another user could squat.
+        #
+        # The SAME number on both sides of -p is required, not cosmetic:
+        # the server builds its OAuth redirect from its own host:port, so
+        # a host port that differs from the container port sends the
+        # browser somewhere the server is not.
+        RUNDIR=$(mktemp -d "${TMPDIR:-/tmp}/e2e-harness.XXXXXXXX")
+        SERVER_LOG="$RUNDIR/server.log"
+
+        for attempt in 1 2 3; do
+          PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); p=s.getsockname()[1]; s.close(); print(p)')
+          NAME="e2e-$PORT"
+          # -h localhost so the base URL the server derives from
+          # FULL_HOSTNAME resolves from the runner. Without it the OAuth
+          # redirect targets the container's own name and the browser
+          # cannot follow it.
+          if docker run -d --name "$NAME" --privileged \
+            -h localhost \
+            -e "E2E_PORT=$PORT" \
+            -p "$PORT:$PORT" \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            golang-htcondor:e2e \
+            /bin/bash -c "scripts/e2e-server.sh"; then
+            break
+          fi
+          # Lost a race for the port between probing and binding it.
+          echo "could not start on port $PORT (attempt $attempt)"
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          PORT=""
+        done
+        [ -n "$PORT" ] || { echo "could not find a free port for the harness"; exit 1; }
+
+        # Later steps need these; nothing else may assume a fixed value.
+        echo "E2E_PORT=$PORT" >> "$GITHUB_ENV"
+        echo "E2E_CONTAINER=$NAME" >> "$GITHUB_ENV"
+        echo "E2E_SERVER_LOG=$SERVER_LOG" >> "$GITHUB_ENV"
         # The server writes READY to its log once condor and the API are
         # both answering; poll for that rather than a fixed sleep.
         for i in $(seq 1 90); do
-          if docker logs e2e 2>&1 | grep -q 'E2E-READY'; then break; fi
-          if ! docker ps -q --filter name=e2e | grep -q .; then
-            echo "container exited early:"; docker logs e2e; exit 1
+          if docker logs "$NAME" 2>&1 | grep -q 'E2E-READY'; then break; fi
+          if ! docker ps -q --filter name="$NAME" | grep -q .; then
+            echo "container exited early:"; docker logs "$NAME"; exit 1
           fi
           sleep 2
         done
-        docker logs e2e | tail -20
-        docker logs e2e 2>&1 | grep -q 'E2E-READY' || { echo "server never became ready"; exit 1; }
-        # Demo mode generates the IDP admin password per run and prints
-        # it; the tests read it from here to log in.
-        docker logs e2e > /tmp/e2e-server.log 2>&1
-        grep -q '^Password:' /tmp/e2e-server.log || {
+        docker logs "$NAME" | tail -20
+        docker logs "$NAME" 2>&1 | grep -q 'E2E-READY' || { echo "server never became ready"; exit 1; }
+        # Demo mode generates the IDP credentials per run and prints
+        # them; the tests read them from here to log in. Written inside
+        # the private run directory, which mktemp -d created 0700.
+        docker logs "$NAME" > "$SERVER_LOG" 2>&1
+        grep -q '^Password:' "$SERVER_LOG" || {
           echo "no admin credentials in the server output; demo mode did not start"; exit 1; }
 
     - name: Run full suite
@@ -209,13 +238,19 @@ jobs:
       env:
         # https, and localhost rather than 127.0.0.1: demo mode serves
         # with a generated cert whose SANs cover the hostname, and the
-        # OAuth redirects are built from it.
-        PLAYWRIGHT_BASE_URL: https://localhost:8080
-        E2E_SERVER_LOG: /tmp/e2e-server.log
+        # OAuth redirects are built from it. Port and log path come from
+        # the start step, which chose both.
+        PLAYWRIGHT_BASE_URL: https://localhost:${{ env.E2E_PORT }}
 
     - name: Server logs on failure
       if: failure()
-      run: docker logs e2e 2>&1 | tail -200
+      # E2E_CONTAINER is empty if the start step failed before naming
+      # one; fall back to whatever e2e-* container exists so a startup
+      # failure still shows its logs rather than "No such container".
+      run: |
+        name="${E2E_CONTAINER:-$(docker ps -aq --filter 'name=^e2e-' | head -1)}"
+        [ -n "$name" ] || { echo "no harness container to log"; exit 0; }
+        docker logs "$name" 2>&1 | tail -200
 
     - name: Upload report
       if: failure()
@@ -227,4 +262,8 @@ jobs:
 
     - name: Stop container
       if: always()
-      run: docker rm -f e2e || true
+      # Remove by the name this run chose, and sweep any e2e-* left by a
+      # start attempt that lost its port race before recording a name.
+      run: |
+        [ -z "${E2E_CONTAINER:-}" ] || docker rm -f "$E2E_CONTAINER" || true
+        for c in $(docker ps -aq --filter 'name=^e2e-'); do docker rm -f "$c" || true; done

@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Superuser mode: the largest privilege the server grants -- acting on
 // another user's jobs as that user.
@@ -19,7 +18,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // reachable without a real pool and a real IDP group.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 const ARM = '/api/v1/admin/superuser';
