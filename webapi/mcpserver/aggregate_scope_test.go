@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -133,4 +134,102 @@ func stripComments(src string) string {
 		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n")
+}
+
+// --- truncation ---
+
+func aggRows(n int) []htcondor.AggregateRow {
+	rows := make([]htcondor.AggregateRow, n)
+	for i := range rows {
+		rows[i] = htcondor.AggregateRow{Group: []string{fmt.Sprintf("owner%03d", i)}, Count: 10}
+	}
+	return rows
+}
+
+// An untruncated answer reports what it found and says nothing about
+// limits -- the common case must not be cluttered with caveats.
+func TestAggregateRenderUntruncated(t *testing.T) {
+	out := renderScheddAggregate("JobStatus == 5", []string{"Owner"}, aggRows(3), false, -1)
+
+	if strings.Contains(strings.ToUpper(out), "TRUNCATED") {
+		t.Errorf("a complete answer must not claim truncation:\n%s", out)
+	}
+	if !strings.Contains(out, "30 job(s) in the live queue") {
+		t.Errorf("total missing or wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "constraint applied: JobStatus == 5") {
+		t.Errorf("the effective constraint is not echoed:\n%s", out)
+	}
+}
+
+// The reported bug: groups past the limit were dropped and the total
+// undercounted, with nothing to say so. Both halves must now be visible.
+func TestAggregateRenderTruncatedWithExactTotal(t *testing.T) {
+	// 500 shown groups of 10 = 5,000 shown; 20,000 actually match.
+	out := renderScheddAggregate("true", []string{"Owner"}, aggRows(aggregateGroupLimit), true, 20000)
+
+	if !strings.Contains(out, "TRUNCATED") {
+		t.Errorf("truncation is not announced:\n%s", out)
+	}
+	// The headline number must be the real one, not the sum of what fit.
+	if !strings.Contains(out, "20000 job(s) match in total") {
+		t.Errorf("the total is not the exact one:\n%s", out)
+	}
+	if !strings.Contains(out, "5000 are in the 500 group(s) shown") {
+		t.Errorf("the shown subtotal is not distinguished from the total:\n%s", out)
+	}
+	// And the reader is told the omission is not random.
+	if !strings.Contains(out, "alphabetically first") {
+		t.Errorf("does not say which groups were kept:\n%s", out)
+	}
+}
+
+// If the follow-up total query fails we still must not present the
+// partial sum as if it were the answer.
+func TestAggregateRenderTruncatedWithoutExactTotal(t *testing.T) {
+	out := renderScheddAggregate("true", []string{"Owner"}, aggRows(aggregateGroupLimit), true, -1)
+
+	if !strings.Contains(out, "TRUNCATED") {
+		t.Errorf("truncation is not announced:\n%s", out)
+	}
+	if !strings.Contains(out, "lower bound") {
+		t.Errorf("a partial total must be labelled a lower bound:\n%s", out)
+	}
+}
+
+// A caller that gets zero needs to tell "no such jobs" from "not your
+// jobs". Echoing the constraint actually applied is what makes that
+// possible from the outside.
+func TestAggregateRenderEchoesTheOwnerScopedConstraint(t *testing.T) {
+	scoped := `(Owner == "alice") && (JobStatus == 5)`
+	out := renderScheddAggregate(scoped, []string{"Owner"}, nil, false, -1)
+
+	if !strings.Contains(out, scoped) {
+		t.Errorf("the owner-scoped constraint is not visible to the caller:\n%s", out)
+	}
+	if !strings.Contains(out, "0 group(s)") {
+		t.Errorf("an empty result is not reported as such:\n%s", out)
+	}
+}
+
+// An empty constraint reaches the schedd as "true"; say that rather than
+// leaving a blank where the constraint should be.
+func TestAggregateRenderEmptyConstraintShowsTrue(t *testing.T) {
+	out := renderScheddAggregate("", nil, aggRows(1), false, -1)
+	if !strings.Contains(out, "constraint applied: true") {
+		t.Errorf("empty constraint not rendered as true:\n%s", out)
+	}
+}
+
+// The group cap must not be the listing default. 50 groups is not an
+// answer to "count jobs by owner" on a busy access point.
+func TestAggregateGroupLimitIsNotTheListingDefault(t *testing.T) {
+	var listingDefault htcondor.QueryOptions
+	if got := listingDefault.ApplyDefaults().Limit; aggregateGroupLimit == got {
+		t.Errorf("the aggregate group cap (%d) is the listing default; "+
+			"that is the value that silently dropped owners past the 50th", got)
+	}
+	if aggregateGroupLimit < 100 {
+		t.Errorf("aggregateGroupLimit = %d, too small to answer a grouping question", aggregateGroupLimit)
+	}
 }
