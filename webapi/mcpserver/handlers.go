@@ -566,7 +566,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			},
 			Tool{
 				Name:        "store_service_credential",
-				Description: "Store an OAuth credential (e.g., a refresh token) for a service. This is used to bootstrap credentials required by jobs that need OAuthServicesNeeded. The credential is stored in the HTCondor credential daemon.",
+				Description: "Store an OAuth credential for a service, to bootstrap what jobs with OAuthServicesNeeded require. The credential must be a JSON document -- not a bare token string -- or an empty string to request a credmon-minted token. It is stored in the HTCondor credential daemon.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -580,7 +580,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						},
 						"credential": map[string]interface{}{
 							"type":        "string",
-							"description": "The credential value (e.g., a refresh token). Can be plain text or base64-encoded.",
+							"description": "The credential as a JSON document, e.g. {\"access_token\":\"...\"} or {\"refresh_token\":\"...\"}, optionally base64-encoded. A bare token string is REFUSED: the credd stores it happily and then fails every later read of it. Pass an empty string to request a credmon-minted token instead of supplying one -- that is the normal case for services a job transform added.",
 						},
 					},
 					"required": []string{"service", "credential"},
@@ -2347,7 +2347,12 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		return nil, fmt.Errorf("service is required")
 	}
 	credential, ok := args["credential"].(string)
-	if !ok || credential == "" {
+	if !ok {
+		// Present-but-empty is allowed; absent is not. An empty credential
+		// is a request for a credmon-minted token, which is what the
+		// OAuthServicesNeeded guidance tells callers to store for services
+		// a job transform added. Rejecting it outright, as this did,
+		// contradicted that guidance and left no way to follow it.
 		return nil, fmt.Errorf("credential is required")
 	}
 	handle, _ := args["handle"].(string)
@@ -2358,20 +2363,10 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		credBytes = []byte(credential)
 	}
 
-	// An OAuth service credential has to be a JSON document, and the
-	// credd will not tell you otherwise until much later. It accepts
-	// anything at store time -- it only parses the bytes if the request
-	// carries scopes or an audience -- but re-parses them whenever a
-	// query names a specific service. Storing a plain string therefore
-	// succeeds, and then get_credential_status fails ever after with
-	// FAILURE_JSON_PARSE while list_service_credentials, which never
-	// names a service, still reports the credential as present. Two read
-	// paths disagreeing about the same credential is a miserable thing
-	// to debug, so refuse the store that causes it.
-	if !json.Valid(credBytes) {
-		return nil, fmt.Errorf("credential for %q is not valid JSON: an OAuth service credential must be "+
-			"a JSON document such as {\"access_token\":\"...\"}. Storing anything else appears to "+
-			"succeed and then breaks every later read of it", service)
+	// See ValidateOAuthCredential for why this is refused here rather than
+	// left for the credd to discover later.
+	if err := htcondor.ValidateOAuthCredential(service, credBytes); err != nil {
+		return nil, err
 	}
 
 	if err := s.credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {

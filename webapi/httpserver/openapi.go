@@ -273,7 +273,7 @@ const openAPISchema = `{
           },
           "credential": {
             "type": "string",
-            "description": "Credential payload (base64 or plain string)"
+            "description": "Credential payload: a JSON document such as {\"access_token\":\"...\"}, optionally base64-encoded. A bare token string is rejected -- the credd would store it and then fail every later read. Empty requests a credmon-minted token instead of supplying one."
           },
           "service": {
             "type": "string",
