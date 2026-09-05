@@ -18,6 +18,11 @@ jobs:
     name: Test in Docker (Rocky Linux)
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Let both platforms report. With the default fail-fast, the first
+      # failure cancels its sibling, and a cancelled job's log says only
+      # "The operation was canceled" -- so a genuine arm64 error shows up
+      # as two broken jobs with the cause visible in neither.
+      fail-fast: false
       matrix:
         platform: [linux/amd64, linux/arm64]
         include:
@@ -84,6 +89,21 @@ jobs:
         restore-keys: |
           docker-gocache-${{ matrix.tag }}-
 
+    # The image runs as a non-root user (USER vscode in the Dockerfile)
+    # while the workspace bind mount is owned by the runner user, so the
+    # container cannot create its own cache directory inside it -- the
+    # first attempt failed with "mkdir /workspace/.gocache: permission
+    # denied". Nothing hit this before because the containers only read
+    # the mount; the Go caches used to live inside the container.
+    #
+    # The uid comes from the image rather than being hardcoded, so this
+    # keeps working if the Dockerfile's user ever changes.
+    - name: Prepare the container Go cache directory
+      run: |
+        ids=$(docker run --rm golang-htcondor:test-${{ matrix.tag }} sh -c 'echo $(id -u):$(id -g)')
+        mkdir -p .gocache
+        sudo chown -R "$ids" .gocache
+
     # Tests and build share ONE container. They used to be two `docker
     # run`s, and a container's Go build cache dies with it -- so the
     # build recompiled, from nothing, everything the test step had just
@@ -114,12 +134,13 @@ jobs:
     # here would spend a shared 10 GB budget on entries nobody else can
     # use. The container writes as root, so hand ownership back before
     # the runner tars it up.
-    - name: Reclaim the container Go cache from root
+    - name: Reclaim the container Go cache for the runner
       if: github.ref == 'refs/heads/main'
-      # The container writes as root; hand ownership back so the runner
-      # can read the tree. The size goes in the log because this repo has
-      # been over GitHub's 10 GB cache budget before, and an entry whose
-      # size nobody watches is how that happened.
+      # The container wrote this tree as the image's user, so hand
+      # ownership back before the runner tars it up. The size goes in the
+      # log because this repo has been over GitHub's 10 GB cache budget
+      # before, and an entry whose size nobody watches is how that
+      # happened.
       run: |
         sudo chown -R "$(id -u):$(id -g)" .gocache
         echo "container Go cache: $(du -sh .gocache | cut -f1)"
@@ -212,6 +233,21 @@ jobs:
         key: docker-gocache-amd64-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           docker-gocache-amd64-
+
+    # The image runs as a non-root user (USER vscode in the Dockerfile)
+    # while the workspace bind mount is owned by the runner user, so the
+    # container cannot create its own cache directory inside it -- the
+    # first attempt failed with "mkdir /workspace/.gocache: permission
+    # denied". Nothing hit this before because the containers only read
+    # the mount; the Go caches used to live inside the container.
+    #
+    # The uid comes from the image rather than being hardcoded, so this
+    # keeps working if the Dockerfile's user ever changes.
+    - name: Prepare the container Go cache directory
+      run: |
+        ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
+        mkdir -p .gocache
+        sudo chown -R "$ids" .gocache
 
     - name: Run integration tests with HTCondor
       run: |
