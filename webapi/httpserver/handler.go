@@ -207,6 +207,7 @@ type Handler struct {
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
 	idpLoginLimiter    *LoginRateLimiter // Rate limiter for IDP login attempts
+	seedDemoUser       bool              // Seed the non-admin "user" account (demo mode only)
 	streamBufferSize   int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout time.Duration     // Write timeout for streaming queries (default: 5s)
 	wg                 sync.WaitGroup    // WaitGroup to track background goroutines
@@ -461,6 +462,18 @@ type HandlerConfig struct {
 	MCPAdminUsers   []string
 	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP       bool   // Enable built-in IDP (always enabled in demo mode)
+	// SeedDemoUser additionally seeds a second, non-admin IDP account
+	// ("user") alongside "admin", printing its generated password the
+	// same way.
+	//
+	// Deliberately NOT keyed on EnableIDP: the built-in IDP can be turned
+	// on in a real deployment with HTTP_API_ENABLE_IDP, and seeding a
+	// second standing account there — with its password on stdout — is
+	// not something an operator asked for. Only -demo sets this.
+	//
+	// It exists so tests have two identities to check authorization
+	// boundaries with: an admin, and someone who is not.
+	SeedDemoUser bool
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	// Retained as an unused field so existing callers keep compiling
 	// during the transition.
@@ -1036,6 +1049,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"access_token_lifespan", idpAccessLifespan,
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
+		h.seedDemoUser = cfg.SeedDemoUser
 		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 
@@ -2615,6 +2629,47 @@ func (h *Handler) initializeIDPUsers(ctx context.Context) error {
 		h.logger.Info(logging.DestinationHTTP, "Created IDP admin user", "username", "admin")
 	}
 
+	if h.seedDemoUser {
+		if err := h.initializeDemoUser(ctx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// initializeDemoUser seeds the non-admin "user" account used to exercise
+// authorization boundaries. State "active" rather than "admin" is the
+// whole point: handleIDPUserInfo emits groups=["admin"] only for admin
+// users, so this account resolves with no groups and is therefore not a
+// WebUI admin.
+func (h *Handler) initializeDemoUser(ctx context.Context) error {
+	exists, err := h.idpProvider.storage.UserExists(ctx, "user")
+	if err != nil {
+		return fmt.Errorf("failed to check if demo user exists: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	password, err := generateRandomPassword(16)
+	if err != nil {
+		return fmt.Errorf("failed to generate demo user password: %w", err)
+	}
+	if err := h.idpProvider.storage.CreateUser(ctx, "user", password, "active"); err != nil {
+		return fmt.Errorf("failed to create demo user: %w", err)
+	}
+
+	fmt.Printf("\n")
+	fmt.Printf("========================================\n")
+	fmt.Printf("IDP Non-Admin Credentials\n")
+	fmt.Printf("========================================\n")
+	fmt.Printf("Username: user\n")
+	fmt.Printf("UserPassword: %s\n", password)
+	fmt.Printf("========================================\n")
+	fmt.Printf("\n")
+
+	h.logger.Info(logging.DestinationHTTP, "Created IDP demo user", "username", "user")
 	return nil
 }
 

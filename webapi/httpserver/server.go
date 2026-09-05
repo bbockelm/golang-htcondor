@@ -148,6 +148,9 @@ type Config struct {
 	// condor@$(UID_DOMAIN). See HandlerConfig.
 	SuperuserFallbackIdentity string
 	EnableIDP                 bool // Enable built-in IDP (always enabled in demo mode)
+	// SeedDemoUser seeds a second, non-admin IDP account. Demo mode only;
+	// see HandlerConfig.SeedDemoUser for why it is not keyed on EnableIDP.
+	SeedDemoUser bool
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -254,6 +257,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SuperuserGroup:              cfg.SuperuserGroup,
 		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
+		SeedDemoUser:                cfg.SeedDemoUser,
 		IDPIssuer:                   cfg.IDPIssuer,
 		IDPAccessTokenLifespan:      cfg.IDPAccessTokenLifespan,
 		IDPRefreshTokenLifespan:     cfg.IDPRefreshTokenLifespan,

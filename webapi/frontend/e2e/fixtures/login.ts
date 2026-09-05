@@ -16,19 +16,26 @@ import type { Page } from '@playwright/test';
 // assertions as loose as "the body is visible" pass against the error
 // document that produces.
 export async function loginAsAdmin(page: Page, password: string) {
+  return loginAs(page, 'admin', password);
+}
+
+// loginAs drives the same flow for any IDP account. Demo mode seeds two:
+// "admin" (state=admin, so userinfo emits groups=["admin"]) and "user"
+// (state=active, no groups) — the pair authorization tests need.
+export async function loginAs(page: Page, username: string, password: string) {
   await page.goto('/login');
 
   // Landed on the IDP's form. If the server were misconfigured we would
   // be looking at a JSON error instead, so assert the form is here
   // rather than letting fill() fail with a less obvious message.
-  const username = page.locator('input[name="username"]');
-  if (!(await username.count())) {
+  const usernameField = page.locator('input[name="username"]');
+  if (!(await usernameField.count())) {
     throw new Error(
       `expected the IDP login form, got: ${(await page.locator('body').innerText()).slice(0, 200)}`,
     );
   }
 
-  await username.fill('admin');
+  await usernameField.fill(username);
   await page.locator('input[name="password"]').fill(password);
 
   // Watch the POST itself rather than only waiting for the URL to
@@ -49,6 +56,21 @@ export async function loginAsAdmin(page: Page, password: string) {
   }
 
   await page.waitForURL((u) => !u.pathname.startsWith('/idp/'), { timeout: 30_000 });
+}
+
+// userPassword reads the NON-admin account's password.
+//
+// Demo mode prints it under "UserPassword:" rather than "Password:" on
+// purpose: adminPassword matches /^Password:/ anchored per line, and two
+// identically-labelled blocks would let it return whichever came first.
+// A test that silently logs in as the wrong identity is exactly the bug
+// an authorization test exists to catch, so the labels stay distinct.
+export function userPassword(serverLog: string): string {
+  const m = serverLog.match(/^UserPassword:\s*(\S+)\s*$/m);
+  if (!m) {
+    throw new Error('no "UserPassword:" line in the server log; did demo mode seed the non-admin user?');
+  }
+  return m[1];
 }
 
 // adminPassword reads the credentials demo mode prints on startup.
