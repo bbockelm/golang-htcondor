@@ -1,0 +1,264 @@
+package jobwatch
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
+)
+
+// fakeSource records what it was asked for, which is how the tests
+// assert the thing that matters most: the backend query is per-owner and
+// never carries a caller-supplied expression.
+type fakeSource struct {
+	queue     map[string]QueueResult
+	history   map[string][]*classad.ClassAd
+	askedFor  []string
+	queueErr  error
+	histErr   error
+	sinceSeen time.Time
+}
+
+func (f *fakeSource) Queue(_ context.Context, owner string, _ int) (QueueResult, error) {
+	f.askedFor = append(f.askedFor, owner)
+	if f.queueErr != nil {
+		return QueueResult{}, f.queueErr
+	}
+	return f.queue[owner], nil
+}
+
+func (f *fakeSource) History(_ context.Context, owner string, since time.Time, _ int) ([]*classad.ClassAd, error) {
+	f.sinceSeen = since
+	if f.histErr != nil {
+		return nil, f.histErr
+	}
+	return f.history[owner], nil
+}
+
+func fired(t *testing.T, s *Store, owner string) []*Watch {
+	t.Helper()
+	yes := true
+	got, err := s.ForOwner(context.Background(), owner, &yes)
+	if err != nil {
+		t.Fatalf("ForOwner: %v", err)
+	}
+	return got
+}
+
+// TestPassFiresAndRecords is the happy path end to end: a watch whose
+// jobs have finished fires once, with what finished.
+func TestPassFiresAndRecords(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventDone, ModeAll)
+
+	src := &fakeSource{history: map[string][]*classad.ClassAd{
+		"alice": {historyAd(0, completed, 0), historyAd(1, completed, 0)},
+	}}
+	st, err := NewEvaluator(s, src, nil).Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if st.Fired != 1 {
+		t.Errorf("Fired = %d, want 1", st.Fired)
+	}
+	got := fired(t, s, "alice")
+	if len(got) != 1 || got[0].MatchedTotal != 2 {
+		t.Fatalf("expected one fired watch over two jobs: %+v", got)
+	}
+	// And it leaves the evaluator's working set.
+	if st2, _ := NewEvaluator(s, src, nil).Pass(ctx); st2.Watches != 0 {
+		t.Errorf("a fired watch is still being evaluated: %d", st2.Watches)
+	}
+}
+
+// TestSourceIsAskedPerOwnerNotPerConstraint pins the structural defence.
+// A caller-supplied constraint that reached the backend query could
+// escape the owner scope; here the query is only ever "this owner's
+// jobs", and one query serves every watch that owner has.
+func TestSourceIsAskedPerOwnerNotPerConstraint(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, ev := range []Event{EventDone, EventHeld, EventRunning} {
+		register(t, s, "alice", ev, ModeAny)
+	}
+	register(t, s, "bob", EventDone, ModeAny)
+
+	src := &fakeSource{}
+	if _, err := NewEvaluator(s, src, nil).Pass(ctx); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(src.askedFor) != 2 {
+		t.Errorf("the source was queried %d times for 4 watches across 2 owners; want one read per owner: %v",
+			len(src.askedFor), src.askedFor)
+	}
+	seen := map[string]bool{}
+	for _, o := range src.askedFor {
+		seen[o] = true
+	}
+	if !seen["alice"] || !seen["bob"] {
+		t.Errorf("both owners should have been read: %v", src.askedFor)
+	}
+}
+
+// TestOneOwnersFailureDoesNotAbandonTheRest. Watches are independent,
+// and the likeliest cause of a per-owner failure is that owner's
+// authorization -- no reason to stop answering everyone else.
+func TestOneOwnersFailureDoesNotAbandonTheRest(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventDone, ModeAny)
+	register(t, s, "bob", EventDone, ModeAny)
+
+	src := &failOne{
+		fail: "alice",
+		inner: &fakeSource{history: map[string][]*classad.ClassAd{
+			"bob": {historyAd(0, completed, 0)},
+		}},
+	}
+	st, err := NewEvaluator(s, src, nil).Pass(ctx)
+	if err != nil {
+		t.Fatalf("the pass itself should not fail: %v", err)
+	}
+	if st.Errors != 1 {
+		t.Errorf("Errors = %d, want alice's failure counted", st.Errors)
+	}
+	if st.Fired != 1 {
+		t.Errorf("Fired = %d; bob's watch should still have been answered", st.Fired)
+	}
+	if len(fired(t, s, "bob")) != 1 {
+		t.Error("bob's watch did not fire despite his data being available")
+	}
+}
+
+type failOne struct {
+	fail  string
+	inner *fakeSource
+}
+
+func (f *failOne) Queue(ctx context.Context, owner string, limit int) (QueueResult, error) {
+	if owner == f.fail {
+		return QueueResult{}, errors.New("permission denied")
+	}
+	return f.inner.Queue(ctx, owner, limit)
+}
+
+func (f *failOne) History(ctx context.Context, owner string, since time.Time, limit int) ([]*classad.ClassAd, error) {
+	return f.inner.History(ctx, owner, since, limit)
+}
+
+// TestHistoryOutageDegradesRatherThanFreezes: losing history should cost
+// the terminal outcomes, not stop the pass. The alternative is that a
+// history problem silently freezes every watch, including the ones that
+// never needed it.
+func TestHistoryOutageDegradesRatherThanFreezes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventHeld, ModeAny)
+
+	src := &fakeSource{
+		queue:   map[string]QueueResult{"alice": {Ads: []*classad.ClassAd{job(42, 0, held)}}},
+		histErr: errors.New("archive unavailable"),
+	}
+	st, err := NewEvaluator(s, src, nil).Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if st.Fired != 1 {
+		t.Error("a held watch needs no history and should still fire during a history outage")
+	}
+}
+
+// TestTruncatedQueueDoesNotReportRunningJobsAsDone is the safety
+// property behind QueueTruncated. "Done" partly rests on a tracked job
+// no longer being in the queue, and in a truncated read "not here" only
+// means "not in the part we got" -- so a paginated backend would report
+// a running cluster as finished.
+func TestTruncatedQueueDoesNotReportRunningJobsAsDone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// ModeAny, so the only thing that can make this fire is the tracked
+	// job's absence being treated as evidence. With ModeAll a second
+	// still-running job would block the fire for an unrelated reason and
+	// the test would pass whether or not truncation was honoured.
+	w := register(t, s, "alice", EventDone, ModeAny)
+	if err := s.SaveProgress(ctx, w.ID, []JobID{{42, 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &fakeSource{queue: map[string]QueueResult{
+		// 42.0 is absent from this page, and there are more pages.
+		"alice": {Ads: []*classad.ClassAd{job(42, 9, running)}, Truncated: true},
+	}}
+	st, err := NewEvaluator(s, src, nil).Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if st.Fired != 0 {
+		t.Error("absence in a truncated queue is not evidence that a job finished; " +
+			"a paginated backend would report a running cluster as done")
+	}
+
+	// The same absence in a COMPLETE read is evidence.
+	src.queue["alice"] = QueueResult{Ads: []*classad.ClassAd{job(42, 9, running)}}
+	if st, _ = NewEvaluator(s, src, nil).Pass(ctx); st.Fired != 1 {
+		t.Error("a complete queue read should let the tracked-but-absent job count as done")
+	}
+}
+
+// TestProgressIsPersistedBetweenPasses: the tracked set is how a watch
+// remembers jobs it has seen, and it is what makes the next pass able to
+// notice they are gone.
+func TestProgressIsPersistedBetweenPasses(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventDone, ModeAll)
+
+	src := &fakeSource{queue: map[string]QueueResult{
+		"alice": {Ads: []*classad.ClassAd{job(42, 0, running), job(42, 1, running)}},
+	}}
+	ev := NewEvaluator(s, src, nil)
+	if st, err := ev.Pass(ctx); err != nil || st.Fired != 0 {
+		t.Fatalf("running jobs should not fire: %+v %v", st, err)
+	}
+
+	live, err := s.Live(ctx)
+	if err != nil || len(live) != 1 {
+		t.Fatalf("Live: %v", err)
+	}
+	if len(live[0].Tracked) != 2 {
+		t.Fatalf("the pass did not remember the jobs it saw: %+v", live[0].Tracked)
+	}
+
+	// Now they are gone from a complete queue: done.
+	src.queue["alice"] = QueueResult{}
+	if st, _ := ev.Pass(ctx); st.Fired != 1 {
+		t.Error("the remembered jobs disappearing should fire the watch")
+	}
+}
+
+// TestHistoryLookbackCoversJobsThatFinishedFirst: an agent submits, does
+// something else, and only then thinks to wait. The watch must see what
+// already happened rather than wait forever for it to happen again.
+func TestHistoryLookbackCoversJobsThatFinishedFirst(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventDone, ModeAll)
+
+	src := &fakeSource{history: map[string][]*classad.ClassAd{
+		"alice": {historyAd(0, completed, 0)},
+	}}
+	before := time.Now()
+	if _, err := NewEvaluator(s, src, nil).Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !src.sinceSeen.Before(before.Add(-HistoryLookback + time.Minute)) {
+		t.Errorf("history was read from %v, which does not look back far enough to find jobs "+
+			"that finished before the watch was registered", src.sinceSeen)
+	}
+	if len(fired(t, s, "alice")) != 1 {
+		t.Error("a watch registered after its jobs finished must fire from history")
+	}
+}

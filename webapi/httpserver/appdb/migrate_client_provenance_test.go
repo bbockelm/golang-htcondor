@@ -112,8 +112,14 @@ func TestClientProvenanceMigrationIsReversible(t *testing.T) {
 	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if err := goose.DownContext(ctx, db, "migrations"); err != nil {
-		t.Fatalf("migrate down: %v", err)
+	// Down TO version 4, rather than one step down. A bare Down reverses
+	// whatever migration happens to be newest, so this test silently
+	// stopped exercising the client-provenance migration the moment a
+	// later one was added -- and then failed, blaming the new migration
+	// for a coupling that was always here. Naming the version keeps it
+	// testing what it says it tests.
+	if err := goose.DownToContext(ctx, db, "migrations", 4); err != nil {
+		t.Fatalf("migrate down to 4: %v", err)
 	}
 
 	// The columns should be gone; selecting one must error.
