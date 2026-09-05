@@ -197,6 +197,7 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	}
 
 	h.superuserGroup = group
+	h.superuserArmed = newSuperuserSessions(cfg.SuperuserArmTTL)
 	h.superuserPolicy = newSuperuserPolicy(
 		scheddSuperUserSource{get: h.getSchedd},
 		h.uidDomain,
@@ -205,13 +206,14 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	)
 	logger.Info(logging.DestinationHTTP, "Superuser mode enabled",
 		"superuser_group", group,
-		"queue_superuser_refresh", h.superuserPolicy.refresh)
+		"queue_superuser_refresh", h.superuserPolicy.refresh,
+		"arm_ttl", h.superuserArmed.ttl)
 }
 
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
 func (h *Handler) superuserModeAvailable() bool {
-	return h.superuserGroup != "" && h.superuserPolicy != nil
+	return h.superuserGroup != "" && h.superuserPolicy != nil && h.superuserArmed != nil
 }
 
 // mayUseSuperuserMode reports whether this request's session is allowed to act

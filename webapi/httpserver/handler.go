@@ -153,6 +153,9 @@ type Handler struct {
 	// superuserPolicy decides which identity to authenticate as when
 	// acting for someone else. Nil when superuser mode is disabled.
 	superuserPolicy *superuserPolicy
+	// superuserArmed tracks which browser sessions currently have the mode
+	// on. Nil when superuser mode is disabled.
+	superuserArmed *superuserSessions
 
 	// oauth2MaxGrantLifetime caps how long a single consent can be
 	// stretched by refreshing. Every refresh resets the refresh token's
@@ -393,10 +396,13 @@ type HandlerConfig struct {
 	// SuperuserRefreshInterval is how often the schedd's QUEUE_SUPER_USERS
 	// set is re-read. Zero selects defaultSuperuserRefresh.
 	SuperuserRefreshInterval time.Duration
-	MCPAccessGroup           string // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup             string // Group required for read operations (empty = all have read)
-	MCPWriteGroup            string // Group required for write operations (empty = all have write)
-	MCPInstructions          string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// SuperuserArmTTL is how long superuser mode stays on before disarming
+	// itself. Zero selects defaultSuperuserArmTTL.
+	SuperuserArmTTL time.Duration
+	MCPAccessGroup  string // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup    string // Group required for read operations (empty = all have read)
+	MCPWriteGroup   string // Group required for write operations (empty = all have write)
+	MCPInstructions string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	// MCPAdminUsers lists authenticated subjects that MCP tool
 	// dispatch treats as admins — most importantly they are exempt
 	// from the owner-scope wrapper, so they can query and act on other

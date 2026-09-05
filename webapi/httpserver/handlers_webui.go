@@ -1,9 +1,11 @@
 package httpserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -22,6 +24,18 @@ type AuthMeResponse struct {
 	Username      string   `json:"username,omitempty"`
 	Groups        []string `json:"groups,omitempty"`
 	IsAdmin       bool     `json:"is_admin"`
+	// SuperuserAllowed reports that this session MAY arm superuser mode --
+	// the feature is configured and the session is in the superuser group.
+	// It says nothing about whether the mode is currently on.
+	SuperuserAllowed bool `json:"superuser_allowed"`
+	// SuperuserActive reports that the mode is armed right now. The SPA
+	// shows its warning banner on this, so every page can tell the user
+	// that their next action may land on somebody else's job.
+	SuperuserActive bool `json:"superuser_active"`
+	// SuperuserExpiresAt is when the mode disarms itself. Surfaced so the
+	// banner can say how long is left rather than have the mode silently
+	// lapse mid-task.
+	SuperuserExpiresAt *time.Time `json:"superuser_expires_at,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -43,6 +57,99 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		if s.webuiAdminGroup != "" {
 			resp.IsAdmin = hasGroup(session.Groups, s.webuiAdminGroup)
 		}
+		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
+		if resp.SuperuserAllowed {
+			if sessionID, err := getSessionCookie(r); err == nil {
+				if armed, until := s.superuserArmed.Armed(sessionID); armed {
+					resp.SuperuserActive = true
+					resp.SuperuserExpiresAt = &until
+				}
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// SuperuserModeRequest toggles superuser mode for the calling session.
+type SuperuserModeRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SuperuserModeResponse reports the resulting state.
+type SuperuserModeResponse struct {
+	Active    bool       `json:"active"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Identity is what the server will authenticate to the schedd as while
+	// the mode is on, and ActorIsQueueSuperUser whether that is the caller
+	// themselves. Surfaced because the two differ in how well the action
+	// can be attributed: as themselves, the schedd records the human; via
+	// the shared account, only this server and the job's reason string do.
+	Identity              string `json:"identity,omitempty"`
+	ActorIsQueueSuperUser bool   `json:"actor_is_queue_superuser,omitempty"`
+}
+
+// handleSuperuserMode handles POST /api/v1/admin/superuser.
+//
+// Arming is an explicit act with an explicit expiry rather than a standing
+// property of being an admin. The mode changes what an ordinary-looking click
+// does -- a remove button starts landing on other people's jobs -- so it
+// should be something the operator turned on moments ago and can see they
+// turned on, not a capability they have forgotten they hold.
+func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if !s.superuserModeAvailable() {
+		s.writeError(w, http.StatusServiceUnavailable,
+			"Superuser mode is not enabled on this server. It requires HTTP_API_SUPERUSER_GROUP and a pool signing key.")
+		return
+	}
+	session, ok := s.getSessionFromRequest(r)
+	if !ok {
+		s.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if !s.mayUseSuperuserMode(r) {
+		s.writeError(w, http.StatusForbidden,
+			fmt.Sprintf("Superuser mode requires membership in group %q", s.superuserGroup))
+		return
+	}
+	sessionID, err := getSessionCookie(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	var req SuperuserModeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	resp := SuperuserModeResponse{}
+	if req.Enabled {
+		until := s.superuserArmed.Arm(sessionID)
+		resp.Active = true
+		resp.ExpiresAt = &until
+		identity, isSuper := s.superuserPolicy.ImpersonationIdentity(session.Username)
+		resp.Identity = identity
+		resp.ActorIsQueueSuperUser = isSuper
+		// Arming is itself worth an audit record: it is the moment an
+		// operator took on the ability to act as anyone, and it may be
+		// the only entry if they then do nothing.
+		s.logger.Info(logging.DestinationSecurity, "Superuser mode armed",
+			"actor", session.Username,
+			"authenticated_as", identity,
+			"actor_is_queue_superuser", isSuper,
+			"expires_at", until,
+			"remote_addr", r.RemoteAddr)
+	} else {
+		s.superuserArmed.Disarm(sessionID)
+		s.logger.Info(logging.DestinationSecurity, "Superuser mode disarmed",
+			"actor", session.Username, "remote_addr", r.RemoteAddr)
 	}
 
 	s.writeJSON(w, http.StatusOK, resp)
