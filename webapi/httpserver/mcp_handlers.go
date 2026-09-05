@@ -764,6 +764,40 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOAuth2Token handles OAuth2 token requests
+// oauthErrorFields turns a fosite error into log key/values that say
+// what actually went wrong.
+//
+// RFC6749Error.Error() returns only ErrorField -- the bare OAuth code,
+// e.g. "server_error" -- and its Unwrap returns the cause, which for a
+// storage or signing failure fosite records in DebugField without
+// setting a separate cause. So both `err` and an unwrap loop bottom out
+// at the code itself, which is how a 500 here reached the log as
+// `error=server_error root_error=server_error` and told an operator
+// nothing.
+//
+// DebugField is the useful one; it is logged server-side only and never
+// reaches the client (fosite gates that behind SendDebugMessagesToClients).
+func oauthErrorFields(err error) []any {
+	var rfcErr *fosite.RFC6749Error
+	if !errors.As(err, &rfcErr) {
+		return []any{"error", err}
+	}
+	fields := []any{"error", rfcErr.ErrorField}
+	if v := rfcErr.DescriptionField; v != "" {
+		fields = append(fields, "description", v)
+	}
+	if v := rfcErr.HintField; v != "" {
+		fields = append(fields, "hint", v)
+	}
+	if v := rfcErr.DebugField; v != "" {
+		fields = append(fields, "debug", v)
+	}
+	if cause := rfcErr.Unwrap(); cause != nil && cause.Error() != rfcErr.ErrorField {
+		fields = append(fields, "cause", cause)
+	}
+	return fields
+}
+
 func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	if h.oauth2Provider == nil {
 		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
@@ -811,16 +845,9 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	// Create access request
 	accessRequest, err := h.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
 	if err != nil {
-		// Extract more detailed error information
-		errorDetails := fmt.Sprintf("%v", err)
-		var rfc6749Err *fosite.RFC6749Error
-		if errors.As(err, &rfc6749Err) {
-			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
-				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
-		}
 		h.logger.Error(logging.DestinationHTTP, "Failed to create access request",
-			"error", err, "error_details", errorDetails,
-			"client_id", r.FormValue("client_id"))
+			append(oauthErrorFields(err),
+				"client_id", r.FormValue("client_id"))...)
 		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
@@ -831,16 +858,10 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		"requested_scopes", accessRequest.GetRequestedScopes())
 	response, err := h.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
 	if err != nil {
-		// Log more details about the error - unwrap to see the root cause
-		rootErr := err
-		for errors.Unwrap(rootErr) != nil {
-			rootErr = errors.Unwrap(rootErr)
-		}
 		h.logger.Error(logging.DestinationHTTP, "Failed to create access response",
-			"error", err,
-			"root_error", rootErr,
-			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
-			"client_id", accessRequest.GetClient().GetID())
+			append(oauthErrorFields(err),
+				"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+				"client_id", accessRequest.GetClient().GetID())...)
 		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
