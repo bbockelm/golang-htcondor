@@ -368,3 +368,22 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 	}
 	return plans, nil
 }
+
+// scopeForImpersonation rebuilds a single-job constraint for an impersonated
+// action.
+//
+// The handlers owner-scope their constraint before they know whether this is a
+// superuser action, and that scoping confines it to the CALLER's jobs -- which
+// is exactly backwards once we are acting for somebody else. Left alone it
+// produces a constraint that matches nothing, and the schedd dutifully reports
+// that it acted on zero jobs: the action silently does nothing rather than
+// failing in a way anyone would notice. The integration test caught this;
+// none of the unit tests could, because they never reach a schedd.
+//
+// Re-scoping to the target rather than dropping the clause keeps the second
+// layer: we act only on jobs belonging to the identity we resolved off the job
+// and authenticated for.
+func (h *Handler) scopeForImpersonation(imp *Impersonation, cluster, proc int) (string, error) {
+	return scopeToOwner(ownerFromActor(imp.Target),
+		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+}

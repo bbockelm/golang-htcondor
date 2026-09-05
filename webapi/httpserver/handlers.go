@@ -723,6 +723,14 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		s.writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if imp != nil {
+		// The scoping above confined this to the caller's own jobs. Re-aim
+		// it at the job's real owner, or the action matches nothing.
+		if constraint, err = s.scopeForImpersonation(imp, cluster, proc); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 
 	// Remove the job using the schedd RemoveJobs method
 	reason := superuserReason(imp, "Removed", "Removed via HTTP API")
@@ -2245,6 +2253,14 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		s.writeError(w, http.StatusForbidden, err.Error())
 		return
+	}
+	if imp != nil {
+		// The scoping above confined this to the caller's own jobs. Re-aim
+		// it at the job's real owner, or the action matches nothing.
+		if constraint, err = s.scopeForImpersonation(imp, cluster, proc); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	// actionName is the past-tense verb ("Held", "Released"), which is
 	// what the reason should lead with. A caller-supplied reason is
