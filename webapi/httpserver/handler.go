@@ -335,6 +335,8 @@ type HandlerConfig struct {
 	// a user's entitlement never expires anything. The cap is the backstop
 	// that bounds that exposure even when no revocation oracle notices the
 	// removal. See reauthorizeRefreshGrant.
+	//
+	// Configurable via HTTP_API_OAUTH2_MAX_GRANT_LIFETIME.
 	OAuth2MaxGrantLifetime time.Duration
 	// OAuth2RevocationOracles names the oracles consulted on every refresh
 	// grant to decide whether the user is still entitled to what they hold.
@@ -352,6 +354,10 @@ type HandlerConfig struct {
 	// Nil selects the default set (schedd-userrec). An explicitly empty,
 	// non-nil slice disables all oracles; the grant lifetime cap still
 	// applies. Unrecognized names are logged and ignored.
+	//
+	// Configurable via HTTP_API_OAUTH2_REVOCATION_ORACLES, where the
+	// literal "none" is the spelling for the empty set — a config file
+	// cannot express nil-versus-empty on its own.
 	OAuth2RevocationOracles []string
 	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup            string // Group required for read operations (empty = all have read)

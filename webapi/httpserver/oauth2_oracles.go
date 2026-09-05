@@ -16,6 +16,14 @@ import (
 // stalling the token endpoint.
 const oracleTimeout = 5 * time.Second
 
+// UserRecordLookup is the slice of the schedd client that UserRecordOracle
+// needs. It exists so the oracle's semantics — above all what a missing record
+// means — can be tested without a live schedd, since that distinction is the
+// difference between "new user" and "locked out".
+type UserRecordLookup interface {
+	GetUserRecord(ctx context.Context, user string) (*htcondor.UserRecord, error)
+}
+
 // UserRecordOracle reports a user revoked when the schedd's per-user record
 // says so — that is, when an admin has run
 // `condor_qusers -disable <user> -reason "..."`.
@@ -28,20 +36,39 @@ const oracleTimeout = 5 * time.Second
 // Absence of a record is deliberately NOT a denial. The schedd creates a
 // record the first time a user submits, so "no record" routinely means "this
 // user has never submitted here" — denying on it would lock out every new
-// user and everyone on a freshly built pool.
+// user and everyone on a freshly built pool. Set Strict only where every user
+// is provisioned up front with `condor_qusers -add`.
 type UserRecordOracle struct {
-	// Schedd supplies the current schedd client. It is a function rather
+	// Lookup supplies the current schedd client. It is a function rather
 	// than a value because the handler re-creates its Schedd when the
 	// daemon's address changes.
-	Schedd func() *htcondor.Schedd
+	Lookup func() UserRecordLookup
 	// UIDDomain qualifies bare usernames before the lookup; schedd records
 	// are keyed on the fully-qualified "user@domain" form.
 	UIDDomain string
 	Logger    *logging.Logger
+	// Strict makes "no record at all" a revocation instead of no opinion.
+	//
+	// Off by default, because the schedd creates records lazily on first
+	// submit: in an ordinary pool "no record" means "has never submitted
+	// here", and revoking on it would cut off every new user.
+	//
+	// It becomes correct — and much stronger — in a pool that provisions a
+	// record for every user up front, since `condor_qusers -add <user>`
+	// (ENABLE_USERREC with the create option) creates one without the user
+	// submitting anything. There, absence really does mean "not a user of
+	// this AP", and `condor_qusers -delete` becomes a revocation an admin
+	// can perform. Do not enable it otherwise.
+	Strict bool
 }
 
 // Name implements RevocationOracle.
-func (o *UserRecordOracle) Name() string { return "schedd-userrec" }
+func (o *UserRecordOracle) Name() string {
+	if o.Strict {
+		return OracleScheddUserRecStrict
+	}
+	return OracleScheddUserRec
+}
 
 // Check implements RevocationOracle.
 func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []string) (ReauthDecision, error) {
@@ -62,6 +89,14 @@ func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []strin
 		return ReauthDecision{}, fmt.Errorf("querying user record for %s: %w", user, err)
 	}
 	if record == nil {
+		if o.Strict {
+			// The deployment promises a record per user, so absence is
+			// a real answer: this is not a user of this access point.
+			return ReauthDecision{
+				Status: UserStatusRevoked,
+				Reason: "no user record on the access point",
+			}, nil
+		}
 		// No record: the schedd has never seen this user submit. No
 		// information, so no opinion.
 		return ReauthDecision{Status: UserStatusUnknown}, nil
@@ -76,11 +111,20 @@ func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []strin
 	return ReauthDecision{Status: UserStatusActive}, nil
 }
 
-func (o *UserRecordOracle) schedd() *htcondor.Schedd {
-	if o.Schedd == nil {
+func (o *UserRecordOracle) schedd() UserRecordLookup {
+	if o.Lookup == nil {
 		return nil
 	}
-	return o.Schedd()
+	l := o.Lookup()
+	if l == nil {
+		return nil
+	}
+	// Guard against a typed nil: h.getSchedd returns a *htcondor.Schedd,
+	// and a nil one wrapped in an interface is not itself nil.
+	if s, ok := l.(*htcondor.Schedd); ok && s == nil {
+		return nil
+	}
+	return l
 }
 
 // ScheddACLOracle strips scopes whose HTCondor authorization level the schedd
@@ -268,28 +312,65 @@ func qualifyUser(username, uidDomain string) string {
 // it cannot misfire on a pool that has never used user records (absence is
 // "no opinion"). The ACL probe is opt-in because it costs extra round trips
 // on every refresh and reports nothing useful in a pool with wildcard ACLs.
-var defaultRevocationOracles = []string{"schedd-userrec"}
+var defaultRevocationOracles = []string{OracleScheddUserRec}
+
+// Recognized revocation oracle names. These are the values accepted by
+// HandlerConfig.OAuth2RevocationOracles and by the
+// HTTP_API_OAUTH2_REVOCATION_ORACLES config knob.
+const (
+	// OracleScheddUserRec honors `condor_qusers -disable`, treating a user
+	// record with no Enabled statement as no opinion.
+	OracleScheddUserRec = "schedd-userrec"
+	// OracleScheddUserRecStrict is OracleScheddUserRec plus "a user with no
+	// record at all is revoked". Only correct in a pool that provisions a
+	// record for every user; see UserRecordOracle.Strict.
+	OracleScheddUserRecStrict = "schedd-userrec-strict"
+	// OracleScheddACL probes the schedd's ACLs with DC_SEC_QUERY.
+	OracleScheddACL = "schedd-acl"
+	// OracleNone disables every oracle. It exists because a config file
+	// cannot express Go's nil-versus-empty-slice distinction: an unset
+	// HTTP_API_OAUTH2_REVOCATION_ORACLES means "use the defaults", so
+	// there has to be a spelling for "I want none of them". Setting it
+	// alongside other names is a configuration error.
+	OracleNone = "none"
+)
 
 // buildRevocationOracles turns configured oracle names into instances.
 // Unrecognized names are logged and skipped rather than failing startup: an
 // oracle is a defense-in-depth measure, and a typo should not stop the server
 // from serving.
+//
+// A nil slice selects the defaults; an explicitly empty one, or one containing
+// only OracleNone, selects nothing. Mixing OracleNone with a real oracle name
+// is contradictory, so the explicit oracles win and the contradiction is
+// logged — refusing to start over it would be a harsh response to a typo in a
+// defense-in-depth setting, and silently disabling everything would be worse.
 func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 	if names == nil {
 		names = defaultRevocationOracles
 	}
+	sawNone := false
 	var oracles []RevocationOracle
 	for _, name := range names {
 		switch strings.TrimSpace(strings.ToLower(name)) {
 		case "":
 			continue
-		case "schedd-userrec":
+		case OracleNone, "disabled", "disable":
+			sawNone = true
+		case OracleScheddUserRec:
 			oracles = append(oracles, &UserRecordOracle{
-				Schedd:    h.getSchedd,
+				Lookup:    h.userRecordLookup,
 				UIDDomain: h.uidDomain,
 				Logger:    h.logger,
 			})
-		case "schedd-acl":
+		case OracleScheddUserRecStrict:
+			oracles = append(oracles, &UserRecordOracle{
+				Lookup:    h.userRecordLookup,
+				UIDDomain: h.uidDomain,
+				Logger:    h.logger,
+				Strict:    true,
+			})
+		case OracleScheddACL:
 			oracles = append(oracles, &ScheddACLOracle{
 				Schedd:    h.getSchedd,
 				UIDDomain: h.uidDomain,
@@ -300,6 +381,11 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 			h.logger.Warn(logging.DestinationHTTP,
 				"Ignoring unknown OAuth2 revocation oracle", "oracle", name)
 		}
+	}
+	if sawNone && len(oracles) > 0 {
+		h.logger.Warn(logging.DestinationHTTP,
+			"OAuth2 revocation oracles list contains both \"none\" and real oracles; honoring the real ones",
+			"oracles", names)
 	}
 	if len(oracles) > 0 {
 		enabled := make([]string, 0, len(oracles))
@@ -314,3 +400,6 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 	}
 	return oracles
 }
+
+// userRecordLookup adapts the handler's schedd accessor to UserRecordLookup.
+func (h *Handler) userRecordLookup() UserRecordLookup { return h.getSchedd() }

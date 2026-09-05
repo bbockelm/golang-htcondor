@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestOraclesReportNoOpinionWithoutASchedd(t *testing.T) {
 func TestUserRecordOracleNeedsAQualifiedName(t *testing.T) {
 	o := &UserRecordOracle{
 		UIDDomain: "",
-		Schedd:    func() *htcondor.Schedd { return htcondor.NewSchedd("test", "127.0.0.1:9618") },
+		Lookup:    func() UserRecordLookup { return &fakeUserRecords{} },
 	}
 	decision, err := o.Check(context.Background(), "alice", nil)
 	if err == nil {
@@ -166,6 +167,36 @@ func TestBuildRevocationOracles(t *testing.T) {
 		}
 	})
 
+	t.Run("none disables every oracle", func(t *testing.T) {
+		// The config system cannot express Go's nil-vs-empty-slice
+		// distinction, so "none" is the spelling for "I want none".
+		for _, spelling := range []string{"none", "None", "disabled", "disable"} {
+			if got := h.buildRevocationOracles([]string{spelling}); len(got) != 0 {
+				t.Errorf("%q gave %v, want no oracles", spelling, oracleNames(got))
+			}
+		}
+	})
+
+	t.Run("none mixed with a real oracle keeps the real one", func(t *testing.T) {
+		// Contradictory config. Silently disabling everything would be
+		// the dangerous reading, so the explicit oracle wins.
+		got := h.buildRevocationOracles([]string{"none", "schedd-userrec"})
+		if strings.Join(oracleNames(got), ",") != "schedd-userrec" {
+			t.Errorf("oracles = %v, want schedd-userrec", oracleNames(got))
+		}
+	})
+
+	t.Run("strict variant is selectable and names itself", func(t *testing.T) {
+		got := h.buildRevocationOracles([]string{"schedd-userrec-strict"})
+		if len(got) != 1 || got[0].Name() != "schedd-userrec-strict" {
+			t.Fatalf("oracles = %v, want [schedd-userrec-strict]", oracleNames(got))
+		}
+		o, ok := got[0].(*UserRecordOracle)
+		if !ok || !o.Strict {
+			t.Errorf("strict flag not set on the built oracle")
+		}
+	})
+
 	t.Run("unknown names are skipped, not fatal", func(t *testing.T) {
 		got := h.buildRevocationOracles([]string{"nope", "schedd-userrec"})
 		if strings.Join(oracleNames(got), ",") != "schedd-userrec" {
@@ -187,4 +218,120 @@ func oracleNames(oracles []RevocationOracle) []string {
 		out = append(out, o.Name())
 	}
 	return out
+}
+
+// fakeUserRecords stands in for the schedd so the oracle's treatment of a
+// missing record can be tested directly.
+type fakeUserRecords struct {
+	record *htcondor.UserRecord
+	err    error
+	asked  string
+}
+
+func (f *fakeUserRecords) GetUserRecord(_ context.Context, user string) (*htcondor.UserRecord, error) {
+	f.asked = user
+	return f.record, f.err
+}
+
+// TestUserRecordOracleAbsentRecord pins the single most consequential decision
+// in this oracle: what a missing user record means.
+//
+// The schedd creates records lazily on first submit, so in an ordinary pool
+// "no record" means "has never submitted here" and must not revoke — that
+// would lock out every new user. In a pool that provisions a record for every
+// user with `condor_qusers -add`, absence is a real answer, and Strict opts
+// into treating it as one.
+func TestUserRecordOracleAbsentRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		strict bool
+		want   UserStatus
+	}{
+		{"default treats absence as no opinion", false, UserStatusUnknown},
+		{"strict treats absence as revoked", true, UserStatusRevoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeUserRecords{record: nil}
+			o := &UserRecordOracle{
+				Lookup:    func() UserRecordLookup { return fake },
+				UIDDomain: "example.org",
+				Strict:    tc.strict,
+			}
+			decision, err := o.Check(context.Background(), "alice", nil)
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if decision.Status != tc.want {
+				t.Errorf("Status = %v, want %v", decision.Status, tc.want)
+			}
+			if fake.asked != "alice@example.org" {
+				t.Errorf("looked up %q, want the uid-domain-qualified name", fake.asked)
+			}
+		})
+	}
+}
+
+// TestUserRecordOracleDisabledRecord covers the ordinary revocation path and
+// that the admin's reason reaches the caller.
+func TestUserRecordOracleDisabledRecord(t *testing.T) {
+	disabled := false
+	fake := &fakeUserRecords{record: &htcondor.UserRecord{
+		User:          "alice@example.org",
+		Enabled:       &disabled,
+		DisableReason: "left the lab",
+	}}
+	o := &UserRecordOracle{
+		Lookup:    func() UserRecordLookup { return fake },
+		UIDDomain: "example.org",
+	}
+	decision, err := o.Check(context.Background(), "alice", nil)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if decision.Status != UserStatusRevoked {
+		t.Errorf("Status = %v, want revoked", decision.Status)
+	}
+	if decision.Reason != "left the lab" {
+		t.Errorf("Reason = %q, want the DisableReason carried through", decision.Reason)
+	}
+}
+
+// TestUserRecordOracleRecordWithoutEnabled pins that a record that says
+// nothing about Enabled is not a denial, even in strict mode: strict only
+// changes what *absence of a record* means, not what an unopinionated record
+// means. The schedd's own default for an unset Enabled is true.
+func TestUserRecordOracleRecordWithoutEnabled(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		fake := &fakeUserRecords{record: &htcondor.UserRecord{User: "alice@example.org"}}
+		o := &UserRecordOracle{
+			Lookup:    func() UserRecordLookup { return fake },
+			UIDDomain: "example.org",
+			Strict:    strict,
+		}
+		decision, err := o.Check(context.Background(), "alice", nil)
+		if err != nil {
+			t.Fatalf("Check(strict=%v): %v", strict, err)
+		}
+		if decision.Status == UserStatusRevoked {
+			t.Errorf("strict=%v: a record with no Enabled statement must not revoke", strict)
+		}
+	}
+}
+
+// TestUserRecordOracleLookupErrorFailsOpen keeps a schedd outage from logging
+// everyone out.
+func TestUserRecordOracleLookupErrorFailsOpen(t *testing.T) {
+	fake := &fakeUserRecords{err: errors.New("schedd unreachable")}
+	o := &UserRecordOracle{
+		Lookup:    func() UserRecordLookup { return fake },
+		UIDDomain: "example.org",
+		Strict:    true, // even strict must not revoke on an error
+	}
+	decision, err := o.Check(context.Background(), "alice", nil)
+	if err == nil {
+		t.Fatalf("expected the lookup error to surface")
+	}
+	if decision.Status == UserStatusRevoked {
+		t.Errorf("a lookup failure must never read as a revocation")
+	}
 }

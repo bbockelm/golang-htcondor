@@ -528,3 +528,62 @@ func TestAdminRevokeLeavesOtherSubjectsAlone(t *testing.T) {
 		t.Errorf("bob's grant should be untouched, got %d: %v", status, body)
 	}
 }
+
+// TestRefreshTokenReuseIsRejectedAndRevokesTheChain is the regression test for
+// getTokenSession returning (nil, ErrInactiveToken).
+//
+// fosite rotates the refresh token on every refresh and marks the previous one
+// inactive. Presenting that previous token is refresh-token reuse, and fosite
+// responds by calling handleRefreshTokenReuse(ctx, signature, originalRequest)
+// to revoke every token in the chain — which dereferences the requester the
+// storage returned alongside the error. Returning nil there panicked the
+// handler goroutine, so reuse was never actually detected or punished.
+//
+// Why nothing caught it before:
+//
+//   - idp_test.go posts grant_type=refresh_token with a made-up token, which
+//     takes the ErrNotFound branch (no row at all), not ErrInactiveToken.
+//   - oauth2_lifespan_test.go calls GetRefreshTokenSession on a row it has
+//     just created, so the row is always active.
+//   - mcp_advanced_integration_test.go substitutes a mock storage and never
+//     reaches this implementation.
+//   - device_code_refresh_integration_test.go is the only end-to-end refresh.
+//     It is behind //go:build integration, skips without condor_master, and
+//     calls useRefreshToken exactly once.
+//
+// Every one of those uses a given refresh token at most once, and an inactive
+// row only exists after a rotation. So the happy path was covered and the
+// reuse path — the entire reason the branch exists — never ran.
+func TestRefreshTokenReuseIsRejectedAndRevokesTheChain(t *testing.T) {
+	f := newReauthFixture(t, Config{})
+	_, firstToken, _ := f.grant(t, "alice", nil)
+
+	// One legitimate refresh. This rotates the token: `firstToken` is now
+	// inactive and `secondToken` is live.
+	status, body := f.refresh(t, firstToken)
+	if status != http.StatusOK {
+		t.Fatalf("first refresh should succeed, got %d: %v", status, body)
+	}
+	secondToken, _ := body["refresh_token"].(string)
+	if secondToken == "" || secondToken == firstToken {
+		t.Fatalf("expected a rotated refresh token, got %q", secondToken)
+	}
+
+	// Re-present the rotated-away token. Before the fix this panicked the
+	// handler goroutine rather than returning any response at all.
+	status, body = f.refresh(t, firstToken)
+	if status == http.StatusOK {
+		t.Fatalf("reusing a rotated refresh token must not succeed: %v", body)
+	}
+	if got, _ := body["error"].(string); got != "invalid_grant" {
+		t.Errorf("error = %q, want invalid_grant", got)
+	}
+
+	// The valuable half: reuse detection must actually punish the chain.
+	// A stolen refresh token racing the legitimate client is the threat
+	// this branch exists for, so the live token has to die too.
+	status, body = f.refresh(t, secondToken)
+	if status == http.StatusOK {
+		t.Errorf("reuse detection did not revoke the rest of the chain; the live token still works: %v", body)
+	}
+}
