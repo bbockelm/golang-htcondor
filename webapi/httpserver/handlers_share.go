@@ -90,6 +90,15 @@ func (s *Handler) verifyShareToken(tok string) (*sharePayload, error) {
 // URLs. Falls back to deriving from the request when HTTPBaseURL is not
 // configured — works for typical deployments behind a single proxy/host.
 func (s *Handler) shareURLBase(r *http.Request) string {
+	// An operator-set HTTP_API_BASE_URL is authoritative: it is the
+	// canonical public URL, and it should win even when a caller reaches
+	// the server by some other name.
+	//
+	// It is empty unless set: publicBaseURL deliberately does not fall
+	// back to FULL_HOSTNAME, which inside a container is the pod name.
+	// Guessing produced share links nobody could open. With no
+	// configured value the request's own Host is used below, which is
+	// right by construction -- the caller reached us at it.
 	if s.httpBaseURL != "" {
 		return strings.TrimRight(s.httpBaseURL, "/")
 	}
@@ -103,6 +112,12 @@ func (s *Handler) shareURLBase(r *http.Request) string {
 	host := r.Host
 	if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
 		host = fwd
+	}
+	if host == "" {
+		// No Host at all (HTTP/1.0, or a synthetic request). Fall back to
+		// the derived value: wrong outside the cluster, but better than
+		// emitting a URL with an empty authority.
+		return strings.TrimRight(s.httpBaseURL, "/")
 	}
 	return fmt.Sprintf("%s://%s", scheme, host)
 }

@@ -1305,7 +1305,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Compute HTTP base URL for MCP file download links
 	useTLS := tlsCertFile != "" && tlsKeyFile != ""
 	httpBaseURL := loadHTTPBaseURL(cfg, listenAddrFromConfig, useTLS)
-	log.Printf("HTTP base URL: %s", httpBaseURL)
+	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
 	llmAPIKeyFile, llmAPIURL, llmModel, llmOperatorInstructions := loadLLMConfig(cfg)
@@ -1332,7 +1332,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		UserHeaderTrustedProxies: loadUserHeaderTrustedProxies(cfg),
 		UserHeaderTrustAnyUnsafe: loadUserHeaderTrustAnyUnsafe(cfg),
 		SigningKeyPath:           signingKeyPath,
-		HTTPBaseURL:              httpBaseURL,
+		HTTPBaseURL:              publicBaseURL(cfg),
 		TLSCertFile:              tlsCertFile,
 		TLSKeyFile:               tlsKeyFile,
 		TLSCACertFile:            tlsCACertFile,
@@ -1630,7 +1630,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// since we don't have FULL_HOSTNAME configured. loadHTTPBaseURL
 	// substitutes "localhost" when listenAddr is in ":port" form.
 	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
-	log.Printf("HTTP base URL: %s", httpBaseURL)
+	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
 	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMOperatorInstructions := loadLLMConfig(cfg)
@@ -1649,7 +1649,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		SigningKeyPath:           signingKeyPath,
 		TrustDomain:              trustDomain,
 		UIDDomain:                uidDomain,
-		HTTPBaseURL:              httpBaseURL,
+		HTTPBaseURL:              publicBaseURL(cfg),
 		TLSCertFile:              certPath,
 		TLSKeyFile:               keyPath,
 		TLSCACertFile:            caPath,
@@ -2248,4 +2248,28 @@ func loadPingInterval(cfg *config.Config, logger *logging.Logger) time.Duration 
 		log.Fatalf("invalid HTTP_API_PING_INTERVAL=%q: must be positive, or 0 to disable", raw)
 	}
 	return d
+}
+
+// publicBaseURL is the externally reachable URL of this server, or ""
+// when the operator has not said what it is.
+//
+// Deliberately NOT loadHTTPBaseURL. That function falls back to
+// FULL_HOSTNAME plus the listen port, which inside a container is the
+// pod name -- so it answers http://htcondor-api-6f9c86677f-sg8cj:8080,
+// a host that resolves nowhere outside the cluster. That value is fine
+// for the server addressing itself, and wrong for every URL handed to a
+// client: share links, MCP download links, the RFC 9728
+// resource_metadata hint, the Jupyter tunnel WebSocket, and the origin
+// Jupyter is told to accept.
+//
+// Every one of those consumers already guards with `if baseURL != ""`
+// and falls back to the requesting client's own Host, which is right by
+// construction. Returning "" rather than a guess is what lets that
+// fallback happen.
+func publicBaseURL(cfg *config.Config) string {
+	v, ok := cfg.Get("HTTP_API_BASE_URL")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(v, "/")
 }
