@@ -148,6 +148,11 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/collector/watch", cors(http.HandlerFunc(h.handleCollectorWatch))) // SSE ad-change stream (more specific than the dispatcher below)
 	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath)                           // Pattern with trailing slash catches /api/v1/collector/* paths
 
+	// htcondordb mirror status (admin-gated inside the handler). The
+	// data is on /readyz and /metrics too, but both of those answer a
+	// monitoring system; this one answers the admin UI.
+	mux.Handle("/api/v1/dbmirror/status", cors(http.HandlerFunc(h.handleDBMirrorStatus)))
+
 	// Ping endpoints
 	mux.HandleFunc("/api/v1/ping", h.handlePing)              // Ping both collector and schedd
 	mux.HandleFunc("/api/v1/schedd/ping", h.handleScheddPing) // Ping schedd only
