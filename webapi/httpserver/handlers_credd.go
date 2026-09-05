@@ -215,7 +215,21 @@ func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Req
 		if effectiveHandle == "" {
 			effectiveHandle = req.Handle
 		}
-		if err := s.credd.PutServiceCred(ctx, credType, decodeCredential(req.Credential), service, effectiveHandle, req.User, req.Refresh); err != nil {
+		credBytes := decodeCredential(req.Credential)
+		// The MCP tool has refused non-JSON OAuth credentials since #255;
+		// this path never did, so the trap that change closed was still
+		// wide open for anyone using the REST API. Same rule, same
+		// message, one implementation -- see ValidateOAuthCredential.
+		//
+		// Only for OAuth: a Kerberos credential is an opaque ticket and
+		// has no business being JSON.
+		if credType == htcondor.CredTypeOAuth {
+			if err := htcondor.ValidateOAuthCredential(service, credBytes); err != nil {
+				s.writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if err := s.credd.PutServiceCred(ctx, credType, credBytes, service, effectiveHandle, req.User, req.Refresh); err != nil {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to store service credential: %v", err))
 			return
 		}

@@ -35,7 +35,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	// Add first service credential (github)
 	addReq := serviceCredentialRequest{ //nolint:gosec // G101: test data
 		CredType:   "OAuth",
-		Credential: "github-oauth-token",
+		Credential: `{"access_token":"github-oauth-token"}`,
 	}
 	body, _ := json.Marshal(addReq)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/creds/service/github", bytes.NewReader(body))
@@ -68,7 +68,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	// Add second service credential (gitlab)
 	addReq2 := serviceCredentialRequest{ //nolint:gosec // G101: test data
 		CredType:   "OAuth",
-		Credential: "gitlab-oauth-token",
+		Credential: `{"access_token":"gitlab-oauth-token"}`,
 	}
 	body2, _ := json.Marshal(addReq2)
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/creds/service/gitlab", bytes.NewReader(body2))
@@ -122,7 +122,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp1); err != nil {
 		t.Fatalf("failed to decode github response: %v", err)
 	}
-	if resp1.Credential != "github-oauth-token" {
+	if resp1.Credential != `{"access_token":"github-oauth-token"}` {
 		t.Fatalf("unexpected github credential: %s", resp1.Credential)
 	}
 	t.Logf("✓ Fetched github credential successfully")
@@ -141,7 +141,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp2); err != nil {
 		t.Fatalf("failed to decode gitlab response: %v", err)
 	}
-	if resp2.Credential != "gitlab-oauth-token" {
+	if resp2.Credential != `{"access_token":"gitlab-oauth-token"}` {
 		t.Fatalf("unexpected gitlab credential: %s", resp2.Credential)
 	}
 	t.Logf("✓ Fetched gitlab credential successfully")

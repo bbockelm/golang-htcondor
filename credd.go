@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -242,4 +243,40 @@ func (c *InMemoryCredd) queryCredential(key credentialKey) (CredentialStatus, er
 	}
 	ts := stored.updatedAt
 	return CredentialStatus{Exists: true, UpdatedAt: &ts}, nil
+}
+
+// ValidateOAuthCredential reports whether a credential's bytes are storable as
+// an OAuth service credential, and explains the problem when they are not.
+//
+// An OAuth service credential has to be a JSON document. The credd will not
+// tell you that at store time: it accepts whatever bytes it is given, and only
+// parses them when a request carries scopes or an audience. It re-parses them,
+// though, whenever a query names a specific service -- so storing a bare token
+// string succeeds, and then get_credential_status fails ever after with
+// FAILURE_JSON_PARSE while list_service_credentials, which never names a
+// service, keeps reporting the credential as present.
+//
+// Two read paths disagreeing about the same credential is a miserable thing to
+// debug, and the evidence points away from the cause: the store said OK. So
+// every path that stores one should refuse at the door instead.
+//
+// Lives here, next to PutServiceCred, because it is a fact about the credd
+// rather than about any particular API in front of it -- there is more than
+// one, and they were not agreeing.
+//
+// An empty credential is deliberately allowed, and is not the same thing as a
+// malformed one. A credmon that mints tokens locally -- see the localcredmon
+// module -- watches for the stored .top file and never reads its contents, so
+// storing nothing is how you ask for a token rather than supply one. That is
+// the normal path for OAuth services a server-side job transform added.
+func ValidateOAuthCredential(service string, cred []byte) error {
+	if len(cred) == 0 {
+		return nil
+	}
+	if !json.Valid(cred) {
+		return fmt.Errorf("credential for %q is not valid JSON: an OAuth service credential must be "+
+			"a JSON document such as {\"access_token\":\"...\"}. Storing anything else appears to "+
+			"succeed and then breaks every later read of it", service)
+	}
+	return nil
 }
