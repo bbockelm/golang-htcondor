@@ -89,6 +89,13 @@ type Watch struct {
 	// outcome; see giveUpWaiting.
 	Undetermined bool
 
+	// Incomplete is set while the watch selects more jobs than one read
+	// covers. Persisted, because check_watches re-reads the watch from
+	// storage -- an in-memory flag would be true only in the call that
+	// set it, and the caller who most needs to hear it is the one coming
+	// back later to ask why nothing has fired.
+	Incomplete bool
+
 	// DeliveredAt is when a caller last read the outcome. Recorded
 	// rather than acted on: a fired watch stays readable so a later
 	// session, or the same one after losing its context, can still find
@@ -253,6 +260,14 @@ type Outcome struct {
 	// AllEndedAt is the updated grace-period stamp, for the caller to
 	// persist. Zero clears it.
 	AllEndedAt time.Time
+
+	// Incomplete says the watch selects more jobs than one read can
+	// cover, so its answer is about a sample rather than the set. An
+	// "all" watch cannot fire in that state at all, and a caller should
+	// narrow the constraint -- watching every job on a busy access point
+	// is not a question anybody needs answered, and it is usually a
+	// constraint that was meant to name a cluster.
+	Incomplete bool
 }
 
 // UnresolvedOutcomeGrace is how long a succeeded/failed watch waits for
@@ -425,12 +440,25 @@ func (f *Fold) Done() Outcome {
 
 	switch f.w.Mode {
 	case ModeAll:
+		// "All" is a claim about a set, so it cannot be made about a set
+		// that was never fully seen. A truncated read discovers only the
+		// first QueueLimit jobs, and those are the only ones that enter
+		// the tracked set -- so without this guard a watch over an owner
+		// with more jobs than the limit fires as soon as the visible
+		// ones finish, reporting that everything is done while thousands
+		// of jobs nobody looked at are still running. Wrong, and
+		// confidently so.
+		//
+		// It only bites where it should: the cap is per owner, and a
+		// watch that names a cluster selects far fewer than it.
+		//
 		// The non-empty requirement is the vacuous-truth guard: "all
 		// finished" is trivially true of no jobs, so without it a watch
 		// registered before its jobs exist -- or with a typo in the
 		// constraint -- fires at once and reports success for work that
 		// never ran.
-		out.Fires = out.Selected > 0 && out.Satisfied == out.Selected
+		out.Fires = !f.truncated && out.Selected > 0 && out.Satisfied == out.Selected
+		out.Incomplete = f.truncated
 	default:
 		out.Fires = out.Satisfied > 0
 	}

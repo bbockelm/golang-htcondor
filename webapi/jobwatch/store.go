@@ -81,7 +81,8 @@ func (s *Store) Register(ctx context.Context, w *Watch, ttl time.Duration) (*Wat
 // on behalf of all of them -- the scoping happens on the read side.
 func (s *Store) Live(ctx context.Context) ([]*Watch, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json, all_ended_at
+		SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json,
+		       all_ended_at, incomplete
 		  FROM job_watches
 		 WHERE fired_at IS NULL AND expires_at > ?
 		 ORDER BY created_at`, s.now().UTC())
@@ -103,7 +104,7 @@ func (s *Store) ForOwner(ctx context.Context, owner string, fired *bool) ([]*Wat
 		return nil, ErrNoOwner
 	}
 	q := `SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json,
-	             fired_at, matched_json, matched_total, delivered_at, undetermined
+	             fired_at, matched_json, matched_total, delivered_at, undetermined, incomplete
 	        FROM job_watches WHERE owner = ? AND expires_at > ?`
 	args := []any{owner, s.now().UTC()}
 	if fired != nil {
@@ -140,7 +141,7 @@ func (s *Store) SaveProgress(ctx context.Context, w *Watch, out Outcome) error {
 		return err
 	}
 	allEndedChanged := !out.AllEndedAt.Equal(w.AllEndedAt)
-	if blob == w.trackedBlob && !allEndedChanged {
+	if blob == w.trackedBlob && !allEndedChanged && out.Incomplete == w.Incomplete {
 		return nil
 	}
 	var allEnded any
@@ -148,11 +149,11 @@ func (s *Store) SaveProgress(ctx context.Context, w *Watch, out Outcome) error {
 		allEnded = out.AllEndedAt.UTC()
 	}
 	if _, err = s.db.ExecContext(ctx,
-		`UPDATE job_watches SET tracked_json = ?, all_ended_at = ? WHERE id = ? AND fired_at IS NULL`,
-		blob, allEnded, w.ID); err != nil {
+		`UPDATE job_watches SET tracked_json = ?, all_ended_at = ?, incomplete = ? WHERE id = ? AND fired_at IS NULL`,
+		blob, allEnded, out.Incomplete, w.ID); err != nil {
 		return err
 	}
-	w.trackedBlob, w.Tracked, w.AllEndedAt = blob, out.Tracked, out.AllEndedAt
+	w.trackedBlob, w.Tracked, w.AllEndedAt, w.Incomplete = blob, out.Tracked, out.AllEndedAt, out.Incomplete
 	return nil
 }
 
@@ -234,7 +235,7 @@ func scanWatches(rows *sql.Rows) ([]*Watch, error) {
 		var event, mode, tracked string
 		var allEnded sql.NullTime
 		if err := rows.Scan(&w.ID, &w.Owner, &w.Label, &w.Constraint, &event, &w.Condition, &mode,
-			&w.CreatedAt, &tracked, &allEnded); err != nil {
+			&w.CreatedAt, &tracked, &allEnded, &w.Incomplete); err != nil {
 			return nil, err
 		}
 		if allEnded.Valid {
@@ -256,7 +257,8 @@ func scanFullWatches(rows *sql.Rows) ([]*Watch, error) {
 		var event, mode, tracked, matched string
 		var firedAt, deliveredAt sql.NullTime
 		if err := rows.Scan(&w.ID, &w.Owner, &w.Label, &w.Constraint, &event, &w.Condition, &mode,
-			&w.CreatedAt, &tracked, &firedAt, &matched, &w.MatchedTotal, &deliveredAt, &w.Undetermined); err != nil {
+			&w.CreatedAt, &tracked, &firedAt, &matched, &w.MatchedTotal, &deliveredAt,
+			&w.Undetermined, &w.Incomplete); err != nil {
 			return nil, err
 		}
 		if err := finish(w, event, mode, tracked); err != nil {

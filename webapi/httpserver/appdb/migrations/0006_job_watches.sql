@@ -59,6 +59,14 @@ CREATE TABLE job_watches (
     -- running, or while outcomes are resolving normally.
     all_ended_at TIMESTAMP,
 
+    -- Set while the watch selects more jobs than one read of the queue
+    -- covers, so it is looking at a sample. An "all" watch cannot fire in
+    -- that state -- "all" is a claim about a set, and the jobs past the
+    -- limit were never looked at -- so the caller is told to narrow the
+    -- constraint. Persisted because it has to survive the reload that
+    -- check_watches does, or the caller never hears about it.
+    incomplete BOOLEAN NOT NULL DEFAULT 0,
+
     -- When the watch was first satisfied, and what satisfied it.
     -- fired_at NULL means it has not fired.
     fired_at TIMESTAMP,

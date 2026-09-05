@@ -213,6 +213,7 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 	var firstErr error
 	for i, w := range watches {
 		out := folds[i].Done()
+		w.Incomplete = out.Incomplete
 		if !out.Fires {
 			if err := e.store.SaveProgress(ctx, w, out); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("saving progress for %s: %w", w.ID, err)

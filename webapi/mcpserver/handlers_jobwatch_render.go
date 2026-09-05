@@ -26,6 +26,13 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 		return b.String()
 	}
 	fmt.Fprintf(&b, "WAITING — watch %s registered: %s\n\n", w.ID, describeQuestion(w))
+	if w.Incomplete {
+		b.WriteString("WARNING: this watch selects more jobs than one read of the queue covers, so it is " +
+			"looking at a sample rather than the whole set. An \"all\" watch will never fire in this state, " +
+			"because \"all\" cannot be claimed about jobs nobody looked at.\n" +
+			"Narrow the constraint — naming a cluster (ClusterId == N) is almost always what was meant — " +
+			"or use aggregate_jobs to follow bulk progress instead.\n\n")
+	}
 	b.WriteString("Nothing to report yet. Do not poll for this; carry on, and call check_watches when you next need to know.\n")
 	return b.String()
 }
@@ -52,7 +59,11 @@ func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool) s
 	if len(waiting) > 0 {
 		b.WriteString("Still waiting:\n")
 		for _, w := range waiting {
-			fmt.Fprintf(&b, "- %s (%s), registered %s ago\n", w.ID, describeQuestion(w), shortDuration(time.Since(w.CreatedAt)))
+			fmt.Fprintf(&b, "- %s (%s), registered %s ago", w.ID, describeQuestion(w), shortDuration(time.Since(w.CreatedAt)))
+			if w.Incomplete {
+				b.WriteString("  [selects more jobs than one read covers; narrow the constraint]")
+			}
+			b.WriteString("\n")
 		}
 	}
 	if !includeDelivered && len(news) > 0 {
