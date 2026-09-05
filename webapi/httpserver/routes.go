@@ -24,6 +24,17 @@ import (
 // fetch unauthenticated endpoints (the welcome page, /healthz,
 // version info) and read responses, including any that leaked
 // upstream metadata.
+const (
+	// mcpMessagePath is the MCP protocol endpoint: the resource whose
+	// identifier OAuth clients validate against.
+	mcpMessagePath = "/mcp/message"
+	// wellKnownProtectedResource is the RFC 9728 metadata path. The
+	// resource-specific document lives at this plus the resource's own
+	// path, so the two are written as one expression rather than as two
+	// strings that can drift apart.
+	wellKnownProtectedResource = "/.well-known/oauth-protected-resource"
+)
+
 func (h *Handler) setupRoutes() {
 	mux := h.mux
 	cors := func(handler http.Handler) http.Handler {
@@ -52,6 +63,18 @@ func (h *Handler) setupRoutes() {
 	} else {
 		mux.HandleFunc("/", h.handleWelcome)
 	}
+
+	// /.well-known/ is discovery space, never SPA content. Without this
+	// the root handler above answers every unregistered probe under it
+	// with the SPA's index.html and a 200, so a client looking for JSON
+	// reports a parse error on "<!DOCTYPE" and never learns that what it
+	// asked for simply is not served here. A 404 says that plainly.
+	//
+	// Registered paths under /.well-known/ still win: this is a subtree
+	// pattern, and ServeMux prefers the longer, more specific match.
+	mux.HandleFunc("/.well-known/", func(w http.ResponseWriter, r *http.Request) {
+		h.writeError(w, http.StatusNotFound, "No metadata document is served at "+r.URL.Path)
+	})
 
 	// Login endpoint
 	mux.HandleFunc("/login", h.handleLogin)
@@ -174,7 +197,13 @@ func (h *Handler) setupRoutes() {
 	if h.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
 		mux.HandleFunc("/.well-known/oauth-authorization-server", h.handleOAuth2Metadata)
-		mux.HandleFunc("/.well-known/oauth-protected-resource", h.handleOAuth2ProtectedResourceMetadata)
+		mux.HandleFunc(wellKnownProtectedResource, h.handleOAuth2ProtectedResourceMetadata)
+		// RFC 9728 section 3.1: a resource with a path is described at
+		// that path appended to the well-known one. MCP clients derive
+		// this URL from the server URL they were configured with, so
+		// without it they fetch a document that does not exist -- see
+		// handleOAuth2ProtectedResourceMetadata.
+		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
 		// OAuth2 endpoints
 		mux.HandleFunc("/mcp/oauth2/authorize", h.handleOAuth2Authorize)
@@ -190,7 +219,7 @@ func (h *Handler) setupRoutes() {
 		mux.HandleFunc("/mcp/oauth2/device/verify", h.handleOAuth2DeviceVerify)
 
 		// MCP protocol endpoint
-		mux.HandleFunc("/mcp/message", h.handleMCPMessage)
+		mux.HandleFunc(mcpMessagePath, h.handleMCPMessage)
 
 		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
 	}
