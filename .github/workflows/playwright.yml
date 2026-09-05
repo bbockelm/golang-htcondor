@@ -175,7 +175,12 @@ jobs:
       run: |
         mkdir -p webapi/httpserver/webui/dist
         cp -r webapi/frontend/out/* webapi/httpserver/webui/dist/
+        # -h localhost so the base URL the server derives from
+        # FULL_HOSTNAME resolves from the runner. Without it the OAuth
+        # redirect targets the container's own name and the browser
+        # cannot follow it.
         docker run -d --name e2e --privileged \
+          -h localhost \
           -p 8080:8080 \
           -v "${{ github.workspace }}:/workspace" \
           -w /workspace \
@@ -192,12 +197,21 @@ jobs:
         done
         docker logs e2e | tail -20
         docker logs e2e 2>&1 | grep -q 'E2E-READY' || { echo "server never became ready"; exit 1; }
+        # Demo mode generates the IDP admin password per run and prints
+        # it; the tests read it from here to log in.
+        docker logs e2e > /tmp/e2e-server.log 2>&1
+        grep -q '^Password:' /tmp/e2e-server.log || {
+          echo "no admin credentials in the server output; demo mode did not start"; exit 1; }
 
     - name: Run full suite
       working-directory: webapi/frontend
       run: PLAYWRIGHT_SUITE=full npx playwright test
       env:
-        PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+        # https, and localhost rather than 127.0.0.1: demo mode serves
+        # with a generated cert whose SANs cover the hostname, and the
+        # OAuth redirects are built from it.
+        PLAYWRIGHT_BASE_URL: https://localhost:8080
+        E2E_SERVER_LOG: /tmp/e2e-server.log
 
     - name: Server logs on failure
       if: failure()

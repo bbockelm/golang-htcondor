@@ -31,13 +31,18 @@ export default defineConfig({
 
   use: {
     baseURL,
+    // Demo mode serves HTTPS with a CA it generates at startup, so the
+    // browser has no way to trust it. The alternative -- plain HTTP --
+    // is worse: the session cookie is set Secure, and dropping it would
+    // leave every authenticated test failing for a reason unrelated to
+    // what it tests.
+    ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    // The full suite authenticates with the header the server is
-    // configured to trust (HTTP_API_USER_HEADER). The smoke suite never
-    // reaches a server, so it is harmless there.
-    extraHTTPHeaders:
-      suite === 'full' ? { 'X-Test-User': process.env.E2E_USER ?? 'e2e@test.htcondor.org' } : {},
+    // No auth headers. The full suite logs in through the real OAuth
+    // flow (see e2e/fixtures/login.ts); the smoke suite never reaches a
+    // server. A header would not help either way: /api/v1/auth/me
+    // resolves the browser session cookie only.
   },
 
   projects: [
