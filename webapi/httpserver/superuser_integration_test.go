@@ -351,12 +351,14 @@ queue`
 	// jobOwner; if the server authenticated as somebody else the whole test
 	// would pass or fail for reasons unrelated to superuser mode.
 	//
-	// This is not hypothetical: an earlier version of this test set
-	// UserHeader, which makes allowFSFallback true for every request, and
-	// the server then authenticated to the schedd over FS as the OS process
-	// user. Jobs came out owned by whoever ran the test. Driving everything
-	// through sessions keeps authentication TOKEN-only and the identities
-	// honest.
+	// Worth asserting rather than assuming. An earlier version of this test
+	// got exactly that wrong -- every job came out owned by whoever ran the
+	// test, and each subtest below then passed or failed for reasons that
+	// had nothing to do with the feature. The specific cause is gone (the
+	// API no longer offers FS alongside its token; see #252), but "the
+	// identity the server presents is not the one this test named" is a
+	// standing hazard for any test that drives two identities at once, and
+	// it is invisible until something downstream checks ownership.
 	// Give the acting admin a UserRec by having them submit once.
 	//
 	// Not incidental setup: the schedd's UserCheck2 rejects a caller it
@@ -620,10 +622,13 @@ func jobStatusOf(t *testing.T, client *http.Client, baseURL, sid, jobID string) 
 	return -1
 }
 
-// submitAsSession submits a job as the session's user. Sessions rather than
-// the X-Test-User header on purpose: setting UserHeader turns on FS fallback
-// for every request, and the server then authenticates to the schedd as the OS
-// process user, so the job would not belong to whoever the test meant.
+// submitAsSession submits a job as the session's user.
+//
+// Sessions rather than the X-Test-User header because that is what superuser
+// mode actually runs on: mayUseSuperuserMode requires a resolvable browser
+// session, and the armed state is keyed by the session cookie, so a header or
+// bearer caller can neither arm the mode nor act under it. Driving the job
+// owner the same way keeps one mechanism in play instead of two.
 func submitAsSession(t *testing.T, client *http.Client, baseURL, sid, submitFile string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"submit_file": submitFile})
