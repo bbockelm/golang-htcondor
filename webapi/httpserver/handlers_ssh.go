@@ -106,6 +106,23 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	// freshness window).
 	interactive := s.jobIsInteractiveByID(ctx, cluster, proc)
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate for it. Like tail, ssh-to-job needs no starter-side
+	// change: the schedd gates GET_JOB_CONNECT_INFO with UserCheck2, which
+	// a queue superuser satisfies, and the starter then builds the session
+	// as the job owner rather than as the caller.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if imp != nil {
+		// Audited at the point of opening the shell rather than on each
+		// keystroke: the session is the grant, and what happens inside it
+		// is between the operator and the job.
+		s.auditSuperuserAction(r, imp, "ssh-to-job", fmt.Sprintf("%d.%d", cluster, proc), nil)
+	}
+
 	// Open the SSH client BEFORE the WebSocket upgrade so that any failure
 	// here can return a proper HTTP error. This makes the happy path "open
 	// SSH session, then upgrade and bridge" — the WebSocket only exists if

@@ -136,7 +136,14 @@ type Config struct {
 	MCPInstructions         string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	MCPAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	WebUIAdminGroup         string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP               bool     // Enable built-in IDP (always enabled in demo mode)
+	// SuperuserGroup gates superuser mode. Empty disables it. See
+	// HandlerConfig.SuperuserGroup -- notably, it is NOT WebUIAdminGroup.
+	SuperuserGroup string
+	// SuperuserFallbackIdentity overrides the identity used when the
+	// operator is not themselves a usable queue superuser. Empty selects
+	// condor@$(UID_DOMAIN). See HandlerConfig.
+	SuperuserFallbackIdentity string
+	EnableIDP                 bool // Enable built-in IDP (always enabled in demo mode)
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -239,6 +246,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
+		SuperuserGroup:              cfg.SuperuserGroup,
+		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
 		IDPIssuer:                   cfg.IDPIssuer,
 		IDPAccessTokenLifespan:      cfg.IDPAccessTokenLifespan,

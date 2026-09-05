@@ -105,6 +105,79 @@ A separate browser-session cookie is used for the SPA UI; it sits
 on top of (2) — the IDP issues the token; the cookie carries the
 session.
 
+### Superuser mode
+
+An administrator can act on another user's jobs *as that user*: remove,
+hold, release, tail output, and ssh-to-job. Off unless configured.
+
+| Config | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_SUPERUSER_GROUP` | *(unset)* | Group whose members may use superuser mode. Unset disables the feature. |
+| `HTTP_API_SUPERUSER_FALLBACK_IDENTITY` | `condor@$(UID_DOMAIN)` | Identity used when the operator is not themselves a usable queue superuser. Only needs setting where the schedd does not run as `condor`. |
+
+Two things must both be true or the feature stays off, and the server logs
+which one is missing:
+
+- the group above is set, **and**
+- a pool signing key is configured — the server mints the credential it acts
+  under, so without a key there is nothing to act with.
+
+`HTTP_API_SUPERUSER_GROUP` is deliberately **not**
+`HTTP_API_WEBUI_ADMIN_GROUP`. That group means "may read the admin pages";
+this one means "may act as anyone on this access point". Point it at your
+web-admin group if you want them to match — the difference is that it is then
+a decision rather than a side effect.
+
+**Using it.** A permitted operator turns the mode on from the sidebar and
+confirms. A red banner then appears on every page, cannot be dismissed, and
+counts down; the mode turns itself off after 30 minutes, and a server restart
+turns it off for everyone. Actions on the operator's *own* jobs are unaffected
+and are not treated as impersonation.
+
+**Which identity acts.** If the operator is themselves listed in the schedd's
+`QUEUE_SUPER_USERS`, the server authenticates as them, and the schedd's own
+log records
+
+```
+QmgmtSetEffectiveOwner real=<operator> ... effective to <owner>
+```
+
+Otherwise it falls back to `condor@$(UID_DOMAIN)`, or to
+`HTTP_API_SUPERUSER_FALLBACK_IDENTITY` where that is set. The default suits a
+schedd running as the `condor` user, because HTCondor recognises the daemon's
+own OS user as the condor identity — but only when it is not a personal
+condor, where that check is disabled entirely. Point the knob at whoever the
+pool runs as in that case.
+
+Being listed in `QUEUE_SUPER_USERS` is necessary but not sufficient: the
+schedd resolves the caller to a user record *first* and refuses one it cannot
+resolve, so an operator who has never submitted a job cannot act. That is
+checked when the mode is armed, and the operator is told to run
+`condor_qusers -add <user>` rather than left with an action that silently does
+nothing. The set is read from the
+schedd with `DC_CONFIG_VAL` at startup and every 15 minutes — never per
+action — so adding an operator to `QUEUE_SUPER_USERS` takes effect within one
+refresh.
+
+**What gets recorded.** Every action is logged with both identities. Hold,
+release and remove additionally write the operator's name into the job's
+reason attribute, which persists into history and is visible to the job's
+owner:
+
+```
+Removed by alice@example.org via the web UI (superuser mode, acting for bob@example.org) (by user condor@example.org)
+```
+
+The trailing `(by user ...)` is appended by the schedd itself. When the
+operator is a queue superuser it names them; when the fallback identity is
+used it names `condor`, and the leading text is then the only record in the
+job ad of which human acted.
+
+**Bulk actions** are split by job owner and performed once per owner, each
+under its own impersonation, so every job acted on belongs to the identity the
+server authenticated as. A constraint spanning more than 25 owners is refused
+rather than fanned out.
+
 ### Refresh-grant re-authorization
 
 A refresh grant re-runs the authorization decision rather than

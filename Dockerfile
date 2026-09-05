@@ -72,6 +72,18 @@ RUN useradd -m -s /bin/bash -u 1000 vscode && \
     mkdir -p /go && \
     chown -R vscode:vscode /go /workspace
 
+# Accounts for the root-mode superuser integration test. A schedd started by
+# root resolves every submitter to a real OS account before it will create a
+# cluster, so these identities have to exist as users -- a personal condor
+# never has to, which is why the ordinary integration run does not need them.
+#
+# Created here rather than by the test: a test that adds and removes system
+# users can damage the machine it runs on, and leave it damaged when it fails
+# part way. The test skips when they are absent.
+RUN for u in jobowner superadmin plainadmin; do \
+        useradd --no-create-home --shell /usr/sbin/nologin "$u"; \
+    done
+
 # Switch to non-root user
 USER vscode
 

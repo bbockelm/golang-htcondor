@@ -114,6 +114,31 @@ export interface Session {
   username?: string;
   groups?: string[];
   is_admin: boolean;
+  // May this session arm superuser mode? Configured feature + membership in
+  // HTTP_API_SUPERUSER_GROUP, which is deliberately not the admin-UI group.
+  superuser_allowed?: boolean;
+  // Is it armed right now? The warning banner keys off this.
+  superuser_active?: boolean;
+  // When it disarms itself, so the banner can count down rather than let the
+  // mode lapse silently mid-task.
+  superuser_expires_at?: string;
+  // What actions will be attributed to on the schedd while armed, and an
+  // explanation when that is not the operator themselves.
+  superuser_identity?: string;
+  superuser_note?: string;
+}
+
+export interface SuperuserModeState {
+  active: boolean;
+  expires_at?: string;
+  // What the server authenticates to the schedd as while armed, and whether
+  // that is the operator themselves. When it is, the schedd's own log names
+  // them; when it is not, only this server's audit log and the job's reason
+  // string do.
+  identity?: string;
+  actor_is_queue_superuser?: boolean;
+  // Explains a fallback and how to fix it. Empty when acting as yourself.
+  note?: string;
 }
 
 export interface DashboardStats {
@@ -694,6 +719,14 @@ export interface AdminAPIKeyCreateResponse {
 export const api = {
   auth: {
     me: (): Promise<Session> => fetchJSON(`${BASE}/auth/me`),
+
+    // Arm or disarm superuser mode for this browser session.
+    setSuperuserMode: (enabled: boolean): Promise<SuperuserModeState> =>
+      fetchJSON(`${BASE}/admin/superuser`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      }),
     logout: (): Promise<void> =>
       fetchJSON(`${BASE}/auth/logout`, { method: 'POST' }),
   },

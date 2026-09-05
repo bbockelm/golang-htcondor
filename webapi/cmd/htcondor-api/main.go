@@ -1224,6 +1224,17 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Web UI admin group (empty disables admin pages — see PR (c)).
 	webuiAdminGroup, _ := cfg.Get("HTTP_API_WEBUI_ADMIN_GROUP")
 
+	// Superuser mode is gated on its own group, not on the admin-UI group:
+	// reading the admin pages and acting as any user on the access point are
+	// different privileges and an operator has to opt into the second one.
+	superuserGroup, _ := cfg.Get("HTTP_API_SUPERUSER_GROUP")
+	// Only needed where the schedd does not run as "condor" -- see
+	// HandlerConfig.SuperuserFallbackIdentity.
+	superuserFallback, _ := cfg.Get("HTTP_API_SUPERUSER_FALLBACK_IDENTITY")
+	if strings.TrimSpace(superuserGroup) != "" {
+		log.Printf("Superuser mode gated on group %q", strings.TrimSpace(superuserGroup))
+	}
+
 	// Create logger with reasonable defaults for unprivileged operation.
 	// Assigning to the OUTER `logger` (declared at the top of the
 	// function) is intentional — the deferred error-logger reads the
@@ -1357,6 +1368,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPInstructions:            mcpCfg.instructions,
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
+		SuperuserGroup:             strings.TrimSpace(superuserGroup),
+		SuperuserFallbackIdentity:  strings.TrimSpace(superuserFallback),
 		EnableIDP:                  enableIDP,
 		IDPIssuer:                  idpIssuer,
 		IDPAccessTokenLifespan:     idpAccessLifespan,

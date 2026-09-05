@@ -714,8 +714,29 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate as an identity the schedd will accept for it. The
+	// target comes from the job, never from the request.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if imp != nil {
+		// The scoping above confined this to the caller's own jobs. Re-aim
+		// it at the job's real owner, or the action matches nothing.
+		if constraint, err = s.scopeForImpersonation(imp, cluster, proc); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
 	// Remove the job using the schedd RemoveJobs method
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Removed via HTTP API")
+	reason := superuserReason(imp, "Removed", "Removed via HTTP API")
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	if imp != nil {
+		s.auditSuperuserAction(r, imp, "remove", fmt.Sprintf("%d.%d", cluster, proc), err)
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -1358,6 +1379,62 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 	constraint, reason, err := s.parseBulkActionRequest(r, actionName)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// If superuser mode is armed, split the constraint by job owner and act
+	// once per owner, each under an impersonation for that owner. See
+	// planSuperuserBulkAction for why this is not one blanket superuser call.
+	plans, err := s.planSuperuserBulkAction(ctx, r, constraint)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if len(plans) > 0 {
+		combined := &htcondor.JobActionResults{}
+		for _, plan := range plans {
+			planCtx := ctx
+			planReason := reason
+			if plan.Imp != nil {
+				impCtx, _, impErr := s.impersonate(ctx, armedSession{
+					identity:         plan.Imp.Identity,
+					actorIsSuperUser: plan.Imp.ActorIsSuperUser,
+				}, plan.Imp.Actor, plan.Imp.Target)
+				if impErr != nil {
+					s.writeError(w, http.StatusForbidden, impErr.Error())
+					return
+				}
+				planCtx = impCtx
+				planReason = plan.Imp.Reason(actionName)
+			}
+			res, actErr := actionFunc(planCtx, plan.Constraint, planReason)
+			if plan.Imp != nil {
+				s.auditSuperuserAction(r, plan.Imp, actionVerb,
+					fmt.Sprintf("%d job(s) matching %s", plan.Jobs, plan.Constraint), actErr)
+			}
+			if actErr != nil {
+				// Report the failure rather than continuing: a partially
+				// applied bulk action across several people's jobs is
+				// worse to reason about than one that stopped and said so.
+				if isAuthenticationError(actErr) {
+					s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", actErr))
+					return
+				}
+				s.writeError(w, http.StatusInternalServerError,
+					fmt.Sprintf("Bulk job %s failed for %s: %v", actionVerb, plan.Constraint, actErr))
+				return
+			}
+			combined.Success += res.Success
+			combined.NotFound += res.NotFound
+			combined.BadStatus += res.BadStatus
+			combined.AlreadyDone += res.AlreadyDone
+			combined.PermissionDenied += res.PermissionDenied
+			combined.Error += res.Error
+			combined.LimitExceeded += res.LimitExceeded
+			combined.TotalJobs += res.TotalJobs
+		}
+		s.handleBulkActionResults(w, combined, constraint, actionVerb)
 		return
 	}
 
@@ -2013,6 +2090,16 @@ func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		sessionID, err := getSessionCookie(r)
 		if err == nil && sessionID != "" {
 			s.sessionStore.Delete(sessionID)
+			// Disarm superuser mode with the session rather than
+			// leaving the entry to time out. Deleting the session row
+			// already makes it unreachable -- every superuser gate
+			// re-resolves the session -- so this is not load-bearing
+			// today. It is here so that the armed set never outlives
+			// the thing it is keyed to, which stops being merely tidy
+			// the moment anyone changes how session ids are issued.
+			if s.superuserArmed != nil {
+				s.superuserArmed.Disarm(sessionID)
+			}
 			if s.logger != nil {
 				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_id", sessionID[:8]+"...")
 			}
@@ -2161,8 +2248,34 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// If superuser mode is armed and this job belongs to somebody else,
+	// re-authenticate as an identity the schedd will accept for it. The
+	// target is derived from the job, never from the request.
+	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if imp != nil {
+		// The scoping above confined this to the caller's own jobs. Re-aim
+		// it at the job's real owner, or the action matches nothing.
+		if constraint, err = s.scopeForImpersonation(imp, cluster, proc); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	// actionName is the past-tense verb ("Held", "Released"), which is
+	// what the reason should lead with. A caller-supplied reason is
+	// replaced rather than appended to: the reason is the durable record
+	// of who did this to somebody else's job, and letting arbitrary text
+	// lead would bury it.
+	reason = superuserReason(imp, actionName, reason)
+
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
+	if imp != nil {
+		s.auditSuperuserAction(r, imp, actionVerb, jobID, err)
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
