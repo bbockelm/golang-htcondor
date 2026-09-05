@@ -81,3 +81,26 @@ test('admin log message column is not squeezed to a sliver', async ({ page }) =>
   // lines is fine, ten is the bug.
   expect(box!.height, `message wrapped to ${box!.height}px tall`).toBeLessThan(80);
 });
+
+// The two components #240 refactored that nothing else reaches.
+//
+// That PR rewrote effect timing in ChatPanel (a ref assigned during
+// render, and a snap-to-full-text effect that was removed entirely) and
+// in JupyterDetailClient (status derived during render instead of
+// assigned from an effect). Both were verified only by the type checker
+// and the compiler; neither is on a page the rest of this suite loads.
+
+test('the chat surface mounts without page errors', async ({ page }) => {
+  const errors = watchForErrors(page);
+  await page.goto('/jobs');
+
+  // ChatPanel is gated on chat/info reporting enabled AND the queue
+  // having at least one job, both of which the fixtures provide. If it
+  // renders nothing the gate changed, and this test is no longer
+  // covering the component it names.
+  await expect(
+    page.getByPlaceholder(/ask|message|chat/i).first().or(page.getByRole('button', { name: /ask|chat|assistant/i }).first()),
+  ).toBeVisible();
+
+  expect(errors, 'chat surface raised page errors').toEqual([]);
+});

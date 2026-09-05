@@ -87,6 +87,10 @@ export const adminLogsFixture: AdminLogsResponse = {
   ],
 };
 
+// The Jupyter detail page derives its whole view state from this one
+// response plus a readiness probe. connected=true with a proxy_path is
+// the "helper is up" branch -- the interesting one, because that is
+// where JupyterDetailClient decides between launching and ready.
 // installApiFixtures answers /api/v1/* from the table below and fails
 // loudly on anything unmapped rather than returning an empty 200 -- a
 // silent {} is how a fixture suite quietly stops testing the page it
@@ -99,7 +103,9 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/dashboard': dashboardFixture,
     '/api/v1/admin/logs': adminLogsFixture,
     '/api/v1/version': { version: 'e2e', commit: 'e2e' },
-    '/api/v1/chat/info': { enabled: false },
+    // enabled so the chat surface actually mounts: the jobs page hides
+    // ChatPanel entirely on enabled=false, which would leave it untested.
+    '/api/v1/chat/info': { enabled: true },
     '/api/v1/templates': { templates: [] },
   };
 

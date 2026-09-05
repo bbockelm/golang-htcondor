@@ -17,30 +17,18 @@ test('the API is up and reports our identity', async ({ request }) => {
   expect(body.user, 'server should attribute the request to the header user').toBeTruthy();
 });
 
-test('the UI is served by the binary, not a dev server', async ({ page }) => {
-  const res = await page.goto('/');
-  expect(res?.status()).toBeLessThan(400);
-  // The embedded export is what production ships (Dockerfile.release
-  // stage 2 with go:embed); if this 404s, the embed tag was missing.
-  await expect(page.locator('body')).toBeVisible();
-});
-
-test('the jobs page renders against a live schedd', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (e) => errors.push(String(e)));
-
-  await page.goto('/jobs');
-  await expect(page.locator('body')).toBeVisible();
-
-  // An empty queue is a legitimate result here — a fresh personal
-  // condor has no jobs. What must not happen is an error state or a
-  // render failure, so assert on those rather than on rows.
-  await expect(page.getByText(/failed|error/i).first()).toBeHidden({ timeout: 5_000 }).catch(() => {
-    // getByText finds nothing at all when the page is clean, which
-    // toBeHidden treats as passing; the catch only absorbs strict-mode
-    // violations from multiple incidental matches.
-  });
-  expect(errors, 'jobs page raised page errors against a live server').toEqual([]);
+test('the UI is served from the embedded export', async ({ request }) => {
+  // Checked with request, not page: the SPA immediately redirects to
+  // /login (see the note at the bottom of this file), so a browser lands
+  // on an error document and page-level assertions here would pass on
+  // that instead of on the UI. What this can honestly verify is that the
+  // binary serves the export at all -- if -tags embed_frontend were
+  // missing this 404s.
+  const res = await request.get('/');
+  expect(res.status()).toBe(200);
+  const body = await res.text();
+  expect(body, 'expected the prerendered HTML shell').toContain('<html');
+  expect(body).toContain('__next');
 });
 
 test('a submitted job appears in the queue', async ({ request }) => {
@@ -77,3 +65,27 @@ test('a submitted job appears in the queue', async ({ request }) => {
     `cluster ${cluster} was accepted but is not in the queue`,
   ).toContain(String(cluster));
 });
+
+// Why there are no page-rendering assertions in this file.
+//
+// The SPA resolves its session through GET /api/v1/auth/me, which is
+// cookie-only by deliberate design -- it does not consult the user
+// header or a bearer token. Under the header auth this harness uses it
+// therefore answers authenticated=false, the app redirects to
+// /login?return_to=..., and the e2e server (which has no OAuth2
+// provider) returns
+//
+//   {"error":"Unauthorized","message":"Authentication required but no
+//    OAuth2 provider configured","code":401}
+//
+// A browser test here lands on that document. Assertions as loose as
+// "the body is visible" or "no page errors" pass against it, and so does
+// any text match that happens to appear in it -- an earlier version of
+// this file matched /error/ and reported the Jupyter detail page as
+// covered while looking at that JSON.
+//
+// So: UI rendering is the smoke suite's job, where fixtures make it
+// deterministic. This suite asserts the API contract and the paths that
+// only a real schedd can exercise. Driving the real SPA here needs a
+// browser session cookie, which means standing up the built-in IDP in
+// the harness -- worth doing, not done.
