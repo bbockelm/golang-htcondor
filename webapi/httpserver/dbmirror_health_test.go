@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +109,37 @@ htcondor_api_dbmirror_up 0
 	}
 	if n := testutil.CollectAndCount(reg, "htcondor_api_dbmirror_history_staleness_seconds"); n != 0 {
 		t.Errorf("history staleness reported for a mirror that was never discovered (%d series)", n)
+	}
+}
+
+// TestMirrorHealthReportsAConnectionFailure separates the two ways
+// routing breaks. Discovery and dialing fail independently: the
+// collector can hand back a good, fresh ad for a database this daemon
+// cannot authenticate to, and then every read declines with dial_failed
+// while the health block reports no error and a healthy status. That is
+// how a mirror that has never once answered a query comes to look like
+// it is working.
+func TestMirrorHealthReportsAConnectionFailure(t *testing.T) {
+	l := dbmirror.NewLocator(htcondor.NewCollector("collector.invalid"), config.NewEmpty())
+
+	// Discovery has not failed here -- it has not run. What has failed is
+	// the connection, which must be reported on its own terms.
+	l.RecordDialForTest(errors.New("connecting to htcondordb at <10.0.0.5:9619>: permission denied"))
+
+	h := mirrorHealth(l, time.Now())
+	if h == nil {
+		t.Fatal("expected a dbmirror block")
+	}
+	if h.DialError == "" {
+		t.Error("a connection failure must be reported, not left to a metric label")
+	}
+	if h.DialLastAttempt == "" {
+		t.Error("when the connection was last tried is half the diagnosis")
+	}
+	if h.Status != "down" {
+		t.Errorf("status = %q, want down: a mirror this daemon cannot reach is not working", h.Status)
+	}
+	if h.LastError != "" {
+		t.Errorf("discovery did not fail; last_error should stay empty, got %q", h.LastError)
 	}
 }

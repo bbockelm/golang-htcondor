@@ -184,6 +184,15 @@ type Locator struct {
 	lastErr string
 	lastTry time.Time
 	lastOK  time.Time
+	// lastDialErr is why the most recent attempt to CONNECT to the mirror
+	// failed, which is a different failure from discovery and was
+	// previously visible only as a metric label. An operator looking at a
+	// dial_failed tally had the count and nothing else -- not the
+	// address, not the error -- while lastErr next to it described
+	// discovery, which was working fine.
+	lastDialErr string
+	lastDialAt  time.Time
+	lastDialOK  time.Time
 }
 
 // NewLocator returns a Locator with default options.
@@ -247,6 +256,16 @@ type Health struct {
 	// Info is kept across a failed attempt, so an ad older than InfoTTL
 	// is one routing would no longer use without re-discovering.
 	InfoAt time.Time
+
+	// LastDialError is why the most recent connection to the mirror
+	// failed, with LastDialAttempt when that was and LastDialSuccess when
+	// one last worked. Discovery and dialing fail independently -- the
+	// collector can hand back a perfectly good ad for a database this
+	// daemon cannot authenticate to -- so a healthy discovery says
+	// nothing about whether reads are reaching it.
+	LastDialError   string
+	LastDialAttempt time.Time
+	LastDialSuccess time.Time
 }
 
 // Health reports what discovery last saw. It never dials and never
@@ -266,6 +285,7 @@ func (l *Locator) Health() Health {
 	defer l.mu.Unlock()
 	h.Info, h.LastError, h.LastSuccess = l.info, l.lastErr, l.lastOK
 	h.LastAttempt, h.InfoAt = l.lastTry, l.infoAt
+	h.LastDialError, h.LastDialAttempt, h.LastDialSuccess = l.lastDialErr, l.lastDialAt, l.lastDialOK
 	return h
 }
 
@@ -498,9 +518,30 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 	sec.Command = SessionCommand
 	cl, err := htcondor.DialSinful(ctx, info.Address, sec, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
+		err = fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
+		l.recordDial(err)
+		return nil, nil, nil, err
 	}
+	l.recordDial(nil)
 	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream())), func() { _ = cl.Close() }, info, nil
+}
+
+// RecordDialForTest records a connection outcome without dialing, so a
+// test can exercise the reporting path. Not for production use: Client
+// records the real thing.
+func (l *Locator) RecordDialForTest(err error) { l.recordDial(err) }
+
+// recordDial keeps the outcome of the last connection attempt for the
+// readiness and admin surfaces.
+func (l *Locator) recordDial(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastDialAt = time.Now()
+	if err != nil {
+		l.lastDialErr = err.Error()
+		return
+	}
+	l.lastDialErr, l.lastDialOK = "", l.lastDialAt
 }
 
 // HistoryDecision decides whether a completed-job query may be served

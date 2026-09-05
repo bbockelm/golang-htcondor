@@ -418,7 +418,10 @@ const openAPISchema = `{
           "history_gap": {"type": "boolean", "description": "A history durability gap, which stops all history routing."},
           "jobs_tolerance_seconds": {"type": "integer", "format": "int64", "description": "Live job reads route to the mirror only below this staleness."},
           "history_tolerance_seconds": {"type": "integer", "format": "int64"},
-          "last_error": {"type": "string"},
+          "last_error": {"type": "string", "description": "Why discovery last failed. Empty does not mean reads are working -- see dial_error."},
+          "dial_error": {"type": "string", "description": "Why the last attempt to connect to the mirror failed. Separate from last_error because discovery and dialing fail independently: a good, fresh ad for a database this daemon cannot authenticate to declines every read with dial_failed while discovery reports no error."},
+          "dial_last_attempt": {"type": "string", "format": "date-time"},
+          "dial_last_success": {"type": "string", "format": "date-time", "description": "When a connection last succeeded. Absent means none has since this server started."},
           "last_attempt": {"type": "string", "format": "date-time", "description": "When discovery last queried the collector. Absent when it never has, which is the whole explanation for a status of \"unknown\"."},
           "last_success": {"type": "string", "format": "date-time", "description": "When discovery last found a mirror."}
         }

@@ -226,6 +226,15 @@ type dbMirrorHealthStatus struct {
 	HistoryToleranceSecs  int64  `json:"history_tolerance_seconds"`
 
 	LastError string `json:"last_error,omitempty"`
+	// DialError is why the last attempt to connect to the mirror failed,
+	// with DialLastAttempt / DialLastSuccess around it (RFC3339). Kept
+	// apart from LastError because discovery and dialing fail
+	// independently: the collector can hand back a good ad for a database
+	// this daemon cannot authenticate to, and then every read declines
+	// with dial_failed while discovery reports no error at all.
+	DialError       string `json:"dial_error,omitempty"`
+	DialLastAttempt string `json:"dial_last_attempt,omitempty"`
+	DialLastSuccess string `json:"dial_last_success,omitempty"`
 	// LastAttempt is when discovery last queried the collector, and
 	// LastSuccess when it last found a mirror. Both RFC3339, omitted when
 	// they have never happened. LastAttempt absent is the whole
@@ -256,10 +265,23 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 	if !h.LastAttempt.IsZero() {
 		out.LastAttempt = h.LastAttempt.Format(time.RFC3339)
 	}
+	out.DialError = h.LastDialError
+	if !h.LastDialAttempt.IsZero() {
+		out.DialLastAttempt = h.LastDialAttempt.Format(time.RFC3339)
+	}
+	if !h.LastDialSuccess.IsZero() {
+		out.DialLastSuccess = h.LastDialSuccess.Format(time.RFC3339)
+	}
+	// A connection that failed since the last one succeeded means reads
+	// are not reaching the mirror, whatever the ad says. It outranks
+	// everything below: an ad can look perfectly fresh for a database
+	// this daemon cannot authenticate to.
+	dialBroken := h.LastDialError != "" && h.LastDialAttempt.After(h.LastDialSuccess)
+
 	if h.Info == nil {
-		if h.LastAttempt.IsZero() {
-			// Nothing has ever asked the collector, so there is nothing
-			// to call down.
+		if h.LastAttempt.IsZero() && !dialBroken {
+			// Nothing has ever asked the collector and nothing has tried
+			// to connect, so there is nothing to call down.
 			out.Status = "unknown"
 		}
 		// Either way the freshness fields stay unset: they would be
@@ -288,6 +310,11 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 	// error that is the actual news.
 	switch {
 	case h.LastError != "" && h.LastAttempt.After(h.LastSuccess):
+		out.Status = "down"
+	case dialBroken:
+		// Discovered and fresh, but the last read could not connect to
+		// it. Reporting that as "ok" off the ad alone is how a mirror
+		// that has never answered a query comes to look healthy.
 		out.Status = "down"
 	case !h.Info.JobQueueCaughtUp,
 		jobsStale > dbmirror.JobsToleranceSecs,

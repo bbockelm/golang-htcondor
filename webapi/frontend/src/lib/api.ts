@@ -167,6 +167,12 @@ export interface DBMirrorHealth {
   last_error?: string;
   last_attempt?: string;
   last_success?: string;
+  // Dialing fails independently of discovery: a perfectly good ad for a
+  // database this daemon cannot authenticate to produces dial_failed on
+  // every read while `last_error` stays empty.
+  dial_error?: string;
+  dial_last_attempt?: string;
+  dial_last_success?: string;
 }
 
 export interface DBMirrorStatus {
