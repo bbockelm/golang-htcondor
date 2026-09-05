@@ -31,6 +31,7 @@ import {
 } from '@/lib/jobStatus';
 import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
+import { ConfirmButton } from '@/components/ConfirmButton';
 
 // Status interpretation lives in lib/jobStatus.ts so list + detail
 // views render the same labels for the same conditions. This page
@@ -188,21 +189,14 @@ export default function JupyterDetailClient() {
           status !== 'removed' &&
           status !== 'gone' && (
             <div className="ml-auto">
-              <button
-                onClick={() => {
-                  if (
-                    confirm(
-                      'End the session? This removes the job from the queue.',
-                    )
-                  ) {
-                    endSession.mutate();
-                  }
-                }}
-                disabled={endSession.isPending}
-                className="text-xs rounded-sm border border-red-300 bg-white px-2 py-1 text-red-700 hover:bg-red-50 disabled:opacity-50"
-              >
-                {endSession.isPending ? 'Ending…' : 'End session'}
-              </button>
+              <ConfirmButton
+                compact
+                label="End session"
+                confirmLabel="End session"
+                onConfirm={() => endSession.mutate()}
+                pending={endSession.isPending}
+                title="End the session — this removes the job from the queue"
+              />
             </div>
           )}
       </div>

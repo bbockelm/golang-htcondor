@@ -40,6 +40,7 @@ import {
   DEFAULT_RESOURCE_REQUEST,
   type ResourceRequest,
 } from '@/components/ResourceRequest';
+import { ConfirmButton } from '@/components/ConfirmButton';
 
 const DEFAULT_JUPYTER_IMAGE = 'quay.io/jupyter/scipy-notebook:latest';
 
@@ -427,19 +428,14 @@ function TerminalTable({
                 >
                   Open ↗
                 </Link>
-                <button
-                  onClick={() => {
-                    if (confirm(`Remove job ${t.job_id}?`)) {
-                      removeMut.mutate(t.job_id);
-                    }
-                  }}
-                  disabled={
+                <ConfirmButton
+                  compact
+                  onConfirm={() => removeMut.mutate(t.job_id)}
+                  pending={
                     removeMut.isPending && removeMut.variables === t.job_id
                   }
-                  className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
-                >
-                  Remove
-                </button>
+                  title={`Remove job ${t.job_id}`}
+                />
               </td>
             </tr>
           ))}

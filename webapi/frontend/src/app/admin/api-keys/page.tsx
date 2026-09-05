@@ -19,6 +19,7 @@ import {
   type AdminAPIKey,
   type AdminAPIKeyCreateResponse,
 } from '@/lib/api';
+import { ConfirmButton } from '@/components/ConfirmButton';
 
 export default function AdminAPIKeysPage() {
   const qc = useQueryClient();
@@ -104,15 +105,7 @@ export default function AdminAPIKeysPage() {
                 <APIKeyRow
                   key={k.key_id}
                   apiKey={k}
-                  onDelete={() => {
-                    if (
-                      confirm(
-                        `Revoke API key "${k.name}"? Existing users will get 401 immediately.`,
-                      )
-                    ) {
-                      remove.mutate(k.key_id);
-                    }
-                  }}
+                  onDelete={() => remove.mutate(k.key_id)}
                   busy={remove.isPending && remove.variables === k.key_id}
                 />
               ))}
@@ -350,14 +343,14 @@ function APIKeyRow({
       </td>
       <td className="px-3 py-2 text-right">
         {!revoked && (
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={busy}
-            className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
-          >
-            {busy ? 'Revoking…' : 'Revoke'}
-          </button>
+          <ConfirmButton
+            compact
+            label="Revoke"
+            confirmLabel="Revoke"
+            onConfirm={onDelete}
+            pending={busy}
+            title={`Revoke API key "${apiKey.name}" — existing users get 401 immediately`}
+          />
         )}
       </td>
     </tr>
