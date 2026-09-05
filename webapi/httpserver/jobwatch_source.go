@@ -164,6 +164,12 @@ func (s watchSource) streamMirror(ctx context.Context, table, constraint string,
 	}
 	defer closer()
 
+	// A "*" projection means "all attributes" to the schedd but a literal
+	// (absent) attribute name to the mirror; collapse it to the empty
+	// projection the mirror reads as "all". Watch callers pass named attrs
+	// today, so this is defense in depth against the archive-detail regression.
+	attrs = normalizeMirrorProjection(attrs)
+
 	// Streamed rather than collected: the caller folds each ad and lets
 	// it go, so a large queue never exists in memory at once.
 	//
