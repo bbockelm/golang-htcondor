@@ -17,11 +17,14 @@ WORKDIR=${WORKDIR:-/tmp/e2e-condor}
 PORT=${E2E_PORT:-8080}
 TRUST_DOMAIN=${E2E_TRUST_DOMAIN:-test.htcondor.org}
 
-mkdir -p "$WORKDIR"/{log,spool,execute,lock,passwords.d,tokens.d}
+# lib/condor is where the server opens its application database. It refuses
+# to create the parent itself (deliberately -- a daemon silently creating
+# directories under a mistyped path is worse), so make it here.
+mkdir -p "$WORKDIR"/{log,spool,execute,lock,passwords.d,tokens.d,lib/condor}
 
 cat > "$WORKDIR/condor_config" <<EOF
 CONDOR_HOST = \$(FULL_HOSTNAME)
-COLLECTOR_HOST = \$(FULL_HOSTNAME):0
+COLLECTOR_HOST = \$(CONDOR_HOST):9618
 LOCAL_DIR = $WORKDIR
 LOG = $WORKDIR/log
 SPOOL = $WORKDIR/spool
@@ -74,11 +77,27 @@ if [ ! -f "$KEYDIR/POOL" ]; then
 fi
 
 echo "building htcondor-api with the UI embedded"
+# -buildvcs=false, deliberately. The Go toolchain stamps VCS metadata by
+# default and fails the build outright when it cannot read the repo:
+#
+#   error obtaining VCS status: exit status 128
+#
+# which happens here for two unrelated reasons -- the bind-mounted workspace
+# is owned by a different uid than the builder, and a git worktree's .git is a
+# file pointing at a path that does not exist inside the container. Marking
+# the directory safe fixes only the first. Nothing here reads the stamp: the
+# readiness probe wants a 200 from /api/v1/version, not a particular version.
 cd /workspace/webapi
-GOWORK=off go build -tags embed_frontend -o /tmp/htcondor-api ./cmd/htcondor-api
+GOWORK=off go build -buildvcs=false -tags embed_frontend -o /tmp/htcondor-api ./cmd/htcondor-api
 
 cd /workspace
-export _condor_HTTP_API_PORT="$PORT"
+# The listen address is a flag, not a config knob -- there is no
+# HTTP_API_PORT parameter, so setting one would be silently ignored.
+# Without this the server logs to $(LOG)/HttpApiLog and a startup failure is
+# invisible: the process prints three lines, redirects the standard logger
+# into the structured one, and then dies silently as far as `docker logs` is
+# concerned. That cost an hour of debugging; do not remove it.
+export _condor_HTTP_API_LOG=stdout
 export _condor_HTTP_API_USER_HEADER="X-Test-User"
 export _condor_HTTP_API_USER_HEADER_TRUST_ANY="true"
 export _condor_TRUST_DOMAIN="$TRUST_DOMAIN"
@@ -86,16 +105,29 @@ export _condor_UID_DOMAIN="$TRUST_DOMAIN"
 export _condor_SEC_PASSWORD_DIRECTORY="$KEYDIR"
 
 echo "starting htcondor-api on :$PORT"
-/tmp/htcondor-api &
+# Bind all interfaces: the workflow reaches this through a published port, so
+# binding loopback inside the container would be unreachable from the runner.
+/tmp/htcondor-api -listen ":$PORT" &
 API_PID=$!
 
+# /healthz, not /api/v1/*: the API endpoints require authentication, so an
+# unauthenticated probe against one answers 401 forever and the wait times
+# out against a server that is in fact healthy.
 for i in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:$PORT/api/v1/version" >/dev/null 2>&1; then break; fi
+  if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then break; fi
   if ! kill -0 "$API_PID" 2>/dev/null; then echo "htcondor-api exited early"; exit 1; fi
   sleep 1
 done
-curl -fsS "http://127.0.0.1:$PORT/api/v1/version" >/dev/null 2>&1 || {
-  echo "api never answered"; exit 1; }
+curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 || {
+  echo "api never answered /healthz"; exit 1; }
+
+# Prove the authenticated path works too, so a header/trust misconfiguration
+# fails here with a clear message instead of as an opaque 401 in every test.
+if ! curl -fsS -H "X-Test-User: ${E2E_USER:-e2e@$TRUST_DOMAIN}" \
+      "http://127.0.0.1:$PORT/api/v1/whoami" >/dev/null 2>&1; then
+  echo "api is up but header auth was refused; check HTTP_API_USER_HEADER settings"
+  exit 1
+fi
 
 echo "E2E-READY"
 wait "$API_PID"

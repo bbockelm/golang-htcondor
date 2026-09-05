@@ -63,7 +63,17 @@ test('a submitted job appears in the queue', async ({ request }) => {
   const cluster = created.cluster_id ?? created.ClusterId ?? created.cluster;
   expect(cluster, 'submit response should name the new cluster').toBeTruthy();
 
-  const listed = await request.get('/api/v1/jobs');
+  // owned_by_me=false deliberately. The default listing is scoped to the
+  // caller, and under header auth the server reaches the schedd as its own
+  // process user, so the schedd records Owner as the daemon user rather than
+  // the header identity -- the same "the schedd picks the identity, not the
+  // caller" behavior behind #177. Scoping by owner here would assert that
+  // identity plumbing rather than that the submit worked, and would fail for
+  // a reason unrelated to what this test is for.
+  const listed = await request.get('/api/v1/jobs?owned_by_me=false');
   expect(listed.status()).toBe(200);
-  expect(await listed.text()).toContain(String(cluster));
+  expect(
+    await listed.text(),
+    `cluster ${cluster} was accepted but is not in the queue`,
+  ).toContain(String(cluster));
 });
