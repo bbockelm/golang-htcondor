@@ -124,7 +124,7 @@ func TestUnchangedProgressIsNotWritten(t *testing.T) {
 func writeCount(t *testing.T, s *Store) int {
 	t.Helper()
 	var n int
-	if err := s.db.QueryRow(`SELECT total_changes()`).Scan(&n); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT total_changes()`).Scan(&n); err != nil {
 		t.Fatalf("total_changes: %v", err)
 	}
 	return n

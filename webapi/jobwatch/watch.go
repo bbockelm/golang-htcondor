@@ -97,9 +97,6 @@ type Watch struct {
 
 	matchConstraint *vm.Query
 	matchCondition  *vm.Query
-	// truncated carries QueueTruncated from the snapshot being evaluated
-	// down to the per-job decision.
-	truncated bool
 	// trackedBlob is the stored form of Tracked as it was loaded, so a
 	// pass that changed nothing can skip the write.
 	trackedBlob string
