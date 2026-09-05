@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -256,9 +254,26 @@ func textResult(text string) interface{} {
 // a transfer: counting by listing would move every matching ad here
 // only to discard it.
 func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string, groupBy []string) (interface{}, error) {
-	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, &htcondor.QueryOptions{
-		FetchOpts: htcondor.FetchMyJobs,
-	})
+	// selfScopedQueryOptions rather than a hardcoded FetchMyJobs.
+	//
+	// FetchMyJobs sends QUERY_JOB_ADS_WITH_AUTH, which makes the schedd
+	// filter on the identity it authenticated -- and this server
+	// authenticates as the END USER, so it confines the answer to that
+	// user's own jobs. Setting it unconditionally applied that
+	// confinement to admins too, who are exempt everywhere else: the
+	// constraint from scopeToOwner above already skips the owner clause
+	// for them. An admin asking to count held jobs pool-wide therefore
+	// got their OWN held jobs, which on an access point where they have
+	// none is a flat zero next to a queue holding thousands.
+	//
+	// For a non-admin nothing changes: this still sets FetchMyJobs and
+	// Owner, behind the constraint scopeToOwner already applied. Two
+	// mechanisms, as everywhere else.
+	opts, ok := s.selfScopedQueryOptions(ctx, nil)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, opts)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate query failed: %w", err)
 	}
