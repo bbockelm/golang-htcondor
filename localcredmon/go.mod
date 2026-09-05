@@ -9,7 +9,7 @@ require (
 
 require (
 	github.com/PelicanPlatform/classad v0.29.6 // indirect
-	github.com/bbockelm/cedar v0.6.11 // indirect
+	github.com/bbockelm/cedar v0.6.12 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
