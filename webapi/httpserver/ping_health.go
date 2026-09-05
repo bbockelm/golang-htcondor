@@ -232,7 +232,12 @@ type dbMirrorHealthStatus struct {
 	// independently: the collector can hand back a good ad for a database
 	// this daemon cannot authenticate to, and then every read declines
 	// with dial_failed while discovery reports no error at all.
-	DialError       string `json:"dial_error,omitempty"`
+	DialError string `json:"dial_error,omitempty"`
+	// TokenError is why no IDTOKEN was offered on that attempt, empty
+	// when one was. Separate again, because a dial error naming FS,
+	// Kerberos and SSL looks exhaustive while omitting the method that
+	// was skipped before it was tried.
+	TokenError      string `json:"token_error,omitempty"`
 	DialLastAttempt string `json:"dial_last_attempt,omitempty"`
 	DialLastSuccess string `json:"dial_last_success,omitempty"`
 	// LastAttempt is when discovery last queried the collector, and
@@ -256,6 +261,7 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 		PinnedName:           h.Name,
 		PinnedAddress:        h.Address,
 		LastError:            h.LastError,
+		TokenError:           h.TokenError,
 		JobsToleranceSecs:    dbmirror.JobsToleranceSecs,
 		HistoryToleranceSecs: dbmirror.HistoryToleranceSecs,
 	}

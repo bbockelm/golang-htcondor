@@ -26,6 +26,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 )
@@ -166,6 +167,20 @@ type Options struct {
 	// required mirror makes the API's availability depend on the
 	// mirror's.
 	Required bool
+
+	// TokenSource mints an IDTOKEN for authenticating to the mirror, or
+	// returns an error when it cannot.
+	//
+	// Without one, the connection can only offer whatever the ambient
+	// SEC_CLIENT_AUTHENTICATION_METHODS provide, and on a containerised
+	// access point that is usually nothing that works: FS needs a shared
+	// filesystem and uid, Kerberos needs a ccache, and SSL needs a
+	// certificate the mirror's has not outlived. htcondordb's session
+	// command wants READ, so a token asserting READ is sufficient and is
+	// the method least coupled to how the two are deployed.
+	//
+	// Optional. Nil keeps the previous behaviour exactly.
+	TokenSource func(ctx context.Context) (string, error)
 }
 
 // Locator discovers the mirror through the collector and dials it. Safe
@@ -184,6 +199,9 @@ type Locator struct {
 	lastErr string
 	lastTry time.Time
 	lastOK  time.Time
+	// tokenErr is why no IDTOKEN was attached to the last connection
+	// attempt, empty when one was.
+	tokenErr string
 	// lastDialErr is why the most recent attempt to CONNECT to the mirror
 	// failed, which is a different failure from discovery and was
 	// previously visible only as a metric label. An operator looking at a
@@ -266,6 +284,12 @@ type Health struct {
 	LastDialError   string
 	LastDialAttempt time.Time
 	LastDialSuccess time.Time
+	// TokenError is why no IDTOKEN was offered on the last connection
+	// attempt, empty when one was. Worth reporting on its own because a
+	// dial error listing FS, Kerberos and SSL reads as "everything was
+	// tried", when the method most likely to work was skipped before it
+	// started.
+	TokenError string
 }
 
 // Health reports what discovery last saw. It never dials and never
@@ -284,6 +308,7 @@ func (l *Locator) Health() Health {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	h.Info, h.LastError, h.LastSuccess = l.info, l.lastErr, l.lastOK
+	h.TokenError = l.tokenErr
 	h.LastAttempt, h.InfoAt = l.lastTry, l.infoAt
 	h.LastDialError, h.LastDialAttempt, h.LastDialSuccess = l.lastDialErr, l.lastDialAt, l.lastDialOK
 	return h
@@ -511,11 +536,10 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 	if l.cfg == nil {
 		return nil, nil, nil, fmt.Errorf("no HTCondor config for htcondordb authentication")
 	}
-	sec, err := htcondor.GetSecurityConfig(l.cfg, SessionCommand, "CLIENT")
+	sec, err := l.securityConfig(ctx, info.Address)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building htcondordb security config: %w", err)
+		return nil, nil, nil, err
 	}
-	sec.Command = SessionCommand
 	cl, err := htcondor.DialSinful(ctx, info.Address, sec, nil)
 	if err != nil {
 		err = fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
@@ -695,4 +719,72 @@ func Provenance(info *Info, reason string) string {
 		note += "; " + reason
 	}
 	return note + "]"
+}
+
+// securityConfig builds the security config for a mirror connection,
+// attaching an IDTOKEN when a TokenSource is configured.
+//
+// A token source that fails is not fatal. The connection still gets the
+// ambient methods and may well succeed on a deployment where FS or SSL
+// works; failing here instead would take away a path that used to work.
+// The error is returned to the caller's log rather than swallowed, so a
+// misconfigured signing key is visible rather than silently reducing the
+// mirror to whatever else it can negotiate.
+func (l *Locator) securityConfig(ctx context.Context, address string) (*security.SecurityConfig, error) {
+	l.mu.Lock()
+	tokenSource := l.opts.TokenSource
+	l.mu.Unlock()
+
+	if tokenSource != nil {
+		token, err := tokenSource(ctx)
+		if err == nil && token != "" {
+			sec, cerr := htcondor.NewClientSecurityConfig(ctx, token, address, SessionCommand, "CLIENT", nil)
+			if cerr != nil {
+				return nil, fmt.Errorf("building htcondordb security config with a token: %w", cerr)
+			}
+			sec.Command = SessionCommand
+			return sec, nil
+		}
+		l.noteTokenFailure(err)
+	}
+
+	sec, err := htcondor.GetSecurityConfig(l.cfg, SessionCommand, "CLIENT")
+	if err != nil {
+		return nil, fmt.Errorf("building htcondordb security config: %w", err)
+	}
+	sec.Command = SessionCommand
+	return sec, nil
+}
+
+// noteTokenFailure records why no token was attached, so Health can say
+// so. A connection that then fails every other method otherwise reports
+// "all authentication methods failed" without mentioning that the one
+// most likely to work was never offered.
+func (l *Locator) noteTokenFailure(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err != nil {
+		l.tokenErr = err.Error()
+		return
+	}
+	l.tokenErr = "the token source returned an empty token"
+}
+
+// SetTokenSource attaches (or replaces) the mirror's token source after
+// construction.
+//
+// It exists because the daemon that can mint a token is built after the
+// Locator it owns: the signing key lives on the handler, and the handler
+// literal contains the Locator. Setting it later avoids threading the
+// key through construction for one optional field.
+//
+// Safe to call before the Locator is used; it takes the same lock every
+// other mutation does.
+func (l *Locator) SetTokenSource(f func(ctx context.Context) (string, error)) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.opts.TokenSource = f
 }

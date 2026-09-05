@@ -62,6 +62,11 @@ type Handler struct {
 	credd                     htcondor.CreddClient
 	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
 	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
+	// dbMirrorTokenSubject overrides the identity the htcondordb token
+	// asserts. Empty means "condor@<trust domain>". Configurable because
+	// the mirror's ALLOW_READ is the operator's, not ours.
+	dbMirrorTokenSubject string
+
 	// placementd is the condor_placementd client, or nil when the pool
 	// runs none. Unlike the schedd and credd it is entirely optional:
 	// its absence disables the /api/v1/placement endpoints and the
@@ -267,6 +272,11 @@ type HandlerConfig struct {
 	// submission ONLY where the submit file is silent, so a user who
 	// sets the same command keeps their own value. Configure via
 	// HTTP_API_SUBMIT_FILE_DEFAULTS.
+	// DBMirrorTokenSubject overrides the identity the htcondordb token
+	// asserts, default "condor@<trust domain>". Configure via
+	// HTTP_API_DBMIRROR_TOKEN_SUBJECT.
+	DBMirrorTokenSubject string
+
 	SubmitFileDefaults string
 	// SubmitFileOverrides are submit-file lines applied to every
 	// submission that WIN over whatever the submit file says. Use for
@@ -600,6 +610,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		jobMirror:                 jobMirror,
 		credd:                     cfg.Credd,
 		placementd:                cfg.Placementd,
+		dbMirrorTokenSubject:      cfg.DBMirrorTokenSubject,
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
@@ -750,6 +761,21 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	} else {
 		h.creddAvailable.Store(true)
 		h.creddDiscovered = false // Explicitly provided, no need for updates
+	}
+
+	// Give the mirror a way to authenticate. Attached here rather than at
+	// construction because the signing key lives on the handler, which
+	// the Locator is built inside. A daemon with no signing key gets no
+	// source at all, which the Locator reads as "not configured" and
+	// stays quiet about.
+	if src := h.mirrorTokenSource(); src != nil {
+		h.dbMirror.SetTokenSource(src)
+		logger.Info(logging.DestinationHTTP, "htcondordb mirror will authenticate with an IDTOKEN",
+			"subject", h.dbMirrorTokenSubject, "trust_domain", h.trustDomain)
+	} else if h.dbMirror.Enabled() {
+		logger.Info(logging.DestinationHTTP,
+			"htcondordb mirror has no IDTOKEN to offer; it can only use the ambient SEC_CLIENT_AUTHENTICATION_METHODS",
+			"signing_key_configured", h.signingKeyPath != "", "trust_domain_configured", h.trustDomain != "")
 	}
 
 	// Discover the placementd. It is optional, so a failure here is

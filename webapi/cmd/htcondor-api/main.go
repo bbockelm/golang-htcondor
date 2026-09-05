@@ -553,6 +553,14 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 	return ""
 }
 
+// firstConfigValue returns a config value, or "" when unset.
+func firstConfigValue(cfg *config.Config, knob string) string {
+	if v, ok := cfg.Get(knob); ok {
+		return v
+	}
+	return ""
+}
+
 // loadSubmitFileLines returns a verbatim block of operator-supplied
 // submit-file directives from the named config knob. Same trust model as
 // loadInteractiveExtraSubmit: the value is operator-only configuration
@@ -1376,6 +1384,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
+		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
 		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
 		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
 		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
