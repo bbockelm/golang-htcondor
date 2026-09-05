@@ -36,6 +36,11 @@ type AuthMeResponse struct {
 	// banner can say how long is left rather than have the mode silently
 	// lapse mid-task.
 	SuperuserExpiresAt *time.Time `json:"superuser_expires_at,omitempty"`
+	// SuperuserIdentity is what actions will be attributed to on the schedd
+	// while the mode is armed, and SuperuserNote explains it if that is not
+	// the operator themselves.
+	SuperuserIdentity string `json:"superuser_identity,omitempty"`
+	SuperuserNote     string `json:"superuser_note,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -60,9 +65,12 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
 		if resp.SuperuserAllowed {
 			if sessionID, err := getSessionCookie(r); err == nil {
-				if armed, until := s.superuserArmed.Armed(sessionID); armed {
+				if armed, ok := s.superuserArmed.Armed(sessionID); ok {
 					resp.SuperuserActive = true
+					until := armed.until
 					resp.SuperuserExpiresAt = &until
+					resp.SuperuserIdentity = armed.identity
+					resp.SuperuserNote = armed.note
 				}
 			}
 		}
@@ -87,6 +95,9 @@ type SuperuserModeResponse struct {
 	// the shared account, only this server and the job's reason string do.
 	Identity              string `json:"identity,omitempty"`
 	ActorIsQueueSuperUser bool   `json:"actor_is_queue_superuser,omitempty"`
+	// Note explains a fallback when one happened, including how to fix it.
+	// Empty when the operator is acting as themselves.
+	Note string `json:"note,omitempty"`
 }
 
 // handleSuperuserMode handles POST /api/v1/admin/superuser.
@@ -131,12 +142,14 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 
 	resp := SuperuserModeResponse{}
 	if req.Enabled {
-		until := s.superuserArmed.Arm(sessionID)
+		armed := s.resolveImpersonationIdentity(r.Context(), session.Username)
+		until := s.superuserArmed.Arm(sessionID, armed)
 		resp.Active = true
 		resp.ExpiresAt = &until
-		identity, isSuper := s.superuserPolicy.ImpersonationIdentity(session.Username)
-		resp.Identity = identity
-		resp.ActorIsQueueSuperUser = isSuper
+		resp.Identity = armed.identity
+		resp.ActorIsQueueSuperUser = armed.actorIsSuperUser
+		resp.Note = armed.note
+		identity, isSuper := armed.identity, armed.actorIsSuperUser
 		// Arming is itself worth an audit record: it is the moment an
 		// operator took on the ability to act as anyone, and it may be
 		// the only entry if they then do nothing.

@@ -123,6 +123,10 @@ export interface Session {
   // When it disarms itself, so the banner can count down rather than let the
   // mode lapse silently mid-task.
   superuser_expires_at?: string;
+  // What actions will be attributed to on the schedd while armed, and an
+  // explanation when that is not the operator themselves.
+  superuser_identity?: string;
+  superuser_note?: string;
 }
 
 export interface SuperuserModeState {
@@ -134,6 +138,8 @@ export interface SuperuserModeState {
   // string do.
   identity?: string;
   actor_is_queue_superuser?: boolean;
+  // Explains a fallback and how to fix it. Empty when acting as yourself.
+  note?: string;
 }
 
 export interface DashboardStats {

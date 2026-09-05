@@ -1398,7 +1398,10 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 			planCtx := ctx
 			planReason := reason
 			if plan.Imp != nil {
-				impCtx, _, impErr := s.impersonate(ctx, plan.Imp.Actor, plan.Imp.Target)
+				impCtx, _, impErr := s.impersonate(ctx, armedSession{
+					identity:         plan.Imp.Identity,
+					actorIsSuperUser: plan.Imp.ActorIsSuperUser,
+				}, plan.Imp.Actor, plan.Imp.Target)
 				if impErr != nil {
 					s.writeError(w, http.StatusForbidden, impErr.Error())
 					return

@@ -2,11 +2,14 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -92,10 +95,10 @@ func TestImpersonateRequiresActorAndTarget(t *testing.T) {
 	h := superuserTestHandler(t, []string{"condor@example.org"})
 	ctx := context.Background()
 
-	if _, _, err := h.impersonate(ctx, "", "alice"); err == nil {
+	if _, _, err := h.impersonate(ctx, armedSession{identity: "condor@example.org"}, "", "alice"); err == nil {
 		t.Errorf("expected an error with no actor")
 	}
-	if _, _, err := h.impersonate(ctx, "bob", ""); err == nil {
+	if _, _, err := h.impersonate(ctx, armedSession{identity: "condor@example.org"}, "bob", ""); err == nil {
 		t.Errorf("expected an error with no target")
 	}
 }
@@ -103,7 +106,7 @@ func TestImpersonateRequiresActorAndTarget(t *testing.T) {
 func TestImpersonateRefusedWhenDisabled(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
 	h := &Handler{logger: logger, uidDomain: "example.org"} // no group, no policy
-	if _, _, err := h.impersonate(context.Background(), "bob", "alice"); err == nil {
+	if _, _, err := h.impersonate(context.Background(), armedSession{identity: "condor@example.org"}, "bob", "alice"); err == nil {
 		t.Errorf("impersonation must be refused when superuser mode is off")
 	}
 }
@@ -128,12 +131,14 @@ func TestSuperuserAuthzExcludesAdministrator(t *testing.T) {
 func TestSuperuserSessionArmAndExpiry(t *testing.T) {
 	s := newSuperuserSessions(50 * time.Millisecond)
 
-	if armed, _ := s.Armed("sess"); armed {
+	if _, ok := s.Armed("sess"); ok {
 		t.Errorf("a fresh session must not be armed")
 	}
-	s.Arm("sess")
-	if armed, _ := s.Armed("sess"); !armed {
+	s.Arm("sess", armedSession{identity: "condor@example.org"})
+	if a, ok := s.Armed("sess"); !ok {
 		t.Errorf("session should be armed after Arm")
+	} else if a.identity != "condor@example.org" {
+		t.Errorf("armed identity = %q, want it preserved", a.identity)
 	}
 	if s.Count() != 1 {
 		t.Errorf("Count = %d, want 1", s.Count())
@@ -141,20 +146,20 @@ func TestSuperuserSessionArmAndExpiry(t *testing.T) {
 
 	// Auto-disarm: an admin who walks away must not leave the mode on.
 	time.Sleep(80 * time.Millisecond)
-	if armed, _ := s.Armed("sess"); armed {
+	if _, ok := s.Armed("sess"); ok {
 		t.Errorf("session should have disarmed itself")
 	}
 	if s.Count() != 0 {
 		t.Errorf("expired session still counted")
 	}
 
-	s.Arm("sess")
+	s.Arm("sess", armedSession{identity: "condor@example.org"})
 	s.Disarm("sess")
-	if armed, _ := s.Armed("sess"); armed {
+	if _, ok := s.Armed("sess"); ok {
 		t.Errorf("Disarm did not take effect")
 	}
 
-	if armed, _ := s.Armed(""); armed {
+	if _, ok := s.Armed(""); ok {
 		t.Errorf("an empty session id must never be armed")
 	}
 }
@@ -269,26 +274,111 @@ func TestBulkOwnerCapIsMeaningful(t *testing.T) {
 func TestArmedStateIsPerSession(t *testing.T) {
 	s := newSuperuserSessions(time.Hour)
 
-	s.Arm("alice-session")
+	s.Arm("alice-session", armedSession{identity: "alice@example.org"})
 
-	if armed, _ := s.Armed("alice-session"); !armed {
+	if _, ok := s.Armed("alice-session"); !ok {
 		t.Errorf("the arming session should be armed")
 	}
-	if armed, _ := s.Armed("bob-session"); armed {
+	if _, ok := s.Armed("bob-session"); ok {
 		t.Errorf("arming one session armed another")
 	}
 	// A second browser for the same human is a different session and is
 	// independently unarmed.
-	if armed, _ := s.Armed("alice-other-browser"); armed {
+	if _, ok := s.Armed("alice-other-browser"); ok {
 		t.Errorf("arming leaked across sessions")
 	}
 
-	s.Arm("bob-session")
+	s.Arm("bob-session", armedSession{identity: "condor@example.org"})
 	s.Disarm("alice-session")
-	if armed, _ := s.Armed("bob-session"); !armed {
+	b, ok := s.Armed("bob-session")
+	if !ok {
 		t.Errorf("disarming one session disarmed another")
 	}
-	if armed, _ := s.Armed("alice-session"); armed {
+	// Each session keeps its OWN resolved identity; one operator's
+	// fallback must not become another's.
+	if b.identity != "condor@example.org" {
+		t.Errorf("bob's identity = %q, want its own", b.identity)
+	}
+	if _, ok := s.Armed("alice-session"); ok {
 		t.Errorf("disarm did not take effect")
+	}
+}
+
+// TestResolveImpersonationIdentityNeedsAUserRec covers the smoothing that the
+// integration test forced: being in QUEUE_SUPER_USERS is necessary but not
+// sufficient. The schedd's UserCheck2 maps the caller to a JobQueueUserRec
+// FIRST and rejects a caller it cannot map, before superuser status is
+// consulted at all -- so acting as an admin who has never submitted fails, and
+// fails pointing nowhere near the cause. Falling back keeps it working.
+func TestResolveImpersonationIdentityNeedsAUserRec(t *testing.T) {
+	disabled := false
+	enabled := true
+
+	for _, tc := range []struct {
+		name         string
+		record       *htcondor.UserRecord
+		lookupErr    error
+		wantIdentity string
+		wantAsActor  bool
+		wantNote     string // substring
+	}{
+		{
+			name:         "queue superuser with a record acts as themselves",
+			record:       &htcondor.UserRecord{User: "bob@example.org", Enabled: &enabled},
+			wantIdentity: "bob@example.org",
+			wantAsActor:  true,
+		},
+		{
+			name:         "queue superuser with no record falls back",
+			record:       nil,
+			wantIdentity: "condor@example.org",
+			wantNote:     "condor_qusers -add",
+		},
+		{
+			name:         "disabled record falls back and says so",
+			record:       &htcondor.UserRecord{User: "bob@example.org", Enabled: &disabled, DisableReason: "on leave"},
+			wantIdentity: "condor@example.org",
+			wantNote:     "disabled",
+		},
+		{
+			// A schedd blip must not silently downgrade the audit trail;
+			// if the record really is missing the action fails loudly.
+			name:         "lookup failure still prefers the actor",
+			lookupErr:    errors.New("schedd unreachable"),
+			wantIdentity: "bob@example.org",
+			wantAsActor:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := superuserTestHandler(t, []string{"bob@example.org", "condor@example.org"})
+			fake := &fakeUserRecords{record: tc.record, err: tc.lookupErr}
+			got := h.resolveImpersonationIdentityWith(context.Background(), "bob", fake)
+
+			if got.identity != tc.wantIdentity {
+				t.Errorf("identity = %q, want %q", got.identity, tc.wantIdentity)
+			}
+			if got.actorIsSuperUser != tc.wantAsActor {
+				t.Errorf("actorIsSuperUser = %v, want %v", got.actorIsSuperUser, tc.wantAsActor)
+			}
+			if tc.wantNote == "" && got.note != "" {
+				t.Errorf("unexpected note: %s", got.note)
+			}
+			if tc.wantNote != "" && !strings.Contains(got.note, tc.wantNote) {
+				t.Errorf("note %q does not mention %q", got.note, tc.wantNote)
+			}
+		})
+	}
+}
+
+// TestResolveIdentityNoteForNonSuperuser: an operator who is simply not a
+// queue superuser should be told, since the fix is one config change.
+func TestResolveIdentityNoteForNonSuperuser(t *testing.T) {
+	h := superuserTestHandler(t, []string{"condor@example.org"})
+	got := h.resolveImpersonationIdentityWith(context.Background(), "carol", &fakeUserRecords{})
+	if got.identity != "condor@example.org" || got.actorIsSuperUser {
+		t.Fatalf("got (%q, %v), want the fallback", got.identity, got.actorIsSuperUser)
+	}
+	if !strings.Contains(got.note, "QUEUE_SUPER_USERS") {
+		t.Errorf("note should explain why: %s", got.note)
 	}
 }

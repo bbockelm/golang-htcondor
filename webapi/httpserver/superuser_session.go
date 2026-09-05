@@ -24,23 +24,42 @@ const defaultSuperuserArmTTL = 30 * time.Minute
 // than making an admin click the button again.
 type superuserSessions struct {
 	mu  sync.RWMutex
-	on  map[string]time.Time // session id -> when it disarms
+	on  map[string]armedSession
 	ttl time.Duration
+}
+
+// armedSession is what one armed browser session carries.
+//
+// The identity is resolved once, here, rather than per action. Deciding it at
+// arm time means the schedd can be consulted about it -- which it must be, see
+// resolveImpersonationIdentity -- without putting a daemon round trip on the
+// path of every job operation. It also means the operator is told up front
+// which identity their actions will carry, instead of finding out from an
+// audit log afterwards.
+type armedSession struct {
+	until            time.Time
+	identity         string
+	actorIsSuperUser bool
+	// note explains a fallback, when one happened. Surfaced to the
+	// operator so a silent downgrade in audit fidelity is not silent.
+	note string
 }
 
 func newSuperuserSessions(ttl time.Duration) *superuserSessions {
 	if ttl <= 0 {
 		ttl = defaultSuperuserArmTTL
 	}
-	return &superuserSessions{on: make(map[string]time.Time), ttl: ttl}
+	return &superuserSessions{on: make(map[string]armedSession), ttl: ttl}
 }
 
-// Arm turns the mode on for a session and returns when it will disarm.
-func (s *superuserSessions) Arm(sessionID string) time.Time {
+// Arm turns the mode on for a session with a resolved identity, and returns
+// when it will disarm.
+func (s *superuserSessions) Arm(sessionID string, a armedSession) time.Time {
 	until := time.Now().Add(s.ttl)
+	a.until = until
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.on[sessionID] = until
+	s.on[sessionID] = a
 	return until
 }
 
@@ -56,27 +75,27 @@ func (s *superuserSessions) Disarm(sessionID string) {
 // Expiry is enforced on read rather than by a sweeper: the only thing that
 // matters is that an expired session cannot act, and checking here means that
 // is true the instant it expires regardless of when a sweep would have run.
-func (s *superuserSessions) Armed(sessionID string) (bool, time.Time) {
+func (s *superuserSessions) Armed(sessionID string) (armedSession, bool) {
 	if sessionID == "" {
-		return false, time.Time{}
+		return armedSession{}, false
 	}
 	s.mu.RLock()
-	until, ok := s.on[sessionID]
+	a, ok := s.on[sessionID]
 	s.mu.RUnlock()
 	if !ok {
-		return false, time.Time{}
+		return armedSession{}, false
 	}
-	if time.Now().After(until) {
+	if time.Now().After(a.until) {
 		// Drop the stale entry so the map does not grow without bound
 		// across a long-lived process.
 		s.mu.Lock()
-		if cur, still := s.on[sessionID]; still && !cur.After(time.Now()) {
+		if cur, still := s.on[sessionID]; still && !cur.until.After(time.Now()) {
 			delete(s.on, sessionID)
 		}
 		s.mu.Unlock()
-		return false, time.Time{}
+		return armedSession{}, false
 	}
-	return true, until
+	return a, true
 }
 
 // Count returns how many sessions currently have the mode armed, for the
@@ -86,8 +105,8 @@ func (s *superuserSessions) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n := 0
-	for _, until := range s.on {
-		if until.After(now) {
+	for _, a := range s.on {
+		if a.until.After(now) {
 			n++
 		}
 	}

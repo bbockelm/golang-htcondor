@@ -58,6 +58,13 @@ export function SuperuserBanner({ session }: { session: Session | undefined }) {
         Actions you take may apply to <strong>other users&apos; jobs</strong>,
         and are recorded against your name.
       </span>
+      {session?.superuser_note && (
+        // Shown because the note always describes a downgrade in how well
+        // the action can be attributed, and each one has a concrete fix.
+        <span className="basis-full text-xs font-normal opacity-90">
+          {session.superuser_note}
+        </span>
+      )}
       <span className="ml-auto flex items-center gap-3">
         {lapsed ? (
           <span className="font-normal opacity-90">expired</span>

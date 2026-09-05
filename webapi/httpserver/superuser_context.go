@@ -77,7 +77,7 @@ func (i Impersonation) sessionTag() string {
 // It returns an error rather than silently falling back to the caller's own
 // identity: a superuser action that quietly degrades into "acted as myself"
 // would either fail confusingly or, worse, succeed against the wrong job.
-func (h *Handler) impersonate(ctx context.Context, actor, target string) (context.Context, *Impersonation, error) {
+func (h *Handler) impersonate(ctx context.Context, armed armedSession, actor, target string) (context.Context, *Impersonation, error) {
 	if !h.superuserModeAvailable() {
 		return nil, nil, fmt.Errorf("superuser mode is not enabled on this server")
 	}
@@ -90,13 +90,13 @@ func (h *Handler) impersonate(ctx context.Context, actor, target string) (contex
 		return nil, nil, fmt.Errorf("could not determine the job's owner")
 	}
 
-	identity, actorIsSuper := h.superuserPolicy.ImpersonationIdentity(actor)
 	imp := &Impersonation{
 		Actor:            qualifyUser(actor, h.uidDomain),
 		Target:           qualifyUser(target, h.uidDomain),
-		Identity:         identity,
-		ActorIsSuperUser: actorIsSuper,
+		Identity:         armed.identity,
+		ActorIsSuperUser: armed.actorIsSuperUser,
 	}
+	identity := armed.identity
 	if imp.Actor == "" {
 		imp.Actor = actor
 	}
@@ -211,7 +211,8 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 	if err != nil {
 		return ctx, nil, nil
 	}
-	if armed, _ := h.superuserArmed.Armed(sessionID); !armed {
+	armed, isArmed := h.superuserArmed.Armed(sessionID)
+	if !isArmed {
 		return ctx, nil, nil
 	}
 	session, ok := h.getSessionFromRequest(r)
@@ -228,7 +229,7 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 		return ctx, nil, nil
 	}
 
-	impCtx, imp, err := h.impersonate(ctx, session.Username, owner)
+	impCtx, imp, err := h.impersonate(ctx, armed, session.Username, owner)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -292,7 +293,8 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 	if err != nil {
 		return nil, nil
 	}
-	if armed, _ := h.superuserArmed.Armed(sessionID); !armed {
+	armed, isArmed := h.superuserArmed.Armed(sessionID)
+	if !isArmed {
 		return nil, nil
 	}
 	session, ok := h.getSessionFromRequest(r)
@@ -360,7 +362,7 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 			plans = append(plans, superuserBulkPlan{Constraint: scoped, Jobs: counts[owner]})
 			continue
 		}
-		_, imp, err := h.impersonate(ctx, session.Username, owner)
+		_, imp, err := h.impersonate(ctx, armed, session.Username, owner)
 		if err != nil {
 			return nil, err
 		}
@@ -386,4 +388,93 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 func (h *Handler) scopeForImpersonation(imp *Impersonation, cluster, proc int) (string, error) {
 	return scopeToOwner(ownerFromActor(imp.Target),
 		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+}
+
+// resolveImpersonationIdentity works out which identity this operator's
+// actions should carry, and whether it will actually work.
+//
+// Being in QUEUE_SUPER_USERS is necessary but NOT sufficient. The schedd's
+// UserCheck2 first maps the caller to a JobQueueUserRec and rejects a caller
+// it cannot map with "anonymous user not permitted" -- before it consults
+// superuser status at all. An administrator who is a queue superuser but has
+// never submitted a job has no such record, so acting as them fails, and fails
+// with a message that points nowhere near the cause.
+//
+// Rather than let that surface as a mysterious "the action did nothing", check
+// for the record here and fall back to the shared identity when it is missing.
+// The cost is audit fidelity, not function: the schedd will name the shared
+// account instead of the human, and the human's name survives only in this
+// server's audit log and in the reason written into the job. The note explains
+// that trade to the operator, along with how to fix it.
+//
+// Done at arm time because it needs a schedd round trip, and arming is rare
+// while actions are not.
+func (h *Handler) resolveImpersonationIdentity(ctx context.Context, actor string) armedSession {
+	schedd := h.getSchedd()
+	if schedd == nil {
+		identity, isSuper := h.superuserPolicy.ImpersonationIdentity(actor)
+		return armedSession{identity: identity, actorIsSuperUser: isSuper}
+	}
+	return h.resolveImpersonationIdentityWith(ctx, actor, schedd)
+}
+
+// resolveImpersonationIdentityWith is resolveImpersonationIdentity with the
+// user-record lookup injected, so the fallback rules are testable without a
+// live schedd. See UserRecordLookup.
+func (h *Handler) resolveImpersonationIdentityWith(ctx context.Context, actor string, lookup UserRecordLookup) armedSession {
+	identity, actorIsSuper := h.superuserPolicy.ImpersonationIdentity(actor)
+	if !actorIsSuper {
+		// Already the shared identity; nothing further to check. Whether
+		// the operator would PREFER to act as themselves is worth saying,
+		// since the fix is one command.
+		return armedSession{
+			identity: identity,
+			note: fmt.Sprintf(
+				"Acting as %s: %s is not in the schedd's QUEUE_SUPER_USERS. "+
+					"Actions will be attributed to the shared account by the schedd; "+
+					"your name is recorded in the audit log and in each job's reason.",
+				identity, actor),
+		}
+	}
+
+	qualified := qualifyUser(actor, h.uidDomain)
+	if lookup == nil {
+		return armedSession{identity: identity, actorIsSuperUser: true}
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, oracleTimeout)
+	defer cancel()
+	record, err := lookup.GetUserRecord(lookupCtx, qualified)
+	switch {
+	case err != nil:
+		// Could not tell. Prefer the actor anyway: they are a queue
+		// superuser, the record probably exists, and a schedd blip should
+		// not silently downgrade the audit trail. If it turns out to be
+		// missing the action fails loudly rather than doing the wrong
+		// thing quietly.
+		h.logger.Warn(logging.DestinationSecurity,
+			"Could not confirm the operator's schedd user record; acting as them anyway",
+			"actor", qualified, "error", err)
+		return armedSession{identity: identity, actorIsSuperUser: true}
+	case record == nil:
+		return armedSession{
+			identity: h.superuserPolicy.fallback,
+			note: fmt.Sprintf(
+				"Acting as %s rather than %s: the schedd has no user record for you, "+
+					"so it would refuse the action outright. Run `condor_qusers -add %s` "+
+					"on the access point to have your own name recorded by the schedd.",
+				h.superuserPolicy.fallback, qualified, qualified),
+		}
+	case record.IsDisabled():
+		// A disabled operator is a strange state to act from, and the
+		// schedd may well refuse. Say so rather than proceed silently.
+		return armedSession{
+			identity: h.superuserPolicy.fallback,
+			note: fmt.Sprintf(
+				"Acting as %s rather than %s: your user record on the access point is "+
+					"disabled (%s).", h.superuserPolicy.fallback, qualified, record.DisableReason),
+		}
+	default:
+		return armedSession{identity: identity, actorIsSuperUser: true}
+	}
 }
