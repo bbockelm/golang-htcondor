@@ -211,7 +211,15 @@ export default function SubmitPage() {
     queryKey: ['templates'],
     queryFn: api.templates.list,
   });
-  const templates = tplQuery.data?.templates ?? [];
+  // Memoised on the query data, not recreated per render: `?? []`
+  // produces a new array identity every time, so every useMemo and
+  // useEffect that lists `templates` as a dependency re-ran on every
+  // render and memoised nothing. That is what react-hooks/exhaustive-deps
+  // was reporting at this line.
+  const templates = useMemo(
+    () => tplQuery.data?.templates ?? [],
+    [tplQuery.data],
+  );
   // IDs the actor has personally saved. Used to flag the save dialog
   // as "Overwrite" rather than "Save", and to drive the save_template
   // tool's `action` reply (saved vs overwrote). Computed against the

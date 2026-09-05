@@ -54,7 +54,6 @@ export async function fetchTextWithCap(
   let buf = '';
   let bytesRead = 0;
   let truncated = false;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
