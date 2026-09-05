@@ -12,7 +12,6 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/ory/fosite"
-	"github.com/ory/fosite/handler/openid"
 )
 
 // OAuth2Storage implements fosite storage interfaces using the unified
@@ -388,9 +387,15 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 		return nil, err
 	}
 
-	if active == 0 {
-		return nil, fosite.ErrInactiveToken
-	}
+	// NOTE: the inactive check is deliberately deferred until after the
+	// request is hydrated below. fosite's refresh handler treats
+	// ErrInactiveToken as refresh-token reuse and calls
+	// handleRefreshTokenReuse(ctx, signature, originalRequest) to revoke
+	// the whole chain — which dereferences the requester we return
+	// alongside the error. Returning (nil, ErrInactiveToken) here panics
+	// that path, and since fosite marks the previous refresh token
+	// inactive on every rotation, a client that merely retries with its
+	// prior refresh token trips it.
 
 	client, err := s.GetClient(ctx, clientID)
 	if err != nil {
@@ -428,7 +433,12 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 		request.Session = session
 	} else {
 		// Create a default session if none provided
-		request.Session = &openid.DefaultSession{}
+		request.Session = newEmptySession()
+	}
+
+	// Report inactivity with the hydrated request; see the note above.
+	if active == 0 {
+		return request, fosite.ErrInactiveToken
 	}
 
 	return request, nil
@@ -878,4 +888,34 @@ func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceC
 		WHERE device_code = ?
 	`, deviceCode)
 	return err
+}
+
+// RevokeAllForSubject deactivates every access and refresh token belonging to
+// one subject, across all clients.
+//
+// This is the operator's answer to "this person is gone, cut them off now".
+// The refresh-time oracles handle the steady state, but they only fire when
+// the user's client next shows up, and only when an oracle can see the
+// removal at all; an admin needs a way to act immediately and unconditionally.
+//
+// It returns the number of token rows deactivated. Rows are marked inactive
+// rather than deleted so the admin token listing can still show what was
+// revoked.
+func (s *OAuth2Storage) RevokeAllForSubject(ctx context.Context, subject string) (int64, error) {
+	if subject == "" {
+		return 0, fmt.Errorf("subject is required")
+	}
+	var total int64
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		// Table names come from this fixed list, never from user input.
+		res, err := s.db.ExecContext(ctx,
+			"UPDATE "+table+" SET active = 0 WHERE subject = ? AND active = 1", subject) //nolint:gosec // G202: table is from a fixed literal list
+		if err != nil {
+			return total, fmt.Errorf("revoking %s for %s: %w", table, subject, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, nil
 }

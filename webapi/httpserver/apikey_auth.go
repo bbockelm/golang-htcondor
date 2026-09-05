@@ -134,6 +134,18 @@ func (s *Handler) authenticateAPIKey(r *http.Request, raw string) (context.Conte
 	ctx = htcondor.WithAuthenticatedUser(ctx, row.Creator)
 	ctx = withAPIKeyScopes(ctx, row.Scopes)
 	ctx = withAPIKeyMarker(ctx)
+
+	// A key carrying condor:/* scopes gets a schedd credential, limited
+	// to exactly those authorizations. A key without them stays as it
+	// always was: identity and scopes only, no way to reach the schedd.
+	if secCtx, err := s.apiKeySecurityContext(ctx, row); err != nil {
+		// Refuse rather than silently degrading to a key that cannot
+		// reach the schedd: a caller whose key says condor:/WRITE
+		// should get an error, not a confusing "no schedd auth".
+		return nil, fmt.Errorf("api key schedd credential: %w", err)
+	} else if secCtx != nil {
+		ctx = secCtx
+	}
 	if s.logger != nil {
 		s.logger.Debug(logging.DestinationSecurity, "Authenticated via API key",
 			"key_id", row.KeyID,

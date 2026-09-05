@@ -148,6 +148,25 @@ func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 		}
 	})
 
+	// The archive page's Mine/Everyone selector is an admin opting IN to
+	// the scoping they are not forced into. Without this the toggle would
+	// render but change nothing.
+	t.Run("admin session honors owned_by_me=true", func(t *testing.T) {
+		server.webuiAdminGroup = "condor-admins"
+		r := sessionReq("root", []string{"condor-admins"})
+		r.URL.RawQuery = "owned_by_me=true"
+		scoped, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain"), r, "JobStatus == 5")
+		if err != nil || !ok {
+			t.Fatalf("an admin asking for their own records must be scoped, got (%q, %v, %v)", scoped, ok, err)
+		}
+		if scopeAdmits(t, scoped, "alice") {
+			t.Errorf("scope admits another owner: %q", scoped)
+		}
+		if !scopeAdmits(t, scoped, "root") {
+			t.Errorf("the admin's own records were excluded: %q", scoped)
+		}
+	})
+
 	t.Run("bearer caller is not scoped by default", func(t *testing.T) {
 		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs/archive", nil)
 		if _, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "alice"), r, "JobStatus == 5"); ok || err != nil {

@@ -318,6 +318,10 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // handleIDPToken handles OAuth2 token requests for IDP
 func (h *Handler) handleIDPToken(w http.ResponseWriter, r *http.Request) {
+	// Bound the request body before anything parses the form, matching
+	// handleOAuth2Token. fosite parses it inside NewAccessRequest below.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	ctx := r.Context()
 
 	// Create a new session
@@ -333,6 +337,22 @@ func (h *Handler) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 
 	// If this is a refresh token grant, we already have the session
 	// If this is an authorization code grant, session is populated from the stored auth code
+
+	// Re-check the user on refresh. handleIDPAuthorize verifies the account
+	// still exists before issuing a code, but fosite's refresh handler
+	// replays the stored session without consulting the user table at all,
+	// so a user deleted with DELETE_USERREC — or reset to "pending" — would
+	// otherwise keep refreshing indefinitely. Unlike the MCP provider, the
+	// IDP owns its user records outright, so this check is authoritative
+	// and cheap: a single indexed lookup against the same DB.
+	if r.FormValue("grant_type") == "refresh_token" {
+		if err := h.reauthorizeIDPRefreshGrant(ctx, ar); err != nil {
+			h.logger.Info(logging.DestinationHTTP, "IDP refresh grant denied on reauthorization",
+				"username", ar.GetSession().GetSubject(), "error", err)
+			h.idpProvider.oauth2.WriteAccessError(ctx, w, ar, err)
+			return
+		}
+	}
 
 	// Create the access response
 	response, err := h.idpProvider.oauth2.NewAccessResponse(ctx, ar)

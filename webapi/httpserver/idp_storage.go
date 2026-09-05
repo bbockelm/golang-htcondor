@@ -421,9 +421,15 @@ func (s *IDPStorage) getTokenSession(ctx context.Context, table string, signatur
 		return nil, err
 	}
 
-	if active == 0 {
-		return nil, fosite.ErrInactiveToken
-	}
+	// NOTE: the inactive check is deliberately deferred until after the
+	// request is hydrated below. fosite's refresh handler treats
+	// ErrInactiveToken as refresh-token reuse and calls
+	// handleRefreshTokenReuse(ctx, signature, originalRequest) to revoke
+	// the whole chain — which dereferences the requester we return
+	// alongside the error. Returning (nil, ErrInactiveToken) here panics
+	// that path, and since fosite marks the previous refresh token
+	// inactive on every rotation, a client that merely retries with its
+	// prior refresh token trips it.
 
 	client, err := s.GetClient(ctx, clientID)
 	if err != nil {
@@ -457,6 +463,11 @@ func (s *IDPStorage) getTokenSession(ctx context.Context, table string, signatur
 		return nil, err
 	}
 	request.Session = session
+
+	// Report inactivity with the hydrated request; see the note above.
+	if active == 0 {
+		return request, fosite.ErrInactiveToken
+	}
 
 	return request, nil
 }
@@ -630,4 +641,25 @@ func (s *IDPStorage) GetPKCERequestSession(ctx context.Context, signature string
 // DeletePKCERequestSession deletes a PKCE request session
 func (s *IDPStorage) DeletePKCERequestSession(ctx context.Context, signature string) error {
 	return s.deleteTokenSession(ctx, "idp_pkce_requests", signature)
+}
+
+// RevokeAllForSubject deactivates every IDP access and refresh token belonging
+// to one subject. See OAuth2Storage.RevokeAllForSubject.
+func (s *IDPStorage) RevokeAllForSubject(ctx context.Context, subject string) (int64, error) {
+	if subject == "" {
+		return 0, fmt.Errorf("subject is required")
+	}
+	var total int64
+	for _, table := range []string{"idp_access_tokens", "idp_refresh_tokens"} {
+		// Table names come from this fixed list, never from user input.
+		res, err := s.db.ExecContext(ctx,
+			"UPDATE "+table+" SET active = 0 WHERE subject = ? AND active = 1", subject) //nolint:gosec // G202: table is from a fixed literal list
+		if err != nil {
+			return total, fmt.Errorf("revoking %s for %s: %w", table, subject, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, nil
 }

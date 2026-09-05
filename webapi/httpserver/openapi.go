@@ -390,6 +390,45 @@ const openAPISchema = `{
           "created_at": {"type": "string", "format": "date-time"}
         }
       },
+      "DBMirrorRoutingCount": {
+        "type": "object",
+        "description": "One routing tally since process start.",
+        "properties": {
+          "table": {"type": "string", "description": "Which read was being routed: jobs or history."},
+          "decision": {"type": "string", "enum": ["served", "declined"]},
+          "reason": {"type": "string", "description": "Why. \"served\" for a mirror read; otherwise the decline reason (stale, no_mirror, history_gap, unsupported_query, ...)."},
+          "count": {"type": "integer", "format": "int64"}
+        }
+      },
+      "DBMirrorHealth": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string", "enum": ["ok", "warning", "down"], "description": "\"ok\" only when reads are actually routing right now. A mirror that is up but too far behind to serve is \"warning\" -- it is running, not working."},
+          "required": {"type": "boolean", "description": "HTTP_API_DBMIRROR_REQUIRED: a read the mirror cannot serve fails instead of falling back to the schedd."},
+          "name": {"type": "string", "description": "The mirror actually in use."},
+          "address": {"type": "string"},
+          "pinned_name": {"type": "string", "description": "Configured targeting, echoed so a typo is visible next to the empty result it produced."},
+          "pinned_address": {"type": "string"},
+          "job_queue_caught_up": {"type": "boolean"},
+          "job_queue_staleness_seconds": {"type": "integer", "format": "int64"},
+          "history_staleness_seconds": {"type": "integer", "format": "int64"},
+          "history_gap": {"type": "boolean", "description": "A history durability gap, which stops all history routing."},
+          "jobs_tolerance_seconds": {"type": "integer", "format": "int64", "description": "Live job reads route to the mirror only below this staleness."},
+          "history_tolerance_seconds": {"type": "integer", "format": "int64"},
+          "last_error": {"type": "string"},
+          "last_success": {"type": "string", "format": "date-time"}
+        }
+      },
+      "DBMirrorStatus": {
+        "type": "object",
+        "properties": {
+          "enabled": {"type": "boolean", "description": "Whether routing can run at all. It needs both a collector to discover through and the HTCondor config whose SEC_* knobs authenticate the connection."},
+          "health": {"$ref": "#/components/schemas/DBMirrorHealth"},
+          "routing": {"type": "array", "items": {"$ref": "#/components/schemas/DBMirrorRoutingCount"}},
+          "served_total": {"type": "integer", "format": "int64"},
+          "declined_total": {"type": "integer", "format": "int64"}
+        }
+      },
       "PlacementStatus": {
         "type": "object",
         "properties": {
@@ -440,6 +479,19 @@ const openAPISchema = `{
           "200": {"description": "Deleted"},
           "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/dbmirror/status": {
+      "get": {
+        "summary": "htcondordb mirror routing status",
+        "description": "Whether reads are being served from an htcondordb mirror rather than the schedd, and if not, why. The same data is on /readyz and /metrics, but both of those answer a monitoring system; this is shaped for the admin UI and adds the per-decision counts that turn \"a mirror exists\" into \"a mirror is answering queries\". Counts are cumulative since process start. Requires membership in the web UI admin group.",
+        "operationId": "dbMirrorStatus",
+        "responses": {
+          "200": {"description": "Routing status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DBMirrorStatus"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Admin UI is not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

@@ -263,7 +263,7 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 
 	// First try to validate as OAuth2 token using fosite
 	ctx := r.Context()
-	session := &openid.DefaultSession{}
+	session := newEmptySession()
 
 	tokenType, accessRequest, err := h.oauth2Provider.GetProvider().IntrospectToken(
 		ctx,
@@ -690,8 +690,12 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		action := r.FormValue("action")
 
 		if action == "approve" {
-			// User approved - create session and complete authorization
-			session := DefaultOpenIDConnectSession(username)
+			// User approved - create session and complete authorization.
+			// The groups ride along in the session so that
+			// reauthorizeRefreshGrant can re-run this same policy when
+			// the grant is later refreshed; they are otherwise read once
+			// here and discarded.
+			session := DefaultOpenIDConnectSession(username).WithGroups(groups)
 
 			// Per-scope consent: a v1 consent page (rendered by
 			// renderConsentPage) carries `consent_form_version=1`
@@ -764,6 +768,40 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOAuth2Token handles OAuth2 token requests
+// oauthErrorFields turns a fosite error into log key/values that say
+// what actually went wrong.
+//
+// RFC6749Error.Error() returns only ErrorField -- the bare OAuth code,
+// e.g. "server_error" -- and its Unwrap returns the cause, which for a
+// storage or signing failure fosite records in DebugField without
+// setting a separate cause. So both `err` and an unwrap loop bottom out
+// at the code itself, which is how a 500 here reached the log as
+// `error=server_error root_error=server_error` and told an operator
+// nothing.
+//
+// DebugField is the useful one; it is logged server-side only and never
+// reaches the client (fosite gates that behind SendDebugMessagesToClients).
+func oauthErrorFields(err error) []any {
+	var rfcErr *fosite.RFC6749Error
+	if !errors.As(err, &rfcErr) {
+		return []any{"error", err}
+	}
+	fields := []any{"error", rfcErr.ErrorField}
+	if v := rfcErr.DescriptionField; v != "" {
+		fields = append(fields, "description", v)
+	}
+	if v := rfcErr.HintField; v != "" {
+		fields = append(fields, "hint", v)
+	}
+	if v := rfcErr.DebugField; v != "" {
+		fields = append(fields, "debug", v)
+	}
+	if cause := rfcErr.Unwrap(); cause != nil && cause.Error() != rfcErr.ErrorField {
+		fields = append(fields, "cause", cause)
+	}
+	return fields
+}
+
 func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	if h.oauth2Provider == nil {
 		h.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
@@ -805,24 +843,35 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create the session object
-	session := &openid.DefaultSession{}
+	// Create the session object. Must be our *Session: for a refresh
+	// grant fosite hydrates it from the stored row, and
+	// reauthorizeRefreshGrant below reads the group list and auth time
+	// out of it.
+	session := newEmptySession()
 
 	// Create access request
 	accessRequest, err := h.oauth2Provider.GetProvider().NewAccessRequest(ctx, r, session)
 	if err != nil {
-		// Extract more detailed error information
-		errorDetails := fmt.Sprintf("%v", err)
-		var rfc6749Err *fosite.RFC6749Error
-		if errors.As(err, &rfc6749Err) {
-			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
-				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
-		}
 		h.logger.Error(logging.DestinationHTTP, "Failed to create access request",
-			"error", err, "error_details", errorDetails,
-			"client_id", r.FormValue("client_id"))
+			append(oauthErrorFields(err),
+				"client_id", r.FormValue("client_id"))...)
 		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
+	}
+
+	// Re-run the authorization decision before minting anything. fosite's
+	// refresh handler has by now replayed the stored grant verbatim — same
+	// session, same scopes — having checked only that the *client* is still
+	// allowed them. This is the one point where the user is re-examined.
+	if grantType == "refresh_token" {
+		if err := h.reauthorizeRefreshGrant(ctx, accessRequest); err != nil {
+			h.logger.Info(logging.DestinationHTTP, "Refresh grant denied on reauthorization",
+				"client_id", accessRequest.GetClient().GetID(),
+				"username", accessRequest.GetSession().GetSubject(),
+				"error", err)
+			h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
+			return
+		}
 	}
 
 	// Create access response (for all flows - this generates tokens including refresh token)
@@ -831,16 +880,10 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		"requested_scopes", accessRequest.GetRequestedScopes())
 	response, err := h.oauth2Provider.GetProvider().NewAccessResponse(ctx, accessRequest)
 	if err != nil {
-		// Log more details about the error - unwrap to see the root cause
-		rootErr := err
-		for errors.Unwrap(rootErr) != nil {
-			rootErr = errors.Unwrap(rootErr)
-		}
 		h.logger.Error(logging.DestinationHTTP, "Failed to create access response",
-			"error", err,
-			"root_error", rootErr,
-			"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
-			"client_id", accessRequest.GetClient().GetID())
+			append(oauthErrorFields(err),
+				"grant_type", accessRequest.GetRequestForm().Get("grant_type"),
+				"client_id", accessRequest.GetClient().GetID())...)
 		h.oauth2Provider.GetProvider().WriteAccessError(ctx, w, accessRequest, err)
 		return
 	}
@@ -880,7 +923,7 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
 
 	// Create session
-	session := &openid.DefaultSession{}
+	session := newEmptySession()
 
 	// Handle device code access request
 	request, err := deviceHandler.HandleDeviceAccessRequest(ctx, deviceCode, session)
@@ -971,7 +1014,7 @@ func (h *Handler) handleOAuth2Introspect(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := r.Context()
-	session := &openid.DefaultSession{}
+	session := newEmptySession()
 
 	ir, err := h.oauth2Provider.GetProvider().NewIntrospectionRequest(ctx, r, session)
 	if err != nil {
@@ -1510,9 +1553,11 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Method 2: Check for session
+		var userGroups []string
 		if username == "" {
 			if session, ok := h.getSessionFromRequest(r); ok {
 				username = session.Username
+				userGroups = session.Groups
 				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 			}
 		}
@@ -1526,8 +1571,9 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 
 		switch action {
 		case "approve":
-			// Create session for user
-			session := DefaultOpenIDConnectSession(username)
+			// Create session for user. See the consent handler for why
+			// the group list is persisted with the grant.
+			session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
 
 			acceptedScopes := narrowDeviceApprovalScopes(r.Form, request)
 
