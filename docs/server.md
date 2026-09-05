@@ -105,6 +105,51 @@ A separate browser-session cookie is used for the SPA UI; it sits
 on top of (2) — the IDP issues the token; the cookie carries the
 session.
 
+### Refresh-grant re-authorization
+
+A refresh grant re-runs the authorization decision rather than
+replaying it, so an entitlement someone loses stops applying without
+waiting for their refresh token to lapse. Three knobs:
+
+| Config | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_OAUTH2_MAX_GRANT_LIFETIME` | `720h` (30d) | Caps a grant's total age, measured from consent, no matter how often it is refreshed. Requires a unit suffix. |
+| `HTTP_API_OAUTH2_REVOCATION_ORACLES` | `schedd-userrec` | Comma-separated oracle list consulted on each refresh. |
+| `HTTP_API_OAUTH2_REFRESH_TOKEN_LIFESPAN` | `720h` (30d) | Unchanged: how long one refresh token lives. Every refresh resets it, which is why the cap above exists. |
+
+Recognized oracles:
+
+- `schedd-userrec` (default) — honors `condor_qusers -disable <user>
+  -reason "..."`, revoking the grant and surfacing the reason. Reads
+  the schedd's per-user record at READ authorization; disabling
+  requires ADMINISTRATOR, so the API server can observe the decision
+  without being able to make it. A user with **no** record is treated
+  as unknown, not denied, because the schedd creates records lazily on
+  first submit.
+- `schedd-userrec-strict` — as above, but a user with no record is
+  revoked. Correct only where every user is provisioned up front with
+  `condor_qusers -add <user>`, which creates a record without the user
+  submitting anything. On an ordinary pool this locks out every new
+  user.
+- `schedd-acl` — probes `ALLOW_READ` / `ALLOW_WRITE` with
+  `DC_SEC_QUERY` and strips refused scopes. Never revokes outright: it
+  cannot see identity, and reports nothing useful where those ACLs are
+  wildcards. Costs up to two extra schedd round trips per refresh.
+- `none` — disable all oracles. The grant lifetime cap still applies.
+  This spelling exists because an unset config value and one set to
+  blank are indistinguishable, and both mean "use the defaults"; there
+  has to be a way to say "none" out loud.
+
+Oracles fail open: a schedd that is unreachable, or that has no record
+of the user, yields no opinion rather than a revocation, so a daemon
+outage does not log everyone out.
+
+Note the group list an oracle-free deployment relies on is captured at
+consent, so re-running group policy catches an operator changing
+`MCP_WRITE_GROUP` but not a user being removed from that group
+upstream. Removals are caught by the oracles, by
+`POST /api/v1/admin/oauth2/revoke`, and ultimately by the lifetime cap.
+
 ## API surface
 
 Endpoint groupings — full reference + request/response shapes are in

@@ -13,8 +13,6 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
-	"github.com/ory/fosite/handler/openid"
-	"github.com/ory/fosite/token/jwt"
 )
 
 // IDPProvider manages OAuth2 operations for the built-in IDP
@@ -187,16 +185,8 @@ func (p *IDPProvider) UpdateIssuer(issuer string) {
 	p.config.TokenURL = issuer + "/idp/token"
 }
 
-// DefaultIDPSession creates a default OpenID Connect session for IDP
-func DefaultIDPSession(username string) *openid.DefaultSession {
-	return &openid.DefaultSession{
-		Claims: &jwt.IDTokenClaims{
-			Subject:   username,
-			Issuer:    "htcondor-idp",
-			IssuedAt:  time.Now(),
-			ExpiresAt: time.Now().Add(1 * time.Hour),
-		},
-		Headers: &jwt.Headers{},
-		Subject: username,
-	}
+// DefaultIDPSession creates a default OpenID Connect session for the IDP.
+// See DefaultOpenIDConnectSession for why this returns *Session.
+func DefaultIDPSession(username string) *Session {
+	return newSession(username, "htcondor-idp")
 }

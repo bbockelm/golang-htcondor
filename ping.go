@@ -10,21 +10,30 @@ import (
 	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/message"
 )
 
 // Permission levels for DC_SEC_QUERY authorization checking.
 // These are sent as AuthCommand during the security handshake.
-// The naming follows HTCondor's command code constants (DC_NOP_*).
+//
+// The values come from cedar's commands package rather than being written
+// out here. They were previously hardcoded and every one from READ through
+// ADMINISTRATOR was off by one — DC_NOP_OWNER (DC_BASE+24) was missing from
+// the list, so DCNopRead asked the daemon about WRITE, DCNopWrite about
+// NEGOTIATOR, and DCNopAdministrator about OWNER. The mistake was invisible
+// because PingWithOptions never read the daemon's answer (see PingResult.
+// Authorized), so nothing depended on asking the right question.
 const (
-	DCNopRead            = 60021
-	DCNopWrite           = 60022
-	DCNopNegotiator      = 60023
-	DCNopAdministrator   = 60024
-	DCNopConfig          = 60025
-	DCNopDaemon          = 60026
-	DCNopAdvertiseStartd = 60027
-	DCNopAdvertiseSchedd = 60028
-	DCNopAdvertiseMaster = 60029
+	DCNopRead            = commands.DC_NOP_READ
+	DCNopWrite           = commands.DC_NOP_WRITE
+	DCNopNegotiator      = commands.DC_NOP_NEGOTIATOR
+	DCNopAdministrator   = commands.DC_NOP_ADMINISTRATOR
+	DCNopOwner           = commands.DC_NOP_OWNER
+	DCNopConfig          = commands.DC_NOP_CONFIG
+	DCNopDaemon          = commands.DC_NOP_DAEMON
+	DCNopAdvertiseStartd = commands.DC_NOP_ADVERTISE_STARTD
+	DCNopAdvertiseSchedd = commands.DC_NOP_ADVERTISE_SCHEDD
+	DCNopAdvertiseMaster = commands.DC_NOP_ADVERTISE_MASTER
 )
 
 // PingResult contains the result of a ping operation
@@ -41,8 +50,15 @@ type PingResult struct {
 	Encryption bool
 	// Authentication indicates whether authentication was performed
 	Authentication bool
-	// Authorized indicates whether the client is authorized for the requested permission level
-	// Only set when CheckPermission is specified
+	// Authorized reports the daemon's answer to the DC_SEC_QUERY probe:
+	// whether the authenticated identity would be permitted to run a
+	// command at the requested level. Only meaningful when
+	// PingOptions.CheckPermission was set; false otherwise.
+	//
+	// Note this is an authorization answer, not an identity one. It says
+	// the daemon's ACLs admit whatever identity the connection presented;
+	// it says nothing about whether that identity still exists wherever it
+	// originated.
 	Authorized bool
 	// Permission is the permission level that was checked (e.g., "READ", "WRITE")
 	// Only set when CheckPermission is specified
@@ -119,13 +135,14 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 		Authentication: negotiation.Authentication,
 	}
 
-	// If checking permissions, extract authorization result
+	// If checking permissions, read the daemon's DC_SEC_QUERY verdict.
 	if opts.CheckPermission != 0 {
-		// The authorization status should be in ValidCommands or a separate field
-		// For now, we'll consider the handshake success as authorization success
-		// TODO: Update once cedar exposes authorization status explicitly via SecAuthorizationSucceeded
-		result.Authorized = negotiation.Authentication // Temporary: if auth succeeded, consider authorized
 		result.Permission = permissionName(opts.CheckPermission)
+		authorized, err := readSecQueryResult(ctx, htcondorClient)
+		if err != nil {
+			return nil, err
+		}
+		result.Authorized = authorized
 	}
 
 	return result, nil
@@ -193,13 +210,14 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 		Authentication: negotiation.Authentication,
 	}
 
-	// If checking permissions, extract authorization result
+	// If checking permissions, read the daemon's DC_SEC_QUERY verdict.
 	if opts.CheckPermission != 0 {
-		// The authorization status should be in ValidCommands or a separate field
-		// For now, we'll consider the handshake success as authorization success
-		// TODO: Update once cedar exposes authorization status explicitly via SecAuthorizationSucceeded
-		result.Authorized = negotiation.Authentication // Temporary: if auth succeeded, consider authorized
 		result.Permission = permissionName(opts.CheckPermission)
+		authorized, err := readSecQueryResult(ctx, htcondorClient)
+		if err != nil {
+			return nil, err
+		}
+		result.Authorized = authorized
 	}
 
 	return result, nil
@@ -253,6 +271,34 @@ func looksLikeConnReset(err error) bool {
 	return strings.Contains(err.Error(), "connection reset by peer")
 }
 
+// readSecQueryResult reads the DC_SEC_QUERY reply that daemon core sends
+// after the security handshake, and reports whether the authenticated
+// identity is authorized for the level named by AuthCommand.
+//
+// The reply is a single ClassAd carrying AuthorizationSucceeded (see
+// daemon_command.cpp: the DC_SEC_QUERY branch of ExecCommand). It is what
+// makes this a real authorization probe rather than an authentication one:
+// the handshake itself succeeds either way, and only this ad distinguishes
+// "authenticated but denied" from "authorized". condor_ping reads the same
+// field.
+//
+// A read failure is reported as an error rather than a denial. Callers that
+// gate access on the result must treat an unreadable answer as "unknown",
+// not as "no" — an older daemon, a truncated reply, or a network blip must
+// not read as a revocation.
+func readSecQueryResult(ctx context.Context, htcondorClient *client.HTCondorClient) (bool, error) {
+	msg := message.NewMessageFromStream(htcondorClient.GetStream())
+	ad, err := msg.GetClassAd(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read DC_SEC_QUERY reply: %w", err)
+	}
+	authorized, ok := ad.EvaluateAttrBool("AuthorizationSucceeded")
+	if !ok {
+		return false, fmt.Errorf("DC_SEC_QUERY reply has no AuthorizationSucceeded attribute")
+	}
+	return authorized, nil
+}
+
 // permissionName converts a permission level constant to a human-readable name
 func permissionName(permission int) string {
 	switch permission {
@@ -264,6 +310,8 @@ func permissionName(permission int) string {
 		return "NEGOTIATOR"
 	case DCNopAdministrator:
 		return "ADMINISTRATOR"
+	case DCNopOwner:
+		return "OWNER"
 	case DCNopConfig:
 		return "CONFIG"
 	case DCNopDaemon:

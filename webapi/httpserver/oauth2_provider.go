@@ -13,8 +13,6 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
-	"github.com/ory/fosite/handler/openid"
-	"github.com/ory/fosite/token/jwt"
 )
 
 // OAuth2Provider manages OAuth2 operations
@@ -194,18 +192,13 @@ func (p *OAuth2Provider) UpdateIssuer(issuer string) {
 	p.config.AccessTokenIssuer = issuer
 }
 
-// DefaultOpenIDConnectSession creates a default OpenID Connect session
-func DefaultOpenIDConnectSession(username string) *openid.DefaultSession {
-	return &openid.DefaultSession{
-		Claims: &jwt.IDTokenClaims{
-			Subject:   username,
-			Issuer:    "htcondor-mcp",
-			IssuedAt:  time.Now(),
-			ExpiresAt: time.Now().Add(1 * time.Hour),
-		},
-		Headers: &jwt.Headers{},
-		Subject: username,
-	}
+// DefaultOpenIDConnectSession creates a default OpenID Connect session.
+//
+// The concrete type is *Session, not *openid.DefaultSession: grants issued
+// by this server must carry the group list and auth time that
+// reauthorizeRefreshGrant re-checks when the grant is later refreshed.
+func DefaultOpenIDConnectSession(username string) *Session {
+	return newSession(username, "htcondor-mcp")
 }
 
 // setStandardTokenExpiries populates Session.ExpiresAt for AccessToken and RefreshToken
@@ -228,7 +221,7 @@ func setStandardTokenExpiries(ctx context.Context, cfg *fosite.Config, session f
 
 // IntrospectToken validates an access token and returns the session
 func (p *OAuth2Provider) IntrospectToken(ctx context.Context, token string) (fosite.Session, error) {
-	session := DefaultOpenIDConnectSession("")
+	session := newEmptySession()
 	_, _, err := p.oauth2.IntrospectToken(ctx, token, fosite.AccessToken, session, []string{}...)
 	if err != nil {
 		return nil, err
