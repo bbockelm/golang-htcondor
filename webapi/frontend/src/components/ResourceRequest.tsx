@@ -186,7 +186,7 @@ export function ResourceRequestPanel({
         />
       </div>
 
-      <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+      <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 space-y-3">
         <div className="flex items-center gap-3">
           <label className="text-sm font-medium text-gray-700" htmlFor={`${numId}-gpu`}>
             GPUs
@@ -198,7 +198,7 @@ export function ResourceRequestPanel({
             max={16}
             value={value.gpus}
             onChange={(e) => patch({ gpus: clampInt(e.target.value, 0, 16, 0) })}
-            className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+            className="w-20 rounded-sm border border-gray-300 px-2 py-1 text-sm"
           />
           <span className="text-xs text-gray-500">
             {value.gpus === 0
@@ -245,7 +245,7 @@ function NumField({
         step={step}
         value={value}
         onChange={(e) => onChange(clampInt(e.target.value, min, max, value))}
-        className="mt-1 w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+        className="mt-1 w-full rounded-sm border border-gray-300 px-3 py-1.5 text-sm"
       />
       {hint && <span className="block text-[11px] text-gray-400 mt-0.5">{hint}</span>}
     </label>
@@ -275,7 +275,7 @@ function TextField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="mt-1 w-full rounded border border-gray-300 px-3 py-1.5 font-mono text-xs"
+        className="mt-1 w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-xs"
       />
       {hint && <span className="block text-[11px] text-gray-400 mt-0.5">{hint}</span>}
     </label>
@@ -299,7 +299,7 @@ function SelectField({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded border border-gray-300 bg-white px-3 py-1.5 text-sm"
+        className="mt-1 w-full rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

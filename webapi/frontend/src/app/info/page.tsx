@@ -157,7 +157,7 @@ function DBMirrorSection() {
               <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
                 Routing decisions since startup
               </h3>
-              <div className="overflow-x-auto rounded border border-gray-200">
+              <div className="overflow-x-auto rounded-sm border border-gray-200">
                 <table className="min-w-full text-sm">
                   <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                     <tr>
@@ -471,7 +471,7 @@ function CondorConfigSection() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter by key or value (substring, case-insensitive)…"
-              className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm"
+              className="flex-1 rounded-sm border border-gray-300 px-2 py-1 text-sm"
               aria-label="Filter HTCondor config"
             />
             <span className="text-[11px] text-gray-500 tabular-nums shrink-0">
@@ -495,7 +495,7 @@ function CondorConfigSection() {
               admin readout never displaces the rest of the page.
               Using max-h instead of h means short filtered results
               don't get a wasteful scrollbar. */}
-          <div className="overflow-y-auto rounded border border-gray-200 max-h-[28rem]">
+          <div className="overflow-y-auto rounded-sm border border-gray-200 max-h-112">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-xs text-gray-500">
                 {modifiedOnly
@@ -519,7 +519,7 @@ function CondorConfigSection() {
                       <td className="px-3 py-1.5 align-top font-mono text-gray-900 break-all">
                         {e.redacted ? (
                           <span
-                            className="rounded bg-gray-200 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-600"
+                            className="rounded-sm bg-gray-200 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-600"
                             title="Server-side redacted; the key is set but the value is hidden"
                           >
                             redacted

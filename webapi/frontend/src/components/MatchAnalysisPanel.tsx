@@ -161,7 +161,7 @@ export function MatchAnalysisPanel({
 
   return (
     <details
-      className="rounded border border-gray-200 bg-white"
+      className="rounded-sm border border-gray-200 bg-white"
       open={defaultOpen}
     >
       <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
@@ -173,7 +173,7 @@ export function MatchAnalysisPanel({
         ) : (
           <p className="text-xs text-gray-600">
             Run a {' '}
-            <code className="text-[11px] bg-gray-100 px-1 py-0.5 rounded">
+            <code className="text-[11px] bg-gray-100 px-1 py-0.5 rounded-sm">
               condor_q -better-analyze
             </code>
             -style breakdown of this job&apos;s requirements against the
@@ -187,7 +187,7 @@ export function MatchAnalysisPanel({
             still want to run early — but explains that a "no obvious
             problem" result on a 12-second-old job is expected. */}
         {jobIsFresh ? (
-          <div className="text-[11px] text-amber-800 border border-amber-200 bg-amber-50 rounded px-2 py-1.5">
+          <div className="text-[11px] text-amber-800 border border-amber-200 bg-amber-50 rounded-sm px-2 py-1.5">
             {/* "0s old" reads awkwardly the moment after submit;
                 phrase the very-young case as "just submitted" and only
                 quote the seconds once there's a meaningful number. */}
@@ -213,7 +213,7 @@ export function MatchAnalysisPanel({
                 ? `Match analysis is only useful for idle or held jobs (current state: ${jobStatus ?? 'unknown'}).`
                 : undefined
             }
-            className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            className="rounded-sm bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             {loading
               ? 'Running…'
@@ -249,14 +249,14 @@ export function MatchAnalysisPanel({
             <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
               Slot projection ({data.slot_cache.projection.length} attrs)
             </summary>
-            <code className="mt-1 block bg-gray-50 border border-gray-200 rounded px-2 py-1 text-gray-700 break-all">
+            <code className="mt-1 block bg-gray-50 border border-gray-200 rounded-sm px-2 py-1 text-gray-700 break-all">
               {data.slot_cache.projection.join(', ')}
             </code>
           </details>
         ) : null}
 
         {error ? (
-          <div className="text-xs text-red-700 border border-red-200 bg-red-50 rounded px-3 py-2">
+          <div className="text-xs text-red-700 border border-red-200 bg-red-50 rounded-sm px-3 py-2">
             {error}
           </div>
         ) : null}
@@ -310,7 +310,7 @@ function MatchAnalysisBody({ data }: { data: MatchAnalysisResponse }) {
 
   return (
     <div className="space-y-3">
-      <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2">
+      <div className="rounded-sm border border-gray-200 bg-gray-50 px-3 py-2">
         <div className="text-sm">
           <span className="font-semibold">{result.full_matches}</span>
           <span className="text-gray-600">
@@ -330,7 +330,7 @@ function MatchAnalysisBody({ data }: { data: MatchAnalysisResponse }) {
       </div>
 
       {requirements ? (
-        <details className="rounded border border-gray-200">
+        <details className="rounded-sm border border-gray-200">
           <summary className="cursor-pointer px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
             Job Requirements expression
           </summary>
@@ -415,7 +415,7 @@ function NarrowingHint({
           {sug.options.map((opt) => (
             <li key={opt.new_value}>
               <span className="text-gray-700">
-                Set <code className="text-[11px] bg-white border border-gray-300 px-1 py-0.5 rounded">{sug.job_attribute} = {opt.new_value}</code>
+                Set <code className="text-[11px] bg-white border border-gray-300 px-1 py-0.5 rounded-sm">{sug.job_attribute} = {opt.new_value}</code>
               </span>{' '}
               <span className="text-emerald-800">
                 → unlocks{' '}
@@ -430,7 +430,7 @@ function NarrowingHint({
         </ul>
         <div className="text-gray-500 text-[11px]">
           (The narrowing predicate{' '}
-          <code className="text-[11px] bg-white border border-gray-300 px-0.5 rounded">
+          <code className="text-[11px] bg-white border border-gray-300 px-0.5 rounded-sm">
             {predicate.source}
           </code>{' '}
           compares this slot attribute against the job&apos;s request.)
@@ -443,7 +443,7 @@ function NarrowingHint({
       <span className="font-medium text-amber-800">
         Narrowing predicate:
       </span>{' '}
-      <code className="text-[11px] bg-white border border-gray-300 px-1 py-0.5 rounded">
+      <code className="text-[11px] bg-white border border-gray-300 px-1 py-0.5 rounded-sm">
         {predicate.source}
       </code>
       <span className="text-gray-500">
@@ -489,7 +489,7 @@ function PredicateRow({
         <span className="text-[11px] text-gray-500 font-mono">
           #{predicate.index}
         </span>
-        <code className="text-[11px] bg-gray-100 px-1 py-0.5 rounded font-mono break-all">
+        <code className="text-[11px] bg-gray-100 px-1 py-0.5 rounded-sm font-mono break-all">
           {predicate.source}
         </code>
         {isNarrowing ? (
@@ -517,7 +517,7 @@ function PredicateRow({
       </div>
 
       {/* Stacked horizontal bar for at-a-glance distribution. */}
-      <div className="mt-1.5 h-1.5 w-full bg-gray-100 rounded overflow-hidden flex">
+      <div className="mt-1.5 h-1.5 w-full bg-gray-100 rounded-sm overflow-hidden flex">
         <div
           className="bg-emerald-500"
           style={{ width: `${matchedPct}%` }}
@@ -698,7 +698,7 @@ function DistRow({
       <span className={labelClass} title={labelTitle}>
         {label}
       </span>
-      <div className="h-1 bg-gray-100 rounded overflow-hidden">
+      <div className="h-1 bg-gray-100 rounded-sm overflow-hidden">
         <div
           className={`${barClass} h-full`}
           style={{ width: `${(count / denom) * 100}%` }}

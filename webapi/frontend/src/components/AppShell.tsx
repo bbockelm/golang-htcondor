@@ -90,7 +90,7 @@ function MobileTopBar({ onOpen }: { onOpen: () => void }) {
       <button
         type="button"
         onClick={onOpen}
-        className="rounded p-1 text-gray-200 hover:bg-white/10 hover:text-white"
+        className="rounded-sm p-1 text-gray-200 hover:bg-white/10 hover:text-white"
         aria-label="Open menu"
       >
         <svg

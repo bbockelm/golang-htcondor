@@ -358,7 +358,7 @@ function NotesEditor({
         rows={2}
         autoFocus
         placeholder="What is this client?"
-        className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+        className="w-full rounded-sm border border-gray-300 px-2 py-1 text-xs focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
       />
       <div className="mt-1 flex gap-2">
         <button
@@ -368,7 +368,7 @@ function NotesEditor({
             onSave(draft);
             setEditing(false);
           }}
-          className="rounded bg-brand-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-sm bg-brand-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
           {saving ? 'Saving...' : 'Save'}
         </button>

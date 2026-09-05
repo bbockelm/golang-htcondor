@@ -440,7 +440,7 @@ export function ChatPanel({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="rounded-full border border-gray-300 bg-white px-4 py-1.5 text-xs text-gray-700 shadow-sm hover:bg-gray-50"
+          className="rounded-full border border-gray-300 bg-white px-4 py-1.5 text-xs text-gray-700 shadow-xs hover:bg-gray-50"
           aria-label="Open chat assistant"
         >
           {togglerLabel}
@@ -464,7 +464,7 @@ export function ChatPanel({
   };
 
   return (
-    <div className="mt-4 rounded-lg border border-gray-200 bg-white shadow-sm">
+    <div className="mt-4 rounded-lg border border-gray-200 bg-white shadow-xs">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-gray-200 px-3 py-2">
         <h2 className="text-sm font-semibold text-gray-900">{headerLabel}</h2>
         <div className="ml-auto flex items-center gap-2 text-xs">
@@ -472,7 +472,7 @@ export function ChatPanel({
             <button
               type="button"
               onClick={() => stop()}
-              className="rounded border border-gray-300 px-2 py-0.5 text-gray-600 hover:bg-gray-50"
+              className="rounded-sm border border-gray-300 px-2 py-0.5 text-gray-600 hover:bg-gray-50"
             >
               Stop
             </button>
@@ -531,14 +531,14 @@ export function ChatPanel({
         */}
         {(status === 'submitted' || isWaitingForFirstAssistantContent(status, messages)) && (
           <div className="flex justify-start">
-            <div className="inline-flex items-center gap-2 rounded bg-gray-50 px-3 py-1.5 text-sm text-gray-500">
+            <div className="inline-flex items-center gap-2 rounded-sm bg-gray-50 px-3 py-1.5 text-sm text-gray-500">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-gray-400" />
               <span>Thinking…</span>
             </div>
           </div>
         )}
         {error && (
-          <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          <div className="rounded-sm border border-red-200 bg-red-50 p-2 text-xs text-red-800">
             {error.message || 'Chat error'}
           </div>
         )}
@@ -553,7 +553,7 @@ export function ChatPanel({
             placeholder="Ask the assistant…"
             rows={2}
             disabled={status === 'streaming' || status === 'submitted'}
-            className="flex-1 min-w-0 resize-none rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400 disabled:bg-gray-50"
+            className="flex-1 min-w-0 resize-none rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400 disabled:bg-gray-50"
           />
           <button
             type="button"
@@ -563,7 +563,7 @@ export function ChatPanel({
               status === 'streaming' ||
               status === 'submitted'
             }
-            className="self-stretch rounded bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            className="self-stretch rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
           >
             Send
           </button>
@@ -752,11 +752,11 @@ function ApprovalCard({
   }, [menuOpen]);
 
   return (
-    <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs">
+    <div className="rounded-sm border border-amber-300 bg-amber-50 p-2 text-xs">
       <div className="font-medium text-amber-900">
         Approve <span className="font-mono">{request.toolName}</span>?
       </div>
-      <pre className="mt-1 max-h-32 overflow-auto rounded bg-white px-2 py-1 font-mono text-[11px] text-gray-800">
+      <pre className="mt-1 max-h-32 overflow-auto rounded-sm bg-white px-2 py-1 font-mono text-[11px] text-gray-800">
         {JSON.stringify(request.input, null, 2)}
       </pre>
       <div className="mt-1.5 flex gap-2">
@@ -786,7 +786,7 @@ function ApprovalCard({
           {menuOpen && (
             <div
               role="menu"
-              className="absolute left-0 top-full z-10 mt-1 min-w-[12rem] rounded border border-gray-200 bg-white shadow-md"
+              className="absolute left-0 top-full z-10 mt-1 min-w-48 rounded-sm border border-gray-200 bg-white shadow-md"
             >
               <button
                 type="button"
@@ -812,7 +812,7 @@ function ApprovalCard({
         <button
           type="button"
           onClick={onReject}
-          className="rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+          className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
         >
           Reject
         </button>
@@ -994,7 +994,7 @@ function PartView({
     else if (tp.state === 'approval-requested') suffix = '— awaiting approval';
     else suffix = '…';
     return (
-      <div className="my-1 inline-block rounded border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-mono text-gray-600">
+      <div className="my-1 inline-block rounded-sm border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-mono text-gray-600">
         {name} {suffix}
       </div>
     );

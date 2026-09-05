@@ -79,7 +79,7 @@ export function SuperuserBanner({ session }: { session: Session | undefined }) {
           type="button"
           onClick={() => disarm.mutate()}
           disabled={disarm.isPending}
-          className="rounded border border-white/60 bg-white/10 px-2 py-0.5 text-xs font-semibold hover:bg-white/20 disabled:opacity-60"
+          className="rounded-sm border border-white/60 bg-white/10 px-2 py-0.5 text-xs font-semibold hover:bg-white/20 disabled:opacity-60"
         >
           {disarm.isPending ? "Turning off…" : "Turn off"}
         </button>

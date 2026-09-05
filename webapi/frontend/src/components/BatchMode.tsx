@@ -85,7 +85,7 @@ export function BatchMode({ text, onChange, onValidityChange }: BatchModeProps) 
   }, [queueLine, error]);
 
   return (
-    <div className="rounded border border-gray-200 bg-white p-4 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
       <div className="text-sm font-medium text-gray-700">Batch mode</div>
       <div className="flex flex-wrap gap-2">
         {MODES.map((m) => (
@@ -178,7 +178,7 @@ function CountInput({
           const n = parseInt(e.target.value, 10);
           if (!Number.isNaN(n) && n > 0) setCount(n);
         }}
-        className="w-24 rounded border border-gray-300 px-2 py-1 text-sm"
+        className="w-24 rounded-sm border border-gray-300 px-2 py-1 text-sm"
       />
     </div>
   );
@@ -209,7 +209,7 @@ function TableEditor({
 
   return (
     <div className="space-y-2">
-      <div className="overflow-x-auto rounded border border-gray-200">
+      <div className="overflow-x-auto rounded-sm border border-gray-200">
         <table className="min-w-full text-xs">
           <thead className="bg-gray-50">
             <tr>
@@ -218,7 +218,7 @@ function TableEditor({
                   <input
                     value={c}
                     onChange={(e) => setColumn(i, e.target.value)}
-                    className="w-28 rounded border border-gray-300 px-1 py-0.5 font-mono text-xs"
+                    className="w-28 rounded-sm border border-gray-300 px-1 py-0.5 font-mono text-xs"
                     placeholder="var"
                   />
                 </th>
@@ -234,7 +234,7 @@ function TableEditor({
                     <input
                       value={row[c] ?? ''}
                       onChange={(e) => setCell(r, c, e.target.value)}
-                      className="w-28 rounded border border-gray-200 px-1 py-0.5 font-mono text-xs"
+                      className="w-28 rounded-sm border border-gray-200 px-1 py-0.5 font-mono text-xs"
                     />
                   </td>
                 ))}
@@ -257,7 +257,7 @@ function TableEditor({
         <button
           type="button"
           onClick={() => setRows([...rows, columns.map(() => '')])}
-          className="text-xs rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
+          className="text-xs rounded-sm border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
         >
           + row
         </button>
@@ -268,7 +268,7 @@ function TableEditor({
             setColumns([...columns, newCol]);
             setRows(rows.map((row) => [...row, '']));
           }}
-          className="text-xs rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
+          className="text-xs rounded-sm border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
         >
           + column
         </button>
@@ -280,7 +280,7 @@ function TableEditor({
               setColumns(next);
               setRows(rows.map((row) => row.slice(0, next.length)));
             }}
-            className="text-xs rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
+            className="text-xs rounded-sm border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
           >
             − column
           </button>
@@ -348,7 +348,7 @@ function CSVUploader({
       )}
 
       {parsed && (
-        <div className="overflow-x-auto rounded border border-gray-200 max-h-48">
+        <div className="overflow-x-auto rounded-sm border border-gray-200 max-h-48">
           <table className="min-w-full text-xs">
             <thead className="bg-gray-50 sticky top-0">
               <tr>

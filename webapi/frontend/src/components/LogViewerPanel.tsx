@@ -26,7 +26,7 @@ export function LogViewerPanel({ jobID }: { jobID: string }) {
   };
 
   return (
-    <div className="rounded border border-gray-200 bg-white p-4 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-gray-900">Job Log</h2>
         <div className="flex items-center gap-2">
@@ -38,7 +38,7 @@ export function LogViewerPanel({ jobID }: { jobID: string }) {
           <button
             onClick={load}
             disabled={loading}
-            className="text-xs rounded border border-gray-300 bg-white px-2 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            className="text-xs rounded-sm border border-gray-300 bg-white px-2 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             {loading ? 'Loading…' : data ? 'Refresh' : 'Load log'}
           </button>
@@ -74,7 +74,7 @@ export function LogViewerPanel({ jobID }: { jobID: string }) {
       )}
 
       {data && data.parseError && (
-        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-sm px-2 py-1">
           Parser stopped early: {data.parseError}
         </p>
       )}
@@ -88,7 +88,7 @@ export function LogViewerPanel({ jobID }: { jobID: string }) {
 function EventRow({ ev }: { ev: JobLogEvent }) {
   const tone = toneFor(ev);
   return (
-    <div className={`rounded border ${tone.border} ${tone.bg} p-2 text-sm`}>
+    <div className={`rounded-sm border ${tone.border} ${tone.bg} p-2 text-sm`}>
       <div className="flex items-start gap-2">
         <span
           aria-hidden
@@ -280,7 +280,7 @@ function BodyText({
   if (!trimmed) return null;
   if (!collapsible) {
     return (
-      <pre className="mt-1 max-h-40 overflow-auto rounded border border-gray-200 bg-white p-1.5 text-[11px] font-mono whitespace-pre-wrap text-gray-700">
+      <pre className="mt-1 max-h-40 overflow-auto rounded-sm border border-gray-200 bg-white p-1.5 text-[11px] font-mono whitespace-pre-wrap text-gray-700">
         {trimmed}
       </pre>
     );
@@ -290,7 +290,7 @@ function BodyText({
       <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
         Show raw body
       </summary>
-      <pre className="mt-1 max-h-60 overflow-auto rounded border border-gray-200 bg-white p-1.5 font-mono whitespace-pre-wrap text-gray-700">
+      <pre className="mt-1 max-h-60 overflow-auto rounded-sm border border-gray-200 bg-white p-1.5 font-mono whitespace-pre-wrap text-gray-700">
         {trimmed}
       </pre>
     </details>

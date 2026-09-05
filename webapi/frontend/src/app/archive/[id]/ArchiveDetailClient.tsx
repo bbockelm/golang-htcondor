@@ -94,7 +94,7 @@ export default function ArchiveDetailClient() {
       {isLoading && <p className="text-gray-400">Loading…</p>}
 
       {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {error.message}
         </div>
       )}
@@ -159,7 +159,7 @@ function ArchiveJobDetail({
 
   return (
     <div className="space-y-6">
-      <div className="rounded border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
+      <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
         <Field label="Owner" value={owner ?? '—'} />
         <Field

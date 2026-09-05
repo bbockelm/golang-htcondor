@@ -262,7 +262,7 @@ function FilterBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="Filter by id, owner, batch name, command, or status…"
-        className="min-w-0 flex-1 max-w-md rounded border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+        className="min-w-0 flex-1 max-w-md rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
       />
       {value && (
         <button

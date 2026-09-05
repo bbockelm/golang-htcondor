@@ -44,7 +44,7 @@ export default function AdminTokensPage() {
           placeholder="Filter by client ID"
           value={clientFilter}
           onChange={(e) => setClientFilter(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-1 text-sm font-mono w-72"
+          className="rounded-sm border border-gray-300 px-2 py-1 text-sm font-mono w-72"
         />
       </div>
 

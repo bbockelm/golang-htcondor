@@ -44,7 +44,7 @@ export function ChipList({
       {shown.map((item) => (
         <span
           key={item}
-          className={`inline-flex rounded px-1.5 py-0.5 font-mono text-[11px] ring-1 ring-inset ${toneClass}`}
+          className={`inline-flex rounded-sm px-1.5 py-0.5 font-mono text-[11px] ring-1 ring-inset ${toneClass}`}
         >
           {item}
         </span>
@@ -53,7 +53,7 @@ export function ChipList({
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="inline-flex rounded bg-white px-1.5 py-0.5 text-[11px] text-gray-500 ring-1 ring-inset ring-gray-200 hover:bg-gray-50 hover:text-gray-700"
+          className="inline-flex rounded-sm bg-white px-1.5 py-0.5 text-[11px] text-gray-500 ring-1 ring-inset ring-gray-200 hover:bg-gray-50 hover:text-gray-700"
           title={items.slice(max).join(" ")}
         >
           +{hidden}
