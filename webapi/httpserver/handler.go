@@ -67,6 +67,9 @@ type Handler struct {
 	// admin UI page that uses them, and is not a startup failure.
 	placementd          htcondor.PlacementdClient
 	placementdAvailable atomic.Bool
+	// clientUsage records "this OAuth2 client obtained a token" without
+	// a database write per token request. Nil when OAuth2 is disabled.
+	clientUsage *clientUsageRecorder
 	// interactiveExtraSubmit holds operator-supplied extra submit-file
 	// lines that the interactive-terminal and Jupyter handlers merge
 	// into every submit file just before the `queue` directive. Loaded
@@ -796,6 +799,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
 
+		// Debounced writer for the admin list's "last used" / "recent
+		// users" columns. Started here so it shares the provider's
+		// database handle and is stopped before that handle closes.
+		h.clientUsage = newClientUsageRecorder(oauth2Provider.GetStorage().GetDB(), 0)
+
 		// Set username claim name (default: "sub")
 		h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
 		if h.oauth2UsernameClaim == "" {
@@ -1490,6 +1498,11 @@ func (h *Handler) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		h.logger.Warn(logging.DestinationHTTP, "Shutdown timeout waiting for background goroutines")
 	}
+
+	// Flush pending client-usage state before the provider closes the
+	// database underneath it. A debounced write that never lands is the
+	// one failure mode this ordering exists to prevent.
+	h.clientUsage.Close()
 
 	// Close OAuth2 provider if enabled
 	if h.oauth2Provider != nil {
@@ -2323,6 +2336,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 			if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
 			} else {
+				h.markSeededClient(ctx, swaggerClientID, "Swagger UI")
 				h.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID)
 			}
 		}
@@ -2401,6 +2415,7 @@ func (h *Handler) initializeOAuth2(ln net.Listener, protocol string) {
 		if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
 		} else {
+			h.markSeededClient(ctx, swaggerClientID, "Swagger UI")
 			h.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
 		}
 	}

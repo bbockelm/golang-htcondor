@@ -102,7 +102,15 @@ func (h *Handler) setupRoutes() {
 	// not configured, 403 when the user lacks the group, 401 when
 	// no session is present).
 	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
-	mux.Handle("/api/v1/admin/oauth2/clients/", cors(http.HandlerFunc(h.handleAdminDeleteClient)))
+	// The per-client path carries both the delete and the notes edit;
+	// split here so each handler can stay about one verb.
+	mux.Handle("/api/v1/admin/oauth2/clients/", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			h.handleAdminUpdateClient(w, r)
+			return
+		}
+		h.handleAdminDeleteClient(w, r)
+	})))
 	mux.Handle("/api/v1/admin/oauth2/tokens", cors(http.HandlerFunc(h.handleAdminListTokens)))
 	mux.Handle("/api/v1/admin/oauth2/revoke", cors(http.HandlerFunc(h.handleAdminRevokeTokens)))
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))

@@ -231,9 +231,29 @@ export interface PlacementAuthorization {
 // We model them loosely and pull common fields out at the call site.
 export type ClassAd = Record<string, unknown>;
 
+// JobListResponse is what /api/v1/jobs returns. The trailing metadata
+// is NOT optional decoration: `has_more` is the only signal that the
+// answer was cut short, and a UI that ignores it silently shows a
+// fraction of the queue as if it were all of it.
 export interface JobListResponse {
   jobs: ClassAd[];
-  // page_token / error fields may appear; omitted here until needed.
+  // How many ads this response carried.
+  total_returned?: number;
+  // More jobs matched than were returned.
+  has_more?: boolean;
+  // Cursor for the next page. Only present when an htcondordb mirror
+  // served the query — a live schedd has no cursor to resume from.
+  next_page_token?: string;
+  // Why there is no cursor, in the server's own words. Present exactly
+  // when the answer was truncated AND cannot be paged through, so it
+  // doubles as the "you must narrow or widen the query instead" signal.
+  pagination_unavailable?: string;
+  // Which backend answered: "schedd" or "htcondordb".
+  source?: string;
+  // Free-text detail about the routing decision, when the mirror served.
+  source_note?: string;
+  // A partial-result error; the ads before it are still valid.
+  error?: string;
 }
 
 // HistoryListResponse mirrors the Go HistoryListResponse struct in
@@ -552,6 +572,12 @@ export interface MatchAnalysisAttributeDistribution {
   error_example?: string;
 }
 
+// AdminClientUse is one entry of a client's recent-users sample.
+export interface AdminClientUse {
+  subject: string;
+  at: string;
+}
+
 export interface AdminClient {
   id: string;
   redirect_uris?: string[];
@@ -560,6 +586,24 @@ export interface AdminClient {
   scopes?: string[];
   public: boolean;
   created_at: string;
+
+  // What the client called itself at registration (RFC 7591
+  // client_name). Absent for seeded clients and for anything registered
+  // before the server started keeping it.
+  name?: string;
+  // Operator annotation. Often the only identifying information for a
+  // client that predates provenance tracking.
+  notes?: string;
+  // 'dynamic' registered itself, 'seeded' was created by this server.
+  // ABSENT MEANS UNKNOWN, not "not dynamic" — the row predates the
+  // field, so rendering it as a negative would assert something nobody
+  // checked.
+  origin?: 'dynamic' | 'seeded' | string;
+  // When this client last obtained a token; absent means never. Written
+  // on a debounced background flush, so treat it as "roughly when".
+  last_used_at?: string;
+  // Last few distinct subjects to obtain a token here, newest first.
+  recent_users?: AdminClientUse[];
 }
 
 export interface AdminToken {
@@ -967,6 +1011,15 @@ export const api = {
     deleteClient: (id: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+      }),
+    // Notes are the only editable field on a client: everything else is
+    // either the client's own assertion at registration or something the
+    // server derived.
+    updateClientNotes: (id: string, notes: string): Promise<{ notes: string }> =>
+      fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
       }),
     listTokens: (params?: {
       client_id?: string;
