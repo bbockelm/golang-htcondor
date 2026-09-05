@@ -68,21 +68,68 @@ jobs:
         # budget, the one entry on main that everybody could.
         cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,mode=min,scope=img-{0}-{1}', matrix.tag, steps.imgcache.outputs.key) || '' }}
 
-    - name: Run tests in Docker
-      run: |
-        docker run --rm --platform ${{ matrix.platform }} \
-          -v ${{ github.workspace }}:/workspace \
-          -w /workspace \
-          golang-htcondor:test-${{ matrix.tag }} \
-          /bin/sh -c "go install gotest.tools/gotestsum@latest && for d in . webapi localcredmon; do (cd \$d && GOWORK=off gotestsum -- -v ./...) || exit 1; done"
+    # The Go build and module caches used INSIDE the containers. They
+    # live under the bind-mounted workspace so they survive the
+    # container, and are restored here so they survive the run.
+    #
+    # Keyed per platform: arm64 object code is not amd64 object code.
+    # restore-keys means a go.sum change warms from the previous cache
+    # rather than starting cold -- most dependencies are unchanged.
+    - name: Restore the container Go cache
+      id: gocache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-${{ matrix.tag }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          docker-gocache-${{ matrix.tag }}-
 
-    - name: Run build in Docker
+    # Tests and build share ONE container. They used to be two `docker
+    # run`s, and a container's Go build cache dies with it -- so the
+    # build recompiled, from nothing, everything the test step had just
+    # compiled. In one container the build reuses that work.
+    #
+    # GOCACHE and GOMODCACHE point into the bind-mounted workspace so
+    # they outlive the container too, and the step above restores them
+    # from the previous run. gotestsum is baked into the image; it used
+    # to be fetched and compiled here on every run.
+    - name: Run tests and build in Docker
       run: |
         docker run --rm --platform ${{ matrix.platform }} \
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
           golang-htcondor:test-${{ matrix.tag }} \
-          /bin/sh -c "git config --global --add safe.directory /workspace && for d in . webapi localcredmon; do (cd \$d && GOWORK=off go build -v ./...) || exit 1; done"
+          /bin/sh -c "
+            set -e
+            git config --global --add safe.directory /workspace
+            for d in . webapi localcredmon; do (cd \$d && GOWORK=off gotestsum -- -v ./...); done
+            for d in . webapi localcredmon; do (cd \$d && GOWORK=off go build -v ./...); done
+          "
+
+
+    # Only main writes, for the same reason the image cache does: a pull
+    # request's cache is readable by that pull request alone, so saving
+    # here would spend a shared 10 GB budget on entries nobody else can
+    # use. The container writes as root, so hand ownership back before
+    # the runner tars it up.
+    - name: Reclaim the container Go cache from root
+      if: github.ref == 'refs/heads/main'
+      # The container writes as root; hand ownership back so the runner
+      # can read the tree. The size goes in the log because this repo has
+      # been over GitHub's 10 GB cache budget before, and an entry whose
+      # size nobody watches is how that happened.
+      run: |
+        sudo chown -R "$(id -u):$(id -g)" .gocache
+        echo "container Go cache: $(du -sh .gocache | cut -f1)"
+        du -sh .gocache/* 2>/dev/null || true
+    - name: Save the container Go cache
+      if: github.ref == 'refs/heads/main'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-${{ matrix.tag }}-${{ hashFiles('**/go.sum') }}
 
     # The image these steps check is the one just tested, rather than a
     # second build of it. A separate job used to rebuild the whole image
@@ -154,14 +201,29 @@ jobs:
         # cache budget without adding anything readable.
         cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
 
+    # Reads the amd64 matrix job's cache -- same platform, same code.
+    # It does not save, for the same reason it does not write the image
+    # cache: the two jobs run concurrently, so a second writer of the
+    # same content only spends budget.
+    - name: Restore the container Go cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-amd64-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          docker-gocache-amd64-
+
     - name: Run integration tests with HTCondor
       run: |
         docker run --rm --privileged \
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
           golang-htcondor:integration-test \
           /bin/bash -c "
-            # Run integration tests (webapi module holds httpserver)
-            go install gotest.tools/gotestsum@latest
+            # Run integration tests (webapi module holds httpserver).
+            # gotestsum comes from the image; GOCACHE/GOMODCACHE are the
+            # restored caches under the bind-mounted workspace.
             cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
           "

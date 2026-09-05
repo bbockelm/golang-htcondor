@@ -76,9 +76,15 @@ RUN useradd -m -s /bin/bash -u 1000 vscode && \
 USER vscode
 
 # Pre-download common Go dependencies (speeds up first build)
+# gotestsum joins the other tools here rather than being installed at
+# container start. CI ran `go install gotest.tools/gotestsum@latest` in
+# three separate containers on every run -- a network fetch and a
+# compile, repeated, for a tool that changes far less often than the
+# image does.
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/go-delve/delve/cmd/dlv@latest && \
-    go install honnef.co/go/tools/cmd/staticcheck@latest
+    go install honnef.co/go/tools/cmd/staticcheck@latest && \
+    go install gotest.tools/gotestsum@latest
 
 # Set working directory
 WORKDIR /workspace
