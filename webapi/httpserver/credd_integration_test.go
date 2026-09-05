@@ -224,7 +224,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	// Add service credential with refresh=true to create .top file for credmon
 	addBody := map[string]any{
 		"cred_type":  "OAuth",
-		"credential": "oauth-token",
+		"credential": `{"access_token":"oauth-token"}`,
 		"refresh":    true, // This creates .top file for credmon to process
 	}
 	addBytes, _ := json.Marshal(addBody)
@@ -323,7 +323,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	// Add gitlab credential with refresh=true
 	addBody2 := map[string]any{
 		"cred_type":  "OAuth",
-		"credential": "gitlab-oauth-token",
+		"credential": `{"access_token":"gitlab-oauth-token"}`,
 		"refresh":    true,
 	}
 	addBytes2, _ := json.Marshal(addBody2)
