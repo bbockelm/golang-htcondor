@@ -25,6 +25,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
@@ -82,6 +83,10 @@ type Handler struct {
 	// are NOT validated against the GPU-string whitelist; the
 	// operator can write any submit-file directive.
 	interactiveExtraSubmit string
+	// submitPolicy is the operator's site-wide submit-file defaults and
+	// overrides, applied to EVERY job this API submits regardless of the
+	// surface it arrived on. Zero value applies nothing.
+	submitPolicy submitpolicy.Policy
 	userHeader             string
 	// userHeaderTrustedProxies is the list of source-IP prefixes from
 	// which the userHeader is honored. Populated from
@@ -244,7 +249,21 @@ type HandlerConfig struct {
 	// disables the feature. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
-	UserHeader             string // HTTP header to extract username from (optional)
+	// SubmitFileDefaults are submit-file lines applied to every
+	// submission ONLY where the submit file is silent, so a user who
+	// sets the same command keeps their own value. Configure via
+	// HTTP_API_SUBMIT_FILE_DEFAULTS.
+	SubmitFileDefaults string
+	// SubmitFileOverrides are submit-file lines applied to every
+	// submission that WIN over whatever the submit file says. Use for
+	// requirements that are not the user's to opt out of -- an access
+	// point that rejects a `log =` outside the home directory, say.
+	// Configure via HTTP_API_SUBMIT_FILE_OVERRIDES.
+	//
+	// Same trust model as InteractiveExtraSubmit: operator-only config,
+	// spliced in verbatim.
+	SubmitFileOverrides string
+	UserHeader          string // HTTP header to extract username from (optional)
 	// UserHeaderTrustedProxies is a list of CIDRs from which UserHeader
 	// is honored. When UserHeader is set, this list MUST be non-empty
 	// (or UserHeaderTrustAnyUnsafe must be true) — otherwise the
@@ -569,6 +588,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// submit file just before `queue` (see appendExtraSubmitLines).
 	// Empty disables; non-empty is logged at startup so the operator
 	// can confirm the directives loaded correctly.
+	h.submitPolicy = submitpolicy.Policy{
+		Defaults:  cfg.SubmitFileDefaults,
+		Overrides: cfg.SubmitFileOverrides,
+	}
+	if !h.submitPolicy.IsZero() {
+		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
+			"defaults_bytes", len(cfg.SubmitFileDefaults),
+			"overrides_bytes", len(cfg.SubmitFileOverrides))
+	}
+
 	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {
 		h.interactiveExtraSubmit = cfg.InteractiveExtraSubmit
 		logger.Info(logging.DestinationHTTP,
@@ -1046,6 +1075,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		HTCondorConfig: h.htcondorConfig,
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
+		SubmitPolicy:   h.submitPolicy,
 		SigningKeyPath: h.signingKeyPath,
 		TrustDomain:    h.trustDomain,
 		UIDDomain:      h.uidDomain,

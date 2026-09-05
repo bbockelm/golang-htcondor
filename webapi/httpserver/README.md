@@ -186,6 +186,50 @@ Authorization: Bearer <TOKEN>
 
 Returns a tarball containing the job's output files.
 
+### Site submit-file policy
+
+Some access points impose submit requirements a user cannot reasonably
+know. One deployment's schedd, for instance, refuses any job whose
+`log =` does not resolve inside the submitter's home directory — and the
+refusal arrives only at commit time, as an opaque transaction failure:
+
+```
+500: Job submission failed: failed to commit transaction: CommitTransaction
+failed: Job event logs produced by 'log =' in the submit file ... must be
+written inside your home directory ... (error code 22)
+```
+
+Two knobs let an operator satisfy that centrally instead of asking every
+user, and every template, to get it right:
+
+| knob | applies |
+|---|---|
+| `HTTP_API_SUBMIT_FILE_DEFAULTS` | only where the submit file is **silent** |
+| `HTTP_API_SUBMIT_FILE_OVERRIDES` | **regardless** of what the submit file says |
+
+Both apply to **every** submission — `POST /api/v1/jobs`, the templates
+and submit pages, interactive terminals, Jupyter, and MCP `submit_job`.
+
+```
+HTTP_API_SUBMIT_FILE_OVERRIDES = @=end
+  log = /home/$ENV(USER)/htcondor-jobs.log
+@end
+```
+
+Neither knob parses submit-file syntax. Submit commands are macro
+assignments evaluated when `queue` is reached, so the last assignment
+before `queue` is the effective one: defaults are prepended (anything the
+user writes later beats them) and overrides are spliced in just before
+`queue` (they beat everything above). Both blocks are wrapped in marker
+comments naming the knob they came from, so a generated submit file says
+where its extra lines originated.
+
+**Trust model:** the same as `HTTP_API_INTERACTIVE_EXTRA_SUBMIT` —
+operator-only configuration, spliced in verbatim, no whitelist and no
+quoting. This is the operator's hook into job admission policy,
+equivalent in privilege to writing the schedd's `site_local` config.
+Setting neither knob leaves submit files byte-for-byte unchanged.
+
 ### Placement (condor_placementd)
 
 Issues and audits access-point credentials for identities that

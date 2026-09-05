@@ -84,6 +84,13 @@ type Config struct {
 	// full documentation. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
+	// SubmitFileDefaults and SubmitFileOverrides are the site-wide
+	// submit-file policy applied to EVERY submission -- REST, templates,
+	// interactive, Jupyter and MCP alike. Defaults apply only where the
+	// submit file is silent; overrides win over it. See
+	// HandlerConfig for the trust model.
+	SubmitFileDefaults  string
+	SubmitFileOverrides string
 
 	// Batch-submission template paths.
 	TemplateGlobalPath string // Optional YAML file with operator-curated templates
@@ -209,6 +216,8 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
+		SubmitFileDefaults:          cfg.SubmitFileDefaults,
+		SubmitFileOverrides:         cfg.SubmitFileOverrides,
 		TemplateGlobalPath:          cfg.TemplateGlobalPath,
 		OAuth2Issuer:                cfg.OAuth2Issuer,
 		OAuth2ClientID:              cfg.OAuth2ClientID,

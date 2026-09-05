@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
 
 // Server represents the MCP server
@@ -32,6 +33,7 @@ type Server struct {
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	delegated          bool
+	submitPolicy       submitpolicy.Policy
 	stdin              io.Reader
 	stdout             io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
@@ -113,6 +115,12 @@ type Config struct {
 	DBMirrorName     string // HTTP_API_DBMIRROR_NAME
 	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS
 	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED
+
+	// SubmitPolicy is the operator's site-wide submit-file defaults and
+	// overrides. The agent surface gets the same treatment as the REST
+	// and web surfaces: a site requirement an agent cannot know about is
+	// exactly the kind this exists to satisfy.
+	SubmitPolicy submitpolicy.Policy
 }
 
 // NewServer creates a new MCP server
@@ -189,6 +197,7 @@ func NewServer(cfg Config) (*Server, error) {
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
 		delegated:      cfg.Delegated,
+		submitPolicy:   cfg.SubmitPolicy,
 		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
