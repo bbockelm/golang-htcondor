@@ -185,13 +185,15 @@ jobs:
       env:
         NODE_ENV: production
 
-    # Not a gate yet: main carries 10 pre-existing eslint errors, eight of
-    # them react-hooks "setState synchronously within an effect" in
-    # src/app/submit/page.tsx. Fixing those changes effect timing and so is
-    # its own change; blocking every PR on them today would only teach
-    # people to skip the job. Runs so the output is visible and the backlog
-    # does not grow silently.
-    - name: Lint (advisory)
+    # A gate as of #240, which cleared the 10 errors main used to carry
+    # (eight of them react-hooks "setState synchronously within an effect").
+    # It ran advisory until then because failing every PR on a pre-existing
+    # backlog only teaches people to skip the job.
+    #
+    # Errors fail the build; the four remaining warnings do not. Ratcheting
+    # to --max-warnings=0 wants those fixed first -- three are
+    # react-hooks/exhaustive-deps on `templates` in submit/page.tsx, which
+    # is a real change rather than a mechanical one.
+    - name: Lint
       working-directory: webapi/frontend
       run: npm run lint
-      continue-on-error: true
