@@ -29,6 +29,13 @@ type AdvertiseConfig struct {
 	// Augment adds the subsystem's attributes to the ad after PublishAd has seeded the common
 	// ones. Optional.
 	Augment func(*classad.ClassAd)
+	// Trigger, when non-nil, forces an immediate advertise on each receive, in addition to the
+	// interval -- so a meaningful state change (e.g. a sync source catching up) reaches the
+	// collector promptly instead of at the next cycle. Sending on it resets the interval timer, so
+	// a triggered update does not cause a near-immediate second one. The caller is responsible for
+	// rate-limiting (a minimum gap between sends) to avoid flapping; a full channel simply drops the
+	// extra signal. Optional.
+	Trigger <-chan struct{}
 	// Logger defaults to the daemon's slog logger.
 	Logger *slog.Logger
 }
@@ -88,6 +95,12 @@ func (d *Daemon) Advertise(ctx context.Context, cfg AdvertiseConfig) {
 			return
 		case <-ticker.C:
 			send()
+		case <-cfg.Trigger:
+			// A caller-driven early update; reset the timer so the next interval is measured from
+			// here rather than firing again almost immediately. A nil Trigger yields a nil channel,
+			// so this case never fires.
+			send()
+			ticker.Reset(interval)
 		}
 	}
 }
