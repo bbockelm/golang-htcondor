@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildCountQueue,
   buildTableQueue,
@@ -34,7 +34,6 @@ export function BatchMode({ text, onChange, onValidityChange }: BatchModeProps) 
     columns: string[];
     rows: string[][];
   } | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   // We're the source of truth for the trailing `queue ...` line — keep
   // it in sync with whichever mode is currently active. We hold the
@@ -43,25 +42,38 @@ export function BatchMode({ text, onChange, onValidityChange }: BatchModeProps) 
   // parent's text update re-triggers our effect).
   const lastWritten = useRef<string>('');
   const text_ = text; // capture for effect closure
-  useEffect(() => {
-    let queueLine = '';
-    let validity: { ok: boolean; message?: string } = { ok: true };
+
+  // The queue line and any error are pure functions of the active mode
+  // and its inputs, so derive them during render rather than storing the
+  // error in state and assigning it from an effect. Setting state in an
+  // effect costs an extra render pass and is what
+  // react-hooks/set-state-in-effect flags.
+  const { queueLine, error } = useMemo<{ queueLine: string; error: string | null }>(() => {
     try {
       if (mode === 'count') {
-        queueLine = buildCountQueue(count);
-      } else if (mode === 'table') {
-        queueLine = buildTableQueue(columns, rows);
-      } else if (mode === 'csv') {
+        return { queueLine: buildCountQueue(count), error: null };
+      }
+      if (mode === 'table') {
+        return { queueLine: buildTableQueue(columns, rows), error: null };
+      }
+      if (mode === 'csv') {
         if (!csvParsed) {
           throw new Error('Upload a CSV file first.');
         }
-        queueLine = buildTableQueue(csvParsed.columns, csvParsed.rows);
+        return { queueLine: buildTableQueue(csvParsed.columns, csvParsed.rows), error: null };
       }
-      setError(null);
+      return { queueLine: '', error: null };
     } catch (e) {
-      validity = { ok: false, message: (e as Error).message };
-      setError((e as Error).message);
-      onValidityChange?.(false, (e as Error).message);
+      return { queueLine: '', error: (e as Error).message };
+    }
+  }, [mode, count, columns, rows, csvParsed]);
+
+  // Telling the parent is a side effect and stays in one. lastWritten
+  // keeps us from pushing an update the parent would echo back as new
+  // `text`, which would re-run this and loop.
+  useEffect(() => {
+    if (error) {
+      onValidityChange?.(false, error);
       return;
     }
     onValidityChange?.(true);
@@ -70,7 +82,7 @@ export function BatchMode({ text, onChange, onValidityChange }: BatchModeProps) 
       onChange(setQueueStatement(text_, queueLine));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, count, columns, rows, csvParsed]);
+  }, [queueLine, error]);
 
   return (
     <div className="rounded border border-gray-200 bg-white p-4 space-y-3">

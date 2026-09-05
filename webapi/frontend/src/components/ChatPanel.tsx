@@ -835,16 +835,17 @@ function ApprovalCard({
 // turn — rerendering history shouldn't re-animate.
 function useTypingText(target: string, skip: boolean): string {
   const [displayed, setDisplayed] = useState(skip ? target : '');
+  // The rAF loop below reads the newest target without taking it as a
+  // dependency, which would restart the animation on every token. The
+  // ref is synced from an effect rather than assigned during render:
+  // mutating a ref while rendering is what react-hooks/refs flags, and
+  // it misbehaves under a render that React discards. Declared before
+  // the effects that read it so it is current by the time they run.
   const targetRef = useRef(target);
-  targetRef.current = target;
-
-  // When skip flips on (e.g. status moved from streaming → ready and
-  // the message is no longer "live"), snap to the full target so the
-  // user sees the complete message instantly instead of finishing the
-  // animation at typewriter pace.
   useEffect(() => {
-    if (skip) setDisplayed(targetRef.current);
-  }, [skip]);
+    targetRef.current = target;
+  }, [target]);
+
 
   useEffect(() => {
     if (skip) return;
@@ -904,7 +905,12 @@ function useTypingText(target: string, skip: boolean): string {
     };
   }, [skip]);
 
-  return displayed;
+  // Skipping is answered here rather than by snapping state from an
+  // effect. When skip flips on (status moved streaming -> ready and the
+  // message is no longer "live") the full text appears on the very next
+  // render instead of one pass later, and the animation state is simply
+  // left where it was for the no-longer-running loop.
+  return skip ? target : displayed;
 }
 
 // revealWords returns a prefix of `target` that ends `n` whitespace-

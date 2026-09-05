@@ -231,10 +231,14 @@ export default function SubmitPage() {
   );
 
   // Auto-select the first library template once the list loads.
-  useEffect(() => {
-    if (mode !== 'library' || selectedID || templates.length === 0) return;
+  //
+  // Adjusted during render instead of from an effect. The guard is
+  // self-clearing -- once selectedID is set it is falsy no longer -- so
+  // this converges on the first pass rather than rendering once with no
+  // selection and then again with one.
+  if (mode === 'library' && !selectedID && templates.length > 0) {
     setSelectedID(templates[0].id);
-  }, [mode, selectedID, templates]);
+  }
 
   const selected = templates.find((t) => t.id === selectedID);
 
@@ -327,12 +331,17 @@ export default function SubmitPage() {
   // derivation OUT of the effect avoids the React 19 hooks lint's
   // "set-state-in-effect" warning while still giving us reactivity
   // when uploadFiles or columns change.
-  useEffect(() => {
+  //
+  // Compared during render against the previous column set rather than
+  // assigned from an effect: the reshape lands before the grid is
+  // committed, so it never paints one frame with the old column count.
+  // active.columns identity changes whenever a description changes too;
+  // we only care about names, and columnNames is a stable hash of those.
+  const [prevColumnNames, setPrevColumnNames] = useState(columnNames);
+  if (prevColumnNames !== columnNames) {
+    setPrevColumnNames(columnNames);
     setRows((prev) => reshapeRows(prev, active.columns));
-    // active.columns identity changes whenever description changes
-    // too; we only care about names. columnNames is a stable hash.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columnNames]);
+  }
 
   // uploadRows: rows derived from the picked files in 'upload' mode.
   // Lives as a memo (not state) so the React 19 hooks lint doesn't
@@ -1445,7 +1454,7 @@ export default function SubmitPage() {
               role="alert"
               className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
             >
-              <span className="font-semibold">Can't submit yet:</span>
+              <span className="font-semibold">Can&apos;t submit yet:</span>
               <span className="flex-1">{submitBlockedReason.message}</span>
               <button
                 type="button"
@@ -1536,9 +1545,15 @@ function SaveTemplateDialog({
   // Re-seed from initial when the dialog reopens with different
   // suggestions (e.g. agent invokes with a new name after the user
   // canceled the previous attempt).
-  useEffect(() => {
+  //
+  // Compared during render rather than assigned from an effect: the
+  // re-render happens before the dialog is committed, so it never
+  // paints one frame of the stale suggestion first.
+  const [prevInitial, setPrevInitial] = useState(initial);
+  if (prevInitial !== initial) {
+    setPrevInitial(initial);
     setValues(initial);
-  }, [initial]);
+  }
 
   const idTrimmed = values.id.trim();
   const isOverwrite = idTrimmed !== '' && existingIDs.has(idTrimmed);
@@ -3869,9 +3884,17 @@ function TemplateCombobox({
 
   // Reset the highlighted row whenever the filter changes — the old
   // index can point past the filtered list otherwise.
-  useEffect(() => {
+  //
+  // Done during render against the previous query rather than in an
+  // effect. This is React's documented way to adjust state when an
+  // input changes: the re-render happens before anything is committed,
+  // so the list never paints with a stale highlight, and it costs no
+  // extra pass (which is what react-hooks/set-state-in-effect flags).
+  const [prevQuery, setPrevQuery] = useState(query);
+  if (prevQuery !== query) {
+    setPrevQuery(query);
     setActiveIdx(0);
-  }, [query]);
+  }
 
   // Click-outside to close.
   useEffect(() => {

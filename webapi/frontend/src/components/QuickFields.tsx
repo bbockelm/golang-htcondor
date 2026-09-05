@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import {
   decodeEnvironment,
   encodeEnvironment,
@@ -31,59 +31,44 @@ const CUDA_CAPS = ['', '5.0', '6.0', '7.0', '7.5', '8.0', '8.6', '9.0'];
 // form (intentional — direct edits are the user dropping to a lower
 // level of abstraction).
 export function QuickFields({ text, onChange }: QuickFieldsProps) {
-  const initialised = useRef(false);
+  // Seeded from the textarea on first mount only. A lazy useState
+  // initializer runs exactly once, for the same reason the ref-guarded
+  // effect this replaces did: subsequent textarea edits must not reset
+  // the form. Doing it here rather than in an effect avoids the extra
+  // render pass the effect caused, which is what
+  // react-hooks/set-state-in-effect flags.
+  const initialGpus = snapTo(GPU_STEPS, parseIntOr(getAttribute(text, 'request_gpus'), 0));
 
   // --- Basics ---
-  const [executable, setExecutable] = useState('');
-  const [args, setArgs] = useState('');
-  const [universe, setUniverse] = useState('vanilla');
-  const [cpus, setCpus] = useState<number>(1);
-  const [memMB, setMemMB] = useState<number>(1024);
-  const [diskMB, setDiskMB] = useState<number>(1024);
-  const [outputFile, setOutputFile] = useState('');
-  const [errorFile, setErrorFile] = useState('');
-  const [logFile, setLogFile] = useState('');
+  const [executable, setExecutable] = useState(() => getAttribute(text, 'executable') ?? '');
+  const [args, setArgs] = useState(() => getAttribute(text, 'arguments') ?? '');
+  const [universe, setUniverse] = useState(() => getAttribute(text, 'universe') ?? 'vanilla');
+  const [cpus, setCpus] = useState<number>(() => snapTo(CPU_STEPS, parseIntOr(getAttribute(text, 'request_cpus'), 1)));
+  const [memMB, setMemMB] = useState<number>(() => snapTo(MEM_STEPS, parseIntOr(getAttribute(text, 'request_memory'), 1024)));
+  const [diskMB, setDiskMB] = useState<number>(() => snapTo(DISK_STEPS, parseIntOr(getAttribute(text, 'request_disk'), 1024)));
+  const [outputFile, setOutputFile] = useState(() => getAttribute(text, 'output') ?? '');
+  const [errorFile, setErrorFile] = useState(() => getAttribute(text, 'error') ?? '');
+  const [logFile, setLogFile] = useState(() => getAttribute(text, 'log') ?? '');
 
   // --- GPU ---
-  const [gpus, setGpus] = useState<number>(0);
-  const [gpuMemMB, setGpuMemMB] = useState<number>(8192);
-  const [gpuMinCap, setGpuMinCap] = useState('');
-  const [gpuMinRuntime, setGpuMinRuntime] = useState('');
-  const [cudaVersion, setCudaVersion] = useState('');
-  const [requireGPUs, setRequireGPUs] = useState('');
+  const [gpus, setGpus] = useState<number>(initialGpus);
+  const [gpuMemMB, setGpuMemMB] = useState<number>(() => snapTo(GPU_MEM_STEPS, parseIntOr(getAttribute(text, 'gpus_minimum_memory'), 8192)));
+  const [gpuMinCap, setGpuMinCap] = useState(() => getAttribute(text, 'gpus_minimum_capability') ?? '');
+  const [gpuMinRuntime, setGpuMinRuntime] = useState(() => getAttribute(text, 'gpus_minimum_runtime') ?? '');
+  const [cudaVersion, setCudaVersion] = useState(() => getAttribute(text, 'cuda_version') ?? '');
+  const [requireGPUs, setRequireGPUs] = useState(() => getAttribute(text, 'require_gpus') ?? '');
 
   // --- Environment ---
-  const [envVars, setEnvVars] = useState<EnvVar[]>([]);
+  const [envVars, setEnvVars] = useState<EnvVar[]>(
+    () => decodeEnvironment(getAttribute(text, 'environment')) || [],
+  );
 
   // --- Section open/close ---
   const [openBasics, setOpenBasics] = useState(false);
-  const [openGPU, setOpenGPU] = useState(false);
+  // Open the GPU section when the submit file already asks for GPUs.
+  const [openGPU, setOpenGPU] = useState(() => initialGpus > 0);
   const [openEnv, setOpenEnv] = useState(false);
 
-  useEffect(() => {
-    if (initialised.current) return;
-    initialised.current = true;
-    setExecutable(getAttribute(text, 'executable') ?? '');
-    setArgs(getAttribute(text, 'arguments') ?? '');
-    setUniverse(getAttribute(text, 'universe') ?? 'vanilla');
-    setCpus(snapTo(CPU_STEPS, parseIntOr(getAttribute(text, 'request_cpus'), 1)));
-    setMemMB(snapTo(MEM_STEPS, parseIntOr(getAttribute(text, 'request_memory'), 1024)));
-    setDiskMB(snapTo(DISK_STEPS, parseIntOr(getAttribute(text, 'request_disk'), 1024)));
-    setOutputFile(getAttribute(text, 'output') ?? '');
-    setErrorFile(getAttribute(text, 'error') ?? '');
-    setLogFile(getAttribute(text, 'log') ?? '');
-    const initialGpus = parseIntOr(getAttribute(text, 'request_gpus'), 0);
-    setGpus(snapTo(GPU_STEPS, initialGpus));
-    setGpuMemMB(snapTo(GPU_MEM_STEPS, parseIntOr(getAttribute(text, 'gpus_minimum_memory'), 8192)));
-    setGpuMinCap(getAttribute(text, 'gpus_minimum_capability') ?? '');
-    setGpuMinRuntime(getAttribute(text, 'gpus_minimum_runtime') ?? '');
-    setCudaVersion(getAttribute(text, 'cuda_version') ?? '');
-    setRequireGPUs(getAttribute(text, 'require_gpus') ?? '');
-    const decoded = decodeEnvironment(getAttribute(text, 'environment'));
-    if (decoded) setEnvVars(decoded);
-    // Auto-open GPU section if the user already has GPU fields set.
-    if (initialGpus > 0) setOpenGPU(true);
-  }, [text]);
 
   // Generic helper: update local state and patch the textarea.
   const update =
