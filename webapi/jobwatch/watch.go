@@ -394,6 +394,37 @@ func (w *Watch) giveUpWaiting(out Outcome, unresolved []JobID, stillHere int, no
 	return out
 }
 
+// BaseAttrs are the attributes every evaluation needs regardless of what
+// a watch asks: identity, the owner the snapshot is scoped to, the state
+// the live events test, the outcome the terminal events test, and the
+// attributes carried into a notification.
+//
+// A projected read that omitted one of these would not error -- the
+// attribute would evaluate to UNDEFINED, the comparison would be false,
+// and the watch would quietly never fire. So the list is deliberately
+// generous: one extra attribute costs bytes, a missing one costs a watch
+// that waits forever.
+var BaseAttrs = append([]string{"ClusterId", "ProcId", "Owner", "JobStatus"}, CarryAttrs...)
+
+// ReadAttrs is every attribute this watch's expressions touch, so a
+// caller can fetch a projected ad instead of a whole one.
+//
+// It comes from the compiled program's own read set (the vm walks the
+// expression tree for attribute references), the same information the
+// store's query planner uses. If that ever under-reports, the symptom
+// here is a watch that silently never fires -- which is why BaseAttrs
+// covers everything the evaluator itself reads.
+func (w *Watch) ReadAttrs() []string {
+	out := append([]string(nil), BaseAttrs...)
+	if w.matchConstraint != nil {
+		out = append(out, w.matchConstraint.ReadAttrs()...)
+	}
+	if w.matchCondition != nil {
+		out = append(out, w.matchCondition.ReadAttrs()...)
+	}
+	return out
+}
+
 func (w *Watch) selects(ad *classad.ClassAd) bool {
 	return w.matchConstraint != nil && w.matchConstraint.Matches(ad)
 }

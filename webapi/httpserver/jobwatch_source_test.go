@@ -46,7 +46,7 @@ func TestWatchSourceMarksATruncatedQueue(t *testing.T) {
 // than to fall back to it.
 func TestWatchSourceHistoryNeedsTheMirror(t *testing.T) {
 	h := &Handler{dbMirror: nil}
-	_, err := watchSource{h: h}.History(context.Background(), "alice", time.Time{}, 100)
+	_, err := watchSource{h: h}.History(context.Background(), "alice", jobwatch.BaseAttrs, time.Time{}, 100)
 	if err == nil {
 		t.Fatal("history without a mirror must error rather than fall back to the schedd")
 	}

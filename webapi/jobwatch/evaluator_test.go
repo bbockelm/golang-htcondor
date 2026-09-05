@@ -13,23 +13,27 @@ import (
 // assert the thing that matters most: the backend query is per-owner and
 // never carries a caller-supplied expression.
 type fakeSource struct {
-	queue     map[string]QueueResult
-	history   map[string][]*classad.ClassAd
-	askedFor  []string
+	queue    map[string]QueueResult
+	history  map[string][]*classad.ClassAd
+	askedFor []string
+	// attrsSeen records the projection each read was given, so a test
+	// can assert whole ads are never fetched.
+	attrsSeen []string
 	queueErr  error
 	histErr   error
 	sinceSeen time.Time
 }
 
-func (f *fakeSource) Queue(_ context.Context, owner string, _ int) (QueueResult, error) {
+func (f *fakeSource) Queue(_ context.Context, owner string, attrs []string, _ int) (QueueResult, error) {
 	f.askedFor = append(f.askedFor, owner)
+	f.attrsSeen = attrs
 	if f.queueErr != nil {
 		return QueueResult{}, f.queueErr
 	}
 	return f.queue[owner], nil
 }
 
-func (f *fakeSource) History(_ context.Context, owner string, since time.Time, _ int) ([]*classad.ClassAd, error) {
+func (f *fakeSource) History(_ context.Context, owner string, _ []string, since time.Time, _ int) ([]*classad.ClassAd, error) {
 	f.sinceSeen = since
 	if f.histErr != nil {
 		return nil, f.histErr
@@ -138,15 +142,15 @@ type failOne struct {
 	inner *fakeSource
 }
 
-func (f *failOne) Queue(ctx context.Context, owner string, limit int) (QueueResult, error) {
+func (f *failOne) Queue(ctx context.Context, owner string, attrs []string, limit int) (QueueResult, error) {
 	if owner == f.fail {
 		return QueueResult{}, errors.New("permission denied")
 	}
-	return f.inner.Queue(ctx, owner, limit)
+	return f.inner.Queue(ctx, owner, attrs, limit)
 }
 
-func (f *failOne) History(ctx context.Context, owner string, since time.Time, limit int) ([]*classad.ClassAd, error) {
-	return f.inner.History(ctx, owner, since, limit)
+func (f *failOne) History(ctx context.Context, owner string, attrs []string, since time.Time, limit int) ([]*classad.ClassAd, error) {
+	return f.inner.History(ctx, owner, attrs, since, limit)
 }
 
 // TestHistoryOutageDegradesRatherThanFreezes: losing history should cost
@@ -260,5 +264,61 @@ func TestHistoryLookbackCoversJobsThatFinishedFirst(t *testing.T) {
 	}
 	if len(fired(t, s, "alice")) != 1 {
 		t.Error("a watch registered after its jobs finished must fire from history")
+	}
+}
+
+// TestReadsAreProjected is a memory property, and a big one. A whole job
+// ad parses to about 12 KB of heap; fetching 20,000 of them costs 231 MB
+// held and 677 MB allocated, every pass, per owner -- to evaluate
+// expressions that touch about ten attributes. Projected, the same read
+// is about 26 MB.
+//
+// It is also a correctness property: an attribute left out of the
+// projection does not error, it evaluates to UNDEFINED, so the watch
+// quietly never fires. The projection must cover what the evaluator
+// itself reads AND what each watch's expressions reference.
+func TestReadsAreProjected(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A constraint over an attribute outside the base set.
+	w, err := New("alice", "l", `ProjectName == "IceCube"`, EventHeld, "", ModeAny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Register(ctx, w, 0); err != nil {
+		t.Fatal(err)
+	}
+	// And a custom condition over another one.
+	w2, err := New("alice", "l2", "ClusterId == 42", EventCustom, "RemoteWallClockTime > 3600", ModeAny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Register(ctx, w2, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &fakeSource{}
+	if _, err := NewEvaluator(s, src, nil).Pass(ctx); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(src.attrsSeen) == 0 {
+		t.Fatal("the read was not projected; whole ads cost roughly nine times the heap")
+	}
+	got := map[string]bool{}
+	for _, a := range src.attrsSeen {
+		got[a] = true
+	}
+	// Everything the evaluator reads for itself.
+	for _, want := range BaseAttrs {
+		if !got[want] {
+			t.Errorf("projection omits %q, which the evaluator reads; the watch would never fire", want)
+		}
+	}
+	// And everything the watches reference.
+	for _, want := range []string{"ProjectName", "RemoteWallClockTime"} {
+		if !got[want] {
+			t.Errorf("projection omits %q, referenced by a watch; its constraint would evaluate to UNDEFINED", want)
+		}
 	}
 }

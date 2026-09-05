@@ -42,10 +42,10 @@ type watchSource struct {
 // than a normal over-fetch: the evaluator treats a tracked job's absence
 // from a COMPLETE queue as evidence that it finished, so a silently
 // truncated read would report a running cluster as done.
-func (s watchSource) Queue(ctx context.Context, owner string, limit int) (jobwatch.QueueResult, error) {
+func (s watchSource) Queue(ctx context.Context, owner string, attrs []string, limit int) (jobwatch.QueueResult, error) {
 	constraint := fmt.Sprintf("Owner == %s", classadStringLit(owner))
 
-	if ads, err := s.fromMirror(ctx, "jobs", constraint, limit+1); err == nil {
+	if ads, err := s.fromMirror(ctx, "jobs", constraint, attrs, limit+1); err == nil {
 		return truncateQueue(ads, limit), nil
 	} else if s.h.dbMirror.Enabled() {
 		s.h.logger.Debug(logging.DestinationHTTP,
@@ -53,8 +53,9 @@ func (s watchSource) Queue(ctx context.Context, owner string, limit int) (jobwat
 	}
 
 	ads, _, err := s.h.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Limit:     limit + 1,
-		FetchOpts: htcondor.FetchNormal,
+		Limit:      limit + 1,
+		Projection: attrs,
+		FetchOpts:  htcondor.FetchNormal,
 	})
 	if err != nil {
 		return jobwatch.QueueResult{}, fmt.Errorf("reading the queue from the schedd: %w", err)
@@ -76,7 +77,7 @@ func (s watchSource) Queue(ctx context.Context, owner string, limit int) (jobwat
 // and the whole picture when no feed is configured. Rows from the
 // archive win on conflict; they are the durable record, and the stream
 // is an observation of it in flight.
-func (s watchSource) History(ctx context.Context, owner string, since time.Time, limit int) ([]*classad.ClassAd, error) {
+func (s watchSource) History(ctx context.Context, owner string, attrs []string, since time.Time, limit int) ([]*classad.ClassAd, error) {
 	var streamed []*classad.ClassAd
 	if s.feed != nil {
 		streamed = s.feed.Terminal(owner, since)
@@ -90,7 +91,7 @@ func (s watchSource) History(ctx context.Context, owner string, since time.Time,
 	}
 	constraint := fmt.Sprintf("(Owner == %s) && (EnteredCurrentStatus >= %d || CompletionDate >= %d)",
 		classadStringLit(owner), since.Unix(), since.Unix())
-	archived, err := s.fromMirror(ctx, "history", constraint, limit)
+	archived, err := s.fromMirror(ctx, "history", constraint, attrs, limit)
 	if err != nil {
 		if len(streamed) > 0 {
 			// The feed is exactly what makes a history outage survivable
@@ -131,8 +132,11 @@ func mergeTerminal(archived, streamed []*classad.ClassAd) []*classad.ClassAd {
 	return out
 }
 
-// fromMirror runs one bounded read against a mirror table.
-func (s watchSource) fromMirror(ctx context.Context, table, constraint string, limit int) ([]*classad.ClassAd, error) {
+// fromMirror runs one bounded, projected read against a mirror table.
+// The projection is the difference between a few megabytes and a few
+// hundred: a whole job ad parses to about 12 KB of heap, the ten or so
+// attributes an evaluation reads to about 1.4 KB.
+func (s watchSource) fromMirror(ctx context.Context, table, constraint string, attrs []string, limit int) ([]*classad.ClassAd, error) {
 	if !s.h.dbMirror.Enabled() {
 		return nil, fmt.Errorf("htcondordb routing is not configured")
 	}
@@ -142,7 +146,7 @@ func (s watchSource) fromMirror(ctx context.Context, table, constraint string, l
 	}
 	defer closer()
 
-	rows, err := dbc.QueryRawProject(ctx, table, constraint, nil, limit)
+	rows, err := dbc.QueryRawProject(ctx, table, constraint, attrs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying the mirror's %s table: %w", table, err)
 	}

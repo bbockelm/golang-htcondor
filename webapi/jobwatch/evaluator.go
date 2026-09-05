@@ -23,12 +23,17 @@ import (
 // It also means one query serves every watch an owner has registered,
 // which is the coalescing that makes a single evaluator cheap.
 type Source interface {
-	// Queue returns the owner's current jobs, up to limit. Truncated
-	// must be set when there were more, because an incomplete queue
-	// makes absence meaningless.
-	Queue(ctx context.Context, owner string, limit int) (QueueResult, error)
-	// History returns the owner's finished jobs since a point in time.
-	History(ctx context.Context, owner string, since time.Time, limit int) ([]*classad.ClassAd, error)
+	// Queue returns the owner's current jobs, up to limit, projected to
+	// attrs. Truncated must be set when there were more, because an
+	// incomplete queue makes absence meaningless.
+	//
+	// attrs is never empty and always covers what the evaluator reads;
+	// an implementation may ignore it and return whole ads, at a cost
+	// measured in hundreds of megabytes on a large queue.
+	Queue(ctx context.Context, owner string, attrs []string, limit int) (QueueResult, error)
+	// History returns the owner's finished jobs since a point in time,
+	// projected the same way.
+	History(ctx context.Context, owner string, attrs []string, since time.Time, limit int) ([]*classad.ClassAd, error)
 }
 
 // QueueResult is a queue read and whether it was complete.
@@ -39,6 +44,15 @@ type QueueResult struct {
 
 const (
 	// QueueLimit bounds one owner's queue read.
+	//
+	// It is a memory bound and a correctness one at the same time. A
+	// projected job ad costs about 1.4 KB on the heap (a whole one costs
+	// 12 KB, measured), so this caps a pass at roughly 26 MB per owner.
+	// Past the cap the read is truncated, which disables the
+	// absence-implies-finished evidence -- so raising it buys correctness
+	// for very large clusters and costs memory linearly, and lowering it
+	// does the reverse. Truncation is not a wrong answer, only a slower
+	// one: those watches wait for the history archive instead.
 	QueueLimit = 20000
 	// HistoryLimit bounds one owner's history read.
 	HistoryLimit = 5000
@@ -161,11 +175,12 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 		}
 	}
 
-	queue, err := e.src.Queue(ctx, owner, QueueLimit)
+	attrs := projectionFor(watches)
+	queue, err := e.src.Queue(ctx, owner, attrs, QueueLimit)
 	if err != nil {
 		return 0, fmt.Errorf("reading the queue: %w", err)
 	}
-	history, err := e.src.History(ctx, owner, since, HistoryLimit)
+	history, err := e.src.History(ctx, owner, attrs, since, HistoryLimit)
 	if err != nil {
 		// A queue read without history still decides "done" by absence,
 		// "held" and "running". Losing history should degrade what can
@@ -224,4 +239,25 @@ func (e *Evaluator) CheckOwner(ctx context.Context, owner string) (int, error) {
 		return 0, nil
 	}
 	return e.passOwner(ctx, owner, mine)
+}
+
+// projectionFor is the union of what an owner's watches read.
+//
+// Fetching whole job ads was costing about 12 KB each on the heap --
+// 231 MB held and 677 MB allocated for a 20,000-job queue, every pass,
+// per owner -- to evaluate expressions that touch about ten attributes.
+// Projecting to those cuts it roughly ninefold.
+func projectionFor(watches []*Watch) []string {
+	seen := make(map[string]bool, 16)
+	out := make([]string, 0, 16)
+	for _, w := range watches {
+		for _, attr := range w.ReadAttrs() {
+			if attr == "" || seen[attr] {
+				continue
+			}
+			seen[attr] = true
+			out = append(out, attr)
+		}
+	}
+	return out
 }

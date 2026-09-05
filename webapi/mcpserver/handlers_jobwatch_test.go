@@ -19,10 +19,10 @@ type stubSource struct {
 	history []*classad.ClassAd
 }
 
-func (s *stubSource) Queue(context.Context, string, int) (jobwatch.QueueResult, error) {
+func (s *stubSource) Queue(context.Context, string, []string, int) (jobwatch.QueueResult, error) {
 	return jobwatch.QueueResult{Ads: s.queue}, nil
 }
-func (s *stubSource) History(context.Context, string, time.Time, int) ([]*classad.ClassAd, error) {
+func (s *stubSource) History(context.Context, string, []string, time.Time, int) ([]*classad.ClassAd, error) {
 	return s.history, nil
 }
 
