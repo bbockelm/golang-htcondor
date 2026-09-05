@@ -150,3 +150,39 @@ func TestLocalConfigDirSelfAppendTerminates(t *testing.T) {
 		t.Errorf("Get(MARKER) = %q, want yes", got)
 	}
 }
+
+// TestLocalConfigDirSetByLocalConfigFile reproduces the ap40 layout that hid
+// TRUST_DOMAIN: the root config points LOCAL_CONFIG_FILE at condor_config.local,
+// and condor_config.local (not the root) is what sets LOCAL_CONFIG_DIR. The
+// config.d it names carries TRUST_DOMAIN. Because LOCAL_CONFIG_DIR is unset when
+// the dir pass first runs, the directory must be scanned again after the file
+// pass -- exactly condor_config.cpp real_config's post-LOCAL_CONFIG_FILE recheck.
+// Before the fix the daemon fell back to the built-in TRUST_DOMAIN default
+// ($(UID_DOMAIN) -> $(FULL_HOSTNAME)), so its advertised trust domain did not
+// match condor_config_val and IDTOKENs minted for the pool were filtered out.
+func TestLocalConfigDirSetByLocalConfigFile(t *testing.T) {
+	tmp := t.TempDir()
+	confD := filepath.Join(tmp, "config.d")
+	mkdirs(t, confD)
+
+	root := filepath.Join(tmp, "condor_config")
+	localFile := filepath.Join(tmp, "condor_config.local")
+	// Root only names the LOCAL_CONFIG_FILE; it does NOT set LOCAL_CONFIG_DIR.
+	writeFile(t, root, "LOCAL_ETC = "+tmp+"\nLOCAL_CONFIG_FILE = "+localFile+"\n")
+	// The local file is what defines LOCAL_CONFIG_DIR (via a macro, like ap40).
+	writeFile(t, localFile, "LOCAL_CONFIG_DIR = $(LOCAL_ETC)/config.d\n")
+	// The config.d carries the value that was being missed.
+	writeFile(t, filepath.Join(confD, "10-base.conf"),
+		"TRUST_DOMAIN = flock.opensciencegrid.org\n")
+
+	t.Setenv("CONDOR_CONFIG", root)
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if got, _ := cfg.Get("TRUST_DOMAIN"); got != "flock.opensciencegrid.org" {
+		t.Errorf("TRUST_DOMAIN = %q, want %q (config.d named by condor_config.local was not scanned)",
+			got, "flock.opensciencegrid.org")
+	}
+}
