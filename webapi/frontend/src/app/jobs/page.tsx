@@ -27,6 +27,7 @@ import {
 import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 // HoldReasonCode is part of the projection so we can re-label "Held
 // + spool" as "Uploading Inputs" client-side. See displayJobStatus
@@ -44,7 +45,8 @@ export default function JobsPage() {
   });
   const isAdmin = !!session?.is_admin;
 
-  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  // Shared with the dashboard and /archive; see lib/scope.ts.
+  const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -177,32 +179,7 @@ export default function JobsPage() {
         <span className="text-sm text-gray-500">
           One row per batch. Click a row to see the jobs in it.
         </span>
-        {isAdmin && (
-          <div className="flex items-center gap-1 rounded border border-gray-300 bg-white p-0.5 text-xs">
-            <button
-              type="button"
-              onClick={() => setScope('mine')}
-              className={`rounded px-2 py-0.5 ${
-                ownedByMe
-                  ? 'bg-gray-200 text-gray-900'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Mine
-            </button>
-            <button
-              type="button"
-              onClick={() => setScope('all')}
-              className={`rounded px-2 py-0.5 ${
-                !ownedByMe
-                  ? 'bg-gray-200 text-gray-900'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Everyone
-            </button>
-          </div>
-        )}
+        {isAdmin && <ScopeToggle />}
         <Link
           href="/submit"
           className="ml-auto rounded bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
