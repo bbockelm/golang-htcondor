@@ -1263,10 +1263,28 @@ func (c *Config) loadConfigFileChain() error {
 	// knobs on a production install -- is silently missed and the built-in
 	// param defaults win instead (e.g. LOG resolves to $(LOCAL_DIR)/log rather
 	// than the config.d override).
+	//
+	// The order mirrors condor_config.cpp real_config: read LOCAL_CONFIG_DIR,
+	// then LOCAL_CONFIG_FILE, then -- crucially -- read LOCAL_CONFIG_DIR ONCE
+	// MORE if the file chain changed it. A common production layout defines
+	// LOCAL_CONFIG_DIR inside condor_config.local (the LOCAL_CONFIG_FILE), so on
+	// the first pass it is still unset and the config.d is never scanned; the
+	// recheck is what lets that config.d (holding TRUST_DOMAIN, security, and
+	// pool knobs) take effect, matching condor_config_val. Comparing against the
+	// pre-file value also fires when a scanned dir file appended a directory.
+	dirlistBefore, _ := c.Get("LOCAL_CONFIG_DIR")
 	if err := c.processLocalConfigDir(); err != nil {
 		return err
 	}
-	return c.processLocalConfigFile()
+	if err := c.processLocalConfigFile(); err != nil {
+		return err
+	}
+	if dirlistAfter, _ := c.Get("LOCAL_CONFIG_DIR"); dirlistAfter != "" && dirlistAfter != dirlistBefore {
+		if err := c.processLocalConfigDir(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // applyCondorEnvOverrides applies _CONDOR_<PARAM> (and _condor_<param>)
