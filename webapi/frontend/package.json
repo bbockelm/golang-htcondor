@@ -6,6 +6,8 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "typecheck": "tsc --noEmit",
+    "e2e:smoke": "PLAYWRIGHT_SUITE=smoke playwright test",
+    "e2e:full": "PLAYWRIGHT_SUITE=full playwright test",
     "start": "next start",
     "lint": "eslint ."
   },
@@ -22,6 +24,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.9.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

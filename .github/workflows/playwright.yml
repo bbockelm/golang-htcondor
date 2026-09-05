@@ -1,0 +1,198 @@
+name: Browser Tests
+
+# Rendering regressions were the one class nothing caught. The Go tests
+# never load a page; the Frontend job in ci.yml proves the UI compiles,
+# not that it draws. #224 shipped a log column squeezed to one letter
+# per line and #240 rewrote effect timing across five components, both
+# with no way to tell whether the result still rendered.
+#
+# Two suites, cheapest first:
+#
+#   smoke - the built static export with /api/v1/* answered from
+#           fixtures. No daemon, no HTCondor. Fails fast, so an
+#           obviously broken build never pays for a container start.
+#   full  - the real htcondor-api binary serving the embedded UI
+#           against a real personal HTCondor. Catches API contract
+#           drift, which frozen fixtures cannot.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Browser smoke (mocked API)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: webapi/frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: webapi/frontend
+      run: npm ci
+
+    # Browsers are ~150MB and change only when the Playwright version
+    # does, so key the cache on the lockfile rather than re-downloading
+    # on every run.
+    - name: Cache Playwright browsers
+      id: pw-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('webapi/frontend/package-lock.json') }}
+
+    - name: Install browser
+      if: steps.pw-cache.outputs.cache-hit != 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install --with-deps chromium
+
+    # --with-deps installs OS packages the cache cannot carry, so it
+    # still has to run on a cache hit; the browser download itself is
+    # what the cache saves.
+    - name: Install browser system deps
+      if: steps.pw-cache.outputs.cache-hit == 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install-deps chromium
+
+    - name: Build static export
+      working-directory: webapi/frontend
+      run: npm run build
+      env:
+        NODE_ENV: production
+
+    - name: Run smoke suite
+      working-directory: webapi/frontend
+      run: |
+        npx serve out -l 3100 &
+        npx wait-on http://127.0.0.1:3100 -t 60000
+        PLAYWRIGHT_SUITE=smoke npx playwright test
+
+    - name: Upload report
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: playwright-smoke-report
+        path: webapi/frontend/playwright-report/
+        retention-days: 7
+
+  full:
+    name: Browser full stack (real HTCondor)
+    runs-on: ubuntu-latest
+    # Only worth the container start if the pages render at all.
+    needs: smoke
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+    # Same image and same gha cache the Docker Tests workflow populates,
+    # so this usually restores layers rather than rebuilding HTCondor
+    # and the Go toolchain. cache-to is deliberately omitted: this job
+    # is a consumer, and writing from here would race the producers.
+    - name: Build dev image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        tags: golang-htcondor:e2e
+        cache-from: type=gha
+
+    - name: Set up Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: webapi/frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: webapi/frontend
+      run: npm ci
+
+    - name: Cache Playwright browsers
+      id: pw-cache-full
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('webapi/frontend/package-lock.json') }}
+
+    - name: Install browser
+      if: steps.pw-cache-full.outputs.cache-hit != 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install --with-deps chromium
+
+    - name: Install browser system deps
+      if: steps.pw-cache-full.outputs.cache-hit == 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install-deps chromium
+
+    # The UI has to be inside the binary, the way production ships it
+    # (Dockerfile.release stage 2). Building the export here and copying
+    # it to the embed path means the full suite exercises the same
+    # serving path an operator gets.
+    - name: Build static export for embedding
+      working-directory: webapi/frontend
+      run: npm run build
+      env:
+        NODE_ENV: production
+
+    - name: Start HTCondor and the API server
+      run: |
+        mkdir -p webapi/httpserver/webui/dist
+        cp -r webapi/frontend/out/* webapi/httpserver/webui/dist/
+        docker run -d --name e2e --privileged \
+          -p 8080:8080 \
+          -v "${{ github.workspace }}:/workspace" \
+          -w /workspace \
+          golang-htcondor:e2e \
+          /bin/bash -c "scripts/e2e-server.sh"
+        # The server writes READY to its log once condor and the API are
+        # both answering; poll for that rather than a fixed sleep.
+        for i in $(seq 1 90); do
+          if docker logs e2e 2>&1 | grep -q 'E2E-READY'; then break; fi
+          if ! docker ps -q --filter name=e2e | grep -q .; then
+            echo "container exited early:"; docker logs e2e; exit 1
+          fi
+          sleep 2
+        done
+        docker logs e2e | tail -20
+        docker logs e2e 2>&1 | grep -q 'E2E-READY' || { echo "server never became ready"; exit 1; }
+
+    - name: Run full suite
+      working-directory: webapi/frontend
+      run: PLAYWRIGHT_SUITE=full npx playwright test
+      env:
+        PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+
+    - name: Server logs on failure
+      if: failure()
+      run: docker logs e2e 2>&1 | tail -200
+
+    - name: Upload report
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: playwright-full-report
+        path: webapi/frontend/playwright-report/
+        retention-days: 7
+
+    - name: Stop container
+      if: always()
+      run: docker rm -f e2e || true
