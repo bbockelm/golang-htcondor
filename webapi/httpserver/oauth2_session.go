@@ -110,6 +110,21 @@ func newSession(username, issuer string) *Session {
 				// the authoritative copy out of the ID token claims,
 				// which callers are free to overwrite.
 				AuthTime: now,
+				// requested_at must be set whenever auth_time is, and to
+				// the same instant. fosite never populates this claim
+				// itself, it only reads it, and for prompt=none it
+				// checks auth_time <= requested_at
+				// (handler/openid/strategy_jwt.go). A zero requested_at
+				// makes any auth_time "after" it, so the check fails and
+				// the token endpoint answers 500 server_error with
+				//
+				//	Failed to generate id token because prompt was set to
+				//	'none' but auth_time happened after the authorization
+				//	request was registered
+				//
+				// Sharing `now` makes the two Equal, which satisfies both
+				// that comparison and the mirrored one for prompt=login.
+				RequestedAt: now,
 			},
 			Headers: &jwt.Headers{},
 			Subject: username,
