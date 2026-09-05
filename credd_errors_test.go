@@ -90,7 +90,7 @@ func TestStoreReturnValueClassification(t *testing.T) {
 	}
 	// The old condition, for the record: it let all of the above pass.
 	oldIsSuccess := func(returnVal int64) bool {
-		return !(returnVal < 0 || (returnVal > 20 && returnVal < 100))
+		return returnVal >= 0 && (returnVal <= 20 || returnVal >= 100)
 	}
 	if !oldIsSuccess(FailureJSONParse) {
 		t.Error("fixture wrong: the old condition did accept code 12 as success")
