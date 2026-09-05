@@ -75,6 +75,7 @@ export default function AdminClientsPage() {
               <tr>
                 <th className="px-3 py-2">Client</th>
                 <th className="px-3 py-2">Type</th>
+                <th className="px-3 py-2">Grants</th>
                 <th className="px-3 py-2">Last used</th>
                 <th className="px-3 py-2">Recent users</th>
                 <th className="px-3 py-2">Scopes</th>
@@ -173,6 +174,15 @@ function ClientRow({
           </Chip>
           <OriginChip origin={client.origin} />
         </div>
+      </td>
+      {/* Grant types decide what the client can actually do, and one
+          absence in particular is worth being able to see: a client
+          without refresh_token gets access tokens only, so its users
+          are sent through a full re-authorization every time one
+          expires. That shows up as "why does this app keep asking me to
+          sign in?", and this column is the evidence. */}
+      <td className="px-3 py-2 text-xs text-gray-700">
+        <ChipList items={client.grant_types} max={4} />
       </td>
       <td className="px-3 py-2 text-xs">
         {client.last_used_at ? (
