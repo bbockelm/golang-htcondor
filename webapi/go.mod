@@ -24,7 +24,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/db v0.29.5 // indirect
+	github.com/PelicanPlatform/classad/db v0.29.6 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect

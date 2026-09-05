@@ -43,8 +43,8 @@ github.com/PelicanPlatform/classad v0.29.6 h1:M0qmwAAFONXCKqN80sSOK4OksZr2I69MJX
 github.com/PelicanPlatform/classad v0.29.6/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
 github.com/PelicanPlatform/classad/collections v0.29.6 h1:ybTfgNDWqlf0CtIphUrw6aVs8b9XJnVIyP0QdMHzYS0=
 github.com/PelicanPlatform/classad/collections v0.29.6/go.mod h1:AN/vsPuTvZqGRGbpdgQjme7UJEZqGS7Ra7New2/jKWY=
-github.com/PelicanPlatform/classad/db v0.29.5 h1:s/MzOvpP25GCcyAeXv0YA59L+guMzAVQwqzgJuAkPJE=
-github.com/PelicanPlatform/classad/db v0.29.5/go.mod h1:5WD3v+jhlUfER5tF7Fg9wPfqSuSGagiMsKBV8/Zi4Zw=
+github.com/PelicanPlatform/classad/db v0.29.6 h1:tOedRm4XHiqNjOnKion43mwBqPhBF3d2ThX/VA5W6yU=
+github.com/PelicanPlatform/classad/db v0.29.6/go.mod h1:5WD3v+jhlUfER5tF7Fg9wPfqSuSGagiMsKBV8/Zi4Zw=
 github.com/PelicanPlatform/classad/dbrpc v0.29.6 h1:RNSyh5Hs3wX7k3393GT3rsLL29hs2bRxMAc00heZaDg=
 github.com/PelicanPlatform/classad/dbrpc v0.29.6/go.mod h1:gzdwTuG3jcLGqbYLS9SZjLkvjp99Bc8ElITy698HjI0=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=
