@@ -185,7 +185,7 @@ func TestSuperuserActionContextInertWhenDisabled(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
 	h := &Handler{logger: logger, uidDomain: "example.org"} // feature off
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/1.0", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/api/v1/jobs/1.0", nil)
 	ctx := context.Background()
 	gotCtx, imp, err := h.superuserActionContext(ctx, req, 1, 0)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestSuperuserActionContextNeedsArming(t *testing.T) {
 	h := superuserTestHandler(t, []string{"condor@example.org"})
 	h.superuserArmed = newSuperuserSessions(time.Hour)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/1.0", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/api/v1/jobs/1.0", nil)
 	// No session cookie at all: cannot be armed, so nothing happens and no
 	// job lookup is attempted (which would fail without a live schedd).
 	ctx := context.Background()
@@ -216,5 +216,49 @@ func TestSuperuserActionContextNeedsArming(t *testing.T) {
 	}
 	if imp != nil || gotCtx != ctx {
 		t.Errorf("unarmed request produced an impersonation")
+	}
+}
+
+// TestBulkPlanInertWhenDisabled: bulk actions must be untouched on a server
+// where the feature is off -- no owner query, no plan.
+func TestBulkPlanInertWhenDisabled(t *testing.T) {
+	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
+	h := &Handler{logger: logger, uidDomain: "example.org"}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/hold", nil)
+	plans, err := h.planSuperuserBulkAction(context.Background(), req, "JobStatus == 5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plans != nil {
+		t.Errorf("a plan was produced with the feature disabled: %v", plans)
+	}
+}
+
+// TestBulkPlanNeedsArming: group membership alone must not engage bulk
+// impersonation, for the same reason it does not for single jobs.
+func TestBulkPlanNeedsArming(t *testing.T) {
+	h := superuserTestHandler(t, []string{"condor@example.org"})
+	h.superuserArmed = newSuperuserSessions(time.Hour)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/hold", nil)
+	plans, err := h.planSuperuserBulkAction(context.Background(), req, "JobStatus == 5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plans != nil {
+		t.Errorf("unarmed request produced a plan")
+	}
+}
+
+// TestBulkOwnerCapIsMeaningful guards the fan-out limit. Each distinct owner
+// costs an impersonation and a schedd round trip, so an unbounded constraint
+// on a busy AP must refuse rather than quietly widen.
+func TestBulkOwnerCapIsMeaningful(t *testing.T) {
+	if maxSuperuserBulkOwners <= 0 {
+		t.Fatalf("the owner cap must be positive, got %d", maxSuperuserBulkOwners)
+	}
+	if maxSuperuserBulkOwners > 100 {
+		t.Errorf("owner cap of %d is high enough to be a fan-out hazard", maxSuperuserBulkOwners)
 	}
 }

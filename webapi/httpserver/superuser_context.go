@@ -170,7 +170,10 @@ func (h *Handler) auditSuperuserAction(r *http.Request, imp *Impersonation, acti
 // is a different and much larger capability than "fix this job".
 func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, error) {
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	ads, err := h.getSchedd().Query(ctx, constraint, []string{"Owner", "User", "ClusterId", "ProcId"})
+	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Limit:      1,
+		Projection: []string{"Owner", "User", "ClusterId", "ProcId"},
+	})
 	if err != nil {
 		return "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
 	}
@@ -240,4 +243,128 @@ func superuserReason(imp *Impersonation, what, fallback string) string {
 		return fallback
 	}
 	return imp.Reason(what)
+}
+
+// maxSuperuserBulkOwners caps how many distinct job owners one bulk action may
+// span.
+//
+// Each owner costs its own impersonation and its own schedd round trip, so an
+// unbounded constraint ("JobStatus == 5") on a busy access point could fan out
+// to hundreds. The cap turns that into a refusal the operator can see and
+// narrow, rather than a request that appears to hang while quietly acting on
+// an ever-widening set of other people's jobs.
+const maxSuperuserBulkOwners = 25
+
+// maxSuperuserBulkJobsScanned bounds the owner-resolution read that precedes a
+// bulk action. Reaching it is treated as "too broad to plan", not as a page to
+// continue from: acting on a truncated view would apply the action to some of
+// the matching jobs and silently not to others.
+const maxSuperuserBulkJobsScanned = 10000
+
+// superuserBulkPlan is one owner's share of a bulk action.
+type superuserBulkPlan struct {
+	// Imp is nil for the actor's own jobs, which are acted on normally.
+	Imp *Impersonation
+	// Constraint is the caller's constraint narrowed to this owner, so each
+	// batch acts only on the jobs the impersonation was granted for.
+	Constraint string
+	// Jobs is how many jobs matched for this owner, for the audit record.
+	Jobs int
+}
+
+// planSuperuserBulkAction splits a bulk constraint into per-owner batches.
+//
+// Bulk is the one place where "derive the target from the job" needs work:
+// there is no single job, and a constraint can span any number of owners.
+// Resolving the owners first and then acting once per owner preserves the
+// property that matters -- every impersonation is for a specific identity that
+// was read off a real job, and every job acted on belongs to the identity the
+// server authenticated as. The alternative, acting once as a superuser across
+// everything, would be a single unbounded grant with one audit line.
+//
+// Returns a nil plan when superuser mode is not engaged, in which case the
+// caller proceeds normally.
+func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, constraint string) ([]superuserBulkPlan, error) {
+	if !h.superuserModeAvailable() || !h.mayUseSuperuserMode(r) {
+		return nil, nil
+	}
+	sessionID, err := getSessionCookie(r)
+	if err != nil {
+		return nil, nil
+	}
+	if armed, _ := h.superuserArmed.Armed(sessionID); !armed {
+		return nil, nil
+	}
+	session, ok := h.getSessionFromRequest(r)
+	if !ok {
+		return nil, nil
+	}
+
+	// Bounded deliberately. Resolving owners means reading every matching
+	// job, and a bulk constraint on a busy access point can match a great
+	// many; an unlimited read here would be the most expensive thing in the
+	// request. The limit is one job past what the owner cap could possibly
+	// need, so hitting it always means the constraint is too broad to plan
+	// safely rather than that the answer was silently truncated.
+	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Limit:      maxSuperuserBulkJobsScanned,
+		Projection: []string{"Owner", "User", "ClusterId", "ProcId"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolving the owners of the matching jobs: %w", err)
+	}
+	if len(ads) >= maxSuperuserBulkJobsScanned {
+		return nil, fmt.Errorf(
+			"this constraint matches at least %d jobs, too many to plan a superuser bulk action over; narrow it",
+			maxSuperuserBulkJobsScanned)
+	}
+	if len(ads) == 0 {
+		// Nothing matches. Let the normal path run and report zero.
+		return nil, nil
+	}
+
+	counts := make(map[string]int)
+	var order []string
+	for _, ad := range ads {
+		owner, ok := ad.EvaluateAttrString("Owner")
+		if !ok || owner == "" {
+			if user, ok := ad.EvaluateAttrString("User"); ok && user != "" {
+				owner = ownerFromActor(user)
+			}
+		}
+		if owner == "" {
+			return nil, fmt.Errorf("a matching job has no owner attribute; narrow the constraint")
+		}
+		if _, seen := counts[owner]; !seen {
+			order = append(order, owner)
+		}
+		counts[owner]++
+	}
+
+	if len(order) > maxSuperuserBulkOwners {
+		return nil, fmt.Errorf(
+			"this constraint spans %d job owners, more than the limit of %d for a superuser bulk action; narrow it",
+			len(order), maxSuperuserBulkOwners)
+	}
+
+	actorOwner := ownerFromActor(session.Username)
+	plans := make([]superuserBulkPlan, 0, len(order))
+	for _, owner := range order {
+		scoped, err := scopeToOwner(owner, constraint)
+		if err != nil {
+			return nil, fmt.Errorf("scoping the constraint to %s: %w", owner, err)
+		}
+		if strings.EqualFold(owner, actorOwner) {
+			// The operator's own jobs. No impersonation and no audit
+			// entry -- acting on your own work is not a use of privilege.
+			plans = append(plans, superuserBulkPlan{Constraint: scoped, Jobs: counts[owner]})
+			continue
+		}
+		_, imp, err := h.impersonate(ctx, session.Username, owner)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, superuserBulkPlan{Imp: imp, Constraint: scoped, Jobs: counts[owner]})
+	}
+	return plans, nil
 }

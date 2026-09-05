@@ -1375,6 +1375,59 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	// If superuser mode is armed, split the constraint by job owner and act
+	// once per owner, each under an impersonation for that owner. See
+	// planSuperuserBulkAction for why this is not one blanket superuser call.
+	plans, err := s.planSuperuserBulkAction(ctx, r, constraint)
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if len(plans) > 0 {
+		combined := &htcondor.JobActionResults{}
+		for _, plan := range plans {
+			planCtx := ctx
+			planReason := reason
+			if plan.Imp != nil {
+				impCtx, _, impErr := s.impersonate(ctx, plan.Imp.Actor, plan.Imp.Target)
+				if impErr != nil {
+					s.writeError(w, http.StatusForbidden, impErr.Error())
+					return
+				}
+				planCtx = impCtx
+				planReason = plan.Imp.Reason(actionName)
+			}
+			res, actErr := actionFunc(planCtx, plan.Constraint, planReason)
+			if plan.Imp != nil {
+				s.auditSuperuserAction(r, plan.Imp, actionVerb,
+					fmt.Sprintf("%d job(s) matching %s", plan.Jobs, plan.Constraint), actErr)
+			}
+			if actErr != nil {
+				// Report the failure rather than continuing: a partially
+				// applied bulk action across several people's jobs is
+				// worse to reason about than one that stopped and said so.
+				if isAuthenticationError(actErr) {
+					s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", actErr))
+					return
+				}
+				s.writeError(w, http.StatusInternalServerError,
+					fmt.Sprintf("Bulk job %s failed for %s: %v", actionVerb, plan.Constraint, actErr))
+				return
+			}
+			combined.Success += res.Success
+			combined.NotFound += res.NotFound
+			combined.BadStatus += res.BadStatus
+			combined.AlreadyDone += res.AlreadyDone
+			combined.PermissionDenied += res.PermissionDenied
+			combined.Error += res.Error
+			combined.LimitExceeded += res.LimitExceeded
+			combined.TotalJobs += res.TotalJobs
+		}
+		s.handleBulkActionResults(w, combined, constraint, actionVerb)
+		return
+	}
+
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
 	if err != nil {
