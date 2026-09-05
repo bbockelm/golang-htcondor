@@ -221,7 +221,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, submitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "interactive submit failed",
 			"owner", username, "error", err)

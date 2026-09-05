@@ -435,7 +435,7 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit job using SubmitRemote
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, req.SubmitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(req.SubmitFile))
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {

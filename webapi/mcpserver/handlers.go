@@ -824,7 +824,11 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		return nil, insp.fatal
 	}
 
-	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, submitFile)
+	// Site policy applies to the agent surface too: a requirement an
+	// agent could not know about is exactly what it exists for. Applied
+	// AFTER the lint above, so the lint judges what the user wrote and
+	// the policy has the last word on what is submitted.
+	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 	if err != nil {
 		return nil, fmt.Errorf("job submission failed: %w", err)
 	}
