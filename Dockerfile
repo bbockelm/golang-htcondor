@@ -46,13 +46,23 @@ RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/i
 RUN pip3 install --no-cache-dir pre-commit
 
 # Add HTCondor repository
-RUN dnf install -y 'dnf-command(config-manager)' && \
-    dnf config-manager --set-enabled crb && \
-    dnf install -y epel-release && \
-    cd /etc/yum.repos.d && \
-    wget https://htcss-downloads.chtc.wisc.edu/repo/25.x/htcondor-release-current.el9.noarch.rpm && \
-    dnf install -y htcondor-release-current.el9.noarch.rpm && \
-    dnf clean all
+# Retried because the htcss-downloads mirror and dnf metadata fetch occasionally flake in CI
+# (seen on the arm64 image build), which would otherwise fail the whole build on a transient
+# network hiccup. Fails the build only after the attempts are exhausted.
+RUN for attempt in 1 2 3 4 5; do \
+        if dnf install -y 'dnf-command(config-manager)' && \
+           dnf config-manager --set-enabled crb && \
+           dnf install -y epel-release && \
+           wget -O /tmp/htcondor-release.rpm https://htcss-downloads.chtc.wisc.edu/repo/25.x/htcondor-release-current.el9.noarch.rpm && \
+           dnf install -y /tmp/htcondor-release.rpm && \
+           dnf clean all; then \
+            rm -f /tmp/htcondor-release.rpm; \
+            break; \
+        fi; \
+        if [ "$attempt" = 5 ]; then echo "htcondor-release repo setup failed after 5 attempts" >&2; exit 1; fi; \
+        echo "htcondor-release repo setup attempt $attempt failed; retrying in 10s" >&2; \
+        sleep 10; \
+    done
 
 # Install HTCondor.
 #
