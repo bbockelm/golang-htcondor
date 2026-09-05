@@ -96,9 +96,16 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 			Note:   err.Error(),
 		})
 	}
-	d := s.recordMirror("jobs", dbmirror.JobsDecision(info, pageToken))
+	// Record a decline here and nothing else: this decision is only a
+	// permission to try, and the read below can still fail to dial or to
+	// query. Counting it as "served" at this point made a mirror that
+	// never once answered look like it was answering everything, with a
+	// matching dial_failed tally beside it that read as an occasional
+	// blip rather than the whole story. streamMirrorRows records the
+	// outcome that actually happened.
+	d := dbmirror.JobsDecision(info, pageToken)
 	if !d.Use {
-		return false, d
+		return false, s.recordMirror("jobs", d)
 	}
 
 	// Confine to the caller's own jobs when the request was confined.
@@ -171,9 +178,10 @@ func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, 
 			Note:   err.Error(),
 		})
 	}
-	d := s.recordMirror("history", dbmirror.HistoryDecision(info, opts))
+	// A decline is final; an approval is not. See jobsFromMirror.
+	d := dbmirror.HistoryDecision(info, opts)
 	if !d.Use {
-		return false, d
+		return false, s.recordMirror("history", d)
 	}
 
 	// No cursor: an archive answers "the newest K" in one shot, and the
@@ -239,7 +247,9 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 		return false, s.recordMirror(table, *declined)
 	}
 	rows.finish(err)
-	return true, dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed, Note: note}
+	// The one place "served" is counted, because it is the only place it
+	// is true: rows are on the wire.
+	return true, s.recordMirror(table, dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed, Note: note})
 }
 
 // recordMirror counts a routing decision and returns it unchanged, so
