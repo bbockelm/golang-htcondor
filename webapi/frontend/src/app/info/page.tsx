@@ -350,7 +350,7 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       />
       {health.name && <Row label="Mirror" value={health.name} />}
       {health.address && <Row label="Address" mono value={health.address} />}
-      {health.required ? (
+      {health.required && (
         <Row
           label="Required"
           value="Yes — a read the mirror cannot serve FAILS instead of falling back to the schedd."

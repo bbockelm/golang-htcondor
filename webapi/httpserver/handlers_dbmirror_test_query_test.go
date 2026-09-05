@@ -7,41 +7,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
-func testQueryServer(t *testing.T) (*Server, func(user string, groups []string) *http.Request) {
-	t.Helper()
-	server, err := NewServer(Config{
-		ListenAddr:   "127.0.0.1:0",
-		ScheddName:   "test",
-		ScheddAddr:   "127.0.0.1:9618",
-		SessionTTL:   time.Hour,
-		OAuth2DBPath: t.TempDir() + "/t.db",
-	})
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	server.webuiAdminGroup = "condor-admins"
-	return server, func(user string, groups []string) *http.Request {
-		sid, _, err := server.sessionStore.Create(user, groups)
-		if err != nil {
-			t.Fatalf("session create: %v", err)
-		}
-		r := httptest.NewRequestWithContext(context.Background(), "POST", "/api/v1/dbmirror/test", nil)
-		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
-		return r
-	}
-}
-
 // The probe names an internal daemon's address and can be pressed
 // repeatedly; neither belongs to a general user.
 func TestDBMirrorTestRequiresAdmin(t *testing.T) {
-	server, req := testQueryServer(t)
+	server, req := newDBMirrorServer(t, http.MethodPost, "/api/v1/dbmirror/test")
 
 	rec := httptest.NewRecorder()
 	server.handleDBMirrorTest(rec, req("alice", nil))
@@ -63,7 +38,7 @@ func TestDBMirrorTestRequiresAdmin(t *testing.T) {
 // connection, or the query itself -- is what an operator cannot get
 // anywhere else, and they are different problems with different fixes.
 func TestDBMirrorTestReportsTheFailingStage(t *testing.T) {
-	server, req := testQueryServer(t)
+	server, req := newDBMirrorServer(t, http.MethodPost, "/api/v1/dbmirror/test")
 	server.dbMirror = dbmirror.NewLocator(
 		htcondor.NewCollector("collector.invalid:9618"), config.NewEmpty())
 
@@ -102,7 +77,7 @@ func TestDBMirrorTestReportsTheFailingStage(t *testing.T) {
 // are different answers, and pressing the button on a pool with no
 // mirror should get the first.
 func TestDBMirrorTestSaysWhenRoutingIsOff(t *testing.T) {
-	server, req := testQueryServer(t)
+	server, req := newDBMirrorServer(t, http.MethodPost, "/api/v1/dbmirror/test")
 
 	rec := httptest.NewRecorder()
 	server.handleDBMirrorTest(rec, req("root", []string{"condor-admins"}))
