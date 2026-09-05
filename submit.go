@@ -48,7 +48,13 @@ var (
 
 // SubmitFile represents a parsed HTCondor submit file
 type SubmitFile struct {
-	cfg      *config.Config
+	cfg *config.Config
+	// assigned is the set of names the submit file itself assigned,
+	// upper-cased. cfg cannot answer that question: it is seeded with
+	// HTCondor's param_info defaults, so a submit command that shares a
+	// name with a config knob reads as "set" even when the file never
+	// mentioned it. See submitCommand.
+	assigned map[string]bool
 	universe int
 
 	// Queue statement information
@@ -181,12 +187,16 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 
 	sf := &SubmitFile{
 		cfg:        cfg,
+		assigned:   assignedNames(configStmts),
 		universe:   UniverseVanilla, // Default
 		queueCount: 1,               // Default if no queue statement
 	}
 
-	// Set universe if specified
-	if univ, ok := cfg.Get("universe"); ok {
+	// Set universe if specified. Read through submitCommand like every
+	// other submit command: there is no UNIVERSE knob in param_info
+	// today, but relying on that would make a future upstream addition
+	// silently change every job's universe.
+	if univ, ok := sf.submitCommand("universe"); ok {
 		sf.universe = parseUniverse(univ)
 	}
 
@@ -536,7 +546,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 // setExecutable sets the executable attribute
 func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
-	exec, ok := sf.cfg.Get("executable")
+	exec, ok := sf.submitCommand("executable")
 	if !ok {
 		return fmt.Errorf("executable is required")
 	}
@@ -551,9 +561,9 @@ func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
 // 2. New style: surrounded by double quotes, uses Arguments attribute
 func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 	// Check both "arguments" and "args"
-	args, ok := sf.cfg.Get("arguments")
+	args, ok := sf.submitCommand("arguments")
 	if !ok {
-		args, ok = sf.cfg.Get("args")
+		args, ok = sf.submitCommand("args")
 	}
 
 	if !ok || args == "" {
@@ -664,9 +674,9 @@ func processNewStyleArguments(s string) string {
 
 // setEnvironment sets the environment attribute
 func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
-	env, ok := sf.cfg.Get("environment")
+	env, ok := sf.submitCommand("environment")
 	if !ok {
-		env, ok = sf.cfg.Get("env")
+		env, ok = sf.submitCommand("env")
 	}
 
 	if ok && env != "" {
@@ -679,22 +689,22 @@ func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
 // setStandardFiles sets input, output, and error file attributes
 func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 	// Input
-	if input, ok := sf.cfg.Get("input"); ok {
+	if input, ok := sf.submitCommand("input"); ok {
 		_ = ad.Set("In", input)
 	}
 
 	// Output
-	if output, ok := sf.cfg.Get("output"); ok {
+	if output, ok := sf.submitCommand("output"); ok {
 		_ = ad.Set("Out", output)
 	}
 
 	// Error
-	if errFile, ok := sf.cfg.Get("error"); ok {
+	if errFile, ok := sf.submitCommand("error"); ok {
 		_ = ad.Set("Err", errFile)
 	}
 
 	// Log
-	if logFile, ok := sf.cfg.Get("log"); ok {
+	if logFile, ok := sf.submitCommand("log"); ok {
 		_ = ad.Set("UserLog", logFile)
 	}
 
@@ -704,7 +714,7 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 // setFileTransfer sets file transfer related attributes
 func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	// should_transfer_files
-	if stf, ok := sf.cfg.Get("should_transfer_files"); ok {
+	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
 		_ = ad.Set("ShouldTransferFiles", strings.ToUpper(stf))
 	} else {
 		// Default: YES
@@ -712,14 +722,14 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// when_to_transfer_output
-	if wto, ok := sf.cfg.Get("when_to_transfer_output"); ok {
+	if wto, ok := sf.submitCommand("when_to_transfer_output"); ok {
 		_ = ad.Set("WhenToTransferOutput", strings.ToUpper(wto))
 	} else {
 		_ = ad.Set("WhenToTransferOutput", "ON_EXIT")
 	}
 
 	// transfer_input_files - parse comma-separated list
-	if tif, ok := sf.cfg.Get("transfer_input_files"); ok {
+	if tif, ok := sf.submitCommand("transfer_input_files"); ok {
 		files := parseFileList(tif)
 		if len(files) > 0 {
 			// Join with commas for ClassAd string list format
@@ -728,7 +738,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// transfer_output_files - parse comma-separated list
-	if tof, ok := sf.cfg.Get("transfer_output_files"); ok {
+	if tof, ok := sf.submitCommand("transfer_output_files"); ok {
 		files := parseFileList(tof)
 		if len(files) > 0 {
 			_ = ad.Set("TransferOutput", strings.Join(files, ","))
@@ -736,7 +746,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// transfer_output_remaps - format: "name1=path1;name2=path2"
-	if tor, ok := sf.cfg.Get("transfer_output_remaps"); ok {
+	if tor, ok := sf.submitCommand("transfer_output_remaps"); ok {
 		remaps := parseRemaps(tor)
 		if len(remaps) > 0 {
 			// Format as ClassAd string with semicolons
@@ -750,13 +760,13 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 
 	// transfer_executable
 	transferExec := true
-	if te, ok := sf.cfg.Get("transfer_executable"); ok {
+	if te, ok := sf.submitCommand("transfer_executable"); ok {
 		transferExec = parseBool(te, true)
 	}
 	_ = ad.Set("TransferExecutable", transferExec)
 
 	// encrypt_input_files - comma-separated list of files to encrypt
-	if eif, ok := sf.cfg.Get("encrypt_input_files"); ok {
+	if eif, ok := sf.submitCommand("encrypt_input_files"); ok {
 		files := parseFileList(eif)
 		if len(files) > 0 {
 			_ = ad.Set("EncryptInputFiles", strings.Join(files, ","))
@@ -764,7 +774,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// encrypt_output_files - comma-separated list of files to encrypt
-	if eof, ok := sf.cfg.Get("encrypt_output_files"); ok {
+	if eof, ok := sf.submitCommand("encrypt_output_files"); ok {
 		files := parseFileList(eof)
 		if len(files) > 0 {
 			_ = ad.Set("EncryptOutputFiles", strings.Join(files, ","))
@@ -772,7 +782,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// dont_encrypt_input_files - comma-separated list
-	if deif, ok := sf.cfg.Get("dont_encrypt_input_files"); ok {
+	if deif, ok := sf.submitCommand("dont_encrypt_input_files"); ok {
 		files := parseFileList(deif)
 		if len(files) > 0 {
 			_ = ad.Set("DontEncryptInputFiles", strings.Join(files, ","))
@@ -780,7 +790,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// dont_encrypt_output_files - comma-separated list
-	if deof, ok := sf.cfg.Get("dont_encrypt_output_files"); ok {
+	if deof, ok := sf.submitCommand("dont_encrypt_output_files"); ok {
 		files := parseFileList(deof)
 		if len(files) > 0 {
 			_ = ad.Set("DontEncryptOutputFiles", strings.Join(files, ","))
@@ -788,7 +798,7 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// transfer_plugins - semicolon-separated list
-	if tp, ok := sf.cfg.Get("transfer_plugins"); ok {
+	if tp, ok := sf.submitCommand("transfer_plugins"); ok {
 		plugins := strings.Split(tp, ";")
 		var cleanPlugins []string
 		for _, p := range plugins {
@@ -803,12 +813,12 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 
 	// skip_filechecks - don't check if input files exist
-	if sfc, ok := sf.cfg.Get("skip_filechecks"); ok {
+	if sfc, ok := sf.submitCommand("skip_filechecks"); ok {
 		_ = ad.Set("SkipFileChecks", parseBool(sfc, false))
 	}
 
 	// preserve_relative_paths
-	if prp, ok := sf.cfg.Get("preserve_relative_paths"); ok {
+	if prp, ok := sf.submitCommand("preserve_relative_paths"); ok {
 		_ = ad.Set("PreserveRelativePaths", parseBool(prp, false))
 	}
 
@@ -819,9 +829,9 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	// docker_image or container_image
 	var containerImage string
-	if img, ok := sf.cfg.Get("docker_image"); ok {
+	if img, ok := sf.submitCommand("docker_image"); ok {
 		containerImage = img
-	} else if img, ok := sf.cfg.Get("container_image"); ok {
+	} else if img, ok := sf.submitCommand("container_image"); ok {
 		containerImage = img
 	}
 
@@ -832,19 +842,19 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	}
 
 	// docker_network_type or container_network
-	if network, ok := sf.cfg.Get("docker_network_type"); ok {
+	if network, ok := sf.submitCommand("docker_network_type"); ok {
 		_ = ad.Set("DockerNetworkType", network)
-	} else if network, ok := sf.cfg.Get("container_network"); ok {
+	} else if network, ok := sf.submitCommand("container_network"); ok {
 		_ = ad.Set("DockerNetworkType", network)
 	}
 
 	// docker_volumes or container_volumes - comma-separated list
-	if volumes, ok := sf.cfg.Get("docker_volumes"); ok {
+	if volumes, ok := sf.submitCommand("docker_volumes"); ok {
 		volList := parseFileList(volumes)
 		if len(volList) > 0 {
 			_ = ad.Set("DockerVolumes", strings.Join(volList, ","))
 		}
-	} else if volumes, ok := sf.cfg.Get("container_volumes"); ok {
+	} else if volumes, ok := sf.submitCommand("container_volumes"); ok {
 		volList := parseFileList(volumes)
 		if len(volList) > 0 {
 			_ = ad.Set("DockerVolumes", strings.Join(volList, ","))
@@ -852,12 +862,12 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	}
 
 	// docker_pull_policy
-	if policy, ok := sf.cfg.Get("docker_pull_policy"); ok {
+	if policy, ok := sf.submitCommand("docker_pull_policy"); ok {
 		_ = ad.Set("DockerPullPolicy", policy)
 	}
 
 	// container_service_names - comma-separated list
-	if services, ok := sf.cfg.Get("container_service_names"); ok {
+	if services, ok := sf.submitCommand("container_service_names"); ok {
 		serviceList := parseFileList(services)
 		if len(serviceList) > 0 {
 			_ = ad.Set("ContainerServiceNames", strings.Join(serviceList, ","))
@@ -865,29 +875,29 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	}
 
 	// require_container - force use of container
-	if rc, ok := sf.cfg.Get("require_container"); ok {
+	if rc, ok := sf.submitCommand("require_container"); ok {
 		_ = ad.Set("RequireContainer", parseBool(rc, false))
 	}
 
 	// container_target_dir - working directory inside container
-	if targetDir, ok := sf.cfg.Get("container_target_dir"); ok {
+	if targetDir, ok := sf.submitCommand("container_target_dir"); ok {
 		_ = ad.Set("ContainerTargetDir", targetDir)
 	}
 
 	// docker_mount_volumes or mount_under_scratch
-	if mv, ok := sf.cfg.Get("docker_mount_volumes"); ok {
+	if mv, ok := sf.submitCommand("docker_mount_volumes"); ok {
 		_ = ad.Set("DockerMountVolumes", parseBool(mv, true))
-	} else if mus, ok := sf.cfg.Get("mount_under_scratch"); ok {
+	} else if mus, ok := sf.submitCommand("mount_under_scratch"); ok {
 		_ = ad.Set("MountUnderScratch", parseBool(mus, true))
 	}
 
 	// Additional docker-specific options
-	if override, ok := sf.cfg.Get("docker_override_entrypoint"); ok {
+	if override, ok := sf.submitCommand("docker_override_entrypoint"); ok {
 		_ = ad.Set("DockerOverrideEntrypoint", parseBool(override, false))
 	}
 
 	// container_image_sha256
-	if sha, ok := sf.cfg.Get("container_image_sha256"); ok {
+	if sha, ok := sf.submitCommand("container_image_sha256"); ok {
 		_ = ad.Set("ContainerImageSHA256", sha)
 	}
 
@@ -899,7 +909,7 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 	var reqParts []string
 
 	// Start with user-specified requirements
-	if req, ok := sf.cfg.Get("requirements"); ok {
+	if req, ok := sf.submitCommand("requirements"); ok {
 		reqParts = append(reqParts, "("+req+")")
 	}
 
@@ -911,60 +921,60 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 	}
 
 	// Add TARGET.Disk check if we're transferring files
-	if stf, ok := sf.cfg.Get("should_transfer_files"); ok {
+	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
 		if strings.ToUpper(stf) == "YES" {
 			reqParts = append(reqParts, "(TARGET.Disk >= RequestDisk)")
 		}
 	}
 
 	// Add memory requirement check if specified
-	if _, ok := sf.cfg.Get("request_memory"); ok {
+	if _, ok := sf.submitCommand("request_memory"); ok {
 		reqParts = append(reqParts, "(TARGET.Memory >= RequestMemory)")
 	}
 
 	// Add CPU requirement check if specified
-	if _, ok := sf.cfg.Get("request_cpus"); ok {
+	if _, ok := sf.submitCommand("request_cpus"); ok {
 		reqParts = append(reqParts, "(TARGET.Cpus >= RequestCpus)")
 	}
 
 	// Add GPU requirement check if specified
-	if reqGpus, ok := sf.cfg.Get("request_gpus"); ok {
+	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
 		if intGpus, err := parseInt(reqGpus); err == nil && intGpus > 0 {
 			reqParts = append(reqParts, "(TARGET.Gpus >= RequestGpus)")
 		}
 	}
 
 	// Add specific OpSys requirement if specified
-	if reqOpsys, ok := sf.cfg.Get("request_opsys"); ok {
+	if reqOpsys, ok := sf.submitCommand("request_opsys"); ok {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.OpSys == %q)", reqOpsys))
 	}
 
 	// Add specific Arch requirement if specified
-	if reqArch, ok := sf.cfg.Get("request_arch"); ok {
+	if reqArch, ok := sf.submitCommand("request_arch"); ok {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.Arch == %q)", reqArch))
 	}
 
 	// Add container requirement if container image is specified
-	if _, ok := sf.cfg.Get("docker_image"); ok {
+	if _, ok := sf.submitCommand("docker_image"); ok {
 		reqParts = append(reqParts, "(TARGET.HasDocker =?= true)")
-	} else if _, ok := sf.cfg.Get("container_image"); ok {
+	} else if _, ok := sf.submitCommand("container_image"); ok {
 		reqParts = append(reqParts, "(TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
 	}
 
 	// Require container support if explicitly requested
-	if rc, ok := sf.cfg.Get("require_container"); ok {
+	if rc, ok := sf.submitCommand("require_container"); ok {
 		if parseBool(rc, false) {
 			reqParts = append(reqParts, "(TARGET.HasDocker =?= true || TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
 		}
 	}
 
 	// Add file system domain requirements
-	if fsDomain, ok := sf.cfg.Get("file_system_domain"); ok {
+	if fsDomain, ok := sf.submitCommand("file_system_domain"); ok {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.FileSystemDomain == %q)", fsDomain))
 	}
 
 	// Add HasFileTransfer requirement if needed
-	if stf, ok := sf.cfg.Get("should_transfer_files"); ok {
+	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
 		if strings.ToUpper(stf) == "YES" {
 			reqParts = append(reqParts, "(TARGET.HasFileTransfer)")
 		}
@@ -987,7 +997,7 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// Request CPUs (default: 1)
 	cpus := 1
-	if reqCpus, ok := sf.cfg.Get("request_cpus"); ok {
+	if reqCpus, ok := sf.submitCommand("request_cpus"); ok {
 		if n, err := parseInt(reqCpus); err == nil {
 			cpus = n
 		}
@@ -996,7 +1006,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 
 	// Request Memory in MB (default: 128)
 	memory := 128
-	if reqMem, ok := sf.cfg.Get("request_memory"); ok {
+	if reqMem, ok := sf.submitCommand("request_memory"); ok {
 		if n, err := parseInt(reqMem); err == nil {
 			memory = n
 		}
@@ -1005,7 +1015,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 
 	// Request Disk in KB (default: 1024)
 	disk := 1024
-	if reqDisk, ok := sf.cfg.Get("request_disk"); ok {
+	if reqDisk, ok := sf.submitCommand("request_disk"); ok {
 		if n, err := parseInt(reqDisk); err == nil {
 			disk = n
 		}
@@ -1013,21 +1023,21 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	_ = ad.Set("RequestDisk", disk)
 
 	// Request GPUs (default: 0)
-	if reqGpus, ok := sf.cfg.Get("request_gpus"); ok {
+	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
 		if n, err := parseInt(reqGpus); err == nil {
 			_ = ad.Set("RequestGpus", n)
 		}
 	}
 
 	// GPU memory per device (MB)
-	if gpuMem, ok := sf.cfg.Get("request_gpu_memory"); ok {
+	if gpuMem, ok := sf.submitCommand("request_gpu_memory"); ok {
 		if n, err := parseInt(gpuMem); err == nil {
 			_ = ad.Set("RequestGpuMemory", n)
 		}
 	}
 
 	// Specific GPU properties
-	if gpuProps, ok := sf.cfg.Get("require_gpus"); ok {
+	if gpuProps, ok := sf.submitCommand("require_gpus"); ok {
 		_ = ad.Set("RequireGpus", gpuProps)
 	}
 
@@ -1037,13 +1047,13 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 // setNotification sets notification preference
 func (sf *SubmitFile) setNotification(ad *classad.ClassAd) error {
 	notification := "NEVER"
-	if notif, ok := sf.cfg.Get("notification"); ok {
+	if notif, ok := sf.submitCommand("notification"); ok {
 		notification = strings.ToUpper(notif)
 	}
 	_ = ad.Set("EmailAttributes", notification)
 
 	// Set email address if provided
-	if email, ok := sf.cfg.Get("notify_user"); ok {
+	if email, ok := sf.submitCommand("notify_user"); ok {
 		_ = ad.Set("NotifyUser", email)
 	}
 
@@ -1052,7 +1062,7 @@ func (sf *SubmitFile) setNotification(ad *classad.ClassAd) error {
 
 // setRank sets the rank expression
 func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
-	if rank, ok := sf.cfg.Get("rank"); ok {
+	if rank, ok := sf.submitCommand("rank"); ok {
 		_ = ad.Set("Rank", rank)
 	} else {
 		// Default rank
@@ -1067,12 +1077,12 @@ func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 	// instead of being ignored.
 
 	// Accounting group
-	if group, ok := sf.cfg.Get("accounting_group"); ok {
+	if group, ok := sf.submitCommand("accounting_group"); ok {
 		_ = ad.Set("AccountingGroup", group)
 	}
 
 	// Accounting group user
-	if user, ok := sf.cfg.Get("accounting_group_user"); ok {
+	if user, ok := sf.submitCommand("accounting_group_user"); ok {
 		_ = ad.Set("AccountingGroupUser", user)
 	}
 
@@ -1082,104 +1092,104 @@ func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 // setJobStatusControl sets job status and control attributes
 func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	// hold - initial hold state
-	if hold, ok := sf.cfg.Get("hold"); ok {
+	if hold, ok := sf.submitCommand("hold"); ok {
 		if parseBool(hold, false) {
 			_ = ad.Set("JobStatus", 5) // 5 = HELD
 		}
 	}
 
 	// hold_reason - reason for initial hold
-	if reason, ok := sf.cfg.Get("hold_reason"); ok {
+	if reason, ok := sf.submitCommand("hold_reason"); ok {
 		_ = ad.Set("HoldReason", reason)
 		// Set release reason code if not already set
-		if _, ok := sf.cfg.Get("hold_reason_code"); !ok {
+		if _, ok := sf.submitCommand("hold_reason_code"); !ok {
 			_ = ad.Set("HoldReasonCode", 1)
 		}
 	}
 
 	// hold_reason_code
-	if code, ok := sf.cfg.Get("hold_reason_code"); ok {
+	if code, ok := sf.submitCommand("hold_reason_code"); ok {
 		if intCode, err := parseInt(code); err == nil {
 			_ = ad.Set("HoldReasonCode", intCode)
 		}
 	}
 
 	// hold_reason_subcode
-	if subcode, ok := sf.cfg.Get("hold_reason_subcode"); ok {
+	if subcode, ok := sf.submitCommand("hold_reason_subcode"); ok {
 		if intSubcode, err := parseInt(subcode); err == nil {
 			_ = ad.Set("HoldReasonSubCode", intSubcode)
 		}
 	}
 
 	// priority - user priority for job
-	if priority, ok := sf.cfg.Get("priority"); ok {
+	if priority, ok := sf.submitCommand("priority"); ok {
 		if intPriority, err := parseInt(priority); err == nil {
 			_ = ad.Set("JobPrio", intPriority)
 		}
 	}
 
 	// nice_user - reduce priority to be nice
-	if niceUser, ok := sf.cfg.Get("nice_user"); ok {
+	if niceUser, ok := sf.submitCommand("nice_user"); ok {
 		_ = ad.Set("NiceUser", parseBool(niceUser, false))
 	}
 
 	// max_job_retirement_time - time to allow for graceful shutdown
-	if maxRetire, ok := sf.cfg.Get("max_job_retirement_time"); ok {
+	if maxRetire, ok := sf.submitCommand("max_job_retirement_time"); ok {
 		if intRetire, err := parseInt(maxRetire); err == nil {
 			_ = ad.Set("MaxJobRetirementTime", intRetire)
 		}
 	}
 
 	// job_max_vacate_time - time for job to vacate before killing
-	if maxVacate, ok := sf.cfg.Get("job_max_vacate_time"); ok {
+	if maxVacate, ok := sf.submitCommand("job_max_vacate_time"); ok {
 		if intVacate, err := parseInt(maxVacate); err == nil {
 			_ = ad.Set("JobMaxVacateTime", intVacate)
 		}
 	}
 
 	// max_retries - number of times to retry on failure
-	if maxRetries, ok := sf.cfg.Get("max_retries"); ok {
+	if maxRetries, ok := sf.submitCommand("max_retries"); ok {
 		if intRetries, err := parseInt(maxRetries); err == nil {
 			_ = ad.Set("MaxRetries", intRetries)
 		}
 	}
 
 	// retry_until - expression for when to stop retrying
-	if retryUntil, ok := sf.cfg.Get("retry_until"); ok {
+	if retryUntil, ok := sf.submitCommand("retry_until"); ok {
 		_ = ad.Set("RetryUntil", retryUntil)
 	}
 
 	// success_exit_code - exit code(s) considered success
-	if successCode, ok := sf.cfg.Get("success_exit_code"); ok {
+	if successCode, ok := sf.submitCommand("success_exit_code"); ok {
 		_ = ad.Set("SuccessExitCode", successCode)
 	}
 
 	// leave_in_queue - keep job in queue after completion
-	if leaveInQueue, ok := sf.cfg.Get("leave_in_queue"); ok {
+	if leaveInQueue, ok := sf.submitCommand("leave_in_queue"); ok {
 		_ = ad.Set("LeaveJobInQueue", parseBool(leaveInQueue, false))
 	}
 
 	// keep_claim_idle - keep claim after job completes
-	if keepClaim, ok := sf.cfg.Get("keep_claim_idle"); ok {
+	if keepClaim, ok := sf.submitCommand("keep_claim_idle"); ok {
 		if intKeep, err := parseInt(keepClaim); err == nil {
 			_ = ad.Set("KeepClaimIdle", intKeep)
 		}
 	}
 
 	// job_lease_duration - how long schedd can keep job leased
-	if leaseDuration, ok := sf.cfg.Get("job_lease_duration"); ok {
+	if leaseDuration, ok := sf.submitCommand("job_lease_duration"); ok {
 		if intLease, err := parseInt(leaseDuration); err == nil {
 			_ = ad.Set("JobLeaseDuration", intLease)
 		}
 	}
 
 	// concurrency_limits - resources this job needs
-	if concLimits, ok := sf.cfg.Get("concurrency_limits"); ok {
+	if concLimits, ok := sf.submitCommand("concurrency_limits"); ok {
 		_ = ad.Set("ConcurrencyLimits", concLimits)
 	}
 
 	// concurrency_limits_expr - expression for concurrency limits
-	if concExpr, ok := sf.cfg.Get("concurrency_limits_expr"); ok {
+	if concExpr, ok := sf.submitCommand("concurrency_limits_expr"); ok {
 		_ = ad.Set("ConcurrencyLimitsExpr", concExpr)
 	}
 
@@ -1313,111 +1323,111 @@ func parseRemaps(remaps string) map[string]string {
 //nolint:gocyclo // Complex function required for grid universe parameter handling
 func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	// grid_resource - Required for grid universe
-	if gridResource, ok := sf.cfg.Get("grid_resource"); ok {
+	if gridResource, ok := sf.submitCommand("grid_resource"); ok {
 		_ = ad.Set("GridResource", gridResource)
 	}
 
 	// EC2 parameters
-	if ec2AmiID, ok := sf.cfg.Get("ec2_ami_id"); ok {
+	if ec2AmiID, ok := sf.submitCommand("ec2_ami_id"); ok {
 		_ = ad.Set("EC2AmiID", ec2AmiID)
 	}
-	if ec2InstanceType, ok := sf.cfg.Get("ec2_instance_type"); ok {
+	if ec2InstanceType, ok := sf.submitCommand("ec2_instance_type"); ok {
 		_ = ad.Set("EC2InstanceType", ec2InstanceType)
 	}
-	if ec2KeyPair, ok := sf.cfg.Get("ec2_keypair"); ok {
+	if ec2KeyPair, ok := sf.submitCommand("ec2_keypair"); ok {
 		_ = ad.Set("EC2KeyPair", ec2KeyPair)
 	}
-	if ec2KeyPairFile, ok := sf.cfg.Get("ec2_keypair_file"); ok {
+	if ec2KeyPairFile, ok := sf.submitCommand("ec2_keypair_file"); ok {
 		_ = ad.Set("EC2KeyPairFile", ec2KeyPairFile)
 	}
-	if ec2AccessKeyID, ok := sf.cfg.Get("ec2_access_key_id"); ok {
+	if ec2AccessKeyID, ok := sf.submitCommand("ec2_access_key_id"); ok {
 		_ = ad.Set("EC2AccessKeyId", ec2AccessKeyID)
 	}
-	if ec2SecretAccessKey, ok := sf.cfg.Get("ec2_secret_access_key"); ok {
+	if ec2SecretAccessKey, ok := sf.submitCommand("ec2_secret_access_key"); ok {
 		_ = ad.Set("EC2SecretAccessKey", ec2SecretAccessKey)
 	}
-	if ec2SecurityGroups, ok := sf.cfg.Get("ec2_security_groups"); ok {
+	if ec2SecurityGroups, ok := sf.submitCommand("ec2_security_groups"); ok {
 		_ = ad.Set("EC2SecurityGroups", ec2SecurityGroups)
 	}
-	if ec2SecurityIDs, ok := sf.cfg.Get("ec2_security_ids"); ok {
+	if ec2SecurityIDs, ok := sf.submitCommand("ec2_security_ids"); ok {
 		_ = ad.Set("EC2SecurityIDs", ec2SecurityIDs)
 	}
-	if ec2SpotPrice, ok := sf.cfg.Get("ec2_spot_price"); ok {
+	if ec2SpotPrice, ok := sf.submitCommand("ec2_spot_price"); ok {
 		_ = ad.Set("EC2SpotPrice", ec2SpotPrice)
 	}
-	if ec2UserData, ok := sf.cfg.Get("ec2_user_data"); ok {
+	if ec2UserData, ok := sf.submitCommand("ec2_user_data"); ok {
 		_ = ad.Set("EC2UserData", ec2UserData)
 	}
-	if ec2UserDataFile, ok := sf.cfg.Get("ec2_user_data_file"); ok {
+	if ec2UserDataFile, ok := sf.submitCommand("ec2_user_data_file"); ok {
 		_ = ad.Set("EC2UserDataFile", ec2UserDataFile)
 	}
 
 	// GCE parameters
-	if gceImage, ok := sf.cfg.Get("gce_image"); ok {
+	if gceImage, ok := sf.submitCommand("gce_image"); ok {
 		_ = ad.Set("GceImage", gceImage)
 	}
-	if gceMachineType, ok := sf.cfg.Get("gce_machine_type"); ok {
+	if gceMachineType, ok := sf.submitCommand("gce_machine_type"); ok {
 		_ = ad.Set("GceMachineType", gceMachineType)
 	}
-	if gceAccount, ok := sf.cfg.Get("gce_account"); ok {
+	if gceAccount, ok := sf.submitCommand("gce_account"); ok {
 		_ = ad.Set("GceAccount", gceAccount)
 	}
-	if gceAuthFile, ok := sf.cfg.Get("gce_auth_file"); ok {
+	if gceAuthFile, ok := sf.submitCommand("gce_auth_file"); ok {
 		_ = ad.Set("GceAuthFile", gceAuthFile)
 	}
-	if gceJSONFile, ok := sf.cfg.Get("gce_json_file"); ok {
+	if gceJSONFile, ok := sf.submitCommand("gce_json_file"); ok {
 		_ = ad.Set("GceJsonFile", gceJSONFile)
 	}
-	if gceMetadata, ok := sf.cfg.Get("gce_metadata"); ok {
+	if gceMetadata, ok := sf.submitCommand("gce_metadata"); ok {
 		_ = ad.Set("GceMetadata", gceMetadata)
 	}
 
 	// Azure parameters
-	if azureImage, ok := sf.cfg.Get("azure_image"); ok {
+	if azureImage, ok := sf.submitCommand("azure_image"); ok {
 		_ = ad.Set("AzureImage", azureImage)
 	}
-	if azureSize, ok := sf.cfg.Get("azure_size"); ok {
+	if azureSize, ok := sf.submitCommand("azure_size"); ok {
 		_ = ad.Set("AzureSize", azureSize)
 	}
-	if azureLocation, ok := sf.cfg.Get("azure_location"); ok {
+	if azureLocation, ok := sf.submitCommand("azure_location"); ok {
 		_ = ad.Set("AzureLocation", azureLocation)
 	}
-	if azureAuthFile, ok := sf.cfg.Get("azure_auth_file"); ok {
+	if azureAuthFile, ok := sf.submitCommand("azure_auth_file"); ok {
 		_ = ad.Set("AzureAuthFile", azureAuthFile)
 	}
-	if azureAdminUsername, ok := sf.cfg.Get("azure_admin_username"); ok {
+	if azureAdminUsername, ok := sf.submitCommand("azure_admin_username"); ok {
 		_ = ad.Set("AzureAdminUsername", azureAdminUsername)
 	}
-	if azureAdminKey, ok := sf.cfg.Get("azure_admin_key"); ok {
+	if azureAdminKey, ok := sf.submitCommand("azure_admin_key"); ok {
 		_ = ad.Set("AzureAdminKey", azureAdminKey)
 	}
 
 	// Batch system parameters (PBS, LSF, SGE, Slurm, etc.)
-	if batchQueue, ok := sf.cfg.Get("batch_queue"); ok {
+	if batchQueue, ok := sf.submitCommand("batch_queue"); ok {
 		_ = ad.Set("BatchQueue", batchQueue)
 	}
-	if batchProject, ok := sf.cfg.Get("batch_project"); ok {
+	if batchProject, ok := sf.submitCommand("batch_project"); ok {
 		_ = ad.Set("BatchProject", batchProject)
 	}
-	if batchRuntime, ok := sf.cfg.Get("batch_runtime"); ok {
+	if batchRuntime, ok := sf.submitCommand("batch_runtime"); ok {
 		if intRuntime, err := parseInt(batchRuntime); err == nil {
 			_ = ad.Set("BatchRuntime", intRuntime)
 		}
 	}
-	if batchExtraArgs, ok := sf.cfg.Get("batch_extra_submit_args"); ok {
+	if batchExtraArgs, ok := sf.submitCommand("batch_extra_submit_args"); ok {
 		_ = ad.Set("BatchExtraSubmitArgs", batchExtraArgs)
 	}
 
 	// ARC parameters
-	if arcRte, ok := sf.cfg.Get("arc_rte"); ok {
+	if arcRte, ok := sf.submitCommand("arc_rte"); ok {
 		_ = ad.Set("ArcRte", arcRte)
 	}
-	if arcResources, ok := sf.cfg.Get("arc_resources"); ok {
+	if arcResources, ok := sf.submitCommand("arc_resources"); ok {
 		_ = ad.Set("ArcResources", arcResources)
 	}
 
 	// Delegate credentials
-	if delegateJobGSI, ok := sf.cfg.Get("delegate_job_gsi_credentials_lifetime"); ok {
+	if delegateJobGSI, ok := sf.submitCommand("delegate_job_gsi_credentials_lifetime"); ok {
 		if intLifetime, err := parseInt(delegateJobGSI); err == nil {
 			_ = ad.Set("DelegateJobGSICredentialsLifetime", intLifetime)
 		}
@@ -1429,81 +1439,81 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 // setVMParams sets VM universe specific parameters
 func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 	// vm_type - Required: type of VM (kvm, xen, vmware)
-	if vmType, ok := sf.cfg.Get("vm_type"); ok {
+	if vmType, ok := sf.submitCommand("vm_type"); ok {
 		_ = ad.Set("VM_Type", vmType)
 	}
 
 	// vm_memory - Memory for the VM in MB
-	if vmMemory, ok := sf.cfg.Get("vm_memory"); ok {
+	if vmMemory, ok := sf.submitCommand("vm_memory"); ok {
 		if intMem, err := parseInt(vmMemory); err == nil {
 			_ = ad.Set("VM_Memory", intMem)
 		}
 	}
 
 	// vm_disk - Disk space for VM
-	if vmDisk, ok := sf.cfg.Get("vm_disk"); ok {
+	if vmDisk, ok := sf.submitCommand("vm_disk"); ok {
 		_ = ad.Set("VM_Disk", vmDisk)
 	}
 
 	// vm_networking - Enable networking for VM
-	if vmNet, ok := sf.cfg.Get("vm_networking"); ok {
+	if vmNet, ok := sf.submitCommand("vm_networking"); ok {
 		_ = ad.Set("VM_Networking", parseBool(vmNet, false))
 	}
 
 	// vm_networking_type - Type of networking (nat, bridge, none)
-	if vmNetType, ok := sf.cfg.Get("vm_networking_type"); ok {
+	if vmNetType, ok := sf.submitCommand("vm_networking_type"); ok {
 		_ = ad.Set("VM_NetworkingType", vmNetType)
 	}
 
 	// vm_macaddr - MAC address for VM
-	if vmMac, ok := sf.cfg.Get("vm_macaddr"); ok {
+	if vmMac, ok := sf.submitCommand("vm_macaddr"); ok {
 		_ = ad.Set("VM_MACAddr", vmMac)
 	}
 
 	// vm_checkpoint - Enable checkpointing
-	if vmCheckpoint, ok := sf.cfg.Get("vm_checkpoint"); ok {
+	if vmCheckpoint, ok := sf.submitCommand("vm_checkpoint"); ok {
 		_ = ad.Set("VM_Checkpoint", parseBool(vmCheckpoint, false))
 	}
 
 	// vm_vcpus - Number of virtual CPUs
-	if vmVCPUs, ok := sf.cfg.Get("vm_vcpus"); ok {
+	if vmVCPUs, ok := sf.submitCommand("vm_vcpus"); ok {
 		if intVCPUs, err := parseInt(vmVCPUs); err == nil {
 			_ = ad.Set("VM_VCPUs", intVCPUs)
 		}
 	}
 
 	// xen_kernel - Xen kernel image
-	if xenKernel, ok := sf.cfg.Get("xen_kernel"); ok {
+	if xenKernel, ok := sf.submitCommand("xen_kernel"); ok {
 		_ = ad.Set("Xen_Kernel", xenKernel)
 	}
 
 	// xen_initrd - Xen initial ramdisk
-	if xenInitrd, ok := sf.cfg.Get("xen_initrd"); ok {
+	if xenInitrd, ok := sf.submitCommand("xen_initrd"); ok {
 		_ = ad.Set("Xen_Initrd", xenInitrd)
 	}
 
 	// xen_root - Xen root device
-	if xenRoot, ok := sf.cfg.Get("xen_root"); ok {
+	if xenRoot, ok := sf.submitCommand("xen_root"); ok {
 		_ = ad.Set("Xen_Root", xenRoot)
 	}
 
 	// xen_kernel_params - Xen kernel parameters
-	if xenParams, ok := sf.cfg.Get("xen_kernel_params"); ok {
+	if xenParams, ok := sf.submitCommand("xen_kernel_params"); ok {
 		_ = ad.Set("Xen_KernelParams", xenParams)
 	}
 
 	// vmware_dir - VMware working directory
-	if vmwareDir, ok := sf.cfg.Get("vmware_dir"); ok {
+	if vmwareDir, ok := sf.submitCommand("vmware_dir"); ok {
 		_ = ad.Set("VMWARE_Dir", vmwareDir)
 	}
 
 	// vmware_snapshot_disk - Use snapshot disk
-	if vmwareSnapshot, ok := sf.cfg.Get("vmware_snapshot_disk"); ok {
+	if vmwareSnapshot, ok := sf.submitCommand("vmware_snapshot_disk"); ok {
 		_ = ad.Set("VMWARE_SnapshotDisk", parseBool(vmwareSnapshot, false))
 	}
 
 	// vmware_should_transfer_files - Transfer files
-	if vmwareTransfer, ok := sf.cfg.Get("vmware_should_transfer_files"); ok {
+	if vmwareTransfer, ok := sf.submitCommand("vmware_should_transfer_files"); ok {
 		_ = ad.Set("VMWARE_ShouldTransferFiles", parseBool(vmwareTransfer, true))
 	}
 
@@ -1513,7 +1523,7 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 // setParallelParams sets parallel/MPI universe specific parameters
 func (sf *SubmitFile) setParallelParams(ad *classad.ClassAd) error {
 	// machine_count - Required: number of machines/nodes needed
-	if machineCount, ok := sf.cfg.Get("machine_count"); ok {
+	if machineCount, ok := sf.submitCommand("machine_count"); ok {
 		if intCount, err := parseInt(machineCount); err == nil {
 			_ = ad.Set("MachineCount", intCount)
 		}
@@ -1528,12 +1538,12 @@ func (sf *SubmitFile) setParallelParams(ad *classad.ClassAd) error {
 // setJavaParams sets Java universe specific parameters
 func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
 	// jar_files - JAR files to include
-	if jarFiles, ok := sf.cfg.Get("jar_files"); ok {
+	if jarFiles, ok := sf.submitCommand("jar_files"); ok {
 		_ = ad.Set("JarFiles", jarFiles)
 	}
 
 	// java_vm_args - Arguments for the JVM
-	if javaVMArgs, ok := sf.cfg.Get("java_vm_args"); ok {
+	if javaVMArgs, ok := sf.submitCommand("java_vm_args"); ok {
 		_ = ad.Set("JavaVMArgs", javaVMArgs)
 	}
 
@@ -1547,97 +1557,97 @@ func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
 // setPeriodicExpressions sets periodic hold/remove/release expressions
 func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 	// periodic_hold - Expression to periodically hold job
-	if periodicHold, ok := sf.cfg.Get("periodic_hold"); ok {
+	if periodicHold, ok := sf.submitCommand("periodic_hold"); ok {
 		_ = ad.Set("PeriodicHold", periodicHold)
 	}
 
 	// periodic_hold_reason - Reason string when periodic hold triggers
-	if holdReason, ok := sf.cfg.Get("periodic_hold_reason"); ok {
+	if holdReason, ok := sf.submitCommand("periodic_hold_reason"); ok {
 		_ = ad.Set("PeriodicHoldReason", holdReason)
 	}
 
 	// periodic_hold_subcode - Subcode when periodic hold triggers
-	if holdSubcode, ok := sf.cfg.Get("periodic_hold_subcode"); ok {
+	if holdSubcode, ok := sf.submitCommand("periodic_hold_subcode"); ok {
 		if intSubcode, err := parseInt(holdSubcode); err == nil {
 			_ = ad.Set("PeriodicHoldSubCode", intSubcode)
 		}
 	}
 
 	// periodic_release - Expression to periodically release held job
-	if periodicRelease, ok := sf.cfg.Get("periodic_release"); ok {
+	if periodicRelease, ok := sf.submitCommand("periodic_release"); ok {
 		_ = ad.Set("PeriodicRelease", periodicRelease)
 	}
 
 	// periodic_remove - Expression to periodically remove job
-	if periodicRemove, ok := sf.cfg.Get("periodic_remove"); ok {
+	if periodicRemove, ok := sf.submitCommand("periodic_remove"); ok {
 		_ = ad.Set("PeriodicRemove", periodicRemove)
 	}
 
 	// on_exit_hold - Hold job based on exit condition
-	if onExitHold, ok := sf.cfg.Get("on_exit_hold"); ok {
+	if onExitHold, ok := sf.submitCommand("on_exit_hold"); ok {
 		_ = ad.Set("OnExitHold", onExitHold)
 	}
 
 	// on_exit_hold_reason - Reason for on_exit hold
-	if onExitHoldReason, ok := sf.cfg.Get("on_exit_hold_reason"); ok {
+	if onExitHoldReason, ok := sf.submitCommand("on_exit_hold_reason"); ok {
 		_ = ad.Set("OnExitHoldReason", onExitHoldReason)
 	}
 
 	// on_exit_hold_subcode - Subcode for on_exit hold
-	if onExitHoldSubcode, ok := sf.cfg.Get("on_exit_hold_subcode"); ok {
+	if onExitHoldSubcode, ok := sf.submitCommand("on_exit_hold_subcode"); ok {
 		if intSubcode, err := parseInt(onExitHoldSubcode); err == nil {
 			_ = ad.Set("OnExitHoldSubCode", intSubcode)
 		}
 	}
 
 	// on_exit_remove - Remove job based on exit condition
-	if onExitRemove, ok := sf.cfg.Get("on_exit_remove"); ok {
+	if onExitRemove, ok := sf.submitCommand("on_exit_remove"); ok {
 		_ = ad.Set("OnExitRemove", onExitRemove)
 	}
 
 	// cron_* parameters for job deferral
-	if cronMinute, ok := sf.cfg.Get("cron_minute"); ok {
+	if cronMinute, ok := sf.submitCommand("cron_minute"); ok {
 		_ = ad.Set("CronMinute", cronMinute)
 	}
-	if cronHour, ok := sf.cfg.Get("cron_hour"); ok {
+	if cronHour, ok := sf.submitCommand("cron_hour"); ok {
 		_ = ad.Set("CronHour", cronHour)
 	}
-	if cronDayOfMonth, ok := sf.cfg.Get("cron_day_of_month"); ok {
+	if cronDayOfMonth, ok := sf.submitCommand("cron_day_of_month"); ok {
 		_ = ad.Set("CronDayOfMonth", cronDayOfMonth)
 	}
-	if cronMonth, ok := sf.cfg.Get("cron_month"); ok {
+	if cronMonth, ok := sf.submitCommand("cron_month"); ok {
 		_ = ad.Set("CronMonth", cronMonth)
 	}
-	if cronDayOfWeek, ok := sf.cfg.Get("cron_day_of_week"); ok {
+	if cronDayOfWeek, ok := sf.submitCommand("cron_day_of_week"); ok {
 		_ = ad.Set("CronDayOfWeek", cronDayOfWeek)
 	}
-	if cronPrepTime, ok := sf.cfg.Get("cron_prep_time"); ok {
+	if cronPrepTime, ok := sf.submitCommand("cron_prep_time"); ok {
 		if intPrepTime, err := parseInt(cronPrepTime); err == nil {
 			_ = ad.Set("CronPrepTime", intPrepTime)
 		}
 	}
-	if cronWindow, ok := sf.cfg.Get("cron_window"); ok {
+	if cronWindow, ok := sf.submitCommand("cron_window"); ok {
 		if intWindow, err := parseInt(cronWindow); err == nil {
 			_ = ad.Set("CronWindow", intWindow)
 		}
 	}
 
 	// deferral_time - Defer job start until specified time
-	if deferralTime, ok := sf.cfg.Get("deferral_time"); ok {
+	if deferralTime, ok := sf.submitCommand("deferral_time"); ok {
 		if intTime, err := parseInt(deferralTime); err == nil {
 			_ = ad.Set("DeferralTime", intTime)
 		}
 	}
 
 	// deferral_window - Time window for deferred job
-	if deferralWindow, ok := sf.cfg.Get("deferral_window"); ok {
+	if deferralWindow, ok := sf.submitCommand("deferral_window"); ok {
 		if intWindow, err := parseInt(deferralWindow); err == nil {
 			_ = ad.Set("DeferralWindow", intWindow)
 		}
 	}
 
 	// deferral_prep_time - Preparation time before deferral
-	if deferralPrepTime, ok := sf.cfg.Get("deferral_prep_time"); ok {
+	if deferralPrepTime, ok := sf.submitCommand("deferral_prep_time"); ok {
 		if intPrepTime, err := parseInt(deferralPrepTime); err == nil {
 			_ = ad.Set("DeferralPrepTime", intPrepTime)
 		}
@@ -1649,7 +1659,7 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 // setAutoAttributes sets auto-generated attributes
 func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 	// IWD (Initial Working Directory) - defaults to current working directory
-	iwd, ok := sf.cfg.Get("initialdir")
+	iwd, ok := sf.submitCommand("initialdir")
 	if !ok || iwd == "" {
 		// If not specified, use current working directory
 		cwd, err := os.Getwd()
@@ -1662,7 +1672,7 @@ func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 
 	// Owner - the user submitting the job
 	// This would typically come from the authenticated user
-	if owner, ok := sf.cfg.Get("owner"); ok {
+	if owner, ok := sf.submitCommand("owner"); ok {
 		_ = ad.Set("Owner", owner)
 	}
 
@@ -1870,7 +1880,7 @@ func (sf *SubmitFile) expandSubmitMacros(value string, jobID JobID, queueVars ma
 // setSignalHandling sets signal handling attributes for the job
 func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
 	// kill_sig - signal to use when killing job
-	if killSig, ok := sf.cfg.Get("kill_sig"); ok {
+	if killSig, ok := sf.submitCommand("kill_sig"); ok {
 		// Can be a signal name (SIGTERM) or number (15)
 		if intSig, err := parseInt(killSig); err == nil {
 			_ = ad.Set("KillSig", intSig)
@@ -1881,7 +1891,7 @@ func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
 	}
 
 	// remove_kill_sig - signal to use when removing job
-	if removeSig, ok := sf.cfg.Get("remove_kill_sig"); ok {
+	if removeSig, ok := sf.submitCommand("remove_kill_sig"); ok {
 		if intSig, err := parseInt(removeSig); err == nil {
 			_ = ad.Set("RemoveKillSig", intSig)
 		} else {
@@ -1890,7 +1900,7 @@ func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
 	}
 
 	// kill_sig_timeout - how long to wait after kill signal before using SIGKILL
-	if killTimeout, ok := sf.cfg.Get("kill_sig_timeout"); ok {
+	if killTimeout, ok := sf.submitCommand("kill_sig_timeout"); ok {
 		if intTimeout, err := parseInt(killTimeout); err == nil {
 			_ = ad.Set("KillSigTimeout", intTimeout)
 		}
@@ -1903,33 +1913,33 @@ func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
 // These are standard HTCondor job attributes that are commonly used
 func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 	// image_size - disk image size (often auto-calculated)
-	if imageSize, ok := sf.cfg.Get("image_size"); ok {
+	if imageSize, ok := sf.submitCommand("image_size"); ok {
 		if intSize, err := parseInt(imageSize); err == nil {
 			_ = ad.Set("ImageSize", intSize)
 		}
 	}
 
 	// executable_size - size of executable
-	if execSize, ok := sf.cfg.Get("executable_size"); ok {
+	if execSize, ok := sf.submitCommand("executable_size"); ok {
 		if intSize, err := parseInt(execSize); err == nil {
 			_ = ad.Set("ExecutableSize", intSize)
 		}
 	}
 
 	// disk_usage - disk usage
-	if diskUsage, ok := sf.cfg.Get("disk_usage"); ok {
+	if diskUsage, ok := sf.submitCommand("disk_usage"); ok {
 		if intUsage, err := parseInt(diskUsage); err == nil {
 			_ = ad.Set("DiskUsage", intUsage)
 		}
 	}
 
 	// remote_initial_dir - initial directory on remote machine
-	if remoteDir, ok := sf.cfg.Get("remote_initialdir"); ok {
+	if remoteDir, ok := sf.submitCommand("remote_initialdir"); ok {
 		_ = ad.Set("RemoteInitialDir", remoteDir)
 	}
 
 	// JobNotification - when to send email
-	if notification, ok := sf.cfg.Get("notification"); ok {
+	if notification, ok := sf.submitCommand("notification"); ok {
 		// Convert notification string to integer code
 		notifCode := 0
 		switch strings.ToLower(notification) {
@@ -1951,61 +1961,61 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 	}
 
 	// WantRemoteIO - request remote I/O
-	if wantIO, ok := sf.cfg.Get("want_remote_io"); ok {
+	if wantIO, ok := sf.submitCommand("want_remote_io"); ok {
 		_ = ad.Set("WantRemoteIO", parseBool(wantIO, false))
 	}
 
 	// WantRemoteSyscalls - request remote system calls
-	if wantSyscalls, ok := sf.cfg.Get("want_remote_syscalls"); ok {
+	if wantSyscalls, ok := sf.submitCommand("want_remote_syscalls"); ok {
 		_ = ad.Set("WantRemoteSyscalls", parseBool(wantSyscalls, false))
 	}
 
 	// StreamInput - stream stdin
-	if streamIn, ok := sf.cfg.Get("stream_input"); ok {
+	if streamIn, ok := sf.submitCommand("stream_input"); ok {
 		_ = ad.Set("StreamInput", parseBool(streamIn, false))
 	}
 
 	// StreamOutput - stream stdout
-	if streamOut, ok := sf.cfg.Get("stream_output"); ok {
+	if streamOut, ok := sf.submitCommand("stream_output"); ok {
 		_ = ad.Set("StreamOutput", parseBool(streamOut, false))
 	}
 
 	// StreamError - stream stderr
-	if streamErr, ok := sf.cfg.Get("stream_error"); ok {
+	if streamErr, ok := sf.submitCommand("stream_error"); ok {
 		_ = ad.Set("StreamError", parseBool(streamErr, false))
 	}
 
 	// JobDescription - human-readable description of job
-	if desc, ok := sf.cfg.Get("description"); ok {
+	if desc, ok := sf.submitCommand("description"); ok {
 		_ = ad.Set("JobDescription", desc)
 	}
 
 	// copy_to_spool - copy files to spool directory
-	if copyToSpool, ok := sf.cfg.Get("copy_to_spool"); ok {
+	if copyToSpool, ok := sf.submitCommand("copy_to_spool"); ok {
 		_ = ad.Set("CopyToSpool", parseBool(copyToSpool, false))
 	}
 
 	// buffer_size - I/O buffer size
-	if bufSize, ok := sf.cfg.Get("buffer_size"); ok {
+	if bufSize, ok := sf.submitCommand("buffer_size"); ok {
 		if intSize, err := parseInt(bufSize); err == nil {
 			_ = ad.Set("BufferSize", intSize)
 		}
 	}
 
 	// buffer_block_size - I/O buffer block size
-	if blockSize, ok := sf.cfg.Get("buffer_block_size"); ok {
+	if blockSize, ok := sf.submitCommand("buffer_block_size"); ok {
 		if intSize, err := parseInt(blockSize); err == nil {
 			_ = ad.Set("BufferBlockSize", intSize)
 		}
 	}
 
 	// JobBatchName - batch name for grouping jobs
-	if batchName, ok := sf.cfg.Get("batch_name"); ok {
+	if batchName, ok := sf.submitCommand("batch_name"); ok {
 		_ = ad.Set("JobBatchName", batchName)
 	}
 
 	// StackSize - stack size in KB
-	if stackSize, ok := sf.cfg.Get("stack_size"); ok {
+	if stackSize, ok := sf.submitCommand("stack_size"); ok {
 		if intSize, err := parseInt(stackSize); err == nil {
 			_ = ad.Set("StackSize", intSize)
 		}
@@ -2020,141 +2030,198 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 //nolint:gocyclo // Complex function required for extended job expression handling
 func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 	// append_files - files to append instead of truncate
-	if appendFiles, ok := sf.cfg.Get("append_files"); ok {
+	if appendFiles, ok := sf.submitCommand("append_files"); ok {
 		_ = ad.Set("AppendFiles", appendFiles)
 	}
 
 	// compress_files - files to compress before transfer
-	if compressFiles, ok := sf.cfg.Get("compress_files"); ok {
+	if compressFiles, ok := sf.submitCommand("compress_files"); ok {
 		_ = ad.Set("CompressFiles", compressFiles)
 	}
 
 	// fetch_files - files to fetch from submit machine
-	if fetchFiles, ok := sf.cfg.Get("fetch_files"); ok {
+	if fetchFiles, ok := sf.submitCommand("fetch_files"); ok {
 		_ = ad.Set("FetchFiles", fetchFiles)
 	}
 
 	// local_files - files that should not be transferred
-	if localFiles, ok := sf.cfg.Get("local_files"); ok {
+	if localFiles, ok := sf.submitCommand("local_files"); ok {
 		_ = ad.Set("LocalFiles", localFiles)
 	}
 
 	// file_remaps - remap file paths
-	if fileRemaps, ok := sf.cfg.Get("file_remaps"); ok {
+	if fileRemaps, ok := sf.submitCommand("file_remaps"); ok {
 		_ = ad.Set("FileRemaps", fileRemaps)
 	}
 
 	// want_graceful_removal - request graceful removal
-	if wantGraceful, ok := sf.cfg.Get("want_graceful_removal"); ok {
+	if wantGraceful, ok := sf.submitCommand("want_graceful_removal"); ok {
 		_ = ad.Set("WantGracefulRemoval", parseBool(wantGraceful, false))
 	}
 
 	// job_max_vacate_time - max time for vacating (already in setJobStatusControl, but keep for completeness)
-	if maxVacate, ok := sf.cfg.Get("job_max_vacate_time"); ok {
+	if maxVacate, ok := sf.submitCommand("job_max_vacate_time"); ok {
 		if intVacate, err := parseInt(maxVacate); err == nil {
 			_ = ad.Set("JobMaxVacateTime", intVacate)
 		}
 	}
 
 	// run_as_owner - run as the submitting user
-	if runAsOwner, ok := sf.cfg.Get("run_as_owner"); ok {
+	if runAsOwner, ok := sf.submitCommand("run_as_owner"); ok {
 		_ = ad.Set("RunAsOwner", parseBool(runAsOwner, false))
 	}
 
 	// load_profile - load user profile before running
-	if loadProfile, ok := sf.cfg.Get("load_profile"); ok {
+	if loadProfile, ok := sf.submitCommand("load_profile"); ok {
 		_ = ad.Set("LoadProfile", parseBool(loadProfile, false))
 	}
 
 	// JobAdInformationAttrs - attributes to include in job ad information
-	if infoAttrs, ok := sf.cfg.Get("job_ad_information_attrs"); ok {
+	if infoAttrs, ok := sf.submitCommand("job_ad_information_attrs"); ok {
 		_ = ad.Set("JobAdInformationAttrs", infoAttrs)
 	}
 
 	// want_io_proxy - request I/O proxy
-	if wantProxy, ok := sf.cfg.Get("want_io_proxy"); ok {
+	if wantProxy, ok := sf.submitCommand("want_io_proxy"); ok {
 		_ = ad.Set("WantIOProxy", parseBool(wantProxy, false))
 	}
 
 	// job_machine_attrs - machine attributes to record in job ad
-	if machAttrs, ok := sf.cfg.Get("job_machine_attrs"); ok {
+	if machAttrs, ok := sf.submitCommand("job_machine_attrs"); ok {
 		_ = ad.Set("JobMachineAttrs", machAttrs)
 	}
 
 	// job_machine_attrs_history_length - how many machine attrs to keep
-	if histLen, ok := sf.cfg.Get("job_machine_attrs_history_length"); ok {
+	if histLen, ok := sf.submitCommand("job_machine_attrs_history_length"); ok {
 		if intLen, err := parseInt(histLen); err == nil {
 			_ = ad.Set("JobMachineAttrsHistoryLength", intLen)
 		}
 	}
 
 	// ec2_tag_names - EC2 tags to apply (grid universe)
-	if ec2Tags, ok := sf.cfg.Get("ec2_tag_names"); ok {
+	if ec2Tags, ok := sf.submitCommand("ec2_tag_names"); ok {
 		_ = ad.Set("EC2TagNames", ec2Tags)
 	}
 
 	// allowed_execute_duration - maximum execution time
-	if maxDuration, ok := sf.cfg.Get("allowed_execute_duration"); ok {
+	if maxDuration, ok := sf.submitCommand("allowed_execute_duration"); ok {
 		if intDuration, err := parseInt(maxDuration); err == nil {
 			_ = ad.Set("AllowedExecuteDuration", intDuration)
 		}
 	}
 
 	// allowed_job_duration - maximum total job duration
-	if maxJobDuration, ok := sf.cfg.Get("allowed_job_duration"); ok {
+	if maxJobDuration, ok := sf.submitCommand("allowed_job_duration"); ok {
 		if intDuration, err := parseInt(maxJobDuration); err == nil {
 			_ = ad.Set("AllowedJobDuration", intDuration)
 		}
 	}
 
 	// checkpoint_exit_code - exit code that indicates checkpoint
-	if checkpointCode, ok := sf.cfg.Get("checkpoint_exit_code"); ok {
+	if checkpointCode, ok := sf.submitCommand("checkpoint_exit_code"); ok {
 		if intCode, err := parseInt(checkpointCode); err == nil {
 			_ = ad.Set("CheckpointExitCode", intCode)
 		}
 	}
 
 	// want_checkpoint - request checkpoint capability
-	if wantCheckpoint, ok := sf.cfg.Get("want_checkpoint"); ok {
+	if wantCheckpoint, ok := sf.submitCommand("want_checkpoint"); ok {
 		_ = ad.Set("WantCheckpoint", parseBool(wantCheckpoint, false))
 	}
 
 	// max_transfer_input_mb - maximum input file transfer size in MB
-	if maxInputMB, ok := sf.cfg.Get("max_transfer_input_mb"); ok {
+	if maxInputMB, ok := sf.submitCommand("max_transfer_input_mb"); ok {
 		if intMB, err := parseInt(maxInputMB); err == nil {
 			_ = ad.Set("MaxTransferInputMB", intMB)
 		}
 	}
 
 	// max_transfer_output_mb - maximum output file transfer size in MB
-	if maxOutputMB, ok := sf.cfg.Get("max_transfer_output_mb"); ok {
+	if maxOutputMB, ok := sf.submitCommand("max_transfer_output_mb"); ok {
 		if intMB, err := parseInt(maxOutputMB); err == nil {
 			_ = ad.Set("MaxTransferOutputMB", intMB)
 		}
 	}
 
 	// preserve_relative_executable - keep relative path for executable
-	if preserveExec, ok := sf.cfg.Get("preserve_relative_executable"); ok {
+	if preserveExec, ok := sf.submitCommand("preserve_relative_executable"); ok {
 		_ = ad.Set("PreserveRelativeExecutable", parseBool(preserveExec, false))
 	}
 
 	// remote_nodenumber - for MPI jobs, the node number
-	if nodeNum, ok := sf.cfg.Get("remote_nodenumber"); ok {
+	if nodeNum, ok := sf.submitCommand("remote_nodenumber"); ok {
 		if intNum, err := parseInt(nodeNum); err == nil {
 			_ = ad.Set("RemoteNodeNumber", intNum)
 		}
 	}
 
 	// KeystoreFile, KeystoreAlias, KeystorePassphraseFile - Java universe security
-	if keystore, ok := sf.cfg.Get("keystore_file"); ok {
+	if keystore, ok := sf.submitCommand("keystore_file"); ok {
 		_ = ad.Set("KeystoreFile", keystore)
 	}
-	if keystoreAlias, ok := sf.cfg.Get("keystore_alias"); ok {
+	if keystoreAlias, ok := sf.submitCommand("keystore_alias"); ok {
 		_ = ad.Set("KeystoreAlias", keystoreAlias)
 	}
-	if keystorePass, ok := sf.cfg.Get("keystore_passphrase_file"); ok {
+	if keystorePass, ok := sf.submitCommand("keystore_passphrase_file"); ok {
 		_ = ad.Set("KeystorePassphraseFile", keystorePass)
 	}
 
 	return nil
+}
+
+// assignedNames collects every name the submit file assigns, including
+// inside conditionals, upper-cased for case-insensitive lookup.
+//
+// A name that appears only in a branch that did not execute is still
+// counted. That is deliberate: the alternative is to inspect cfg, which
+// cannot distinguish "the file set this" from "param_info has a default
+// for a knob of the same name" -- exactly the confusion this exists to
+// remove. Over-counting yields a value the user did write somewhere;
+// under-counting would silently resurrect the config default.
+func assignedNames(stmts []config.Statement) map[string]bool {
+	names := make(map[string]bool)
+	var walk func([]config.Statement)
+	walk = func(list []config.Statement) {
+		for _, stmt := range list {
+			switch st := stmt.(type) {
+			case *config.Assignment:
+				names[strings.ToUpper(st.Name)] = true
+			case *config.Conditional:
+				walk(st.ThenBlock)
+				for _, ei := range st.ElseIfBlock {
+					walk(ei.Block)
+				}
+				walk(st.ElseBlock)
+			}
+		}
+	}
+	walk(stmts)
+	return names
+}
+
+// submitCommand reads a submit-file command.
+//
+// This is NOT cfg.Get. The submit file's config namespace is seeded with
+// HTCondor's param_info defaults (config.NewEmptyWithOptions calls
+// initBuiltins), and config lookups are case-insensitive, so a submit
+// command whose name collides with a config knob resolves to that knob's
+// default even when the submit file never mentions it. Five attributes
+// leaked into every job ad that way -- among them
+//
+//	max_transfer_input_mb  -> MAX_TRANSFER_INPUT_MB  -> MaxTransferInputMB = -1
+//
+// which a schedd that protects the attribute rejects outright:
+//
+//	CommitTransaction failed: You are not allowed to change
+//	MAX_TRANSFER_INPUT_MB. (error code 22)
+//
+// Requiring the name to have been assigned by the file matches
+// condor_submit, where a submit command and a config macro of the same
+// name are separate things. Macro expansion still sees the whole config,
+// so $(SOME_KNOB) inside a submit file keeps working.
+func (sf *SubmitFile) submitCommand(key string) (string, bool) {
+	if sf == nil || !sf.assigned[strings.ToUpper(key)] {
+		return "", false
+	}
+	return sf.cfg.Get(key)
 }
