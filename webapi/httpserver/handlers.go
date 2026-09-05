@@ -2903,6 +2903,11 @@ func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 type VersionResponse struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
+	// StartTime is when this server process came up, RFC3339 in UTC.
+	StartTime string `json:"start_time"`
+	// UptimeSeconds is StartTime expressed as an elapsed duration, so a
+	// caller does not have to trust its own clock to agree with ours.
+	UptimeSeconds int64 `json:"uptime_seconds"`
 }
 
 // handleVersion handles GET /api/v1/version. Returns the embedded build
@@ -2924,9 +2929,15 @@ func (s *Handler) handleVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := version.Get()
+	uptime := time.Since(s.startTime)
+	if uptime < 0 {
+		uptime = 0
+	}
 	s.writeJSON(w, http.StatusOK, VersionResponse{
-		Version: info.Version,
-		Commit:  info.Commit,
+		Version:       info.Version,
+		Commit:        info.Commit,
+		StartTime:     s.startTime.UTC().Format(time.RFC3339),
+		UptimeSeconds: int64(uptime.Seconds()),
 	})
 }
 

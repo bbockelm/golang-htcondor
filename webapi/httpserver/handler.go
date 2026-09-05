@@ -41,6 +41,11 @@ import (
 
 // Handler represents the HTTP API handler that can be embedded in any HTTP server
 type Handler struct {
+	// startTime is when this handler was constructed, i.e. when the
+	// server came up. Fixed for the process lifetime and reported by
+	// /api/v1/version so the Info page can show how long the access
+	// point has been running.
+	startTime        time.Time
 	schedd           *htcondor.Schedd
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
@@ -600,6 +605,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 
 	h := &Handler{
+		startTime:                 now,
 		schedd:                    schedd,
 		scheddName:                cfg.ScheddName,
 		scheddHost:                cfg.ScheddHost,

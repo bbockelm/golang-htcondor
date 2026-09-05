@@ -102,7 +102,12 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/jobs': jobsFixture,
     '/api/v1/dashboard': dashboardFixture,
     '/api/v1/admin/logs': adminLogsFixture,
-    '/api/v1/version': { version: 'e2e', commit: 'e2e' },
+    '/api/v1/version': {
+      version: 'e2e',
+      commit: 'e2e',
+      start_time: '2026-01-02T15:04:05Z',
+      uptime_seconds: 3661,
+    },
     // enabled so the chat surface actually mounts: the jobs page hides
     // ChatPanel entirely on enabled=false, which would leave it untested.
     '/api/v1/chat/info': { enabled: true },

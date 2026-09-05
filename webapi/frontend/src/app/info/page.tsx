@@ -14,7 +14,14 @@ export default function InfoPage() {
     data: version,
     isLoading: versionLoading,
     error: versionError,
-  } = useQuery({ queryKey: ["version"], queryFn: api.version });
+  } = useQuery({
+    queryKey: ["version"],
+    queryFn: api.version,
+    // Uptime is a snapshot taken when the server answered, so refetch
+    // periodically rather than letting the displayed value age with
+    // the open tab.
+    refetchInterval: 60_000,
+  });
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -37,6 +44,15 @@ export default function InfoPage() {
           <DefList>
             <Row label="Version" value={version.version || "(unset)"} />
             <Row label="Commit" mono value={version.commit || "(unset)"} />
+            <Row label="Uptime" value={formatUptime(version.uptime_seconds)} />
+            <Row
+              label="Started"
+              value={
+                version.start_time
+                  ? new Date(version.start_time).toLocaleString()
+                  : "(unknown)"
+              }
+            />
           </DefList>
         )}
       </Section>
@@ -568,6 +584,25 @@ function CondorConfigSection() {
       )}
     </Section>
   );
+}
+
+// formatUptime renders the server-measured elapsed seconds as a short
+// human-readable duration ("3d 2h 5m"). The two largest non-zero units
+// are enough: nobody reads the seconds off a server that has been up
+// for days, and a server that just started should still show them.
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "(unknown)";
+  const total = Math.floor(seconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
+  return parts.slice(0, 2).join(" ");
 }
 
 function Section({
