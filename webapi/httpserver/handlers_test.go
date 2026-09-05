@@ -569,3 +569,91 @@ func TestSwaggerUI(t *testing.T) {
 		t.Error("Expected Swagger UI bundle in response")
 	}
 }
+
+// TestHandleVersionUptime pins the server-uptime fields on
+// GET /api/v1/version, which the Web UI's Info page renders.
+//
+// Two separate claims, because they fail for different reasons:
+// that the start time is stamped once at construction (not
+// recomputed per request), and that the reported uptime is derived
+// from that stamp.
+func TestHandleVersionUptime(t *testing.T) {
+	// getVersion issues an authenticated GET and decodes the response.
+	getVersion := func(t *testing.T, s *Server) VersionResponse {
+		t.Helper()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", nil)
+		req.Header.Set("Authorization", "Bearer "+createTestJWTToken(3600))
+		w := httptest.NewRecorder()
+		s.handleVersion(w, req)
+
+		resp := w.Result()
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", resp.StatusCode, http.StatusOK, w.Body.String())
+		}
+		var got VersionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return got
+	}
+
+	t.Run("start time is stamped at construction", func(t *testing.T) {
+		// Bracket construction so we can assert the stamp is the
+		// server's birth, not the time of the request below.
+		before := time.Now()
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		after := time.Now()
+
+		got := getVersion(t, s)
+		if got.StartTime == "" {
+			t.Fatal("start_time is empty; the server does not report when it came up")
+		}
+		start, err := time.Parse(time.RFC3339, got.StartTime)
+		if err != nil {
+			t.Fatalf("start_time %q is not RFC3339: %v", got.StartTime, err)
+		}
+		// RFC3339 here is second-granularity, so widen the window by a
+		// second on each side to absorb truncation.
+		lo, hi := before.Add(-time.Second), after.Add(time.Second)
+		if start.Before(lo) || start.After(hi) {
+			t.Errorf("start_time = %v, want within [%v, %v]", start, lo, hi)
+		}
+
+		// A freshly built server has been up for ~0 seconds. Anything
+		// large means the field is not measuring this process.
+		if got.UptimeSeconds < 0 || got.UptimeSeconds > 60 {
+			t.Errorf("uptime_seconds = %d, want a small non-negative value", got.UptimeSeconds)
+		}
+
+		// The stamp must not move between requests.
+		again := getVersion(t, s)
+		if again.StartTime != got.StartTime {
+			t.Errorf("start_time changed between requests: %q then %q", got.StartTime, again.StartTime)
+		}
+	})
+
+	t.Run("uptime is derived from the recorded start time", func(t *testing.T) {
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		// Backdate rather than sleep: the assertion is that uptime is
+		// measured from startTime, and a real wait would only prove it
+		// to one-second resolution after a one-second test.
+		const uptime = 90 * time.Minute
+		backdated := time.Now().Add(-uptime)
+		s.startTime = backdated
+
+		got := getVersion(t, s)
+		if got.UptimeSeconds < int64(uptime.Seconds())-5 || got.UptimeSeconds > int64(uptime.Seconds())+5 {
+			t.Errorf("uptime_seconds = %d, want ~%d", got.UptimeSeconds, int64(uptime.Seconds()))
+		}
+		if want := backdated.UTC().Format(time.RFC3339); got.StartTime != want {
+			t.Errorf("start_time = %q, want %q", got.StartTime, want)
+		}
+	})
+}

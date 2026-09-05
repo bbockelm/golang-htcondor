@@ -306,6 +306,10 @@ export interface HistoryListResponse {
 export interface VersionInfo {
   version: string;
   commit: string;
+  // RFC3339 UTC timestamp of when the server process came up.
+  start_time: string;
+  // Elapsed seconds since start_time, measured by the server.
+  uptime_seconds: number;
 }
 
 export interface SubmitResponse {

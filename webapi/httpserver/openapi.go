@@ -151,7 +151,7 @@ const openAPISchema = `{
       },
       "VersionResponse": {
         "type": "object",
-        "required": ["version", "commit"],
+        "required": ["version", "commit", "start_time", "uptime_seconds"],
         "properties": {
           "version": {
             "type": "string",
@@ -160,6 +160,16 @@ const openAPISchema = `{
           "commit": {
             "type": "string",
             "description": "Short git SHA of the commit the binary was built from. Defaults to 'unknown' if not set at build time."
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this server process came up, RFC3339 in UTC."
+          },
+          "uptime_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds elapsed since start_time, measured by the server."
           }
         }
       },
@@ -2357,7 +2367,7 @@ const openAPISchema = `{
     "/version": {
       "get": {
         "summary": "Get server build information",
-        "description": "Returns the version and git commit SHA embedded in the running binary at build time. Requires authentication.",
+        "description": "Returns the version and git commit SHA embedded in the running binary at build time, plus when the server started and how long it has been up. Requires authentication.",
         "operationId": "getVersion",
         "responses": {
           "200": {
@@ -2369,7 +2379,9 @@ const openAPISchema = `{
                 },
                 "example": {
                   "version": "v0.1.0-3-g7240eb5",
-                  "commit": "7240eb5"
+                  "commit": "7240eb5",
+                  "start_time": "2026-01-02T15:04:05Z",
+                  "uptime_seconds": 93784
                 }
               }
             }
