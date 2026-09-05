@@ -1670,14 +1670,17 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
-		OAuth2Issuer:           httpBaseURL,
-		OAuth2ClientID:         "demo-client",
-		OAuth2ClientSecret:     "demo-secret",
-		OAuth2AuthURL:          httpBaseURL + "/mcp/oauth2/authorize",
-		OAuth2TokenURL:         httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:      httpBaseURL + "/mcp/oauth2/callback",
-		OAuth2Scopes:           []string{"openid", "profile", "email"},
-		EnableIDP:              true,
+		OAuth2Issuer:       httpBaseURL,
+		OAuth2ClientID:     "demo-client",
+		OAuth2ClientSecret: "demo-secret",
+		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
+		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
+		OAuth2RedirectURL:  httpBaseURL + "/mcp/oauth2/callback",
+		OAuth2Scopes:       []string{"openid", "profile", "email"},
+		EnableIDP:          true,
+		// Demo mode only: gives the browser tests a non-admin identity
+		// to check authorization boundaries against.
+		SeedDemoUser:           true,
 		IDPIssuer:              httpBaseURL,
 		JupyterWorkDir:         loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
