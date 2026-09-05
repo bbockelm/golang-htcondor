@@ -60,8 +60,10 @@ const (
 	// ReasonPageToken is set when the rest of this walk belongs to the
 	// schedd.
 	ReasonPageToken Reason = "page_token"
-	// ReasonNoOwnerScope is set when no authenticated caller to confine the read
-	// to, and the mirror serves only owner-scoped reads.
+	// ReasonNoOwnerScope is set when the schedd has not identified the
+	// caller. A mirror read skips the schedd handshake, so it is not
+	// offered to a caller the schedd has not already accepted -- and a
+	// confined read has no owner to confine it to either.
 	ReasonNoOwnerScope Reason = "no_owner_scope"
 )
 

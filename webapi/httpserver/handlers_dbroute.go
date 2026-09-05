@@ -26,17 +26,37 @@ import (
 //
 // Every path here is best-effort: any miss (no mirror, stale mirror,
 // dial/query/parse error, more rows than the cap) returns ok=false and
-// the caller proceeds to the schedd exactly as before. A read is only
-// ever routed when its constraint is already confined to the caller's
-// own records, because the mirror connection authenticates as this
-// daemon rather than as the caller — the schedd's per-caller ACL does
-// not apply there, so routing an unconfined read would widen what a
-// caller can see.
+// the caller proceeds to the schedd exactly as before.
+//
+// What a routed read must never do is show a caller something the
+// schedd would not have. Two facts settle when that holds. Reading the
+// queue and the history are both READ-level commands on the schedd
+// (QUERY_JOB_ADS, QUERY_SCHEDD_HISTORY), and neither applies an
+// owner filter of its own — the schedd narrows a query to one owner
+// only when the CLIENT asks it to, via the MyJobs flag this daemon sets
+// for a scoped request. So any caller the schedd authenticates can
+// already read every job ad; there is no per-caller ACL on reads for a
+// mirror read to be missing.
+//
+// The one thing the mirror path does bypass is the schedd handshake
+// itself, and that is the invariant these functions enforce: a read is
+// routed only when the caller's identity is established, which here
+// means the schedd accepted their credential — either a prior request
+// got a 2xx with it (tokenCache.MarkValidated) or actorForSession
+// pinged the schedd with that very credential and was told who they
+// are. Without that, a caller the schedd would have refused outright
+// could read the queue out of the mirror instead. An unauthenticated
+// request therefore falls back to the schedd, which is exactly where it
+// gets refused.
+//
+// Scoping is a separate matter and rides along: when the request was
+// confined to one owner, the mirror read is confined the same way.
 
 // jobsFromMirror tries to serve a live job listing from the mirror's
 // "jobs" table (the mirrored job_queue.log), writing the response
-// itself. owner must be the authenticated caller; the result is
-// confined to their jobs.
+// itself. owner is the identity the schedd attributes to this caller,
+// and scoped says whether the listing is confined to their own jobs (see
+// the package comment).
 //
 // Returns handled=false only while nothing has been written, so the
 // caller can still fall back to the schedd; the returned Decision says
@@ -56,7 +76,7 @@ import (
 // consistent snapshot. Only a token the mirror itself issued is
 // accepted (JobsDecision); a schedd-issued one belongs to the schedd's
 // walk and is left to it.
-func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, projection []string, limit int, pageToken, owner string) (bool, dbmirror.Decision) {
+func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, projection []string, limit int, pageToken, owner string, scoped bool) (bool, dbmirror.Decision) {
 	if !s.dbMirror.Enabled() {
 		return false, s.recordMirror("jobs", dbmirror.Decision{
 			Reason: dbmirror.ReasonNotConfigured,
@@ -66,7 +86,7 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 	if owner == "" {
 		return false, s.recordMirror("jobs", dbmirror.Decision{
 			Reason: dbmirror.ReasonNoOwnerScope,
-			Note:   "the mirror serves only owner-scoped job queries; this request has no authenticated owner to confine it to",
+			Note:   "the schedd has not identified this caller, so the mirror must not answer on its behalf",
 		})
 	}
 	info, err := s.dbMirror.Discover(ctx)
@@ -81,16 +101,20 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 		return false, d
 	}
 
-	// Confine to the caller's own jobs. scopeToOwner re-serializes the
-	// caller's constraint so it cannot escape the enclosing AND; an
-	// unparseable one falls back to the schedd rather than being
-	// widened.
-	scoped, err := scopeToOwner(ownerFromActor(owner), constraint)
-	if err != nil {
-		return false, s.recordMirror("jobs", dbmirror.Decision{
-			Reason: dbmirror.ReasonUnsupportedQuery,
-			Note:   fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err),
-		})
+	// Confine to the caller's own jobs when the request was confined.
+	// scopeToOwner re-serializes the caller's constraint so it cannot
+	// escape the enclosing AND; an unparseable one falls back to the
+	// schedd rather than being widened. A whole-queue listing is passed
+	// through as-is, which is what the schedd would have returned.
+	mirrorConstraint := constraint
+	if scoped {
+		var err error
+		if mirrorConstraint, err = scopeToOwner(ownerFromActor(owner), constraint); err != nil {
+			return false, s.recordMirror("jobs", dbmirror.Decision{
+				Reason: dbmirror.ReasonUnsupportedQuery,
+				Note:   fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err),
+			})
+		}
 	}
 
 	// A mirror-issued token resumes its scan; a first page starts at the
@@ -111,14 +135,15 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 		cursor = c
 	}
 
-	return s.streamMirrorRows(ctx, w, "jobs", scoped, projection, limit,
+	return s.streamMirrorRows(ctx, w, "jobs", mirrorConstraint, projection, limit,
 		"jobs", dbmirror.Provenance(info, d.Note), &cursor)
 }
 
 // historyFromMirror tries to serve a completed-job listing from the
 // mirror's "history" archive, writing the response itself. constraint
-// must already be confined to the caller's own records; see the package
-// comment.
+// arrives already confined if the request was confined; actor is the
+// identity the schedd attributes to this caller, and an empty one keeps
+// the read on the schedd (see the package comment).
 //
 // The archive returns matches newest first with the limit pushed down
 // (ArchiveTable.QueryRawProjected), which is exactly condor_history's
@@ -126,11 +151,17 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 // the keyset cursor the endpoint already accepts (before_cluster /
 // before_proc) rides in the constraint. A paginated archive request is
 // therefore one the mirror serves rather than declines.
-func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, opts *htcondor.HistoryQueryOptions) (bool, dbmirror.Decision) {
+func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, opts *htcondor.HistoryQueryOptions, actor string) (bool, dbmirror.Decision) {
 	if !s.dbMirror.Enabled() {
 		return false, s.recordMirror("history", dbmirror.Decision{
 			Reason: dbmirror.ReasonNotConfigured,
 			Note:   "htcondordb routing is not configured",
+		})
+	}
+	if actor == "" {
+		return false, s.recordMirror("history", dbmirror.Decision{
+			Reason: dbmirror.ReasonNoOwnerScope,
+			Note:   "the schedd has not identified this caller, so the mirror must not answer on its behalf",
 		})
 	}
 	info, err := s.dbMirror.Discover(ctx)

@@ -37,6 +37,29 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 	return hasGroup(session.Groups, s.webuiAdminGroup)
 }
 
+// resolveOwnerScope settles whether a request asking for other people's
+// records may have them, given the owned_by_me it asked for. It is this
+// daemon's UI policy, not the schedd's: a browser session outside the
+// admin group is confined to its own records whatever it asked for,
+// while an admin session and a bearer-token caller are left alone.
+//
+// It says nothing about whether a read may be served from the htcondordb
+// mirror. That question is about identity, not group membership, and is
+// answered in handlers_dbroute.go.
+//
+// Both endpoints that offer a Mine/Everyone choice call this, so they
+// cannot drift on who is allowed what.
+func (s *Handler) resolveOwnerScope(r *http.Request, ownedByMe bool) bool {
+	if ownedByMe {
+		return true
+	}
+	if s.isWebUIAdmin(r) {
+		return false
+	}
+	_, hasSession := s.getSessionFromRequest(r)
+	return hasSession
+}
+
 // confusing than helpful.
 func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.webuiAdminGroup == "" {

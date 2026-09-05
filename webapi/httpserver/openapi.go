@@ -1935,7 +1935,7 @@ const openAPISchema = `{
     "/jobs/archive": {
       "get": {
         "summary": "Query job archive",
-        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the query is owner-scoped \u2014 the response's source field names which answered.",
+        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered.",
         "operationId": "queryJobArchive",
         "parameters": [
           {
@@ -1969,7 +1969,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers (the schedd's ACL is the boundary); always applied to a browser session that is not a Web UI admin. An owner-scoped query is also the only kind that may be served from an htcondordb mirror.",
+            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers; always applied to a browser session that is not a Web UI admin. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
             "required": false,
             "schema": {
               "type": "boolean",

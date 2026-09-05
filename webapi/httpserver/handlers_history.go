@@ -240,7 +240,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		TransferTypes: transferTypes,
 	}
 
-	scopedConstraint, scoped, serr := s.historyOwnerScope(ctx, r, constraint)
+	scopedConstraint, _, serr := s.historyOwnerScope(ctx, r, constraint)
 	if serr != nil {
 		s.writeError(w, http.StatusBadRequest, serr.Error())
 		return
@@ -249,10 +249,13 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 
 	// Offload the history-file scan to a synchronized htcondordb mirror
 	// when one is current. Completed-job history is append-only, so a
-	// mirror a few minutes behind still answers correctly; only the
-	// job-history source is mirrored, and only an owner-scoped query is
-	// routed. Any miss falls through to the schedd.
-	if scoped && baseOpts.Source == htcondor.HistorySourceJobHistory {
+	// mirror a few minutes behind still answers correctly, and only the
+	// job-history source is mirrored. An unscoped read routes as readily
+	// as a scoped one -- QUERY_SCHEDD_HISTORY is READ-level on the schedd
+	// and applies no owner filter of its own -- but only for a caller the
+	// schedd has identified, since routing is what skips asking it. Any
+	// miss falls through to the schedd.
+	if baseOpts.Source == htcondor.HistorySourceJobHistory {
 		// scan_limit is a budget for the schedd's backwards scan of the
 		// history FILE; the archive prunes by zone map and has no
 		// equivalent, so HistoryDecision treats it as a reason to stay
@@ -263,7 +266,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		if !scanLimitExplicit {
 			mirrorOpts.ScanLimit = 0
 		}
-		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts)
+		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts,
+			htcondor.GetAuthenticatedUserFromContext(ctx))
 		if served {
 			return
 		}
@@ -408,19 +412,16 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 // when it must be, returning the constraint to use and whether it ended
 // up scoped.
 //
-// Two reasons this exists. A browser session that is not in the admin
-// group must not be able to read every user's history — the same
-// enforcement /api/v1/jobs already applies to the live queue, which the
-// archive endpoint was missing. And a confined query is the only kind
-// that may be served from the htcondordb mirror: that connection
-// authenticates as this daemon, so the schedd's per-caller ACL is not
-// behind it.
+// A browser session that is not in the admin group must not be able to
+// read every user's history — the same enforcement /api/v1/jobs applies
+// to the live queue, which the archive endpoint was missing. The default
+// is unscoped, which preserves the behavior bearer-token API callers
+// have today; they can opt in with owned_by_me=true. A non-admin browser
+// session is scoped regardless of the parameter.
 //
-// The default is unscoped, which preserves the behavior bearer-token API
-// callers have today (the schedd's ACL is their boundary); they can opt
-// in with owned_by_me=true, which is also what makes their reads
-// eligible for the mirror. A non-admin browser session is scoped
-// regardless of the parameter.
+// Whether the result may come from the htcondordb mirror is a separate
+// question, decided on the caller's identity rather than on scoping;
+// see handlers_dbroute.go.
 func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constraint string) (string, bool, error) {
 	ownedByMe := false
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
@@ -430,10 +431,7 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 		}
 		ownedByMe = parsed
 	}
-	if _, hasSession := s.getSessionFromRequest(r); hasSession && !s.isWebUIAdmin(r) {
-		ownedByMe = true
-	}
-	if !ownedByMe {
+	if !s.resolveOwnerScope(r, ownedByMe) {
 		return constraint, false, nil
 	}
 
