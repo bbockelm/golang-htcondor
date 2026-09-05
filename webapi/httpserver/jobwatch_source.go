@@ -46,7 +46,7 @@ func (s watchSource) Queue(ctx context.Context, owner string, limit int) (jobwat
 	constraint := fmt.Sprintf("Owner == %s", classadStringLit(owner))
 
 	if ads, err := s.fromMirror(ctx, "jobs", constraint, limit+1); err == nil {
-		return truncate(ads, limit), nil
+		return truncateQueue(ads, limit), nil
 	} else if s.h.dbMirror.Enabled() {
 		s.h.logger.Debug(logging.DestinationHTTP,
 			"job watches: mirror unavailable for the queue, using the schedd", "error", err)
@@ -59,7 +59,7 @@ func (s watchSource) Queue(ctx context.Context, owner string, limit int) (jobwat
 	if err != nil {
 		return jobwatch.QueueResult{}, fmt.Errorf("reading the queue from the schedd: %w", err)
 	}
-	return truncate(ads, limit), nil
+	return truncateQueue(ads, limit), nil
 }
 
 // History returns one owner's finished jobs since a point in time,
@@ -159,7 +159,7 @@ func (s watchSource) fromMirror(ctx context.Context, table, constraint string, l
 	return ads, nil
 }
 
-func truncate(ads []*classad.ClassAd, limit int) jobwatch.QueueResult {
+func truncateQueue(ads []*classad.ClassAd, limit int) jobwatch.QueueResult {
 	if len(ads) > limit {
 		return jobwatch.QueueResult{Ads: ads[:limit], Truncated: true}
 	}

@@ -22,19 +22,19 @@ func TestWatchSourceMarksATruncatedQueue(t *testing.T) {
 		ads = append(ads, classad.New())
 	}
 
-	full := truncate(ads, 5)
+	full := truncateQueue(ads, 5)
 	if full.Truncated || len(full.Ads) != 5 {
 		t.Errorf("an exactly-full page is not truncated: %+v", full)
 	}
 	// One past the limit is how "there were more" is detected.
-	over := truncate(ads, 4)
+	over := truncateQueue(ads, 4)
 	if !over.Truncated {
 		t.Error("a read that returned more than the limit must be marked truncated")
 	}
 	if len(over.Ads) != 4 {
 		t.Errorf("the extra probe row must not be handed to the evaluator: %d ads", len(over.Ads))
 	}
-	if short := truncate(ads[:2], 4); short.Truncated {
+	if short := truncateQueue(ads[:2], 4); short.Truncated {
 		t.Errorf("a short read is complete: %+v", short)
 	}
 }
