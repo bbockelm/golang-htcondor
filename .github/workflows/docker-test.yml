@@ -124,7 +124,49 @@ jobs:
           /bin/sh -c "
             set -e
             git config --global --add safe.directory /workspace
-            for d in . webapi localcredmon; do (cd \$d && GOWORK=off gotestsum -- -v ./...); done
+            # Run the modules concurrently and wait on all of them,
+            # failing if any did. They were sequential, which cost the
+            # sum rather than the max: measured on one run, the root
+            # module is 274s, webapi 24s and localcredmon under a
+            # second, so overlapping them saves roughly the 25s the two
+            # smaller ones take.
+            #
+            # It is a small win because a SINGLE package dominates --
+            # the root package itself is the whole 274s. go test's -p
+            # only parallelises across package binaries, so raising it
+            # would buy nothing here; the root package's tests each
+            # stand up a condor_master on fixed ports and share a
+            # CONDOR_CONFIG, so they cannot call t.Parallel() until
+            # each one gets its own instance. That is the real lever
+            # and it is a test-architecture change, not a flag.
+            #
+            # Output is captured per module rather than interleaved,
+            # because three test streams on one terminal are unreadable
+            # and the failing one is the one you need to find.
+            # Populate the module cache sequentially first. The three
+            # test processes share one GOMODCACHE on the bind-mounted
+            # workspace, and starting them cold had them racing on the
+            # same download temp files:
+            #
+            #   open .../@v/v3.27.3.zip558732947.tmp: no such file or
+            #   directory
+            #
+            # go locks that cache, so this may be specific to bind mounts
+            # where the lock does not carry; either way, downloading up
+            # front costs nothing when the restored cache is warm and
+            # removes the race entirely.
+            for d in . webapi localcredmon; do (cd \$d && GOWORK=off go mod download); done
+
+            pids=\"\"
+            for d in . webapi localcredmon; do
+              ( cd \$d && GOWORK=off gotestsum -- -v ./... ) > /tmp/test-\$(echo \$d | tr / _).log 2>&1 &
+              pids=\"\$pids \$!\"
+            done
+            rc=0
+            for p in \$pids; do wait \$p || rc=1; done
+            for f in /tmp/test-*.log; do echo \"===== \$f =====\"; cat \$f; done
+            [ \$rc -eq 0 ] || exit 1
+
             for d in . webapi localcredmon; do (cd \$d && GOWORK=off go build -v ./...); done
           "
 
