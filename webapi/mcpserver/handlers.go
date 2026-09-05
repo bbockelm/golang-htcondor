@@ -2355,6 +2355,22 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		credBytes = []byte(credential)
 	}
 
+	// An OAuth service credential has to be a JSON document, and the
+	// credd will not tell you otherwise until much later. It accepts
+	// anything at store time -- it only parses the bytes if the request
+	// carries scopes or an audience -- but re-parses them whenever a
+	// query names a specific service. Storing a plain string therefore
+	// succeeds, and then get_credential_status fails ever after with
+	// FAILURE_JSON_PARSE while list_service_credentials, which never
+	// names a service, still reports the credential as present. Two read
+	// paths disagreeing about the same credential is a miserable thing
+	// to debug, so refuse the store that causes it.
+	if !json.Valid(credBytes) {
+		return nil, fmt.Errorf("credential for %q is not valid JSON: an OAuth service credential must be "+
+			"a JSON document such as {\"access_token\":\"...\"}. Storing anything else appears to "+
+			"succeed and then breaks every later read of it", service)
+	}
+
 	if err := s.credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
 		return nil, fmt.Errorf("failed to store credential: %w", err)
 	}

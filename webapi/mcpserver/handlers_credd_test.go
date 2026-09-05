@@ -127,7 +127,7 @@ func TestToolStoreServiceCredential(t *testing.T) {
 
 	result, err := s.toolStoreServiceCredential(ctx, map[string]interface{}{
 		"service":    "scitokens",
-		"credential": "refresh_token_value",
+		"credential": `{"refresh_token":"refresh_token_value"}`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -157,7 +157,7 @@ func TestToolStoreServiceCredential_WithHandle(t *testing.T) {
 	_, err := s.toolStoreServiceCredential(ctx, map[string]interface{}{
 		"service":    "scitokens",
 		"handle":     "myhandle",
-		"credential": "refresh_token_value",
+		"credential": `{"refresh_token":"refresh_token_value"}`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
