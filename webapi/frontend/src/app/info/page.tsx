@@ -242,11 +242,25 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       />
       {health.name && <Row label="Mirror" value={health.name} />}
       {health.address && <Row label="Address" mono value={health.address} />}
-      {health.required && (
+      {health.required ? (
         <Row
           label="Required"
-          value="Yes — a read the mirror cannot serve fails instead of falling back to the schedd."
+          value="Yes — a read the mirror cannot serve FAILS instead of falling back to the schedd."
         />
+      ) : (
+        health.status !== 'ok' && (
+          // Say the consequence, not only the fault. The error below is
+          // the loudest thing on the panel, and without this an operator
+          // reasonably reads it as an outage — when a mirror that cannot
+          // be reached is a lost optimisation and nothing more, because
+          // every declined read goes to the schedd instead.
+          <Row
+            label="Impact"
+            value="None on correctness — reads are falling back to the schedd. The mirror is an
+              optimisation here (HTTP_API_DBMIRROR_REQUIRED is not set), so a failure below means
+              queries are slower and land on the access point, not that they fail."
+          />
+        )
       )}
       {(health.pinned_name || health.pinned_address) && (
         <Row
