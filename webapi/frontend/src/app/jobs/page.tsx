@@ -13,7 +13,12 @@
 // submit time (see submit.go).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -23,6 +28,7 @@ import {
   type ClassAd,
   type DisplayStatus,
   type DisplayStatusInfo,
+  type JobListResponse,
 } from '@/lib/api';
 import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -34,6 +40,19 @@ import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 // in lib/api.ts.
 const PROJECTION =
   'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,Iwd';
+
+// How many job ads to pull per request. The queue can be far larger than
+// this -- an access point with 30k queued jobs is ordinary -- so the
+// number is a page size, not a ceiling, and the response's has_more tells
+// us when we are looking at a fraction of the queue.
+const PAGE_SIZE = 1000;
+
+// Auto-refresh cadence. Slower once the whole queue has been pulled in:
+// re-fetching every loaded page every 15s is cheap for one page and
+// decidedly not for thirty.
+const REFRESH_MS = 15_000;
+const REFRESH_MS_FULL = 60_000;
+
 
 export default function JobsPage() {
   // Admin browser sessions can opt into a pool-wide view; non-admin
@@ -49,12 +68,45 @@ export default function JobsPage() {
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['jobs', scope],
-    queryFn: () =>
-      api.jobs.list({ projection: PROJECTION, limit: 1000, owned_by_me: ownedByMe }),
-    refetchInterval: 15_000,
+  // "Load everything" is opt-in per scope: the default keeps a bounded
+  // first page so opening /jobs on a 30k-job queue is not a multi-second
+  // download, and the banner below offers the rest.
+  const [loadAll, setLoadAll] = useState(false);
+
+  const {
+    data: pages,
+    isLoading,
+    error,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<JobListResponse, Error>({
+    queryKey: ['jobs', scope, loadAll],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      api.jobs.list({
+        projection: PROJECTION,
+        // "*" is the server's unlimited sentinel. Only ever sent because
+        // the user asked for it after being told the answer was cut off.
+        limit: loadAll ? '*' : PAGE_SIZE,
+        page_token: pageParam as string | undefined,
+        owned_by_me: ownedByMe,
+      }),
+    // A token is only ever present when an htcondordb mirror served the
+    // query; a live schedd cannot be paged through.
+    getNextPageParam: (last) => last.next_page_token ?? undefined,
+    refetchInterval: loadAll ? REFRESH_MS_FULL : REFRESH_MS,
   });
+
+  // Flatten the loaded pages, and read the truncation state off the
+  // LAST one -- earlier pages always report has_more.
+  const jobs = useMemo(
+    () => (pages?.pages ?? []).flatMap((p) => p.jobs ?? []),
+    [pages],
+  );
+  const lastPage = pages?.pages[pages.pages.length - 1];
+  const data = pages ? { jobs } : undefined;
 
   // Chat surface gating. We hit /api/v1/chat/info on mount; the
   // server returns enabled=false (with a reason) when the LLM key
@@ -221,6 +273,18 @@ export default function JobsPage() {
         </p>
       )}
 
+      {lastPage && (
+        <TruncationNotice
+          shown={jobs.length}
+          page={lastPage}
+          canPage={!!hasNextPage}
+          fetchingMore={isFetchingNextPage}
+          loadedAll={loadAll}
+          onLoadMore={() => fetchNextPage()}
+          onLoadAll={() => setLoadAll(true)}
+        />
+      )}
+
       {data && data.jobs.length > 0 && (
         <>
           <FilterBar value={filter} onChange={setFilter} />
@@ -250,6 +314,114 @@ export default function JobsPage() {
           </Link>{' '}
           for completed and removed jobs.
         </p>
+      )}
+    </div>
+  );
+}
+
+// TruncationNotice is the answer to "am I looking at all my jobs?".
+//
+// The server has always reported has_more, and when it cannot paginate
+// it even explains why -- this page used to throw both away and render a
+// truncated list as though it were the whole queue. On an access point
+// with 30k queued jobs that is not a cosmetic problem: it is the UI
+// asserting something false.
+//
+// Two ways out, depending on which backend answered:
+//   - An htcondordb mirror gives a cursor, so "Load more" appends the
+//     next page.
+//   - A live schedd has no cursor to resume from, so the only options
+//     are to pull the whole answer in one request or to narrow the
+//     query. We offer the former and say so plainly.
+function TruncationNotice({
+  shown,
+  page,
+  canPage,
+  fetchingMore,
+  loadedAll,
+  onLoadMore,
+  onLoadAll,
+}: {
+  shown: number;
+  page: JobListResponse;
+  canPage: boolean;
+  fetchingMore: boolean;
+  loadedAll: boolean;
+  onLoadMore: () => void;
+  onLoadAll: () => void;
+}) {
+  // A partial-result error is worth showing even when nothing was
+  // truncated: the ads that arrived are valid, but the answer is short
+  // for a reason the user should see.
+  if (page.error) {
+    return (
+      <p className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+        Showing {shown.toLocaleString()} job{shown === 1 ? '' : 's'}; the query
+        did not finish: {page.error}
+      </p>
+    );
+  }
+
+  if (!page.has_more) {
+    // Everything that matched is on screen. Say so only when the number
+    // is big enough that the question would otherwise come up.
+    if (loadedAll && shown > PAGE_SIZE) {
+      return (
+        <p className="text-xs text-gray-500">
+          Showing all {shown.toLocaleString()} matching jobs.
+        </p>
+      );
+    }
+    return null;
+  }
+
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+      <span>
+        Showing the first <strong>{shown.toLocaleString()}</strong> jobs. More
+        match this view.
+      </span>{' '}
+      {canPage ? (
+        <button
+          type="button"
+          onClick={onLoadMore}
+          disabled={fetchingMore}
+          className="font-medium underline hover:text-amber-950 disabled:opacity-50"
+        >
+          {fetchingMore ? 'Loading…' : 'Load more'}
+        </button>
+      ) : (
+        <>
+          {/* The server's own explanation. Better than paraphrasing it
+              here, because the reason differs by backend and version. */}
+          {page.pagination_unavailable && (
+            <span className="text-amber-800">{page.pagination_unavailable}. </span>
+          )}
+          {loadedAll ? (
+            // Already asked for everything and the answer is still
+            // short. Offering the same button again would imply there
+            // is something left to try; narrowing the view is the only
+            // remaining move.
+            <span className="text-amber-800">
+              Narrow the view with the filter below, or switch scope.
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onLoadAll}
+                disabled={fetchingMore}
+                className="font-medium underline hover:text-amber-950 disabled:opacity-50"
+              >
+                Load all matching jobs
+              </button>
+              <span className="text-amber-800">
+                {' '}
+                — one large request; slow on a big queue.
+              </span>
+            </>
+          )}
+        </>
       )}
     </div>
   );
@@ -614,7 +786,8 @@ function BatchTable({
             {totalBatches > 0 && (
               <tr ref={batchSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
                 <td colSpan={7} className="px-3 py-2 text-xs text-gray-500">
-                  Showing {shownBatches} of {totalBatches} batches
+                  Showing {shownBatches.toLocaleString()} of{' '}
+                  {totalBatches.toLocaleString()} batches
                   {hasMoreBatches && (
                     <>
                       {' '}— scroll to load more, or{' '}
@@ -868,7 +1041,7 @@ function JobsSubTable({
           {totalJobs > 0 && (
             <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
               <td colSpan={5} className="px-3 py-1.5 text-[11px] text-gray-500">
-                Showing {shownJobs} of {totalJobs} jobs
+                Showing {shownJobs.toLocaleString()} of {totalJobs.toLocaleString()} jobs
                 {hasMoreJobs && (
                   <>
                     {' '}— scroll to load more, or{' '}

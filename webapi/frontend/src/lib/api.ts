@@ -186,9 +186,29 @@ export interface PlacementAuthorization {
 // We model them loosely and pull common fields out at the call site.
 export type ClassAd = Record<string, unknown>;
 
+// JobListResponse is what /api/v1/jobs returns. The trailing metadata
+// is NOT optional decoration: `has_more` is the only signal that the
+// answer was cut short, and a UI that ignores it silently shows a
+// fraction of the queue as if it were all of it.
 export interface JobListResponse {
   jobs: ClassAd[];
-  // page_token / error fields may appear; omitted here until needed.
+  // How many ads this response carried.
+  total_returned?: number;
+  // More jobs matched than were returned.
+  has_more?: boolean;
+  // Cursor for the next page. Only present when an htcondordb mirror
+  // served the query — a live schedd has no cursor to resume from.
+  next_page_token?: string;
+  // Why there is no cursor, in the server's own words. Present exactly
+  // when the answer was truncated AND cannot be paged through, so it
+  // doubles as the "you must narrow or widen the query instead" signal.
+  pagination_unavailable?: string;
+  // Which backend answered: "schedd" or "htcondordb".
+  source?: string;
+  // Free-text detail about the routing decision, when the mirror served.
+  source_note?: string;
+  // A partial-result error; the ads before it are still valid.
+  error?: string;
 }
 
 // HistoryListResponse mirrors the Go HistoryListResponse struct in

@@ -404,31 +404,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Close JSON array and add metadata
-	metadata := fmt.Sprintf(`],"total_returned":%d`, jobCount)
-
-	// Add error if one occurred
-	if errorMsg != "" {
-		errJSON, _ := json.Marshal(errorMsg)
-		metadata += fmt.Sprintf(`,"error":%s`, errJSON)
-	}
-
-	// The answer may be cut short, but no token is issued: the schedd
-	// has no cursor to resume from, and one that restarted the listing
-	// would hand back rows the caller already has. Pagination is
-	// available when an htcondordb mirror serves the query.
-	if errorMsg == "" && limit > 0 && jobCount >= limit {
-		metadata += `,"has_more":true,"pagination_unavailable":` +
-			`"more jobs match; this schedd cannot be paged through, so raise limit or narrow the constraint"`
-	} else {
-		metadata += `,"has_more":false`
-	}
-
-	// Name the backend that answered, so a caller can tell a live schedd
-	// read from a mirror-served one (see handlers_dbroute.go).
-	metadata += `,"source":"schedd"}`
-
-	if _, err := w.Write([]byte(metadata)); err != nil {
+	if _, err := w.Write([]byte(scheddJobListTrailer(jobCount, limit, errorMsg))); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 	}
 }
@@ -3386,4 +3362,41 @@ func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, 
 	command := r.FormValue("command")
 
 	return ads, withAck, command, nil
+}
+
+// scheddJobListTrailer renders the metadata that closes a schedd-served
+// job listing: the closing bracket of the "jobs" array plus the fields
+// that describe the answer as a whole.
+//
+// has_more is the load-bearing one. A caller that ignores it renders a
+// truncated listing as though it were the entire queue, which on an
+// access point with tens of thousands of queued jobs is the UI asserting
+// something false. It is paired with pagination_unavailable rather than
+// a cursor because a live schedd has no cursor to resume from: restarting
+// the listing would hand back rows the caller already has. Pagination is
+// available only when an htcondordb mirror serves the query, which is a
+// different code path (see handlers_dbroute.go).
+//
+// A truncated-looking count is NOT reported as has_more when the query
+// also errored: the listing stopped because it broke, not because it
+// filled up, and telling the caller to ask for more would send them
+// after rows that were never coming.
+func scheddJobListTrailer(jobCount, limit int, errorMsg string) string {
+	trailer := fmt.Sprintf(`],"total_returned":%d`, jobCount)
+
+	if errorMsg != "" {
+		errJSON, _ := json.Marshal(errorMsg)
+		trailer += fmt.Sprintf(`,"error":%s`, errJSON)
+	}
+
+	if errorMsg == "" && limit > 0 && jobCount >= limit {
+		trailer += `,"has_more":true,"pagination_unavailable":` +
+			`"more jobs match; this schedd cannot be paged through, so raise limit or narrow the constraint"`
+	} else {
+		trailer += `,"has_more":false`
+	}
+
+	// Name the backend that answered, so a caller can tell a live schedd
+	// read from a mirror-served one.
+	return trailer + `,"source":"schedd"}`
 }
