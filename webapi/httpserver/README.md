@@ -186,6 +186,91 @@ Authorization: Bearer <TOKEN>
 
 Returns a tarball containing the job's output files.
 
+### Placement (condor_placementd)
+
+Issues and audits access-point credentials for identities that
+authenticate elsewhere. **Every endpoint here requires membership in the
+web UI admin group** (`HTTP_API_WEBUI_ADMIN_GROUP`): the placementd
+registers its commands at ADMINISTRATOR and this server talks to it as
+the access point's own identity, so a non-admin caller reaching these
+would be able to mint a bearer token for any identity in the daemon's
+map file.
+
+The server discovers the daemon from `PLACEMENTD_ADDRESS_FILE` (or the
+default `$(LOG)/.placementd_address`), then from a `PlacementD` ad in the
+collector. A pool with no placementd is normal: discovery simply leaves
+this whole group disabled, and every endpoint but `/status` returns 503.
+
+#### Feature probe
+```bash
+GET /api/v1/placement/status
+```
+```json
+{"available": true, "address": "<10.0.0.5:9618?...>"}
+```
+Answers even when no daemon was found (`available: false` plus a
+`reason`), so a UI can decide whether to offer the page at all.
+
+#### List users
+```bash
+GET /api/v1/placement/users[?username=student1@example.edu]
+```
+Returns everyone in the map file, plus anyone still holding an unexpired
+token. The latter come back with `authorized: false` — their existing
+tokens keep working until they expire, but no new token can be issued.
+
+#### List issued tokens
+```bash
+GET /api/v1/placement/tokens[?username=...][&token_id=...][&valid_only=true]
+```
+The daemon never deletes token rows, so an unfiltered query includes
+expired ones; pass `valid_only=true` for live tokens. The token string
+itself is not stored by the daemon and is never returned here — only its
+`token_id` (jti) and claims.
+
+#### List authorizations
+```bash
+GET /api/v1/placement/authorizations[?username=...]
+```
+Returns each grantable authorization with the `label`, `color`, and
+`description` from the daemon's authorizations map file, so a UI renders
+the operator's own vocabulary. Passing a `username` narrows the list to
+what that user may request, and returns 403 if they are not mapped.
+
+#### Mint a token
+```bash
+POST /api/v1/placement/login
+Content-Type: application/json
+
+{
+  "username": "student1@example.edu",
+  "authorizations": ["READ", "WRITE"],
+  "project": "Chem101",
+  "requester": "instructor@example.edu"
+}
+```
+```json
+{"token": "eyJhbGciOi..."}
+```
+
+- Omit `authorizations` for everything the user is entitled to. Naming
+  any authorization they lack refuses the **whole** request rather than
+  dropping the ones it cannot grant.
+- `requester` is for issuing on someone else's behalf; that identity must
+  itself be mapped and hold the `INSTRUCTOR` authorization.
+- Beyond returning the token, a login creates the AP user record — and
+  the project record, when a project is named — on the schedd if they do
+  not exist. A login against a **disabled** user or project is refused
+  rather than re-enabling it.
+- The response is the only time the token is retrievable. It is sent
+  with `Cache-Control: no-store`.
+
+Refusals from the daemon map to actionable statuses: 400 for a malformed
+request, 403 for a policy decision (unknown or expired user, an
+authorization or project they are not entitled to, a requester lacking
+`INSTRUCTOR`), 500 when the daemon could not record the token, and 502
+when it could not be reached or its schedd leg failed.
+
 ### Documentation
 
 #### OpenAPI Schema

@@ -61,6 +61,12 @@ type Handler struct {
 	credd                     htcondor.CreddClient
 	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
 	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
+	// placementd is the condor_placementd client, or nil when the pool
+	// runs none. Unlike the schedd and credd it is entirely optional:
+	// its absence disables the /api/v1/placement endpoints and the
+	// admin UI page that uses them, and is not a startup failure.
+	placementd          htcondor.PlacementdClient
+	placementdAvailable atomic.Bool
 	// interactiveExtraSubmit holds operator-supplied extra submit-file
 	// lines that the interactive-terminal and Jupyter handlers merge
 	// into every submit file just before the `queue` directive. Loaded
@@ -348,6 +354,10 @@ type HandlerConfig struct {
 	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token              string               // Token for daemon authentication (optional)
 	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	// Placementd is an optional condor_placementd client. Nil means
+	// "discover one", and a failed discovery simply leaves the
+	// placement endpoints disabled. Tests inject a fake here.
+	Placementd htcondor.PlacementdClient
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key used by the chat endpoint at /api/v1/chat. Empty disables
@@ -475,6 +485,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		collector:                 cfg.Collector,
 		jobMirror:                 jobMirror,
 		credd:                     cfg.Credd,
+		placementd:                cfg.Placementd,
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
@@ -608,6 +619,22 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	} else {
 		h.creddAvailable.Store(true)
 		h.creddDiscovered = false // Explicitly provided, no need for updates
+	}
+
+	// Discover the placementd. It is optional, so a failure here is
+	// logged at info: most pools run no placementd at all, and a warning
+	// would be noise in every one of them.
+	if h.placementd == nil {
+		placementAddr, err := discoverPlacementd(context.Background(), cfg.HTCondorConfig, cfg.Collector, logger)
+		if err != nil {
+			logger.Info(logging.DestinationHTTP, "No placementd found; placement endpoints disabled", "reason", err)
+		} else {
+			logger.Info(logging.DestinationHTTP, "Discovered placementd", "address", placementAddr)
+			h.placementd = htcondor.NewPlacementd(placementAddr)
+			h.placementdAvailable.Store(true)
+		}
+	} else {
+		h.placementdAvailable.Store(true)
 	}
 
 	// Open the unified application database. Same SQLite file is

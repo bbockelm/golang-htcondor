@@ -972,6 +972,10 @@ const (
 	DaemonMaster     DaemonType = "Master"
 	DaemonCollector  DaemonType = "Collector"
 	DaemonNegotiator DaemonType = "Negotiator"
+	// DaemonPlacementd is condor_placementd. It advertises a generic ad
+	// whose MyType is "PlacementD", so it is located through the generic-ad
+	// query path rather than a dedicated QUERY_*_ADS command.
+	DaemonPlacementd DaemonType = "PlacementD"
 )
 
 // Ad type names accepted as the adType argument by the collector query methods
@@ -990,6 +994,10 @@ const (
 	LicenseAdType    = "LicenseAd"
 	CollectorAdType  = "CollectorAd"
 	NegotiatorAdType = "NegotiatorAd"
+	// PlacementdAdType is the placementd's ad. Unlike the types above it is
+	// the MyType the daemon publishes verbatim, because the collector stores
+	// placementd ads as generic ads keyed by that name.
+	PlacementdAdType = "PlacementD"
 )
 
 // adType returns the collector-query ad type corresponding to the daemon type
@@ -1007,6 +1015,8 @@ func (dt DaemonType) adType() string {
 		return CollectorAdType
 	case DaemonNegotiator:
 		return NegotiatorAdType
+	case DaemonPlacementd:
+		return PlacementdAdType
 	default:
 		return string(dt)
 	}

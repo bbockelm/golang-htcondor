@@ -136,6 +136,9 @@ type Config struct {
 	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token              string               // Token for daemon authentication (optional)
 	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	// Placementd is an optional condor_placementd client; nil means
+	// "discover one". See HandlerConfig.
+	Placementd htcondor.PlacementdClient
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key. Empty disables the chat endpoint. See HandlerConfig.
@@ -227,6 +230,7 @@ func NewServer(cfg Config) (*Server, error) {
 		StreamWriteTimeout:          cfg.StreamWriteTimeout,
 		Token:                       cfg.Token,
 		Credd:                       cfg.Credd,
+		Placementd:                  cfg.Placementd,
 		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
 		LLMAPIURL:                   cfg.LLMAPIURL,
 		LLMModel:                    cfg.LLMModel,

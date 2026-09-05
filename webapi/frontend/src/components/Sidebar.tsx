@@ -23,6 +23,7 @@ const NAV = [
 ];
 
 const ADMIN_NAV = [
+  { href: '/admin/placement', label: 'Placement' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
   { href: '/admin/api-keys', label: 'API Keys' },
