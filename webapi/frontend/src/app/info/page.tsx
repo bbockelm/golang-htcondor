@@ -330,8 +330,26 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       )}
       {health.last_error && (
         <Row
-          label="Last error"
+          label="Discovery error"
           value={<span className="text-red-700">{health.last_error}</span>}
+        />
+      )}
+      {health.dial_error && (
+        <Row
+          label="Connection error"
+          value={
+            <span>
+              <span className="text-red-700">{health.dial_error}</span>
+              <span className="block text-xs text-gray-400">
+                The mirror was found but could not be connected to, so reads
+                fall back to the schedd and are counted as{' '}
+                <code className="font-mono">dial_failed</code> below.
+                {health.dial_last_success
+                  ? ` Last connected ${new Date(health.dial_last_success).toLocaleString()}.`
+                  : ' It has never connected since this server started.'}
+              </span>
+            </span>
+          }
         />
       )}
     </>

@@ -18,6 +18,8 @@ package dbmirror
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,6 +139,24 @@ type Options struct {
 	// mirror is current enough to trust.
 	Address string
 
+	// ScheddAddress is the address of the schedd whose queue this daemon
+	// serves. It is how discovery tells one access point's mirror from
+	// another's when several advertise: htcondordb mirrors a schedd by
+	// TAILING ITS job_queue.log, a local file, so a mirror necessarily
+	// runs on its schedd's host. Matching hosts is therefore not a
+	// heuristic -- a mirror on a different host is mirroring a different
+	// schedd, whatever its ad says about freshness.
+	//
+	// It is a func because the address is not fixed: it may be discovered
+	// from the collector after this Locator is built, and the address
+	// updater can replace it at runtime. A snapshot taken at construction
+	// would be empty or stale exactly when it matters.
+	//
+	// Nil, or returning "" (or a mirror advertising no usable address),
+	// means discovery cannot match, and with more than one advertiser it
+	// declines rather than guessing; see pickMirror.
+	ScheddAddress func() string
+
 	// Required turns routing from an optimization into a requirement: a
 	// read that would have fallen back to the schedd fails instead, with
 	// the reason. Use it when the whole point of the deployment is to
@@ -164,6 +184,15 @@ type Locator struct {
 	lastErr string
 	lastTry time.Time
 	lastOK  time.Time
+	// lastDialErr is why the most recent attempt to CONNECT to the mirror
+	// failed, which is a different failure from discovery and was
+	// previously visible only as a metric label. An operator looking at a
+	// dial_failed tally had the count and nothing else -- not the
+	// address, not the error -- while lastErr next to it described
+	// discovery, which was working fine.
+	lastDialErr string
+	lastDialAt  time.Time
+	lastDialOK  time.Time
 }
 
 // NewLocator returns a Locator with default options.
@@ -227,6 +256,16 @@ type Health struct {
 	// Info is kept across a failed attempt, so an ad older than InfoTTL
 	// is one routing would no longer use without re-discovering.
 	InfoAt time.Time
+
+	// LastDialError is why the most recent connection to the mirror
+	// failed, with LastDialAttempt when that was and LastDialSuccess when
+	// one last worked. Discovery and dialing fail independently -- the
+	// collector can hand back a perfectly good ad for a database this
+	// daemon cannot authenticate to -- so a healthy discovery says
+	// nothing about whether reads are reaching it.
+	LastDialError   string
+	LastDialAttempt time.Time
+	LastDialSuccess time.Time
 }
 
 // Health reports what discovery last saw. It never dials and never
@@ -246,6 +285,7 @@ func (l *Locator) Health() Health {
 	defer l.mu.Unlock()
 	h.Info, h.LastError, h.LastSuccess = l.info, l.lastErr, l.lastOK
 	h.LastAttempt, h.InfoAt = l.lastTry, l.infoAt
+	h.LastDialError, h.LastDialAttempt, h.LastDialSuccess = l.lastDialErr, l.lastDialAt, l.lastDialOK
 	return h
 }
 
@@ -356,9 +396,13 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("no htcondordb database is advertising to the collector")
 	}
 
-	info := pickMirror(ads)
-	if info == nil {
-		return nil, fmt.Errorf("the htcondordb ad has no MyAddress; cannot connect")
+	var scheddHost string
+	if l.opts.ScheddAddress != nil {
+		scheddHost = hostOfSinful(l.opts.ScheddAddress())
+	}
+	info, err := pickMirror(ads, scheddHost)
+	if err != nil {
+		return nil, err
 	}
 	if l.opts.Address != "" {
 		// The operator says the advertised address is not the one to
@@ -369,35 +413,69 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	return info, nil
 }
 
-// pickMirror chooses among the advertised mirrors. One is the normal
-// case. Several means the pool runs more than one htcondordb, and
-// nothing in the ad says which schedd each one mirrors, so the choice is
-// a guess either way — take the freshest job queue, which is the one
-// most likely to be this access point's, and let an operator who knows
-// better pin it by Name. Ads with no address are skipped rather than
-// chosen and failed on.
-func pickMirror(ads []*classad.ClassAd) *Info {
-	var best *Info
+// pickMirror chooses among the advertised mirrors, or returns nil with a
+// reason when it cannot choose safely.
+//
+// One advertiser is the normal case and is taken as-is. Several means the
+// pool runs more than one htcondordb, and picking the wrong one does not
+// return stale data -- it returns SOMEBODY ELSE'S JOBS, from another
+// access point's queue, to a caller who may not be entitled to see them.
+// So the tie is broken on the one thing that actually identifies a
+// mirror's schedd: the host it runs on, because syncing a schedd means
+// tailing its job_queue.log off local disk.
+//
+// When the host cannot settle it, this declines. The previous rule --
+// take the freshest job queue -- was a guess, and a bad one in a
+// specific way: it ranked "caught up" above "recently synced", so a
+// mirror whose syncer had stopped while caught up outranked a live one
+// that was momentarily behind. A busy queue on this access point made
+// its own mirror look worse and handed the read to a stranger's.
+func pickMirror(ads []*classad.ClassAd, scheddHost string) (*Info, error) {
+	var usable []*Info
 	for _, ad := range ads {
-		info := ParseAd(ad)
-		if info.Address == "" {
-			continue
-		}
-		if best == nil || fresherJobQueue(info, best) {
-			best = info
+		if info := ParseAd(ad); info.Address != "" {
+			usable = append(usable, info)
 		}
 	}
-	return best
+	switch len(usable) {
+	case 0:
+		return nil, fmt.Errorf("the htcondordb ad has no MyAddress; cannot connect")
+	case 1:
+		return usable[0], nil
+	}
+
+	var matched []*Info
+	for _, info := range usable {
+		if scheddHost != "" && hostOfSinful(info.Address) == scheddHost {
+			matched = append(matched, info)
+		}
+	}
+	switch len(matched) {
+	case 1:
+		return matched[0], nil
+	case 0:
+		return nil, fmt.Errorf("%d htcondordb databases are advertising and none runs on this schedd's host (%q); "+
+			"set HTTP_API_DBMIRROR_NAME to say which one mirrors this access point, because the others hold a different queue",
+			len(usable), scheddHost)
+	default:
+		return nil, fmt.Errorf("%d htcondordb databases are advertising on this schedd's host (%q); "+
+			"set HTTP_API_DBMIRROR_NAME to say which one mirrors this access point", len(matched), scheddHost)
+	}
 }
 
-// fresherJobQueue reports whether a's job queue is more current than
-// b's. A caught-up mirror beats one that is not, regardless of clock
-// readings; among equals, the more recent sync wins.
-func fresherJobQueue(a, b *Info) bool {
-	if a.JobQueueCaughtUp != b.JobQueueCaughtUp {
-		return a.JobQueueCaughtUp
+// hostOfSinful extracts the host from a sinful string such as
+// "<10.0.0.1:9619?alias=ap40&sock=x>". Returns "" when there is none to
+// compare, which never matches.
+func hostOfSinful(addr string) string {
+	s := strings.TrimPrefix(strings.TrimSpace(addr), "<")
+	s = strings.TrimSuffix(s, ">")
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[:i]
 	}
-	return a.JobQueueLastSyncTime > b.JobQueueLastSyncTime
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host
+	}
+	return s
 }
 
 // classadStringLit quotes a value for use in a collector constraint.
@@ -440,9 +518,30 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 	sec.Command = SessionCommand
 	cl, err := htcondor.DialSinful(ctx, info.Address, sec, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
+		err = fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
+		l.recordDial(err)
+		return nil, nil, nil, err
 	}
+	l.recordDial(nil)
 	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream())), func() { _ = cl.Close() }, info, nil
+}
+
+// RecordDialForTest records a connection outcome without dialing, so a
+// test can exercise the reporting path. Not for production use: Client
+// records the real thing.
+func (l *Locator) RecordDialForTest(err error) { l.recordDial(err) }
+
+// recordDial keeps the outcome of the last connection attempt for the
+// readiness and admin surfaces.
+func (l *Locator) recordDial(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastDialAt = time.Now()
+	if err != nil {
+		l.lastDialErr = err.Error()
+		return
+	}
+	l.lastDialErr, l.lastDialOK = "", l.lastDialAt
 }
 
 // HistoryDecision decides whether a completed-job query may be served

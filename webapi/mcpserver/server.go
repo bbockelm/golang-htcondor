@@ -212,6 +212,9 @@ func NewServer(cfg Config) (*Server, error) {
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
 			Required: cfg.DBMirrorRequired,
+			// Which schedd this daemon serves, so discovery can tell
+			// this access point's mirror from another's.
+			ScheddAddress: schedd.Address,
 		})
 	}
 
