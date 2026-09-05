@@ -115,6 +115,10 @@ const STATUS_LABEL_BY_KEY: Record<string, string> = {
   removed: JOB_STATUS_LABEL[3],
   completed: JOB_STATUS_LABEL[4],
   held: JOB_STATUS_LABEL[5],
+  // Not a JobStatus: the server buckets held-because-spooling separately
+  // so a routine submit does not show up as HELD. Matches the label
+  // displayJobStatus gives the same job on the jobs page.
+  uploading: 'Uploading Inputs',
   transferring_output: JOB_STATUS_LABEL[6],
   suspended: JOB_STATUS_LABEL[7],
 };
@@ -151,6 +155,7 @@ function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }) {
     'removed',
     'transferring_output',
     'suspended',
+    'uploading',
   ]);
   const extras = Object.entries(byStatus).filter(
     ([key, n]) => n > 0 && !['idle', 'running', 'held', 'completed'].includes(key),

@@ -190,6 +190,22 @@ type DashboardResponse struct {
 	JobsTotal    int            `json:"jobs_total"`
 }
 
+// holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
+// hold. A job sits here between submit and the input transfer finishing;
+// it is not a failure and resolves on its own. Mirrors
+// HOLD_REASON_CODE_SPOOLING_INPUT in the frontend's lib/api.ts.
+const holdReasonCodeSpoolingInput = 16
+
+// dashboardStatusName is statusName plus the one presentation override
+// the jobs page makes: held-because-spooling is its own bucket rather
+// than part of "held". The wire value of JobStatus is untouched.
+func dashboardStatusName(status, holdReasonCode int64) string {
+	if status == 5 && holdReasonCode == holdReasonCodeSpoolingInput {
+		return "uploading"
+	}
+	return statusName(status)
+}
+
 // statusName maps an HTCondor JobStatus integer to a stable lower-case
 // string suitable for JSON keys. Keep in sync with the schedd:
 //
@@ -255,9 +271,14 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ownedByMe = true
 	}
 
+	// HoldReasonCode rides along so a job held purely because its input
+	// is still spooling can be counted separately from a real hold. The
+	// jobs page already draws that distinction (displayJobStatus in
+	// lib/api.ts); without it the dashboard's HELD tile makes a routine
+	// submit look like a failure.
 	opts := &htcondor.QueryOptions{
 		Limit:      -1,
-		Projection: []string{"JobStatus"},
+		Projection: []string{"JobStatus", "HoldReasonCode"},
 	}
 	if ownedByMe {
 		opts.FetchOpts = htcondor.FetchMyJobs
@@ -298,7 +319,11 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		if v, ok := result.Ad.EvaluateAttrInt("JobStatus"); ok {
 			js = v
 		}
-		counts[statusName(js)]++
+		var hrc int64
+		if v, ok := result.Ad.EvaluateAttrInt("HoldReasonCode"); ok {
+			hrc = v
+		}
+		counts[dashboardStatusName(js, hrc)]++
 		total++
 	}
 
