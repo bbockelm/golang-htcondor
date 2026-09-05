@@ -159,3 +159,28 @@ func TestExtractSandboxFileSkipsDirectories(t *testing.T) {
 		}
 	}
 }
+
+// A job that succeeds usually writes no stderr. Rendering that as a
+// heading with nothing under it looks like a truncated response and
+// invites another round of investigation, which is the thing this whole
+// change is trying to stop.
+func TestDescribeJobOutputSaysWhenEmpty(t *testing.T) {
+	got := describeJobOutput("", "stderr")
+
+	if got == "" {
+		t.Fatal("an empty output rendered as nothing at all")
+	}
+	for _, want := range []string{"empty", "present in the job sandbox", "stderr"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the description is missing %q: %s", want, got)
+		}
+	}
+}
+
+// Real output is passed through untouched -- no banner, no wrapper.
+func TestDescribeJobOutputPassesContentThrough(t *testing.T) {
+	const body = "line one\nline two\n"
+	if got := describeJobOutput(body, "stdout"); got != body {
+		t.Errorf("content was altered: %q", got)
+	}
+}

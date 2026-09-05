@@ -1612,7 +1612,8 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType, outputContent),
+				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType,
+					describeJobOutput(outputContent, outputType)),
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -1620,8 +1621,25 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 			"output_type": outputType,
 			"filename":    outputFile,
 			"size":        len(outputContent),
+			"empty":       outputContent == "",
 		},
 	}, nil
+}
+
+// describeJobOutput renders retrieved output, saying so when there is
+// none.
+//
+// An empty file is a real and common answer -- a job that succeeds
+// usually writes no stderr -- but rendering it as a heading followed by
+// nothing looks like a truncated or broken response, which is an
+// invitation to go looking for a problem that does not exist. Saying it
+// outright costs a line and closes the question.
+func describeJobOutput(content, outputType string) string {
+	if content != "" {
+		return content
+	}
+	return fmt.Sprintf("(empty -- the file is present in the job sandbox and contains nothing, "+
+		"so the job wrote no %s)", outputType)
 }
 
 // toolAdvertiseToCollector handles advertise_to_collector tool calls
