@@ -77,8 +77,28 @@ func (s *Schedd) AggregateJobs(ctx context.Context, constraint string, groupBy [
 	// The flag is what selects the aggregating handler; the projection
 	// names the grouping columns rather than the attributes to return.
 	req.InsertAttrBool("ProjectionIsGroupBy", true)
-	if len(groupBy) > 0 {
-		_ = req.Set("Projection", strings.Join(groupBy, ","))
+
+	// The projection must also carry every attribute the constraint
+	// mentions.
+	//
+	// The schedd's aggregate handler evaluates the constraint against an
+	// ad built from the PROJECTION, not against the job. An attribute
+	// the constraint names but the grouping does not is therefore
+	// undefined, the comparison is never true, and the query returns
+	// nothing -- silently, and indistinguishably from "no jobs match".
+	// Measured against a live schedd (HTCondor 25.8.0): grouping by
+	// Owner, the constraint `Owner == "x"` matched, while
+	// `JobStatus == 5`, `ClusterId >= 1` and `JobUniverse == 5` each
+	// matched zero of four jobs that a plain query showed satisfied
+	// them. Adding those attributes to the projection made all of them
+	// match.
+	//
+	// Sending the union changes the grouping the schedd performs -- it
+	// now groups by the wider tuple -- so the rows are folded back down
+	// to the caller's grouping below.
+	projection := aggregateProjection(groupBy, expr)
+	if len(projection) > 0 {
+		_ = req.Set("Projection", strings.Join(projection, ","))
 	}
 	if eo.Limit > 0 {
 		_ = req.Set("LimitResults", int64(eo.Limit))
@@ -108,7 +128,7 @@ func (s *Schedd) AggregateJobs(ctx context.Context, constraint string, groupBy [
 				}
 				return nil, fmt.Errorf("schedd aggregate error %d: %s", code, msg)
 			}
-			return rows, nil
+			return foldAggregateRows(rows, groupBy), nil
 		}
 
 		count, _ := ad.EvaluateAttrInt("JobCount")
@@ -118,6 +138,61 @@ func (s *Schedd) AggregateJobs(ctx context.Context, constraint string, groupBy [
 		}
 		rows = append(rows, row)
 	}
+}
+
+// aggregateProjection returns the attributes to send as the aggregate
+// query's projection: the caller's grouping, plus every attribute the
+// constraint refers to that is not already in it.
+//
+// The grouping comes first and keeps its order, because that order is
+// the caller's and the returned rows are read back against it.
+func aggregateProjection(groupBy []string, constraint *classad.Expr) []string {
+	projection := append([]string(nil), groupBy...)
+	seen := make(map[string]struct{}, len(groupBy))
+	for _, g := range groupBy {
+		seen[strings.ToLower(g)] = struct{}{}
+	}
+	// An empty ad resolves nothing, so every attribute the expression
+	// names comes back as an external reference -- which is exactly the
+	// set the schedd needs in the projection.
+	for _, ref := range classad.New().ExternalRefs(constraint) {
+		if ref == "" || strings.Contains(ref, ".") {
+			// Scoped references (MY.x, TARGET.x) are not job attributes
+			// the projection can carry.
+			continue
+		}
+		if _, dup := seen[strings.ToLower(ref)]; dup {
+			continue
+		}
+		seen[strings.ToLower(ref)] = struct{}{}
+		projection = append(projection, ref)
+	}
+	return projection
+}
+
+// foldAggregateRows collapses rows that share the caller's grouping.
+//
+// Widening the projection so the constraint can be evaluated also makes
+// the schedd group by the wider tuple, so "count by Owner" constrained
+// on JobStatus comes back split by (Owner, JobStatus). Summing the rows
+// that share an Owner restores the grouping that was asked for. Order is
+// the order each group was first seen, so it stays the schedd's.
+func foldAggregateRows(rows []AggregateRow, groupBy []string) []AggregateRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	folded := make([]AggregateRow, 0, len(rows))
+	at := make(map[string]int, len(rows))
+	for _, r := range rows {
+		key := groupKey(r.Group)
+		if i, ok := at[key]; ok {
+			folded[i].Count += r.Count
+			continue
+		}
+		at[key] = len(folded)
+		folded = append(folded, r)
+	}
+	return folded
 }
 
 // attrToString renders a group-by value for display. The attribute may
@@ -135,4 +210,19 @@ func attrToString(ad *classad.ClassAd, attr string) string {
 		return fmt.Sprintf("%t", v)
 	}
 	return "undefined"
+}
+
+// groupKey builds a collision-free map key from a group tuple.
+//
+// Joining on a separator is not enough on its own: any separator can in
+// principle appear inside a value, and then ["a","b"] and ["a<sep>b"]
+// are the same key and two distinct groups are silently summed into one.
+// Length-prefixing each element removes the possibility rather than
+// relying on a character being unusual.
+func groupKey(group []string) string {
+	var b strings.Builder
+	for _, g := range group {
+		fmt.Fprintf(&b, "%d:%s", len(g), g)
+	}
+	return b.String()
 }
