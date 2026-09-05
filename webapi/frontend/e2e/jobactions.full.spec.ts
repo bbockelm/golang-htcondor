@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Job actions land in the schedd, not just in the React list.
 //
@@ -11,7 +10,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // a client-side list looks the same whether the schedd acted or not.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 type Ad = Record<string, unknown>;
