@@ -1,0 +1,151 @@
+name: Refresh HTCondor param defaults
+
+# The config package ships a vendored copy of HTCondor's param_info.in
+# (param/param_info.in), generated into config/param_defaults.go. That
+# snapshot goes stale silently: nothing fails when upstream adds a knob
+# or changes a default, the Go daemons just quietly disagree with the
+# C++ ones. This checks weekly and opens a PR when it drifts.
+#
+# It never merges on its own. A changed default is a behavior change --
+# STARTER_NESTED_SCRATCH flipping false -> true, say -- and wants human
+# review, so the job's whole job is to make the drift visible.
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'HTCondor tag to refresh from (default: latest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the refresh branch
+      pull-requests: write   # open the PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+
+      - name: Resolve the target HTCondor release
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            # Use the release, not the tag list: the upstream repo carries
+            # moving junk tags (ztest, zlatest) that sort above real ones.
+            tag=$(gh api repos/htcondor/htcondor/releases/latest --jq .tag_name)
+          fi
+          current=$(tr -d '[:space:]' < param/SOURCE_VERSION)
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "Vendored ${current}; upstream latest ${tag}"
+          if [ "${tag}" = "${current}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch param_info.in and regenerate
+        if: steps.target.outputs.changed == 'true'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          url="https://raw.githubusercontent.com/htcondor/htcondor/${TAG}/src/condor_utils/param_info.in"
+          curl -fsSL "${url}" -o /tmp/param_info.in
+          # Match what the repo's pre-commit hooks enforce, so the PR does
+          # not arrive already failing its own lint.
+          sed -e 's/[[:space:]]*$//' /tmp/param_info.in > param/param_info.in
+          printf '%s\n' "${TAG}" > param/SOURCE_VERSION
+          (cd config && go generate ./...)
+          gofmt -w config/param_defaults.go
+
+      - name: Verify the refreshed defaults still load
+        if: steps.target.outputs.changed == 'true'
+        run: go test ./config/
+
+      - name: Summarize the drift
+        if: steps.target.outputs.changed == 'true'
+        id: drift
+        run: |
+          set -euo pipefail
+          names() { grep -oE '\{Name: "[^"]+"' | sed 's/.*"\(.*\)"/\1/' | sort -u; }
+          git show HEAD:config/param_defaults.go | names > /tmp/old.txt
+          names < config/param_defaults.go > /tmp/new.txt || true
+          names_new=$(comm -13 /tmp/old.txt /tmp/new.txt)
+          names_gone=$(comm -23 /tmp/old.txt /tmp/new.txt)
+          {
+            echo "Parameters with defaults: $(wc -l < /tmp/old.txt) -> $(wc -l < /tmp/new.txt)"
+            echo
+            echo "### Added ($(echo "$names_new" | grep -c . || true))"
+            echo '```'
+            echo "$names_new"
+            echo '```'
+            echo "### Removed ($(echo "$names_gone" | grep -c . || true))"
+            echo '```'
+            echo "$names_gone"
+            echo '```'
+            echo "Removed parameters still referenced in Go code:"
+            echo '```'
+            for p in $names_gone; do
+              # A no-match grep exits 1; under set -e that aborts the loop
+              # and would silently report "nothing still references these".
+              n=$(grep -rl "$p" --include='*.go' . | grep -v param_defaults.go | tr '\n' ' ' || true)
+              if [ -n "$n" ]; then echo "$p: $n"; fi
+            done
+            echo '```'
+          } > /tmp/body.md
+          cat /tmp/body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the refresh PR
+        if: steps.target.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+          CURRENT: ${{ steps.target.outputs.current }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "SOURCE_VERSION moved but nothing generated changed; nothing to do."
+            exit 0
+          fi
+          branch="chore/param-defaults-${TAG}"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "Branch ${branch} already exists; a refresh PR is presumably open."
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -b "${branch}"
+          git add param/param_info.in param/SOURCE_VERSION config/param_defaults.go
+          git commit             -m "config: refresh param defaults from HTCondor ${TAG}"             -m "Vendored snapshot moves ${CURRENT} -> ${TAG}. Generated by the refresh-param-defaults workflow; see the run summary for the drift."
+          git push origin "${branch}"
+          {
+            echo "Refreshes the vendored HTCondor \`param_info.in\` from **${CURRENT}** to **${TAG}**."
+            echo
+            cat /tmp/body.md
+            echo
+            echo "Review the changed defaults before merging: a default that moves is a"
+            echo "behavior change for anyone who did not set the knob explicitly."
+          } > /tmp/pr.md
+          gh pr create \
+            --title "config: refresh param defaults from HTCondor ${TAG}" \
+            --body-file /tmp/pr.md \
+            --base main \
+            --head "${branch}"
