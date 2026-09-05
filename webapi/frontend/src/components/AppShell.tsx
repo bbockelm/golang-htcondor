@@ -1,17 +1,17 @@
-"use client";
+'use client';
 
-import { useQuery } from "@tanstack/react-query";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
-import { Sidebar } from "./Sidebar";
-import { SuperuserBanner } from "./SuperuserBanner";
-import { Footer } from "./Footer";
+import { useQuery } from '@tanstack/react-query';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
+import { Sidebar } from './Sidebar';
+import { SuperuserBanner } from './SuperuserBanner';
+import { Footer } from './Footer';
 
 // Pages that render without an authenticated session. The dashboard ('/')
 // is included so unauthenticated visitors see a "Sign In" prompt instead
 // of an instant redirect loop.
-const publicPaths = ["/"];
+const publicPaths = ['/'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -32,14 +32,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [pathname]);
 
   const { data: session, isLoading } = useQuery({
-    queryKey: ["session"],
+    queryKey: ['session'],
     queryFn: api.auth.me,
   });
 
   const isPublic = publicPaths.includes(pathname);
   const isAuthenticated = !!session?.authenticated;
 
-  const search = searchParams?.toString() ?? "";
+  const search = searchParams?.toString() ?? '';
   const fullPath = search ? `${pathname}?${search}` : pathname;
 
   useEffect(() => {

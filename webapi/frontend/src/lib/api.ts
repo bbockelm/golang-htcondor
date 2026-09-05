@@ -4,7 +4,7 @@
 // the SPA; bearer tokens for programmatic use). All fetches include
 // credentials so the session cookie is sent with every request.
 
-const BASE = "/api/v1";
+const BASE = '/api/v1';
 
 export class ApiError extends Error {
   status: number;
@@ -24,15 +24,15 @@ export async function fetchTextWithCap(
   cap: number,
 ): Promise<{ text: string; truncated: boolean }> {
   const res = await fetch(url, {
-    credentials: "include",
-    headers: { Accept: "text/plain" },
+    credentials: 'include',
+    headers: { Accept: 'text/plain' },
   });
   if (res.status === 401) {
-    if (typeof window !== "undefined") {
+    if (typeof window !== 'undefined') {
       const returnTo = window.location.pathname + window.location.search;
       window.location.href = `/login?return_to=${encodeURIComponent(returnTo)}`;
     }
-    throw new ApiError(401, "Unauthorized");
+    throw new ApiError(401, 'Unauthorized');
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -51,7 +51,7 @@ export async function fetchTextWithCap(
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buf = "";
+  let buf = '';
   let bytesRead = 0;
   let truncated = false;
   // eslint-disable-next-line no-constant-condition
@@ -80,20 +80,20 @@ export async function fetchTextWithCap(
 async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...opts,
-    credentials: "include",
+    credentials: 'include',
     headers: {
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
       ...opts?.headers,
     },
   });
   if (res.status === 401) {
     // Unauthenticated: bounce to /login (the Go-side OAuth2 SSO redirect),
     // preserving where the user was so we can return them after login.
-    if (typeof window !== "undefined") {
+    if (typeof window !== 'undefined') {
       const returnTo = window.location.pathname + window.location.search;
       window.location.href = `/login?return_to=${encodeURIComponent(returnTo)}`;
     }
-    throw new ApiError(401, "Unauthorized");
+    throw new ApiError(401, 'Unauthorized');
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -160,7 +160,7 @@ export interface DashboardStats {
 // this endpoint only ever has one.
 export interface DBMirrorRoutingCount {
   table: string;
-  decision: "served" | "declined" | string;
+  decision: 'served' | 'declined' | string;
   reason: string;
   count: number;
 }
@@ -169,7 +169,7 @@ export interface DBMirrorRoutingCount {
 // when reads are actually routing right now; a mirror that is up but too
 // far behind to serve is "warning" -- running, not working.
 export interface DBMirrorHealth {
-  status: "ok" | "warning" | "down" | string;
+  status: 'ok' | 'warning' | 'down' | string;
   required: boolean;
   name?: string;
   address?: string;
@@ -332,7 +332,7 @@ export interface Template {
   description?: string;
   columns: TemplateColumn[];
   contents: string;
-  source: "builtin" | "global" | "user";
+  source: 'builtin' | 'global' | 'user';
   input_files?: TemplateInputFile[];
   // User-template only: the username of the row's owner. Set to the
   // current user for "mine"; set to another user for shared templates
@@ -340,7 +340,7 @@ export interface Template {
   owner?: string;
   // User-template only: 'private' or 'shared'. Built-in / global
   // templates leave it absent.
-  visibility?: "private" | "shared";
+  visibility?: 'private' | 'shared';
 }
 
 export interface TemplateSaveRequest {
@@ -352,7 +352,7 @@ export interface TemplateSaveRequest {
   contents: string;
   input_files?: TemplateInputFile[];
   // Optional. Defaults to 'private' server-side.
-  visibility?: "private" | "shared";
+  visibility?: 'private' | 'shared';
 }
 
 // MAX_TEMPLATE_INPUT_FILE_BYTES mirrors templates.MaxInputFileBytes
@@ -452,7 +452,7 @@ export interface InteractiveTerminalSummary {
 // uses it to filter the global /jobs list down to the user's terminal
 // sessions without a dedicated list endpoint.
 export const INTERACTIVE_TERMINAL_BATCH_PREFIX =
-  "htcondor-api-interactive-terminal-";
+  'htcondor-api-interactive-terminal-';
 
 // JobLogEvent mirrors userlog.Event on the Go side. Field names match the
 // snake_case JSON tags. Fields are mostly optional because the parser
@@ -503,7 +503,7 @@ export interface JobLogResponse {
 // reals come in as their textual form ("42", "3.14") and the server
 // parses them; booleans are "true" / "false".
 export interface TypedAttributeValue {
-  type: "string" | "integer" | "real" | "boolean" | "raw";
+  type: 'string' | 'integer' | 'real' | 'boolean' | 'raw';
   value: string;
 }
 
@@ -572,10 +572,10 @@ export interface MatchAnalysisPredicate {
 }
 
 export interface MatchAnalysisResourceSuggestion {
-  job_attribute: string; // e.g., "RequestMemory"
-  slot_attribute: string; // e.g., "Memory"
-  current_value?: string; // e.g., "8192" — current value of job_attribute
-  operator: string; // e.g., ">="
+  job_attribute: string;   // e.g., "RequestMemory"
+  slot_attribute: string;  // e.g., "Memory"
+  current_value?: string;  // e.g., "8192" — current value of job_attribute
+  operator: string;        // e.g., ">="
   options: { new_value: string; additional_matches: number }[];
 }
 
@@ -608,7 +608,7 @@ export interface AdminClient {
 }
 
 export interface AdminToken {
-  kind: "access" | "refresh";
+  kind: 'access' | 'refresh';
   signature_prefix: string;
   client_id: string;
   subject?: string;
@@ -677,12 +677,12 @@ export const api = {
     // Arm or disarm superuser mode for this browser session.
     setSuperuserMode: (enabled: boolean): Promise<SuperuserModeState> =>
       fetchJSON(`${BASE}/admin/superuser`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       }),
     logout: (): Promise<void> =>
-      fetchJSON(`${BASE}/auth/logout`, { method: "POST" }),
+      fetchJSON(`${BASE}/auth/logout`, { method: 'POST' }),
   },
 
   // owned_by_me: server defaults to true. Admin sessions may pass
@@ -691,10 +691,10 @@ export const api = {
   dashboard: (params?: { owned_by_me?: boolean }): Promise<DashboardStats> => {
     const qs = new URLSearchParams();
     if (params?.owned_by_me !== undefined) {
-      qs.set("owned_by_me", String(params.owned_by_me));
+      qs.set('owned_by_me', String(params.owned_by_me));
     }
     const q = qs.toString();
-    return fetchJSON(`${BASE}/dashboard${q ? "?" + q : ""}`);
+    return fetchJSON(`${BASE}/dashboard${q ? '?' + q : ''}`);
   },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
@@ -703,20 +703,20 @@ export const api = {
     // limit accepts a number or '*' (unlimited). projection is a CSV.
     list: (params?: {
       constraint?: string;
-      limit?: number | "*";
+      limit?: number | '*';
       projection?: string;
       page_token?: string;
       owned_by_me?: boolean;
     }): Promise<JobListResponse> => {
       const qs = new URLSearchParams();
-      if (params?.constraint) qs.set("constraint", params.constraint);
-      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
-      if (params?.projection) qs.set("projection", params.projection);
-      if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.constraint) qs.set('constraint', params.constraint);
+      if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+      if (params?.projection) qs.set('projection', params.projection);
+      if (params?.page_token) qs.set('page_token', params.page_token);
       if (params?.owned_by_me !== undefined)
-        qs.set("owned_by_me", String(params.owned_by_me));
+        qs.set('owned_by_me', String(params.owned_by_me));
       const query = qs.toString();
-      return fetchJSON(`${BASE}/jobs${query ? "?" + query : ""}`);
+      return fetchJSON(`${BASE}/jobs${query ? '?' + query : ''}`);
     },
 
     // Query the schedd's history (completed / removed jobs) at
@@ -731,7 +731,7 @@ export const api = {
     // both want a single response body.
     archive: (params?: {
       constraint?: string;
-      limit?: number | "*";
+      limit?: number | '*';
       projection?: string;
       since?: string;
       // Confine the listing to the caller's own records. A non-admin
@@ -748,17 +748,17 @@ export const api = {
       before_proc?: number;
     }): Promise<HistoryListResponse> => {
       const qs = new URLSearchParams();
-      if (params?.constraint) qs.set("constraint", params.constraint);
-      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
-      if (params?.projection) qs.set("projection", params.projection);
-      if (params?.since) qs.set("since", params.since);
+      if (params?.constraint) qs.set('constraint', params.constraint);
+      if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+      if (params?.projection) qs.set('projection', params.projection);
+      if (params?.since) qs.set('since', params.since);
       if (params?.owned_by_me !== undefined)
-        qs.set("owned_by_me", String(params.owned_by_me));
+        qs.set('owned_by_me', String(params.owned_by_me));
       if (params?.before_cluster !== undefined)
-        qs.set("before_cluster", String(params.before_cluster));
+        qs.set('before_cluster', String(params.before_cluster));
       if (params?.before_proc !== undefined)
-        qs.set("before_proc", String(params.before_proc));
-      qs.set("stream_results", "false");
+        qs.set('before_proc', String(params.before_proc));
+      qs.set('stream_results', 'false');
       return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
     },
 
@@ -769,17 +769,14 @@ export const api = {
     // Remove a single job (cluster.proc).
     remove: (id: string): Promise<unknown> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`, {
-        method: "DELETE",
+        method: 'DELETE',
       }),
 
     // Remove every job matching a ClassAd constraint expression. Used by
     // the batch listing's "Remove batch" action with `ClusterId == N`.
-    removeByConstraint: (
-      constraint: string,
-      reason?: string,
-    ): Promise<unknown> =>
+    removeByConstraint: (constraint: string, reason?: string): Promise<unknown> =>
       fetchJSON(`${BASE}/jobs`, {
-        method: "DELETE",
+        method: 'DELETE',
         body: JSON.stringify({ constraint, reason }),
       }),
 
@@ -788,7 +785,7 @@ export const api = {
     // the job from JobStatus=5 (Held) back to Idle.
     release: (id: string, reason?: string): Promise<unknown> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/release`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify(reason ? { reason } : {}),
       }),
 
@@ -813,7 +810,7 @@ export const api = {
       attributes: Record<string, string | TypedAttributeValue>,
     ): Promise<unknown> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`, {
-        method: "PATCH",
+        method: 'PATCH',
         body: JSON.stringify({ attributes }),
       }),
 
@@ -827,13 +824,13 @@ export const api = {
       attributes: Record<string, string | TypedAttributeValue>,
     ): Promise<unknown> =>
       fetchJSON(`${BASE}/jobs`, {
-        method: "PATCH",
+        method: 'PATCH',
         body: JSON.stringify({ constraint, attributes }),
       }),
 
     submit: (submitFile: string): Promise<SubmitResponse> =>
       fetchJSON(`${BASE}/jobs`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify({ submit_file: submitFile }),
       }),
 
@@ -846,11 +843,11 @@ export const api = {
     ): Promise<void> => {
       const form = new FormData();
       for (const f of files) {
-        form.append(f.executable ? "executable" : "input", f.file, f.name);
+        form.append(f.executable ? 'executable' : 'input', f.file, f.name);
       }
       const res = await fetch(
         `${BASE}/jobs/${encodeURIComponent(id)}/input/multipart`,
-        { method: "POST", body: form, credentials: "include" },
+        { method: 'POST', body: form, credentials: 'include' },
       );
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -879,23 +876,23 @@ export const api = {
     peek: (
       id: string,
       params?: {
-        stream?: "stdout" | "stderr" | "both";
+        stream?: 'stdout' | 'stderr' | 'both';
         stdout_offset?: number;
         stderr_offset?: number;
         max_bytes?: number;
       },
     ): Promise<JobPeekResponse> => {
       const qs = new URLSearchParams();
-      if (params?.stream) qs.set("stream", params.stream);
+      if (params?.stream) qs.set('stream', params.stream);
       if (params?.stdout_offset !== undefined)
-        qs.set("stdout_offset", String(params.stdout_offset));
+        qs.set('stdout_offset', String(params.stdout_offset));
       if (params?.stderr_offset !== undefined)
-        qs.set("stderr_offset", String(params.stderr_offset));
+        qs.set('stderr_offset', String(params.stderr_offset));
       if (params?.max_bytes !== undefined)
-        qs.set("max_bytes", String(params.max_bytes));
+        qs.set('max_bytes', String(params.max_bytes));
       const query = qs.toString();
       return fetchJSON(
-        `${BASE}/jobs/${encodeURIComponent(id)}/peek${query ? "?" + query : ""}`,
+        `${BASE}/jobs/${encodeURIComponent(id)}/peek${query ? '?' + query : ''}`,
       );
     },
 
@@ -920,9 +917,9 @@ export const api = {
     //     gone.
     matchAnalysis: (
       id: string,
-      opts?: { source?: "live" | "archive" },
+      opts?: { source?: 'live' | 'archive' },
     ): Promise<MatchAnalysisResponse> => {
-      const qs = opts?.source ? `?source=${opts.source}` : "";
+      const qs = opts?.source ? `?source=${opts.source}` : '';
       return fetchJSON(
         `${BASE}/jobs/${encodeURIComponent(id)}/match-analysis${qs}`,
       );
@@ -934,7 +931,7 @@ export const api = {
       ttlSeconds?: number,
     ): Promise<ShareOutputResponse> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/output/share`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify(ttlSeconds ? { ttl_seconds: ttlSeconds } : {}),
       }),
 
@@ -942,20 +939,20 @@ export const api = {
     // browser must be on the same origin (or have a session cookie that
     // counts as same-origin) for the upgrade to authenticate.
     sshWebSocketUrl: (id: string, cols?: number, rows?: number): string => {
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const qs = new URLSearchParams();
-      if (cols && cols > 0) qs.set("cols", String(cols));
-      if (rows && rows > 0) qs.set("rows", String(rows));
+      if (cols && cols > 0) qs.set('cols', String(cols));
+      if (rows && rows > 0) qs.set('rows', String(rows));
       const path = `/api/v1/jobs/${encodeURIComponent(id)}/ssh`;
       const query = qs.toString();
-      return `${proto}//${window.location.host}${path}${query ? "?" + query : ""}`;
+      return `${proto}//${window.location.host}${path}${query ? '?' + query : ''}`;
     },
   },
 
   jupyter: {
     create: (req: JupyterCreateRequest): Promise<JupyterCreateResponse> =>
       fetchJSON(`${BASE}/jupyter/instances`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify(req),
       }),
 
@@ -985,7 +982,7 @@ export const api = {
       req: InteractiveTerminalCreateRequest,
     ): Promise<InteractiveTerminalCreateResponse> =>
       fetchJSON(`${BASE}/interactive/terminal`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify(req),
       }),
 
@@ -1001,12 +998,12 @@ export const api = {
       fetchJSON(`${BASE}/templates`),
     save: (t: TemplateSaveRequest): Promise<Template> =>
       fetchJSON(`${BASE}/templates`, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify(t),
       }),
     remove: (id: string): Promise<unknown> =>
       fetchJSON(`${BASE}/templates/${encodeURIComponent(id)}`, {
-        method: "DELETE",
+        method: 'DELETE',
       }),
   },
 
@@ -1015,7 +1012,7 @@ export const api = {
       fetchJSON(`${BASE}/admin/oauth2/clients`),
     deleteClient: (id: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
-        method: "DELETE",
+        method: 'DELETE',
       }),
     listTokens: (params?: {
       client_id?: string;
@@ -1023,15 +1020,15 @@ export const api = {
       limit?: number;
     }): Promise<{ tokens: AdminToken[] }> => {
       const qs = new URLSearchParams();
-      if (params?.client_id) qs.set("client_id", params.client_id);
+      if (params?.client_id) qs.set('client_id', params.client_id);
       if (params?.active_only !== undefined)
-        qs.set("active_only", String(params.active_only));
-      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+        qs.set('active_only', String(params.active_only));
+      if (params?.limit !== undefined) qs.set('limit', String(params.limit));
       const q = qs.toString();
-      return fetchJSON(`${BASE}/admin/oauth2/tokens${q ? "?" + q : ""}`);
+      return fetchJSON(`${BASE}/admin/oauth2/tokens${q ? '?' + q : ''}`);
     },
     logs: (limit?: number): Promise<AdminLogsResponse> =>
-      fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ""}`),
+      fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ''}`),
     // Read the running HTCondor config (admin only). The backend
     // sorts keys case-insensitively and redacts password/secret/api-
     // key/etc.-named values with `redacted:true`. Filtering is
@@ -1053,13 +1050,13 @@ export const api = {
       expires_at?: string;
     }): Promise<AdminAPIKeyCreateResponse> =>
       fetchJSON(`${BASE}/admin/api-keys`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
       }),
     deleteAPIKey: (keyID: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
-        method: "DELETE",
+        method: 'DELETE',
       }),
   },
 
@@ -1072,11 +1069,10 @@ export const api = {
   placement: {
     // Probe first: a pool with no placementd returns available=false
     // rather than an error, and the nav entry is hidden on that.
-    status: (): Promise<PlacementStatus> =>
-      fetchJSON(`${BASE}/placement/status`),
+    status: (): Promise<PlacementStatus> => fetchJSON(`${BASE}/placement/status`),
     listUsers: (username?: string): Promise<{ users: PlacementUser[] }> =>
       fetchJSON(
-        `${BASE}/placement/users${username ? `?username=${encodeURIComponent(username)}` : ""}`,
+        `${BASE}/placement/users${username ? `?username=${encodeURIComponent(username)}` : ''}`,
       ),
     listTokens: (params?: {
       username?: string;
@@ -1084,11 +1080,11 @@ export const api = {
       valid_only?: boolean;
     }): Promise<{ tokens: PlacementToken[] }> => {
       const qs = new URLSearchParams();
-      if (params?.username) qs.set("username", params.username);
-      if (params?.token_id) qs.set("token_id", params.token_id);
-      if (params?.valid_only) qs.set("valid_only", "true");
+      if (params?.username) qs.set('username', params.username);
+      if (params?.token_id) qs.set('token_id', params.token_id);
+      if (params?.valid_only) qs.set('valid_only', 'true');
       const q = qs.toString();
-      return fetchJSON(`${BASE}/placement/tokens${q ? "?" + q : ""}`);
+      return fetchJSON(`${BASE}/placement/tokens${q ? '?' + q : ''}`);
     },
     // Omitting username lists every defined authorization; passing one
     // narrows to what that user may request (and 403s if unmapped).
@@ -1096,7 +1092,7 @@ export const api = {
       username?: string,
     ): Promise<{ authorizations: PlacementAuthorization[] }> =>
       fetchJSON(
-        `${BASE}/placement/authorizations${username ? `?username=${encodeURIComponent(username)}` : ""}`,
+        `${BASE}/placement/authorizations${username ? `?username=${encodeURIComponent(username)}` : ''}`,
       ),
     // The response is the ONLY time the token exists in a form anyone
     // can copy. Show it, then let it go.
@@ -1107,8 +1103,8 @@ export const api = {
       requester?: string;
     }): Promise<{ token: string }> =>
       fetchJSON(`${BASE}/placement/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
       }),
   },
@@ -1119,11 +1115,13 @@ export const api = {
     // or anything else upstream of the engine is missing. The SPA
     // hides the chat surface entirely on enabled=false.
     info: (): Promise<{ enabled: boolean; reason?: string }> =>
-      fetch(`${BASE}/chat/info`, { credentials: "include" }).then(async (r) => {
-        if (r.status === 503) return r.json(); // returns {enabled:false,...}
-        if (!r.ok) throw new ApiError(r.status, r.statusText);
-        return r.json();
-      }),
+      fetch(`${BASE}/chat/info`, { credentials: 'include' }).then(
+        async (r) => {
+          if (r.status === 503) return r.json(); // returns {enabled:false,...}
+          if (!r.ok) throw new ApiError(r.status, r.statusText);
+          return r.json();
+        },
+      ),
     // The streaming endpoint is consumed by the AI SDK's useChat
     // hook (see ChatPanel). We don't expose a typed wrapper here —
     // useChat handles the request shape and stream parsing.
@@ -1135,20 +1133,20 @@ export const api = {
 
 // HTCondor JobStatus codes. Keep this in sync with handlers_webui.go.
 export const JOB_STATUS_LABEL: Record<number, string> = {
-  1: "Idle",
-  2: "Running",
-  3: "Removed",
-  4: "Completed",
-  5: "Held",
-  6: "Transferring Output",
-  7: "Suspended",
+  1: 'Idle',
+  2: 'Running',
+  3: 'Removed',
+  4: 'Completed',
+  5: 'Held',
+  6: 'Transferring Output',
+  7: 'Suspended',
 };
 
 export function jobStatusLabel(code: unknown): string {
-  if (typeof code === "number" && JOB_STATUS_LABEL[code]) {
+  if (typeof code === 'number' && JOB_STATUS_LABEL[code]) {
     return JOB_STATUS_LABEL[code];
   }
-  return "Unknown";
+  return 'Unknown';
 }
 
 // HTCondor uses HoldReasonCode 16 to mean "the job is held while the
@@ -1165,15 +1163,15 @@ const HOLD_REASON_CODE_SPOOLING_INPUT = 16;
 // holds. Used so detail/listing pages share the same label and
 // pill colour table.
 export type DisplayStatus =
-  | "idle"
-  | "running"
-  | "removed"
-  | "completed"
-  | "held"
-  | "transferring"
-  | "suspended"
-  | "uploading"
-  | "unknown";
+  | 'idle'
+  | 'running'
+  | 'removed'
+  | 'completed'
+  | 'held'
+  | 'transferring'
+  | 'suspended'
+  | 'uploading'
+  | 'unknown';
 
 export interface DisplayStatusInfo {
   key: DisplayStatus;
@@ -1194,31 +1192,31 @@ export function displayJobStatus(j: JobStatusFields): DisplayStatusInfo {
   const status = numLike(j.status);
   const holdCode = numLike(j.holdReasonCode);
   if (status === 5 && holdCode === HOLD_REASON_CODE_SPOOLING_INPUT) {
-    return { key: "uploading", label: "Uploading Inputs" };
+    return { key: 'uploading', label: 'Uploading Inputs' };
   }
   switch (status) {
     case 1:
-      return { key: "idle", label: "Idle" };
+      return { key: 'idle', label: 'Idle' };
     case 2:
-      return { key: "running", label: "Running" };
+      return { key: 'running', label: 'Running' };
     case 3:
-      return { key: "removed", label: "Removed" };
+      return { key: 'removed', label: 'Removed' };
     case 4:
-      return { key: "completed", label: "Completed" };
+      return { key: 'completed', label: 'Completed' };
     case 5:
-      return { key: "held", label: "Held" };
+      return { key: 'held', label: 'Held' };
     case 6:
-      return { key: "transferring", label: "Transferring Output" };
+      return { key: 'transferring', label: 'Transferring Output' };
     case 7:
-      return { key: "suspended", label: "Suspended" };
+      return { key: 'suspended', label: 'Suspended' };
     default:
-      return { key: "unknown", label: "Unknown" };
+      return { key: 'unknown', label: 'Unknown' };
   }
 }
 
 function numLike(v: unknown): number | undefined {
-  if (typeof v === "number") return v;
-  if (typeof v === "string") {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
     const n = Number(v);
     if (!Number.isNaN(n)) return n;
   }

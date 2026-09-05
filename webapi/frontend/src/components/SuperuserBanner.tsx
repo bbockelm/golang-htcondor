@@ -1,8 +1,8 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
+import { useEffect, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api, type Session } from '@/lib/api';
 
 // SuperuserBanner warns, on every page, that this session's next action may
 // land on somebody else's job.
