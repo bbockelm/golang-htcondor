@@ -16,7 +16,17 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
+// newDBMirrorStatusServer builds an admin-capable server and a request
+// factory for GET /dbmirror/status. The probe endpoint's tests use
+// newDBMirrorServer directly, since the only thing that differs is the
+// method and path.
 func newDBMirrorStatusServer(t *testing.T) (*Server, func(user string, groups []string) *http.Request) {
+	t.Helper()
+	server, req := newDBMirrorServer(t, http.MethodGet, "/api/v1/dbmirror/status")
+	return server, req
+}
+
+func newDBMirrorServer(t *testing.T, method, path string) (*Server, func(user string, groups []string) *http.Request) {
 	t.Helper()
 	server, err := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -35,7 +45,7 @@ func newDBMirrorStatusServer(t *testing.T) (*Server, func(user string, groups []
 		if err != nil {
 			t.Fatalf("session create: %v", err)
 		}
-		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/dbmirror/status", nil)
+		r := httptest.NewRequestWithContext(context.Background(), method, path, nil)
 		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
 		return r
 	}

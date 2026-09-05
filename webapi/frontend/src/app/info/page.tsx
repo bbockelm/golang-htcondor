@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, type DBMirrorHealth } from "@/lib/api";
+import { api, type DBMirrorHealth, type DBMirrorTest } from "@/lib/api";
 
 export default function InfoPage() {
   const {
@@ -168,6 +168,8 @@ function DBMirrorSection() {
             {data.health && <MirrorHealthRows health={data.health} />}
           </DefList>
 
+          <MirrorTestButton />
+
           {data.routing && data.routing.length > 0 && (
             <div>
               <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -223,6 +225,96 @@ function DBMirrorSection() {
   );
 }
 
+// MirrorTestButton runs a real read against the mirror on demand.
+//
+// The status card answers "is it healthy"; an operator debugging one
+// that is not needs "what happens when you actually try", and those are
+// different questions. Discovery can succeed against a collector ad for
+// a database this daemon cannot authenticate to, and the background
+// poller only re-checks on its own cadence -- so a fix applied at the
+// mirror is invisible here for up to an interval unless something asks
+// now.
+//
+// The result is per stage because that is the diagnostic value: the card
+// already says it failed, and where it failed is what an operator cannot
+// get anywhere else.
+function MirrorTestButton() {
+  const [result, setResult] = useState<DBMirrorTest | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      setResult(await api.dbmirror.test());
+    } catch (e) {
+      setResult(null);
+      setError((e as Error).message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={run}
+        disabled={running}
+        className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+      >
+        {running ? 'Testing…' : 'Test connection'}
+      </button>
+      <span className="ml-2 text-xs text-gray-500">
+        Runs a real read (discover → connect → query). The query matches nothing, so it is safe to repeat.
+      </span>
+
+      {error && <p className="mt-2 text-sm text-red-700">{error}</p>}
+
+      {result && (
+        <div className="mt-2 rounded border border-gray-200">
+          <div
+            className={`px-3 py-1.5 text-sm font-medium ${
+              result.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'
+            }`}
+          >
+            {result.ok
+              ? `Mirror answered in ${result.total_millis} ms`
+              : 'Mirror did not answer — the failing stage is marked below'}
+          </div>
+          <table className="min-w-full text-sm">
+            <tbody className="divide-y divide-gray-100">
+              {result.stages.map((stage) => (
+                <tr key={stage.name}>
+                  <td className="px-3 py-1.5 font-mono text-xs">{stage.name}</td>
+                  <td className="px-3 py-1.5">
+                    {stage.ok ? (
+                      <span className="text-green-700">ok</span>
+                    ) : (
+                      <span className="font-medium text-red-700">failed</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5 text-gray-600">
+                    {stage.error ? (
+                      <span className="text-red-700">{stage.error}</span>
+                    ) : (
+                      stage.detail
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-gray-400">
+                    {stage.millis} ms
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // MirrorHealthRows renders the discovery and freshness half. Staleness is
 // shown against the tolerance that actually gates routing, because the
 // number alone does not say whether it is a problem.
@@ -258,25 +350,11 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       />
       {health.name && <Row label="Mirror" value={health.name} />}
       {health.address && <Row label="Address" mono value={health.address} />}
-      {health.required ? (
+      {health.required && (
         <Row
           label="Required"
           value="Yes — a read the mirror cannot serve FAILS instead of falling back to the schedd."
         />
-      ) : (
-        health.status !== 'ok' && (
-          // Say the consequence, not only the fault. The error below is
-          // the loudest thing on the panel, and without this an operator
-          // reasonably reads it as an outage — when a mirror that cannot
-          // be reached is a lost optimisation and nothing more, because
-          // every declined read goes to the schedd instead.
-          <Row
-            label="Impact"
-            value="None on correctness — reads are falling back to the schedd. The mirror is an
-              optimisation here (HTTP_API_DBMIRROR_REQUIRED is not set), so a failure below means
-              queries are slower and land on the access point, not that they fail."
-          />
-        )
       )}
       {(health.pinned_name || health.pinned_address) && (
         <Row

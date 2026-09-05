@@ -204,6 +204,24 @@ export interface DBMirrorHealth {
   dial_last_success?: string;
 }
 
+// DBMirrorTest is one on-demand probe of the mirror, reported per stage:
+// "it failed" is what the status card already says, and WHERE it failed
+// is what an operator cannot get anywhere else.
+export interface DBMirrorTestStage {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  error?: string;
+  millis: number;
+}
+
+export interface DBMirrorTest {
+  ok: boolean;
+  stages: DBMirrorTestStage[];
+  constraint: string;
+  total_millis: number;
+}
+
 export interface DBMirrorStatus {
   enabled: boolean;
   health?: DBMirrorHealth;
@@ -1133,6 +1151,11 @@ export const api = {
     // Admin-only. Returns enabled=false rather than an error when no
     // mirror routing is configured, which is the common case.
     status: (): Promise<DBMirrorStatus> => fetchJSON(`${BASE}/dbmirror/status`),
+    // Runs a real read against the mirror -- discover, connect, query --
+    // with a constraint that matches nothing, so it can be pressed
+    // repeatedly while chasing a misconfiguration.
+    test: (): Promise<DBMirrorTest> =>
+      fetchJSON(`${BASE}/dbmirror/test`, { method: 'POST' }),
   },
 
   placement: {

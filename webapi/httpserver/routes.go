@@ -187,6 +187,10 @@ func (h *Handler) setupRoutes() {
 	// data is on /readyz and /metrics too, but both of those answer a
 	// monitoring system; this one answers the admin UI.
 	mux.Handle("/api/v1/dbmirror/status", cors(http.HandlerFunc(h.handleDBMirrorStatus)))
+	// An on-demand probe, so an operator debugging a mirror does not have
+	// to leave the page or wait for the background poller's next tick to
+	// see whether a change they just made worked.
+	mux.Handle("/api/v1/dbmirror/test", cors(http.HandlerFunc(h.handleDBMirrorTest)))
 
 	// Ping endpoints
 	mux.HandleFunc("/api/v1/ping", h.handlePing)              // Ping both collector and schedd
