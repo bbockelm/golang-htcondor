@@ -117,7 +117,7 @@ export function ConfirmButton({
             setArmed(false);
             onConfirm();
           }}
-          className={`rounded border border-red-600 bg-red-600 ${sizeCls} font-medium text-white hover:bg-red-700 disabled:opacity-60`}
+          className={`rounded-sm border border-red-600 bg-red-600 ${sizeCls} font-medium text-white hover:bg-red-700 disabled:opacity-60`}
         >
           {confirmLabel}
         </button>

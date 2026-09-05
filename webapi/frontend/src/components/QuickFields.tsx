@@ -126,7 +126,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <input
               value={executable}
               onChange={(e) => update(setExecutable, 'executable')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
               placeholder="/bin/bash"
             />
           </Field>
@@ -134,7 +134,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <select
               value={universe}
               onChange={(e) => update(setUniverse, 'universe')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 text-xs"
             >
               {UNIVERSES.map((u) => (
                 <option key={u} value={u}>{u}</option>
@@ -145,7 +145,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <input
               value={args}
               onChange={(e) => update(setArgs, 'arguments')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
               placeholder={`"-c 'echo hello'"`}
             />
           </Field>
@@ -171,7 +171,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <input
               value={outputFile}
               onChange={(e) => update(setOutputFile, 'output')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
               placeholder="output.txt"
             />
           </Field>
@@ -179,7 +179,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <input
               value={errorFile}
               onChange={(e) => update(setErrorFile, 'error')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
               placeholder="error.txt"
             />
           </Field>
@@ -187,7 +187,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
             <input
               value={logFile}
               onChange={(e) => update(setLogFile, 'log')(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
               placeholder="job.log"
             />
           </Field>
@@ -213,7 +213,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
                 <select
                   value={gpuMinCap}
                   onChange={(e) => update(setGpuMinCap, 'gpus_minimum_capability')(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  className="w-full rounded-sm border border-gray-300 px-2 py-1 text-xs"
                 >
                   {CUDA_CAPS.map((c) => (
                     <option key={c} value={c}>{c === '' ? '(any)' : c}</option>
@@ -230,7 +230,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
                 <input
                   value={gpuMinRuntime}
                   onChange={(e) => update(setGpuMinRuntime, 'gpus_minimum_runtime')(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+                  className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
                   placeholder="e.g. 11.0"
                 />
               </Field>
@@ -238,7 +238,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
                 <input
                   value={cudaVersion}
                   onChange={(e) => update(setCudaVersion, 'cuda_version')(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+                  className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
                   placeholder="e.g. 12.1"
                 />
               </Field>
@@ -246,7 +246,7 @@ export function QuickFields({ text, onChange }: QuickFieldsProps) {
                 <input
                   value={requireGPUs}
                   onChange={(e) => update(setRequireGPUs, 'require_gpus')(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+                  className="w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"
                   placeholder='e.g. Capability >= 7.0 && GlobalMemoryMb >= 16000'
                 />
                 <span className="block text-[11px] text-gray-400 mt-1">
@@ -288,7 +288,7 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded border border-gray-200 bg-white">
+    <div className="rounded-sm border border-gray-200 bg-white">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -384,7 +384,7 @@ function EnvEditor({
         </p>
       )}
       {vars.length > 0 && (
-        <div className="overflow-x-auto rounded border border-gray-200">
+        <div className="overflow-x-auto rounded-sm border border-gray-200">
           <table className="min-w-full text-xs">
             <thead className="bg-gray-50">
               <tr>
@@ -412,7 +412,7 @@ function EnvEditor({
                     <input
                       value={v.value}
                       onChange={(e) => setRow(i, { value: e.target.value })}
-                      className="w-full rounded border border-gray-200 px-1 py-0.5 font-mono text-xs"
+                      className="w-full rounded-sm border border-gray-200 px-1 py-0.5 font-mono text-xs"
                       placeholder="value"
                     />
                   </td>
@@ -435,7 +435,7 @@ function EnvEditor({
       <button
         type="button"
         onClick={addRow}
-        className="text-xs rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
+        className="text-xs rounded-sm border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50"
       >
         + variable
       </button>

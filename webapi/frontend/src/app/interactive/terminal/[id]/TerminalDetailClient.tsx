@@ -134,7 +134,7 @@ export default function TerminalDetailClient() {
                   }
                 }}
                 disabled={endSession.isPending}
-                className="text-xs rounded border border-red-300 bg-white px-2 py-1 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                className="text-xs rounded-sm border border-red-300 bg-white px-2 py-1 text-red-700 hover:bg-red-50 disabled:opacity-50"
               >
                 {endSession.isPending ? 'Ending…' : 'End session'}
               </button>
@@ -245,7 +245,7 @@ function Banner({
       ? 'border-red-200 bg-red-50 text-red-700'
       : 'border-blue-200 bg-blue-50 text-blue-800';
   return (
-    <div className={`rounded border px-3 py-2 text-sm ${cls}`}>{children}</div>
+    <div className={`rounded-sm border px-3 py-2 text-sm ${cls}`}>{children}</div>
   );
 }
 

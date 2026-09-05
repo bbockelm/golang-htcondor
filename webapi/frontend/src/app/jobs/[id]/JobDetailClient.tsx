@@ -89,7 +89,7 @@ export default function JobDetailClient(_props: {
               type="button"
               onClick={() => releaseMut.mutate()}
               disabled={releaseMut.isPending}
-              className="rounded border border-brand-600 bg-white px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+              className="rounded-sm border border-brand-600 bg-white px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
               title={`Release held job ${id}`}
             >
               {releaseMut.isPending ? 'Releasing…' : 'Release'}
@@ -106,7 +106,7 @@ export default function JobDetailClient(_props: {
       </div>
 
       {removeMut.error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           Remove failed:{' '}
           {removeMut.error instanceof ApiError
             ? removeMut.error.message
@@ -115,7 +115,7 @@ export default function JobDetailClient(_props: {
       )}
 
       {releaseMut.error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           Release failed:{' '}
           {releaseMut.error instanceof ApiError
             ? releaseMut.error.message
@@ -126,7 +126,7 @@ export default function JobDetailClient(_props: {
       {isLoading && <p className="text-gray-400">Loading...</p>}
 
       {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {(error as Error).message}
         </div>
       )}
@@ -182,7 +182,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
           collapsed pill at the bottom. */}
       <JobDetailChat jobID={jobID} job={job} />
 
-      <div className="rounded border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
+      <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
         <Field label="Owner" value={owner ?? '—'} />
         <Field
@@ -622,7 +622,7 @@ function TerminalPanel({
   const canSSH = status === 2 || status === 6;
 
   return (
-    <div className="rounded border border-gray-200 bg-white p-4 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-gray-900">Terminal</h2>
         {!canSSH && (
@@ -634,7 +634,7 @@ function TerminalPanel({
       {canSSH && !open && (
         <button
           onClick={() => setOpen(true)}
-          className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+          className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
         >
           Open shell
         </button>
@@ -718,7 +718,7 @@ function OutputFilesPanel({
         {ready ? (
           <a
             href={api.jobs.outputDownloadUrl(jobID)}
-            className="text-sm rounded bg-brand-600 px-3 py-1.5 text-white hover:bg-brand-700"
+            className="text-sm rounded-sm bg-brand-600 px-3 py-1.5 text-white hover:bg-brand-700"
             download
           >
             Download as tar
@@ -727,7 +727,7 @@ function OutputFilesPanel({
           <button
             type="button"
             disabled
-            className="text-sm rounded bg-brand-600 px-3 py-1.5 text-white opacity-60 cursor-not-allowed"
+            className="text-sm rounded-sm bg-brand-600 px-3 py-1.5 text-white opacity-60 cursor-not-allowed"
             title={hint ?? ''}
           >
             Download as tar
@@ -736,7 +736,7 @@ function OutputFilesPanel({
         <button
           onClick={() => shareMut.mutate()}
           disabled={!ready || shareMut.isPending}
-          className="text-sm rounded border border-gray-300 bg-white px-3 py-1.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="text-sm rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {shareMut.isPending ? 'Generating...' : 'Generate share link'}
         </button>
@@ -749,7 +749,7 @@ function OutputFilesPanel({
       )}
 
       {share && (
-        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs space-y-2">
+        <div className="rounded-sm border border-amber-200 bg-amber-50 p-3 text-xs space-y-2">
           <div className="text-amber-900">
             Anyone with this link can download the output files until{' '}
             <strong>{share.expires.toLocaleString()}</strong>.
@@ -758,12 +758,12 @@ function OutputFilesPanel({
             <input
               readOnly
               value={share.url}
-              className="flex-1 min-w-0 rounded border border-amber-300 bg-white px-2 py-1 font-mono"
+              className="flex-1 min-w-0 rounded-sm border border-amber-300 bg-white px-2 py-1 font-mono"
               onFocus={(e) => e.currentTarget.select()}
             />
             <button
               onClick={handleCopy}
-              className="rounded bg-amber-200 px-2 py-1 text-amber-900 hover:bg-amber-300 min-w-16"
+              className="rounded-sm bg-amber-200 px-2 py-1 text-amber-900 hover:bg-amber-300 min-w-16"
               type="button"
             >
               {copied ? 'Copied' : 'Copy'}
@@ -936,7 +936,7 @@ function LiveTailPanel({
   // render).
   if (!engaged) {
     return (
-      <div className="rounded border border-gray-200 bg-white p-3 flex items-center gap-3">
+      <div className="rounded-sm border border-gray-200 bg-white p-3 flex items-center gap-3">
         <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
         <span className="text-xs text-gray-500">
           Stream stdout / stderr from the running sandbox.
@@ -947,7 +947,7 @@ function LiveTailPanel({
             setEngaged(true);
             setActive(true);
           }}
-          className="ml-auto text-xs rounded border border-brand-600 bg-white px-2 py-0.5 text-brand-700 hover:bg-brand-50"
+          className="ml-auto text-xs rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-brand-700 hover:bg-brand-50"
         >
           Live tail
         </button>
@@ -956,10 +956,10 @@ function LiveTailPanel({
   }
 
   return (
-    <div className="rounded border border-gray-200 bg-white p-4 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
-        <div className="inline-flex rounded border border-gray-300 bg-white p-0.5 text-xs">
+        <div className="inline-flex rounded-sm border border-gray-300 bg-white p-0.5 text-xs">
           <button
             type="button"
             onClick={() => switchStream('stdout')}
@@ -999,7 +999,7 @@ function LiveTailPanel({
           <button
             type="button"
             onClick={closePanel}
-            className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-sm border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
             title="Close the live tail (clears the buffer)"
             aria-label="Close live tail"
           >
@@ -1030,7 +1030,7 @@ function LiveTailPanel({
 
       <pre
         ref={preRef}
-        className="h-64 overflow-auto rounded bg-gray-900 px-3 py-2 font-mono text-[11px] text-gray-100 whitespace-pre-wrap break-words"
+        className="h-64 overflow-auto rounded-sm bg-gray-900 px-3 py-2 font-mono text-[11px] text-gray-100 whitespace-pre-wrap wrap-break-word"
       >
         {text || (
           <span className="text-gray-500">
@@ -1081,7 +1081,7 @@ function OutputStreamPreview({
 
   return (
     <details
-      className="rounded border border-gray-200 bg-gray-50"
+      className="rounded-sm border border-gray-200 bg-gray-50"
       onToggle={(e) => {
         const next = (e.currentTarget as HTMLDetailsElement).open;
         setOpen(next);
@@ -1105,7 +1105,7 @@ function OutputStreamPreview({
           data.text === '' ? (
             <p className="text-xs italic text-gray-500">(empty)</p>
           ) : (
-            <pre className="max-h-96 overflow-auto rounded border border-gray-200 bg-white p-2 text-[11px] font-mono whitespace-pre-wrap">
+            <pre className="max-h-96 overflow-auto rounded-sm border border-gray-200 bg-white p-2 text-[11px] font-mono whitespace-pre-wrap">
               {data.text}
             </pre>
           )
@@ -1138,7 +1138,7 @@ export function JobDetailsSection({
   editable?: boolean;
 }) {
   return (
-    <section className="rounded border border-gray-200 bg-white">
+    <section className="rounded-sm border border-gray-200 bg-white">
       <header className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 rounded-t">
         <h2 className="text-sm font-semibold text-gray-900">Job Details</h2>
         <p className="text-xs text-gray-500 mt-0.5">
@@ -1321,10 +1321,10 @@ export function AttributesTable({
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="Filter by attribute name or value…"
-        className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
+        className="mb-2 w-full rounded-sm border border-gray-300 px-2 py-1 text-xs"
         aria-label="Filter ClassAd attributes"
       />
-      <div className="overflow-hidden rounded border border-gray-200">
+      <div className="overflow-hidden rounded-sm border border-gray-200">
         <table className="min-w-full text-xs table-fixed">
           <thead className="bg-gray-50 text-left text-[10px] uppercase tracking-wide text-gray-500">
             <tr>
@@ -1421,7 +1421,7 @@ function AttributeViewRow({
           <button
             type="button"
             onClick={onEdit}
-            className="text-[11px] rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+            className="text-[11px] rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
           >
             edit
           </button>
@@ -1507,7 +1507,7 @@ function AttributeEditRow({
         <select
           value={type}
           onChange={(e) => changeType(e.target.value as AttributeType)}
-          className="w-full rounded border border-gray-300 bg-white px-1 py-0.5 text-[11px]"
+          className="w-full rounded-sm border border-gray-300 bg-white px-1 py-0.5 text-[11px]"
           aria-label="Attribute type"
         >
           <option value="string">string</option>
@@ -1530,7 +1530,7 @@ function AttributeEditRow({
               if (e.key === 'Escape') onCancel();
             }}
             autoFocus
-            className="w-full rounded border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
+            className="w-full rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
             aria-label="Boolean value"
           >
             <option value="true">true</option>
@@ -1547,7 +1547,7 @@ function AttributeEditRow({
             }}
             autoFocus
             spellCheck={false}
-            className="w-full rounded border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
+            className="w-full rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
             placeholder={
               type === 'string'
                 ? 'value (typed verbatim, no quotes)'
@@ -1567,7 +1567,7 @@ function AttributeEditRow({
             type="button"
             onClick={submit}
             disabled={editMut.isPending}
-            className="text-[11px] rounded border border-brand-600 bg-brand-600 px-2 py-0.5 font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            className="text-[11px] rounded-sm border border-brand-600 bg-brand-600 px-2 py-0.5 font-medium text-white hover:bg-brand-700 disabled:opacity-50"
           >
             {editMut.isPending ? '…' : 'save'}
           </button>
@@ -1575,7 +1575,7 @@ function AttributeEditRow({
             type="button"
             onClick={onCancel}
             disabled={editMut.isPending}
-            className="text-[11px] rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            className="text-[11px] rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             cancel
           </button>
@@ -1638,7 +1638,7 @@ export function ResourceTable({ job }: { job: ClassAd }) {
       <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
         Resources
       </h3>
-      <div className="overflow-hidden rounded border border-gray-200">
+      <div className="overflow-hidden rounded-sm border border-gray-200">
         <table className="min-w-full text-sm">
           <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
             <tr>
@@ -1693,7 +1693,7 @@ export function ExecutionTable({ job }: { job: ClassAd }) {
       <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
         Execution
       </h3>
-      <div className="overflow-hidden rounded border border-gray-200">
+      <div className="overflow-hidden rounded-sm border border-gray-200">
         <table className="min-w-full text-sm">
           <tbody className="divide-y divide-gray-100">
             {rows.map((r) => (
@@ -1720,7 +1720,7 @@ export function RawClassAd({ job }: { job: ClassAd }) {
     setTimeout(() => setCopied(false), 2000);
   };
   return (
-    <details className="rounded border border-gray-200">
+    <details className="rounded-sm border border-gray-200">
       <summary className="cursor-pointer flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
         <span>Raw ClassAd</span>
         <button
@@ -1730,13 +1730,13 @@ export function RawClassAd({ job }: { job: ClassAd }) {
             e.stopPropagation();
             handleCopy();
           }}
-          className="ml-auto rounded border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-50"
+          className="ml-auto rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-50"
           title="Copy raw ClassAd to clipboard"
         >
           {copied ? 'Copied' : 'Copy'}
         </button>
       </summary>
-      <pre className="px-3 py-2 text-[11px] bg-gray-50 overflow-auto font-mono max-h-[32rem]">
+      <pre className="px-3 py-2 text-[11px] bg-gray-50 overflow-auto font-mono max-h-128">
         {text}
       </pre>
     </details>
@@ -1874,7 +1874,7 @@ export function Field({
       <div
         className={`mt-0.5 ${mono ? 'font-mono text-xs' : 'text-sm'} ${
           warn ? 'text-red-700' : 'text-gray-900'
-        } break-words`}
+        } wrap-break-word`}
       >
         {value}
       </div>

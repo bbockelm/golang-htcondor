@@ -234,7 +234,7 @@ export default function JobsPage() {
         {isAdmin && <ScopeToggle />}
         <Link
           href="/submit"
-          className="ml-auto rounded bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
         >
           + Submit a batch
         </Link>
@@ -355,7 +355,7 @@ function TruncationNotice({
   // for a reason the user should see.
   if (page.error) {
     return (
-      <p className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+      <p className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
         Showing {shown.toLocaleString()} job{shown === 1 ? '' : 's'}; the query
         did not finish: {page.error}
       </p>
@@ -376,7 +376,7 @@ function TruncationNotice({
   }
 
   return (
-    <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+    <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
       <span>
         Showing the first <strong>{shown.toLocaleString()}</strong> jobs. More
         match this view.
@@ -444,7 +444,7 @@ function FilterBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="batch name, cluster id, status…"
-        className="min-w-0 flex-1 max-w-sm rounded border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+        className="min-w-0 flex-1 max-w-sm rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
       />
       {value && (
         <button
@@ -739,7 +739,7 @@ function BatchTable({
   return (
     <div className="space-y-2">
       {removeError && (
-        <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {/* Failure message is shared between Remove and Release —
               both kinds of mutation surface here, label with whichever
               actually failed so the user can tell what happened. */}
@@ -1020,7 +1020,7 @@ function JobsSubTable({
                       disabled={
                         pendingReleaseActive && pendingRelease === j.id
                       }
-                      className="rounded border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+                      className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
                       title={`Release held job ${j.id}`}
                     >
                       {pendingReleaseActive && pendingRelease === j.id

@@ -36,7 +36,7 @@ function LandingPage() {
       </p>
       <a
         href="/login"
-        className="mt-6 inline-block rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+        className="mt-6 inline-block rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
       >
         Sign In
       </a>

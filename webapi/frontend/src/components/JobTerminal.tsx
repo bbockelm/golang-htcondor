@@ -165,7 +165,7 @@ export function JobTerminal({ jobID }: { jobID: string }) {
       )}
       <div
         ref={containerRef}
-        className="w-full rounded border border-gray-300 bg-[#0b0f17] p-2"
+        className="w-full rounded-sm border border-gray-300 bg-[#0b0f17] p-2"
         // xterm.js sizes its rows/cols against the container. Give it enough
         // height to be useful by default; the user can resize the window.
         style={{ height: '480px' }}

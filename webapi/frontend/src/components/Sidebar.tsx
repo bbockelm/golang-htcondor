@@ -71,7 +71,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={onClose}
-            className="rounded p-1 text-gray-300 hover:bg-white/10 hover:text-white lg:hidden"
+            className="rounded-sm p-1 text-gray-300 hover:bg-white/10 hover:text-white lg:hidden"
             aria-label="Close menu"
           >
             <svg

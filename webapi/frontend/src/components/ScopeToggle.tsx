@@ -22,7 +22,7 @@ export function ScopeToggle({ className = '' }: { className?: string }) {
   const [scope, setScope] = useScope();
   return (
     <div
-      className={`flex items-center gap-1 rounded border border-gray-300 bg-white p-0.5 text-xs ${className}`}
+      className={`flex items-center gap-1 rounded-sm border border-gray-300 bg-white p-0.5 text-xs ${className}`}
       role="group"
       aria-label="Listing scope"
     >

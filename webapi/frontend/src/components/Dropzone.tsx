@@ -96,7 +96,7 @@ export function Dropzone({ files, onChange, disabled }: DropzoneProps) {
       </div>
 
       {files.length > 0 && (
-        <ul className="rounded border border-gray-200 bg-white divide-y divide-gray-100">
+        <ul className="rounded-sm border border-gray-200 bg-white divide-y divide-gray-100">
           {files.map((f) => (
             <li key={f.id} className="flex items-center gap-2 px-3 py-2 text-sm">
               <input
@@ -108,7 +108,7 @@ export function Dropzone({ files, onChange, disabled }: DropzoneProps) {
                     ),
                   )
                 }
-                className="flex-1 min-w-0 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs hover:border-gray-200 focus:border-gray-300 focus:outline-none"
+                className="flex-1 min-w-0 rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs hover:border-gray-200 focus:border-gray-300 focus:outline-hidden"
               />
               <span className="text-xs text-gray-400 shrink-0">
                 {humanSize(f.file.size)}

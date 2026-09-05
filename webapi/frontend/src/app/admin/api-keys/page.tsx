@@ -182,7 +182,7 @@ function NewKeyForm({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. prom-scrape"
-            className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+            className="mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
           />
         </label>
         <label className="block text-xs">
@@ -190,7 +190,7 @@ function NewKeyForm({
           <select
             value={expiresInDays}
             onChange={(e) => setExpiresInDays(e.target.value)}
-            className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+            className="mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
           >
             <option value="never">Never</option>
             <option value="30">In 30 days</option>
@@ -217,7 +217,7 @@ function NewKeyForm({
                         return next;
                       })
                     }
-                    className="mt-0.5 rounded border-gray-300"
+                    className="mt-0.5 rounded-sm border-gray-300"
                   />
                   <span>
                     <span className="font-mono">{s}</span>{' '}
@@ -234,7 +234,7 @@ function NewKeyForm({
           type="button"
           onClick={submit}
           disabled={busy || !name.trim() || scopes.size === 0}
-          className="rounded bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
           {busy ? 'Minting…' : 'Mint key'}
         </button>
@@ -284,19 +284,19 @@ function NewKeyShown({
           readOnly
           value={minted.key}
           onFocus={(e) => e.currentTarget.select()}
-          className="flex-1 rounded border border-amber-300 bg-white px-2 py-1 font-mono text-xs text-gray-900"
+          className="flex-1 rounded-sm border border-amber-300 bg-white px-2 py-1 font-mono text-xs text-gray-900"
         />
         <button
           type="button"
           onClick={copy}
-          className="rounded border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
+          className="rounded-sm border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
         >
           {copied ? 'Copied!' : 'Copy'}
         </button>
         <button
           type="button"
           onClick={onDismiss}
-          className="rounded bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700"
+          className="rounded-sm bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700"
         >
           I&apos;ve saved it
         </button>

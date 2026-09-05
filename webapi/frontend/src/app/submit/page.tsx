@@ -1394,7 +1394,7 @@ export default function SubmitPage() {
       {libraryUploadWarning && (
         <div
           role="alert"
-          className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="rounded-sm border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
         >
           ⚠ {libraryUploadWarning}
         </div>
@@ -1403,7 +1403,7 @@ export default function SubmitPage() {
       {bodyHasQueue && (
         <div
           role="alert"
-          className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="rounded-sm border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
         >
           ⚠ The submit-file body contains a <code>queue</code> line. The
           page synthesizes the queue statement from the table rows;
@@ -1427,7 +1427,7 @@ export default function SubmitPage() {
       </ChatHighlight>
 
       {submit.isError && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {submit.error instanceof ApiError
             ? `${submit.error.status}: ${submit.error.message}`
             : (submit.error as Error).message}
@@ -1440,7 +1440,7 @@ export default function SubmitPage() {
             <button
               onClick={() => submit.mutate()}
               disabled={submitDisabled}
-              className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+              className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
             >
               {submit.isPending
                 ? 'Submitting…'
@@ -1460,14 +1460,14 @@ export default function SubmitPage() {
           {submitBlockedReason && !submit.isPending && (
             <div
               role="alert"
-              className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+              className="flex items-start gap-2 rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
             >
               <span className="font-semibold">Can&apos;t submit yet:</span>
               <span className="flex-1">{submitBlockedReason.message}</span>
               <button
                 type="button"
                 onClick={() => flashSection(submitBlockedReason.section)}
-                className="rounded border border-amber-400 bg-white px-2 py-0.5 text-amber-800 hover:bg-amber-100"
+                className="rounded-sm border border-amber-400 bg-white px-2 py-0.5 text-amber-800 hover:bg-amber-100"
               >
                 Show me
               </button>
@@ -1576,7 +1576,7 @@ function SaveTemplateDialog({
         role="dialog"
         aria-labelledby="save-template-dialog-title"
         aria-modal="true"
-        className="w-full max-w-lg rounded bg-white p-5 shadow-lg"
+        className="w-full max-w-lg rounded-sm bg-white p-5 shadow-lg"
       >
         <h2
           id="save-template-dialog-title"
@@ -1616,7 +1616,7 @@ function SaveTemplateDialog({
                       : v.id,
                 }));
               }}
-              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1"
+              className="mt-0.5 w-full rounded-sm border border-gray-300 px-2 py-1"
               autoFocus
             />
           </label>
@@ -1652,10 +1652,10 @@ function SaveTemplateDialog({
                 setValues((v) => ({ ...v, description: e.target.value }))
               }
               rows={2}
-              className="mt-0.5 w-full resize-none rounded border border-gray-300 px-2 py-1"
+              className="mt-0.5 w-full resize-none rounded-sm border border-gray-300 px-2 py-1"
             />
           </label>
-          <fieldset className="rounded border border-gray-200 px-3 py-2">
+          <fieldset className="rounded-sm border border-gray-200 px-3 py-2">
             <legend className="px-1 text-xs font-medium uppercase tracking-wide text-gray-500">
               Visibility
             </legend>
@@ -1698,7 +1698,7 @@ function SaveTemplateDialog({
         </div>
 
         {error && (
-          <div className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+          <div className="mt-3 rounded-sm border border-red-200 bg-red-50 p-2 text-xs text-red-700">
             {error}
           </div>
         )}
@@ -1707,7 +1707,7 @@ function SaveTemplateDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+            className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
           >
             Cancel
           </button>
@@ -1821,7 +1821,7 @@ function TemplateSection({
                 />
               </label>
               {selected && (
-                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs space-y-2">
+                <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 text-xs space-y-2">
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-gray-700">{selected.name}</span>
                     <SourceBadge source={selected.source} />
@@ -1839,7 +1839,7 @@ function TemplateSection({
                     // affordance the security audit asked for: makes
                     // shared-by-others templates visually distinct from
                     // user-A's own and from system-built-in templates.
-                    <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-800">
+                    <div className="rounded-sm border border-amber-300 bg-amber-50 p-2 text-amber-800">
                       <strong>Authored by {selected.owner}.</strong> Review
                       the template body and any default input files
                       below before submitting — the job will run under
@@ -1859,7 +1859,7 @@ function TemplateSection({
                         <code
                           key={c.name}
                           title={c.description ?? undefined}
-                          className="ml-1 rounded bg-white border border-gray-200 px-1 py-0.5"
+                          className="ml-1 rounded-sm bg-white border border-gray-200 px-1 py-0.5"
                         >
                           {c.name}
                         </code>
@@ -1872,7 +1872,7 @@ function TemplateSection({
                       {selected.input_files.map((f) => (
                         <code
                           key={f.name}
-                          className="ml-1 rounded bg-white border border-gray-200 px-1 py-0.5"
+                          className="ml-1 rounded-sm bg-white border border-gray-200 px-1 py-0.5"
                         >
                           {f.name}
                         </code>
@@ -1883,7 +1883,7 @@ function TemplateSection({
                     <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
                       Show submit-file body
                     </summary>
-                    <pre className="mt-2 max-h-64 overflow-auto rounded border border-gray-200 bg-white p-2 font-mono text-[11px]">
+                    <pre className="mt-2 max-h-64 overflow-auto rounded-sm border border-gray-200 bg-white p-2 font-mono text-[11px]">
                       {selected.contents}
                     </pre>
                   </details>
@@ -2003,7 +2003,7 @@ function CustomDraftEditor({
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             placeholder="My Pipeline"
-            className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 text-sm"
           />
         </Field>
         <Field label="Description (optional)">
@@ -2012,7 +2012,7 @@ function CustomDraftEditor({
             value={draft.description}
             onChange={(e) => setDraft({ ...draft, description: e.target.value })}
             placeholder="One-line description"
-            className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 text-sm"
           />
         </Field>
       </div>
@@ -2029,7 +2029,7 @@ function CustomDraftEditor({
           value={draft.contents}
           onChange={(e) => setDraft({ ...draft, contents: e.target.value })}
           spellCheck={false}
-          className="w-full h-64 rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+          className="w-full h-64 rounded-sm border border-gray-300 px-3 py-2 font-mono text-xs"
         />
         <p className="mt-1 text-xs text-gray-500">
           Reference table columns as <code>$(columnName)</code>. Don&apos;t add
@@ -2055,13 +2055,13 @@ function CustomDraftEditor({
         />
       </Field>
 
-      <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+      <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 space-y-3">
         <label className="flex items-center gap-2 text-sm text-gray-700">
           <input
             type="checkbox"
             checked={includeResources}
             onChange={(e) => toggleResources(e.target.checked)}
-            className="rounded border-gray-300"
+            className="rounded-sm border-gray-300"
           />
           Bake resource requests into this template
         </label>
@@ -2082,7 +2082,7 @@ function CustomDraftEditor({
           type="button"
           onClick={onSave}
           disabled={!canSave || saveState.isPending}
-          className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50"
+          className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50"
           title="Persist this template to the library"
         >
           {saveState.isPending ? 'Saving…' : 'Save as template'}
@@ -2115,7 +2115,7 @@ function CloneFromPicker({
   currentUser: string;
 }) {
   return (
-    <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs">
+    <div className="rounded-sm border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-xs">
       <div className="text-gray-600 mb-1">Start from a copy of:</div>
       <TemplateCombobox
         templates={templates}
@@ -2197,7 +2197,7 @@ function ColumnEditor({
               setColumns(next);
             }}
             placeholder="description (optional, shown as help text)"
-            className="flex-1 min-w-0 rounded border border-gray-300 px-2 py-1 text-sm"
+            className="flex-1 min-w-0 rounded-sm border border-gray-300 px-2 py-1 text-sm"
           />
           <button
             type="button"
@@ -2225,7 +2225,7 @@ function ColumnEditor({
             }
           }}
           placeholder="new column name"
-          className="w-40 rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+          className="w-40 rounded-sm border border-gray-300 px-2 py-1 font-mono text-sm"
         />
         <input
           type="text"
@@ -2238,13 +2238,13 @@ function ColumnEditor({
             }
           }}
           placeholder="description (optional)"
-          className="flex-1 min-w-0 rounded border border-gray-300 px-2 py-1 text-sm"
+          className="flex-1 min-w-0 rounded-sm border border-gray-300 px-2 py-1 text-sm"
         />
         <button
           type="button"
           onClick={addPending}
           disabled={pendingName.trim() === ''}
-          className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           title="Add column"
         >
           + Add
@@ -2286,13 +2286,13 @@ function InlineScriptEditor({
   setScript: (s: InlineScript | null) => void;
 }) {
   return (
-    <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 space-y-3">
       <label className="flex items-center gap-2 text-sm text-gray-700">
         <input
           type="checkbox"
           checked={script !== null}
           onChange={(e) => setScript(e.target.checked ? STARTER_INLINE_SCRIPT : null)}
-          className="rounded border-gray-300"
+          className="rounded-sm border-gray-300"
         />
         Write executable script inline
       </label>
@@ -2305,7 +2305,7 @@ function InlineScriptEditor({
               value={script.name}
               onChange={(e) => setScript({ ...script, name: e.target.value })}
               placeholder="run.sh"
-              className="w-48 rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+              className="w-48 rounded-sm border border-gray-300 px-2 py-1 font-mono text-sm"
             />
             <p className="mt-1 text-xs text-gray-500">
               Attached as a default input file. The Submit-file body
@@ -2322,7 +2322,7 @@ function InlineScriptEditor({
               value={script.content}
               onChange={(e) => setScript({ ...script, content: e.target.value })}
               spellCheck={false}
-              className="w-full h-48 rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+              className="w-full h-48 rounded-sm border border-gray-300 px-3 py-2 font-mono text-xs"
             />
           </Field>
         </div>
@@ -2388,7 +2388,7 @@ function InlineFilesEditor({
   };
 
   return (
-    <div className="rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+    <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 space-y-3">
       <div className="flex items-baseline justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium text-gray-700">
@@ -2405,7 +2405,7 @@ function InlineFilesEditor({
         <button
           type="button"
           onClick={addBlank}
-          className="shrink-0 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+          className="shrink-0 rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
         >
           + Add file
         </button>
@@ -2440,7 +2440,7 @@ function InlineFilesEditor({
           return (
             <div
               key={i}
-              className="rounded border border-gray-200 bg-white p-2 space-y-1.5"
+              className="rounded-sm border border-gray-200 bg-white p-2 space-y-1.5"
             >
               <div className="flex items-center gap-2">
                 <input
@@ -2459,7 +2459,7 @@ function InlineFilesEditor({
                 <button
                   type="button"
                   onClick={() => removeAt(i)}
-                  className="shrink-0 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-600 hover:border-red-400 hover:text-red-700"
+                  className="shrink-0 rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-600 hover:border-red-400 hover:text-red-700"
                   aria-label="Remove inline file"
                   title="Remove"
                 >
@@ -2474,7 +2474,7 @@ function InlineFilesEditor({
                 onChange={(e) => updateAt(i, { content: e.target.value })}
                 spellCheck={false}
                 rows={8}
-                className="w-full resize-y rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+                className="w-full resize-y rounded-sm border border-gray-300 px-3 py-2 font-mono text-xs"
                 placeholder={
                   trimmedName.endsWith('.py')
                     ? '#!/usr/bin/env python3\n# Your script…'
@@ -2534,9 +2534,9 @@ function TemplateInputFilesEditor({
 
   return (
     <div className="space-y-2">
-      <div className="rounded border border-dashed border-gray-300 bg-gray-50 px-3 py-3 text-xs">
+      <div className="rounded-sm border border-dashed border-gray-300 bg-gray-50 px-3 py-3 text-xs">
         <label className="cursor-pointer text-gray-700">
-          <span className="rounded border border-gray-300 bg-white px-2 py-1 hover:bg-gray-100">
+          <span className="rounded-sm border border-gray-300 bg-white px-2 py-1 hover:bg-gray-100">
             Attach files…
           </span>
           <input
@@ -2563,7 +2563,7 @@ function TemplateInputFilesEditor({
       {error && <p className="text-xs text-red-700">{error}</p>}
 
       {files.length > 0 && (
-        <ul className="rounded border border-gray-200 bg-white divide-y divide-gray-100 text-sm">
+        <ul className="rounded-sm border border-gray-200 bg-white divide-y divide-gray-100 text-sm">
           {files.map((f) => (
             <li key={f.id} className="flex items-center gap-2 px-3 py-2">
               <input
@@ -2575,7 +2575,7 @@ function TemplateInputFilesEditor({
                     ),
                   )
                 }
-                className="flex-1 min-w-0 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs hover:border-gray-200 focus:border-gray-300 focus:outline-none"
+                className="flex-1 min-w-0 rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs hover:border-gray-200 focus:border-gray-300 focus:outline-hidden"
               />
               <span className="text-xs text-gray-400 shrink-0">
                 {humanSize(f.size)}
@@ -2823,7 +2823,7 @@ function TableSection({
       ) : (
         <div className="space-y-2">
           <CSVImporter columns={columnNames} setRows={setRows} />
-          <div className="overflow-x-auto rounded border border-gray-200 bg-white">
+          <div className="overflow-x-auto rounded-sm border border-gray-200 bg-white">
             <table className="min-w-full text-sm border-collapse">
               <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                 <tr>
@@ -2878,7 +2878,7 @@ function TableSection({
                             next[ri][ci] = e.target.value;
                             setRows(next);
                           }}
-                          className="w-full rounded border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs hover:border-gray-400 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+                          className="w-full rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs hover:border-gray-400 focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
                         />
                       </td>
                     ))}
@@ -2902,7 +2902,7 @@ function TableSection({
             <button
               type="button"
               onClick={() => setRows([...rows, columns.map(() => '')])}
-              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+              className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
             >
               + Add row
             </button>
@@ -2911,7 +2911,7 @@ function TableSection({
               onClick={() =>
                 setRows([...rows, ...rows.map((r) => [...r])])
               }
-              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+              className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
               title="Duplicate every row (handy for parameter sweeps)"
             >
               × Duplicate all
@@ -2972,7 +2972,7 @@ function CountSource({
             const n = parseInt(e.target.value, 10);
             setCount(Number.isFinite(n) && n >= 1 ? n : 1);
           }}
-          className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+          className="w-24 rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
         />
       </label>
       <p className="text-xs text-gray-500">
@@ -3057,19 +3057,19 @@ function UploadSource({
 
   return (
     <div className="space-y-3">
-      <div className="rounded border border-dashed border-gray-300 bg-gray-50 p-4 space-y-3">
+      <div className="rounded-sm border border-dashed border-gray-300 bg-gray-50 p-4 space-y-3">
         <div className="text-xs text-gray-700">
           Pick a directory or a .tar / .tar.gz archive. Each file becomes
           one job, with{' '}
-          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded-sm">
             $({firstColumn || 'file'})
           </code>{' '}
           bound to the file&apos;s basename.{' '}
-          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded-sm">
             transfer_input_files
           </code>{' '}
           is wired up automatically — the submit body gets{' '}
-          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded">
+          <code className="bg-white border border-gray-200 px-1 py-0.5 rounded-sm">
             $({firstColumn || 'file'})
           </code>{' '}
           appended (or set, if the attribute is missing) so each job
@@ -3077,7 +3077,7 @@ function UploadSource({
         </div>
 
         <div className="flex flex-wrap gap-2 text-xs">
-          <label className="cursor-pointer rounded border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
+          <label className="cursor-pointer rounded-sm border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
             Pick directory…
             <input
               type="file"
@@ -3101,7 +3101,7 @@ function UploadSource({
               }}
             />
           </label>
-          <label className="cursor-pointer rounded border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
+          <label className="cursor-pointer rounded-sm border border-gray-300 bg-white px-3 py-1.5 hover:bg-gray-100">
             Pick tarball…
             <input
               type="file"
@@ -3126,7 +3126,7 @@ function UploadSource({
                 setError(null);
                 setWarnings([]);
               }}
-              className="rounded border border-gray-300 bg-white px-3 py-1.5 text-red-700 hover:bg-red-50"
+              className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-red-700 hover:bg-red-50"
             >
               Clear ({uploadFiles.length})
             </button>
@@ -3154,7 +3154,7 @@ function UploadSource({
       </div>
 
       {uploadFiles.length > 0 && (
-        <div className="rounded border border-gray-200 bg-white">
+        <div className="rounded-sm border border-gray-200 bg-white">
           <div className="border-b border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-600">
             {uploadFiles.length} file{uploadFiles.length === 1 ? '' : 's'} = {uploadFiles.length} job{uploadFiles.length === 1 ? '' : 's'}
           </div>
@@ -3276,11 +3276,11 @@ function CSVImporter({
             setError(null);
             setInfo(null);
           }}
-          className="rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+          className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
         >
           {open ? 'Cancel paste' : 'Paste CSV'}
         </button>
-        <label className="rounded border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 cursor-pointer">
+        <label className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 cursor-pointer">
           Upload CSV
           <input
             type="file"
@@ -3308,14 +3308,14 @@ function CSVImporter({
               columns.join(',') +
               '\n'
             }
-            className="w-full h-32 rounded border border-gray-300 bg-white px-2 py-1 font-mono text-xs"
+            className="w-full h-32 rounded-sm border border-gray-300 bg-white px-2 py-1 font-mono text-xs"
           />
           <div className="flex gap-2">
             <button
               type="button"
               disabled={paste.trim() === ''}
               onClick={() => apply(paste, 'paste')}
-              className="rounded bg-brand-600 px-2 py-1 text-xs text-white hover:bg-brand-700 disabled:opacity-50"
+              className="rounded-sm bg-brand-600 px-2 py-1 text-xs text-white hover:bg-brand-700 disabled:opacity-50"
             >
               Replace table with this CSV
             </button>
@@ -3490,7 +3490,7 @@ function ResourcesSection({
                 cpus: clampInt(e.target.value, 1, 64, resources.cpus),
               })
             }
-            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+            className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </ResourceFieldRow>
 
@@ -3516,7 +3516,7 @@ function ResourcesSection({
                 memoryMB: clampInt(e.target.value, 256, undefined, resources.memoryMB),
               })
             }
-            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+            className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </ResourceFieldRow>
 
@@ -3542,7 +3542,7 @@ function ResourcesSection({
                 diskMB: clampInt(e.target.value, 256, undefined, resources.diskMB),
               })
             }
-            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+            className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </ResourceFieldRow>
 
@@ -3568,7 +3568,7 @@ function ResourcesSection({
                 gpus: clampInt(e.target.value, 0, 16, resources.gpus),
               })
             }
-            className="w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+            className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </ResourceFieldRow>
 
@@ -3581,7 +3581,7 @@ function ResourcesSection({
             change small and the GPU UX consistent with the
             interactive page. */}
         {fields.gpus && resources.gpus > 0 && (
-          <div className="ml-7 mt-2 rounded border border-gray-200 bg-gray-50 p-3">
+          <div className="ml-7 mt-2 rounded-sm border border-gray-200 bg-gray-50 p-3">
             <ResourceRequestPanel
               value={resources}
               onChange={setResources}
@@ -3623,7 +3623,7 @@ function ResourceFieldRow({
           type="checkbox"
           checked={checked}
           onChange={(e) => onChecked(e.target.checked)}
-          className="rounded border-gray-300"
+          className="rounded-sm border-gray-300"
         />
         {label}
       </label>
@@ -3663,7 +3663,7 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-gray-200 bg-white shadow-sm">
+    <section className="rounded-lg border border-gray-200 bg-white shadow-xs">
       <header className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 rounded-t-lg">
         <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
         {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
@@ -3937,7 +3937,7 @@ function TemplateCombobox({
             // until `open` flips and the input renders.
             setTimeout(() => inputRef.current?.focus(), 0);
           }}
-          className="mt-1 flex w-full items-center justify-between rounded border border-gray-300 bg-white px-3 py-1.5 text-left text-sm hover:border-gray-400"
+          className="mt-1 flex w-full items-center justify-between rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-left text-sm hover:border-gray-400"
         >
           <span className="flex items-center gap-2 truncate">
             <span className={selected ? 'text-gray-900' : 'text-gray-400'}>
@@ -3977,11 +3977,11 @@ function TemplateCombobox({
               setOpen(false);
             }
           }}
-          className="mt-1 w-full rounded border border-brand-400 bg-white px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand-400"
+          className="mt-1 w-full rounded-sm border border-brand-400 bg-white px-3 py-1.5 text-sm focus:outline-hidden focus:ring-1 focus:ring-brand-400"
         />
       )}
       {open && (
-        <div className="absolute left-0 right-0 z-10 mt-1 max-h-72 overflow-y-auto rounded border border-gray-300 bg-white shadow-lg">
+        <div className="absolute left-0 right-0 z-10 mt-1 max-h-72 overflow-y-auto rounded-sm border border-gray-300 bg-white shadow-lg">
           {flat.length === 0 ? (
             <p className="px-3 py-2 text-xs text-gray-500">
               No templates match.
@@ -4016,7 +4016,7 @@ function TemplateCombobox({
                           // and built-ins. Mirrors the banner shown
                           // after selection — ditto the security-audit
                           // motivation.
-                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                          <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
                             by {t.owner}
                           </span>
                         )}

@@ -225,7 +225,7 @@ function IssueTokenPanel({
               value={username}
               onChange={(e) => onUsernameChange(e.target.value)}
               placeholder="student1@example.edu"
-              className="mt-1 w-full rounded border border-gray-300 px-2 py-1 font-mono text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+              className="mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
             />
           </label>
           <label className="block text-xs">
@@ -237,7 +237,7 @@ function IssueTokenPanel({
               value={project}
               onChange={(e) => setProject(e.target.value)}
               placeholder="Chem101"
-              className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+              className="mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
             />
           </label>
           <label className="block text-xs">
@@ -249,7 +249,7 @@ function IssueTokenPanel({
               value={requester}
               onChange={(e) => setRequester(e.target.value)}
               placeholder="instructor@example.edu"
-              className="mt-1 w-full rounded border border-gray-300 px-2 py-1 font-mono text-sm focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+              className="mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 font-mono text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
             />
           </label>
         </div>
@@ -280,7 +280,7 @@ function IssueTokenPanel({
                         return next;
                       })
                     }
-                    className="rounded border-gray-300"
+                    className="rounded-sm border-gray-300"
                   />
                   <AuthzChip authz={a} />
                 </label>
@@ -298,7 +298,7 @@ function IssueTokenPanel({
             type="button"
             onClick={submit}
             disabled={login.isPending || !username.trim()}
-            className="rounded bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
           >
             {login.isPending ? 'Issuing…' : 'Issue token'}
           </button>
@@ -357,20 +357,20 @@ function IssuedToken({
         rows={3}
         value={token}
         onFocus={(e) => e.currentTarget.select()}
-        className="mt-2 w-full break-all rounded border border-amber-300 bg-white px-2 py-1 font-mono text-xs text-gray-900"
+        className="mt-2 w-full break-all rounded-sm border border-amber-300 bg-white px-2 py-1 font-mono text-xs text-gray-900"
       />
       <div className="mt-2 flex gap-2">
         <button
           type="button"
           onClick={copy}
-          className="rounded border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
+          className="rounded-sm border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
         >
           {copied ? 'Copied!' : 'Copy'}
         </button>
         <button
           type="button"
           onClick={onDismiss}
-          className="rounded bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700"
+          className="rounded-sm bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700"
         >
           I&apos;ve delivered it
         </button>
@@ -414,7 +414,7 @@ function UsersTab({
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="Filter by user, AP account, or project"
-        className="w-80 rounded border border-gray-300 px-2 py-1 text-sm"
+        className="w-80 rounded-sm border border-gray-300 px-2 py-1 text-sm"
       />
 
       {users.isLoading && <p className="text-gray-400">Loading…</p>}
@@ -479,7 +479,7 @@ function UsersTab({
                           ? undefined
                           : 'This identity is no longer in the map file'
                       }
-                      className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40"
+                      className="rounded-sm border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40"
                     >
                       Issue token
                     </button>
@@ -531,7 +531,7 @@ function TokensTab({
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           placeholder="Exact username"
-          className="w-72 rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+          className="w-72 rounded-sm border border-gray-300 px-2 py-1 font-mono text-sm"
         />
       </div>
 

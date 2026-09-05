@@ -123,14 +123,14 @@ function JupyterSection() {
       )}
       {instances.length > 0 && <JupyterTable instances={instances} />}
 
-      <div className="rounded border border-gray-200 bg-white p-4 space-y-4 mt-3">
+      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
         <div className="text-sm font-medium text-gray-700">Launch new</div>
         <Field label="Docker image">
           <input
             type="text"
             value={image}
             onChange={(e) => setImage(e.target.value)}
-            className="w-full rounded border border-gray-300 px-3 py-1.5 font-mono text-sm"
+            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
             placeholder={DEFAULT_JUPYTER_IMAGE}
           />
           <p className="mt-1 text-xs text-gray-500">
@@ -143,7 +143,7 @@ function JupyterSection() {
         <button
           onClick={() => submit.mutate()}
           disabled={submit.isPending}
-          className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
         >
           {submit.isPending ? 'Submitting…' : 'Launch JupyterLab'}
         </button>
@@ -306,14 +306,14 @@ function TerminalSection() {
         />
       )}
 
-      <div className="rounded border border-gray-200 bg-white p-4 space-y-4 mt-3">
+      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
         <div className="text-sm font-medium text-gray-700">Launch new</div>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
           disabled={submit.isPending}
-          className="rounded bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
         >
           {submit.isPending ? 'Submitting…' : 'Launch terminal'}
         </button>
@@ -490,7 +490,7 @@ function Field({
 
 function ErrorBanner({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+    <div className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
       {children}
     </div>
   );

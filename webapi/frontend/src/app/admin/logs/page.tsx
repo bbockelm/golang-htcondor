@@ -84,14 +84,14 @@ export default function AdminLogsPage() {
             controls underneath it — hidden exactly on the narrow
             screens where vertical space is scarcest. 12 = 3rem = the
             bar's height (h-6 icon + p-1 button + py-2 bar). */}
-      <div className="sticky top-12 z-10 -mx-4 border-b border-gray-200 bg-gray-50/95 px-4 py-3 backdrop-blur lg:-mx-8 lg:top-0 lg:px-8">
+      <div className="sticky top-12 z-10 -mx-4 border-b border-gray-200 bg-gray-50/95 px-4 py-3 backdrop-blur-sm lg:-mx-8 lg:top-0 lg:px-8">
         <div className="flex flex-wrap items-center gap-3">
           <input
             type="text"
             placeholder="Filter (substring match across time, level, destination, message, fields)"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="flex-1 min-w-[20rem] max-w-md rounded border border-gray-300 px-2 py-1 text-sm"
+            className="flex-1 min-w-[20rem] max-w-md rounded-sm border border-gray-300 px-2 py-1 text-sm"
           />
           <div className="flex items-center gap-1.5">
             {ALL_LEVELS.map((lvl) => {
@@ -184,7 +184,7 @@ export default function AdminLogsPage() {
         <p className="text-red-600 text-sm">{(error as Error).message}</p>
       )}
 
-      <div className="rounded border border-gray-200 bg-white font-mono text-xs">
+      <div className="rounded-sm border border-gray-200 bg-white font-mono text-xs">
         <ul className="divide-y divide-gray-100">
           {entries.length === 0 && (
             <li className="px-3 py-2 text-gray-400">No matching entries.</li>
@@ -249,11 +249,11 @@ function LogRow({ entry }: { entry: LogEntry }) {
 
             basis-0 on the fields span puts both on the same footing, and
             min-w on the message keeps it legible on a narrow viewport. */}
-        <span className={`min-w-[8rem] flex-1 break-words ${cls}`}>
+        <span className={`min-w-32 flex-1 wrap-break-word ${cls}`}>
           {entry.message}
         </span>
         {hasFields && (
-          <span className="min-w-0 flex-[2] basis-0 text-gray-400 break-all">
+          <span className="min-w-0 flex-2 basis-0 text-gray-400 break-all">
             {fieldsAsString(entry.fields)}
           </span>
         )}
@@ -304,7 +304,7 @@ function ExpandedDetail({ entry }: { entry: LogEntry }) {
         <button
           type="button"
           onClick={onCopy}
-          className="rounded border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-100"
+          className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-100"
           title="Copy this entry as a single-line plain-text record"
         >
           {copied ? "Copied" : "Copy"}
