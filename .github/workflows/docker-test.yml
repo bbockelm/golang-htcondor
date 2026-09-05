@@ -12,6 +12,17 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+  # The image cache key rotates at 00:00 UTC (see "Derive the image
+  # cache key"), so without this the first person to push each day pays
+  # the full ~5 minute rebuild in all three jobs. This run happens on
+  # main, so it is the one that writes the day's cache; everything after
+  # it reads.
+  #
+  # If the daily Actions minutes are not worth it, delete this trigger:
+  # the caching still works, the first push of each day just pays for
+  # the rebuild instead.
+  schedule:
+    - cron: '20 0 * * *'
 
 jobs:
   docker-test:
@@ -35,6 +46,16 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+    - name: Derive the image cache key
+      id: imgcache
+      # The image is rebuilt at most once a day. hashFiles covers the
+      # changes somebody committed; the date covers the ones nobody did
+      # -- the Dockerfile runs `dnf update -y` and installs an unpinned
+      # `condor >= 25.7.2`, so a layer cached indefinitely would drift
+      # arbitrarily far from what those lines mean today.
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
     - name: Build Docker image
       uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
       with:
@@ -42,8 +63,15 @@ jobs:
         platforms: ${{ matrix.platform }}
         load: true
         tags: golang-htcondor:test-${{ matrix.tag }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # Scope is per-platform: amd64 and arm64 layers have nothing in
+        # common, and sharing one scope had them overwriting each
+        # other's manifest.
+        cache-from: type=gha,scope=img-${{ matrix.tag }}-${{ steps.imgcache.outputs.key }}
+        # Only main writes. A pull request's cache is readable by that
+        # pull request alone, so every PR build was depositing ~500 MB
+        # that nobody else could use -- and evicting, from a 10 GB
+        # budget, the one entry on main that everybody could.
+        cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,mode=min,scope=img-{0}-{1}', matrix.tag, steps.imgcache.outputs.key) || '' }}
 
     - name: Run tests in Docker
       run: |
@@ -102,6 +130,16 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+    - name: Derive the image cache key
+      id: imgcache
+      # The image is rebuilt at most once a day. hashFiles covers the
+      # changes somebody committed; the date covers the ones nobody did
+      # -- the Dockerfile runs `dnf update -y` and installs an unpinned
+      # `condor >= 25.7.2`, so a layer cached indefinitely would drift
+      # arbitrarily far from what those lines mean today.
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
     - name: Build Docker image
       uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
       with:
@@ -109,8 +147,11 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: golang-htcondor:integration-test
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # Same Dockerfile, same platform as the amd64 matrix job, so it
+        # reads that job's scope. It deliberately does not write: the two
+        # run concurrently, and a second writer of identical layers costs
+        # cache budget without adding anything readable.
+        cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
 
     - name: Run integration tests with HTCondor
       run: |
