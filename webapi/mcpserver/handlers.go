@@ -2445,9 +2445,10 @@ func describeSandboxEntries(entries []string) string {
 		return "nothing at all -- the schedd returned an empty sandbox, so the output was " +
 			"probably never transferred back"
 	}
-	const max = 25
-	if len(entries) > max {
-		return strings.Join(entries[:max], ", ") + fmt.Sprintf(", and %d more", len(entries)-max)
+	const maxListed = 25
+	if len(entries) > maxListed {
+		return strings.Join(entries[:maxListed], ", ") +
+			fmt.Sprintf(", and %d more", len(entries)-maxListed)
 	}
 	return strings.Join(entries, ", ")
 }
