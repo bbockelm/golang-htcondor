@@ -287,6 +287,13 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+    - name: Derive the image cache key
+      id: imgcache
+      # Same derivation as the other two jobs. It has to be, or the scope
+      # below names a cache entry nobody writes.
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
     - name: Build Docker image
       uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
       with:
@@ -294,21 +301,55 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: golang-htcondor:integration-test
-        # Reads the same cache the integration job writes; identical image.
-        cache-from: type=gha
+        # Reads what the amd64 matrix job writes on main -- same
+        # Dockerfile, same platform, so the layers are identical.
+        #
+        # This was a bare `type=gha`, which is not the same thing: with
+        # no scope it reads BuildKit's default one, which nothing in this
+        # workflow writes. So the import always missed and every run
+        # rebuilt the image from scratch -- `dnf update`, the HTCondor
+        # repo, and `condor` itself, about three minutes -- while the
+        # integration job beside it, building the very same image on the
+        # very same platform, reported every layer CACHED.
+        #
+        # Like that job, it deliberately does not write: the two run
+        # concurrently, and a second writer of identical layers spends
+        # cache budget without adding anything readable.
+        cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
+
+    # Reads the amd64 matrix job's cache, as the integration job does.
+    # Without it the test compiles the whole webapi module cold, having
+    # already downloaded every module first.
+    - name: Restore the container Go cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-amd64-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          docker-gocache-amd64-
 
     - name: Run the root-only integration tests
       run: |
+        mkdir -p .gocache
         # --user 0:0 overrides the image's USER vscode. The pool's daemons
         # then drop to the condor account, which is the arrangement under
         # test. The submitter accounts the test needs are created in the
         # image; the test skips rather than creating them itself.
+        #
+        # Running as uid 0 is also why this needs none of the chown the
+        # integration job does to make the cache directory writable.
+        #
+        # gotestsum comes from the image. This ran `go install
+        # gotest.tools/gotestsum@latest` instead, which is the fetch-and-
+        # compile-per-run that the Dockerfile pinned it at v1.13.0 to put
+        # a stop to -- and at a floating version, unlike the rest of CI.
         docker run --rm --privileged --user 0:0 \
           -v ${{ github.workspace }}:/workspace \
           -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
           golang-htcondor:integration-test \
           /bin/bash -c "
-            go install gotest.tools/gotestsum@latest
             cd webapi && GOWORK=off gotestsum -- \
               -tags=integration -timeout=10m \
               -run 'AsCondor$' \
