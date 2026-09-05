@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // metricsNamespace is the leading "<ns>_" string applied to every
@@ -548,49 +549,58 @@ type mirrorRoutingCount struct {
 	Count    int64  `json:"count"`
 }
 
-// mirrorRoutingCounts reads the routing-decision counter back out of the
-// registry, so the admin UI can answer "is this host actually using the
-// mirror?" without the operator standing up Prometheus.
+// mirrorRoutingCounts reads the routing-decision counter, so the admin
+// UI can answer "is this host actually using the mirror?" without the
+// operator standing up Prometheus.
 //
-// It reads the counter rather than keeping a second tally: a parallel
-// counter would be one more thing to remember to increment, and this is
-// a once-per-page-view read of a handful of series.
+// It collects the ONE CounterVec directly rather than calling
+// registry.Gather(). Gather runs every collector registered on the
+// shared registry, and that set includes the metricsdAdapter -- whose
+// Collect queries the pool for every machine, slot and job with no
+// deadline. Using it to read a handful of in-process counters turned an
+// admin page view into a full pool scrape: seconds of latency, hundreds
+// of megabytes of ClassAds, and on a large pool an OOM kill that leaves
+// no Go panic behind because SIGKILL is not catchable. The Info page
+// polls, so it did that repeatedly.
+//
+// A CounterVec is itself a prometheus.Collector, so collecting it alone
+// touches nothing else. Collect writes into the channel and blocks, so
+// it runs in a goroutine while we range.
 //
 // Counts are cumulative since process start. That is the honest shape --
 // a rate needs two samples and this endpoint only ever has one -- so the
 // UI presents them as totals, not as current behavior.
 func (m *httpMetrics) mirrorRoutingCounts() []mirrorRoutingCount {
-	if m == nil || m.registry == nil {
+	if m == nil || m.mirror == nil || m.mirror.decisions == nil {
 		return nil
 	}
-	families, err := m.registry.Gather()
-	if err != nil {
-		// A partial gather still returns the families it managed to
-		// collect, so keep going rather than dropping the whole answer.
-		if len(families) == 0 {
-			return nil
-		}
-	}
-	want := metricsNamespace + "_dbmirror_decisions_total"
+
+	ch := make(chan prometheus.Metric, 64)
+	go func() {
+		defer close(ch)
+		m.mirror.decisions.Collect(ch)
+	}()
+
 	var out []mirrorRoutingCount
-	for _, fam := range families {
-		if fam.GetName() != want {
+	for metric := range ch {
+		var pb dto.Metric
+		if err := metric.Write(&pb); err != nil {
+			// One unreadable series should not drop the rest; the
+			// panel is a summary, not an audit.
 			continue
 		}
-		for _, metric := range fam.GetMetric() {
-			row := mirrorRoutingCount{Count: int64(metric.GetCounter().GetValue())}
-			for _, label := range metric.GetLabel() {
-				switch label.GetName() {
-				case "table":
-					row.Table = label.GetValue()
-				case "decision":
-					row.Decision = label.GetValue()
-				case "reason":
-					row.Reason = label.GetValue()
-				}
+		row := mirrorRoutingCount{Count: int64(pb.GetCounter().GetValue())}
+		for _, label := range pb.GetLabel() {
+			switch label.GetName() {
+			case "table":
+				row.Table = label.GetValue()
+			case "decision":
+				row.Decision = label.GetValue()
+			case "reason":
+				row.Reason = label.GetValue()
 			}
-			out = append(out, row)
 		}
+		out = append(out, row)
 	}
 	// Stable order so the panel does not reshuffle between refreshes;
 	// Gather's own order is by label hash.

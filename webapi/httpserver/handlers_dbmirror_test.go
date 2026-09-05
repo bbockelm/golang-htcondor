@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -183,5 +186,80 @@ func TestDBMirrorStatusEnabledWithoutDiscovery(t *testing.T) {
 	// Nothing discovered yet, so reads are falling back to the schedd.
 	if resp.Health.Status != "down" {
 		t.Errorf("status = %q, want down before discovery succeeds", resp.Health.Status)
+	}
+}
+
+// expensiveCollector stands in for the metricsdAdapter: a collector on
+// the shared registry whose Collect is costly. The real one queries the
+// pool for every machine, slot and job, with no deadline.
+type expensiveCollector struct {
+	collected atomic.Int64
+	desc      *prometheus.Desc
+}
+
+func newExpensiveCollector() *expensiveCollector {
+	return &expensiveCollector{
+		desc: prometheus.NewDesc("test_expensive_metric", "stands in for a pool scrape", nil, nil),
+	}
+}
+
+func (c *expensiveCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *expensiveCollector) Collect(ch chan<- prometheus.Metric) {
+	c.collected.Add(1)
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1)
+}
+
+// Reading the routing counters must not run the other collectors on the
+// shared registry.
+//
+// This is a regression test for a real outage, not a hypothetical: the
+// first version called registry.Gather(), which runs EVERY registered
+// collector -- including the metricsdAdapter, whose Collect scrapes the
+// whole pool with no deadline. Loading the admin Info page therefore
+// triggered a full pool scrape, and on a large pool the container was
+// OOM-killed. SIGKILL is not catchable, so nothing was logged and the
+// process just vanished; the page showed a bare "Could not load mirror
+// status" and the pod restarted. The page polls, so it recurred.
+func TestMirrorRoutingCountsDoesNotScrapeTheRegistry(t *testing.T) {
+	m := newHTTPMetrics()
+	expensive := newExpensiveCollector()
+	m.registry.MustRegister(expensive)
+
+	m.recordMirrorDecision("jobs", dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed})
+	m.recordMirrorDecision("history", dbmirror.Decision{Reason: dbmirror.ReasonStale})
+
+	counts := m.mirrorRoutingCounts()
+
+	if n := expensive.collected.Load(); n != 0 {
+		t.Errorf("reading the routing counters ran %d other collector(s); "+
+			"on a real deployment that is a full pool scrape per page view", n)
+	}
+
+	// And it still has to return the counts, or the cheap version is
+	// cheap for the wrong reason.
+	if len(counts) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(counts), counts)
+	}
+	var served, declined int64
+	for _, row := range counts {
+		if row.Decision == "served" {
+			served += row.Count
+			continue
+		}
+		declined += row.Count
+	}
+	if served != 1 || declined != 1 {
+		t.Errorf("served=%d declined=%d, want 1 and 1 (%+v)", served, declined, counts)
+	}
+
+	// Sanity check on the fixture: the collector IS reachable through
+	// the registry, so the assertion above is about our access path and
+	// not about a collector that could never have run.
+	if _, err := m.registry.Gather(); err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	if n := expensive.collected.Load(); n == 0 {
+		t.Error("fixture is inert: Gather did not run the expensive collector either")
 	}
 }
