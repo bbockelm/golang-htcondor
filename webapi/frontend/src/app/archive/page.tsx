@@ -30,6 +30,7 @@ import {
   type HistoryListResponse,
 } from '@/lib/api';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 // Default projection for the listing. Slightly wider than the server
 // default so the UI can show submission/completion times and exit
@@ -58,6 +59,18 @@ interface PageData {
 export default function ArchivePage() {
   const [filter, setFilter] = useState('');
 
+  // Same Mine/Everyone selector as the dashboard and /jobs, sharing one
+  // stored choice (lib/scope.ts). Only admins see it: the server
+  // confines a non-admin browser session to its own records whatever we
+  // send, so the toggle would be inert for them.
+  const { data: session } = useQuery({
+    queryKey: ['session'],
+    queryFn: api.auth.me,
+  });
+  const isAdmin = !!session?.is_admin;
+  const [scope] = useScope();
+  const ownedByMe = scope === 'mine';
+
   const {
     data,
     isLoading,
@@ -66,7 +79,7 @@ export default function ArchivePage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<PageData, Error>({
-    queryKey: ['jobs', 'archive'],
+    queryKey: ['jobs', 'archive', scope],
     initialPageParam: { beforeCluster: undefined, beforeProc: undefined } as PageCursor,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as PageCursor;
@@ -75,6 +88,7 @@ export default function ArchivePage() {
         limit: PAGE_SIZE,
         before_cluster: cursor.beforeCluster,
         before_proc: cursor.beforeProc,
+        owned_by_me: ownedByMe,
       });
       const ads = resp.ads ?? [];
       // The keyset cursor is the LAST ad in the page (oldest in
@@ -163,10 +177,13 @@ export default function ArchivePage() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold text-gray-900">Archive</h1>
+        <h1 className="text-2xl font-bold text-gray-900">
+          {ownedByMe ? 'My Archive' : 'All Archive'}
+        </h1>
         <span className="text-sm text-gray-500">
           Completed and removed jobs from the schedd&apos;s history.
         </span>
+        {isAdmin && <ScopeToggle />}
         <Link
           href="/jobs"
           className="ml-auto text-sm text-brand-700 hover:underline"

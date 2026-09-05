@@ -133,6 +133,13 @@ type mcpConfig struct {
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
 	oauth2RefreshTokenLifespan time.Duration
+	// oauth2MaxGrantLifetime caps a grant's total age from consent,
+	// regardless of refreshing. Zero means "use the package default".
+	oauth2MaxGrantLifetime time.Duration
+	// oauth2RevocationOracles selects the refresh-time revocation oracles.
+	// Nil means "use the package defaults"; a non-nil empty slice means
+	// "none", which is why the loader distinguishes the two.
+	oauth2RevocationOracles []string
 }
 
 // fixConfigDefaults handles edge cases in HTCondor configuration
@@ -728,6 +735,37 @@ func validateDurationHasUnit(s string) error {
 // log.Fatalf rather than falling back to a default, because a token lifespan
 // silently reverting to a default that the operator did not choose is exactly the
 // "horribly confusing" failure mode this validation exists to prevent.
+// loadRevocationOracles reads HTTP_API_OAUTH2_REVOCATION_ORACLES.
+//
+// The return distinguishes three states that the config file can express but
+// a plain []string cannot on its own:
+//
+//	unset / whitespace  -> nil, meaning "use the package defaults"
+//	"none"              -> empty non-nil slice, meaning "no oracles at all"
+//	"a, b"              -> those names
+//
+// The "none" spelling exists precisely because an empty config value is
+// indistinguishable from an unset one in the condor config system, and
+// silently turning "I set this to blank" into "you get the defaults" would be
+// the wrong way to resolve that ambiguity for a security control. Unknown
+// names are passed through for httpserver to log and ignore, so a typo
+// degrades a defense-in-depth layer rather than stopping the daemon.
+func loadRevocationOracles(cfg *config.Config, logger *logging.Logger) []string {
+	raw, ok := cfg.Get("HTTP_API_OAUTH2_REVOCATION_ORACLES")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	names := splitCommaList(raw)
+	for _, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), httpserver.OracleNone) {
+			logger.Info(logging.DestinationHTTP, "OAuth2 refresh revocation oracles disabled by configuration")
+			return []string{}
+		}
+	}
+	logger.Info(logging.DestinationHTTP, "OAuth2 refresh revocation oracles configured", "oracles", names)
+	return names
+}
+
 func loadTokenLifespan(cfg *config.Config, key string, logger *logging.Logger) time.Duration {
 	raw, ok := cfg.Get(key)
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -845,6 +883,11 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	if config.oauth2RefreshTokenLifespan > 0 {
 		logger.Info(logging.DestinationHTTP, "OAuth2 refresh token lifespan", "duration", config.oauth2RefreshTokenLifespan)
 	}
+	config.oauth2MaxGrantLifetime = loadTokenLifespan(cfg, "HTTP_API_OAUTH2_MAX_GRANT_LIFETIME", logger)
+	if config.oauth2MaxGrantLifetime > 0 {
+		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime", "duration", config.oauth2MaxGrantLifetime)
+	}
+	config.oauth2RevocationOracles = loadRevocationOracles(cfg, logger)
 
 	// Load the MCP admin list. These subjects skip the owner-scope
 	// wrapper on MCP tools, so they can query and act on other users'
@@ -1286,6 +1329,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan: mcpCfg.oauth2RefreshTokenLifespan,
+		OAuth2MaxGrantLifetime:     mcpCfg.oauth2MaxGrantLifetime,
+		OAuth2RevocationOracles:    mcpCfg.oauth2RevocationOracles,
 		MCPAccessGroup:             mcpCfg.mcpAccessGroup,
 		MCPReadGroup:               mcpCfg.mcpReadGroup,
 		MCPWriteGroup:              mcpCfg.mcpWriteGroup,

@@ -511,3 +511,92 @@ func redactSignature(sig string) string {
 	}
 	return sig[:8] + "..."
 }
+
+// AdminRevokeRequest is the body of a token revocation request.
+type AdminRevokeRequest struct {
+	// Subject is the user whose grants should be revoked. Matched exactly
+	// against the subject recorded on each token row, which is the same
+	// value the OAuth2 session carries (typically the username claim, not
+	// the schedd's "user@domain" form).
+	Subject string `json:"subject"`
+}
+
+// AdminRevokeResponse reports what was revoked.
+type AdminRevokeResponse struct {
+	Subject string `json:"subject"`
+	// Revoked counts token rows deactivated across both issuers.
+	Revoked int64 `json:"revoked"`
+	// OAuth2 and IDP break that count down by issuer, so an operator can
+	// tell whether the user held MCP grants, IDP grants, or both.
+	OAuth2 int64 `json:"oauth2"`
+	IDP    int64 `json:"idp"`
+}
+
+// handleAdminRevokeTokens handles POST /api/v1/admin/oauth2/revoke.
+//
+// It cuts off one user immediately, across every client they have authorized.
+// The refresh-time revocation oracles cover the steady state, but they only
+// act when the user's client next presents a refresh token, and only when an
+// oracle can actually observe the removal — an upstream IDP deleting an
+// account is invisible from here. This is the unconditional lever for the
+// cases nothing else catches.
+//
+// Access tokens already issued remain valid until they expire on their own
+// (they are self-contained as far as the client is concerned, though this
+// server does introspect them against storage, so marking the rows inactive
+// does take effect on the next request). What this guarantees is that no new
+// tokens can be minted from the user's refresh tokens.
+func (s *Handler) handleAdminRevokeTokens(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req AdminRevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.Subject = strings.TrimSpace(req.Subject)
+	if req.Subject == "" {
+		s.writeError(w, http.StatusBadRequest, "subject is required")
+		return
+	}
+
+	resp := AdminRevokeResponse{Subject: req.Subject}
+
+	if s.oauth2Provider != nil {
+		n, err := s.oauth2Provider.GetStorage().RevokeAllForSubject(r.Context(), req.Subject)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to revoke OAuth2 grants",
+				"subject", req.Subject, "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to revoke grants")
+			return
+		}
+		resp.OAuth2 = n
+	}
+	if s.idpProvider != nil {
+		n, err := s.idpProvider.GetStorage().RevokeAllForSubject(r.Context(), req.Subject)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to revoke IDP grants",
+				"subject", req.Subject, "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to revoke grants")
+			return
+		}
+		resp.IDP = n
+	}
+	resp.Revoked = resp.OAuth2 + resp.IDP
+
+	// Log at Info: this is an administrative action on someone else's
+	// access and belongs in the audit trail whether or not it matched
+	// anything.
+	s.logger.Info(logging.DestinationHTTP, "Administrator revoked OAuth2 grants",
+		"subject", req.Subject, "revoked", resp.Revoked,
+		"oauth2", resp.OAuth2, "idp", resp.IDP)
+
+	s.writeJSON(w, http.StatusOK, resp)
+}

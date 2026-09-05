@@ -142,8 +142,19 @@ type Handler struct {
 	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
-	mcpInstructions     string            // Server-level instructions provided to agents via MCP initialize
-	mcpAdminUsers       []string          // Authenticated subjects exempt from the MCP owner-scope wrapper
+
+	// oauth2MaxGrantLifetime caps how long a single consent can be
+	// stretched by refreshing. Every refresh resets the refresh token's
+	// own expiry, so without this a client that refreshes regularly holds
+	// its grant forever. Measured from Session.AuthTime; zero means
+	// DefaultMaxGrantLifetime. See reauthorizeRefreshGrant.
+	oauth2MaxGrantLifetime time.Duration
+	// revocationOracles are consulted on every refresh grant to decide
+	// whether the user is still entitled to what they hold. They fail
+	// open by contract; see RevocationOracle.
+	revocationOracles []RevocationOracle
+	mcpInstructions   string   // Server-level instructions provided to agents via MCP initialize
+	mcpAdminUsers     []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// mcpServer handles /mcp/message. One long-lived instance: it holds
 	// the validated-token cache and the collector-backed metrics/DB
 	// wiring, all of which a per-request server would throw away. Every
@@ -320,10 +331,44 @@ type HandlerConfig struct {
 	// MCP issuer is valid. Defaults to 30 days if zero. Must be >= OAuth2AccessTokenLifespan;
 	// otherwise refresh grants will fail before the access token expires (see PelicanPlatform/pelican#3389).
 	OAuth2RefreshTokenLifespan time.Duration
-	MCPAccessGroup             string // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup               string // Group required for read operations (empty = all have read)
-	MCPWriteGroup              string // Group required for write operations (empty = all have write)
-	MCPInstructions            string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// OAuth2MaxGrantLifetime caps the total age of a grant, measured from
+	// the consent that created it, regardless of how often it is
+	// refreshed. Defaults to DefaultMaxGrantLifetime (30 days) if zero.
+	//
+	// This is distinct from OAuth2RefreshTokenLifespan, which every
+	// refresh resets: without a cap, a client that refreshes more often
+	// than the refresh lifespan holds its access indefinitely, so removing
+	// a user's entitlement never expires anything. The cap is the backstop
+	// that bounds that exposure even when no revocation oracle notices the
+	// removal. See reauthorizeRefreshGrant.
+	//
+	// Configurable via HTTP_API_OAUTH2_MAX_GRANT_LIFETIME.
+	OAuth2MaxGrantLifetime time.Duration
+	// OAuth2RevocationOracles names the oracles consulted on every refresh
+	// grant to decide whether the user is still entitled to what they hold.
+	// Recognized values:
+	//
+	//   "schedd-userrec" — honor `condor_qusers -disable <user>`. Reads the
+	//       schedd's per-user record (READ authorization) and revokes the
+	//       grant when it says Enabled=false, surfacing DisableReason.
+	//       Cheap, and acts only on an explicit administrative decision.
+	//   "schedd-acl"     — probe the schedd's ALLOW_READ / ALLOW_WRITE ACLs
+	//       with DC_SEC_QUERY and strip scopes it refuses. Costs up to two
+	//       extra schedd round trips per refresh and tells you nothing in a
+	//       pool whose ACLs are wildcards, so it is opt-in.
+	//
+	// Nil selects the default set (schedd-userrec). An explicitly empty,
+	// non-nil slice disables all oracles; the grant lifetime cap still
+	// applies. Unrecognized names are logged and ignored.
+	//
+	// Configurable via HTTP_API_OAUTH2_REVOCATION_ORACLES, where the
+	// literal "none" is the spelling for the empty set — a config file
+	// cannot express nil-versus-empty on its own.
+	OAuth2RevocationOracles []string
+	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup            string // Group required for read operations (empty = all have read)
+	MCPWriteGroup           string // Group required for write operations (empty = all have write)
+	MCPInstructions         string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	// MCPAdminUsers lists authenticated subjects that MCP tool
 	// dispatch treats as admins — most importantly they are exempt
 	// from the owner-scope wrapper, so they can query and act on other
@@ -795,6 +840,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 
 		// Set group-based access control
+		h.oauth2MaxGrantLifetime = cfg.OAuth2MaxGrantLifetime
+		if h.oauth2MaxGrantLifetime <= 0 {
+			h.oauth2MaxGrantLifetime = DefaultMaxGrantLifetime
+		}
+		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime configured",
+			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
+
+		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+
 		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpReadGroup = cfg.MCPReadGroup
 		h.mcpWriteGroup = cfg.MCPWriteGroup

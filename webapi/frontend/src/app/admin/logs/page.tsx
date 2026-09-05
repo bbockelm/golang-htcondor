@@ -236,15 +236,24 @@ function LogRow({ entry }: { entry: LogEntry }) {
         {entry.destination && (
           <span className="shrink-0 text-gray-400">[{entry.destination}]</span>
         )}
-        {/* min-w-0 + break-words so a long message wraps inside the
-            flex row instead of pushing the trailing fields off the
-            right edge. The user explicitly wanted the WHOLE line
-            visible, so no truncation. */}
-        <span className={`min-w-0 flex-1 break-words ${cls}`}>
+        {/* Both spans wrap rather than truncate: the whole line stays
+            visible. They also have to SHARE the row, which is why each
+            one sets a flex basis and the message sets a floor.
+
+            flex-1 is `flex: 1 1 0%`, so the message's basis is 0 and it
+            only gets whatever the fields span leaves behind. The fields
+            span defaulted to `flex: 0 1 auto` — basis auto, i.e. its own
+            content width — and a line carrying a full user_agent is long
+            enough to claim the entire row. The message then rendered at
+            near-zero width, breaking "HTTP request" one letter per line.
+
+            basis-0 on the fields span puts both on the same footing, and
+            min-w on the message keeps it legible on a narrow viewport. */}
+        <span className={`min-w-[8rem] flex-1 break-words ${cls}`}>
           {entry.message}
         </span>
         {hasFields && (
-          <span className="min-w-0 text-gray-400 break-all">
+          <span className="min-w-0 flex-[2] basis-0 text-gray-400 break-all">
             {fieldsAsString(entry.fields)}
           </span>
         )}
