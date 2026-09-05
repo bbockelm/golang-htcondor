@@ -28,6 +28,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
@@ -202,7 +203,12 @@ type Handler struct {
 	// dbMirror routes heavy job and history reads to a synchronized
 	// htcondordb mirror when one is current (handlers_dbroute.go). It
 	// shares its freshness policy with the MCP tools via webapi/dbmirror.
-	dbMirror           *dbmirror.Locator
+	dbMirror *dbmirror.Locator
+	// jobWatch stores registered watches and jobWatchEval runs them; see
+	// startJobWatchEvaluator.
+	jobWatch           *jobwatch.Store
+	jobWatchEval       *jobwatch.Evaluator
+	jobWatchFeed       *jobwatch.Feed
 	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
@@ -1168,6 +1174,21 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// whenever the route is installed, and gating on EnableMCP here
 	// would leave the handler with a nil server on paths that install
 	// it anyway.
+	// Job watches: an agent registers a question and comes back for the
+	// answer instead of polling. The store shares the application
+	// database (registrations must survive a restart -- a watch that did
+	// not would fail silently, and only for the agents that waited
+	// longest), and one evaluator serves every registered watch.
+	h.jobWatch = jobwatch.NewStore(h.db)
+	// Following the mirror's change log lets a job's outcome be read off
+	// the wire during the sub-second window it exists in the queue,
+	// instead of waiting for the history archive. Purely additive:
+	// without a reachable mirror everything still works, just later.
+	h.jobWatchFeed = jobwatch.NewFeed(
+		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
+	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
+		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
+
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
 		Schedd:         h.schedd,
 		Credd:          h.credd,
@@ -1190,6 +1211,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// rather than each discovering the mirror on their own. One
 		// cache, one poll loop, and an admin page that describes both.
 		DBMirror: h.dbMirror,
+		// The same store and evaluator the REST daemon uses, so a watch
+		// registered through one surface is visible from the other.
+		JobWatch:     h.jobWatch,
+		JobWatchEval: h.jobWatchEval,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)
@@ -1613,7 +1638,88 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// collector round trip.
 	h.startDBMirrorPoll(ctx)
 
+	h.startJobWatchEvaluator(ctx)
+	h.startJobWatchFeed(ctx)
+
 	return nil
+}
+
+// startJobWatchFeed follows the mirror's jobs table so a job's outcome
+// can be observed in the moment it exists.
+//
+// It runs whenever routing is configured and needs nothing else: the
+// stream is a dbrpc opWatch over the same authenticated session as every
+// other mirror read, so there is no second endpoint, no second
+// credential, and nothing to discover. Run reconnects with backoff on
+// its own, and the evaluator falls back to the history archive whenever
+// the feed has no answer -- including the first moments after startup.
+func (h *Handler) startJobWatchFeed(ctx context.Context) {
+	if h.jobWatchFeed == nil || !h.dbMirror.Enabled() {
+		return
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.logger.Info(logging.DestinationHTTP, "Following the htcondordb jobs table for job watches")
+		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
+	}()
+}
+
+// watchJobsTable opens one watch on the mirror's jobs table.
+//
+// The connection is dialed per attempt rather than held, so a reconnect
+// re-runs discovery and authentication and picks up a mirror that has
+// moved or restarted. The returned stop closes the session as well as
+// ending the stream.
+func (h *Handler) watchJobsTable(ctx context.Context) (<-chan jobwatch.WatchEvent, func(), error) {
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// From the head: a cursor would replay deletes for jobs whose
+	// upserts this process never saw, which is a terminal record with no
+	// outcome in it.
+	cursor, err := dbc.WatchHead(ctx, "jobs")
+	if err != nil {
+		closer()
+		return nil, nil, fmt.Errorf("reading the jobs watch head: %w", err)
+	}
+	raw, stop, err := dbc.WatchTable(ctx, "jobs", cursor)
+	if err != nil {
+		closer()
+		return nil, nil, fmt.Errorf("opening the jobs watch: %w", err)
+	}
+
+	out := make(chan jobwatch.WatchEvent, 64)
+	go func() {
+		defer close(out)
+		for ev := range raw {
+			select {
+			case out <- jobwatch.WatchEvent{Kind: ev.Kind, Key: ev.Key, AdText: ev.AdText}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, func() { stop(); closer() }, nil
+}
+
+// startJobWatchEvaluator runs the watch loop for the life of the
+// handler.
+//
+// It runs unconditionally rather than behind a knob: a watch that is
+// registered and never evaluated is the worst outcome available, because
+// the caller is told it is waiting and then waits forever. If the tools
+// are reachable the evaluator has to be running.
+func (h *Handler) startJobWatchEvaluator(ctx context.Context) {
+	if h.jobWatchEval == nil {
+		return
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.jobWatchEval.Run(ctx)
+	}()
 }
 
 // startDBMirrorPoll runs the mirror discovery loop for the life of the

@@ -31,8 +31,8 @@ func scopeAdmits(t *testing.T, scoped, owner string) bool {
 func TestScopeToOwnerConfinesToActor(t *testing.T) {
 	const actor = "alice"
 	cases := []string{
-		"",                      // owner-only
-		"JobStatus == 5",        // benign filter
+		"",                       // owner-only
+		"JobStatus == 5",         // benign filter
 		`Owner == "bob" || true`, // tautology that tries to widen
 		"JobStatus == 5 || 1 == 1",
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
@@ -58,7 +59,9 @@ type Server struct {
 	// dbMirror discovers and dials the synchronized htcondordb mirror, and owns the
 	// policy for when a read may be served from it (webapi/dbmirror). Shared with the
 	// REST API so both surfaces route on the same freshness rules.
-	dbMirror *dbmirror.Locator
+	dbMirror     *dbmirror.Locator
+	jobWatch     *jobwatch.Store
+	jobWatchEval *jobwatch.Evaluator
 }
 
 // Config holds server configuration
@@ -115,6 +118,12 @@ type Config struct {
 	DBMirrorName     string // HTTP_API_DBMIRROR_NAME
 	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS
 	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED
+	// JobWatch and JobWatchEval enable the watch tools. Both or neither:
+	// registering a watch nothing evaluates would be a promise the
+	// server cannot keep, and the agent would wait forever.
+	JobWatch     *jobwatch.Store
+	JobWatchEval *jobwatch.Evaluator
+
 	// DBMirror lets a host that already has a Locator share it instead
 	// of having a second one built from the three knobs above. The HTTP
 	// daemon does: it runs these tools in-process, and two Locators
@@ -206,6 +215,8 @@ func NewServer(cfg Config) (*Server, error) {
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
 		dbMirror:       cfg.DBMirror,
+		jobWatch:       cfg.JobWatch,
+		jobWatchEval:   cfg.JobWatchEval,
 	}
 	if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{

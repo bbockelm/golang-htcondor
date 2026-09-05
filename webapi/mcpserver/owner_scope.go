@@ -10,6 +10,44 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
+// OwnerScope is what a tool call was confined to, so a handler can both
+// apply it and say what it applied.
+//
+// Saying so matters as much as doing it. The caller is a language model,
+// and a listing that silently covers every user reads exactly like one
+// that covers its own -- which is how a session ends up being told there
+// are ten thousand held jobs by one tool and none by another, with
+// nothing in either answer to explain the difference.
+type OwnerScope struct {
+	// Owner is the identity the call was confined to, empty for an
+	// unconfined admin call.
+	Owner string
+	// AllUsers is true when the call covers every user's jobs.
+	AllUsers bool
+}
+
+// Note renders the scope for the caller. Every read tool appends it, so
+// the answer always carries the question it actually answered.
+func (o OwnerScope) Note() string {
+	if o.AllUsers {
+		return "[scope: ALL users' jobs -- you are an MCP admin, so this is not limited to your own]"
+	}
+	return fmt.Sprintf("[scope: only jobs owned by %q]", o.Owner)
+}
+
+// ownerScope resolves who a call is for and whether it is confined.
+// ok==false means the caller could not be identified.
+func (s *Server) ownerScope(ctx context.Context) (OwnerScope, bool) {
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return OwnerScope{}, false
+	}
+	if s.isAdmin(actor) {
+		return OwnerScope{AllUsers: true}, true
+	}
+	return OwnerScope{Owner: ownerFromActor(actor)}, true
+}
+
 // scopeToOwner wraps an LLM-supplied ClassAd constraint with an owner
 // filter so a tool call against the schedd can never operate on
 // another user's jobs. Mirrors the wrapper used by the chat-side
@@ -196,4 +234,15 @@ func ownerScopedConstraint(owner, constraint string) (string, error) {
 		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
 	}
 	return fmt.Sprintf("(%s) && (%s)", scope, safe), nil
+}
+
+// fetchOptsFor keeps the schedd-side hint aligned with the constraint.
+// FetchMyJobs narrows to the connection's authenticated identity, which
+// is right for a confined call and wrong for an admin's deliberately
+// unconfined one.
+func fetchOptsFor(scope OwnerScope) htcondor.QueryFetchOpts {
+	if scope.AllUsers {
+		return htcondor.FetchNormal
+	}
+	return htcondor.FetchMyJobs
 }
