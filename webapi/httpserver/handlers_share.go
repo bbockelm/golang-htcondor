@@ -94,14 +94,12 @@ func (s *Handler) shareURLBase(r *http.Request) string {
 	// canonical public URL, and it should win even when a caller reaches
 	// the server by some other name.
 	//
-	// A DERIVED base URL must not win. When HTTP_API_BASE_URL is unset,
-	// the server guesses one from FULL_HOSTNAME and the listen port --
-	// and inside a container that is the pod name, so the guess is
-	// http://htcondor-api-6f9c86677f-sg8cj:8080, a host that resolves
-	// nowhere outside the cluster. Preferring it produced share links
-	// nobody could open. The request's own Host is the one signal that
-	// is right by construction: the caller reached us at it.
-	if s.httpBaseURLExplicit && s.httpBaseURL != "" {
+	// It is empty unless set: publicBaseURL deliberately does not fall
+	// back to FULL_HOSTNAME, which inside a container is the pod name.
+	// Guessing produced share links nobody could open. With no
+	// configured value the request's own Host is used below, which is
+	// right by construction -- the caller reached us at it.
+	if s.httpBaseURL != "" {
 		return strings.TrimRight(s.httpBaseURL, "/")
 	}
 	scheme := "http"

@@ -107,7 +107,6 @@ type Handler struct {
 	trustDomain              string
 	uidDomain                string
 	httpBaseURL              string // Base URL for HTTP API (for generating MCP file download links)
-	httpBaseURLExplicit      bool   // true when the operator set HTTP_API_BASE_URL; see Config
 	tlsCACertFile            string
 	logger                   *logging.Logger
 	// db is the single SQLite file shared by OAuth2/MCP storage, the
@@ -294,18 +293,12 @@ type HandlerConfig struct {
 	// Configure via HTTP_API_USER_HEADER_TRUST_ANY=1 (loud warning
 	// at startup).
 	UserHeaderTrustAnyUnsafe bool
-	SigningKeyPath           string // Path to token signing key (optional, for token generation)
-	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	// HTTPBaseURLExplicit distinguishes a base URL the operator set
-	// (HTTP_API_BASE_URL) from one this server guessed off FULL_HOSTNAME
-	// and the listen port. Only the first is authoritative for links a
-	// caller has to be able to open: inside a container the guess is the
-	// pod name, which resolves nowhere outside the cluster.
-	HTTPBaseURLExplicit bool
-	TLSCACertFile       string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	Collector           *htcondor.Collector // Collector for metrics (optional)
+	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
+	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	Collector                *htcondor.Collector // Collector for metrics (optional)
 
 	// htcondordb mirror routing. Empty/false is the default: discover
 	// whatever htcondordb advertises to the collector and use it as an
@@ -610,7 +603,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
-		httpBaseURLExplicit:       cfg.HTTPBaseURLExplicit,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
 		jupyterWorkDir:            cfg.JupyterWorkDir,

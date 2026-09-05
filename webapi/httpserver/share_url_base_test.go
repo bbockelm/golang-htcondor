@@ -20,11 +20,10 @@ import (
 // actually reached the server at -- the one value that is right by
 // construction.
 func TestShareURLBasePrefersRequestHostOverGuess(t *testing.T) {
-	h := &Handler{
-		// What loadHTTPBaseURL derives inside a pod.
-		httpBaseURL:         "http://htcondor-api-6f9c86677f-sg8cj:8080",
-		httpBaseURLExplicit: false,
-	}
+	// publicBaseURL returns "" when HTTP_API_BASE_URL is unset, which is
+	// what makes the request's Host reachable at all. The old behaviour
+	// put the derived pod URL here, and it won.
+	h := &Handler{httpBaseURL: ""}
 
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/api/v1/jobs/1.0/output/share", nil)
 	r.Host = "ap40-api.osgdev.chtc.io"
@@ -40,10 +39,7 @@ func TestShareURLBasePrefersRequestHostOverGuess(t *testing.T) {
 // who sets HTTP_API_BASE_URL means it, and it must win even when the
 // caller arrives by a different name.
 func TestShareURLBaseHonorsExplicitConfig(t *testing.T) {
-	h := &Handler{
-		httpBaseURL:         "https://canonical.example.org",
-		httpBaseURLExplicit: true,
-	}
+	h := &Handler{httpBaseURL: "https://canonical.example.org"}
 
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/x", nil)
 	r.Host = "some-other-name.internal:8080"
@@ -56,7 +52,7 @@ func TestShareURLBaseHonorsExplicitConfig(t *testing.T) {
 // TestShareURLBaseUsesForwardedHost covers the proxied path, which is how
 // the deployment actually receives requests.
 func TestShareURLBaseUsesForwardedHost(t *testing.T) {
-	h := &Handler{httpBaseURL: "http://pod-name:8080"}
+	h := &Handler{httpBaseURL: ""}
 
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/x", nil)
 	r.Host = "pod-name:8080"
@@ -72,12 +68,12 @@ func TestShareURLBaseUsesForwardedHost(t *testing.T) {
 // still produces a syntactically usable URL rather than one with an
 // empty authority.
 func TestShareURLBaseFallsBackWhenHostMissing(t *testing.T) {
-	h := &Handler{httpBaseURL: "http://derived:8080"}
+	h := &Handler{httpBaseURL: "http://configured:8080"}
 
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/x", nil)
 	r.Host = ""
 
-	if got, want := h.shareURLBase(r), "http://derived:8080"; got != want {
+	if got, want := h.shareURLBase(r), "http://configured:8080"; got != want {
 		t.Errorf("shareURLBase() = %q, want %q", got, want)
 	}
 }
