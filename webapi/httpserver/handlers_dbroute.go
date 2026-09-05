@@ -200,6 +200,14 @@ func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, 
 // returns true: the response is committed, and any later failure is
 // reported inside it.
 func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, table, constraint string, projection []string, limit int, key, note string, cursor *dbrpc.SeqCursor) (bool, dbmirror.Decision) {
+	// The frontend's projection=* -- and the schedd's history protocol -- use "*"
+	// to mean "every attribute". The mirror's raw-projection layer signals that
+	// with an EMPTY projection and treats "*" as a literal attribute name, which
+	// no ad carries: a "*" projection streams ads stripped to their type fields,
+	// so e.g. the archive detail page (/archive/<id>, projection=*) renders
+	// nothing. Translate the wildcard to the empty (all-attributes) projection so
+	// the mirror answers the same ad the schedd would.
+	projection = normalizeMirrorProjection(projection)
 	effLimit := dbmirror.ClampLimit(limit)
 
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
@@ -250,6 +258,21 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 	// The one place "served" is counted, because it is the only place it
 	// is true: rows are on the wire.
 	return true, s.recordMirror(table, dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed, Note: note})
+}
+
+// normalizeMirrorProjection converts a wildcard projection to the empty
+// projection the mirror reads as "all attributes". A projection containing "*"
+// is HTCondor's "give me everything"; the mirror's raw-projection layer instead
+// takes an empty list as "everything" and would treat "*" as a literal (absent)
+// attribute name. Any explicit "*" therefore collapses to nil -- mixing "*"
+// with named attributes is meaningless, and "all" subsumes the names anyway.
+func normalizeMirrorProjection(projection []string) []string {
+	for _, a := range projection {
+		if a == "*" {
+			return nil
+		}
+	}
+	return projection
 }
 
 // recordMirror counts a routing decision and returns it unchanged, so
