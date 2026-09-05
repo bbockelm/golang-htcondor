@@ -63,19 +63,19 @@ func (h *Handler) setupRoutes() {
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
 
 	// Job management endpoints
-	mux.Handle("/api/v1/jobs/watch", cors(http.HandlerFunc(h.handleJobsWatch))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
-	mux.Handle("/api/v1/jobs", cors(http.HandlerFunc(h.handleJobs)))
-	mux.Handle("/api/v1/jobs/", cors(http.HandlerFunc(h.handleJobByID))) // Pattern with trailing slash catches /api/v1/jobs/{id}
+	mux.Handle("/api/v1/jobs/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobsWatch)))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
+	mux.Handle("/api/v1/jobs", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobs))))
+	mux.Handle("/api/v1/jobs/", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobByID)))) // Pattern with trailing slash catches /api/v1/jobs/{id}
 
 	// Job history endpoints
-	mux.Handle("/api/v1/jobs/archive", cors(http.HandlerFunc(h.handleJobHistory)))
-	mux.Handle("/api/v1/jobs/epochs", cors(http.HandlerFunc(h.handleJobEpochs)))
-	mux.Handle("/api/v1/jobs/transfers", cors(http.HandlerFunc(h.handleJobTransfers)))
+	mux.Handle("/api/v1/jobs/archive", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobHistory))))
+	mux.Handle("/api/v1/jobs/epochs", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobEpochs))))
+	mux.Handle("/api/v1/jobs/transfers", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobTransfers))))
 
 	// Credential management endpoints (credd)
-	mux.Handle("/api/v1/creds/user", cors(http.HandlerFunc(h.handleUserCredential)))
-	mux.Handle("/api/v1/creds/service", cors(http.HandlerFunc(h.handleServiceCredentialCollection)))
-	mux.Handle("/api/v1/creds/service/", cors(http.HandlerFunc(h.handleServiceCredentialItem)))
+	mux.Handle("/api/v1/creds/user", cors(h.requireCondorScope(http.HandlerFunc(h.handleUserCredential))))
+	mux.Handle("/api/v1/creds/service", cors(h.requireCondorScope(http.HandlerFunc(h.handleServiceCredentialCollection))))
+	mux.Handle("/api/v1/creds/service/", cors(h.requireCondorScope(http.HandlerFunc(h.handleServiceCredentialItem))))
 
 	// Placement endpoints (condor_placementd). Catch-all under the
 	// prefix so handlePlacementPath can route on the last segment; all
@@ -90,7 +90,7 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/auth/logout", cors(http.HandlerFunc(h.handleAuthLogout)))
 
 	// Web UI dashboard summary
-	mux.Handle("/api/v1/dashboard", cors(http.HandlerFunc(h.handleDashboard)))
+	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))
 
 	// Public sandbox download via short-lived signed URL. No session
 	// required — the token in ?t=... is the authorization.
@@ -146,8 +146,8 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
 
 	// Collector endpoints
-	mux.Handle("/api/v1/collector/watch", cors(http.HandlerFunc(h.handleCollectorWatch))) // SSE ad-change stream (more specific than the dispatcher below)
-	mux.HandleFunc("/api/v1/collector/", h.handleCollectorPath)                           // Pattern with trailing slash catches /api/v1/collector/* paths
+	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch)))) // SSE ad-change stream (more specific than the dispatcher below)
+	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))             // Pattern with trailing slash catches /api/v1/collector/* paths
 
 	// Ping endpoints
 	mux.HandleFunc("/api/v1/ping", h.handlePing)              // Ping both collector and schedd

@@ -51,6 +51,18 @@ func rowToAdminDTO(r apiKeyRow) adminAPIKeyDTO {
 // scope an attacker could request is one we've explicitly blessed.
 var validScopes = map[string]string{
 	"metrics": "Read /metrics (Prometheus exposition).",
+
+	// condor:/* scopes are carried into the IDTOKEN minted for the key
+	// as HTCondor authorization limits, so the schedd enforces them.
+	// A key holding only condor:/READ cannot be used to write even on
+	// a codepath here that neglects to check scopes. Same vocabulary
+	// the OAuth2/MCP path already uses, mapped by
+	// mapCondorScopesToAuthz.
+	"condor:/READ": "Query the schedd as the key's creator. Read-only: the token cannot write.",
+	// Not a superset of READ: mapCondorScopesToAuthz maps scopes to
+	// authorizations one-to-one, so a key expected to both query and
+	// act needs both scopes selected.
+	"condor:/WRITE": "Act on the creator's jobs (submit, hold, release, remove). Does not grant READ; select both to query as well.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.
@@ -151,6 +163,14 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 				fmt.Sprintf("unknown scope %q", sc))
 			return
 		}
+	}
+	// A condor:/* scope only means anything if this server can actually
+	// mint IDTOKENs. Refuse here rather than minting a key that looks
+	// valid in the UI and then fails authentication on every use.
+	if hasCondorScopes(req.Scopes) && (s.signingKeyPath == "" || s.trustDomain == "") {
+		s.writeError(w, http.StatusBadRequest,
+			"condor:/* scopes require SIGNING_KEY and TRUST_DOMAIN to be configured on this server")
+		return
 	}
 	// Reject already-expired requests immediately. A key that's
 	// born dead is just confusing.
