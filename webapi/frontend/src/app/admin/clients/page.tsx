@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 // OAuth2 client list.
 //
@@ -16,23 +16,28 @@
 //               that registered once and never came back is the churn
 //               worth deleting.
 //   - recent users — who it acts for.
+//
+// List-valued columns render through ChipList, which also keeps them
+// readable now that the server hands back real arrays rather than
+// comma-split JSON fragments.
 
-import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type AdminClient } from '@/lib/api';
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type AdminClient } from "@/lib/api";
+import { ChipList } from "@/components/ChipList";
 
 export default function AdminClientsPage() {
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', 'clients'],
+    queryKey: ["admin", "clients"],
     queryFn: api.admin.listClients,
   });
 
   const remove = useMutation({
     mutationFn: (id: string) => api.admin.deleteClient(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['admin', 'clients'] });
-      qc.invalidateQueries({ queryKey: ['admin', 'tokens'] });
+      qc.invalidateQueries({ queryKey: ["admin", "clients"] });
+      qc.invalidateQueries({ queryKey: ["admin", "tokens"] });
     },
   });
 
@@ -55,7 +60,9 @@ export default function AdminClientsPage() {
       </div>
 
       {isLoading && <p className="text-gray-400">Loading...</p>}
-      {error && <p className="text-red-600 text-sm">{(error as Error).message}</p>}
+      {error && (
+        <p className="text-red-600 text-sm">{(error as Error).message}</p>
+      )}
 
       {data && data.clients.length === 0 && (
         <p className="text-gray-500 text-sm">No clients registered.</p>
@@ -68,6 +75,7 @@ export default function AdminClientsPage() {
               <tr>
                 <th className="px-3 py-2">Client</th>
                 <th className="px-3 py-2">Type</th>
+                <th className="px-3 py-2">Grants</th>
                 <th className="px-3 py-2">Last used</th>
                 <th className="px-3 py-2">Recent users</th>
                 <th className="px-3 py-2">Scopes</th>
@@ -167,6 +175,16 @@ function ClientRow({
           <OriginChip origin={client.origin} />
         </div>
       </td>
+      {/* Grant types decide what the client can actually do, and one
+          absence in particular is worth being able to see: a client
+          without refresh_token gets access tokens only, so its users
+          are sent through a full re-authorization every time one
+          expires. That shows up as "why does this app keep asking me to
+          sign in?", and this column is the evidence. */}
+      <td className="px-3 py-2 text-xs text-gray-700">
+        <ChipList items={client.grant_types} max={4} />
+        <RefreshWarning blockedBy={client.refresh_blocked_by} />
+      </td>
       <td className="px-3 py-2 text-xs">
         {client.last_used_at ? (
           <span
@@ -199,7 +217,7 @@ function ClientRow({
         )}
       </td>
       <td className="px-3 py-2 text-xs text-gray-700">
-        {client.scopes?.join(' ') || '—'}
+        <ChipList items={client.scopes} tone="blue" />
       </td>
       <td className="px-3 py-2 text-xs text-gray-500">
         {new Date(client.created_at).toLocaleString()}
@@ -210,10 +228,30 @@ function ClientRow({
           disabled={busy}
           className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
         >
-          {busy ? 'Deleting...' : 'Delete'}
+          {busy ? "Deleting..." : "Delete"}
         </button>
       </td>
     </tr>
+  );
+}
+
+// RefreshWarning surfaces a client that can never hold a refresh token.
+//
+// Nothing errors when this is misconfigured -- the client simply never
+// receives a refresh token, and its users get sent through a full
+// re-authorization every time an access token expires. That reaches an
+// operator as "why does this app keep asking me to sign in?", with
+// nothing in the logs to point at. The server works out the reason (it
+// owns the OAuth semantics); this renders it.
+function RefreshWarning({ blockedBy }: { blockedBy?: string[] }) {
+  if (!blockedBy || blockedBy.length === 0) return null;
+  return (
+    <span
+      className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900"
+      title={`This client is missing ${blockedBy.join(" and ")}, so it never receives a refresh token. Its users re-authorize every time an access token expires.`}
+    >
+      cannot refresh
+    </span>
   );
 }
 

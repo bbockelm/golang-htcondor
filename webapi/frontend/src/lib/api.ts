@@ -604,6 +604,12 @@ export interface AdminClient {
   last_used_at?: string;
   // Last few distinct subjects to obtain a token here, newest first.
   recent_users?: AdminClientUse[];
+  // What stops this client from ever receiving a refresh token, so its
+  // users re-authorize on every access-token expiry. Absent means
+  // nothing does — or that the client has no interactive flow, in which
+  // case there is no user to inconvenience. Computed by the server,
+  // which owns these OAuth semantics.
+  refresh_blocked_by?: string[];
 }
 
 export interface AdminToken {
@@ -635,6 +641,10 @@ export interface AdminCondorConfigEntry {
   // Empty string when redacted=true (server scrubbed an apparent secret).
   value?: string;
   redacted?: boolean;
+  // True when the key still holds HTCondor's compiled-in value — nothing
+  // in this deployment's config files or environment touched it. Omitted
+  // (so undefined, i.e. falsy) for keys the deployment did set.
+  is_default?: boolean;
 }
 
 export interface AdminCondorConfigResponse {
@@ -642,6 +652,9 @@ export interface AdminCondorConfigResponse {
   // — typically only the demo path. Treat as "feature unavailable".
   configured: boolean;
   entries?: AdminCondorConfigEntry[];
+  // How many entries differ from their built-in default, counted over the
+  // whole readout rather than the client's current filter.
+  modified_count?: number;
 }
 
 // AdminAPIKey is the metadata-only DTO the list endpoint returns.

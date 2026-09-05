@@ -92,6 +92,11 @@ type AdminClient struct {
 	// RecentUsers is a rolling sample of the last few distinct subjects
 	// to obtain a token through this client, newest first.
 	RecentUsers []AdminClientUse `json:"recent_users,omitempty"`
+	// RefreshBlockedBy names what stops this client from ever receiving
+	// a refresh token, so its users re-authorize on every access-token
+	// expiry. Empty means nothing does -- or that the client has no
+	// interactive flow and so has no user to inconvenience.
+	RefreshBlockedBy []string `json:"refresh_blocked_by,omitempty"`
 }
 
 // AdminClientUse is one entry of a client's recent-users sample.
@@ -159,11 +164,13 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 			s.logger.Warn(logging.DestinationHTTP, "Skipping malformed client row", "error", err)
 			continue
 		}
-		c.RedirectURIs = splitNonEmpty(redirectURIs)
-		c.GrantTypes = splitNonEmpty(grantTypes)
-		c.ResponseTypes = splitNonEmpty(responseTypes)
-		c.Scopes = splitNonEmpty(scopes)
+		c.RedirectURIs = decodeStringList(redirectURIs)
+		c.GrantTypes = decodeStringList(grantTypes)
+		c.ResponseTypes = decodeStringList(responseTypes)
+		c.Scopes = decodeStringList(scopes)
 		c.Public = public != 0
+
+		c.RefreshBlockedBy = refreshBlockedBy(c.GrantTypes, c.Scopes)
 
 		p := scanProvenance(name, notes, origin, lastUsed, recentUsers)
 		c.Name, c.Notes, c.Origin, c.LastUsedAt = p.Name, p.Notes, string(p.Origin), p.LastUsedAt
@@ -400,7 +407,7 @@ func queryTokenTable(
 			SignaturePrefix: redactSignature(sig),
 			ClientID:        clientID,
 			Subject:         subject,
-			Scopes:          splitNonEmpty(scopes),
+			Scopes:          decodeStringList(scopes),
 			Active:          active != 0,
 			RequestedAt:     requestedAt,
 		}
@@ -459,6 +466,12 @@ type AdminCondorConfigEntry struct {
 	Key      string `json:"key"`
 	Value    string `json:"value,omitempty"`
 	Redacted bool   `json:"redacted,omitempty"`
+	// IsDefault reports that this key still holds HTCondor's compiled-in
+	// value — nothing in this deployment's config files or environment
+	// touched it. Roughly a thousand of the ~1085 keys in a stock config
+	// are in this state, which is what makes an unfiltered dump tedious
+	// to read, so the SPA offers to hide them.
+	IsDefault bool `json:"is_default,omitempty"`
 }
 
 // AdminCondorConfigResponse is the full readout. Configured=false means
@@ -467,6 +480,9 @@ type AdminCondorConfigEntry struct {
 type AdminCondorConfigResponse struct {
 	Configured bool                     `json:"configured"`
 	Entries    []AdminCondorConfigEntry `json:"entries"`
+	// ModifiedCount is how many entries this deployment actually set,
+	// so the SPA can label its filter without counting client-side.
+	ModifiedCount int `json:"modified_count"`
 }
 
 // sensitiveCondorKeyPattern matches config keys whose VALUES we mask
@@ -511,18 +527,65 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 	})
 
 	entries := make([]AdminCondorConfigEntry, 0, len(keys))
+	modified := 0
 	for _, k := range keys {
-		val, _ := s.htcondorConfig.Get(k)
+		isDefault := s.htcondorConfig.IsDefault(k)
+		if !isDefault {
+			modified++
+		}
 		if sensitiveCondorKeyPattern.MatchString(k) {
-			entries = append(entries, AdminCondorConfigEntry{Key: k, Redacted: true})
+			// Still report default-ness for a redacted key: knowing
+			// whether a password knob was set at all is useful and
+			// leaks nothing about its value.
+			entries = append(entries, AdminCondorConfigEntry{
+				Key: k, Redacted: true, IsDefault: isDefault,
+			})
 			continue
 		}
-		entries = append(entries, AdminCondorConfigEntry{Key: k, Value: val})
+		val, _ := s.htcondorConfig.Get(k)
+		entries = append(entries, AdminCondorConfigEntry{
+			Key: k, Value: val, IsDefault: isDefault,
+		})
 	}
 	s.writeJSON(w, http.StatusOK, AdminCondorConfigResponse{
-		Configured: true,
-		Entries:    entries,
+		Configured:    true,
+		Entries:       entries,
+		ModifiedCount: modified,
 	})
+}
+
+// decodeStringList turns a stored list column into a slice.
+//
+// The OAuth2 storage writes these columns with json.Marshal, so a client's
+// scopes arrive as `["openid","mcp:read"]`. Splitting that on commas — which
+// is what this code did until the admin UI started showing entries like
+// `["openid"` and `"mcp:read"]` — hands the SPA JSON fragments to render as
+// list items. Parse the JSON when it looks like JSON, and keep the old
+// splitting as a fallback for any row written before the storage settled on
+// that encoding.
+func decodeStringList(s string) []string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var out []string
+		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+			cleaned := make([]string, 0, len(out))
+			for _, v := range out {
+				if v = strings.TrimSpace(v); v != "" {
+					cleaned = append(cleaned, v)
+				}
+			}
+			if len(cleaned) == 0 {
+				return nil
+			}
+			return cleaned
+		}
+		// Malformed JSON: fall through rather than dropping the value
+		// entirely, so an admin still sees *something* to debug with.
+	}
+	return splitNonEmpty(trimmed)
 }
 
 // splitNonEmpty splits on whitespace/comma and drops empty results. The
