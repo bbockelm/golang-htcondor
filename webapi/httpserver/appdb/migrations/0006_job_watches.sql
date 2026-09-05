@@ -52,9 +52,21 @@ CREATE TABLE job_watches (
     -- permanently.
     tracked_json TEXT NOT NULL DEFAULT '[]',
 
+    -- When every tracked job was first seen to have left the queue with
+    -- its outcome unexplained. It starts the grace period after which a
+    -- succeeded/failed watch stops waiting for a history row that may
+    -- never come and reports what it does know. NULL while any job is
+    -- running, or while outcomes are resolving normally.
+    all_ended_at TIMESTAMP,
+
     -- When the watch was first satisfied, and what satisfied it.
     -- fired_at NULL means it has not fired.
     fired_at TIMESTAMP,
+    -- Set when the watch fired without being able to establish the
+    -- outcome: the jobs are known to have ended and nothing could say
+    -- how. The answer is still worth delivering -- silence is the one
+    -- result an agent misreads, because it looks like "still running".
+    undetermined BOOLEAN NOT NULL DEFAULT 0,
     -- JSON array of the matching jobs, capped -- a watch over a
     -- 100k-job cluster summarizes rather than storing the cluster.
     matched_json TEXT NOT NULL DEFAULT '[]',

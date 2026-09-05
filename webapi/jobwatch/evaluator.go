@@ -175,14 +175,14 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 			"owner", owner, "error", err)
 		history = nil
 	}
-	snap := Snapshot{Queue: queue.Ads, History: history, QueueTruncated: queue.Truncated}
+	snap := Snapshot{Now: e.now(), Queue: queue.Ads, History: history, QueueTruncated: queue.Truncated}
 
 	var fired int
 	var firstErr error
 	for _, w := range watches {
 		out := w.Evaluate(snap)
 		if !out.Fires {
-			if err := e.store.SaveProgress(ctx, w.ID, out.Tracked); err != nil && firstErr == nil {
+			if err := e.store.SaveProgress(ctx, w.ID, out); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("saving progress for %s: %w", w.ID, err)
 			}
 			continue
@@ -195,7 +195,8 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 		}
 		fired++
 		e.logf("job watch fired", "watch", w.ID, "owner", owner, "label", w.Label,
-			"event", string(w.Event), "mode", string(w.Mode), "jobs", out.Satisfied)
+			"event", string(w.Event), "mode", string(w.Mode), "jobs", out.Satisfied,
+			"outcome_undetermined", out.Undetermined)
 	}
 	return fired, firstErr
 }

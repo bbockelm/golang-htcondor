@@ -3,6 +3,7 @@ package jobwatch
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
@@ -159,14 +160,107 @@ func TestSucceededAndFailedPartitionTerminal(t *testing.T) {
 		})
 	}
 
-	// Gone from the queue with no history row is "done" but is neither
-	// succeeded nor failed -- we do not know yet, and guessing would
-	// report an outcome that was never observed.
+	// Gone from the queue with no history row is not YET succeeded or
+	// failed: guessing would report an outcome nobody observed. But it
+	// must not be silent forever either -- see
+	// TestUnresolvedOutcomeFiresRatherThanWaitingForever.
+	now := time.Now()
 	for _, event := range []Event{EventSucceeded, EventFailed} {
 		w := mustWatch(t, event, ModeAny)
 		w.Tracked = []JobID{{42, 0}}
-		if w.Evaluate(Snapshot{}).Fires {
-			t.Errorf("%s fired on absence alone; the outcome is not known without history", event)
+		got := w.Evaluate(Snapshot{Now: now})
+		if got.Fires {
+			t.Errorf("%s fired immediately on absence; in a healthy pool the history row lands "+
+				"seconds later and this would report every job as undetermined", event)
+		}
+		if got.AllEndedAt.IsZero() {
+			t.Errorf("%s did not start the grace period, so it can never give up waiting", event)
+		}
+	}
+}
+
+// TestUnresolvedOutcomeFiresRatherThanWaitingForever is the answer to
+// "what if history never comes". A succeeded/failed watch used to stay
+// silent in that case, and silence is the one result an agent misreads:
+// it looks exactly like "still running", so the agent concludes nothing
+// failed and moves on.
+//
+// Once every tracked job has left the queue and stayed unexplained for
+// longer than the grace period, the watch fires and says so. It does not
+// claim the event happened -- what it reports is "these ended and I
+// cannot tell you how", which is something an agent can act on.
+func TestUnresolvedOutcomeFiresRatherThanWaitingForever(t *testing.T) {
+	start := time.Now()
+	for _, event := range []Event{EventSucceeded, EventFailed} {
+		w := mustWatch(t, event, ModeAll)
+		w.Tracked = []JobID{{42, 0}, {42, 1}}
+
+		// The jobs are gone and history has nothing.
+		got := w.Evaluate(Snapshot{Now: start})
+		if got.Fires {
+			t.Fatalf("%s fired before the grace period", event)
+		}
+		w.AllEndedAt = got.AllEndedAt
+
+		// Still inside the grace period: keep waiting, history may land.
+		if got = w.Evaluate(Snapshot{Now: start.Add(UnresolvedOutcomeGrace - time.Minute)}); got.Fires {
+			t.Errorf("%s gave up before the grace period elapsed", event)
+		}
+
+		// Past it: fire, flagged.
+		got = w.Evaluate(Snapshot{Now: start.Add(UnresolvedOutcomeGrace + time.Minute)})
+		if !got.Fires {
+			t.Fatalf("%s never fired; the agent is left reading silence as \"nothing happened\"", event)
+		}
+		if !got.Undetermined {
+			t.Errorf("%s claimed the event happened without evidence", event)
+		}
+		if got.Satisfied != 2 || len(got.Matched) != 2 {
+			t.Errorf("%s should name the jobs so the agent can go and look: %+v", event, got)
+		}
+	}
+}
+
+// TestUnresolvedGraceDoesNotApplyWhileWorkIsRunning: a cluster with jobs
+// still in the queue has not ended, so there is nothing to give up on.
+func TestUnresolvedGraceDoesNotApplyWhileWorkIsRunning(t *testing.T) {
+	w := mustWatch(t, EventFailed, ModeAny)
+	w.Tracked = []JobID{{42, 0}, {42, 1}}
+	long := time.Now().Add(-24 * time.Hour)
+	w.AllEndedAt = long
+
+	got := w.Evaluate(Snapshot{Now: time.Now(), Queue: []*classad.ClassAd{job(42, 1, running)}})
+	if got.Fires {
+		t.Error("fired while a job was still running")
+	}
+	if !got.AllEndedAt.IsZero() {
+		t.Error("the grace stamp should clear once a job is seen running again")
+	}
+}
+
+// TestResolvedOutcomeBeatsTheGracePeriod: when history does arrive, the
+// real answer wins and nothing is reported as undetermined.
+func TestResolvedOutcomeBeatsTheGracePeriod(t *testing.T) {
+	w := mustWatch(t, EventFailed, ModeAny)
+	w.Tracked = []JobID{{42, 0}}
+	w.AllEndedAt = time.Now().Add(-24 * time.Hour)
+
+	got := w.Evaluate(Snapshot{Now: time.Now(), History: []*classad.ClassAd{historyAd(0, completed, 1)}})
+	if !got.Fires || got.Undetermined {
+		t.Errorf("a resolved failure should fire normally: %+v", got)
+	}
+}
+
+// TestUndeterminedNeverAppliesToTheLiveEvents: "done" already fires on
+// absence and the live-state events describe jobs still in the queue, so
+// neither can be left waiting on an outcome nobody can supply.
+func TestUndeterminedNeverAppliesToTheLiveEvents(t *testing.T) {
+	for _, event := range []Event{EventHeld, EventRunning} {
+		w := mustWatch(t, event, ModeAny)
+		w.Tracked = []JobID{{42, 0}}
+		w.AllEndedAt = time.Now().Add(-24 * time.Hour)
+		if got := w.Evaluate(Snapshot{Now: time.Now()}); got.Fires {
+			t.Errorf("%s fired on absence; it describes a job that is in the queue", event)
 		}
 	}
 }

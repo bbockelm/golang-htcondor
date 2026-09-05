@@ -47,7 +47,7 @@ func TestWatchSurvivesARestart(t *testing.T) {
 	// The tracked set is the part that must survive: a job that finishes
 	// during an outage is neither still in the queue nor yet in history,
 	// so without its memory the watch misses it permanently.
-	if err := s.SaveProgress(ctx, w.ID, []JobID{{42, 0}, {42, 1}}); err != nil {
+	if err := s.SaveProgress(ctx, w.ID, Outcome{Tracked: []JobID{{42, 0}, {42, 1}}}); err != nil {
 		t.Fatalf("SaveProgress: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestReloadedWatchEvaluates(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	w := register(t, s, "alice", EventDone, ModeAll)
-	if err := s.SaveProgress(ctx, w.ID, []JobID{{42, 0}}); err != nil {
+	if err := s.SaveProgress(ctx, w.ID, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
 		t.Fatal(err)
 	}
 

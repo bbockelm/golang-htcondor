@@ -54,7 +54,10 @@ func jobWatchTools() []Tool {
 				"the queue by the schedd, so that condition is never observed. Use event=\"done\" instead, which is resolved across " +
 				"the queue and the history archive.\n\nEvents:\n" + jobwatch.DescribeEvents() +
 				"\nIf the condition is ALREADY satisfied when you call this, it fires straight away and the answer is in this response — " +
-				"so it is safe to register a watch after submitting, or after the jobs have already finished.",
+				"so it is safe to register a watch after submitting, or after the jobs have already finished.\n\n" +
+				"\"succeeded\" and \"failed\" need the history archive to say how a job ended. If the jobs leave the queue and no " +
+				"history record arrives, the watch still fires after a few minutes and tells you the outcome could not be " +
+				"determined, so you can go and check — it will not leave you waiting silently.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

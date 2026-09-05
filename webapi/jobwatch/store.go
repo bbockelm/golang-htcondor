@@ -80,7 +80,7 @@ func (s *Store) Register(ctx context.Context, w *Watch, ttl time.Duration) (*Wat
 // on behalf of all of them -- the scoping happens on the read side.
 func (s *Store) Live(ctx context.Context) ([]*Watch, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json
+		SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json, all_ended_at
 		  FROM job_watches
 		 WHERE fired_at IS NULL AND expires_at > ?
 		 ORDER BY created_at`, s.now().UTC())
@@ -102,7 +102,7 @@ func (s *Store) ForOwner(ctx context.Context, owner string, fired *bool) ([]*Wat
 		return nil, ErrNoOwner
 	}
 	q := `SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json,
-	             fired_at, matched_json, matched_total, delivered_at
+	             fired_at, matched_json, matched_total, delivered_at, undetermined
 	        FROM job_watches WHERE owner = ? AND expires_at > ?`
 	args := []any{owner, s.now().UTC()}
 	if fired != nil {
@@ -124,13 +124,18 @@ func (s *Store) ForOwner(ctx context.Context, owner string, fired *bool) ([]*Wat
 // not fire: the tracked set only. It is separate from Fire so that the
 // common case -- nothing happened -- cannot accidentally write a fired
 // timestamp.
-func (s *Store) SaveProgress(ctx context.Context, id string, tracked []JobID) error {
-	blob, err := json.Marshal(tracked)
+func (s *Store) SaveProgress(ctx context.Context, id string, out Outcome) error {
+	blob, err := json.Marshal(out.Tracked)
 	if err != nil {
 		return fmt.Errorf("encoding the tracked set: %w", err)
 	}
+	var allEnded any
+	if !out.AllEndedAt.IsZero() {
+		allEnded = out.AllEndedAt.UTC()
+	}
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE job_watches SET tracked_json = ? WHERE id = ? AND fired_at IS NULL`, string(blob), id)
+		`UPDATE job_watches SET tracked_json = ?, all_ended_at = ? WHERE id = ? AND fired_at IS NULL`,
+		string(blob), allEnded, id)
 	return err
 }
 
@@ -149,9 +154,9 @@ func (s *Store) Fire(ctx context.Context, id string, out Outcome, at time.Time) 
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE job_watches
-		   SET fired_at = ?, matched_json = ?, matched_total = ?, tracked_json = ?
+		   SET fired_at = ?, matched_json = ?, matched_total = ?, tracked_json = ?, undetermined = ?
 		 WHERE id = ? AND fired_at IS NULL`,
-		at.UTC(), string(matched), out.Satisfied, string(tracked), id)
+		at.UTC(), string(matched), out.Satisfied, string(tracked), out.Undetermined, id)
 	return err
 }
 
@@ -210,9 +215,13 @@ func scanWatches(rows *sql.Rows) ([]*Watch, error) {
 	for rows.Next() {
 		w := &Watch{}
 		var event, mode, tracked string
+		var allEnded sql.NullTime
 		if err := rows.Scan(&w.ID, &w.Owner, &w.Label, &w.Constraint, &event, &w.Condition, &mode,
-			&w.CreatedAt, &tracked); err != nil {
+			&w.CreatedAt, &tracked, &allEnded); err != nil {
 			return nil, err
+		}
+		if allEnded.Valid {
+			w.AllEndedAt = allEnded.Time
 		}
 		if err := finish(w, event, mode, tracked); err != nil {
 			return nil, err
@@ -230,7 +239,7 @@ func scanFullWatches(rows *sql.Rows) ([]*Watch, error) {
 		var event, mode, tracked, matched string
 		var firedAt, deliveredAt sql.NullTime
 		if err := rows.Scan(&w.ID, &w.Owner, &w.Label, &w.Constraint, &event, &w.Condition, &mode,
-			&w.CreatedAt, &tracked, &firedAt, &matched, &w.MatchedTotal, &deliveredAt); err != nil {
+			&w.CreatedAt, &tracked, &firedAt, &matched, &w.MatchedTotal, &deliveredAt, &w.Undetermined); err != nil {
 			return nil, err
 		}
 		if err := finish(w, event, mode, tracked); err != nil {

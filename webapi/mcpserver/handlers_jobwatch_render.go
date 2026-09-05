@@ -80,6 +80,12 @@ func describeFired(w *jobwatch.Watch) string {
 	if w.MatchedTotal != 1 {
 		noun = "jobs"
 	}
+	if w.Undetermined {
+		// Deliberately not phrased as the event: nothing established
+		// that these succeeded or failed, and saying so would be a
+		// guess. What is known is that they ended.
+		return fmt.Sprintf("%d %s ended, but their outcome could not be determined", w.MatchedTotal, noun)
+	}
 	switch w.Event {
 	case jobwatch.EventDone:
 		return fmt.Sprintf("%d %s finished", w.MatchedTotal, noun)
@@ -104,6 +110,11 @@ func renderMatched(w *jobwatch.Watch) string {
 		return ""
 	}
 	var b strings.Builder
+	if w.Undetermined {
+		b.WriteString("  These jobs left the queue, but no history record was available to say how they\n" +
+			"  finished -- the history mirror is unreachable or behind. Check them directly with\n" +
+			"  query_history_db or get_job.\n")
+	}
 	for _, m := range w.Matched {
 		fmt.Fprintf(&b, "  %d.%d", m.Cluster, m.Proc)
 		for _, attr := range []string{"JobStatus", "ExitCode", "HoldReason", "RemoveReason"} {

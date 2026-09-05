@@ -184,7 +184,7 @@ func TestTruncatedQueueDoesNotReportRunningJobsAsDone(t *testing.T) {
 	// still-running job would block the fire for an unrelated reason and
 	// the test would pass whether or not truncation was honoured.
 	w := register(t, s, "alice", EventDone, ModeAny)
-	if err := s.SaveProgress(ctx, w.ID, []JobID{{42, 0}}); err != nil {
+	if err := s.SaveProgress(ctx, w.ID, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
 		t.Fatal(err)
 	}
 

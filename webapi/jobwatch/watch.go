@@ -65,6 +65,13 @@ type Watch struct {
 
 	CreatedAt time.Time
 
+	// AllEndedAt is when every tracked job was first seen to have left
+	// the queue with its outcome still unresolved. It starts the grace
+	// period after which the watch gives up waiting for history and
+	// reports what it does know; zero while any job is still running or
+	// while the outcomes are resolving normally.
+	AllEndedAt time.Time
+
 	// Tracked is every job this watch has ever selected. It is the
 	// watch's memory, and without it the terminal events cannot work: a
 	// cluster that has fully drained is absent from the queue, so
@@ -77,6 +84,10 @@ type Watch struct {
 	FiredAt      time.Time
 	Matched      []JobRef
 	MatchedTotal int
+
+	// Undetermined is set on a watch that fired without establishing the
+	// outcome; see giveUpWaiting.
+	Undetermined bool
 
 	// DeliveredAt is when a caller last read the outcome. Recorded
 	// rather than acted on: a fired watch stays readable so a later
@@ -202,6 +213,9 @@ func (w *Watch) Compile() error {
 // attributes say; a job in Queue has not. Merging them would lose
 // exactly the distinction the terminal events turn on.
 type Snapshot struct {
+	// Now is the evaluation time, for the unresolved-outcome grace
+	// period. Zero means time.Now.
+	Now     time.Time
 	Queue   []*classad.ClassAd
 	History []*classad.ClassAd
 	// QueueTruncated says the backend could not return every job, so
@@ -229,7 +243,28 @@ type Outcome struct {
 	// Tracked is the updated memory of every job this watch has seen,
 	// for the caller to persist.
 	Tracked []JobID
+
+	// Undetermined marks a firing where the jobs are known to have ended
+	// but their outcome could not be established -- see
+	// UnresolvedOutcomeGrace. The watch fires anyway; what it reports is
+	// "these finished and I cannot tell you how", which an agent can act
+	// on. Silence is the one answer it cannot.
+	Undetermined bool
+	// AllEndedAt is the updated grace-period stamp, for the caller to
+	// persist. Zero clears it.
+	AllEndedAt time.Time
 }
+
+// UnresolvedOutcomeGrace is how long a succeeded/failed watch waits for
+// history to explain jobs it has already seen leave the queue.
+//
+// Not zero, because in a healthy pool the history row lands seconds
+// later and firing immediately would report "outcome unknown" for
+// everything, destroying the distinction the event exists for. Not
+// unbounded, because when history never arrives -- an unreachable
+// mirror, a stalled syncer -- the alternative is that the watch stays
+// silent forever, and an agent reads silence as "nothing failed".
+const UnresolvedOutcomeGrace = 5 * time.Minute
 
 // Evaluate decides whether the watch is satisfied by this snapshot,
 // without mutating the watch.
@@ -269,8 +304,17 @@ func (w *Watch) Evaluate(s Snapshot) Outcome {
 	}
 
 	out := Outcome{Selected: len(selected), Tracked: make([]JobID, 0, len(selected))}
+	// unresolved is jobs known to have ended whose outcome nothing can
+	// explain: gone from a complete queue, absent from history.
+	var unresolved []JobID
+	var stillHere int
 	for id := range selected {
 		out.Tracked = append(out.Tracked, id)
+		if _, present := inQueue[id]; present {
+			stillHere++
+		} else if _, finished := inHistory[id]; !finished && !w.truncated {
+			unresolved = append(unresolved, id)
+		}
 		ad, ok := w.satisfiedBy(id, inQueue, inHistory)
 		if !ok {
 			continue
@@ -281,6 +325,7 @@ func (w *Watch) Evaluate(s Snapshot) Outcome {
 		}
 	}
 	sortJobIDs(out.Tracked)
+	sortJobIDs(unresolved)
 
 	switch w.Mode {
 	case ModeAll:
@@ -292,6 +337,59 @@ func (w *Watch) Evaluate(s Snapshot) Outcome {
 		out.Fires = out.Selected > 0 && out.Satisfied == out.Selected
 	default:
 		out.Fires = out.Satisfied > 0
+	}
+	if out.Fires {
+		return out
+	}
+	return w.giveUpWaiting(out, unresolved, stillHere, s.Now)
+}
+
+// giveUpWaiting decides whether a watch that cannot resolve its outcomes
+// should fire anyway.
+//
+// It applies only to the events that need history. "Done" already fires
+// on absence, and the live-state events describe jobs that are still in
+// the queue, so neither can be left waiting on an outcome nobody can
+// supply.
+//
+// The condition is deliberately narrow: every selected job has left the
+// queue, at least one of them has no history row to explain it, and that
+// has been true for longer than the grace period. A healthy pool never
+// reaches it -- the row lands seconds after the job goes. A pool whose
+// mirror is unreachable or whose syncer has stalled reaches it in five
+// minutes, and the watch says "these finished, I cannot tell you how"
+// instead of saying nothing at all. Nothing is the one answer an agent
+// misreads, because it looks exactly like "still running".
+func (w *Watch) giveUpWaiting(out Outcome, unresolved []JobID, stillHere int, now time.Time) Outcome {
+	if w.Event != EventSucceeded && w.Event != EventFailed {
+		return out
+	}
+	if stillHere > 0 || len(unresolved) == 0 {
+		// Either work is still running, or everything that ended was
+		// explained. Nothing to give up on.
+		return out
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	out.AllEndedAt = w.AllEndedAt
+	if out.AllEndedAt.IsZero() {
+		out.AllEndedAt = now
+	}
+	if now.Sub(out.AllEndedAt) < UnresolvedOutcomeGrace {
+		return out
+	}
+
+	out.Fires, out.Undetermined = true, true
+	out.Satisfied = len(unresolved)
+	out.Matched = out.Matched[:0]
+	for _, id := range unresolved {
+		if len(out.Matched) >= MaxMatched {
+			break
+		}
+		// No ad to carry: the whole point is that nothing describes
+		// these. The identity is what lets the agent go and look.
+		out.Matched = append(out.Matched, JobRef{JobID: id})
 	}
 	return out
 }
