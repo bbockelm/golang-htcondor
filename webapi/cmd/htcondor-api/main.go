@@ -1692,6 +1692,16 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// match that here so the admin pages (api-keys, clients,
 		// etc.) become usable out of the box.
 		WebUIAdminGroup: "admin",
+		// Superuser mode on the same group, for the same reason: demo
+		// mode exists to exercise the shipped product, and this is a
+		// shipped feature that is otherwise unreachable without a real
+		// pool, a real IDP group, and a signing key.
+		//
+		// It stays a deliberate act even here -- the operator still has
+		// to arm it, it still expires, and arming is still audited. The
+		// preconditions it needs (signing key, trust domain) demo mode
+		// already satisfies.
+		SuperuserGroup: "admin",
 		// Pick up the LLM/chat knobs in demo mode too so an
 		// operator can hand-test the chat surface against the
 		// embedded mini-condor without spinning up a real pool.
