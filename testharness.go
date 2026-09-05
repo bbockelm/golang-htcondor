@@ -156,6 +156,12 @@ func SetupCondorHarnessWithConfig(t TestingT, extraConfig string) *CondorTestHar
 		}
 	}
 
+	// The token signing key has to be in place before the daemons start;
+	// see writeSigningKey.
+	if err := h.writeSigningKey(); err != nil {
+		t.Fatalf("Failed to set up the harness signing key: %v", err)
+	}
+
 	// Generate HTCondor configuration
 	h.collectorAddr = "127.0.0.1:0" // Use dynamic port
 	h.scheddName = fmt.Sprintf("test_schedd_%d", os.Getpid())
@@ -218,6 +224,20 @@ SEC_DEFAULT_AUTHENTICATION = REQUIRED
 SEC_DEFAULT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
 SEC_CLIENT_AUTHENTICATION_METHODS = FS, PASSWORD, IDTOKENS, CLAIMTOBE
 
+# Make IDTOKENS actually usable by a test daemon, rather than a method
+# that is offered and then always filtered out.
+#
+# A token is accepted only when its iss claim matches this schedd's
+# TRUST_DOMAIN and its kid claim names a key this schedd can read. Both
+# defaulted to something a test could not predict -- TRUST_DOMAIN follows
+# UID_DOMAIN to $(FULL_HOSTNAME), and the key directory to $(ETC) -- so a
+# daemon minting tokens for the harness had no way to be trusted by it,
+# and every such connection silently fell through to FS instead. Pinning
+# both here is what lets a test exercise the token path at all; see
+# GetTrustDomain and GetSigningKeyPath.
+TRUST_DOMAIN = %s
+SEC_PASSWORD_DIRECTORY = %s
+
 # Allow all operations for testing
 ALLOW_READ = *
 ALLOW_WRITE = *
@@ -251,7 +271,7 @@ UPDATE_INTERVAL = 5
 # Disable unwanted features for testing
 ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
-`, sbinDir, binDir, libexecLine, h.tmpDir, h.scheddName)
+`, sbinDir, binDir, libexecLine, h.tmpDir, h.scheddName, HarnessTrustDomain, h.GetPasswordDir())
 
 	if extraConfig != "" {
 		configContent += "\n" + extraConfig + "\n"
@@ -708,6 +728,56 @@ func (h *CondorTestHarness) GetScheddName() string {
 // GetSpoolDir returns the spool directory path for this harness
 func (h *CondorTestHarness) GetSpoolDir() string {
 	return h.spoolDir
+}
+
+// HarnessTrustDomain is the TRUST_DOMAIN the harness pins, and so the
+// `iss` a daemon must mint tokens with to be trusted by this schedd. It
+// is a fixed string rather than the hostname the default would produce,
+// so a test can configure a daemon to match it without first asking the
+// harness what its hostname resolved to.
+const HarnessTrustDomain = "test.htcondor.org"
+
+// GetTrustDomain returns the trust domain this harness's daemons accept
+// tokens from. Pass it as a daemon's TRUST_DOMAIN.
+func (h *CondorTestHarness) GetTrustDomain() string {
+	return HarnessTrustDomain
+}
+
+// GetPasswordDir returns the SEC_PASSWORD_DIRECTORY this harness pins,
+// which is where its daemons look for token signing keys.
+func (h *CondorTestHarness) GetPasswordDir() string {
+	return filepath.Join(h.spoolDir, "passwords.d")
+}
+
+// GetSigningKeyPath returns the POOL signing key this harness created.
+// Pass it as a daemon's SIGNING_KEY_PATH: a token signed with it and
+// issued for GetTrustDomain is one this harness's schedd will accept, so
+// the daemon authenticates as the token's subject rather than falling
+// through to FS and being recorded as its own OS user.
+func (h *CondorTestHarness) GetSigningKeyPath() string {
+	return filepath.Join(h.GetPasswordDir(), "POOL")
+}
+
+// writeSigningKey creates the POOL key before the daemons start.
+//
+// It has to exist up front: a test that writes its own key afterwards is
+// racing the first authentication, and one that writes it somewhere else
+// is not writing it where the schedd looks at all -- which is how token
+// auth came to be silently unused here, with FS quietly answering for it.
+func (h *CondorTestHarness) writeSigningKey() error {
+	if err := os.MkdirAll(h.GetPasswordDir(), 0700); err != nil {
+		return fmt.Errorf("creating the harness password directory: %w", err)
+	}
+	// Deterministic, and not a secret: this pool exists for the length of
+	// one test and listens only on loopback.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(h.GetSigningKeyPath(), key, 0600); err != nil {
+		return fmt.Errorf("writing the harness POOL signing key: %w", err)
+	}
+	return nil
 }
 
 // GetLogDir returns the log directory path for this harness

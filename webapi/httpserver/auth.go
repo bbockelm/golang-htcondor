@@ -44,10 +44,16 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 //
 // allowFSFallback semantics:
 //
-//   - true  (user-header mode): the token is generated locally per
-//     request and not signed with anything the schedd recognises, so
-//     we APPEND FS as a fallback for use against a same-host schedd
-//     where the OS-user identity is acceptable.
+//   - true: APPEND FS to the offered methods. No production call site
+//     passes this any more. It was used for user-header mode, on the
+//     premise that such a token was "generated locally per request and
+//     not signed with anything the schedd recognises" -- which was not
+//     true. extractOrGenerateToken signs the header-mode token with the
+//     same s.signingKeyPath and s.trustDomain as the session-mode one,
+//     so the schedd validates both identically, and appending FS only
+//     let FS win the negotiation and hide the caller's identity behind
+//     the daemon's OS user. Retained for the tests that pin the
+//     append/strip behaviour itself.
 //
 //   - false (session/JWT mode): the token IS signed by us with the
 //     pool's signing key, the schedd validates it, and its `sub`
