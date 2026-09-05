@@ -55,7 +55,21 @@ func TestAggregateJobsAgainstARealSchedd(t *testing.T) {
 		t.Fatalf("config: %v", err)
 	}
 	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
+	defer func() {
+		// Unset FIRST, then reload. htcondor caches the parsed default
+		// config in a process-global that nothing invalidates, so any
+		// test that points CONDOR_CONFIG at a mini-condor leaves that
+		// config loaded for every test after it. This one sets
+		// SEC_CLIENT_AUTHENTICATION_METHODS = FS,TOKEN, which is why
+		// TestConfigureSecurityForTokenAuthMethods then failed asserting
+		// SSL was among the defaults.
+		//
+		// The other integration tests have the same hazard and get away
+		// with it only because Go runs test files in name order and they
+		// sort after auth_test.go. This file sorts before it.
+		os.Unsetenv("CONDOR_CONFIG")
+		htcondor.ReloadDefaultConfig()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -119,7 +133,6 @@ func TestAggregateJobsAgainstARealSchedd(t *testing.T) {
 		}
 		return n
 	}
-
 
 	t.Run("an unconstrained aggregate counts every job", func(t *testing.T) {
 		rows, err := schedd.AggregateJobs(ctx, "true", []string{"Owner"}, nil)

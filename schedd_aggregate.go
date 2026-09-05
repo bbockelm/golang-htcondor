@@ -128,7 +128,7 @@ func (s *Schedd) AggregateJobs(ctx context.Context, constraint string, groupBy [
 				}
 				return nil, fmt.Errorf("schedd aggregate error %d: %s", code, msg)
 			}
-			return foldAggregateRows(rows, groupBy), nil
+			return foldAggregateRows(rows), nil
 		}
 
 		count, _ := ad.EvaluateAttrInt("JobCount")
@@ -177,7 +177,11 @@ func aggregateProjection(groupBy []string, constraint *classad.Expr) []string {
 // on JobStatus comes back split by (Owner, JobStatus). Summing the rows
 // that share an Owner restores the grouping that was asked for. Order is
 // the order each group was first seen, so it stays the schedd's.
-func foldAggregateRows(rows []AggregateRow, groupBy []string) []AggregateRow {
+//
+// The grouping itself is not a parameter: each row's Group was already
+// built from the caller's group-by attributes alone, so rows that belong
+// together are exactly the rows whose Group is equal.
+func foldAggregateRows(rows []AggregateRow) []AggregateRow {
 	if len(rows) == 0 {
 		return rows
 	}
