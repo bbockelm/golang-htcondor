@@ -143,6 +143,17 @@ type Handler struct {
 	mcpReadGroup        string            // Group required for read access (empty = all users have read)
 	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
 
+	// superuserGroup gates superuser mode: acting on another user's jobs
+	// as that user. Deliberately NOT the same knob as webuiAdminGroup,
+	// which only grants read access to the admin pages -- reusing it
+	// would silently promote everyone who can look at the admin UI into
+	// someone who can act as anybody on this access point.
+	// Empty disables the feature entirely.
+	superuserGroup string
+	// superuserPolicy decides which identity to authenticate as when
+	// acting for someone else. Nil when superuser mode is disabled.
+	superuserPolicy *superuserPolicy
+
 	// oauth2MaxGrantLifetime caps how long a single consent can be
 	// stretched by refreshing. Every refresh resets the refresh token's
 	// own expiry, so without this a client that refreshes regularly holds
@@ -365,10 +376,27 @@ type HandlerConfig struct {
 	// literal "none" is the spelling for the empty set — a config file
 	// cannot express nil-versus-empty on its own.
 	OAuth2RevocationOracles []string
-	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup            string // Group required for read operations (empty = all have read)
-	MCPWriteGroup           string // Group required for write operations (empty = all have write)
-	MCPInstructions         string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// SuperuserGroup gates superuser mode, in which an administrator acts
+	// on another user's jobs as that user. Empty (the default) disables it.
+	//
+	// Intentionally separate from WebUIAdminGroup. That group means "may
+	// read the admin pages"; this one means "may act as anyone on this
+	// access point", a categorically larger privilege that deserves its own
+	// decision and its own off switch.
+	//
+	// Superuser mode additionally requires a pool signing key: without one
+	// this server cannot mint the credential it would act under, so the
+	// feature stays off however this is set.
+	//
+	// Configurable via HTTP_API_SUPERUSER_GROUP.
+	SuperuserGroup string
+	// SuperuserRefreshInterval is how often the schedd's QUEUE_SUPER_USERS
+	// set is re-read. Zero selects defaultSuperuserRefresh.
+	SuperuserRefreshInterval time.Duration
+	MCPAccessGroup           string // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup             string // Group required for read operations (empty = all have read)
+	MCPWriteGroup            string // Group required for write operations (empty = all have write)
+	MCPInstructions          string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	// MCPAdminUsers lists authenticated subjects that MCP tool
 	// dispatch treats as admins — most importantly they are exempt
 	// from the owner-scope wrapper, so they can query and act on other
@@ -560,6 +588,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if h.webuiAdminGroup != "" {
 		logger.Info(logging.DestinationHTTP, "Web UI admin group configured", "admin_group", h.webuiAdminGroup)
 	}
+
+	// Superuser mode. Runs after the signing key and domains are set,
+	// because it refuses to enable without them.
+	h.initSuperuserMode(cfg, logger)
 
 	// Operator-supplied extra submit-file directives. The value is
 	// inserted verbatim into every interactive-terminal / Jupyter
@@ -1420,6 +1452,14 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Tail the schedd's job_queue.log into the watch collection, if configured.
 	if h.jobMirror != nil {
 		go func() { _ = h.jobMirror.Run(h.ctx) }()
+	}
+
+	// Keep the schedd's queue-superuser set fresh. Polled here rather than
+	// per-action so that acting on a job never waits on a config read, and
+	// so a momentarily unreachable schedd cannot look like an authorization
+	// failure. See superuserPolicy.
+	if h.superuserPolicy != nil {
+		go h.superuserPolicy.Run(h.ctx)
 	}
 
 	// Initialize IDP if enabled
