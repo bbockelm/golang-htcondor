@@ -386,16 +386,24 @@ func (c *CedarCredd) storeCredential(ctx context.Context, user string, mode int,
 	}
 	_ = returnAd // May contain additional info like fully_qualified_user
 
-	// Check return value
-	// Convention: error codes are 0-20, success with timestamp is > 100
+	// Check return value.
+	//
+	// The credd answers a store with SUCCESS (1) or SUCCESS_PENDING (6),
+	// and some modes answer with a modification timestamp instead.
+	// Everything else is a failure -- including FAILURE (0) and the
+	// 2..14 error codes in HTCondor's store_cred.h.
+	//
+	// The previous test was `returnVal < 0 || (returnVal > 20 &&
+	// returnVal < 100)`, which contradicted the comment above it: it let
+	// every one of those error codes through as success. A store
+	// refused for FAILURE_NOT_ALLOWED or written unparseably was
+	// reported to the caller as having worked.
 	if returnVal == FailureNotFound {
 		return ErrCredentialNotFound
 	}
-	if returnVal < 0 || (returnVal > 20 && returnVal < 100) {
-		return fmt.Errorf("store credential failed with code %d", returnVal)
+	if returnVal != Success && returnVal != SuccessPending && returnVal <= 100 {
+		return creddError("store credential failed", returnVal)
 	}
-	// returnVal is Success (1), SuccessPending (6), or timestamp (> 100)
-	// All are success cases
 
 	return nil
 }
@@ -470,7 +478,7 @@ func (c *CedarCredd) queryCredential(ctx context.Context, user string, mode int,
 		return nil, ErrCredentialNotFound
 	}
 	if returnVal != Success && returnVal != SuccessPending {
-		return nil, fmt.Errorf("query credential failed with code %d", returnVal)
+		return nil, creddError("query credential failed", returnVal)
 	}
 
 	return returnAd, nil
