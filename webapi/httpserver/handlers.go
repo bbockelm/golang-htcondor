@@ -2080,6 +2080,16 @@ func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		sessionID, err := getSessionCookie(r)
 		if err == nil && sessionID != "" {
 			s.sessionStore.Delete(sessionID)
+			// Disarm superuser mode with the session rather than
+			// leaving the entry to time out. Deleting the session row
+			// already makes it unreachable -- every superuser gate
+			// re-resolves the session -- so this is not load-bearing
+			// today. It is here so that the armed set never outlives
+			// the thing it is keyed to, which stops being merely tidy
+			// the moment anyone changes how session ids are issued.
+			if s.superuserArmed != nil {
+				s.superuserArmed.Disarm(sessionID)
+			}
 			if s.logger != nil {
 				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_id", sessionID[:8]+"...")
 			}

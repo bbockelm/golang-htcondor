@@ -262,3 +262,33 @@ func TestBulkOwnerCapIsMeaningful(t *testing.T) {
 		t.Errorf("owner cap of %d is high enough to be a fan-out hazard", maxSuperuserBulkOwners)
 	}
 }
+
+// TestArmedStateIsPerSession is the property that matters most about arming:
+// it is keyed to one browser session, never process-wide. One operator turning
+// the mode on must not change what anybody else's requests do.
+func TestArmedStateIsPerSession(t *testing.T) {
+	s := newSuperuserSessions(time.Hour)
+
+	s.Arm("alice-session")
+
+	if armed, _ := s.Armed("alice-session"); !armed {
+		t.Errorf("the arming session should be armed")
+	}
+	if armed, _ := s.Armed("bob-session"); armed {
+		t.Errorf("arming one session armed another")
+	}
+	// A second browser for the same human is a different session and is
+	// independently unarmed.
+	if armed, _ := s.Armed("alice-other-browser"); armed {
+		t.Errorf("arming leaked across sessions")
+	}
+
+	s.Arm("bob-session")
+	s.Disarm("alice-session")
+	if armed, _ := s.Armed("bob-session"); !armed {
+		t.Errorf("disarming one session disarmed another")
+	}
+	if armed, _ := s.Armed("alice-session"); armed {
+		t.Errorf("disarm did not take effect")
+	}
+}
