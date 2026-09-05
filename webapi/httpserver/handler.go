@@ -25,13 +25,13 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -87,7 +87,7 @@ type Handler struct {
 	// overrides, applied to EVERY job this API submits regardless of the
 	// surface it arrived on. Zero value applies nothing.
 	submitPolicy submitpolicy.Policy
-	userHeader             string
+	userHeader   string
 	// userHeaderTrustedProxies is the list of source-IP prefixes from
 	// which the userHeader is honored. Populated from
 	// HandlerConfig.UserHeaderTrustedProxies (CIDR list). nil + empty
@@ -1086,10 +1086,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// rather than fall back to whoever this daemon authenticates as.
 		Delegated: true,
 		// The MCP tools and the REST endpoints must route identically —
-		// one daemon, one policy — so the same options reach both.
-		DBMirrorName:     cfg.DBMirrorName,
-		DBMirrorAddress:  cfg.DBMirrorAddress,
-		DBMirrorRequired: cfg.DBMirrorRequired,
+		// one daemon, one policy — so they share this daemon's Locator
+		// rather than each discovering the mirror on their own. One
+		// cache, one poll loop, and an admin page that describes both.
+		DBMirror: h.dbMirror,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)
@@ -1498,7 +1498,44 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 		go h.periodicPing(ctx)
 	}
 
+	// Keep the htcondordb mirror's advertisement current in the
+	// background. Without this, discovery happens only on a read that
+	// wants to route, so the admin and readiness surfaces describe
+	// nothing until traffic arrives -- and the first such read pays the
+	// collector round trip.
+	h.startDBMirrorPoll(ctx)
+
 	return nil
+}
+
+// startDBMirrorPoll runs the mirror discovery loop for the life of the
+// handler. It is a no-op when routing is not configured.
+//
+// Only failures and recoveries are logged, not every poll: at one poll
+// per PollInterval a success line would be pure noise, while the
+// transition into and out of "cannot find the mirror" is the thing an
+// operator greps for after noticing reads went back to the schedd.
+func (h *Handler) startDBMirrorPoll(ctx context.Context) {
+	if !h.dbMirror.Enabled() {
+		return
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		var failing bool
+		h.dbMirror.Poll(ctx, func(info *dbmirror.Info, err error) {
+			switch {
+			case err != nil && !failing:
+				failing = true
+				h.logger.Warn(logging.DestinationHTTP,
+					"htcondordb mirror discovery is failing; reads are using the schedd", "error", err)
+			case err == nil && failing:
+				failing = false
+				h.logger.Info(logging.DestinationHTTP,
+					"htcondordb mirror discovery recovered", "mirror", info.Name, "address", info.Address)
+			}
+		})
+	}()
 }
 
 // Stop gracefully stops all background goroutines and closes providers.

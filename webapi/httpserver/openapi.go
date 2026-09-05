@@ -404,20 +404,23 @@ const openAPISchema = `{
       "DBMirrorHealth": {
         "type": "object",
         "properties": {
-          "status": {"type": "string", "enum": ["ok", "warning", "down"], "description": "\"ok\" only when reads are actually routing right now. A mirror that is up but too far behind to serve is \"warning\" -- it is running, not working."},
+          "status": {"type": "string", "enum": ["ok", "warning", "down", "unknown"], "description": "\"ok\" only when reads are actually routing right now. A mirror that is up but too far behind to serve is \"warning\" -- it is running, not working. \"unknown\" means discovery has not run yet, which is not the same as failing."},
           "required": {"type": "boolean", "description": "HTTP_API_DBMIRROR_REQUIRED: a read the mirror cannot serve fails instead of falling back to the schedd."},
           "name": {"type": "string", "description": "The mirror actually in use."},
           "address": {"type": "string"},
           "pinned_name": {"type": "string", "description": "Configured targeting, echoed so a typo is visible next to the empty result it produced."},
           "pinned_address": {"type": "string"},
+          "discovered": {"type": "boolean", "description": "Whether an advertisement was read. When false the staleness fields are absent rather than zero -- a 0 would read as \"perfectly caught up\" for a mirror nobody has found."},
+          "ad_age_seconds": {"type": "integer", "format": "int64", "description": "How long ago the advertisement was discovered -- the age of this information, not of the mirror's data. Everything the mirror reports about itself was measured when it built the ad; it keeps syncing between advertisements, so an aging ad does not mean a lagging mirror."},
           "job_queue_caught_up": {"type": "boolean"},
-          "job_queue_staleness_seconds": {"type": "integer", "format": "int64"},
-          "history_staleness_seconds": {"type": "integer", "format": "int64"},
+          "job_queue_staleness_seconds": {"type": "integer", "format": "int64", "description": "How far the mirror's job queue was behind the schedd when it built its advertisement. Absent when nothing was discovered. Pair with ad_age_seconds, which says how old that measurement is."},
+          "history_staleness_seconds": {"type": "integer", "format": "int64", "description": "How far the mirror's history was behind when it built its advertisement. Absent when nothing was discovered."},
           "history_gap": {"type": "boolean", "description": "A history durability gap, which stops all history routing."},
           "jobs_tolerance_seconds": {"type": "integer", "format": "int64", "description": "Live job reads route to the mirror only below this staleness."},
           "history_tolerance_seconds": {"type": "integer", "format": "int64"},
           "last_error": {"type": "string"},
-          "last_success": {"type": "string", "format": "date-time"}
+          "last_attempt": {"type": "string", "format": "date-time", "description": "When discovery last queried the collector. Absent when it never has, which is the whole explanation for a status of \"unknown\"."},
+          "last_success": {"type": "string", "format": "date-time", "description": "When discovery last found a mirror."}
         }
       },
       "DBMirrorStatus": {

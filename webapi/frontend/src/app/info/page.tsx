@@ -216,13 +216,17 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       ? 'bg-green-100 text-green-800'
       : health.status === 'warning'
         ? 'bg-amber-100 text-amber-800'
-        : 'bg-red-100 text-red-800';
+        : health.status === 'unknown'
+          ? 'bg-gray-100 text-gray-700'
+          : 'bg-red-100 text-red-800';
   const statusText =
     health.status === 'ok'
       ? 'Serving'
       : health.status === 'warning'
         ? 'Discovered, not serving'
-        : 'Not reachable';
+        : health.status === 'unknown'
+          ? 'Not checked yet'
+          : 'Not reachable';
 
   return (
     <>
@@ -253,33 +257,68 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
             .join(' @ ')}
         />
       )}
-      <Row
-        label="Job queue"
-        value={
-          <StalenessValue
-            ok={health.job_queue_caught_up}
-            okText="caught up"
-            notOkText="behind the schedd's job_queue.log"
-            seconds={health.job_queue_staleness_seconds}
-            tolerance={health.jobs_tolerance_seconds}
+      {health.discovered ? (
+        <>
+          <Row
+            label="Job queue"
+            value={
+              <StalenessValue
+                ok={health.job_queue_caught_up}
+                okText="caught up"
+                notOkText="behind the schedd's job_queue.log"
+                seconds={health.job_queue_staleness_seconds}
+                tolerance={health.jobs_tolerance_seconds}
+              />
+            }
           />
-        }
-      />
+          <Row
+            label="History"
+            value={
+              health.history_gap ? (
+                <span className="text-red-700">
+                  durability gap reported — history routing is stopped
+                </span>
+              ) : (
+                <StalenessValue
+                  ok
+                  okText=""
+                  notOkText=""
+                  seconds={health.history_staleness_seconds}
+                  tolerance={health.history_tolerance_seconds}
+                />
+              )
+            }
+          />
+        </>
+      ) : (
+        <Row
+          label="Freshness"
+          value={
+            <span className="text-gray-500">
+              Unknown — no mirror advertisement has been read, and the lag
+              is only ever reported by the mirror itself.
+            </span>
+          }
+        />
+      )}
       <Row
-        label="History"
+        label="Last polled"
         value={
-          health.history_gap ? (
-            <span className="text-red-700">
-              durability gap reported — history routing is stopped
+          health.last_attempt ? (
+            <span>
+              {new Date(health.last_attempt).toLocaleString()}
+              {health.ad_age_seconds ? (
+                <span className="text-gray-400">
+                  {' '}
+                  · advertisement read{' '}
+                  {health.ad_age_seconds.toLocaleString()}s ago
+                </span>
+              ) : null}
             </span>
           ) : (
-            <StalenessValue
-              ok
-              okText=""
-              notOkText=""
-              seconds={health.history_staleness_seconds}
-              tolerance={health.history_tolerance_seconds}
-            />
+            <span className="text-gray-500">
+              Never — nothing has asked the collector for the mirror yet.
+            </span>
           )
         }
       />
@@ -301,6 +340,12 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
 
 // StalenessValue puts a staleness next to the tolerance that gates it:
 // "12s behind (routes below 60s)" is actionable where a bare "12" is not.
+//
+// The number is the lag the mirror measured on ITSELF when it last
+// advertised, not anything derived from this server's clock. The mirror
+// advertises every few minutes but syncs continuously, so an aging
+// advertisement is not a lagging mirror -- how old the reading is, is
+// the "Last polled" row's job.
 function StalenessValue({
   ok,
   okText,
@@ -311,13 +356,21 @@ function StalenessValue({
   ok: boolean;
   okText: string;
   notOkText: string;
-  seconds: number;
+  seconds?: number;
   tolerance: number;
 }) {
+  if (seconds === undefined) {
+    return (
+      <span className="text-gray-500">
+        unknown{' '}
+        <span className="text-gray-400">(routes below {tolerance}s)</span>
+      </span>
+    );
+  }
   const over = seconds > tolerance;
   return (
     <span className={over || !ok ? 'text-amber-700' : undefined}>
-      {seconds.toLocaleString()}s behind{' '}
+      {seconds.toLocaleString()}s behind when last advertised{' '}
       <span className="text-gray-400">(routes below {tolerance}s)</span>
       {!ok && notOkText ? ` — ${notOkText}` : ''}
       {ok && okText && !over ? ` — ${okText}` : ''}

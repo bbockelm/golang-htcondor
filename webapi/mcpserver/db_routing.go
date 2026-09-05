@@ -96,7 +96,7 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 // bypass, so this does the same via an Owner constraint -- routing must not widen
 // what a caller sees. The result shares toolQueryJobs' shape (renderJobsBase) so
 // only the provenance note and "source" metadata reveal the backend.
-func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projection []string, limit int, pageToken string, nowUnix int64) (interface{}, bool, dbmirror.Decision) {
+func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projection []string, limit int, pageToken string) (interface{}, bool, dbmirror.Decision) {
 	if !s.htcondordbEnabled() {
 		return nil, false, decline(dbmirror.ReasonNotConfigured, "htcondordb routing is not configured")
 	}
@@ -111,7 +111,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if err != nil {
 		return nil, false, decline(dbmirror.ReasonNoMirror, err.Error())
 	}
-	d := dbmirror.JobsDecision(info, pageToken, nowUnix)
+	d := dbmirror.JobsDecision(info, pageToken)
 	if !d.Use {
 		return nil, false, d
 	}
@@ -163,7 +163,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	if info.Name != "" {
 		note += fmt.Sprintf(" %q", info.Name)
 	}
-	if stale := dbmirror.JobQueueStaleness(info, nowUnix); stale > 0 {
+	if stale := dbmirror.JobQueueStaleness(info); stale > 0 {
 		note += fmt.Sprintf("; job queue synced %ds ago", stale)
 	}
 	note += "; " + d.Note + "]"

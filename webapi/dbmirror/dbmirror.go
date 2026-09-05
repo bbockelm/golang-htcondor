@@ -47,6 +47,15 @@ const (
 	// InfoTTL is how long a discovered mirror ad is reused before the
 	// collector is asked again.
 	InfoTTL = 30 * time.Second
+	// PollInterval is how often Poll re-discovers the mirror. It matches
+	// InfoTTL, so a polled Locator asks the collector exactly as often as
+	// a busy on-demand one did -- polling moves that query off the read
+	// path rather than adding load.
+	PollInterval = InfoTTL
+	// PollTimeout bounds one poll's collector query, so a collector that
+	// accepts the connection and then hangs cannot wedge the loop for the
+	// life of the daemon.
+	PollTimeout = 10 * time.Second
 
 	// HistoryToleranceSecs is the maximum mirror staleness at which
 	// completed-job reads still prefer the mirror. History is
@@ -68,14 +77,21 @@ type Info struct {
 	Name              string
 	Address           string
 	TimeTravelEnabled bool
-	SecondsSinceSync  int64
 	HistoryGap        bool
 
-	// Job-queue mirror freshness, for routing live job queries.
-	// CaughtUp means the syncer had drained job_queue.log to EOF at its
-	// last poll; LastSyncTime is that poll's absolute Unix time, so the
-	// CURRENT staleness can be computed as now-LastSyncTime independent
-	// of how old the collector ad is.
+	// History mirror freshness, as measured when the ad was BUILT.
+	// SecondsSinceSync is the syncer's lag at that moment and
+	// HistoryLastSyncTime is the absolute Unix time of the poll it was
+	// measured against. Routing gates on the lag; see staleness for why
+	// it is not recomputed against the local clock.
+	HistoryLastSyncTime int64
+	SecondsSinceSync    int64
+
+	// Job-queue mirror freshness, for routing live job queries, and
+	// likewise as of the ad's build time. CaughtUp means the syncer had
+	// drained job_queue.log to EOF at its last poll; LastSyncTime is
+	// that poll's absolute Unix time, which orders two mirrors' polls
+	// against each other (see fresherJobQueue).
 	JobQueueCaughtUp     bool
 	JobQueueLastSyncTime int64
 	JobQueueSecondsSync  int64
@@ -88,6 +104,7 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	info.Address, _ = ad.EvaluateAttrString("MyAddress")
 	info.TimeTravelEnabled, _ = ad.EvaluateAttrBool("TimeTravelEnabled")
 	info.HistoryGap, _ = ad.EvaluateAttrBool("HistoryGapDetected")
+	info.HistoryLastSyncTime, _ = ad.EvaluateAttrInt("HistoryLastSyncTime")
 	info.SecondsSinceSync, _ = ad.EvaluateAttrInt("HistorySecondsSinceSync")
 	info.JobQueueCaughtUp, _ = ad.EvaluateAttrBool("JobQueueCaughtUp")
 	info.JobQueueLastSyncTime, _ = ad.EvaluateAttrInt("JobQueueLastSyncTime")
@@ -194,6 +211,22 @@ type Health struct {
 	LastError string
 	// LastSuccess is when discovery last found a mirror; zero if never.
 	LastSuccess time.Time
+	// LastAttempt is when the collector was last asked, zero if it never
+	// has been. On a daemon running Poll this is never more than
+	// PollInterval old; without Poll, discovery only happens on a read
+	// that wants to route, so an idle one leaves it zero and every other
+	// field here describes nothing that was ever checked.
+	//
+	// It exists because "no mirror is advertising" and "nobody has
+	// looked" are the same absence otherwise, and the second is the
+	// common case while an operator is setting the integration up. A
+	// Discover answered from the InfoTTL cache does not count as an
+	// attempt -- nothing was asked of the collector.
+	LastAttempt time.Time
+	// InfoAt is when the cached ad in Info was discovered; zero if none.
+	// Info is kept across a failed attempt, so an ad older than InfoTTL
+	// is one routing would no longer use without re-discovering.
+	InfoAt time.Time
 }
 
 // Health reports what discovery last saw. It never dials and never
@@ -212,6 +245,7 @@ func (l *Locator) Health() Health {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	h.Info, h.LastError, h.LastSuccess = l.info, l.lastErr, l.lastOK
+	h.LastAttempt, h.InfoAt = l.lastTry, l.infoAt
 	return h
 }
 
@@ -234,9 +268,18 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 	}
 	l.mu.Unlock()
 
+	return l.refresh(ctx)
+}
+
+// refresh queries the collector unconditionally, bypassing the InfoTTL
+// cache, and records the outcome. Discover uses it on a cache miss and
+// Poll on every tick -- a poll that could be answered from the cache
+// would defeat the point, since the cache is what it exists to refill.
+func (l *Locator) refresh(ctx context.Context) (*Info, error) {
 	info, err := l.discover(ctx)
 
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.lastTry = time.Now()
 	if err != nil {
 		// Keep the previous ad out of the cache on failure: a stale
@@ -244,12 +287,57 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 		// freshness gate is the whole safety story. lastErr is kept for
 		// the readiness snapshot.
 		l.lastErr = err.Error()
-		l.mu.Unlock()
 		return nil, err
 	}
 	l.info, l.infoAt, l.lastErr, l.lastOK = info, time.Now(), "", time.Now()
-	l.mu.Unlock()
 	return info, nil
+}
+
+// Poll re-discovers the mirror on a timer until ctx is done. It is meant
+// to be run in a goroutine for the life of the daemon, and returns
+// immediately when routing is not configured.
+//
+// Discovery is otherwise lazy -- it happens on a read that wants to
+// route -- which has two costs. The first read after startup pays the
+// collector round trip and, worse, an idle daemon knows nothing at all:
+// its status page cannot say whether the mirror is reachable, because
+// nothing ever asked, and "never looked" is indistinguishable from
+// "looked and failed". Polling makes the answer continuously true
+// instead of a side effect of traffic, and gives the operator a "last
+// checked" that means something.
+//
+// onResult, if non-nil, is called with the outcome of every poll -- the
+// discovered ad, or the error. It is how a caller logs transitions; this
+// package deliberately does no logging of its own, since it has no
+// opinion about which of a daemon's log destinations this belongs to.
+func (l *Locator) Poll(ctx context.Context, onResult func(*Info, error)) {
+	if !l.Enabled() {
+		return
+	}
+	// Poll once up front: a daemon that just started should know where
+	// the mirror is before the first request arrives, not one interval
+	// later.
+	l.pollOnce(ctx, onResult)
+
+	ticker := time.NewTicker(PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			l.pollOnce(ctx, onResult)
+		}
+	}
+}
+
+func (l *Locator) pollOnce(ctx context.Context, onResult func(*Info, error)) {
+	ctx, cancel := context.WithTimeout(ctx, PollTimeout)
+	defer cancel()
+	info, err := l.refresh(ctx)
+	if onResult != nil {
+		onResult(info, err)
+	}
 }
 
 func (l *Locator) discover(ctx context.Context) (*Info, error) {
@@ -372,8 +460,8 @@ func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 	if info.HistoryGap {
 		return decline(ReasonHistoryGap, "mirror reported a history durability gap")
 	}
-	if info.SecondsSinceSync > HistoryToleranceSecs {
-		return decline(ReasonStale, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", info.SecondsSinceSync, HistoryToleranceSecs))
+	if stale := HistoryStaleness(info); stale > HistoryToleranceSecs {
+		return decline(ReasonStale, fmt.Sprintf("mirror is stale (%ds since last sync > %ds tolerance)", stale, HistoryToleranceSecs))
 	}
 	if opts != nil {
 		if opts.Since != "" {
@@ -389,19 +477,54 @@ func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 	return serve("served from the htcondordb mirror")
 }
 
-// JobQueueStaleness is the mirror's CURRENT job-queue staleness in
-// seconds. It uses the absolute last-sync stamp when advertised
-// (now-LastSyncTime, correct regardless of how old the collector ad is)
-// and falls back to the ad's frozen SecondsSinceSync only when the
-// absolute stamp is missing.
-func JobQueueStaleness(info *Info, nowUnix int64) int64 {
-	if info.JobQueueLastSyncTime > 0 {
-		if d := nowUnix - info.JobQueueLastSyncTime; d >= 0 {
-			return d
-		}
+// JobQueueStaleness is how far the mirror's job queue was behind the
+// schedd when it last advertised. See staleness.
+func JobQueueStaleness(info *Info) int64 {
+	if info == nil {
 		return 0
 	}
-	return info.JobQueueSecondsSync
+	return staleness(info.JobQueueSecondsSync)
+}
+
+// HistoryStaleness is how far the mirror's history was behind when it
+// last advertised. See staleness.
+func HistoryStaleness(info *Info) int64 {
+	if info == nil {
+		return 0
+	}
+	return staleness(info.SecondsSinceSync)
+}
+
+// staleness is the lag the mirror measured on itself at the moment it
+// built the ad, which is what every routing decision gates on.
+//
+// The tempting alternative -- now minus the advertised LastSyncTime --
+// is wrong, and wrong in a way that quietly disables routing. It adds
+// the AD's age to the MIRROR's lag, and those are different quantities:
+// a mirror re-advertises on the collector's update interval (five
+// minutes in a stock pool) while its syncer polls continuously, so an
+// ad built when the syncer was 5s behind still reports a 5s lag four
+// minutes later even though the syncer has run many times since. The
+// local clock cannot see those runs. Recomputing against it would make
+// a perfectly current mirror read as minutes stale for most of every
+// advertise window, and the 60s job-queue tolerance would then decline
+// essentially every live query.
+//
+// What that leaves uncovered is a mirror whose syncer stalls between
+// ads. That shows up on the next advertisement, when the mirror measures
+// its own now-larger lag -- so the gate closes an update interval later
+// rather than immediately. How old the information is, is a separate
+// question with a separate answer: the age of the ad, which callers
+// report alongside the lag rather than folded into it.
+//
+// A negative lag (an older mirror, or a bug) clamps to 0 rather than
+// passing through, since a negative would sail through every tolerance
+// check.
+func staleness(adTimeLagSecs int64) int64 {
+	if adTimeLagSecs < 0 {
+		return 0
+	}
+	return adTimeLagSecs
 }
 
 // JobsDecision decides whether a live job query may be served from the
@@ -416,7 +539,7 @@ func JobQueueStaleness(info *Info, nowUnix int64) int64 {
 // continuing a SCHEDD-issued token here: the two cursors mean different
 // things, so a caller holding one stays where it started (see
 // EncodeCursor).
-func JobsDecision(info *Info, pageToken string, nowUnix int64) Decision {
+func JobsDecision(info *Info, pageToken string) Decision {
 	if info == nil || info.Address == "" {
 		return decline(ReasonNoMirror, "no htcondordb mirror is advertising")
 	}
@@ -426,7 +549,7 @@ func JobsDecision(info *Info, pageToken string, nowUnix int64) Decision {
 	if !info.JobQueueCaughtUp {
 		return decline(ReasonNotCaughtUp, "mirror's job queue is not caught up to the schedd")
 	}
-	if stale := JobQueueStaleness(info, nowUnix); stale > JobsToleranceSecs {
+	if stale := JobQueueStaleness(info); stale > JobsToleranceSecs {
 		return decline(ReasonStale, fmt.Sprintf("mirror's job queue last synced %ds ago (> %ds tolerance)", stale, JobsToleranceSecs))
 	}
 	if pageToken != "" {
@@ -466,8 +589,8 @@ func Provenance(info *Info, reason string) string {
 	if info != nil && info.Name != "" {
 		note += fmt.Sprintf(" %q", info.Name)
 	}
-	if info != nil && info.SecondsSinceSync > 0 {
-		note += fmt.Sprintf("; synced %ds ago", info.SecondsSinceSync)
+	if s := HistoryStaleness(info); s > 0 {
+		note += fmt.Sprintf("; synced %ds ago", s)
 	}
 	if reason != "" {
 		note += "; " + reason

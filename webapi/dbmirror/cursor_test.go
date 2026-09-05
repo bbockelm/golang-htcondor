@@ -68,19 +68,18 @@ func TestDecodeCursorRejectsGarbage(t *testing.T) {
 // issued and declines one the schedd issued, so neither backend
 // continues the other's walk.
 func TestJobsDecisionOwnsItsOwnTokens(t *testing.T) {
-	now := int64(1_700_000_000)
-	fresh := &Info{Name: "db", Address: "<1.2.3.4:9618>", JobQueueCaughtUp: true, JobQueueLastSyncTime: now - 5}
+	fresh := &Info{Name: "db", Address: "<1.2.3.4:9618>", JobQueueCaughtUp: true, JobQueueSecondsSync: 5}
 
-	if d := JobsDecision(fresh, "", now); !d.Use {
+	if d := JobsDecision(fresh, ""); !d.Use {
 		t.Error("a first page should route to a current mirror")
 	}
-	if d := JobsDecision(fresh, EncodeCursor(dbrpc.SeqCursor{Shard: 2, Seq: 9}), now); !d.Use {
+	if d := JobsDecision(fresh, EncodeCursor(dbrpc.SeqCursor{Shard: 2, Seq: 9})); !d.Use {
 		t.Error("a mirror-issued token should resume on the mirror")
 	}
 	// A schedd-issued token is a query-shape decline, not an
 	// availability one: retrying will not help, the caller has to drop
 	// the token.
-	d := JobsDecision(fresh, "MTIzLjQ=", now)
+	d := JobsDecision(fresh, "MTIzLjQ=")
 	if d.Use {
 		t.Errorf("a schedd-issued token must stay with the schedd, got ok (%s)", d.Note)
 	}

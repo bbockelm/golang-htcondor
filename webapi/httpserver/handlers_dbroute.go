@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
@@ -77,7 +76,7 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 			Note:   err.Error(),
 		})
 	}
-	d := s.recordMirror("jobs", dbmirror.JobsDecision(info, pageToken, time.Now().Unix()))
+	d := s.recordMirror("jobs", dbmirror.JobsDecision(info, pageToken))
 	if !d.Use {
 		return false, d
 	}

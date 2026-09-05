@@ -1,9 +1,18 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
+
+// mirrorProbeTimeout bounds the fallback discovery this endpoint can
+// force. It is a single collector query, and the page it serves
+// refreshes on a timer, so a hung collector must not hold the request
+// open.
+const mirrorProbeTimeout = 5 * time.Second
 
 // The htcondordb mirror answers job and history reads that would
 // otherwise hit the schedd, and it does so silently: a correctly
@@ -54,6 +63,18 @@ func (s *Handler) handleDBMirrorStatus(w http.ResponseWriter, r *http.Request) {
 
 	resp := dbMirrorStatusResponse{Enabled: s.dbMirror.Enabled()}
 	if resp.Enabled {
+		// The background poller normally keeps this current, so the
+		// usual case does nothing here. Probe only when it has not run
+		// recently -- a handler built without Start having run it, or a
+		// wedged loop -- because the worst thing this page can say is
+		// "not reachable" about a mirror nothing ever tried to reach.
+		// The result is discarded; mirrorHealth reads the same state
+		// back.
+		if h := s.dbMirror.Health(); h.LastAttempt.IsZero() || time.Since(h.LastAttempt) > dbmirror.PollInterval {
+			ctx, cancel := context.WithTimeout(r.Context(), mirrorProbeTimeout)
+			_, _ = s.dbMirror.Discover(ctx)
+			cancel()
+		}
 		resp.Health = mirrorHealth(s.dbMirror, time.Now())
 	}
 	resp.Routing = s.httpMetricsState.mirrorRoutingCounts()

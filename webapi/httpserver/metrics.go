@@ -487,6 +487,7 @@ type mirrorCollector struct {
 	jobsStale    *prometheus.Desc
 	historyStale *prometheus.Desc
 	historyGap   *prometheus.Desc
+	adAge        *prometheus.Desc
 }
 
 func newMirrorCollector(l *dbmirror.Locator) *mirrorCollector {
@@ -498,8 +499,9 @@ func newMirrorCollector(l *dbmirror.Locator) *mirrorCollector {
 		up:           n("up", "1 if an htcondordb mirror was discovered and is usable, 0 otherwise."),
 		required:     n("required", "1 if reads must be served from the mirror (no schedd fallback), 0 otherwise."),
 		caughtUp:     n("job_queue_caught_up", "1 if the mirror had drained the schedd's job_queue.log at its last poll."),
-		jobsStale:    n("job_queue_staleness_seconds", "Seconds since the mirror last synced the job queue. Live job reads route to the mirror only below the routing tolerance."),
-		historyStale: n("history_staleness_seconds", "Seconds since the mirror last synced job history."),
+		jobsStale:    n("job_queue_staleness_seconds", "How far the mirror's job queue was behind the schedd when it last advertised. Live job reads route to the mirror only below the routing tolerance."),
+		historyStale: n("history_staleness_seconds", "How far the mirror's history was behind when it last advertised."),
+		adAge:        n("ad_age_seconds", "Age of the mirror advertisement these figures come from. The mirror measures its own lag when it advertises and keeps syncing between advertisements, so this is the age of the information, not of the mirror's data."),
 		historyGap:   n("history_gap", "1 if the mirror reported a history durability gap, which stops all history routing."),
 	}
 }
@@ -511,6 +513,7 @@ func (c *mirrorCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.jobsStale
 	ch <- c.historyStale
 	ch <- c.historyGap
+	ch <- c.adAge
 }
 
 func (c *mirrorCollector) Collect(ch chan<- prometheus.Metric) {
@@ -528,9 +531,16 @@ func (c *mirrorCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	g(c.up, 1)
 	g(c.caughtUp, b2f(h.Info.JobQueueCaughtUp))
-	g(c.jobsStale, float64(dbmirror.JobQueueStaleness(h.Info, time.Now().Unix())))
-	g(c.historyStale, float64(h.Info.SecondsSinceSync))
+	g(c.jobsStale, float64(dbmirror.JobQueueStaleness(h.Info)))
+	g(c.historyStale, float64(dbmirror.HistoryStaleness(h.Info)))
 	g(c.historyGap, b2f(h.Info.HistoryGap))
+	if !h.InfoAt.IsZero() {
+		// Without this, every other gauge here is a number with no
+		// indication of how old it is, and a mirror that stopped
+		// advertising looks indistinguishable from a healthy one until
+		// the collector expires its ad.
+		g(c.adAge, time.Since(h.InfoAt).Seconds())
+	}
 }
 
 func b2f(b bool) float64 {
