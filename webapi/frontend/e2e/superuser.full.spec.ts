@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { adminPassword, loginAs, loginAsAdmin, userPassword } from './fixtures/login';
 import { serverLog } from './fixtures/serverlog';
 
 // Superuser mode: the largest privilege the server grants -- acting on
@@ -17,9 +17,9 @@ import { serverLog } from './fixtures/serverlog';
 // covered. Demo mode now sets SuperuserGroup so the feature is
 // reachable without a real pool and a real IDP group.
 
-const password = adminPassword(
-  serverLog(),
-);
+const log = serverLog();
+const password = adminPassword(log);
+const userPw = userPassword(log);
 
 const ARM = '/api/v1/admin/superuser';
 const ME = '/api/v1/auth/me';
@@ -107,4 +107,55 @@ test('arming is written to the audit log', async ({ page }) => {
 
   expect(text, 'arming should be recorded').toContain('Superuser mode armed');
   expect(text, 'the record should name the operator').toContain('admin');
+});
+
+// Gating: who may arm at all.
+//
+// This is the control that matters. Everything above describes how the
+// mode behaves for someone entitled to it; these say that someone who
+// is not entitled cannot get it. HTTP_API_SUPERUSER_GROUP is a live
+// production setting (OSG-Staff on ap40), so the group check is what
+// stands between an ordinary account and acting as anyone on the AP.
+test('a non-member is refused superuser mode', async ({ page }) => {
+  await loginAs(page, 'user', userPw);
+
+  // The server must refuse, not merely decline to arm. A 200 carrying
+  // active:false would be a pass for any test that only checked the
+  // armed state afterwards, while leaving the endpoint reachable.
+  const res = await page.request.post(ARM, { data: { enabled: true } });
+  expect(
+    res.status(),
+    `a non-member should be forbidden, got ${res.status()}: ${(await res.text()).slice(0, 160)}`,
+  ).toBe(403);
+
+  // And the refusal has to hold: nothing may be armed afterwards.
+  const me = await (await page.request.get(ME)).json();
+  expect(me.superuser_allowed, 'a non-member is not permitted to arm').toBe(false);
+  expect(me.superuser_active, 'a refused request must not have armed anything').toBe(false);
+});
+
+test('a non-member cannot ride an admin\'s armed session', async ({ browser }) => {
+  // Arming is per session, so an armed admin elsewhere must not change
+  // what a non-member's own session can do. Checked because the two
+  // facts -- "armed" is global state on the server, "allowed" is a
+  // property of the caller -- are exactly the pair a lookup keyed on
+  // the wrong thing would conflate.
+  const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const adminPage = await adminCtx.newPage();
+  const userPage = await userCtx.newPage();
+
+  await loginAsAdmin(adminPage, password);
+  await loginAs(userPage, 'user', userPw);
+
+  const armed = await adminPage.request.post(ARM, { data: { enabled: true } });
+  expect(armed.status(), 'the admin should be able to arm').toBe(200);
+
+  const me = await (await userPage.request.get(ME)).json();
+  expect(me.superuser_active, 'a non-member must not inherit an armed session').toBe(false);
+  expect(me.superuser_allowed).toBe(false);
+
+  await adminPage.request.post(ARM, { data: { enabled: false } });
+  await adminCtx.close();
+  await userCtx.close();
 });
