@@ -87,7 +87,7 @@ func TestFoldAggregateRows(t *testing.T) {
 		{Group: []string{"bob"}, Count: 5},
 		{Group: []string{"alice"}, Count: 4},
 	}
-	got := foldAggregateRows(rows, []string{"Owner"})
+	got := foldAggregateRows(rows)
 
 	if len(got) != 2 {
 		t.Fatalf("got %d group(s), want 2: %v", len(got), got)
@@ -104,7 +104,7 @@ func TestFoldAggregateRows(t *testing.T) {
 // everything matching" means once the projection has been widened for
 // the constraint.
 func TestFoldAggregateRowsWithNoGrouping(t *testing.T) {
-	got := foldAggregateRows([]AggregateRow{{Count: 3}, {Count: 4}, {Count: 5}}, nil)
+	got := foldAggregateRows([]AggregateRow{{Count: 3}, {Count: 4}, {Count: 5}})
 	if len(got) != 1 || got[0].Count != 12 {
 		t.Fatalf("got %v, want a single row of 12", got)
 	}
@@ -117,13 +117,13 @@ func TestFoldAggregateRowsDoesNotCollideGroups(t *testing.T) {
 		{Group: []string{"a", "b"}, Count: 1},
 		{Group: []string{"a\x00b"}, Count: 1},
 	}
-	if got := foldAggregateRows(rows, []string{"x", "y"}); len(got) != 2 {
+	if got := foldAggregateRows(rows); len(got) != 2 {
 		t.Errorf("distinct groupings folded together: %v", got)
 	}
 }
 
 func TestFoldAggregateRowsEmpty(t *testing.T) {
-	if got := foldAggregateRows(nil, []string{"Owner"}); len(got) != 0 {
+	if got := foldAggregateRows(nil); len(got) != 0 {
 		t.Errorf("got %v, want empty", got)
 	}
 }
