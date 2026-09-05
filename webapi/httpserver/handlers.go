@@ -375,6 +375,10 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Marshal the ad
+		// Same treatment as the single-job path: usage attributes go out
+		// as numbers, not as the expressions the schedd stored them as.
+		evaluateUsageAttrs(result.Ad)
+
 		adJSON, err := json.Marshal(result.Ad)
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to marshal job ad", "error", err)
@@ -682,6 +686,11 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 		s.writeError(w, http.StatusNotFound, "Job not found")
 		return
 	}
+
+	// Turn expression-valued usage attributes into numbers before they go
+	// out. MemoryUsage in particular is an expression over ResidentSetSize,
+	// and would otherwise reach the client as "/Expr(...)/".
+	evaluateUsageAttrs(jobAds[0])
 
 	// Return the job ClassAd as JSON - uses MarshalJSON method
 	s.writeJSON(w, http.StatusOK, jobAds[0])
