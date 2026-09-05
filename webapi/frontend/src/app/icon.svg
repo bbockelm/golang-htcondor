@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  HTCondor brand mark, taken verbatim from the HTCondor source tree
+  (docs/_static/logo.svg) so the path and the #ce1f44 red match the
+  project's own artwork rather than an approximation of it.
+
+  htcondor.org itself ships no favicon — /favicon.ico is a 404 and the
+  page declares no icon link — so there was nothing to copy directly.
+
+  The only change is the canvas. The mark is 1868.15 x 680.73, roughly
+  2.7:1, and a browser tab is square: left as-is it would be letterboxed
+  by the browser and rendered even smaller. Here it sits on a square
+  viewBox, centred vertically and inset 5% so it doesn't touch the
+  edges, which is the largest the mark can be drawn in a square without
+  distorting it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1868.15 1868.15">
+  <g transform="translate(93.41,627.72) scale(0.9)">
+    <path fill="#ce1f44" d="M1762.09,22.26c-222.47,63.32-556.11,141.43-812.66,353.05C684.32,143.17,258.3,42.53,157.65,22.01,68.27,3.75-76.7-17.67,49.23,27.93c307,97.93,796.3,510.02,880.91,639.94,11.1,17.06,22,17.06,35.19,.53,101.72-127.78,371.18-367.11,868-641.67,53.12-27.55,57.03-41.03-71.25-4.48Z"/>
+  </g>
+</svg>
