@@ -912,12 +912,22 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		}
 	}
 
-	// Convert token to SecurityConfig with the appropriate session cache
-	// Determine if we should allow FS fallback:
-	// - In user-header mode, tokens are generated but not validated by schedd, so FS fallback is needed
-	// - In session-based auth, tokens are properly signed and validated, so TOKEN-only should be used
-	allowFSFallback := s.userHeader != ""
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, allowFSFallback)
+	// Never offer FS, whatever produced the token.
+	//
+	// User-header mode used to append it, on the premise that its token
+	// was "generated locally and not signed with anything the schedd
+	// recognises". That premise was wrong: both branches of
+	// extractOrGenerateToken call security.GenerateJWT with the same
+	// s.signingKeyPath and the same s.trustDomain, so a header-mode
+	// token is signed exactly like a session-mode one and the schedd
+	// validates it the same way.
+	//
+	// Offering FS alongside it only let the schedd pick FS -- it lists FS
+	// first -- and record the daemon's own OS user as the job Owner
+	// instead of the header identity. A caller then could not see, hold
+	// or remove the job they had just submitted, because every
+	// owner-scoped query filters on an Owner that is not theirs.
+	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}

@@ -1,15 +1,21 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/bbockelm/cedar/security"
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -410,4 +416,79 @@ func TestConfigureSecurityForTokenAuthMethods(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestUserHeaderModeDoesNotOfferFS is the regression. User-header mode
+// appended FS to the offered auth methods, on the premise that its
+// generated token was unsigned. It is not: extractOrGenerateToken signs
+// it with the same key and issuer as the session-cookie path.
+//
+// Offering FS let the schedd pick it -- HTCondor lists FS first, and
+// cedar's negotiation takes the server's preference order -- so the
+// schedd recorded its own OS user as the job Owner instead of the token
+// subject. The caller could then not see, hold or remove the job they
+// had just submitted: every owner-scoped query filters on an Owner that
+// is not theirs.
+//
+// Verified against a real personal HTCondor before and after:
+//
+//	before: condor_q -af Owner User  ->  vscode  vscode@test.htcondor.org
+//	after:  condor_q -af Owner User  ->  e2e     e2e@test.htcondor.org
+//
+// This drives createAuthenticatedContext rather than calling
+// ConfigureSecurityForTokenWithCacheAndFallback directly: the bug was
+// the argument that call site passed, so a test that supplies its own
+// argument cannot catch it. An earlier version of this test did exactly
+// that and passed with the bug reintroduced.
+func TestUserHeaderModeDoesNotOfferFS(t *testing.T) {
+	keyDir := t.TempDir()
+	// On-disk signing keys are XOR-scrambled with 0xdeadbeef; write one
+	// in that format so GenerateJWT can actually sign.
+	raw := []byte("user-header-mode-regression-test-key")
+	deadbeef := []byte{0xde, 0xad, 0xbe, 0xef}
+	scrambled := make([]byte, len(raw))
+	for i := range raw {
+		scrambled[i] = raw[i] ^ deadbeef[i%len(deadbeef)]
+	}
+	keyPath := filepath.Join(keyDir, "POOL")
+	if err := os.WriteFile(keyPath, scrambled, 0o600); err != nil {
+		t.Fatalf("write signing key: %v", err)
+	}
+
+	// A logger is required, not optional: the user-header branch calls
+	// s.logger.Debug unguarded (unlike the API-key path, which checks for
+	// nil), so a Handler without one panics before it reaches the code
+	// under test.
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+
+	h := &Handler{
+		logger:                   logger,
+		userHeader:               "X-Test-User",
+		userHeaderUnsafeAllowAll: true,
+		signingKeyPath:           keyPath,
+		trustDomain:              "test.htcondor.org",
+		uidDomain:                "test.htcondor.org",
+	}
+
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
+	r.Header.Set("X-Test-User", "alice")
+
+	ctx, err := h.createAuthenticatedContext(r)
+	if err != nil {
+		t.Fatalf("createAuthenticatedContext: %v", err)
+	}
+	cfg, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		t.Fatal("no SecurityConfig on the authenticated context")
+	}
+	if containsAuthMethod(cfg.AuthMethods, security.AuthFS) {
+		t.Errorf("FS is offered (%v); the schedd will pick it and record its own OS user as the job Owner",
+			cfg.AuthMethods)
+	}
+	if len(cfg.AuthMethods) == 0 {
+		t.Error("no auth methods offered at all; stripping FS must not empty the list")
+	}
 }
