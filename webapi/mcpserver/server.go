@@ -329,14 +329,30 @@ func (s *Server) handleMessage(ctx context.Context, msg *MCPMessage) *MCPMessage
 	case "tools/list":
 		response.Result = s.handleListTools(ctx, msg.Params)
 	case "tools/call":
+		// Minted here, not inside handleCallTool: the id has to be
+		// readable on THIS scope so the error result can carry the same
+		// value the log line does. A context derived inside the callee
+		// does not come back.
+		traceID := newTraceID()
+		ctx = withTraceID(ctx, traceID)
 		result, err := s.handleCallTool(ctx, msg.Params)
-		if err != nil {
+		switch {
+		case err == nil:
+			response.Result = result
+		case isProtocolError(err):
+			// A malformed request: no tool ran, so there is no tool
+			// result to return.
 			response.Error = &MCPError{
 				Code:    -32000,
 				Message: err.Error(),
 			}
-		} else {
-			response.Result = result
+		default:
+			// A tool ran and failed. MCP wants that as a normal result
+			// carrying isError, because a JSON-RPC error is a protocol
+			// fault that clients surface as an opaque failure -- the
+			// model never sees the text, so the diagnosis is thrown
+			// away exactly when it is needed.
+			response.Result = toolErrorResult(toolNameFromParams(msg.Params), traceID, err)
 		}
 	case "resources/list":
 		response.Result = s.handleListResources(ctx, msg.Params)
@@ -397,4 +413,18 @@ func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interfac
 		result["instructions"] = s.instructions
 	}
 	return result
+}
+
+// toolNameFromParams re-reads just the tool name from a tools/call
+// params blob, for error reporting. The dispatcher has already parsed
+// and validated these params by the time we need this, so a failure here
+// means the name is genuinely absent rather than malformed.
+func toolNameFromParams(params json.RawMessage) string {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil || req.Name == "" {
+		return "unknown"
+	}
+	return req.Name
 }
