@@ -8,6 +8,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # A release published minutes ago has had no time to be found
+    # malicious. The cooldown makes Dependabot wait before proposing one,
+    # which is the same reason the Dockerfile pins its tools to versions
+    # that have been public for a while. Security updates are exempt from
+    # cooldown by GitHub's own rules, so a real advisory still arrives
+    # immediately.
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
@@ -29,6 +37,19 @@ updates:
       - "/examples/*"
     schedule:
       interval: "weekly"
+    # A release published minutes ago has had no time to be found
+    # malicious. The cooldown makes Dependabot wait before proposing one,
+    # which is the same reason the Dockerfile pins its tools to versions
+    # that have been public for a while. Security updates are exempt from
+    # cooldown by GitHub's own rules, so a real advisory still arrives
+    # immediately.
+    cooldown:
+      default-days: 7
+      # A major bump is the one most likely to be both disruptive and
+      # under-reviewed, so it waits longest.
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
     groups:
       go-minor-and-patch:
         update-types: ["minor", "patch"]
