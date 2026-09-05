@@ -147,7 +147,7 @@ type sshKeyPair struct {
 // Callers should hand the conn to ssh.NewClientConn — it must not be wrapped
 // in any further buffered reader, since cedar's Stream reads directly from
 // the conn and any extra buffering would swallow sshd's banner.
-func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context) (net.Conn, *sshKeyPair, error) {
+func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming bool) (net.Conn, *sshKeyPair, error) {
 	claim := security.ParseClaimID(info.ClaimID)
 	if claim == nil || claim.SecSessionID() == "" {
 		return nil, nil, fmt.Errorf("malformed ClaimId: missing session id")
@@ -200,7 +200,13 @@ func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context) (net.Conn, *
 	secConfig.Encryption = security.SecurityRequired
 	secConfig.Integrity = security.SecurityRequired
 
-	htcondorClient, err := client.ConnectAndAuthenticate(ctx, info.StarterAddr, secConfig)
+	// DialSinful rather than ConnectAndAuthenticate: same behaviour for a
+	// directly reachable starter, but it can also be told how to traverse
+	// CCB. The two differ only in the options, so the plain call is the
+	// same call with none set.
+	htcondorClient, err := DialSinful(ctx, info.StarterAddr, secConfig, &DialOptions{
+		CCBRequireStreaming: ccbStreaming,
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resume starter session at %s: %w", info.StarterAddr, err)
 	}
@@ -317,6 +323,18 @@ func parseSSHReplyKeys(respAd *classad.ClassAd) (*sshKeyPair, error) {
 type JobShellOptions struct {
 	// HandshakeTimeout caps the SSH handshake (NewClientConn). Default 30s.
 	HandshakeTimeout time.Duration
+
+	// CCBStreaming reaches a starter behind CCB by having the broker relay
+	// the connection, instead of having the execute node dial back to us.
+	//
+	// The default (dial back) needs this process to be reachable from the
+	// execute node, which is not true of an API server in a container or
+	// behind NAT: the broker tells the starter to connect to an address
+	// nothing routes to, and the attempt times out with nothing to show
+	// for it. Set this when we cannot accept inbound connections. It costs
+	// nothing when the starter is not behind CCB -- the address decides
+	// whether CCB is involved at all.
+	CCBStreaming bool
 }
 
 // OpenJobShell is the end-to-end convenience: GET_JOB_CONNECT_INFO + START_SSHD
@@ -377,7 +395,7 @@ func (info *JobConnectInfo) OpenSSH(ctx context.Context, opts *JobShellOptions) 
 		timeout = 30 * time.Second
 	}
 
-	rawConn, keys, err := info.startSSHDOnStarter(ctx)
+	rawConn, keys, err := info.startSSHDOnStarter(ctx, opts.CCBStreaming)
 	if err != nil {
 		return nil, err
 	}
