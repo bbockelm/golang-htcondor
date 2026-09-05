@@ -409,8 +409,8 @@ func testMCPOwnerScopedTool(t *testing.T, client *http.Client, baseURL, bearer s
 		Method:  "tools/call",
 		Params:  json.RawMessage(params),
 	})
-	if resp.Error != nil {
-		t.Fatalf("get_job failed: %v", resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("get_job failed: %v", msg)
 	}
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
@@ -790,11 +790,14 @@ func testMCPSubmitJobRejectsSystemExecutable(t *testing.T, client *http.Client, 
 		Method:  "tools/call",
 		Params:  json.RawMessage(params),
 	})
-	if resp.Error == nil {
+	msg, failed := mcpToolFailure(t, resp)
+	if !failed {
 		t.Fatalf("expected submit_job to reject a system-path executable, got result: %v", resp.Result)
 	}
-	if !strings.Contains(resp.Error.Message, "transfer_executable = False") {
-		t.Errorf("expected the fix in the error message, got: %s", resp.Error.Message)
+	// The point of the rejection is that it tells the caller how to fix
+	// it, so the remedy has to survive into whatever the caller sees.
+	if !strings.Contains(msg, "transfer_executable = False") {
+		t.Errorf("expected the fix in the error message, got: %s", msg)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 )
@@ -684,8 +686,27 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	}
 
 	if err := json.Unmarshal(params, &request); err != nil {
-		return nil, fmt.Errorf("invalid tool call params: %w", err)
+		// The request itself is malformed, so this one really is a
+		// protocol error.
+		return nil, protocolErrorf("invalid tool call params: %w", err)
 	}
+
+	// The dispatcher puts a trace id on the context so the log line and
+	// the message the caller sees carry the same value. Mint one anyway
+	// for any caller that reaches this function directly.
+	traceID := TraceIDFromContext(ctx)
+	if traceID == "" {
+		traceID = newTraceID()
+		ctx = withTraceID(ctx, traceID)
+	}
+
+	started := time.Now()
+	s.logger.Info(logging.DestinationMCP, "MCP tool call",
+		"tool", request.Name,
+		"trace_id", traceID,
+		"session_id", SessionIDFromContext(ctx),
+		"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
+		"arg_keys", argKeys(request.Arguments))
 
 	// Route to appropriate handler
 	var result interface{}
@@ -745,12 +766,45 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		// cyclomatic-complexity score doesn't grow each time we add
 		// a new condor_doc_* tool.
 		if !isCondorDocTool(request.Name) {
-			return nil, fmt.Errorf("unknown tool: %s", request.Name)
+			return nil, protocolErrorf("unknown tool: %s", request.Name)
 		}
 		result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
 	}
 
+	// Log the outcome either way. A failing tool used to produce no log
+	// line at all, which left an administrator with nothing to look at
+	// when a user reported that something "just failed".
+	if err != nil {
+		s.logger.Error(logging.DestinationMCP, "MCP tool call failed",
+			"tool", request.Name,
+			"trace_id", traceID,
+			"session_id", SessionIDFromContext(ctx),
+			"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"duration_ms", time.Since(started).Milliseconds(),
+			"error", err)
+	} else {
+		s.logger.Info(logging.DestinationMCP, "MCP tool call succeeded",
+			"tool", request.Name,
+			"trace_id", traceID,
+			"duration_ms", time.Since(started).Milliseconds())
+	}
+
 	return result, err
+}
+
+// argKeys lists an argument map's keys for the log. Only the keys: a
+// submit file, a credential, or a constraint naming another user all
+// arrive in these values, and none of them belong in a log line.
+func argKeys(args map[string]interface{}) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // toolSubmitJob handles job submission
