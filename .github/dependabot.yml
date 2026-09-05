@@ -32,3 +32,24 @@ updates:
     groups:
       go-minor-and-patch:
         update-types: ["minor", "patch"]
+
+  # The Web UI's npm dependencies (webapi/frontend). Worth tracking now that
+  # they are actually verified: before the Frontend job in ci.yml, nothing
+  # built or type-checked this package on a PR, so a dependency bump could
+  # only be reviewed by reading it. It now has to survive tsc, next build and
+  # the browser tests before it can merge.
+  #
+  # Minor and patch grouped, as with Go. Majors arrive individually: a Next.js
+  # or React major is a migration, not a bump, and bundling it with unrelated
+  # updates makes it impossible to revert one without the others.
+  #
+  # A @playwright/test bump changes the browser cache key in playwright.yml
+  # (it hashes package-lock.json), so that PR re-downloads browsers once. That
+  # is the intended behaviour -- the cached browsers have to match the client.
+  - package-ecosystem: "npm"
+    directory: "/webapi/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
