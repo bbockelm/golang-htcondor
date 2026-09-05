@@ -132,6 +132,12 @@ var readOnlyMCPTools = map[string]bool{
 	"query_history_db":              true,
 	"query_jobs_as_of":              true,
 	"aggregate_jobs":                true,
+	// The watch tools change only this server's own bookkeeping; they
+	// neither read nor alter a job, so an agent restricted to read-only
+	// tools can still ask to be told when something happens.
+	"watch_jobs":    true,
+	"check_watches": true,
+	"cancel_watch":  true,
 }
 
 // handleListTools returns the list of available tools, filtered by
@@ -610,6 +616,12 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 	// Add htcondordb-backed tools when a database is discoverable via the collector. These
 	// answer questions the live schedd is bad at: completed-job history, point-in-time
 	// (time-travel) state, and cheap server-side aggregates. All are read-only and owner-scoped.
+	// Watches let an agent stop polling: register a question, come back
+	// for the answer. Offered whenever the server can evaluate them.
+	if s.jobWatchEnabled() {
+		tools = append(tools, jobWatchTools()...)
+	}
+
 	if s.htcondordbEnabled() {
 		tools = append(tools,
 			Tool{
@@ -754,6 +766,12 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolStoreServiceCredential(ctx, request.Arguments)
 	case "delete_service_credential":
 		result, err = s.toolDeleteServiceCredential(ctx, request.Arguments)
+	case "watch_jobs":
+		result, err = s.toolWatchJobs(ctx, request.Arguments)
+	case "check_watches":
+		result, err = s.toolCheckWatches(ctx, request.Arguments)
+	case "cancel_watch":
+		result, err = s.toolCancelWatch(ctx, request.Arguments)
 	case "query_history_db":
 		result, err = s.toolQueryHistoryDB(ctx, request.Arguments)
 	case "query_jobs_as_of":
