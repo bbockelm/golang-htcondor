@@ -1595,39 +1595,25 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	}
 
 	// Extract the output file from the tar archive
-	tarReader := tar.NewReader(&sandboxBuf)
-	var outputContent string
-
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read tar archive: %w", err)
-		}
-
-		// Check if this is the output file we're looking for
-		baseName := filepath.Base(header.Name)
-		if baseName == outputFile {
-			content, err := io.ReadAll(tarReader)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read %s content: %w", outputType, err)
-			}
-			outputContent = string(content)
-			break
-		}
+	outputContent, found, entries, err := extractSandboxFile(&sandboxBuf, outputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read job sandbox: %w", err)
 	}
-
-	if outputContent == "" {
-		return nil, fmt.Errorf("%s file not found in job sandbox (expected: %s)", outputType, outputFile)
+	if !found {
+		// Say what was there. Previously this named only what was
+		// wanted, which left "the transfer returned nothing" and "the
+		// file is called something else" looking identical from the
+		// outside.
+		return nil, fmt.Errorf("%s file %q not found in the job sandbox; the sandbox contains: %s",
+			outputType, filepath.Base(outputFile), describeSandboxEntries(entries))
 	}
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType, outputContent),
+				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType,
+					describeJobOutput(outputContent, outputType)),
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -1635,8 +1621,25 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 			"output_type": outputType,
 			"filename":    outputFile,
 			"size":        len(outputContent),
+			"empty":       outputContent == "",
 		},
 	}, nil
+}
+
+// describeJobOutput renders retrieved output, saying so when there is
+// none.
+//
+// An empty file is a real and common answer -- a job that succeeds
+// usually writes no stderr -- but rendering it as a heading followed by
+// nothing looks like a truncated or broken response, which is an
+// invitation to go looking for a problem that does not exist. Saying it
+// outright costs a line and closes the question.
+func describeJobOutput(content, outputType string) string {
+	if content != "" {
+		return content
+	}
+	return fmt.Sprintf("(empty -- the file is present in the job sandbox and contains nothing, "+
+		"so the job wrote no %s)", outputType)
 }
 
 // toolAdvertiseToCollector handles advertise_to_collector tool calls
@@ -2406,4 +2409,64 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 			},
 		},
 	}, nil
+}
+
+// extractSandboxFile pulls one file out of a job-sandbox tar, matching on
+// base name, and returns what else the archive held so a miss can be
+// explained.
+//
+// Both sides are reduced to their base name. The wanted name comes from
+// the job's Out or Err attribute, which is not always the bare filename
+// the tar carries: a job submitted with an initial directory of "/"
+// stores it path-qualified, and comparing that against a tar entry's
+// base name never matches. The archive is the authority on where the
+// file sits inside the sandbox, so only the name is compared.
+//
+// found is returned separately from content because an empty file is a
+// real answer. Reporting "not found" for a job whose stdout was empty
+// sends the caller looking for a transfer problem that does not exist.
+func extractSandboxFile(r io.Reader, want string) (content string, found bool, entries []string, err error) {
+	wantBase := filepath.Base(want)
+	tr := tar.NewReader(r)
+	for {
+		header, terr := tr.Next()
+		if errors.Is(terr, io.EOF) {
+			break
+		}
+		if terr != nil {
+			return "", false, entries, terr
+		}
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+		name := filepath.Base(header.Name)
+		entries = append(entries, name)
+		if found || name != wantBase {
+			continue
+		}
+		b, rerr := io.ReadAll(tr)
+		if rerr != nil {
+			return "", false, entries, rerr
+		}
+		// Keep reading so entries lists the whole sandbox even after a
+		// hit; the listing is what makes a later miss diagnosable.
+		content, found = string(b), true
+	}
+	return content, found, entries, nil
+}
+
+// describeSandboxEntries renders a sandbox listing for an error message,
+// distinguishing an empty archive from one whose contents simply did not
+// include what was asked for.
+func describeSandboxEntries(entries []string) string {
+	if len(entries) == 0 {
+		return "nothing at all -- the schedd returned an empty sandbox, so the output was " +
+			"probably never transferred back"
+	}
+	const maxListed = 25
+	if len(entries) > maxListed {
+		return strings.Join(entries[:maxListed], ", ") +
+			fmt.Sprintf(", and %d more", len(entries)-maxListed)
+	}
+	return strings.Join(entries, ", ")
 }
