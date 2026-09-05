@@ -1278,10 +1278,45 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// protectedResourceIdentifier turns the path of an RFC 9728 metadata
+// request back into the resource identifier that document describes.
+//
+// RFC 9728 section 3.1 builds the metadata URL by inserting
+// /.well-known/oauth-protected-resource between the resource's host and
+// its path, so https://host/mcp/message is described by
+// https://host/.well-known/oauth-protected-resource/mcp/message. Whatever
+// follows the well-known segment is therefore the resource's own path,
+// and echoing it back is what keeps the document self-consistent under
+// section 3.3 -- which requires `resource` to equal the identifier the
+// client used to build the URL, and says clients MUST reject it
+// otherwise.
+//
+// Deriving it here rather than storing a constant means a document is
+// correct for whichever of the registered paths asked for it, instead of
+// being right for one and wrong for the rest.
+func (h *Handler) protectedResourceIdentifier(metadataPath string) string {
+	base := strings.TrimRight(h.httpBaseURL, "/")
+	if base == "" {
+		// No public base URL configured. The issuer is the best guess
+		// available, and is what this reported before deriving anything.
+		base = strings.TrimRight(h.oauth2Provider.config.AccessTokenIssuer, "/")
+	}
+	return base + strings.TrimPrefix(metadataPath, wellKnownProtectedResource)
+}
+
 // handleOAuth2ProtectedResourceMetadata handles OAuth 2.0 Protected Resource metadata discovery
-// Implements RFC 9068: OAuth 2.0 Protected Resource Metadata
-// See: https://datatracker.ietf.org/doc/html/rfc9068
-func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+// Implements RFC 9728: OAuth 2.0 Protected Resource Metadata
+// See: https://datatracker.ietf.org/doc/html/rfc9728
+//
+// It answers on both the bare well-known path and the resource-specific
+// one, and reports a `resource` matching whichever was asked for. It used
+// to report the token issuer on the bare path alone: a client protecting
+// https://host/mcp/message, as MCP clients do, then fetched the
+// resource-specific URL, fell through to the SPA, and got HTML; falling
+// back to the bare path it got a document naming the issuer, which is not
+// the resource it asked about, so section 3.3 obliged it to reject that
+// too.
+func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	if h.oauth2Provider == nil {
 		h.writeError(w, http.StatusNotFound, "OAuth2 not configured")
 		return
@@ -1291,7 +1326,7 @@ func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, _
 	issuer := h.oauth2Provider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
-		"resource":                              issuer,
+		"resource":                              h.protectedResourceIdentifier(r.URL.Path),
 		"authorization_servers":                 []string{issuer},
 		"bearer_methods_supported":              []string{"header"},
 		"resource_signing_alg_values_supported": []string{"RS256"},
