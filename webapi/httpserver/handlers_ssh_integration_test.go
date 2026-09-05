@@ -106,9 +106,24 @@ request_memory = 64
 request_disk = 64
 queue
 `
+	// Submit AS testuser, the same identity the WebSocket request below
+	// authenticates as.
+	//
+	// ssh-to-job is ownership-checked by the schedd (UserCheck2 via
+	// GET_JOB_CONNECT_INFO), so the submitter and the caller have to be the
+	// same person -- which is what a real user does anyway. This used to
+	// pass with a plain schedd.Submit only because the API offered FS
+	// alongside its token and the schedd picked FS, making BOTH sides the
+	// harness's OS user. With that fallback gone the caller is genuinely
+	// testuser, and a job owned by anyone else is correctly refused.
+	submitCtx, err := contextAsUser(ctx, harness, testUser)
+	if err != nil {
+		t.Fatalf("building a submit context for %s: %v", testUser, err)
+	}
+
 	// Use Submit (non-spooled) so the job lands in Idle and the negotiator
 	// can match it without us needing to ship input via SPOOL_JOB_FILES.
-	clusterIDStr, err := schedd.Submit(ctx, submitFile)
+	clusterIDStr, err := schedd.Submit(submitCtx, submitFile)
 	if err != nil {
 		harness.PrintScheddLog()
 		t.Fatalf("Submit: %v", err)
@@ -135,18 +150,12 @@ queue
 
 	// --- Stand up the HTTP server -------------------------------------------
 
-	passwordsDir := filepath.Join(harness.GetSpoolDir(), "passwords.d")
-	if err := os.MkdirAll(passwordsDir, 0700); err != nil {
-		t.Fatalf("mkdir passwords.d: %v", err)
-	}
-	signingKeyPath := filepath.Join(passwordsDir, "POOL")
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-	if err := os.WriteFile(signingKeyPath, key, 0600); err != nil {
-		t.Fatalf("write signing key: %v", err)
-	}
+	// The harness creates the POOL key before its daemons start, and pins
+	// SEC_PASSWORD_DIRECTORY at it. Writing our own copy afterwards -- as
+	// this test used to -- lands on the same path with the same bytes, so
+	// it worked, but only by coincidence: the moment either side changed
+	// how the key is derived the two would part company silently.
+	signingKeyPath := harness.GetSigningKeyPath()
 
 	server, err := NewServer(Config{
 		ListenAddr:               "127.0.0.1:0",
@@ -155,8 +164,8 @@ queue
 		UserHeader:               "X-Test-User",
 		UserHeaderTrustAnyUnsafe: true, // demo opt-in: tests run on a single host with no proxy
 		SigningKeyPath:           signingKeyPath,
-		TrustDomain:              "test.htcondor.org",
-		UIDDomain:                "test.htcondor.org",
+		TrustDomain:              harness.GetTrustDomain(),
+		UIDDomain:                harness.GetTrustDomain(),
 		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2.db"),
 	})
 	if err != nil {
@@ -184,12 +193,12 @@ queue
 		RawQuery: "cols=120&rows=40",
 	}
 	hdr := http.Header{}
-	hdr.Set("X-Test-User", "testuser")
+	hdr.Set("X-Test-User", testUser)
 
 	// First, sanity-check the auth header by issuing a plain GET to a non-WS
 	// endpoint. If this 401's, the handshake will too — for a clearer reason.
 	probeReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/api/v1/whoami", addr), nil)
-	probeReq.Header.Set("X-Test-User", "testuser")
+	probeReq.Header.Set("X-Test-User", testUser)
 	probeResp, probeErr := http.DefaultClient.Do(probeReq)
 	if probeErr != nil {
 		t.Fatalf("auth-probe GET failed: %v", probeErr)
@@ -324,4 +333,36 @@ func waitForJobRunningHTTP(ctx context.Context, s *htcondor.Schedd, clusterID in
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// testUser is the identity this test submits as and calls as. ssh-to-job is
+// ownership-checked by the schedd, so those must be the same person.
+const testUser = "testuser"
+
+// contextAsUser returns a context whose schedd calls authenticate as user,
+// using the harness's own signing key and trust domain.
+//
+// Without this a test's direct schedd calls authenticate as whoever runs the
+// test, while its HTTP calls authenticate as the header identity -- two
+// different people, which any ownership check will (correctly) reject.
+func contextAsUser(ctx context.Context, harness *htcondor.CondorTestHarness, user string) (context.Context, error) {
+	now := time.Now()
+	token, err := generateMCPAccessJWT(
+		filepath.Dir(harness.GetSigningKeyPath()),
+		filepath.Base(harness.GetSigningKeyPath()),
+		user+"@"+harness.GetTrustDomain(),
+		harness.GetTrustDomain(),
+		now.Unix(),
+		now.Add(time.Hour).Unix(),
+		[]string{"READ", "WRITE"},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("minting a token for %s: %w", user, err)
+	}
+	secConfig, err := htcondor.NewClientSecurityConfig(ctx, token, "", 0, "CLIENT", nil)
+	if err != nil {
+		return nil, fmt.Errorf("building a security config for %s: %w", user, err)
+	}
+	secConfig.SecurityTag = user
+	return htcondor.WithSecurityConfig(ctx, secConfig), nil
 }
