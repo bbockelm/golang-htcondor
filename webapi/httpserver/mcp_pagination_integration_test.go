@@ -225,8 +225,8 @@ func queryJobsPage(t *testing.T, client *http.Client, baseURL, token string, lim
 	resp := sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 1, Method: "tools/call", Params: params,
 	})
-	if resp.Error != nil {
-		t.Fatalf("query_jobs failed: %v", resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("query_jobs failed: %v", msg)
 	}
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
@@ -338,8 +338,9 @@ func queryJobsPageExpectingError(t *testing.T, client *http.Client, baseURL, tok
 	resp := sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 1, Method: "tools/call", Params: params,
 	})
-	if resp.Error == nil {
+	msg, failed := mcpToolFailure(t, resp)
+	if !failed {
 		t.Fatalf("a page token against the schedd was accepted rather than refused: %+v", resp.Result)
 	}
-	return nil, "", resp.Error.Message
+	return nil, "", msg
 }
