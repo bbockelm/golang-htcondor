@@ -26,10 +26,14 @@ func TestMirrorHealthOmittedWhenRoutingIsOff(t *testing.T) {
 	}
 }
 
-// TestMirrorHealthBeforeDiscovery: routing is configured but nothing has
-// been found yet. "down" with the pinned targeting echoed back is what
-// makes a typo in HTTP_API_DBMIRROR_NAME diagnosable — the operator sees
-// the name they configured next to the fact that nothing matched it.
+// TestMirrorHealthBeforeDiscovery: routing is configured but discovery
+// has not run. That is "unknown", not "down" — discovery happens on a
+// routed read, so an idle daemon has not failed to reach the mirror, it
+// has not looked, and calling that "down" sends an operator hunting a
+// network problem that does not exist. The pinned targeting is echoed
+// back either way, which is what makes a typo in HTTP_API_DBMIRROR_NAME
+// diagnosable: the operator sees the name they configured next to the
+// fact that nothing matched it.
 func TestMirrorHealthBeforeDiscovery(t *testing.T) {
 	l := dbmirror.NewLocatorWithOptions(
 		htcondor.NewCollector("collector.invalid"), config.NewEmpty(),
@@ -39,8 +43,19 @@ func TestMirrorHealthBeforeDiscovery(t *testing.T) {
 	if h == nil {
 		t.Fatal("expected a dbmirror block when routing is configured")
 	}
-	if h.Status != "down" {
-		t.Errorf("status = %q, want down before any successful discovery", h.Status)
+	if h.Status != "unknown" {
+		t.Errorf("status = %q, want unknown before discovery has ever run", h.Status)
+	}
+	if h.LastAttempt != "" {
+		t.Errorf("nothing has queried the collector, so last_attempt must be empty: %q", h.LastAttempt)
+	}
+	if h.Discovered {
+		t.Error("discovered should be false before anything is found")
+	}
+	// The staleness fields must be absent, not zero: a JSON 0 here reads
+	// as "perfectly caught up" for a mirror that was never contacted.
+	if h.JobQueueStalenessSecs != nil || h.HistoryStalenessSecs != nil {
+		t.Errorf("staleness reported for an undiscovered mirror: %+v", h)
 	}
 	if !h.Required {
 		t.Error("required should be reported")

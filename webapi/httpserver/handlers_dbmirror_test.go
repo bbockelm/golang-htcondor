@@ -187,6 +187,21 @@ func TestDBMirrorStatusEnabledWithoutDiscovery(t *testing.T) {
 	if resp.Health.Status != "down" {
 		t.Errorf("status = %q, want down before discovery succeeds", resp.Health.Status)
 	}
+	// The endpoint probes rather than reporting whatever a previous read
+	// happened to leave behind. Without that, an idle daemon reports
+	// "not reachable" for a mirror it never tried to reach, and the
+	// operator gets no error to work from and no idea when -- or
+	// whether -- anything was checked. Both of these are empty when the
+	// probe did not run.
+	if resp.Health.LastAttempt == "" {
+		t.Error("the status endpoint must run discovery, recording when it last tried")
+	}
+	if resp.Health.LastError == "" {
+		t.Error("an unreachable collector must surface its error, not a bare 'down'")
+	}
+	if resp.Health.Discovered {
+		t.Error("nothing is advertising, so discovered must be false")
+	}
 }
 
 // expensiveCollector stands in for the metricsdAdapter: a collector on

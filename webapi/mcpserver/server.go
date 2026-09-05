@@ -115,6 +115,13 @@ type Config struct {
 	DBMirrorName     string // HTTP_API_DBMIRROR_NAME
 	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS
 	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED
+	// DBMirror lets a host that already has a Locator share it instead
+	// of having a second one built from the three knobs above. The HTTP
+	// daemon does: it runs these tools in-process, and two Locators
+	// would mean two discovery caches, two sets of poll timings, and an
+	// admin page describing only one of them. Nil (the standalone
+	// stdio server) builds a Locator from the knobs.
+	DBMirror *dbmirror.Locator
 
 	// SubmitPolicy is the operator's site-wide submit-file defaults and
 	// overrides. The agent surface gets the same treatment as the REST
@@ -198,11 +205,14 @@ func NewServer(cfg Config) (*Server, error) {
 		htcondorConfig: cfg.HTCondorConfig,
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
-		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
+		dbMirror:       cfg.DBMirror,
+	}
+	if s.dbMirror == nil {
+		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
 			Required: cfg.DBMirrorRequired,
-		}),
+		})
 	}
 
 	// Setup metrics if collector is provided

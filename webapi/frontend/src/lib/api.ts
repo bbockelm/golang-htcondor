@@ -142,21 +142,31 @@ export interface DBMirrorRoutingCount {
 
 // DBMirrorHealth mirrors what /readyz reports. `status` is "ok" only
 // when reads are actually routing right now; a mirror that is up but too
-// far behind to serve is "warning" -- running, not working.
+// far behind to serve is "warning" -- running, not working. "unknown"
+// means discovery has not run, which is not the same as failing.
+//
+// The staleness fields are absent, not zero, when `discovered` is false:
+// a 0 there would read as "perfectly caught up" for a mirror nobody has
+// found. When present they are the lag the mirror measured on itself as
+// it advertised; `ad_age_seconds` says how old that reading is, and the
+// two are deliberately not added together.
 export interface DBMirrorHealth {
-  status: 'ok' | 'warning' | 'down' | string;
+  status: 'ok' | 'warning' | 'down' | 'unknown' | string;
   required: boolean;
   name?: string;
   address?: string;
   pinned_name?: string;
   pinned_address?: string;
+  discovered: boolean;
+  ad_age_seconds?: number;
   job_queue_caught_up: boolean;
-  job_queue_staleness_seconds: number;
-  history_staleness_seconds: number;
+  job_queue_staleness_seconds?: number;
+  history_staleness_seconds?: number;
   history_gap: boolean;
   jobs_tolerance_seconds: number;
   history_tolerance_seconds: number;
   last_error?: string;
+  last_attempt?: string;
   last_success?: string;
 }
 

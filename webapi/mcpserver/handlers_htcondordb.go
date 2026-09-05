@@ -219,7 +219,9 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info) i
 }
 
 // freshnessNote annotates a result with the mirror's staleness and any durability gap, so an
-// agent can weigh how current the DB-backed answer is.
+// agent can weigh how current the DB-backed answer is. The staleness is recomputed from the
+// mirror's absolute sync stamp rather than read off the ad, whose own figure is frozen at the
+// ad's build time and so understates the lag by up to a collector update interval.
 func freshnessNote(info *dbmirror.Info) string {
 	if info == nil {
 		return ""
@@ -229,8 +231,8 @@ func freshnessNote(info *dbmirror.Info) string {
 	if info.Name != "" {
 		fmt.Fprintf(&b, " %q", info.Name)
 	}
-	if info.SecondsSinceSync > 0 {
-		fmt.Fprintf(&b, "; last synced %ds ago", info.SecondsSinceSync)
+	if s := dbmirror.HistoryStaleness(info); s > 0 {
+		fmt.Fprintf(&b, "; last synced %ds ago", s)
 	}
 	if info.HistoryGap {
 		b.WriteString("; WARNING: a history durability gap was detected -- some completed jobs may be missing")

@@ -950,7 +950,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// queue is caught up (db_routing.go). Reproduces this path's self-scoping and
 	// falls through to the schedd on any miss, so the caller sees identical
 	// results plus a provenance note.
-	if res, ok, decision := s.tryJobsFromDB(ctx, constraint, projection, limit, pageToken, time.Now().Unix()); ok {
+	if res, ok, decision := s.tryJobsFromDB(ctx, constraint, projection, limit, pageToken); ok {
 		return res, nil
 	} else if err := s.mirrorRequiredError(decision); err != nil {
 		return nil, err

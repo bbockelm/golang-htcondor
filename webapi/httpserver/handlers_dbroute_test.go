@@ -42,34 +42,79 @@ func TestMirrorRoutingDisabledFallsThrough(t *testing.T) {
 	h := &Handler{dbMirror: dbmirror.NewLocator(nil, nil)}
 	ctx := context.Background()
 
-	if served, _ := h.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
+	if served, _ := h.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice", false); served {
 		t.Error("jobs routing must decline when no mirror is configured")
 	}
-	if served, _ := h.historyFromMirror(ctx, httptest.NewRecorder(), "true", &htcondor.HistoryQueryOptions{Backwards: true}); served {
+	if served, _ := h.historyFromMirror(ctx, httptest.NewRecorder(), "true", &htcondor.HistoryQueryOptions{Backwards: true}, "alice"); served {
 		t.Error("history routing must decline when no mirror is configured")
 	}
 
 	// A Handler that never got a locator at all (zero value) must not panic.
 	var bare Handler
-	if served, _ := bare.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
+	if served, _ := bare.jobsFromMirror(ctx, httptest.NewRecorder(), "true", nil, 50, "", "alice", false); served {
 		t.Error("jobs routing must decline with no locator")
 	}
 }
 
-// TestMirrorJobsRoutingRequiresAnOwner checks the confinement
-// precondition: without an authenticated caller to scope to, the mirror
-// is not used — its connection authenticates as the daemon, so an
-// unconfined read there would not have the schedd's per-caller ACL
-// behind it.
-func TestMirrorJobsRoutingRequiresAnOwner(t *testing.T) {
+// TestMirrorRoutingRequiresAScheddIdentity is the one thing routing must
+// never skip. Reading the queue and the history are READ-level on the
+// schedd and carry no owner filter of their own, so a mirror read shows
+// an authenticated caller nothing new -- but it reaches the mirror
+// WITHOUT the schedd handshake. A caller the schedd would have refused
+// outright must therefore not be answered from the mirror; they fall
+// back to the schedd, which is where the refusal happens.
+//
+// An empty actor is exactly that caller: identity here comes from the
+// schedd itself, either a prior 2xx promoting the token to validated or
+// actorForSession pinging the schedd with the caller's own credential.
+func TestMirrorRoutingRequiresAScheddIdentity(t *testing.T) {
 	// Enabled locator (collector + config present); no connection is
-	// made because the owner check comes first.
+	// made because the identity check comes first.
 	h := &Handler{dbMirror: dbmirror.NewLocator(htcondor.NewCollector("collector.invalid"), config.NewEmpty())}
 	if !h.dbMirror.Enabled() {
 		t.Fatal("expected the locator to report enabled")
 	}
-	if served, _ := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", ""); served {
-		t.Error("jobs routing must decline without an authenticated owner")
+
+	for _, scoped := range []bool{true, false} {
+		served, d := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "", scoped)
+		if served {
+			t.Errorf("scoped=%v: jobs routing must decline for a caller the schedd has not identified", scoped)
+		}
+		if d.Reason != dbmirror.ReasonNoOwnerScope {
+			t.Errorf("scoped=%v: Reason = %q, want %q", scoped, d.Reason, dbmirror.ReasonNoOwnerScope)
+		}
+	}
+	if served, d := h.historyFromMirror(context.Background(), httptest.NewRecorder(), "true",
+		&htcondor.HistoryQueryOptions{Backwards: true}, ""); served || d.Reason != dbmirror.ReasonNoOwnerScope {
+		t.Errorf("history routing must decline without a schedd identity (served=%v reason=%q)", served, d.Reason)
+	}
+}
+
+// TestMirrorServesWholeQueueForIdentifiedCaller is the fix for the
+// "Everyone" view: an unscoped listing has no owner to confine it to,
+// but it is still routable, because the schedd applies no owner filter
+// to a query that does not ask for one. Declining it put the broadest,
+// most expensive query -- the one the mirror exists to absorb -- back on
+// the schedd.
+//
+// Routing still fails here (nothing is advertising to collector.invalid),
+// which is the point: it must fail for a reason about the MIRROR rather
+// than bail out at the identity check.
+func TestMirrorServesWholeQueueForIdentifiedCaller(t *testing.T) {
+	h := &Handler{dbMirror: dbmirror.NewLocator(htcondor.NewCollector("collector.invalid"), config.NewEmpty())}
+
+	_, d := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "alice", false)
+	if d.Reason == dbmirror.ReasonNoOwnerScope {
+		t.Error("an identified caller's whole-queue read must not be refused for lack of owner scoping")
+	}
+	if d.Reason != dbmirror.ReasonNoMirror {
+		t.Errorf("Reason = %q, want %q (it should have gotten as far as discovery)", d.Reason, dbmirror.ReasonNoMirror)
+	}
+
+	_, d = h.historyFromMirror(context.Background(), httptest.NewRecorder(), "true",
+		&htcondor.HistoryQueryOptions{Backwards: true}, "alice")
+	if d.Reason != dbmirror.ReasonNoMirror {
+		t.Errorf("history: Reason = %q, want %q", d.Reason, dbmirror.ReasonNoMirror)
 	}
 }
 
@@ -81,7 +126,7 @@ func TestMirrorDeclineWritesNothing(t *testing.T) {
 	ctx := context.Background()
 
 	rec := httptest.NewRecorder()
-	if served, _ := h.jobsFromMirror(ctx, rec, "true", nil, 50, "", "alice"); served {
+	if served, _ := h.jobsFromMirror(ctx, rec, "true", nil, 50, "", "alice", false); served {
 		t.Fatal("expected the jobs route to decline")
 	}
 	if rec.Body.Len() != 0 || rec.Flushed {
@@ -90,11 +135,65 @@ func TestMirrorDeclineWritesNothing(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	if served, _ := h.historyFromMirror(ctx, rec, "true", &htcondor.HistoryQueryOptions{Backwards: true}); served {
+	if served, _ := h.historyFromMirror(ctx, rec, "true", &htcondor.HistoryQueryOptions{Backwards: true}, "alice"); served {
 		t.Fatal("expected the history route to decline")
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("declining wrote %d bytes", rec.Body.Len())
+	}
+}
+
+// TestResolveOwnerScope pins this daemon's Mine/Everyone policy, which
+// is stricter than the schedd's: a browser session outside the admin
+// group is confined to its own records however it asks, while an admin
+// session and a bearer-token caller are left alone. It says nothing
+// about mirror routing -- that turns on identity, not on group
+// membership (see TestMirrorRoutingRequiresAScheddIdentity).
+func TestResolveOwnerScope(t *testing.T) {
+	server, err := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		ScheddName:   "test",
+		ScheddAddr:   "127.0.0.1:9618",
+		SessionTTL:   time.Hour,
+		OAuth2DBPath: t.TempDir() + "/t.db",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	server.webuiAdminGroup = "condor-admins"
+
+	req := func(groups ...[]string) *http.Request {
+		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
+		if len(groups) == 0 {
+			return r // bearer caller: no session cookie
+		}
+		sid, _, err := server.sessionStore.Create("someone", groups[0])
+		if err != nil {
+			t.Fatalf("session create: %v", err)
+		}
+		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
+		return r
+	}
+
+	cases := []struct {
+		name       string
+		r          *http.Request
+		ownedByMe  bool
+		wantScoped bool
+	}{
+		{"non-admin asking for everyone is forced back", req([]string{"users"}), false, true},
+		{"non-admin asking for mine", req([]string{"users"}), true, true},
+		{"admin asking for everyone", req([]string{"condor-admins"}), false, false},
+		{"admin opting into mine", req([]string{"condor-admins"}), true, true},
+		{"bearer asking for everyone", req(), false, false},
+		{"bearer asking for mine", req(), true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := server.resolveOwnerScope(c.r, c.ownedByMe); got != c.wantScoped {
+				t.Errorf("resolveOwnerScope = %v, want %v", got, c.wantScoped)
+			}
+		})
 	}
 }
 
@@ -325,7 +424,7 @@ func TestMirrorDecisionsAreCounted(t *testing.T) {
 		dbMirror:         dbmirror.NewLocator(nil, nil),
 	}
 	// Routing is not configured, so this declines before any I/O.
-	if served, _ := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "alice"); served {
+	if served, _ := h.jobsFromMirror(context.Background(), httptest.NewRecorder(), "true", nil, 50, "", "alice", false); served {
 		t.Fatal("expected the jobs route to decline")
 	}
 
