@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api, JOB_STATUS_LABEL } from '@/lib/api';
+import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 export default function Dashboard() {
   const { data: session, isLoading: sessionLoading } = useQuery({
@@ -51,9 +51,9 @@ function AuthenticatedDashboard({
   username: string;
   isAdmin: boolean;
 }) {
-  // Same scope toggle as /jobs. Default is "mine" for everyone —
-  // admin pool-wide counts are explicit, not surprising.
-  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  // Shared with /jobs and /archive; see lib/scope.ts. Default is "mine"
+  // for everyone — admin pool-wide counts are explicit, not surprising.
+  const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
   const { data, isLoading, error } = useQuery({
@@ -69,32 +69,7 @@ function AuthenticatedDashboard({
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-sm text-gray-500">Signed in as {username}</p>
         </div>
-        {isAdmin && (
-          <div className="ml-auto flex items-center gap-1 rounded border border-gray-300 bg-white p-0.5 text-xs">
-            <button
-              type="button"
-              onClick={() => setScope('mine')}
-              className={`rounded px-2 py-0.5 ${
-                ownedByMe
-                  ? 'bg-gray-200 text-gray-900'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Mine
-            </button>
-            <button
-              type="button"
-              onClick={() => setScope('all')}
-              className={`rounded px-2 py-0.5 ${
-                !ownedByMe
-                  ? 'bg-gray-200 text-gray-900'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Everyone
-            </button>
-          </div>
-        )}
+        {isAdmin && <ScopeToggle className="ml-auto" />}
       </div>
 
       {isLoading && <p className="text-gray-400">Loading job counts...</p>}

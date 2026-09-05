@@ -636,6 +636,11 @@ export const api = {
       limit?: number | '*';
       projection?: string;
       since?: string;
+      // Confine the listing to the caller's own records. A non-admin
+      // browser session is confined by the server regardless; for an
+      // admin session this is the Mine/Everyone selector, and omitting
+      // it means "everyone".
+      owned_by_me?: boolean;
       // Keyset cursor: pass the (cluster, proc) of the LAST record
       // from the previous page to fetch records strictly older than
       // that. Server ANDs the equivalent ClassAd predicate into the
@@ -649,6 +654,8 @@ export const api = {
       if (params?.limit !== undefined) qs.set('limit', String(params.limit));
       if (params?.projection) qs.set('projection', params.projection);
       if (params?.since) qs.set('since', params.since);
+      if (params?.owned_by_me !== undefined)
+        qs.set('owned_by_me', String(params.owned_by_me));
       if (params?.before_cluster !== undefined)
         qs.set('before_cluster', String(params.before_cluster));
       if (params?.before_proc !== undefined)
