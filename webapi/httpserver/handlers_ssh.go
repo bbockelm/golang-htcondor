@@ -46,6 +46,11 @@ type wsControlMsg struct {
 	// Exit fields (server -> client only)
 	Code   int    `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Message carries a human-readable failure (server -> client only,
+	// with Type "error"). Setup failures travel this way because the
+	// browser cannot see the HTTP response to a failed WebSocket
+	// handshake -- see failSSHSetup.
+	Message string `json:"message,omitempty"`
 }
 
 // sshUpgrader returns a per-request websocket.Upgrader with origin
@@ -60,6 +65,50 @@ func (s *Handler) sshUpgrader() websocket.Upgrader {
 		WriteBufferSize: 4096,
 		CheckOrigin:     s.checkWebSocketOrigin,
 	}
+}
+
+// sshSetupTimeout bounds opening the shell on the execute node: a schedd
+// GET_JOB_CONNECT_INFO round trip, then a Cedar handshake with the
+// starter. Exceeded, it is reported as a timeout rather than as a bare
+// "context deadline exceeded" -- see failSSHSetup.
+const sshSetupTimeout = 30 * time.Second
+
+// failSSHSetup reports a setup failure to a client whose WebSocket is
+// already open, and closes it.
+//
+// Setup used to run before the upgrade so that a failure could be a real
+// HTTP status with a real message. That reasoning does not survive
+// contact with a browser: when a WebSocket handshake gets an HTTP error
+// instead of a 101, the browser discards the status and the body and
+// hands the page an Event with no detail in it. So the carefully worded
+// 502 was written to a reader that could not exist, and what the user
+// saw was an unexplained failure after a 30-second wait.
+//
+// A close frame does reach the page. The reason field caps at 123 bytes
+// (RFC 6455 5.5), which is too short for anything with an error in it,
+// so the full text goes first as a JSON frame -- the same channel the
+// exit notification already uses -- and the close reason carries a
+// short label.
+func (s *Handler) failSSHSetup(wsConn *websocket.Conn, label, detail string) {
+	_ = wsConn.WriteJSON(wsControlMsg{Type: "error", Reason: label, Message: detail})
+	msg := websocket.FormatCloseMessage(websocket.ClosePolicyViolation, label)
+	_ = wsConn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
+	_ = wsConn.Close()
+}
+
+// describeShellOpenError turns the error from OpenJobShell into something
+// that says what to do about it. The timeout is the case worth naming:
+// it is indistinguishable from a hang, it is the one users hit, and
+// "context deadline exceeded" names the mechanism rather than the event.
+func describeShellOpenError(err error) (label, detail string) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out", fmt.Sprintf(
+			"Timed out after %s opening a shell on the execute node. The job may still be "+
+				"starting up, the execute node may be unreachable from here, or its starter "+
+				"may not be accepting connections. Underlying error: %v",
+			sshSetupTimeout, err)
+	}
+	return "could not open shell", fmt.Sprintf("Failed to open a shell on the execute node: %v", err)
 }
 
 // handleJobSSH bridges a WebSocket client to an interactive SSH session
@@ -123,83 +172,18 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 		s.auditSuperuserAction(r, imp, "ssh-to-job", fmt.Sprintf("%d.%d", cluster, proc), nil)
 	}
 
-	// Open the SSH client BEFORE the WebSocket upgrade so that any failure
-	// here can return a proper HTTP error. This makes the happy path "open
-	// SSH session, then upgrade and bridge" — the WebSocket only exists if
-	// we already have a working SSH client.
-	openCtx, cancelOpen := context.WithTimeout(ctx, 30*time.Second)
-	defer cancelOpen()
-
-	schedd := s.getSchedd()
-	if schedd == nil {
-		s.writeError(w, http.StatusServiceUnavailable, "schedd not configured")
+	// Everything above answers with an HTTP status: it is quick, and a
+	// non-WebSocket caller deserves to be told why it was refused. From
+	// here on the work is slow and the failures are the ones users
+	// actually hit, so upgrade first and report them over the socket --
+	// a browser cannot read the response to a failed handshake, so an
+	// HTTP error here would reach nobody. See failSSHSetup.
+	if !websocket.IsWebSocketUpgrade(r) {
+		s.writeError(w, http.StatusUpgradeRequired,
+			"this endpoint speaks WebSocket; connect with ws:// or wss://")
 		return
 	}
 
-	sshClient, err := schedd.OpenJobShell(openCtx, cluster, proc, nil)
-	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "OpenJobShell failed",
-			"user", username, "cluster", cluster, "proc", proc, "error", err)
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to open job shell: %v", err))
-		return
-	}
-
-	// Open the SSH session and request a PTY before we hand off to the WS,
-	// for the same reason as above: any error here should be a clean 502.
-	session, err := sshClient.NewSession()
-	if err != nil {
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to open SSH session: %v", err))
-		return
-	}
-
-	// Initial PTY size. The browser will resize immediately, so 80x24 is
-	// just a safe placeholder.
-	cols, rows := initialPtyDimsFromQuery(r.URL.Query())
-	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 38400,
-		ssh.TTY_OP_OSPEED: 38400,
-	}
-	if err := session.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		_ = session.Close()
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to request PTY: %v", err))
-		return
-	}
-
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		_ = session.Close()
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to attach stdin: %v", err))
-		return
-	}
-	stdout, err := session.StdoutPipe()
-	if err != nil {
-		_ = session.Close()
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to attach stdout: %v", err))
-		return
-	}
-	// Merge stderr into stdout so the terminal renders both. Some servers
-	// emit warnings on stderr that the user wants to see.
-	stderr, err := session.StderrPipe()
-	if err != nil {
-		_ = session.Close()
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to attach stderr: %v", err))
-		return
-	}
-
-	if err := session.Shell(); err != nil {
-		_ = session.Close()
-		_ = sshClient.Close()
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to start shell: %v", err))
-		return
-	}
-
-	// All systems go: upgrade.
 	upgrader := s.sshUpgrader()
 	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -215,8 +199,79 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 			"user", username,
 			"cluster", cluster, "proc", proc,
 			"error", err)
+		return
+	}
+
+	openCtx, cancelOpen := context.WithTimeout(ctx, sshSetupTimeout)
+	defer cancelOpen()
+
+	schedd := s.getSchedd()
+	if schedd == nil {
+		s.failSSHSetup(wsConn, "unavailable", "No schedd is configured for this API server.")
+		return
+	}
+
+	sshClient, err := schedd.OpenJobShell(openCtx, cluster, proc, nil)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "OpenJobShell failed",
+			"user", username, "cluster", cluster, "proc", proc, "error", err)
+		label, detail := describeShellOpenError(err)
+		s.failSSHSetup(wsConn, label, detail)
+		return
+	}
+
+	// Open the SSH session and request a PTY before we hand off to the WS,
+	// for the same reason as above: any error here should be a clean 502.
+	session, err := sshClient.NewSession()
+	if err != nil {
+		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "could not start session", fmt.Sprintf("Opened a connection to the execute node, but could not start a session on it: %v", err))
+		return
+	}
+
+	// Initial PTY size. The browser will resize immediately, so 80x24 is
+	// just a safe placeholder.
+	cols, rows := initialPtyDimsFromQuery(r.URL.Query())
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 38400,
+		ssh.TTY_OP_OSPEED: 38400,
+	}
+	if err := session.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 		_ = session.Close()
 		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "no pty", fmt.Sprintf("The execute node refused to allocate a terminal: %v", err))
+		return
+	}
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		_ = session.Close()
+		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "pipe failed", fmt.Sprintf("Could not attach the session input stream: %v", err))
+		return
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		_ = session.Close()
+		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "pipe failed", fmt.Sprintf("Could not attach the session output stream: %v", err))
+		return
+	}
+	// Merge stderr into stdout so the terminal renders both. Some servers
+	// emit warnings on stderr that the user wants to see.
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		_ = session.Close()
+		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "pipe failed", fmt.Sprintf("Could not attach the session error stream: %v", err))
+		return
+	}
+
+	if err := session.Shell(); err != nil {
+		_ = session.Close()
+		_ = sshClient.Close()
+		s.failSSHSetup(wsConn, "shell failed", fmt.Sprintf("The execute node accepted the session but could not start a shell: %v", err))
 		return
 	}
 
