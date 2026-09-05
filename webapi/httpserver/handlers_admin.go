@@ -92,6 +92,11 @@ type AdminClient struct {
 	// RecentUsers is a rolling sample of the last few distinct subjects
 	// to obtain a token through this client, newest first.
 	RecentUsers []AdminClientUse `json:"recent_users,omitempty"`
+	// RefreshBlockedBy names what stops this client from ever receiving
+	// a refresh token, so its users re-authorize on every access-token
+	// expiry. Empty means nothing does -- or that the client has no
+	// interactive flow and so has no user to inconvenience.
+	RefreshBlockedBy []string `json:"refresh_blocked_by,omitempty"`
 }
 
 // AdminClientUse is one entry of a client's recent-users sample.
@@ -164,6 +169,8 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 		c.ResponseTypes = decodeStringList(responseTypes)
 		c.Scopes = decodeStringList(scopes)
 		c.Public = public != 0
+
+		c.RefreshBlockedBy = refreshBlockedBy(c.GrantTypes, c.Scopes)
 
 		p := scanProvenance(name, notes, origin, lastUsed, recentUsers)
 		c.Name, c.Notes, c.Origin, c.LastUsedAt = p.Name, p.Notes, string(p.Origin), p.LastUsedAt

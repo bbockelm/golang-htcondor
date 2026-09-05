@@ -183,6 +183,7 @@ function ClientRow({
           sign in?", and this column is the evidence. */}
       <td className="px-3 py-2 text-xs text-gray-700">
         <ChipList items={client.grant_types} max={4} />
+        <RefreshWarning blockedBy={client.refresh_blocked_by} />
       </td>
       <td className="px-3 py-2 text-xs">
         {client.last_used_at ? (
@@ -231,6 +232,26 @@ function ClientRow({
         </button>
       </td>
     </tr>
+  );
+}
+
+// RefreshWarning surfaces a client that can never hold a refresh token.
+//
+// Nothing errors when this is misconfigured -- the client simply never
+// receives a refresh token, and its users get sent through a full
+// re-authorization every time an access token expires. That reaches an
+// operator as "why does this app keep asking me to sign in?", with
+// nothing in the logs to point at. The server works out the reason (it
+// owns the OAuth semantics); this renders it.
+function RefreshWarning({ blockedBy }: { blockedBy?: string[] }) {
+  if (!blockedBy || blockedBy.length === 0) return null;
+  return (
+    <span
+      className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900"
+      title={`This client is missing ${blockedBy.join(" and ")}, so it never receives a refresh token. Its users re-authorize every time an access token expires.`}
+    >
+      cannot refresh
+    </span>
   );
 }
 

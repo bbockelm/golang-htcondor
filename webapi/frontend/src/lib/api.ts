@@ -604,6 +604,12 @@ export interface AdminClient {
   last_used_at?: string;
   // Last few distinct subjects to obtain a token here, newest first.
   recent_users?: AdminClientUse[];
+  // What stops this client from ever receiving a refresh token, so its
+  // users re-authorize on every access-token expiry. Absent means
+  // nothing does — or that the client has no interactive flow, in which
+  // case there is no user to inconvenience. Computed by the server,
+  // which owns these OAuth semantics.
+  refresh_blocked_by?: string[];
 }
 
 export interface AdminToken {
