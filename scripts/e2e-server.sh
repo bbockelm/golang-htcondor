@@ -24,19 +24,29 @@ set -euo pipefail
 
 PORT=${E2E_PORT:-8080}
 
+# Everything this script writes goes in a private directory, not a fixed
+# /tmp name. Two harnesses on one host would otherwise fight over the
+# same binary and log; on a shared host a predictable name is also
+# somewhere another user can squat or point a symlink. mktemp -d is
+# 0700 and unguessable.
+RUNDIR=$(mktemp -d "${TMPDIR:-/tmp}/htcondor-e2e.XXXXXXXX")
+API_BIN="$RUNDIR/htcondor-api"
+echo "E2E-RUNDIR $RUNDIR"
+
 echo "building htcondor-api"
 # -buildvcs=false: the workspace is bind-mounted and may be a git
 # worktree, whose .git is a file pointing outside the container. The Go
 # toolchain fails the build outright when it cannot read VCS state, and
 # nothing here reads the stamp.
 cd /workspace/webapi
-GOWORK=off go build -buildvcs=false -tags embed_frontend -o /tmp/htcondor-api ./cmd/htcondor-api
+GOWORK=off go build -buildvcs=false -tags embed_frontend -o "$API_BIN" ./cmd/htcondor-api
 
-# Run from /tmp: demo mode creates its own state directory and does not
-# want to write into the bind-mounted workspace.
-cd /tmp
+# Run from the private run directory: demo mode creates its own state
+# directory beneath the working directory and must not write into the
+# bind-mounted workspace.
+cd "$RUNDIR"
 echo "starting htcondor-api -demo on :$PORT"
-/tmp/htcondor-api -demo -listen ":$PORT" &
+"$API_BIN" -demo -listen ":$PORT" &
 API_PID=$!
 
 # Demo mode serves HTTPS with the cert it just generated, so probe with

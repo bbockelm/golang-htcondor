@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAs, loginAsAdmin, userPassword } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Authorization boundaries, from a browser.
 //
@@ -11,9 +10,9 @@ import { adminPassword, loginAs, loginAsAdmin, userPassword } from './fixtures/l
 // (state=active, no groups). Without a second identity none of this is
 // testable, which is why nothing covered it before.
 
-const serverLog = readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8');
-const adminPw = adminPassword(serverLog);
-const userPw = userPassword(serverLog);
+const log = serverLog();
+const adminPw = adminPassword(log);
+const userPw = userPassword(log);
 
 // Paths the admin UI actually calls. Worth naming carefully: an
 // endpoint that does not exist is served the SPA shell with a 200, so a

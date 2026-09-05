@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Redeeming a share link.
 //
@@ -19,7 +18,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // and hide whether the token did anything.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 async function mintShare(page: import('@playwright/test').Page): Promise<string> {

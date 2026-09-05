@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // A job that actually runs.
 //
@@ -12,7 +11,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // die in input transfer -- and every other test here still passes.
 
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 // Generous, because this waits on a real negotiation cycle, but bounded:

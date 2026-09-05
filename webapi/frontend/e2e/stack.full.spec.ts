@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
+import { serverLog } from './fixtures/serverlog';
 
 // Full-stack suite: the real htcondor-api binary, serving the embedded
 // UI, against a real personal HTCondor started by `-demo`.
@@ -21,7 +20,7 @@ import { adminPassword, loginAsAdmin } from './fixtures/login';
 // Demo mode generates the admin password per run and prints it; the
 // workflow captures the server output to this path.
 const password = adminPassword(
-  readFileSync(process.env.E2E_SERVER_LOG ?? '/tmp/e2e-server.log', 'utf8'),
+  serverLog(),
 );
 
 test.beforeEach(async ({ page }) => {
