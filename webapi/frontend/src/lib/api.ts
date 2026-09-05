@@ -184,6 +184,10 @@ export interface DBMirrorHealth {
   discovered: boolean;
   ad_age_seconds?: number;
   job_queue_caught_up: boolean;
+  // Whether the mirror advertised live-queue sync at all. False for a
+  // history-only mirror, whose caught-up/staleness fields are then not
+  // meaningful.
+  job_queue_reported?: boolean;
   job_queue_staleness_seconds?: number;
   history_staleness_seconds?: number;
   history_gap: boolean;

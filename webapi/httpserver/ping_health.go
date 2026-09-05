@@ -218,7 +218,13 @@ type dbMirrorHealthStatus struct {
 
 	// The two staleness figures are the mirror's own lag as of that
 	// measurement, in seconds, and are what routing gates on.
-	JobQueueCaughtUp      bool   `json:"job_queue_caught_up"`
+	JobQueueCaughtUp bool `json:"job_queue_caught_up"`
+	// JobQueueReported is whether the mirror advertised live-queue sync
+	// at all. When false the mirror syncs history only, and the
+	// caught-up/staleness fields below are not meaningful -- a
+	// history-only mirror is not "0s behind", it simply does not carry
+	// the live queue.
+	JobQueueReported      bool   `json:"job_queue_reported"`
 	JobQueueStalenessSecs *int64 `json:"job_queue_staleness_seconds,omitempty"`
 	HistoryStalenessSecs  *int64 `json:"history_staleness_seconds,omitempty"`
 	HistoryGap            bool   `json:"history_gap"`
@@ -301,9 +307,18 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 		}
 	}
 	out.Name, out.Address = h.Info.Name, h.Info.Address
+	out.JobQueueReported = h.Info.JobQueueReported
 	out.JobQueueCaughtUp = h.Info.JobQueueCaughtUp
-	jobsStale, historyStale := dbmirror.JobQueueStaleness(h.Info), dbmirror.HistoryStaleness(h.Info)
-	out.JobQueueStalenessSecs, out.HistoryStalenessSecs = &jobsStale, &historyStale
+	historyStale := dbmirror.HistoryStaleness(h.Info)
+	out.HistoryStalenessSecs = &historyStale
+	// Only report a live-queue staleness when the mirror actually
+	// advertised one; otherwise the number is a zero-value placeholder,
+	// not a measurement, and the panel would render "0s behind" for a
+	// mirror that never claimed to sync the queue.
+	if h.Info.JobQueueReported {
+		jobsStale := dbmirror.JobQueueStaleness(h.Info)
+		out.JobQueueStalenessSecs = &jobsStale
+	}
 	out.HistoryGap = h.Info.HistoryGap
 
 	// "ok" means reads are actually routing right now, which is the
@@ -323,7 +338,7 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 		// that has never answered a query comes to look healthy.
 		out.Status = "down"
 	case !h.Info.JobQueueCaughtUp,
-		jobsStale > dbmirror.JobsToleranceSecs,
+		h.Info.JobQueueReported && dbmirror.JobQueueStaleness(h.Info) > dbmirror.JobsToleranceSecs,
 		h.Info.HistoryGap,
 		historyStale > dbmirror.HistoryToleranceSecs:
 		out.Status = "warning"
