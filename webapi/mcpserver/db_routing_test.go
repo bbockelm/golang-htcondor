@@ -1,12 +1,17 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
 func TestHistoryResultShape(t *testing.T) {
@@ -92,5 +97,41 @@ func TestHistoryResultScheddPathNoNote(t *testing.T) {
 	}
 	if m["metadata"].(map[string]interface{})["source"] != "JOB_EPOCH" {
 		t.Error("schedd path should preserve the record source label")
+	}
+}
+
+// TestDelegatedHistoryRoutingRequiresAnIdentity: behind HTTP every call
+// is on somebody else's behalf, and routing to the mirror is what skips
+// the schedd handshake. A caller the schedd would refuse must not get
+// history out of the mirror instead -- they fall back to the schedd,
+// where the refusal happens.
+//
+// Over stdio the process IS the user and its own credential is what
+// would have been used either way, so nothing has to be established;
+// refusing there would break the CLI to fix a problem it does not have.
+func TestDelegatedHistoryRoutingRequiresAnIdentity(t *testing.T) {
+	locator := dbmirror.NewLocator(htcondor.NewCollector("collector.invalid"), config.NewEmpty())
+	opts := &htcondor.HistoryQueryOptions{Backwards: true}
+
+	delegated := &Server{dbMirror: locator, delegated: true}
+	_, ok, d := delegated.tryHistoryFromDB(context.Background(), "true", opts, "job history")
+	if ok {
+		t.Error("a delegated server must not answer an unidentified caller from the mirror")
+	}
+	if d.Reason != dbmirror.ReasonNoOwnerScope {
+		t.Errorf("Reason = %q, want %q", d.Reason, dbmirror.ReasonNoOwnerScope)
+	}
+
+	// Same call over stdio gets as far as discovery instead of stopping
+	// at the identity check.
+	stdio := &Server{dbMirror: locator}
+	if _, _, d := stdio.tryHistoryFromDB(context.Background(), "true", opts, "job history"); d.Reason != dbmirror.ReasonNoMirror {
+		t.Errorf("stdio: Reason = %q, want %q", d.Reason, dbmirror.ReasonNoMirror)
+	}
+
+	// And a delegated call WITH an identity is likewise not stopped there.
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
+	if _, _, d := delegated.tryHistoryFromDB(ctx, "true", opts, "job history"); d.Reason != dbmirror.ReasonNoMirror {
+		t.Errorf("identified delegated caller: Reason = %q, want %q", d.Reason, dbmirror.ReasonNoMirror)
 	}
 }

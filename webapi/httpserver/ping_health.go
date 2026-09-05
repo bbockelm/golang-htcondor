@@ -177,9 +177,16 @@ type dbMirrorHealthStatus struct {
 	// Status is "ok" when a mirror was discovered and is fresh enough to
 	// serve, "warning" when it was discovered but reads are currently
 	// falling back (stale, behind, or a history gap), "down" when
-	// discovery is failing, and "disabled" when routing is not
-	// configured. Required routing turns "warning" and "down" into
-	// errors for callers, so they are worth alerting on there.
+	// discovery is failing, "unknown" when routing is configured but
+	// discovery has not run yet, and "disabled" when routing is not
+	// configured. Required routing turns everything but "ok" into errors
+	// for callers, so they are worth alerting on there.
+	//
+	// "unknown" is separate from "down" because discovery is lazy --
+	// it runs on a routed read, not on a timer -- so an idle daemon has
+	// not failed to reach the mirror, it has not looked. Reporting that
+	// as "down" sends an operator hunting for a network problem that
+	// does not exist.
 	Status string `json:"status"`
 	// Required reflects HTTP_API_DBMIRROR_REQUIRED: when true, a read
 	// this mirror cannot serve fails instead of using the schedd.
@@ -194,15 +201,37 @@ type dbMirrorHealthStatus struct {
 	PinnedName    string `json:"pinned_name,omitempty"`
 	PinnedAddress string `json:"pinned_address,omitempty"`
 
-	JobQueueCaughtUp      bool  `json:"job_queue_caught_up"`
-	JobQueueStalenessSecs int64 `json:"job_queue_staleness_seconds"`
-	HistoryStalenessSecs  int64 `json:"history_staleness_seconds"`
-	HistoryGap            bool  `json:"history_gap"`
-	JobsToleranceSecs     int64 `json:"jobs_tolerance_seconds"`
-	HistoryToleranceSecs  int64 `json:"history_tolerance_seconds"`
+	// Discovered says whether the freshness fields below describe a real
+	// advertisement. When it is false there is no ad, and the staleness
+	// fields are omitted rather than sent as zero -- a literal 0 reads as
+	// "perfectly caught up", which is the opposite of "we have no idea".
+	Discovered bool `json:"discovered"`
+	// AdAgeSeconds is how long ago the ad being described was
+	// discovered, which is the age of the INFORMATION below rather than
+	// of the mirror's data. Everything the mirror reports about itself
+	// -- both staleness figures, caught-up, the gap flag -- was measured
+	// when it built that ad, so this says how long ago that was. It is
+	// reported next to those figures rather than folded into them,
+	// because a mirror that keeps syncing between advertisements is
+	// current even when our copy of its self-report is not.
+	AdAgeSeconds int64 `json:"ad_age_seconds,omitempty"`
 
-	LastError   string `json:"last_error,omitempty"`
-	LastSuccess string `json:"last_success,omitempty"` // RFC3339; when discovery last found a mirror
+	// The two staleness figures are the mirror's own lag as of that
+	// measurement, in seconds, and are what routing gates on.
+	JobQueueCaughtUp      bool   `json:"job_queue_caught_up"`
+	JobQueueStalenessSecs *int64 `json:"job_queue_staleness_seconds,omitempty"`
+	HistoryStalenessSecs  *int64 `json:"history_staleness_seconds,omitempty"`
+	HistoryGap            bool   `json:"history_gap"`
+	JobsToleranceSecs     int64  `json:"jobs_tolerance_seconds"`
+	HistoryToleranceSecs  int64  `json:"history_tolerance_seconds"`
+
+	LastError string `json:"last_error,omitempty"`
+	// LastAttempt is when discovery last queried the collector, and
+	// LastSuccess when it last found a mirror. Both RFC3339, omitted when
+	// they have never happened. LastAttempt absent is the whole
+	// explanation for a status of "unknown".
+	LastAttempt string `json:"last_attempt,omitempty"`
+	LastSuccess string `json:"last_success,omitempty"`
 }
 
 // mirrorHealth renders the Locator's view for /readyz. Returns nil when
@@ -224,23 +253,46 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 	if !h.LastSuccess.IsZero() {
 		out.LastSuccess = h.LastSuccess.Format(time.RFC3339)
 	}
+	if !h.LastAttempt.IsZero() {
+		out.LastAttempt = h.LastAttempt.Format(time.RFC3339)
+	}
 	if h.Info == nil {
+		if h.LastAttempt.IsZero() {
+			// Nothing has ever asked the collector, so there is nothing
+			// to call down.
+			out.Status = "unknown"
+		}
+		// Either way the freshness fields stay unset: they would be
+		// describing an ad that does not exist.
 		return out
+	}
+	out.Discovered = true
+	if !h.InfoAt.IsZero() {
+		if age := int64(now.Sub(h.InfoAt).Seconds()); age > 0 {
+			out.AdAgeSeconds = age
+		}
 	}
 	out.Name, out.Address = h.Info.Name, h.Info.Address
 	out.JobQueueCaughtUp = h.Info.JobQueueCaughtUp
-	out.JobQueueStalenessSecs = dbmirror.JobQueueStaleness(h.Info, now.Unix())
-	out.HistoryStalenessSecs = h.Info.SecondsSinceSync
+	jobsStale, historyStale := dbmirror.JobQueueStaleness(h.Info), dbmirror.HistoryStaleness(h.Info)
+	out.JobQueueStalenessSecs, out.HistoryStalenessSecs = &jobsStale, &historyStale
 	out.HistoryGap = h.Info.HistoryGap
 
 	// "ok" means reads are actually routing right now, which is the
 	// question being asked — a mirror that is up but too far behind to
 	// serve is not working, it is just running.
+	//
+	// A discovery that failed since the last success stays "down" even
+	// though an ad is in hand: that ad is the one routing has stopped
+	// trusting, and reporting the mirror healthy off it would hide the
+	// error that is the actual news.
 	switch {
+	case h.LastError != "" && h.LastAttempt.After(h.LastSuccess):
+		out.Status = "down"
 	case !h.Info.JobQueueCaughtUp,
-		out.JobQueueStalenessSecs > dbmirror.JobsToleranceSecs,
+		jobsStale > dbmirror.JobsToleranceSecs,
 		h.Info.HistoryGap,
-		out.HistoryStalenessSecs > dbmirror.HistoryToleranceSecs:
+		historyStale > dbmirror.HistoryToleranceSecs:
 		out.Status = "warning"
 	default:
 		out.Status = "ok"

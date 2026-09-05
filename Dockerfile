@@ -88,9 +88,34 @@ RUN for u in jobowner superadmin plainadmin; do \
 USER vscode
 
 # Pre-download common Go dependencies (speeds up first build)
-RUN go install golang.org/x/tools/gopls@latest && \
-    go install github.com/go-delve/delve/cmd/dlv@latest && \
-    go install honnef.co/go/tools/cmd/staticcheck@latest
+# Developer and CI tooling, at pinned versions.
+#
+# `@latest` resolves at build time to whatever was published moments
+# earlier, which makes a compromised release of any of these -- or of
+# anything in their dependency trees -- something this image executes
+# before the compromise has been noticed. Pinning turns that into a
+# deliberate, reviewable change. The go.sum-style checksum protection Go
+# applies to a build does not help here: `go install pkg@latest` will
+# happily verify the checksum of a version chosen for us.
+#
+# The versions carry their publication dates because the point is the
+# cooldown, not the pin: each has been public long enough that a
+# malicious release would likely have been reported. Dates are as of
+# 2026-09-05.
+#
+# NOTE: Dependabot does not see these. It reads go.mod, GitHub Actions
+# and Docker base images, not `go install` lines in a RUN. Bumping them
+# is a manual, deliberate act -- see .github/dependabot.yml, where the
+# ecosystems Dependabot DOES manage carry a matching cooldown.
+#
+# gotestsum is here rather than installed at container start: CI ran
+# `go install gotest.tools/gotestsum@latest` in three separate
+# containers on every run, which was both a supply-chain exposure and a
+# repeated network fetch and compile.
+RUN go install golang.org/x/tools/gopls@v0.23.0 && \
+    go install github.com/go-delve/delve/cmd/dlv@v1.27.1 && \
+    go install honnef.co/go/tools/cmd/staticcheck@v0.8.1 && \
+    go install gotest.tools/gotestsum@v1.13.0
 
 # Set working directory
 WORKDIR /workspace

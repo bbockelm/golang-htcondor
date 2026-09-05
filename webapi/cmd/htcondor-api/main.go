@@ -553,6 +553,26 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 	return ""
 }
 
+// loadSubmitFileLines returns a verbatim block of operator-supplied
+// submit-file directives from the named config knob. Same trust model as
+// loadInteractiveExtraSubmit: the value is operator-only configuration
+// and is spliced into submit files as written.
+//
+// Multi-line content uses HTCondor config syntax -- a quoted multi-line
+// value, or backslash continuations -- which is how an operator writes
+// more than one directive:
+//
+//	HTTP_API_SUBMIT_FILE_OVERRIDES = @=end
+//	  log = /home/$ENV(USER)/htcondor-jobs.log
+//	  accounting_group = grp_ap40
+//	@end
+func loadSubmitFileLines(cfg *config.Config, knob string) string {
+	if v, ok := cfg.Get(knob); ok {
+		return v
+	}
+	return ""
+}
+
 // (User-templates DB path resolution was removed: the templates store
 // now shares the unified application database resolved by loadDBPath.)
 
@@ -1356,6 +1376,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
+		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
+		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
 		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
 		HTCondorConfig:             cfg,
 		// LLM/chat configuration. Optional; the chat endpoint

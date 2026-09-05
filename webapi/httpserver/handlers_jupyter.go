@@ -688,7 +688,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	// Remote-submit + spool from an in-memory fs.FS. No on-disk state
 	// to clean up if the request fails partway through.
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, submitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 	if err != nil {
 		reg.CloseInstance(instID)
 		s.logger.Error(logging.DestinationHTTP, "jupyter submit failed",

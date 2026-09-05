@@ -8,6 +8,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # A release published minutes ago has had no time to be found
+    # malicious. The cooldown makes Dependabot wait before proposing one,
+    # which is the same reason the Dockerfile pins its tools to versions
+    # that have been public for a while. Security updates are exempt from
+    # cooldown by GitHub's own rules, so a real advisory still arrives
+    # immediately.
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
@@ -29,6 +37,40 @@ updates:
       - "/examples/*"
     schedule:
       interval: "weekly"
+    # A release published minutes ago has had no time to be found
+    # malicious. The cooldown makes Dependabot wait before proposing one,
+    # which is the same reason the Dockerfile pins its tools to versions
+    # that have been public for a while. Security updates are exempt from
+    # cooldown by GitHub's own rules, so a real advisory still arrives
+    # immediately.
+    cooldown:
+      default-days: 7
+      # A major bump is the one most likely to be both disruptive and
+      # under-reviewed, so it waits longest.
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
     groups:
       go-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # The Web UI's npm dependencies (webapi/frontend). Worth tracking now that
+  # they are actually verified: before the Frontend job in ci.yml, nothing
+  # built or type-checked this package on a PR, so a dependency bump could
+  # only be reviewed by reading it. It now has to survive tsc, next build and
+  # the browser tests before it can merge.
+  #
+  # Minor and patch grouped, as with Go. Majors arrive individually: a Next.js
+  # or React major is a migration, not a bump, and bundling it with unrelated
+  # updates makes it impossible to revert one without the others.
+  #
+  # A @playwright/test bump changes the browser cache key in playwright.yml
+  # (it hashes package-lock.json), so that PR re-downloads browsers once. That
+  # is the intended behaviour -- the cached browsers have to match the client.
+  - package-ecosystem: "npm"
+    directory: "/webapi/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-and-patch:
         update-types: ["minor", "patch"]

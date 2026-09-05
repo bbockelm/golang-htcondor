@@ -31,6 +31,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -67,6 +68,9 @@ type Handler struct {
 	// admin UI page that uses them, and is not a startup failure.
 	placementd          htcondor.PlacementdClient
 	placementdAvailable atomic.Bool
+	// clientUsage records "this OAuth2 client obtained a token" without
+	// a database write per token request. Nil when OAuth2 is disabled.
+	clientUsage *clientUsageRecorder
 	// interactiveExtraSubmit holds operator-supplied extra submit-file
 	// lines that the interactive-terminal and Jupyter handlers merge
 	// into every submit file just before the `queue` directive. Loaded
@@ -79,7 +83,11 @@ type Handler struct {
 	// are NOT validated against the GPU-string whitelist; the
 	// operator can write any submit-file directive.
 	interactiveExtraSubmit string
-	userHeader             string
+	// submitPolicy is the operator's site-wide submit-file defaults and
+	// overrides, applied to EVERY job this API submits regardless of the
+	// surface it arrived on. Zero value applies nothing.
+	submitPolicy submitpolicy.Policy
+	userHeader   string
 	// userHeaderTrustedProxies is the list of source-IP prefixes from
 	// which the userHeader is honored. Populated from
 	// HandlerConfig.UserHeaderTrustedProxies (CIDR list). nil + empty
@@ -255,7 +263,21 @@ type HandlerConfig struct {
 	// disables the feature. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
-	UserHeader             string // HTTP header to extract username from (optional)
+	// SubmitFileDefaults are submit-file lines applied to every
+	// submission ONLY where the submit file is silent, so a user who
+	// sets the same command keeps their own value. Configure via
+	// HTTP_API_SUBMIT_FILE_DEFAULTS.
+	SubmitFileDefaults string
+	// SubmitFileOverrides are submit-file lines applied to every
+	// submission that WIN over whatever the submit file says. Use for
+	// requirements that are not the user's to opt out of -- an access
+	// point that rejects a `log =` outside the home directory, say.
+	// Configure via HTTP_API_SUBMIT_FILE_OVERRIDES.
+	//
+	// Same trust model as InteractiveExtraSubmit: operator-only config,
+	// spliced in verbatim.
+	SubmitFileOverrides string
+	UserHeader          string // HTTP header to extract username from (optional)
 	// UserHeaderTrustedProxies is a list of CIDRs from which UserHeader
 	// is honored. When UserHeader is set, this list MUST be non-empty
 	// (or UserHeaderTrustAnyUnsafe must be true) — otherwise the
@@ -617,6 +639,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// submit file just before `queue` (see appendExtraSubmitLines).
 	// Empty disables; non-empty is logged at startup so the operator
 	// can confirm the directives loaded correctly.
+	h.submitPolicy = submitpolicy.Policy{
+		Defaults:  cfg.SubmitFileDefaults,
+		Overrides: cfg.SubmitFileOverrides,
+	}
+	if !h.submitPolicy.IsZero() {
+		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
+			"defaults_bytes", len(cfg.SubmitFileDefaults),
+			"overrides_bytes", len(cfg.SubmitFileOverrides))
+	}
+
 	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {
 		h.interactiveExtraSubmit = cfg.InteractiveExtraSubmit
 		logger.Info(logging.DestinationHTTP,
@@ -846,6 +878,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+
+		// Debounced writer for the admin list's "last used" / "recent
+		// users" columns. Started here so it shares the provider's
+		// database handle and is stopped before that handle closes.
+		h.clientUsage = newClientUsageRecorder(oauth2Provider.GetStorage().GetDB(), 0)
 
 		// Set username claim name (default: "sub")
 		h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
@@ -1089,6 +1126,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		HTCondorConfig: h.htcondorConfig,
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
+		SubmitPolicy:   h.submitPolicy,
 		SigningKeyPath: h.signingKeyPath,
 		TrustDomain:    h.trustDomain,
 		UIDDomain:      h.uidDomain,
@@ -1099,10 +1137,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// rather than fall back to whoever this daemon authenticates as.
 		Delegated: true,
 		// The MCP tools and the REST endpoints must route identically —
-		// one daemon, one policy — so the same options reach both.
-		DBMirrorName:     cfg.DBMirrorName,
-		DBMirrorAddress:  cfg.DBMirrorAddress,
-		DBMirrorRequired: cfg.DBMirrorRequired,
+		// one daemon, one policy — so they share this daemon's Locator
+		// rather than each discovering the mirror on their own. One
+		// cache, one poll loop, and an admin page that describes both.
+		DBMirror: h.dbMirror,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)
@@ -1519,7 +1557,44 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 		go h.periodicPing(ctx)
 	}
 
+	// Keep the htcondordb mirror's advertisement current in the
+	// background. Without this, discovery happens only on a read that
+	// wants to route, so the admin and readiness surfaces describe
+	// nothing until traffic arrives -- and the first such read pays the
+	// collector round trip.
+	h.startDBMirrorPoll(ctx)
+
 	return nil
+}
+
+// startDBMirrorPoll runs the mirror discovery loop for the life of the
+// handler. It is a no-op when routing is not configured.
+//
+// Only failures and recoveries are logged, not every poll: at one poll
+// per PollInterval a success line would be pure noise, while the
+// transition into and out of "cannot find the mirror" is the thing an
+// operator greps for after noticing reads went back to the schedd.
+func (h *Handler) startDBMirrorPoll(ctx context.Context) {
+	if !h.dbMirror.Enabled() {
+		return
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		var failing bool
+		h.dbMirror.Poll(ctx, func(info *dbmirror.Info, err error) {
+			switch {
+			case err != nil && !failing:
+				failing = true
+				h.logger.Warn(logging.DestinationHTTP,
+					"htcondordb mirror discovery is failing; reads are using the schedd", "error", err)
+			case err == nil && failing:
+				failing = false
+				h.logger.Info(logging.DestinationHTTP,
+					"htcondordb mirror discovery recovered", "mirror", info.Name, "address", info.Address)
+			}
+		})
+	}()
 }
 
 // Stop gracefully stops all background goroutines and closes providers.
@@ -1549,6 +1624,11 @@ func (h *Handler) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		h.logger.Warn(logging.DestinationHTTP, "Shutdown timeout waiting for background goroutines")
 	}
+
+	// Flush pending client-usage state before the provider closes the
+	// database underneath it. A debounced write that never lands is the
+	// one failure mode this ordering exists to prevent.
+	h.clientUsage.Close()
 
 	// Close OAuth2 provider if enabled
 	if h.oauth2Provider != nil {
@@ -2382,6 +2462,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 			if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
 			} else {
+				h.markSeededClient(ctx, swaggerClientID, "Swagger UI")
 				h.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID)
 			}
 		}
@@ -2460,6 +2541,7 @@ func (h *Handler) initializeOAuth2(ln net.Listener, protocol string) {
 		if err := h.oauth2Provider.GetStorage().CreateClient(ctx, client); err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to create Swagger OAuth2 client", "error", err)
 		} else {
+			h.markSeededClient(ctx, swaggerClientID, "Swagger UI")
 			h.logger.Info(logging.DestinationHTTP, "Created Swagger OAuth2 client", "client_id", swaggerClientID, "redirect_uris", swaggerRedirectURIs)
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // metricsNamespace is the leading "<ns>_" string applied to every
@@ -486,6 +487,7 @@ type mirrorCollector struct {
 	jobsStale    *prometheus.Desc
 	historyStale *prometheus.Desc
 	historyGap   *prometheus.Desc
+	adAge        *prometheus.Desc
 }
 
 func newMirrorCollector(l *dbmirror.Locator) *mirrorCollector {
@@ -497,8 +499,9 @@ func newMirrorCollector(l *dbmirror.Locator) *mirrorCollector {
 		up:           n("up", "1 if an htcondordb mirror was discovered and is usable, 0 otherwise."),
 		required:     n("required", "1 if reads must be served from the mirror (no schedd fallback), 0 otherwise."),
 		caughtUp:     n("job_queue_caught_up", "1 if the mirror had drained the schedd's job_queue.log at its last poll."),
-		jobsStale:    n("job_queue_staleness_seconds", "Seconds since the mirror last synced the job queue. Live job reads route to the mirror only below the routing tolerance."),
-		historyStale: n("history_staleness_seconds", "Seconds since the mirror last synced job history."),
+		jobsStale:    n("job_queue_staleness_seconds", "How far the mirror's job queue was behind the schedd when it last advertised. Live job reads route to the mirror only below the routing tolerance."),
+		historyStale: n("history_staleness_seconds", "How far the mirror's history was behind when it last advertised."),
+		adAge:        n("ad_age_seconds", "Age of the mirror advertisement these figures come from. The mirror measures its own lag when it advertises and keeps syncing between advertisements, so this is the age of the information, not of the mirror's data."),
 		historyGap:   n("history_gap", "1 if the mirror reported a history durability gap, which stops all history routing."),
 	}
 }
@@ -510,6 +513,7 @@ func (c *mirrorCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.jobsStale
 	ch <- c.historyStale
 	ch <- c.historyGap
+	ch <- c.adAge
 }
 
 func (c *mirrorCollector) Collect(ch chan<- prometheus.Metric) {
@@ -527,9 +531,16 @@ func (c *mirrorCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	g(c.up, 1)
 	g(c.caughtUp, b2f(h.Info.JobQueueCaughtUp))
-	g(c.jobsStale, float64(dbmirror.JobQueueStaleness(h.Info, time.Now().Unix())))
-	g(c.historyStale, float64(h.Info.SecondsSinceSync))
+	g(c.jobsStale, float64(dbmirror.JobQueueStaleness(h.Info)))
+	g(c.historyStale, float64(dbmirror.HistoryStaleness(h.Info)))
 	g(c.historyGap, b2f(h.Info.HistoryGap))
+	if !h.InfoAt.IsZero() {
+		// Without this, every other gauge here is a number with no
+		// indication of how old it is, and a mirror that stopped
+		// advertising looks indistinguishable from a healthy one until
+		// the collector expires its ad.
+		g(c.adAge, time.Since(h.InfoAt).Seconds())
+	}
 }
 
 func b2f(b bool) float64 {
@@ -548,49 +559,58 @@ type mirrorRoutingCount struct {
 	Count    int64  `json:"count"`
 }
 
-// mirrorRoutingCounts reads the routing-decision counter back out of the
-// registry, so the admin UI can answer "is this host actually using the
-// mirror?" without the operator standing up Prometheus.
+// mirrorRoutingCounts reads the routing-decision counter, so the admin
+// UI can answer "is this host actually using the mirror?" without the
+// operator standing up Prometheus.
 //
-// It reads the counter rather than keeping a second tally: a parallel
-// counter would be one more thing to remember to increment, and this is
-// a once-per-page-view read of a handful of series.
+// It collects the ONE CounterVec directly rather than calling
+// registry.Gather(). Gather runs every collector registered on the
+// shared registry, and that set includes the metricsdAdapter -- whose
+// Collect queries the pool for every machine, slot and job with no
+// deadline. Using it to read a handful of in-process counters turned an
+// admin page view into a full pool scrape: seconds of latency, hundreds
+// of megabytes of ClassAds, and on a large pool an OOM kill that leaves
+// no Go panic behind because SIGKILL is not catchable. The Info page
+// polls, so it did that repeatedly.
+//
+// A CounterVec is itself a prometheus.Collector, so collecting it alone
+// touches nothing else. Collect writes into the channel and blocks, so
+// it runs in a goroutine while we range.
 //
 // Counts are cumulative since process start. That is the honest shape --
 // a rate needs two samples and this endpoint only ever has one -- so the
 // UI presents them as totals, not as current behavior.
 func (m *httpMetrics) mirrorRoutingCounts() []mirrorRoutingCount {
-	if m == nil || m.registry == nil {
+	if m == nil || m.mirror == nil || m.mirror.decisions == nil {
 		return nil
 	}
-	families, err := m.registry.Gather()
-	if err != nil {
-		// A partial gather still returns the families it managed to
-		// collect, so keep going rather than dropping the whole answer.
-		if len(families) == 0 {
-			return nil
-		}
-	}
-	want := metricsNamespace + "_dbmirror_decisions_total"
+
+	ch := make(chan prometheus.Metric, 64)
+	go func() {
+		defer close(ch)
+		m.mirror.decisions.Collect(ch)
+	}()
+
 	var out []mirrorRoutingCount
-	for _, fam := range families {
-		if fam.GetName() != want {
+	for metric := range ch {
+		var pb dto.Metric
+		if err := metric.Write(&pb); err != nil {
+			// One unreadable series should not drop the rest; the
+			// panel is a summary, not an audit.
 			continue
 		}
-		for _, metric := range fam.GetMetric() {
-			row := mirrorRoutingCount{Count: int64(metric.GetCounter().GetValue())}
-			for _, label := range metric.GetLabel() {
-				switch label.GetName() {
-				case "table":
-					row.Table = label.GetValue()
-				case "decision":
-					row.Decision = label.GetValue()
-				case "reason":
-					row.Reason = label.GetValue()
-				}
+		row := mirrorRoutingCount{Count: int64(pb.GetCounter().GetValue())}
+		for _, label := range pb.GetLabel() {
+			switch label.GetName() {
+			case "table":
+				row.Table = label.GetValue()
+			case "decision":
+				row.Decision = label.GetValue()
+			case "reason":
+				row.Reason = label.GetValue()
 			}
-			out = append(out, row)
 		}
+		out = append(out, row)
 	}
 	// Stable order so the panel does not reshuffle between refreshes;
 	// Gather's own order is by label hash.

@@ -364,6 +364,33 @@ const openAPISchema = `{
           "token": {"type": "string", "description": "The signed IDToken. A bearer credential for the AP identity it names: it is returned exactly once and is not recoverable afterwards."}
         }
       },
+      "AdminClientUse": {
+        "type": "object",
+        "description": "One entry of a client's recent-users sample.",
+        "properties": {
+          "subject": {"type": "string"},
+          "at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "AdminClient": {
+        "type": "object",
+        "description": "An OAuth2 client as the admin UI sees it. Secrets are never returned.",
+        "properties": {
+          "id": {"type": "string", "description": "Client id. A dynamically registered one looks like \"client_<unixnano>\" and says nothing about the app -- which is what name, notes and origin are for."},
+          "name": {"type": "string", "description": "What the client called itself at registration (RFC 7591 client_name). Absent for seeded clients and for anything registered before this was kept."},
+          "notes": {"type": "string", "description": "Operator annotation, editable via PATCH. Often the only identifying information for a client that predates provenance tracking."},
+          "origin": {"type": "string", "enum": ["dynamic", "seeded", ""], "description": "How the client came to exist: \"dynamic\" registered itself through /mcp/oauth2/register, \"seeded\" was created by this server. EMPTY MEANS UNKNOWN, not \"not dynamic\" -- the row predates the field and nobody recorded the answer."},
+          "last_used_at": {"type": "string", "format": "date-time", "description": "When this client last obtained a token. Absent means never. Written on a debounced background flush, so it may lag real usage; it is a \"roughly when\", not an audit record."},
+          "recent_users": {"type": "array", "items": {"$ref": "#/components/schemas/AdminClientUse"}, "description": "Rolling sample of the last few distinct subjects to obtain a token through this client, newest first."},
+          "refresh_blocked_by": {"type": "array", "items": {"type": "string"}, "description": "What stops this client from ever receiving a refresh token, so its users re-authorize on every access-token expiry: the refresh_token grant, the offline_access scope, or both. Nothing errors when this is misconfigured -- the client simply never gets a refresh token. Absent means nothing blocks it, OR that the client has no interactive flow and so has no user to inconvenience."},
+          "redirect_uris": {"type": "array", "items": {"type": "string"}},
+          "grant_types": {"type": "array", "items": {"type": "string"}},
+          "response_types": {"type": "array", "items": {"type": "string"}},
+          "scopes": {"type": "array", "items": {"type": "string"}},
+          "public": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      },
       "DBMirrorRoutingCount": {
         "type": "object",
         "description": "One routing tally since process start.",
@@ -377,20 +404,23 @@ const openAPISchema = `{
       "DBMirrorHealth": {
         "type": "object",
         "properties": {
-          "status": {"type": "string", "enum": ["ok", "warning", "down"], "description": "\"ok\" only when reads are actually routing right now. A mirror that is up but too far behind to serve is \"warning\" -- it is running, not working."},
+          "status": {"type": "string", "enum": ["ok", "warning", "down", "unknown"], "description": "\"ok\" only when reads are actually routing right now. A mirror that is up but too far behind to serve is \"warning\" -- it is running, not working. \"unknown\" means discovery has not run yet, which is not the same as failing."},
           "required": {"type": "boolean", "description": "HTTP_API_DBMIRROR_REQUIRED: a read the mirror cannot serve fails instead of falling back to the schedd."},
           "name": {"type": "string", "description": "The mirror actually in use."},
           "address": {"type": "string"},
           "pinned_name": {"type": "string", "description": "Configured targeting, echoed so a typo is visible next to the empty result it produced."},
           "pinned_address": {"type": "string"},
+          "discovered": {"type": "boolean", "description": "Whether an advertisement was read. When false the staleness fields are absent rather than zero -- a 0 would read as \"perfectly caught up\" for a mirror nobody has found."},
+          "ad_age_seconds": {"type": "integer", "format": "int64", "description": "How long ago the advertisement was discovered -- the age of this information, not of the mirror's data. Everything the mirror reports about itself was measured when it built the ad; it keeps syncing between advertisements, so an aging ad does not mean a lagging mirror."},
           "job_queue_caught_up": {"type": "boolean"},
-          "job_queue_staleness_seconds": {"type": "integer", "format": "int64"},
-          "history_staleness_seconds": {"type": "integer", "format": "int64"},
+          "job_queue_staleness_seconds": {"type": "integer", "format": "int64", "description": "How far the mirror's job queue was behind the schedd when it built its advertisement. Absent when nothing was discovered. Pair with ad_age_seconds, which says how old that measurement is."},
+          "history_staleness_seconds": {"type": "integer", "format": "int64", "description": "How far the mirror's history was behind when it built its advertisement. Absent when nothing was discovered."},
           "history_gap": {"type": "boolean", "description": "A history durability gap, which stops all history routing."},
           "jobs_tolerance_seconds": {"type": "integer", "format": "int64", "description": "Live job reads route to the mirror only below this staleness."},
           "history_tolerance_seconds": {"type": "integer", "format": "int64"},
           "last_error": {"type": "string"},
-          "last_success": {"type": "string", "format": "date-time"}
+          "last_attempt": {"type": "string", "format": "date-time", "description": "When discovery last queried the collector. Absent when it never has, which is the whole explanation for a status of \"unknown\"."},
+          "last_success": {"type": "string", "format": "date-time", "description": "When discovery last found a mirror."}
         }
       },
       "DBMirrorStatus": {
@@ -414,6 +444,48 @@ const openAPISchema = `{
     }
   },
   "paths": {
+    "/admin/oauth2/clients": {
+      "get": {
+        "summary": "List OAuth2 clients",
+        "description": "Every registered OAuth2 client, newest first, with the provenance fields that make the list readable: the name the client registered under, the operator's notes, how it came to exist, when it last obtained a token, and who for. Requires membership in the web UI admin group.",
+        "operationId": "listAdminClients",
+        "responses": {
+          "200": {"description": "Clients", "content": {"application/json": {"schema": {"type": "object", "properties": {"clients": {"type": "array", "items": {"$ref": "#/components/schemas/AdminClient"}}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/admin/oauth2/clients/{id}": {
+      "patch": {
+        "summary": "Annotate an OAuth2 client",
+        "description": "Set the operator's note for a client. The note is the ONLY editable field: everything else is either the client's own assertion at registration or something this server derived, and letting an admin rewrite those would turn the provenance columns into a record of a belief rather than a fact. Requires membership in the web UI admin group.",
+        "operationId": "updateAdminClient",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"notes": {"type": "string", "maxLength": 4096}}}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"type": "object", "properties": {"notes": {"type": "string"}}}}}},
+          "400": {"description": "Malformed body or notes over the length limit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Delete an OAuth2 client",
+        "description": "Removes the client and every token issued under it. Useful for clearing dynamic-registration churn. Requires membership in the web UI admin group.",
+        "operationId": "deleteAdminClient",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Deleted"},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/dbmirror/status": {
       "get": {
         "summary": "htcondordb mirror routing status",
@@ -1863,7 +1935,7 @@ const openAPISchema = `{
     "/jobs/archive": {
       "get": {
         "summary": "Query job archive",
-        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the query is owner-scoped \u2014 the response's source field names which answered.",
+        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered.",
         "operationId": "queryJobArchive",
         "parameters": [
           {
@@ -1897,7 +1969,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers (the schedd's ACL is the boundary); always applied to a browser session that is not a Web UI admin. An owner-scoped query is also the only kind that may be served from an htcondordb mirror.",
+            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers; always applied to a browser session that is not a Web UI admin. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
             "required": false,
             "schema": {
               "type": "boolean",

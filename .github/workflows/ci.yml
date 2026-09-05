@@ -149,3 +149,51 @@ jobs:
     # Dependabot's per-module bumps. The failure message points at `make tidy-all`.
     - name: Verify modules are tidy
       run: make tidy-check
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    # The Web UI had no CI at all: ci.yml and docker-test.yml never touched
+    # webapi/frontend, so a change there merged unverified and the first
+    # thing to notice was the release container build (Dockerfile.release
+    # stage 1) -- on main, after the fact, as an opaque image-build failure.
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        # Match the version Dockerfile.release and release-binaries.yml
+        # build with, so a green PR means the release build is green too.
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: webapi/frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: webapi/frontend
+      run: npm ci
+
+    - name: Type check
+      working-directory: webapi/frontend
+      run: npm run typecheck
+
+    - name: Build
+      working-directory: webapi/frontend
+      run: npm run build
+      env:
+        NODE_ENV: production
+
+    # A gate as of #240, which cleared the 10 errors main used to carry
+    # (eight of them react-hooks "setState synchronously within an effect").
+    # It ran advisory until then because failing every PR on a pre-existing
+    # backlog only teaches people to skip the job.
+    #
+    # Errors fail the build; the four remaining warnings do not. Ratcheting
+    # to --max-warnings=0 wants those fixed first -- three are
+    # react-hooks/exhaustive-deps on `templates` in submit/page.tsx, which
+    # is a real change rather than a mechanical one.
+    - name: Lint
+      working-directory: webapi/frontend
+      run: npm run lint

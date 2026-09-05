@@ -2,11 +2,11 @@ package mcpserver
 
 import (
 	"context"
+
 	"fmt"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"strings"
 	"time"
-
-	htcondor "github.com/bbockelm/golang-htcondor"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
@@ -219,7 +219,9 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info) i
 }
 
 // freshnessNote annotates a result with the mirror's staleness and any durability gap, so an
-// agent can weigh how current the DB-backed answer is.
+// agent can weigh how current the DB-backed answer is. The staleness is recomputed from the
+// mirror's absolute sync stamp rather than read off the ad, whose own figure is frozen at the
+// ad's build time and so understates the lag by up to a collector update interval.
 func freshnessNote(info *dbmirror.Info) string {
 	if info == nil {
 		return ""
@@ -229,8 +231,8 @@ func freshnessNote(info *dbmirror.Info) string {
 	if info.Name != "" {
 		fmt.Fprintf(&b, " %q", info.Name)
 	}
-	if info.SecondsSinceSync > 0 {
-		fmt.Fprintf(&b, "; last synced %ds ago", info.SecondsSinceSync)
+	if s := dbmirror.HistoryStaleness(info); s > 0 {
+		fmt.Fprintf(&b, "; last synced %ds ago", s)
 	}
 	if info.HistoryGap {
 		b.WriteString("; WARNING: a history durability gap was detected -- some completed jobs may be missing")
@@ -256,31 +258,121 @@ func textResult(text string) interface{} {
 // a transfer: counting by listing would move every matching ad here
 // only to discard it.
 func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string, groupBy []string) (interface{}, error) {
-	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, &htcondor.QueryOptions{
-		FetchOpts: htcondor.FetchMyJobs,
-	})
+	// selfScopedQueryOptions rather than a hardcoded FetchMyJobs, so an
+	// admin is exempt here as everywhere else. Note this is consistency
+	// rather than a behaviour fix on its own: the schedd routes a
+	// ProjectionIsGroupBy query to command_query_job_aggregates BEFORE
+	// it looks at owner filtering at all, and this request ad never
+	// carried a MyJobs attribute, so the flag was not confining anything.
+	opts, ok := s.selfScopedQueryOptions(ctx, nil)
+	if !ok {
+		return nil, fmt.Errorf("authentication required")
+	}
+
+	// Ask for one more group than we will show. The schedd stops at
+	// LimitResults and says nothing about it -- JobAggregationResults::
+	// next() simply returns nullptr once results_returned reaches the
+	// limit -- so an extra row is the only way to learn that more
+	// existed. Without this the answer was silently the alphabetically
+	// first 50 groups, because the default came from QueryOptions.
+	// ApplyDefaults, which sets the LISTING default of 50. A GROUP BY is
+	// not a listing.
+	opts.Limit = aggregateGroupLimit + 1
+	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, opts)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate query failed: %w", err)
 	}
 
+	truncated := len(rows) > aggregateGroupLimit
+	if truncated {
+		rows = rows[:aggregateGroupLimit]
+	}
+
+	// A truncated grouping cannot be summed into a total -- that is how
+	// the count came out ~15,000 short of the queue. Ask again without a
+	// grouping, which returns one row and cannot be truncated, so the
+	// headline number is right even when the breakdown is partial. Only
+	// on the truncated path: the common case still costs one query.
+	exactTotal := int64(-1)
+	if truncated {
+		totalOpts, ok := s.selfScopedQueryOptions(ctx, nil)
+		if ok {
+			totalOpts.Limit = 2
+			if totalRows, terr := s.schedd.AggregateJobs(ctx, constraint, nil, totalOpts); terr == nil {
+				exactTotal = 0
+				for _, r := range totalRows {
+					exactTotal += r.Count
+				}
+			}
+		}
+	}
+
+	return textResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal)), nil
+}
+
+// aggregateGroupLimit bounds how many groups an aggregate returns. It is
+// deliberately not QueryOptions' listing default of 50: a "count jobs by
+// owner" on a busy access point has hundreds of owners, and 50 of them
+// is not an answer to the question asked.
+const aggregateGroupLimit = 500
+
+// renderScheddAggregate formats a schedd-served aggregate for an agent.
+//
+// Everything here exists because the previous version told the caller
+// less than it knew. It reported a group count and a total, both derived
+// from a silently truncated result, with no way for a reader to tell
+// that either was partial -- and the total was simply wrong. An agent
+// acting on that has no signal to look further.
+//
+// The effective constraint is echoed for the same reason. It is not
+// always what the caller passed: a non-admin gets an owner clause ANDed
+// in, so a caller seeing zero can tell "no such jobs" apart from "not
+// your jobs", which is otherwise indistinguishable from the outside.
+func renderScheddAggregate(constraint string, groupBy []string, rows []htcondor.AggregateRow, truncated bool, exactTotal int64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Aggregate COUNT over live jobs (%d group(s))", len(rows))
+	fmt.Fprintf(&b, "Aggregate COUNT over live jobs (%d group(s)", len(rows))
+	if truncated {
+		fmt.Fprintf(&b, ", TRUNCATED at %d -- more groups matched", aggregateGroupLimit)
+	}
+	b.WriteString(")")
 	if len(groupBy) > 0 {
 		fmt.Fprintf(&b, " by %s", strings.Join(groupBy, ", "))
 	}
 	b.WriteString(":\n")
-	var total int64
+
+	var shown int64
 	for _, r := range rows {
-		total += r.Count
+		shown += r.Count
 		if len(groupBy) > 0 {
 			fmt.Fprintf(&b, "  %s = %d\n", strings.Join(r.Group, "/"), r.Count)
 		} else {
 			fmt.Fprintf(&b, "  count = %d\n", r.Count)
 		}
 	}
-	// Name the backend, as the job and history tools do, and say what it
-	// does not cover: a schedd knows nothing about completed jobs.
-	fmt.Fprintf(&b, "\n[source: schedd; %d job(s) in the live queue. Completed jobs are not included -- "+
-		"history lives in an htcondordb mirror, which this pool does not have.]", total)
-	return textResult(b.String()), nil
+
+	b.WriteString("\n[source: schedd")
+
+	// The constraint actually applied, which may not be the one asked
+	// for.
+	shownConstraint := constraint
+	if shownConstraint == "" {
+		shownConstraint = "true"
+	}
+	fmt.Fprintf(&b, "; constraint applied: %s", shownConstraint)
+
+	switch {
+	case truncated && exactTotal >= 0:
+		fmt.Fprintf(&b, "; %d job(s) match in total, of which %d are in the %d group(s) shown. "+
+			"The groups are the alphabetically first ones; narrow the constraint to see the rest",
+			exactTotal, shown, len(rows))
+	case truncated:
+		fmt.Fprintf(&b, "; %d job(s) in the %d group(s) shown, and MORE GROUPS MATCHED that are not "+
+			"listed -- this total is a lower bound. Narrow the constraint to see the rest", shown, len(rows))
+	default:
+		fmt.Fprintf(&b, "; %d job(s) in the live queue", shown)
+	}
+
+	b.WriteString(". Completed jobs are not included -- history lives in an htcondordb mirror, " +
+		"which this pool does not have.]")
+	return b.String()
 }

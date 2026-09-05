@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
 
 // Server represents the MCP server
@@ -32,6 +33,7 @@ type Server struct {
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	delegated          bool
+	submitPolicy       submitpolicy.Policy
 	stdin              io.Reader
 	stdout             io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
@@ -113,6 +115,19 @@ type Config struct {
 	DBMirrorName     string // HTTP_API_DBMIRROR_NAME
 	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS
 	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED
+	// DBMirror lets a host that already has a Locator share it instead
+	// of having a second one built from the three knobs above. The HTTP
+	// daemon does: it runs these tools in-process, and two Locators
+	// would mean two discovery caches, two sets of poll timings, and an
+	// admin page describing only one of them. Nil (the standalone
+	// stdio server) builds a Locator from the knobs.
+	DBMirror *dbmirror.Locator
+
+	// SubmitPolicy is the operator's site-wide submit-file defaults and
+	// overrides. The agent surface gets the same treatment as the REST
+	// and web surfaces: a site requirement an agent cannot know about is
+	// exactly the kind this exists to satisfy.
+	SubmitPolicy submitpolicy.Policy
 }
 
 // NewServer creates a new MCP server
@@ -189,11 +204,15 @@ func NewServer(cfg Config) (*Server, error) {
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
 		delegated:      cfg.Delegated,
-		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
+		submitPolicy:   cfg.SubmitPolicy,
+		dbMirror:       cfg.DBMirror,
+	}
+	if s.dbMirror == nil {
+		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
 			Required: cfg.DBMirrorRequired,
-		}),
+		})
 	}
 
 	// Setup metrics if collector is provided
@@ -329,14 +348,30 @@ func (s *Server) handleMessage(ctx context.Context, msg *MCPMessage) *MCPMessage
 	case "tools/list":
 		response.Result = s.handleListTools(ctx, msg.Params)
 	case "tools/call":
+		// Minted here, not inside handleCallTool: the id has to be
+		// readable on THIS scope so the error result can carry the same
+		// value the log line does. A context derived inside the callee
+		// does not come back.
+		traceID := newTraceID()
+		ctx = withTraceID(ctx, traceID)
 		result, err := s.handleCallTool(ctx, msg.Params)
-		if err != nil {
+		switch {
+		case err == nil:
+			response.Result = result
+		case isProtocolError(err):
+			// A malformed request: no tool ran, so there is no tool
+			// result to return.
 			response.Error = &MCPError{
 				Code:    -32000,
 				Message: err.Error(),
 			}
-		} else {
-			response.Result = result
+		default:
+			// A tool ran and failed. MCP wants that as a normal result
+			// carrying isError, because a JSON-RPC error is a protocol
+			// fault that clients surface as an opaque failure -- the
+			// model never sees the text, so the diagnosis is thrown
+			// away exactly when it is needed.
+			response.Result = toolErrorResult(toolNameFromParams(msg.Params), traceID, err)
 		}
 	case "resources/list":
 		response.Result = s.handleListResources(ctx, msg.Params)
@@ -397,4 +432,18 @@ func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interfac
 		result["instructions"] = s.instructions
 	}
 	return result
+}
+
+// toolNameFromParams re-reads just the tool name from a tools/call
+// params blob, for error reporting. The dispatcher has already parsed
+// and validated these params by the time we need this, so a failure here
+// means the name is genuinely absent rather than malformed.
+func toolNameFromParams(params json.RawMessage) string {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil || req.Name == "" {
+		return "unknown"
+	}
+	return req.Name
 }

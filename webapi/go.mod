@@ -41,7 +41,6 @@ require (
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
@@ -132,6 +131,7 @@ require (
 require (
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+	github.com/prometheus/client_model v0.6.2
 )
 
 replace github.com/bbockelm/golang-htcondor => ../

@@ -203,8 +203,8 @@ func submitJobAsUser(t *testing.T, client *http.Client, baseURL, token, user str
 	resp := sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 1, Method: "tools/call", Params: params,
 	})
-	if resp.Error != nil {
-		t.Fatalf("submit_job as %s failed: %v", user, resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("submit_job as %s failed: %v", user, msg)
 	}
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
@@ -239,8 +239,8 @@ func assertOwnJobsOnly(t *testing.T, client *http.Client, baseURL, token string,
 	resp := sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 2, Method: "tools/call", Params: params,
 	})
-	if resp.Error != nil {
-		t.Fatalf("query_jobs failed: %v", resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("query_jobs failed: %v", msg)
 	}
 	listing := toolText(t, resp.Result)
 	if !strings.Contains(listing, fmt.Sprintf(`"ClusterId":%d`, ownCluster)) {
@@ -258,7 +258,10 @@ func assertOwnJobsOnly(t *testing.T, client *http.Client, baseURL, token string,
 	resp = sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 3, Method: "tools/call", Params: params,
 	})
-	if resp.Error == nil {
+	// The refusal must be a refusal, in either shape. Deliberately NOT
+	// "the payload does not mention the other cluster": the refusal
+	// message itself names the job it would not hand over.
+	if _, failed := mcpToolFailure(t, resp); !failed {
 		got, _ := json.Marshal(resp.Result)
 		t.Errorf("CROSS-TALK: get_job returned the other user's job %d.0: %s", otherCluster, got)
 	}
@@ -272,8 +275,8 @@ func assertOwnJobsOnly(t *testing.T, client *http.Client, baseURL, token string,
 	resp = sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 4, Method: "tools/call", Params: params,
 	})
-	if resp.Error != nil {
-		t.Fatalf("caller cannot fetch their own job %d.0: %v", ownCluster, resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("caller cannot fetch their own job %d.0: %v", ownCluster, msg)
 	}
 	if own := toolText(t, resp.Result); !strings.Contains(own, fmt.Sprintf(`"ClusterId": %d`, ownCluster)) {
 		t.Errorf("get_job returned something other than the caller's job %d.0: %s", ownCluster, own)
@@ -299,4 +302,34 @@ func toolText(t *testing.T, result interface{}) string {
 	}
 	text, _ := first["text"].(string)
 	return text
+}
+
+// mcpToolFailure reports whether a tools/call refused, and with what
+// message, across BOTH shapes a refusal can take.
+//
+// A tool that ran and failed comes back as a result carrying isError
+// with the reason in its content; only a malformed request is a
+// JSON-RPC error. Tests that checked `resp.Error != nil` alone therefore
+// read a correct refusal as a success — which, in the cross-talk test,
+// meant reporting a leak that had not happened.
+//
+// Callers must use this rather than inspecting resp.Error directly, and
+// must not fall back to searching the whole payload for an identifier:
+// a refusal names the thing it refused ("job 2.0 not found"), so a
+// substring search over the error text finds the other user's job id in
+// the very message proving it was withheld.
+func mcpToolFailure(t *testing.T, resp *mcpserver.MCPMessage) (string, bool) {
+	t.Helper()
+	if resp.Error != nil {
+		return resp.Error.Message, true
+	}
+	m, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	isErr, _ := m["isError"].(bool)
+	if !isErr {
+		return "", false
+	}
+	return toolText(t, resp.Result), true
 }

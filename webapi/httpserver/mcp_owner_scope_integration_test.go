@@ -293,8 +293,8 @@ func queryJobsAs(t *testing.T, client *http.Client, baseURL, token, constraint s
 	resp := sendMCPRequest(t, client, baseURL, token, mcpserver.MCPMessage{
 		JSONRPC: "2.0", ID: 2, Method: "tools/call", Params: params,
 	})
-	if resp.Error != nil {
-		t.Fatalf("query_jobs failed: %v", resp.Error.Message)
+	if msg, failed := mcpToolFailure(t, resp); failed {
+		t.Fatalf("query_jobs failed: %v", msg)
 	}
 	return toolText(t, resp.Result)
 }

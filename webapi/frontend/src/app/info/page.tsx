@@ -1,22 +1,28 @@
-'use client';
+"use client";
 
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { api, type DBMirrorHealth } from '@/lib/api';
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api, type DBMirrorHealth } from "@/lib/api";
 
 export default function InfoPage() {
-  const { data: session, isLoading: sessionLoading, error: sessionError } =
-    useQuery({ queryKey: ['session'], queryFn: api.auth.me });
-  const { data: version, isLoading: versionLoading, error: versionError } =
-    useQuery({ queryKey: ['version'], queryFn: api.version });
+  const {
+    data: session,
+    isLoading: sessionLoading,
+    error: sessionError,
+  } = useQuery({ queryKey: ["session"], queryFn: api.auth.me });
+  const {
+    data: version,
+    isLoading: versionLoading,
+    error: versionError,
+  } = useQuery({ queryKey: ["version"], queryFn: api.version });
 
   return (
     <div className="space-y-6 max-w-4xl">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Info</h1>
         <p className="text-sm text-gray-500">
-          Build information for this access point and details about your
-          current session.
+          Build information for this access point and details about your current
+          session.
         </p>
       </div>
 
@@ -29,8 +35,8 @@ export default function InfoPage() {
         )}
         {version && (
           <DefList>
-            <Row label="Version" value={version.version || '(unset)'} />
-            <Row label="Commit" mono value={version.commit || '(unset)'} />
+            <Row label="Version" value={version.version || "(unset)"} />
+            <Row label="Commit" mono value={version.commit || "(unset)"} />
           </DefList>
         )}
       </Section>
@@ -44,7 +50,7 @@ export default function InfoPage() {
         )}
         {session && !session.authenticated && (
           <p className="text-sm text-gray-500">
-            Not signed in.{' '}
+            Not signed in.{" "}
             <a
               href="/login"
               className="text-brand-700 hover:text-brand-900 underline"
@@ -56,11 +62,8 @@ export default function InfoPage() {
         )}
         {session?.authenticated && (
           <DefList>
-            <Row label="Username" value={session.username ?? '(unknown)'} />
-            <Row
-              label="Admin"
-              value={session.is_admin ? 'Yes' : 'No'}
-            />
+            <Row label="Username" value={session.username ?? "(unknown)"} />
+            <Row label="Admin" value={session.is_admin ? "Yes" : "No"} />
             <Row
               label="Groups"
               value={
@@ -213,13 +216,17 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
       ? 'bg-green-100 text-green-800'
       : health.status === 'warning'
         ? 'bg-amber-100 text-amber-800'
-        : 'bg-red-100 text-red-800';
+        : health.status === 'unknown'
+          ? 'bg-gray-100 text-gray-700'
+          : 'bg-red-100 text-red-800';
   const statusText =
     health.status === 'ok'
       ? 'Serving'
       : health.status === 'warning'
         ? 'Discovered, not serving'
-        : 'Not reachable';
+        : health.status === 'unknown'
+          ? 'Not checked yet'
+          : 'Not reachable';
 
   return (
     <>
@@ -250,33 +257,68 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
             .join(' @ ')}
         />
       )}
-      <Row
-        label="Job queue"
-        value={
-          <StalenessValue
-            ok={health.job_queue_caught_up}
-            okText="caught up"
-            notOkText="behind the schedd's job_queue.log"
-            seconds={health.job_queue_staleness_seconds}
-            tolerance={health.jobs_tolerance_seconds}
+      {health.discovered ? (
+        <>
+          <Row
+            label="Job queue"
+            value={
+              <StalenessValue
+                ok={health.job_queue_caught_up}
+                okText="caught up"
+                notOkText="behind the schedd's job_queue.log"
+                seconds={health.job_queue_staleness_seconds}
+                tolerance={health.jobs_tolerance_seconds}
+              />
+            }
           />
-        }
-      />
+          <Row
+            label="History"
+            value={
+              health.history_gap ? (
+                <span className="text-red-700">
+                  durability gap reported — history routing is stopped
+                </span>
+              ) : (
+                <StalenessValue
+                  ok
+                  okText=""
+                  notOkText=""
+                  seconds={health.history_staleness_seconds}
+                  tolerance={health.history_tolerance_seconds}
+                />
+              )
+            }
+          />
+        </>
+      ) : (
+        <Row
+          label="Freshness"
+          value={
+            <span className="text-gray-500">
+              Unknown — no mirror advertisement has been read, and the lag
+              is only ever reported by the mirror itself.
+            </span>
+          }
+        />
+      )}
       <Row
-        label="History"
+        label="Last polled"
         value={
-          health.history_gap ? (
-            <span className="text-red-700">
-              durability gap reported — history routing is stopped
+          health.last_attempt ? (
+            <span>
+              {new Date(health.last_attempt).toLocaleString()}
+              {health.ad_age_seconds ? (
+                <span className="text-gray-400">
+                  {' '}
+                  · advertisement read{' '}
+                  {health.ad_age_seconds.toLocaleString()}s ago
+                </span>
+              ) : null}
             </span>
           ) : (
-            <StalenessValue
-              ok
-              okText=""
-              notOkText=""
-              seconds={health.history_staleness_seconds}
-              tolerance={health.history_tolerance_seconds}
-            />
+            <span className="text-gray-500">
+              Never — nothing has asked the collector for the mirror yet.
+            </span>
           )
         }
       />
@@ -298,6 +340,12 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
 
 // StalenessValue puts a staleness next to the tolerance that gates it:
 // "12s behind (routes below 60s)" is actionable where a bare "12" is not.
+//
+// The number is the lag the mirror measured on ITSELF when it last
+// advertised, not anything derived from this server's clock. The mirror
+// advertises every few minutes but syncs continuously, so an aging
+// advertisement is not a lagging mirror -- how old the reading is, is
+// the "Last polled" row's job.
 function StalenessValue({
   ok,
   okText,
@@ -308,13 +356,21 @@ function StalenessValue({
   ok: boolean;
   okText: string;
   notOkText: string;
-  seconds: number;
+  seconds?: number;
   tolerance: number;
 }) {
+  if (seconds === undefined) {
+    return (
+      <span className="text-gray-500">
+        unknown{' '}
+        <span className="text-gray-400">(routes below {tolerance}s)</span>
+      </span>
+    );
+  }
   const over = seconds > tolerance;
   return (
     <span className={over || !ok ? 'text-amber-700' : undefined}>
-      {seconds.toLocaleString()}s behind{' '}
+      {seconds.toLocaleString()}s behind when last advertised{' '}
       <span className="text-gray-400">(routes below {tolerance}s)</span>
       {!ok && notOkText ? ` — ${notOkText}` : ''}
       {ok && okText && !over ? ` — ${okText}` : ''}
@@ -330,13 +386,18 @@ function StalenessValue({
 // container so it stays reachable without backtracking.
 function CondorConfigSection() {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin-condor-config'],
+    queryKey: ["admin-condor-config"],
     queryFn: api.admin.condorConfig,
     // Config doesn't change at runtime; cache for the tab's lifetime.
     staleTime: Infinity,
     retry: false,
   });
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState("");
+  // Default to hiding untouched parameters. A stock config carries on
+  // the order of a thousand built-in defaults against a handful the
+  // deployment actually set, so showing everything by default buries
+  // the interesting rows in noise.
+  const [modifiedOnly, setModifiedOnly] = useState(true);
 
   // Filter on every render — the entry count is a few thousand, the
   // user's filter text is short, substring match is cheap. Memoize
@@ -345,20 +406,26 @@ function CondorConfigSection() {
   const filtered = useMemo(() => {
     if (!data?.entries) return [];
     const q = filter.trim().toLowerCase();
-    if (!q) return data.entries;
-    return data.entries.filter(
-      (e) =>
+    return data.entries.filter((e) => {
+      if (modifiedOnly && e.is_default) return false;
+      if (!q) return true;
+      return (
         e.key.toLowerCase().includes(q) ||
-        (e.value ? e.value.toLowerCase().includes(q) : false),
-    );
-  }, [data, filter]);
+        (e.value ? e.value.toLowerCase().includes(q) : false)
+      );
+    });
+  }, [data, filter, modifiedOnly]);
 
   const total = data?.entries?.length ?? 0;
+  // Prefer the server's count: it is computed over the whole readout
+  // rather than the current filter, so the label stays stable while
+  // the user types.
+  const modifiedCount = data?.modified_count ?? 0;
 
   return (
     <Section title="HTCondor configuration (admin)">
       <p className="text-xs text-gray-500 mb-3">
-        Running config of this access point. Equivalent to{' '}
+        Running config of this access point. Equivalent to{" "}
         <code className="font-mono">condor_config_val -dump</code>. Values for
         keys that look like secrets (PASSWORD / SECRET / API_KEY / TOKEN / …)
         are redacted server-side; the key still appears so you can confirm
@@ -390,11 +457,21 @@ function CondorConfigSection() {
               aria-label="Filter HTCondor config"
             />
             <span className="text-[11px] text-gray-500 tabular-nums shrink-0">
-              {filter
-                ? `${filtered.length.toLocaleString()} / ${total.toLocaleString()}`
-                : total.toLocaleString()}
+              {`${filtered.length.toLocaleString()} / ${total.toLocaleString()}`}
             </span>
           </div>
+
+          <label className="mb-2 flex items-center gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={modifiedOnly}
+              onChange={(e) => setModifiedOnly(e.target.checked)}
+            />
+            Only show values changed from their default
+            <span className="text-gray-400">
+              ({modifiedCount.toLocaleString()} of {total.toLocaleString()})
+            </span>
+          </label>
 
           {/* Inner scroll container caps the table height so the
               admin readout never displaces the rest of the page.
@@ -403,7 +480,9 @@ function CondorConfigSection() {
           <div className="overflow-y-auto rounded border border-gray-200 max-h-[28rem]">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-xs text-gray-500">
-                No matches.
+                {modifiedOnly
+                  ? "No matches among changed values — untick the box above to search the built-in defaults too."
+                  : "No matches."}
               </p>
             ) : (
               <table className="min-w-full text-xs">
@@ -481,7 +560,7 @@ function Row({
     <>
       <dt className="text-gray-500">{label}</dt>
       <dd
-        className={`text-gray-900 break-all ${mono ? 'font-mono text-xs' : ''}`}
+        className={`text-gray-900 break-all ${mono ? "font-mono text-xs" : ""}`}
       >
         {value}
       </dd>

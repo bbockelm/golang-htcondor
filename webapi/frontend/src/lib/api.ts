@@ -167,21 +167,31 @@ export interface DBMirrorRoutingCount {
 
 // DBMirrorHealth mirrors what /readyz reports. `status` is "ok" only
 // when reads are actually routing right now; a mirror that is up but too
-// far behind to serve is "warning" -- running, not working.
+// far behind to serve is "warning" -- running, not working. "unknown"
+// means discovery has not run, which is not the same as failing.
+//
+// The staleness fields are absent, not zero, when `discovered` is false:
+// a 0 there would read as "perfectly caught up" for a mirror nobody has
+// found. When present they are the lag the mirror measured on itself as
+// it advertised; `ad_age_seconds` says how old that reading is, and the
+// two are deliberately not added together.
 export interface DBMirrorHealth {
-  status: 'ok' | 'warning' | 'down' | string;
+  status: 'ok' | 'warning' | 'down' | 'unknown' | string;
   required: boolean;
   name?: string;
   address?: string;
   pinned_name?: string;
   pinned_address?: string;
+  discovered: boolean;
+  ad_age_seconds?: number;
   job_queue_caught_up: boolean;
-  job_queue_staleness_seconds: number;
-  history_staleness_seconds: number;
+  job_queue_staleness_seconds?: number;
+  history_staleness_seconds?: number;
   history_gap: boolean;
   jobs_tolerance_seconds: number;
   history_tolerance_seconds: number;
   last_error?: string;
+  last_attempt?: string;
   last_success?: string;
 }
 
@@ -597,6 +607,12 @@ export interface MatchAnalysisAttributeDistribution {
   error_example?: string;
 }
 
+// AdminClientUse is one entry of a client's recent-users sample.
+export interface AdminClientUse {
+  subject: string;
+  at: string;
+}
+
 export interface AdminClient {
   id: string;
   redirect_uris?: string[];
@@ -605,6 +621,30 @@ export interface AdminClient {
   scopes?: string[];
   public: boolean;
   created_at: string;
+
+  // What the client called itself at registration (RFC 7591
+  // client_name). Absent for seeded clients and for anything registered
+  // before the server started keeping it.
+  name?: string;
+  // Operator annotation. Often the only identifying information for a
+  // client that predates provenance tracking.
+  notes?: string;
+  // 'dynamic' registered itself, 'seeded' was created by this server.
+  // ABSENT MEANS UNKNOWN, not "not dynamic" — the row predates the
+  // field, so rendering it as a negative would assert something nobody
+  // checked.
+  origin?: 'dynamic' | 'seeded' | string;
+  // When this client last obtained a token; absent means never. Written
+  // on a debounced background flush, so treat it as "roughly when".
+  last_used_at?: string;
+  // Last few distinct subjects to obtain a token here, newest first.
+  recent_users?: AdminClientUse[];
+  // What stops this client from ever receiving a refresh token, so its
+  // users re-authorize on every access-token expiry. Absent means
+  // nothing does — or that the client has no interactive flow, in which
+  // case there is no user to inconvenience. Computed by the server,
+  // which owns these OAuth semantics.
+  refresh_blocked_by?: string[];
 }
 
 export interface AdminToken {
@@ -636,6 +676,10 @@ export interface AdminCondorConfigEntry {
   // Empty string when redacted=true (server scrubbed an apparent secret).
   value?: string;
   redacted?: boolean;
+  // True when the key still holds HTCondor's compiled-in value — nothing
+  // in this deployment's config files or environment touched it. Omitted
+  // (so undefined, i.e. falsy) for keys the deployment did set.
+  is_default?: boolean;
 }
 
 export interface AdminCondorConfigResponse {
@@ -643,6 +687,9 @@ export interface AdminCondorConfigResponse {
   // — typically only the demo path. Treat as "feature unavailable".
   configured: boolean;
   entries?: AdminCondorConfigEntry[];
+  // How many entries differ from their built-in default, counted over the
+  // whole readout rather than the client's current filter.
+  modified_count?: number;
 }
 
 // AdminAPIKey is the metadata-only DTO the list endpoint returns.
@@ -1013,6 +1060,15 @@ export const api = {
     deleteClient: (id: string): Promise<void> =>
       fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+      }),
+    // Notes are the only editable field on a client: everything else is
+    // either the client's own assertion at registration or something the
+    // server derived.
+    updateClientNotes: (id: string, notes: string): Promise<{ notes: string }> =>
+      fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
       }),
     listTokens: (params?: {
       client_id?: string;

@@ -37,6 +37,29 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 	return hasGroup(session.Groups, s.webuiAdminGroup)
 }
 
+// resolveOwnerScope settles whether a request asking for other people's
+// records may have them, given the owned_by_me it asked for. It is this
+// daemon's UI policy, not the schedd's: a browser session outside the
+// admin group is confined to its own records whatever it asked for,
+// while an admin session and a bearer-token caller are left alone.
+//
+// It says nothing about whether a read may be served from the htcondordb
+// mirror. That question is about identity, not group membership, and is
+// answered in handlers_dbroute.go.
+//
+// Both endpoints that offer a Mine/Everyone choice call this, so they
+// cannot drift on who is allowed what.
+func (s *Handler) resolveOwnerScope(r *http.Request, ownedByMe bool) bool {
+	if ownedByMe {
+		return true
+	}
+	if s.isWebUIAdmin(r) {
+		return false
+	}
+	_, hasSession := s.getSessionFromRequest(r)
+	return hasSession
+}
+
 // confusing than helpful.
 func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.webuiAdminGroup == "" {
@@ -69,6 +92,40 @@ type AdminClient struct {
 	Scopes        []string  `json:"scopes,omitempty"`
 	Public        bool      `json:"public"`
 	CreatedAt     time.Time `json:"created_at"`
+
+	// Name is what the client called itself at registration (RFC 7591
+	// client_name). Empty for seeded clients and for anything registered
+	// before we started keeping it.
+	Name string `json:"name,omitempty"`
+	// Notes is the operator's own annotation, editable from the UI. It
+	// is the only identifying field available for clients that predate
+	// provenance tracking.
+	Notes string `json:"notes,omitempty"`
+	// Origin is "dynamic", "seeded", or empty for unknown. Empty is not
+	// the same as "not dynamic" -- it means nobody recorded the answer.
+	Origin string `json:"origin,omitempty"`
+	// LastUsedAt is when this client last obtained a token. Absent means
+	// never, which for a dynamically registered client usually means an
+	// app registered once and never came back.
+	//
+	// Written on a debounced background flush, so it can lag real usage
+	// by up to a flush interval. It is a "roughly when", not an audit
+	// record; oauth2_access_tokens has the per-token history.
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// RecentUsers is a rolling sample of the last few distinct subjects
+	// to obtain a token through this client, newest first.
+	RecentUsers []AdminClientUse `json:"recent_users,omitempty"`
+	// RefreshBlockedBy names what stops this client from ever receiving
+	// a refresh token, so its users re-authorize on every access-token
+	// expiry. Empty means nothing does -- or that the client has no
+	// interactive flow and so has no user to inconvenience.
+	RefreshBlockedBy []string `json:"refresh_blocked_by,omitempty"`
+}
+
+// AdminClientUse is one entry of a client's recent-users sample.
+type AdminClientUse struct {
+	Subject string    `json:"subject"`
+	At      time.Time `json:"at"`
 }
 
 // AdminToken is the SPA-facing shape for an OAuth2 access/refresh token
@@ -100,9 +157,15 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Flush any debounced usage first so the list reflects a token
+	// issued moments ago rather than making an admin wait out the
+	// interval and wonder whether the column works.
+	s.clientUsage.FlushNow(r.Context())
+
 	db := s.oauth2Provider.GetStorage().GetDB()
 	rows, err := db.QueryContext(r.Context(),
-		`SELECT id, redirect_uris, grant_types, response_types, scopes, public, created_at
+		`SELECT id, redirect_uris, grant_types, response_types, scopes, public, created_at,
+		        client_name, notes, origin, last_used_at, recent_users
 		 FROM oauth2_clients ORDER BY created_at DESC`)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to list OAuth2 clients", "error", err)
@@ -116,20 +179,86 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 		var c AdminClient
 		var redirectURIs, grantTypes, responseTypes, scopes string
 		var public int
+		var name, notes, origin, recentUsers string
+		var lastUsed sql.NullTime
 		if err := rows.Scan(&c.ID, &redirectURIs, &grantTypes, &responseTypes,
-			&scopes, &public, &c.CreatedAt); err != nil {
+			&scopes, &public, &c.CreatedAt,
+			&name, &notes, &origin, &lastUsed, &recentUsers); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "Skipping malformed client row", "error", err)
 			continue
 		}
-		c.RedirectURIs = splitNonEmpty(redirectURIs)
-		c.GrantTypes = splitNonEmpty(grantTypes)
-		c.ResponseTypes = splitNonEmpty(responseTypes)
-		c.Scopes = splitNonEmpty(scopes)
+		c.RedirectURIs = decodeStringList(redirectURIs)
+		c.GrantTypes = decodeStringList(grantTypes)
+		c.ResponseTypes = decodeStringList(responseTypes)
+		c.Scopes = decodeStringList(scopes)
 		c.Public = public != 0
+
+		c.RefreshBlockedBy = refreshBlockedBy(c.GrantTypes, c.Scopes)
+
+		p := scanProvenance(name, notes, origin, lastUsed, recentUsers)
+		c.Name, c.Notes, c.Origin, c.LastUsedAt = p.Name, p.Notes, string(p.Origin), p.LastUsedAt
+		for _, u := range p.RecentUsers {
+			c.RecentUsers = append(c.RecentUsers, AdminClientUse(u))
+		}
 		clients = append(clients, c)
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{"clients": clients})
+}
+
+// adminClientNotesRequest is the PATCH body for annotating a client.
+type adminClientNotesRequest struct {
+	Notes string `json:"notes"`
+}
+
+// maxClientNotesLen bounds an operator annotation. Generous for a note
+// and small enough that the column cannot be used as a data store.
+const maxClientNotesLen = 4096
+
+// handleAdminUpdateClient handles PATCH /api/v1/admin/oauth2/clients/{id}.
+//
+// The only editable field is the note. Everything else on a client row
+// is either the client's own assertion at registration or something this
+// server derived, and letting an admin rewrite those would turn the
+// provenance columns into a place to record a belief rather than a fact.
+func (s *Handler) handleAdminUpdateClient(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	clientID := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/oauth2/clients/")
+	if clientID == "" || strings.Contains(clientID, "/") {
+		s.writeError(w, http.StatusBadRequest, "Invalid client ID")
+		return
+	}
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "OAuth2 provider not configured")
+		return
+	}
+
+	var req adminClientNotesRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+	if len(req.Notes) > maxClientNotesLen {
+		s.writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("Notes are limited to %d characters", maxClientNotesLen))
+		return
+	}
+
+	found, err := setClientNotes(r.Context(), s.oauth2Provider.GetStorage().GetDB(),
+		clientID, req.Notes)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to update client notes",
+			"client_id", clientID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to update client")
+		return
+	}
+	if !found {
+		s.writeError(w, http.StatusNotFound, "Client not found")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"notes": req.Notes})
 }
 
 // handleAdminDeleteClient handles DELETE /api/v1/admin/oauth2/clients/{id}.
@@ -301,7 +430,7 @@ func queryTokenTable(
 			SignaturePrefix: redactSignature(sig),
 			ClientID:        clientID,
 			Subject:         subject,
-			Scopes:          splitNonEmpty(scopes),
+			Scopes:          decodeStringList(scopes),
 			Active:          active != 0,
 			RequestedAt:     requestedAt,
 		}
@@ -360,6 +489,12 @@ type AdminCondorConfigEntry struct {
 	Key      string `json:"key"`
 	Value    string `json:"value,omitempty"`
 	Redacted bool   `json:"redacted,omitempty"`
+	// IsDefault reports that this key still holds HTCondor's compiled-in
+	// value — nothing in this deployment's config files or environment
+	// touched it. Roughly a thousand of the ~1085 keys in a stock config
+	// are in this state, which is what makes an unfiltered dump tedious
+	// to read, so the SPA offers to hide them.
+	IsDefault bool `json:"is_default,omitempty"`
 }
 
 // AdminCondorConfigResponse is the full readout. Configured=false means
@@ -368,6 +503,9 @@ type AdminCondorConfigEntry struct {
 type AdminCondorConfigResponse struct {
 	Configured bool                     `json:"configured"`
 	Entries    []AdminCondorConfigEntry `json:"entries"`
+	// ModifiedCount is how many entries this deployment actually set,
+	// so the SPA can label its filter without counting client-side.
+	ModifiedCount int `json:"modified_count"`
 }
 
 // sensitiveCondorKeyPattern matches config keys whose VALUES we mask
@@ -412,18 +550,65 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 	})
 
 	entries := make([]AdminCondorConfigEntry, 0, len(keys))
+	modified := 0
 	for _, k := range keys {
-		val, _ := s.htcondorConfig.Get(k)
+		isDefault := s.htcondorConfig.IsDefault(k)
+		if !isDefault {
+			modified++
+		}
 		if sensitiveCondorKeyPattern.MatchString(k) {
-			entries = append(entries, AdminCondorConfigEntry{Key: k, Redacted: true})
+			// Still report default-ness for a redacted key: knowing
+			// whether a password knob was set at all is useful and
+			// leaks nothing about its value.
+			entries = append(entries, AdminCondorConfigEntry{
+				Key: k, Redacted: true, IsDefault: isDefault,
+			})
 			continue
 		}
-		entries = append(entries, AdminCondorConfigEntry{Key: k, Value: val})
+		val, _ := s.htcondorConfig.Get(k)
+		entries = append(entries, AdminCondorConfigEntry{
+			Key: k, Value: val, IsDefault: isDefault,
+		})
 	}
 	s.writeJSON(w, http.StatusOK, AdminCondorConfigResponse{
-		Configured: true,
-		Entries:    entries,
+		Configured:    true,
+		Entries:       entries,
+		ModifiedCount: modified,
 	})
+}
+
+// decodeStringList turns a stored list column into a slice.
+//
+// The OAuth2 storage writes these columns with json.Marshal, so a client's
+// scopes arrive as `["openid","mcp:read"]`. Splitting that on commas — which
+// is what this code did until the admin UI started showing entries like
+// `["openid"` and `"mcp:read"]` — hands the SPA JSON fragments to render as
+// list items. Parse the JSON when it looks like JSON, and keep the old
+// splitting as a fallback for any row written before the storage settled on
+// that encoding.
+func decodeStringList(s string) []string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var out []string
+		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+			cleaned := make([]string, 0, len(out))
+			for _, v := range out {
+				if v = strings.TrimSpace(v); v != "" {
+					cleaned = append(cleaned, v)
+				}
+			}
+			if len(cleaned) == 0 {
+				return nil
+			}
+			return cleaned
+		}
+		// Malformed JSON: fall through rather than dropping the value
+		// entirely, so an admin still sees *something* to debug with.
+	}
+	return splitNonEmpty(trimmed)
 }
 
 // splitNonEmpty splits on whitespace/comma and drops empty results. The

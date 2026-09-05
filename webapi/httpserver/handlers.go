@@ -229,19 +229,20 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !ownedByMe {
-		if _, hasSession := s.getSessionFromRequest(r); hasSession && !s.isWebUIAdmin(r) {
-			ownedByMe = true
-		}
-	}
+	ownedByMe = s.resolveOwnerScope(r, ownedByMe)
+
+	// The identity the schedd attributes to this caller. Needed for the
+	// scoping below when the listing is confined, and for the mirror
+	// either way: routing bypasses the schedd handshake, so it happens
+	// only for a caller the schedd has already accepted.
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 
 	// Build fetch options
 	fetchOpts := htcondor.FetchNormal
 	owner := ""
 	if ownedByMe {
 		fetchOpts |= htcondor.FetchMyJobs
-		// Extract owner from authenticated user in context
-		owner = htcondor.GetAuthenticatedUserFromContext(ctx)
+		owner = actor
 
 		// No identity means nothing to scope to, and an unscoped
 		// listing here is the whole queue. createAuthenticatedContext
@@ -281,40 +282,38 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Offload the queue walk to a synchronized htcondordb mirror when
-	// one is current (handlers_dbroute.go). Only an owner-scoped request
-	// qualifies: the mirror connection authenticates as this daemon, so
-	// a read that is not already confined to the caller would not have
-	// the schedd's per-caller ACL behind it. Any miss falls through to
-	// the schedd below with no visible difference beyond the "source"
-	// field.
+	// one is current (handlers_dbroute.go). A whole-queue listing
+	// qualifies as readily as a scoped one: reading the queue is
+	// READ-level on the schedd with no owner filter of its own, so the
+	// mirror returns what the schedd would have. What jobsFromMirror
+	// insists on is that the schedd has identified this caller, since
+	// routing is what skips asking it. Any miss falls through to the
+	// schedd below with no visible difference beyond the "source" field.
 	//
 	// Pagination stays with whichever backend started the walk: each
 	// issues a page token only it can read, and each declines the
 	// other's, so a resumed page is never silently restarted from the
 	// beginning of a different scan.
-	if ownedByMe {
-		served, decision := s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, owner)
-		if served {
-			return
-		}
-		// With HTTP_API_DBMIRROR_REQUIRED set, a decline is an error
-		// rather than schedd load. Nothing has been written yet, so the
-		// error is the whole response, and its reason is more specific
-		// than the stale-token message below.
-		if s.mirrorRequiredError(w, decision) {
-			return
-		}
-		if dbmirror.IsCursor(pageToken) {
-			// The mirror issued this token and can no longer honor it —
-			// it went away, fell behind, or the scan it names has been
-			// compacted out from under the cursor. The schedd cannot
-			// resume someone else's walk, and restarting from the top
-			// would hand back rows the caller already has as if they
-			// were new.
-			s.writeError(w, http.StatusBadRequest,
-				"This page token is no longer valid. Retry the query without a page token.")
-			return
-		}
+	served, decision := s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, actor, ownedByMe)
+	if served {
+		return
+	}
+	// With HTTP_API_DBMIRROR_REQUIRED set, a decline is an error rather
+	// than schedd load. Nothing has been written yet, so the error is the
+	// whole response, and its reason is more specific than the
+	// stale-token message below.
+	if s.mirrorRequiredError(w, decision) {
+		return
+	}
+	if dbmirror.IsCursor(pageToken) {
+		// The mirror issued this token and can no longer honor it — it
+		// went away, fell behind, or the scan it names has been compacted
+		// out from under the cursor. The schedd cannot resume someone
+		// else's walk, and restarting from the top would hand back rows
+		// the caller already has as if they were new.
+		s.writeError(w, http.StatusBadRequest,
+			"This page token is no longer valid. Retry the query without a page token.")
+		return
 	}
 
 	// Start streaming query
@@ -435,7 +434,7 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit job using SubmitRemote
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, req.SubmitFile)
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(req.SubmitFile))
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
