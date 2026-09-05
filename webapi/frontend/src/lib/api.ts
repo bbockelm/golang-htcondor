@@ -123,6 +123,51 @@ export interface DashboardStats {
   jobs_total: number;
 }
 
+// --- htcondordb mirror ---
+//
+// The mirror answers job and history reads that would otherwise hit the
+// schedd, and it does so silently: correctly configured, it looks
+// exactly like a fast schedd from the outside. Admins need a way to see
+// whether the deployment they configured is doing anything.
+
+// DBMirrorRoutingCount is one (table, decision, reason) tally since the
+// server started. Cumulative, not a rate -- a rate needs two samples and
+// this endpoint only ever has one.
+export interface DBMirrorRoutingCount {
+  table: string;
+  decision: 'served' | 'declined' | string;
+  reason: string;
+  count: number;
+}
+
+// DBMirrorHealth mirrors what /readyz reports. `status` is "ok" only
+// when reads are actually routing right now; a mirror that is up but too
+// far behind to serve is "warning" -- running, not working.
+export interface DBMirrorHealth {
+  status: 'ok' | 'warning' | 'down' | string;
+  required: boolean;
+  name?: string;
+  address?: string;
+  pinned_name?: string;
+  pinned_address?: string;
+  job_queue_caught_up: boolean;
+  job_queue_staleness_seconds: number;
+  history_staleness_seconds: number;
+  history_gap: boolean;
+  jobs_tolerance_seconds: number;
+  history_tolerance_seconds: number;
+  last_error?: string;
+  last_success?: string;
+}
+
+export interface DBMirrorStatus {
+  enabled: boolean;
+  health?: DBMirrorHealth;
+  routing?: DBMirrorRoutingCount[];
+  served_total: number;
+  declined_total: number;
+}
+
 // --- Placement (condor_placementd) ---
 //
 // The placementd issues IDTokens to "foreign" identities -- users who
@@ -960,6 +1005,12 @@ export const api = {
       fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
         method: 'DELETE',
       }),
+  },
+
+  dbmirror: {
+    // Admin-only. Returns enabled=false rather than an error when no
+    // mirror routing is configured, which is the common case.
+    status: (): Promise<DBMirrorStatus> => fetchJSON(`${BASE}/dbmirror/status`),
   },
 
   placement: {

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { api, type DBMirrorHealth } from '@/lib/api';
 
 export default function InfoPage() {
   const { data: session, isLoading: sessionLoading, error: sessionError } =
@@ -84,8 +84,241 @@ export default function InfoPage() {
       {/* Admin-only: HTCondor config readout. Hidden entirely for
           non-admins (the endpoint also gates server-side, so a
           curious user crafting their own request still gets 403). */}
+      {session?.is_admin && <DBMirrorSection />}
+
       {session?.is_admin && <CondorConfigSection />}
     </div>
+  );
+}
+
+// DBMirrorSection answers "is this access point serving reads out of
+// htcondordb, or out of the schedd?".
+//
+// Routing is deliberately invisible in normal operation: a working
+// mirror looks exactly like a fast schedd, and a mirror that falls
+// behind silently hands the work back rather than failing. That is the
+// right behavior and it leaves an operator with no way to tell whether
+// the deployment they configured is doing anything -- hence the counts,
+// which distinguish "a mirror exists" from "a mirror is answering".
+function DBMirrorSection() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['dbmirror', 'status'],
+    queryFn: api.dbmirror.status,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  return (
+    <Section title="htcondordb mirror (admin)">
+      {isLoading && <p className="text-gray-400 text-sm">Loading...</p>}
+      {error && (
+        <p className="text-red-600 text-sm">
+          Could not load mirror status: {(error as Error).message}
+        </p>
+      )}
+
+      {data && !data.enabled && (
+        <p className="text-sm text-gray-600">
+          Not configured. Every job and history read goes to the schedd.
+          Routing needs both a collector to discover the mirror through
+          and the HTCondor config whose <code className="font-mono text-xs">SEC_*</code>{' '}
+          settings authenticate the connection.
+        </p>
+      )}
+
+      {data?.enabled && (
+        <div className="space-y-4">
+          <DefList>
+            <Row
+              label="Reads served"
+              value={
+                data.served_total + data.declined_total === 0 ? (
+                  <span className="text-gray-500">
+                    No routable read yet since this server started.
+                  </span>
+                ) : (
+                  <span>
+                    <strong>{data.served_total.toLocaleString()}</strong> from
+                    the mirror,{' '}
+                    <strong>{data.declined_total.toLocaleString()}</strong> from
+                    the schedd
+                  </span>
+                )
+              }
+            />
+            {data.health && <MirrorHealthRows health={data.health} />}
+          </DefList>
+
+          {data.routing && data.routing.length > 0 && (
+            <div>
+              <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Routing decisions since startup
+              </h3>
+              <div className="overflow-x-auto rounded border border-gray-200">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+                    <tr>
+                      <th className="px-3 py-1.5">Read</th>
+                      <th className="px-3 py-1.5">Outcome</th>
+                      <th className="px-3 py-1.5">Reason</th>
+                      <th className="px-3 py-1.5 text-right">Count</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {data.routing.map((row) => (
+                      <tr
+                        key={`${row.table}-${row.decision}-${row.reason}`}
+                        className="hover:bg-gray-50"
+                      >
+                        <td className="px-3 py-1.5">{row.table}</td>
+                        <td className="px-3 py-1.5">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                              row.decision === 'served'
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-gray-100 text-gray-700'
+                            }`}
+                          >
+                            {row.decision === 'served' ? 'mirror' : 'schedd'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 font-mono text-xs text-gray-600">
+                          {row.reason}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {row.count.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-1 text-xs text-gray-400">
+                Cumulative since this server started, not a current rate.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// MirrorHealthRows renders the discovery and freshness half. Staleness is
+// shown against the tolerance that actually gates routing, because the
+// number alone does not say whether it is a problem.
+function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
+  const badge =
+    health.status === 'ok'
+      ? 'bg-green-100 text-green-800'
+      : health.status === 'warning'
+        ? 'bg-amber-100 text-amber-800'
+        : 'bg-red-100 text-red-800';
+  const statusText =
+    health.status === 'ok'
+      ? 'Serving'
+      : health.status === 'warning'
+        ? 'Discovered, not serving'
+        : 'Not reachable';
+
+  return (
+    <>
+      <Row
+        label="Status"
+        value={
+          <span
+            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge}`}
+          >
+            {statusText}
+          </span>
+        }
+      />
+      {health.name && <Row label="Mirror" value={health.name} />}
+      {health.address && <Row label="Address" mono value={health.address} />}
+      {health.required && (
+        <Row
+          label="Required"
+          value="Yes — a read the mirror cannot serve fails instead of falling back to the schedd."
+        />
+      )}
+      {(health.pinned_name || health.pinned_address) && (
+        <Row
+          label="Pinned to"
+          mono
+          value={[health.pinned_name, health.pinned_address]
+            .filter(Boolean)
+            .join(' @ ')}
+        />
+      )}
+      <Row
+        label="Job queue"
+        value={
+          <StalenessValue
+            ok={health.job_queue_caught_up}
+            okText="caught up"
+            notOkText="behind the schedd's job_queue.log"
+            seconds={health.job_queue_staleness_seconds}
+            tolerance={health.jobs_tolerance_seconds}
+          />
+        }
+      />
+      <Row
+        label="History"
+        value={
+          health.history_gap ? (
+            <span className="text-red-700">
+              durability gap reported — history routing is stopped
+            </span>
+          ) : (
+            <StalenessValue
+              ok
+              okText=""
+              notOkText=""
+              seconds={health.history_staleness_seconds}
+              tolerance={health.history_tolerance_seconds}
+            />
+          )
+        }
+      />
+      {health.last_success && (
+        <Row
+          label="Last discovered"
+          value={new Date(health.last_success).toLocaleString()}
+        />
+      )}
+      {health.last_error && (
+        <Row
+          label="Last error"
+          value={<span className="text-red-700">{health.last_error}</span>}
+        />
+      )}
+    </>
+  );
+}
+
+// StalenessValue puts a staleness next to the tolerance that gates it:
+// "12s behind (routes below 60s)" is actionable where a bare "12" is not.
+function StalenessValue({
+  ok,
+  okText,
+  notOkText,
+  seconds,
+  tolerance,
+}: {
+  ok: boolean;
+  okText: string;
+  notOkText: string;
+  seconds: number;
+  tolerance: number;
+}) {
+  const over = seconds > tolerance;
+  return (
+    <span className={over || !ok ? 'text-amber-700' : undefined}>
+      {seconds.toLocaleString()}s behind{' '}
+      <span className="text-gray-400">(routes below {tolerance}s)</span>
+      {!ok && notOkText ? ` — ${notOkText}` : ''}
+      {ok && okText && !over ? ` — ${okText}` : ''}
+    </span>
   );
 }
 

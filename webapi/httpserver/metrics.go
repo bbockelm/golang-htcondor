@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -536,4 +537,71 @@ func b2f(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// mirrorRoutingCount is one (table, decision, reason) tally read back
+// out of the metrics registry.
+type mirrorRoutingCount struct {
+	Table    string `json:"table"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+	Count    int64  `json:"count"`
+}
+
+// mirrorRoutingCounts reads the routing-decision counter back out of the
+// registry, so the admin UI can answer "is this host actually using the
+// mirror?" without the operator standing up Prometheus.
+//
+// It reads the counter rather than keeping a second tally: a parallel
+// counter would be one more thing to remember to increment, and this is
+// a once-per-page-view read of a handful of series.
+//
+// Counts are cumulative since process start. That is the honest shape --
+// a rate needs two samples and this endpoint only ever has one -- so the
+// UI presents them as totals, not as current behavior.
+func (m *httpMetrics) mirrorRoutingCounts() []mirrorRoutingCount {
+	if m == nil || m.registry == nil {
+		return nil
+	}
+	families, err := m.registry.Gather()
+	if err != nil {
+		// A partial gather still returns the families it managed to
+		// collect, so keep going rather than dropping the whole answer.
+		if len(families) == 0 {
+			return nil
+		}
+	}
+	want := metricsNamespace + "_dbmirror_decisions_total"
+	var out []mirrorRoutingCount
+	for _, fam := range families {
+		if fam.GetName() != want {
+			continue
+		}
+		for _, metric := range fam.GetMetric() {
+			row := mirrorRoutingCount{Count: int64(metric.GetCounter().GetValue())}
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case "table":
+					row.Table = label.GetValue()
+				case "decision":
+					row.Decision = label.GetValue()
+				case "reason":
+					row.Reason = label.GetValue()
+				}
+			}
+			out = append(out, row)
+		}
+	}
+	// Stable order so the panel does not reshuffle between refreshes;
+	// Gather's own order is by label hash.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Table != out[j].Table {
+			return out[i].Table < out[j].Table
+		}
+		if out[i].Decision != out[j].Decision {
+			return out[i].Decision < out[j].Decision
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	return out
 }
