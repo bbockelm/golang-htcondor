@@ -411,6 +411,28 @@ const openAPISchema = `{
           "count": {"type": "integer", "format": "int64"}
         }
       },
+      "DBMirrorTest": {
+        "type": "object",
+        "properties": {
+          "ok": {"type": "boolean", "description": "Whether every stage succeeded."},
+          "constraint": {"type": "string", "description": "The constraint used, echoed so the page can show what was asked. Matches nothing by design."},
+          "total_millis": {"type": "integer", "format": "int64"},
+          "stages": {
+            "type": "array",
+            "description": "One entry per step attempted, in order. The probe stops at the first failure and does not invent the stages after it.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string", "description": "configured, discover, connect, or query."},
+                "ok": {"type": "boolean"},
+                "detail": {"type": "string", "description": "The outcome worth reading: the mirror found, the row count."},
+                "error": {"type": "string"},
+                "millis": {"type": "integer", "format": "int64", "description": "How long the stage took. A dial that takes ten seconds and then succeeds is a different problem from one that fails."}
+              }
+            }
+          }
+        }
+      },
       "DBMirrorHealth": {
         "type": "object",
         "properties": {
@@ -496,6 +518,20 @@ const openAPISchema = `{
           "200": {"description": "Deleted"},
           "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "No such client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/dbmirror/test": {
+      "post": {
+        "summary": "Test the htcondordb mirror",
+        "description": "Runs one real read against the mirror -- discover, connect, query -- and reports each stage separately. The query uses a constraint matching nothing, so the probe moves no rows and is safe to repeat while chasing a misconfiguration. Answers a different question from /dbmirror/status: that reports whether the mirror looks healthy, this reports what happens when a read actually tries, and which step fails. Admin only.",
+        "operationId": "testDBMirror",
+        "responses": {
+          "200": {
+            "description": "The probe ran. ok=false with the failing stage is a normal response, not an error.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DBMirrorTest"}}}
+          },
+          "403": {"description": "Not an admin"}
         }
       }
     },
