@@ -100,6 +100,9 @@ type Watch struct {
 	// truncated carries QueueTruncated from the snapshot being evaluated
 	// down to the per-job decision.
 	truncated bool
+	// trackedBlob is the stored form of Tracked as it was loaded, so a
+	// pass that changed nothing can skip the write.
+	trackedBlob string
 }
 
 // JobRef is a job in a fired watch, with enough of the ad to act on
@@ -267,67 +270,163 @@ type Outcome struct {
 const UnresolvedOutcomeGrace = 5 * time.Minute
 
 // Evaluate decides whether the watch is satisfied by this snapshot,
-// without mutating the watch.
-//
-// It takes a whole snapshot rather than one ad at a time because both
-// modes are questions about a SET: fed incrementally, ModeAll would fire
-// on the first finished job of a cluster and ModeAny would fire once per
-// job rather than once.
+// without mutating the watch. It is a thin wrapper over Fold, kept
+// because a whole-snapshot answer is much easier to reason about in
+// tests than a stream of calls.
 func (w *Watch) Evaluate(s Snapshot) Outcome {
-	w.truncated = s.QueueTruncated
-	inQueue := make(map[JobID]*classad.ClassAd, len(s.Queue))
-	inHistory := make(map[JobID]*classad.ClassAd, len(s.History))
+	f := w.Fold(s.Now, s.QueueTruncated)
 	for _, ad := range s.Queue {
-		if w.selects(ad) {
-			inQueue[jobIDOf(ad)] = ad
-		}
+		f.Queued(ad)
 	}
 	for _, ad := range s.History {
-		if w.selects(ad) {
-			inHistory[jobIDOf(ad)] = ad
+		f.Finished(ad)
+	}
+	return f.Done()
+}
+
+// Fold accumulates an evaluation over a stream of ads, so a pass never
+// has to hold the queue in memory.
+//
+// Even projected, materializing a 20,000-job queue costs about 26 MB per
+// owner per pass. Folding as the rows arrive costs the job IDENTITIES
+// instead -- tens of bytes each rather than 1.4 KB -- because that is
+// genuinely all the decision needs: which jobs are in scope, which of
+// them satisfy the event, and a capped handful of ads to put in the
+// notification.
+//
+// Queued must be called for every job in the queue and Finished for
+// every history row, in that order or interleaved; Done then answers.
+// Order does not matter because each job's verdict depends on where it
+// was seen, not on when.
+type Fold struct {
+	w         *Watch
+	now       time.Time
+	truncated bool
+
+	// seen is every job in scope: the tracked set plus anything matching
+	// that turns up now. The value records where it was seen, which is
+	// what the terminal events turn on.
+	seen map[JobID]placement
+
+	satisfied int
+	matched   []JobRef
+}
+
+// placement is where a job was observed this pass.
+type placement struct {
+	inQueue   bool
+	inHistory bool
+}
+
+// Fold starts an evaluation. now may be zero for time.Now.
+func (w *Watch) Fold(now time.Time, queueTruncated bool) *Fold {
+	f := &Fold{w: w, now: now, truncated: queueTruncated, seen: make(map[JobID]placement, len(w.Tracked)+16)}
+	// The tracked set is in scope before anything arrives. Without it a
+	// cluster that has fully drained would look like an empty selection,
+	// and "all done" would be back to deciding a vacuous truth.
+	for _, id := range w.Tracked {
+		f.seen[id] = placement{}
+	}
+	return f
+}
+
+// Truncated marks the queue read as incomplete. It is called after the
+// read rather than at construction because a backend only discovers it
+// hit the limit at the end -- and it must be applied before Done, since
+// absence in a partial read is not evidence of anything.
+func (f *Fold) Truncated() { f.truncated = true }
+
+// Queued folds in one job currently in the queue.
+func (f *Fold) Queued(ad *classad.ClassAd) {
+	if !f.w.selects(ad) {
+		return
+	}
+	id := jobIDOf(ad)
+	p := f.seen[id]
+	p.inQueue = true
+	f.seen[id] = p
+
+	// Decide the live events here, while the ad is in hand: keeping it
+	// until Done would be keeping the queue.
+	switch f.w.Event {
+	case EventHeld:
+		if statusOf(ad) == statusHeld {
+			f.hit(id, ad)
+		}
+	case EventRunning:
+		if statusOf(ad) == statusRunning {
+			f.hit(id, ad)
+		}
+	case EventCustom:
+		if f.w.matchCondition != nil && f.w.matchCondition.Matches(ad) {
+			f.hit(id, ad)
 		}
 	}
+}
 
-	// The selected set is everything this watch has ever seen plus
-	// everything it sees now. A job that has left the queue and not yet
-	// appeared in history is still selected -- dropping it would let a
-	// draining cluster satisfy "all done" one job early.
-	selected := make(map[JobID]struct{}, len(w.Tracked)+len(inQueue)+len(inHistory))
-	for _, id := range w.Tracked {
-		selected[id] = struct{}{}
+// Finished folds in one history row.
+func (f *Fold) Finished(ad *classad.ClassAd) {
+	if !f.w.selects(ad) {
+		return
 	}
-	for id := range inQueue {
-		selected[id] = struct{}{}
-	}
-	for id := range inHistory {
-		selected[id] = struct{}{}
-	}
+	id := jobIDOf(ad)
+	p := f.seen[id]
+	p.inHistory = true
+	f.seen[id] = p
 
-	out := Outcome{Selected: len(selected), Tracked: make([]JobID, 0, len(selected))}
-	// unresolved is jobs known to have ended whose outcome nothing can
-	// explain: gone from a complete queue, absent from history.
+	switch f.w.Event {
+	case EventDone:
+		f.hit(id, ad)
+	case EventSucceeded, EventFailed:
+		if succeeded(ad) == (f.w.Event == EventSucceeded) {
+			f.hit(id, ad)
+		}
+	}
+}
+
+func (f *Fold) hit(id JobID, ad *classad.ClassAd) {
+	f.satisfied++
+	if len(f.matched) < MaxMatched {
+		f.matched = append(f.matched, jobRef(id, ad))
+	}
+}
+
+// Done resolves the fold, including the verdicts that can only be
+// reached once everything has been seen: a tracked job absent from a
+// complete queue and from history has finished, which is what lets
+// "done" work without an archive.
+func (f *Fold) Done() Outcome {
+	out := Outcome{Tracked: make([]JobID, 0, len(f.seen)), Satisfied: f.satisfied, Matched: f.matched}
 	var unresolved []JobID
 	var stillHere int
-	for id := range selected {
+	for id, p := range f.seen {
 		out.Tracked = append(out.Tracked, id)
-		if _, present := inQueue[id]; present {
+		switch {
+		case p.inQueue:
 			stillHere++
-		} else if _, finished := inHistory[id]; !finished && !w.truncated {
-			unresolved = append(unresolved, id)
-		}
-		ad, ok := w.satisfiedBy(id, inQueue, inHistory)
-		if !ok {
-			continue
-		}
-		out.Satisfied++
-		if len(out.Matched) < MaxMatched && ad != nil {
-			out.Matched = append(out.Matched, jobRef(id, ad))
+		case p.inHistory:
+			// Accounted for by Finished.
+		case f.truncated:
+			// Absent from a partial read means absent from the part we
+			// got, which is not evidence of anything.
+		default:
+			// Gone from a complete queue with nothing to explain it.
+			if f.w.Event == EventDone && f.w.tracks(id) {
+				f.satisfied++
+				out.Satisfied = f.satisfied
+				if len(out.Matched) < MaxMatched {
+					out.Matched = append(out.Matched, JobRef{JobID: id})
+				}
+			} else if f.w.Event == EventSucceeded || f.w.Event == EventFailed {
+				unresolved = append(unresolved, id)
+			}
 		}
 	}
+	out.Selected = len(out.Tracked)
 	sortJobIDs(out.Tracked)
 	sortJobIDs(unresolved)
 
-	switch w.Mode {
+	switch f.w.Mode {
 	case ModeAll:
 		// The non-empty requirement is the vacuous-truth guard: "all
 		// finished" is trivially true of no jobs, so without it a watch
@@ -341,7 +440,38 @@ func (w *Watch) Evaluate(s Snapshot) Outcome {
 	if out.Fires {
 		return out
 	}
-	return w.giveUpWaiting(out, unresolved, stillHere, s.Now)
+	return f.w.giveUpWaiting(out, unresolved, stillHere, f.now)
+}
+
+// BaseAttrs are the attributes every evaluation needs regardless of what
+// a watch asks: identity, the owner the snapshot is scoped to, the state
+// the live events test, the outcome the terminal events test, and the
+// attributes carried into a notification.
+//
+// A projected read that omitted one of these would not error -- the
+// attribute would evaluate to UNDEFINED, the comparison would be false,
+// and the watch would quietly never fire. So the list is deliberately
+// generous: one extra attribute costs bytes, a missing one costs a watch
+// that waits forever.
+var BaseAttrs = append([]string{"ClusterId", "ProcId", "Owner", "JobStatus"}, CarryAttrs...)
+
+// ReadAttrs is every attribute this watch's expressions touch, so a
+// caller can fetch a projected ad instead of a whole one.
+//
+// It comes from the compiled program's own read set (the vm walks the
+// expression tree for attribute references), the same information the
+// store's query planner uses. If that ever under-reports, the symptom
+// here is a watch that silently never fires -- which is why BaseAttrs
+// covers everything the evaluator itself reads.
+func (w *Watch) ReadAttrs() []string {
+	out := append([]string(nil), BaseAttrs...)
+	if w.matchConstraint != nil {
+		out = append(out, w.matchConstraint.ReadAttrs()...)
+	}
+	if w.matchCondition != nil {
+		out = append(out, w.matchCondition.ReadAttrs()...)
+	}
+	return out
 }
 
 // giveUpWaiting decides whether a watch that cannot resolve its outcomes
@@ -394,88 +524,8 @@ func (w *Watch) giveUpWaiting(out Outcome, unresolved []JobID, stillHere int, no
 	return out
 }
 
-// BaseAttrs are the attributes every evaluation needs regardless of what
-// a watch asks: identity, the owner the snapshot is scoped to, the state
-// the live events test, the outcome the terminal events test, and the
-// attributes carried into a notification.
-//
-// A projected read that omitted one of these would not error -- the
-// attribute would evaluate to UNDEFINED, the comparison would be false,
-// and the watch would quietly never fire. So the list is deliberately
-// generous: one extra attribute costs bytes, a missing one costs a watch
-// that waits forever.
-var BaseAttrs = append([]string{"ClusterId", "ProcId", "Owner", "JobStatus"}, CarryAttrs...)
-
-// ReadAttrs is every attribute this watch's expressions touch, so a
-// caller can fetch a projected ad instead of a whole one.
-//
-// It comes from the compiled program's own read set (the vm walks the
-// expression tree for attribute references), the same information the
-// store's query planner uses. If that ever under-reports, the symptom
-// here is a watch that silently never fires -- which is why BaseAttrs
-// covers everything the evaluator itself reads.
-func (w *Watch) ReadAttrs() []string {
-	out := append([]string(nil), BaseAttrs...)
-	if w.matchConstraint != nil {
-		out = append(out, w.matchConstraint.ReadAttrs()...)
-	}
-	if w.matchCondition != nil {
-		out = append(out, w.matchCondition.ReadAttrs()...)
-	}
-	return out
-}
-
 func (w *Watch) selects(ad *classad.ClassAd) bool {
 	return w.matchConstraint != nil && w.matchConstraint.Matches(ad)
-}
-
-// satisfiedBy answers whether one job has the watch's event, and returns
-// the ad that says so (for the notification payload).
-func (w *Watch) satisfiedBy(id JobID, inQueue, inHistory map[JobID]*classad.ClassAd) (*classad.ClassAd, bool) {
-	hist, finished := inHistory[id]
-	queued, present := inQueue[id]
-
-	switch w.Event {
-	case EventDone:
-		// Terminal by either evidence: a history row, or a job this
-		// watch was tracking that is no longer in the queue. The second
-		// is what keeps "done" working when history is unavailable or
-		// lagging -- the job is gone, which is the fact being asked
-		// about.
-		if finished {
-			return hist, true
-		}
-		if !present && !w.truncated && w.tracks(id) {
-			return nil, true
-		}
-		return nil, false
-	case EventSucceeded, EventFailed:
-		// These need the outcome, which only history carries. Absence
-		// from the queue says the job ended, not how.
-		if !finished {
-			return nil, false
-		}
-		if succeeded(hist) == (w.Event == EventSucceeded) {
-			return hist, true
-		}
-		return nil, false
-	case EventHeld:
-		if present && statusOf(queued) == statusHeld {
-			return queued, true
-		}
-		return nil, false
-	case EventRunning:
-		if present && statusOf(queued) == statusRunning {
-			return queued, true
-		}
-		return nil, false
-	case EventCustom:
-		if present && w.matchCondition != nil && w.matchCondition.Matches(queued) {
-			return queued, true
-		}
-		return nil, false
-	}
-	return nil, false
 }
 
 func (w *Watch) tracks(id JobID) bool {

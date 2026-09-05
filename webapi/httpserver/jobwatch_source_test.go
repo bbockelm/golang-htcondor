@@ -12,32 +12,11 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 )
 
-// TestWatchSourceMarksATruncatedQueue. The evaluator treats a tracked
-// job's absence from a COMPLETE queue as evidence that it finished, so a
-// read that silently dropped the tail would report a running cluster as
-// done. Truncation has to be detected, not assumed away.
-func TestWatchSourceMarksATruncatedQueue(t *testing.T) {
-	ads := make([]*classad.ClassAd, 0, 5)
-	for i := 0; i < 5; i++ {
-		ads = append(ads, classad.New())
-	}
-
-	full := truncateQueue(ads, 5)
-	if full.Truncated || len(full.Ads) != 5 {
-		t.Errorf("an exactly-full page is not truncated: %+v", full)
-	}
-	// One past the limit is how "there were more" is detected.
-	over := truncateQueue(ads, 4)
-	if !over.Truncated {
-		t.Error("a read that returned more than the limit must be marked truncated")
-	}
-	if len(over.Ads) != 4 {
-		t.Errorf("the extra probe row must not be handed to the evaluator: %d ads", len(over.Ads))
-	}
-	if short := truncateQueue(ads[:2], 4); short.Truncated {
-		t.Errorf("a short read is complete: %+v", short)
-	}
-}
+// TestWatchSourceHistoryNeedsAnOutcomeSource: the evaluator treats a
+// tracked job's absence from a COMPLETE queue as evidence it finished,
+// so the read has to know when it was cut short -- a silently truncated
+// page would report a running cluster as done. Queue detects that by
+// fetching one row past the limit and never yielding the probe.
 
 // TestWatchSourceHistoryNeedsTheMirror: condor_history scans the
 // schedd's on-disk history file, and running that from a loop every
@@ -46,7 +25,8 @@ func TestWatchSourceMarksATruncatedQueue(t *testing.T) {
 // than to fall back to it.
 func TestWatchSourceHistoryNeedsTheMirror(t *testing.T) {
 	h := &Handler{dbMirror: nil}
-	_, err := watchSource{h: h}.History(context.Background(), "alice", jobwatch.BaseAttrs, time.Time{}, 100)
+	err := watchSource{h: h}.History(context.Background(), "alice", jobwatch.BaseAttrs, time.Time{}, 100,
+		func(*classad.ClassAd) {})
 	if err == nil {
 		t.Fatal("history without a mirror must error rather than fall back to the schedd")
 	}

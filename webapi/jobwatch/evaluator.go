@@ -23,23 +23,18 @@ import (
 // It also means one query serves every watch an owner has registered,
 // which is the coalescing that makes a single evaluator cheap.
 type Source interface {
-	// Queue returns the owner's current jobs, up to limit, projected to
-	// attrs. Truncated must be set when there were more, because an
-	// incomplete queue makes absence meaningless.
+	// Queue streams the owner's current jobs, projected to attrs, calling
+	// yield for each. It reports whether the read was truncated at limit,
+	// because an incomplete queue makes absence meaningless.
 	//
-	// attrs is never empty and always covers what the evaluator reads;
-	// an implementation may ignore it and return whole ads, at a cost
-	// measured in hundreds of megabytes on a large queue.
-	Queue(ctx context.Context, owner string, attrs []string, limit int) (QueueResult, error)
-	// History returns the owner's finished jobs since a point in time,
+	// Streaming rather than returning a slice is what keeps a pass from
+	// holding the queue: the evaluator folds each ad into counters and
+	// job identities and lets it go. attrs is never empty and always
+	// covers what the evaluator reads.
+	Queue(ctx context.Context, owner string, attrs []string, limit int, yield func(*classad.ClassAd)) (truncated bool, err error)
+	// History streams the owner's finished jobs since a point in time,
 	// projected the same way.
-	History(ctx context.Context, owner string, attrs []string, since time.Time, limit int) ([]*classad.ClassAd, error)
-}
-
-// QueueResult is a queue read and whether it was complete.
-type QueueResult struct {
-	Ads       []*classad.ClassAd
-	Truncated bool
+	History(ctx context.Context, owner string, attrs []string, since time.Time, limit int, yield func(*classad.ClassAd)) error
 }
 
 const (
@@ -176,28 +171,50 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 	}
 
 	attrs := projectionFor(watches)
-	queue, err := e.src.Queue(ctx, owner, attrs, QueueLimit)
+
+	// One fold per watch, all fed from a single pass over the owner's
+	// jobs. This is why the queue is read once per owner rather than
+	// once per watch, and why none of it is kept.
+	folds := make([]*Fold, len(watches))
+	for i, w := range watches {
+		folds[i] = w.Fold(e.now(), false)
+	}
+
+	truncated, err := e.src.Queue(ctx, owner, attrs, QueueLimit, func(ad *classad.ClassAd) {
+		for _, f := range folds {
+			f.Queued(ad)
+		}
+	})
 	if err != nil {
 		return 0, fmt.Errorf("reading the queue: %w", err)
 	}
-	history, err := e.src.History(ctx, owner, attrs, since, HistoryLimit)
-	if err != nil {
+	if truncated {
+		// Discovered only at the end of the read, so it is applied to
+		// the folds now rather than at construction.
+		for _, f := range folds {
+			f.Truncated()
+		}
+	}
+
+	if err := e.src.History(ctx, owner, attrs, since, HistoryLimit, func(ad *classad.ClassAd) {
+		for _, f := range folds {
+			f.Finished(ad)
+		}
+	}); err != nil {
 		// A queue read without history still decides "done" by absence,
 		// "held" and "running". Losing history should degrade what can
 		// be answered, not stop the pass -- the alternative is that a
 		// history outage silently freezes every watch.
 		e.logf("reading history for job watches failed; terminal outcomes are unavailable this pass",
 			"owner", owner, "error", err)
-		history = nil
 	}
-	snap := Snapshot{Now: e.now(), Queue: queue.Ads, History: history, QueueTruncated: queue.Truncated}
 
 	var fired int
 	var firstErr error
-	for _, w := range watches {
-		out := w.Evaluate(snap)
+	for i, w := range watches {
+		out := folds[i].Done()
 		if !out.Fires {
-			if err := e.store.SaveProgress(ctx, w.ID, out); err != nil && firstErr == nil {
+			if err := e.store.SaveProgress(ctx, w, out); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("saving progress for %s: %w", w.ID, err)
 			}
 			continue

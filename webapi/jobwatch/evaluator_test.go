@@ -13,9 +13,10 @@ import (
 // assert the thing that matters most: the backend query is per-owner and
 // never carries a caller-supplied expression.
 type fakeSource struct {
-	queue    map[string]QueueResult
-	history  map[string][]*classad.ClassAd
-	askedFor []string
+	queue     map[string][]*classad.ClassAd
+	truncated bool
+	history   map[string][]*classad.ClassAd
+	askedFor  []string
 	// attrsSeen records the projection each read was given, so a test
 	// can assert whole ads are never fetched.
 	attrsSeen []string
@@ -24,21 +25,29 @@ type fakeSource struct {
 	sinceSeen time.Time
 }
 
-func (f *fakeSource) Queue(_ context.Context, owner string, attrs []string, _ int) (QueueResult, error) {
+func (f *fakeSource) Queue(_ context.Context, owner string, attrs []string, _ int,
+	yield func(*classad.ClassAd)) (bool, error) {
 	f.askedFor = append(f.askedFor, owner)
 	f.attrsSeen = attrs
 	if f.queueErr != nil {
-		return QueueResult{}, f.queueErr
+		return false, f.queueErr
 	}
-	return f.queue[owner], nil
+	for _, ad := range f.queue[owner] {
+		yield(ad)
+	}
+	return f.truncated, nil
 }
 
-func (f *fakeSource) History(_ context.Context, owner string, _ []string, since time.Time, _ int) ([]*classad.ClassAd, error) {
+func (f *fakeSource) History(_ context.Context, owner string, _ []string, since time.Time, _ int,
+	yield func(*classad.ClassAd)) error {
 	f.sinceSeen = since
 	if f.histErr != nil {
-		return nil, f.histErr
+		return f.histErr
 	}
-	return f.history[owner], nil
+	for _, ad := range f.history[owner] {
+		yield(ad)
+	}
+	return nil
 }
 
 func fired(t *testing.T, s *Store, owner string) []*Watch {
@@ -142,15 +151,17 @@ type failOne struct {
 	inner *fakeSource
 }
 
-func (f *failOne) Queue(ctx context.Context, owner string, attrs []string, limit int) (QueueResult, error) {
+func (f *failOne) Queue(ctx context.Context, owner string, attrs []string, limit int,
+	yield func(*classad.ClassAd)) (bool, error) {
 	if owner == f.fail {
-		return QueueResult{}, errors.New("permission denied")
+		return false, errors.New("permission denied")
 	}
-	return f.inner.Queue(ctx, owner, attrs, limit)
+	return f.inner.Queue(ctx, owner, attrs, limit, yield)
 }
 
-func (f *failOne) History(ctx context.Context, owner string, attrs []string, since time.Time, limit int) ([]*classad.ClassAd, error) {
-	return f.inner.History(ctx, owner, attrs, since, limit)
+func (f *failOne) History(ctx context.Context, owner string, attrs []string, since time.Time, limit int,
+	yield func(*classad.ClassAd)) error {
+	return f.inner.History(ctx, owner, attrs, since, limit, yield)
 }
 
 // TestHistoryOutageDegradesRatherThanFreezes: losing history should cost
@@ -163,7 +174,7 @@ func TestHistoryOutageDegradesRatherThanFreezes(t *testing.T) {
 	register(t, s, "alice", EventHeld, ModeAny)
 
 	src := &fakeSource{
-		queue:   map[string]QueueResult{"alice": {Ads: []*classad.ClassAd{job(42, 0, held)}}},
+		queue:   map[string][]*classad.ClassAd{"alice": {job(42, 0, held)}},
 		histErr: errors.New("archive unavailable"),
 	}
 	st, err := NewEvaluator(s, src, nil).Pass(ctx)
@@ -188,14 +199,17 @@ func TestTruncatedQueueDoesNotReportRunningJobsAsDone(t *testing.T) {
 	// still-running job would block the fire for an unrelated reason and
 	// the test would pass whether or not truncation was honoured.
 	w := register(t, s, "alice", EventDone, ModeAny)
-	if err := s.SaveProgress(ctx, w.ID, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
+	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
 		t.Fatal(err)
 	}
 
-	src := &fakeSource{queue: map[string]QueueResult{
-		// 42.0 is absent from this page, and there are more pages.
-		"alice": {Ads: []*classad.ClassAd{job(42, 9, running)}, Truncated: true},
-	}}
+	src := &fakeSource{
+		truncated: true,
+		queue: map[string][]*classad.ClassAd{
+			// 42.0 is absent from this page, and there are more pages.
+			"alice": []*classad.ClassAd{job(42, 9, running)},
+		},
+	}
 	st, err := NewEvaluator(s, src, nil).Pass(ctx)
 	if err != nil {
 		t.Fatalf("Pass: %v", err)
@@ -206,7 +220,8 @@ func TestTruncatedQueueDoesNotReportRunningJobsAsDone(t *testing.T) {
 	}
 
 	// The same absence in a COMPLETE read is evidence.
-	src.queue["alice"] = QueueResult{Ads: []*classad.ClassAd{job(42, 9, running)}}
+	src.truncated = false
+	src.queue["alice"] = []*classad.ClassAd{job(42, 9, running)}
 	if st, _ = NewEvaluator(s, src, nil).Pass(ctx); st.Fired != 1 {
 		t.Error("a complete queue read should let the tracked-but-absent job count as done")
 	}
@@ -220,8 +235,8 @@ func TestProgressIsPersistedBetweenPasses(t *testing.T) {
 	ctx := context.Background()
 	register(t, s, "alice", EventDone, ModeAll)
 
-	src := &fakeSource{queue: map[string]QueueResult{
-		"alice": {Ads: []*classad.ClassAd{job(42, 0, running), job(42, 1, running)}},
+	src := &fakeSource{queue: map[string][]*classad.ClassAd{
+		"alice": []*classad.ClassAd{job(42, 0, running), job(42, 1, running)},
 	}}
 	ev := NewEvaluator(s, src, nil)
 	if st, err := ev.Pass(ctx); err != nil || st.Fired != 0 {
@@ -237,7 +252,7 @@ func TestProgressIsPersistedBetweenPasses(t *testing.T) {
 	}
 
 	// Now they are gone from a complete queue: done.
-	src.queue["alice"] = QueueResult{}
+	src.queue["alice"] = nil
 	if st, _ := ev.Pass(ctx); st.Fired != 1 {
 		t.Error("the remembered jobs disappearing should fire the watch")
 	}
