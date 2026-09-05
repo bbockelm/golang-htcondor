@@ -25,6 +25,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AdminClient } from "@/lib/api";
 import { ChipList } from "@/components/ChipList";
+import { ConfirmButton } from "@/components/ConfirmButton";
 
 export default function AdminClientsPage() {
   const qc = useQueryClient();
@@ -88,15 +89,7 @@ export default function AdminClientsPage() {
                 <ClientRow
                   key={c.id}
                   client={c}
-                  onDelete={() => {
-                    if (
-                      confirm(
-                        `Delete client "${clientLabel(c)}"? This revokes all of its tokens.`,
-                      )
-                    ) {
-                      remove.mutate(c.id);
-                    }
-                  }}
+                  onDelete={() => remove.mutate(c.id)}
                   onSaveNotes={(notes) => annotate.mutate({ id: c.id, notes })}
                   savingNotes={
                     annotate.isPending && annotate.variables?.id === c.id
@@ -223,13 +216,14 @@ function ClientRow({
         {new Date(client.created_at).toLocaleString()}
       </td>
       <td className="px-3 py-2 text-right">
-        <button
-          onClick={onDelete}
-          disabled={busy}
-          className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
-        >
-          {busy ? "Deleting..." : "Delete"}
-        </button>
+        <ConfirmButton
+          compact
+          label="Delete"
+          confirmLabel="Delete"
+          onConfirm={onDelete}
+          pending={busy}
+          title={`Delete client "${clientLabel(client)}" — this revokes all of its tokens`}
+        />
       </td>
     </tr>
   );
