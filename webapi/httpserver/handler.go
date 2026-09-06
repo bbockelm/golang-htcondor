@@ -207,9 +207,13 @@ type Handler struct {
 	dbMirror *dbmirror.Locator
 	// jobWatch stores registered watches and jobWatchEval runs them; see
 	// startJobWatchEvaluator.
-	jobWatch           *jobwatch.Store
-	jobWatchEval       *jobwatch.Evaluator
-	jobWatchFeed       *jobwatch.Feed
+	jobWatch     *jobwatch.Store
+	jobWatchEval *jobwatch.Evaluator
+	jobWatchFeed *jobwatch.Feed
+	// jobPolls backs GET /api/v1/jobs/{id}/watch on a pool with no usable
+	// mirror feed: one schedd poll per distinct owner-scoped constraint,
+	// however many browsers are watching that job.
+	jobPolls           *jobPollHub
 	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
@@ -1189,6 +1193,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// without a reachable mirror everything still works, just later.
 	h.jobWatchFeed = jobwatch.NewFeed(
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
+	// The schedd-polling fallback for per-job watches. Two seconds is the
+	// cadence the session pages used to poll at on their own; the
+	// difference is that one poll now serves every viewer of a job, and
+	// none runs when nobody is watching.
+	h.jobPolls = newJobPollHub(2*time.Second, h.logger, h.scheddJobQuery)
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 

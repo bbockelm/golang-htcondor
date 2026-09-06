@@ -56,6 +56,10 @@ type Feed struct {
 	ended map[string]endedJob
 	// warm says a stream is connected and nothing has been missed since.
 	warm bool
+	// subs are per-job followers of this same stream. See subscribe.go.
+	// Keyed by job identity rather than storage key so the feed's refusal
+	// to parse that key does not leak out to callers.
+	subs map[jobIdent]map[*keySub]struct{}
 
 	now  func() time.Time
 	logf func(string, ...any)
@@ -192,12 +196,18 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// after a compaction reload. Clear any terminal record so it is
 		// not reported as finished while it is running again.
 		delete(f.ended, ev.Key)
+		if id, ok := identOf(ad); ok {
+			f.notifyLocked(id, KeyChange{Ad: ad})
+		}
 	case WatchDelete:
 		// The delete says only that the key is gone. What it was doing
 		// when it went is in the upsert we kept.
 		if ad, ok := f.live[ev.Key]; ok {
 			f.ended[ev.Key] = endedJob{ad: ad, at: f.now()}
 			delete(f.live, ev.Key)
+			if id, idok := identOf(ad); idok {
+				f.notifyLocked(id, KeyChange{Gone: true})
+			}
 		}
 		// A delete for a job never seen upserted carries nothing to act
 		// on; the snapshot path will notice its absence.
@@ -205,6 +215,7 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// A full replay is about to follow, so what is held describes a
 		// world that no longer applies.
 		f.clearLocked()
+		f.notifyAllLocked()
 		return
 	}
 	f.evictLocked()
@@ -217,6 +228,7 @@ func (f *Feed) Reset() {
 	defer f.mu.Unlock()
 	f.clearLocked()
 	f.warm = false
+	f.notifyAllLocked()
 }
 
 func (f *Feed) clearLocked() {
@@ -227,7 +239,14 @@ func (f *Feed) clearLocked() {
 func (f *Feed) setWarm(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	was := f.warm
 	f.warm = v
+	// Tell followers when the stream drops. Without this a subscriber
+	// cannot distinguish a disconnected feed from a quiet one, and would
+	// sit indefinitely believing no news is good news.
+	if was && !v {
+		f.notifyAllLocked()
+	}
 }
 
 // Warm reports whether the feed has a usable picture. A cold feed

@@ -607,6 +607,13 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GET /api/v1/jobs/{id}/watch — SSE for one job's state, so a page
+	// waiting on a job does not have to poll it.
+	if len(parts) == 2 && parts[1] == "watch" {
+		s.handleJobWatch(w, r, jobID)
+		return
+	}
+
 	// Handle job operations
 	switch r.Method {
 	case http.MethodGet:
