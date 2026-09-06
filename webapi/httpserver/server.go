@@ -53,6 +53,7 @@ type Config struct {
 	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
 	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
 	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	CCBStreaming             bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
 	TLSCertFile              string              // Path to TLS certificate file (optional, enables HTTPS)
 	TLSKeyFile               string              // Path to TLS key file (optional, enables HTTPS)
 	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
@@ -214,6 +215,7 @@ func NewServer(cfg Config) (*Server, error) {
 		TrustDomain:                 cfg.TrustDomain,
 		UIDDomain:                   cfg.UIDDomain,
 		HTTPBaseURL:                 cfg.HTTPBaseURL,
+		CCBStreaming:                cfg.CCBStreaming,
 		TLSCACertFile:               cfg.TLSCACertFile,
 		Collector:                   cfg.Collector,
 		JobQueueLogPath:             cfg.JobQueueLogPath,

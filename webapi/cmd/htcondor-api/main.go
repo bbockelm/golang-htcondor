@@ -1333,6 +1333,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
+		CCBStreaming:             loadCCBStreaming(cfg, logger),
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
 		ScheddHost:               scheddHostValue,
@@ -2197,6 +2198,46 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 //	                           NAT or reachable only over a tunnel
 //	HTTP_API_DBMIRROR_REQUIRED never fall back to the schedd; a read the
 //	                           mirror cannot serve fails instead
+//
+// loadCCBStreaming decides how this server reaches daemons that sit behind a
+// Condor Connection Broker.
+//
+// CCB's default is for the private daemon to dial back to the client, which
+// requires the client to be reachable from the execute node. Running under
+// condor_master means running on a pool host, where that generally holds.
+// Standalone means anything else -- a container, a separate host, a
+// Kubernetes pod -- where it generally does not, and where the failure is
+// silent: the broker tells the starter to connect to an address nothing
+// routes to, and condor_ssh_to_job times out having explained nothing.
+// Streaming mode has the broker relay instead, so no inbound path is needed.
+//
+// Detected from the environment rather than taken from the daemon handle
+// because the server is constructed before daemon.New runs; this is the same
+// predicate daemon.New itself uses.
+//
+// HTTP_API_CCB_STREAMING overrides the guess in either direction.
+func loadCCBStreaming(cfg *config.Config, logger *logging.Logger) bool {
+	streaming := !daemon.UnderCondorMaster()
+	source := "standalone default"
+
+	if raw, ok := cfg.Get("HTTP_API_CCB_STREAMING"); ok && strings.TrimSpace(raw) != "" {
+		v, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			// Fatal rather than defaulting: an operator who set this was
+			// working around a reachability problem, and ignoring a typo
+			// would put them back where they started with no clue why.
+			log.Fatalf("invalid HTTP_API_CCB_STREAMING=%q: must be a boolean", raw)
+		}
+		streaming, source = v, "HTTP_API_CCB_STREAMING"
+	}
+
+	logger.Info(logging.DestinationHTTP,
+		"CCB connection mode selected",
+		"streaming", streaming, "source", source,
+		"under_condor_master", daemon.UnderCondorMaster())
+	return streaming
+}
+
 func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, address string, required bool) {
 	name, _ = cfg.Get("HTTP_API_DBMIRROR_NAME")
 	address, _ = cfg.Get("HTTP_API_DBMIRROR_ADDRESS")

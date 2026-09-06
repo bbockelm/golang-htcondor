@@ -47,6 +47,7 @@ type Handler struct {
 	// /api/v1/version so the Info page can show how long the access
 	// point has been running.
 	startTime        time.Time
+	ccbStreaming     bool // route CCB dials through the broker; see HandlerConfig.CCBStreaming
 	schedd           *htcondor.Schedd
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
@@ -319,6 +320,7 @@ type HandlerConfig struct {
 	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
 	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
 	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+	CCBStreaming             bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
 	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
 	Collector                *htcondor.Collector // Collector for metrics (optional)
 
@@ -639,6 +641,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
+		ccbStreaming:              cfg.CCBStreaming,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
 		jupyterWorkDir:            cfg.JupyterWorkDir,

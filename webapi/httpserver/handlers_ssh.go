@@ -211,7 +211,9 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sshClient, err := schedd.OpenJobShell(openCtx, cluster, proc, nil)
+	sshClient, err := schedd.OpenJobShell(openCtx, cluster, proc, &htcondor.JobShellOptions{
+		CCBStreaming: s.ccbStreaming,
+	})
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "OpenJobShell failed",
 			"user", username, "cluster", cluster, "proc", proc, "error", err)
