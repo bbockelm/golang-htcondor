@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -19,8 +20,8 @@ func TestWatchSSERedactsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := httptest.NewRecorder() // implements http.Flusher
-	if err := writeWatchSSE(rec, rec, "upsert", "1.0", ad, []byte("cursor-1"), ""); err != nil {
+	rec := httptest.NewRecorder()
+	if err := writeWatchSSE(rec, http.NewResponseController(rec), "upsert", "1.0", ad, []byte("cursor-1"), ""); err != nil {
 		t.Fatalf("writeWatchSSE: %v", err)
 	}
 	body := rec.Body.String()

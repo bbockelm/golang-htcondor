@@ -445,26 +445,18 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
+	// Shared with the other SSE endpoints: sets the headers, clears the
+	// server's write deadline (WriteTimeout otherwise kills the stream
+	// mid-flight and the browser silently reconnects), and flushes so
+	// EventSource opens.
+	rc, ok := sseSetup(w)
 	if !ok {
 		s.writeError(w, http.StatusInternalServerError, "server does not support streaming")
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	// Disable response buffering at any reverse proxy that respects this.
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
 	events, cancel := inst.Subscribe(16)
 	defer cancel()
-
-	// Send a comment line right away to flush headers and let the
-	// browser's EventSource transition out of "connecting".
-	_, _ = w.Write([]byte(": connected\n\n"))
-	flusher.Flush()
 
 	// Heartbeat so intermediate proxies don't drop the idle connection.
 	ticker := time.NewTicker(15 * time.Second)
@@ -480,7 +472,7 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return
 			}
-			flusher.Flush()
+			_ = rc.Flush()
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -490,7 +482,7 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 				continue
 			}
 			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, payload)
-			flusher.Flush()
+			_ = rc.Flush()
 			if ev.Kind == jupytertunnel.EventClosed {
 				return
 			}
