@@ -59,6 +59,7 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "server does not support streaming")
 		return
 	}
+	defer h.streamOpened()()
 
 	events, err := col.WatchAds(ctx, adType, constraint, cursor)
 	if err != nil {
@@ -228,6 +229,7 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "server does not support streaming")
 		return
 	}
+	defer h.streamOpened()()
 
 	seq, err := h.jobMirror.Collection().Watch(ctx, cursor)
 	if err != nil {
