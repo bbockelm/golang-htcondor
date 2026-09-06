@@ -25,6 +25,23 @@ func WithSecurityConfig(ctx context.Context, secConfig *security.SecurityConfig)
 	return context.WithValue(ctx, securityConfigContextKey{}, secConfig)
 }
 
+// WithoutSecurityConfig returns ctx with any caller credential detached, so
+// the connection built from it authenticates as this daemon rather than as
+// whoever made the request.
+//
+// A request context carries the caller's own SecurityConfig, and
+// GetSecurityConfigOrDefault prefers it over the daemon's configuration.
+// That is right for anything done *on behalf of* the caller. It is wrong for
+// the plumbing underneath: a connection to a broker, a relay, or any other
+// piece of infrastructure is this daemon talking, and offering the caller's
+// credential there asks a third party to trust a token it has no reason to
+// recognise.
+//
+// Cancellation and deadlines are preserved -- only the credential is dropped.
+func WithoutSecurityConfig(ctx context.Context) context.Context {
+	return context.WithValue(ctx, securityConfigContextKey{}, (*security.SecurityConfig)(nil))
+}
+
 // GetSecurityConfigFromContext retrieves the security configuration from the context
 func GetSecurityConfigFromContext(ctx context.Context) (security.SecurityConfig, bool) {
 	secConfig, ok := ctx.Value(securityConfigContextKey{}).(*security.SecurityConfig)
