@@ -31,6 +31,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 )
 
@@ -1434,6 +1435,16 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// the TLS ClientHello / HTTP request line); ServeTLS terminates TLS on those
 	// forwarded connections exactly as it does for a directly-bound TCP port.
 	serve := func(ctx context.Context, l net.Listener) error {
+		// Advertise this API server to the collector so the pool can discover
+		// its endpoint and see its health (schedd fronted, mirror state, live
+		// streams). daemon.Advertise is a no-op when COLLECTOR_HOST is unset;
+		// HTTP_API_ADVERTISE=false opts out even when it is set.
+		if httpAPIAdvertiseEnabled(cfg) {
+			go d.Advertise(ctx, daemon.AdvertiseConfig{
+				MyType:  apiad.AdType,
+				Augment: server.Handler.AdvertiseAugment(),
+			})
+		}
 		go func() { //nolint:gosec // G118: ctx is Done before we shut down, so the deadline must be an independent context, not a child of ctx
 			<-ctx.Done()
 			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2216,6 +2227,22 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 // predicate daemon.New itself uses.
 //
 // HTTP_API_CCB_STREAMING overrides the guess in either direction.
+// httpAPIAdvertiseEnabled reports whether to advertise this server to the
+// collector. Default true; HTTP_API_ADVERTISE=false opts out. (daemon.Advertise
+// is independently a no-op when COLLECTOR_HOST is unset, so this only matters
+// when a collector IS configured but the operator does not want the ad.)
+func httpAPIAdvertiseEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_ADVERTISE")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_ADVERTISE=%q: must be a boolean", raw)
+	}
+	return v
+}
+
 func loadCCBStreaming(cfg *config.Config, logger *logging.Logger) bool {
 	streaming := !daemon.UnderCondorMaster()
 	source := "standalone default"

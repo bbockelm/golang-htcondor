@@ -149,7 +149,14 @@ type Handler struct {
 	// setupRoutes. Always non-nil after NewHandler; the metricsdAdapter
 	// surfaces the legacy pool/process collectors through this same
 	// registry when they're enabled.
-	httpMetricsState    *httpMetrics
+	httpMetricsState *httpMetrics
+	// activeStreams counts long-lived SSE responses (job/collector watch,
+	// Jupyter events) currently open. These are distinct from
+	// requests_in_flight -- they are held open for minutes -- so they get
+	// their own gauge, exposed to Prometheus (a GaugeFunc reads this atomic)
+	// and to the collector ad (ActiveWatchStreams). streamOpened() is the
+	// single inc/dec choke point.
+	activeStreams       atomic.Int64
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
 	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
@@ -775,6 +782,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.
 	h.httpMetricsState.registry.MustRegister(newMirrorCollector(h.dbMirror))
+	// Live count of open watch/SSE streams, exposed to /metrics from the same
+	// atomic the collector ad reads (one source of truth).
+	h.registerStreamGauge()
 
 	// Discover credd if not provided
 	if h.credd == nil {
