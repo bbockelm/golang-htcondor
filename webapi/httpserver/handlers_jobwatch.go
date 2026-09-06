@@ -129,6 +129,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		s.writeError(w, http.StatusInternalServerError, "server does not support streaming")
 		return
 	}
+	defer s.streamOpened()()
 
 	last := projectAttrs(ad, attrs)
 	writeSSE(w, rc, "snapshot", last)
