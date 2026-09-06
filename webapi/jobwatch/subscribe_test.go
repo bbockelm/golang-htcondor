@@ -72,6 +72,24 @@ func TestSubscribeReportsGoneOnDelete(t *testing.T) {
 	}
 }
 
+func TestSubscribeDistinguishesProcsOfOneCluster(t *testing.T) {
+	f := NewFeed(nil)
+	ch, cancel := f.Subscribe(7, 1)
+	defer cancel()
+
+	// Same cluster, different proc. An implementation that keyed identity
+	// on ClusterId alone would pass every other test in this file, since
+	// they all use proc 0 -- which is what the linter noticed about the
+	// helper before this test existed.
+	f.Apply(subUpsert(7, 0, 2))
+	expectQuiet(t, ch)
+
+	f.Apply(subUpsert(7, 1, 2))
+	if got := recv(t, ch); got.Ad == nil {
+		t.Fatalf("expected the ad for 7.1, got %+v", got)
+	}
+}
+
 func TestSubscribeIgnoresDeleteOfAnotherJob(t *testing.T) {
 	f := NewFeed(nil)
 	ch, cancel := f.Subscribe(7, 0)
