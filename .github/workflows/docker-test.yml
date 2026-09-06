@@ -256,8 +256,26 @@ jobs:
           -w /workspace \
           -e GOCACHE=/workspace/.gocache/build \
           -e GOMODCACHE=/workspace/.gocache/mod \
+          -e HTCONDORDB_BINARY=/workspace/.gocache/htcondordb \
           golang-htcondor:integration-test \
           /bin/bash -c "
+            # Build the htcondordb the mirror integration test runs
+            # against. The version comes from .github/tools, an isolated
+            # module that exists so Dependabot has something to bump --
+            # a pin in a shell script here would age silently, and the
+            # test would go on passing against a release nobody uses.
+            #
+            # Built rather than downloaded because htcondordb publishes
+            # no container or release binary for this platform, and a
+            # 'go build' of a pinned module version is reproducible in
+            # the same way a pinned image tag would be.
+            #
+            # If this build fails the test SKIPS rather than fails, which
+            # would hide the gap it exists to close -- so fail the job
+            # here instead.
+            set -e
+            (cd .github/tools && GOWORK=off go build -o /workspace/.gocache/htcondordb github.com/bbockelm/htcondordb/cmd/htcondordb)
+
             # Run integration tests (webapi module holds httpserver).
             # gotestsum comes from the image; GOCACHE/GOMODCACHE are the
             # restored caches under the bind-mounted workspace.

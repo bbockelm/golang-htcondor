@@ -35,6 +35,14 @@ updates:
       - "/webapi"
       - "/localcredmon"
       - "/examples/*"
+      # .github/tools pins the external binaries CI builds -- currently
+      # htcondordb, which webapi/httpserver's integration test runs
+      # against. It is a module of its own precisely so this pin is
+      # visible here: nothing imports it, so bumping it cannot affect any
+      # other module's build, and a new htcondordb release arrives as an
+      # ordinary PR that runs the integration test against it. See
+      # .github/tools/README.md.
+      - "/.github/tools"
     schedule:
       interval: "weekly"
     # A release published minutes ago has had no time to be found
