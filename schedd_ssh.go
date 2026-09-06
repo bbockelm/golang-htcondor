@@ -147,6 +147,54 @@ type sshKeyPair struct {
 // Callers should hand the conn to ssh.NewClientConn — it must not be wrapped
 // in any further buffered reader, since cedar's Stream reads directly from
 // the conn and any extra buffering would swallow sshd's banner.
+// starterSecurityConfig builds the SecurityConfig for the starter leg of
+// ssh-to-job, and for the CCB broker leg underneath it.
+//
+// Split out from startSSHDOnStarter so the credential it ends up with can be
+// asserted directly. Which credential that is has been wrong before, and the
+// symptom appeared two hops away, on a machine behind a firewall.
+func starterSecurityConfig(ctx context.Context, starterAddr string, cache *security.SessionCache) (*security.SecurityConfig, error) {
+	// Build the SecurityConfig from the configured CLIENT auth methods
+	// (so SSL/Kerberos/etc. are offered when configured) but keep the
+	// AES pin and the REQUIRED encryption/integrity levels — those
+	// matter for the session-resume happy path where ExportSecSessionInfo
+	// emits a legacy CryptoMethods preferred order that cedar would
+	// otherwise misinterpret. Auth methods only kick in if the resume
+	// fails and ClientHandshake falls back to fresh authentication;
+	// in that fallback path we want the same configured methods every
+	// other client uses.
+	//
+	// Token is empty here: the schedd-minted ClaimID seeded in `cache`
+	// IS the credential, and we want NewClientSecurityConfig to leave
+	// AuthMethods alone rather than prepending TOKEN.
+	//
+	// The caller's credential is detached for the same reason. An empty
+	// token argument means "do not override", not "do not authenticate":
+	// GetSecurityConfigOrDefault prefers the SecurityConfig on the request
+	// context, so this used to inherit the JWT the API server minted for
+	// the browser session. Nothing on this path wants it. The schedd
+	// already authorized the caller and expressed that grant as a
+	// job-scoped ClaimID, and the starter resumes on that.
+	//
+	// It did reach the wire, though, on the one leg that performs a fresh
+	// handshake: reaching a starter behind CCB authenticates to a broker
+	// first, and the broker was offered a token signed by this server's
+	// own key. A pool broker has no such key, so it rejected it with a
+	// bare AUTH_PW_ERROR and ssh-to-job failed against every firewalled
+	// execute node. Authenticating as the daemon uses the pool credential
+	// the broker does recognise, and does not widen what the caller can
+	// reach: the ClaimID is the capability, and it names one job.
+	secConfig, err := NewClientSecurityConfig(WithoutSecurityConfig(ctx), "", starterAddr, startSSHDCommand, "CLIENT", cache)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build starter security config: %w", err)
+	}
+	secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
+	secConfig.Authentication = security.SecurityRequired
+	secConfig.Encryption = security.SecurityRequired
+	secConfig.Integrity = security.SecurityRequired
+	return secConfig, nil
+}
+
 func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming bool) (net.Conn, *sshKeyPair, error) {
 	claim := security.ParseClaimID(info.ClaimID)
 	if claim == nil || claim.SecSessionID() == "" {
@@ -178,27 +226,10 @@ func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming
 	cache.Store(entry)
 	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", startSSHDCommand), claim.SecSessionID())
 
-	// Build the SecurityConfig from the configured CLIENT auth methods
-	// (so SSL/Kerberos/etc. are offered when configured) but keep the
-	// AES pin and the REQUIRED encryption/integrity levels — those
-	// matter for the session-resume happy path where ExportSecSessionInfo
-	// emits a legacy CryptoMethods preferred order that cedar would
-	// otherwise misinterpret. Auth methods only kick in if the resume
-	// fails and ClientHandshake falls back to fresh authentication;
-	// in that fallback path we want the same configured methods every
-	// other client uses.
-	//
-	// Token is empty here: the schedd-minted ClaimID seeded in `cache`
-	// IS the credential, and we want NewClientSecurityConfig to leave
-	// AuthMethods alone rather than prepending TOKEN.
-	secConfig, err := NewClientSecurityConfig(ctx, "", info.StarterAddr, startSSHDCommand, "CLIENT", cache)
+	secConfig, err := starterSecurityConfig(ctx, info.StarterAddr, cache)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build starter security config: %w", err)
+		return nil, nil, err
 	}
-	secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
-	secConfig.Authentication = security.SecurityRequired
-	secConfig.Encryption = security.SecurityRequired
-	secConfig.Integrity = security.SecurityRequired
 
 	// DialSinful rather than ConnectAndAuthenticate: same behaviour for a
 	// directly reachable starter, but it can also be told how to traverse
