@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func TestWriteWatchSSEUpsert(t *testing.T) {
 
 	cursor := []byte{0x01, 0x02, 0x03}
 	key := "slot1@host\x00<1.2.3.4:9618>"
-	if err := writeWatchSSE(rec, rec, "upsert", watchKeyString(key), ad, cursor, ""); err != nil {
+	if err := writeWatchSSE(rec, http.NewResponseController(rec), "upsert", watchKeyString(key), ad, cursor, ""); err != nil {
 		t.Fatalf("writeWatchSSE: %v", err)
 	}
 	out := rec.Body.String()
@@ -43,7 +44,7 @@ func TestWriteWatchSSEUpsert(t *testing.T) {
 
 func TestWriteWatchSSEDeleteNoCursor(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := writeWatchSSE(rec, rec, "delete", watchKeyString("k"), nil, nil, ""); err != nil {
+	if err := writeWatchSSE(rec, http.NewResponseController(rec), "delete", watchKeyString("k"), nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	out := rec.Body.String()

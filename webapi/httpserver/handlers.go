@@ -401,10 +401,16 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 		jobCount++
 
-		// Flush after each ad for true streaming
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+		// Flush after each ad for true streaming.
+		//
+		// Through the response controller, not a w.(http.Flusher)
+		// assertion: this route can be served behind a wrapper, and the
+		// assertion's `ok` guard turns that into a silent skip -- the
+		// rows pile up in the chunked-encoding buffer and arrive
+		// together at the end, which looks like a slow server rather
+		// than a non-streaming one. The same mistake is on record in
+		// server.go's Unwrap comment.
+		_ = http.NewResponseController(w).Flush()
 	}
 
 	if _, err := w.Write([]byte(scheddJobListTrailer(jobCount, limit, errorMsg))); err != nil {
@@ -2437,10 +2443,16 @@ func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 
 		adCount++
 
-		// Flush after each ad for true streaming
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+		// Flush after each ad for true streaming.
+		//
+		// Through the response controller, not a w.(http.Flusher)
+		// assertion: this route can be served behind a wrapper, and the
+		// assertion's `ok` guard turns that into a silent skip -- the
+		// rows pile up in the chunked-encoding buffer and arrive
+		// together at the end, which looks like a slow server rather
+		// than a non-streaming one. The same mistake is on record in
+		// server.go's Unwrap comment.
+		_ = http.NewResponseController(w).Flush()
 	}
 
 	// Close JSON array and add metadata
@@ -2613,10 +2625,16 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 
 		adCount++
 
-		// Flush after each ad for true streaming
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+		// Flush after each ad for true streaming.
+		//
+		// Through the response controller, not a w.(http.Flusher)
+		// assertion: this route can be served behind a wrapper, and the
+		// assertion's `ok` guard turns that into a silent skip -- the
+		// rows pile up in the chunked-encoding buffer and arrive
+		// together at the end, which looks like a slow server rather
+		// than a non-streaming one. The same mistake is on record in
+		// server.go's Unwrap comment.
+		_ = http.NewResponseController(w).Flush()
 	}
 
 	// Close JSON array and add metadata

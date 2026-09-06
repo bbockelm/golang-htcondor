@@ -79,7 +79,7 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return
 			}
-			flusher.Flush()
+			_ = flusher.Flush()
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -93,24 +93,44 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 
 // sseSetup writes the SSE response headers and returns the flusher. It reports
 // false if the writer cannot stream.
-func sseSetup(w http.ResponseWriter) (http.Flusher, bool) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return nil, false
-	}
+func sseSetup(w http.ResponseWriter) (*http.ResponseController, bool) {
+	// http.NewResponseController rather than a w.(http.Flusher) assertion.
+	// Some routes are served through a status-capturing wrapper, which
+	// implements Unwrap precisely so the controller can find the real
+	// writer; asserting Flusher on the wrapper fails and the endpoint
+	// reports that the server cannot stream when it can.
+	//
+	// Headers first: flushing is what commits them, so probing for the
+	// capability before setting Content-Type would send the response as
+	// whatever the default is and EventSource would discard the stream.
+	flusher := http.NewResponseController(w)
+	// Drop the server's write deadline for this response. WriteTimeout is
+	// set once for the whole write, not per write, so a stream that
+	// outlives it dies mid-flight: the first write past the deadline
+	// fails and the handler unwinds. Before this, every SSE stream here
+	// was capped at WriteTimeout (30s by default) and survived only
+	// because EventSource silently reconnects -- which costs a
+	// re-subscribe and a fresh snapshot every half minute, and hides the
+	// truncation from anyone reading the code.
+	//
+	// An error is not fatal: a writer that cannot take a deadline simply
+	// keeps the server's, which is the behaviour we had.
+	_ = flusher.SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(": connected\n\n")) // flush headers; EventSource goes "open"
-	flusher.Flush()
+	if err := flusher.Flush(); err != nil {
+		return nil, false
+	}
 	return flusher, true
 }
 
 // writeWatchSSE writes one watch event as an SSE frame. A non-empty cursor is
 // emitted as the id: (the resume token); errMsg, if set, is included in data.
-func writeWatchSSE(w http.ResponseWriter, flusher http.Flusher, event, key string, ad *classad.ClassAd, cursor []byte, errMsg string) error {
+func writeWatchSSE(w http.ResponseWriter, flusher *http.ResponseController, event, key string, ad *classad.ClassAd, cursor []byte, errMsg string) error {
 	var b strings.Builder
 	if len(cursor) > 0 {
 		fmt.Fprintf(&b, "id: %s\n", base64.StdEncoding.EncodeToString(cursor))
@@ -133,7 +153,7 @@ func writeWatchSSE(w http.ResponseWriter, flusher http.Flusher, event, key strin
 	if _, err := w.Write([]byte(b.String())); err != nil {
 		return err
 	}
-	flusher.Flush()
+	_ = flusher.Flush()
 	return nil
 }
 
@@ -230,7 +250,7 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 // frames until ctx or the request ends, servicing a heartbeat so idle proxies
 // keep the connection. The pull iterator is fed through a channel so the loop can
 // also select on the ticker and disconnect.
-func streamCollectionEvents(ctx context.Context, w http.ResponseWriter, r *http.Request, flusher http.Flusher, seq iter.Seq[collections.WatchEvent]) {
+func streamCollectionEvents(ctx context.Context, w http.ResponseWriter, r *http.Request, flusher *http.ResponseController, seq iter.Seq[collections.WatchEvent]) {
 	events := make(chan collections.WatchEvent, 64)
 	go func() {
 		defer close(events)
@@ -255,7 +275,7 @@ func streamCollectionEvents(ctx context.Context, w http.ResponseWriter, r *http.
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return
 			}
-			flusher.Flush()
+			_ = flusher.Flush()
 		case ev, ok := <-events:
 			if !ok {
 				return
