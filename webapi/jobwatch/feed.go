@@ -2,6 +2,7 @@ package jobwatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -184,7 +185,7 @@ func (f *Feed) Apply(ev WatchEvent) {
 
 	switch ev.Kind {
 	case WatchUpsert:
-		ad, err := classad.ParseOld(ev.AdText)
+		ad, err := parseWatchAd(ev.AdText)
 		if err != nil || ad == nil {
 			// An unreadable upsert leaves no record, so the delete that
 			// follows finds nothing and the job falls through to the
@@ -307,3 +308,30 @@ func (f *Feed) evictLocked() {
 		delete(f.ended, oldestKey)
 	}
 }
+
+// parseWatchAd reads the ad text a watch event carries.
+//
+// The transport sends whatever ClassAd.String() produces, which is the
+// new format ([a = b; c = d]); dbrpc's own comment calls it old-ClassAd
+// text, and that is what this used to parse it as. ParseOld fails on the
+// new format, so every upsert from a real database took the unreadable
+// branch: the feed's live map stayed empty, no terminal record was ever
+// built, and the change stream contributed nothing. Nothing reported it,
+// because an empty feed degrades to the history archive by design --
+// answers arrive later rather than wrong, which is invisible unless you
+// are looking for it.
+//
+// Both formats are accepted rather than one: the wire format is a
+// property of whatever wrote the row, this reads from two transports
+// already, and being wrong about it silently costs the whole feature.
+func parseWatchAd(text string) (*classad.ClassAd, error) {
+	if text == "" {
+		return nil, errEmptyAd
+	}
+	if ad, err := classad.Parse(text); err == nil && ad != nil {
+		return ad, nil
+	}
+	return classad.ParseOld(text)
+}
+
+var errEmptyAd = errors.New("jobwatch: empty ad text")
