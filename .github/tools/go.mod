@@ -14,7 +14,7 @@ require (
 	github.com/PelicanPlatform/classad/dbrpc v0.29.9 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
-	github.com/bbockelm/cedar v0.6.13 // indirect
+	github.com/bbockelm/cedar v0.6.14 // indirect
 	github.com/bbockelm/golang-htcondor v0.13.1 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
