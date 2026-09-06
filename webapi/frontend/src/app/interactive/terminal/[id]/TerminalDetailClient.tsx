@@ -23,6 +23,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { api, ApiError, type ClassAd } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { useJobWatch } from '@/lib/useJobWatch';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
   HOLD_REASON_SPOOLING_INPUT,
@@ -47,26 +48,36 @@ export default function TerminalDetailClient() {
   const router = useRouter();
   const queryClient = useQueryClient();
 
+  // Opened before the query so the stream is live for whatever the
+  // first read returns; the hook writes into this same cache entry.
+  const watch = useJobWatch(id);
+
   const { data, error } = useQuery({
     queryKey: ['job', id],
     queryFn: () => api.jobs.get(id),
     enabled: !!id && id !== '_',
-    // Poll every 2s while the job hasn't started running so the
-    // terminal mounts as soon as the schedd matches it. Once running,
-    // react-query's automatic cache cuts the request rate to once per
-    // staleTime. Spooling-hold (transient, ~seconds) gets the same
-    // poll cadence so we don't sit on a stale "starting" view.
+    // Poll only while the watch stream is not carrying changes.
+    //
+    // This used to stop once the job was running (the interval returned
+    // false), on the theory that staleTime kept a slower refresh going.
+    // It does not: staleTime governs refetch on mount and focus, not
+    // background polling, and refetchOnWindowFocus is at its default.
+    // A running session that was then held or evicted stayed "running"
+    // on screen until the user tabbed away and back.
+    //
+    // With the stream connected the poll is redundant; without it -- no
+    // EventSource, a proxy that buffers, a server too old for the
+    // endpoint -- polling is still the answer, and now it does not stop
+    // when the job starts.
     refetchInterval: (q) => {
+      if (watch.connected) return false;
       const ad = q.state.data as ClassAd | undefined;
       // Run through the same interpreter so the cadence and the
       // banner agree about which states are "still settling".
       const s = interpretJobStatus({ job: ad });
-      return s === 'idle' ||
-        s === 'spooling' ||
-        s === 'transferring_input' ||
-        s === 'loading'
-        ? 2000
-        : false;
+      const settling =
+        s === 'idle' || s === 'spooling' || s === 'transferring_input' || s === 'loading';
+      return settling ? 2000 : 10_000;
     },
     staleTime: 30_000,
   });
