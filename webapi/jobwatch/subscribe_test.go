@@ -181,3 +181,31 @@ func TestSubscribersDoNotStallTheFeed(t *testing.T) {
 		t.Fatal("Apply blocked on an unread subscriber")
 	}
 }
+
+// The transport sends ClassAd.String() output -- the new format. This
+// used to be parsed as old-format text, which fails, so every upsert
+// from a real database was silently dropped and the feed stayed empty.
+// The unit tests missed it because they all hand-build old-format text.
+func TestFeedAcceptsTheFormatTheWireSends(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"new format, as dbrpc sends", "[ClusterId = 9; ProcId = 0; JobStatus = 2]"},
+		{"old format", "ClusterId = 9\nProcId = 0\nJobStatus = 2\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewFeed(nil)
+			ch, cancel := f.Subscribe(9, 0)
+			defer cancel()
+			f.Apply(WatchEvent{Kind: WatchUpsert, Key: "9.0", AdText: tc.text})
+			got := recv(t, ch)
+			if got.Ad == nil {
+				t.Fatal("the upsert was dropped as unreadable")
+			}
+			if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 2 {
+				t.Errorf("JobStatus = %d, want 2", v)
+			}
+		})
+	}
+}
