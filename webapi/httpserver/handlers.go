@@ -2304,6 +2304,12 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		// The schedd says why it acted on nothing; say that instead of
+		// blaming the server. See jobActionRefusal.
+		if code, msg, ok := jobActionRefusal(results, actionVerb); ok {
+			s.writeError(w, code, msg)
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job %s failed: %v", actionVerb, err))
 		return
 	}
