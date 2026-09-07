@@ -30,6 +30,7 @@ import {
   type Status,
 } from '@/lib/jobStatus';
 import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
+import { useJobWatch } from '@/lib/useJobWatch';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 
@@ -89,11 +90,21 @@ export default function JupyterDetailClient() {
   // says "running" and we don't need it anymore.
   const clusterID = data?.cluster_id;
   const jobIDForPoll = clusterID ? `${clusterID}.0` : null;
+  // Follow the job for as long as the page is open, not just until the
+  // tunnel dials back. Stopping at connect is why a session that was
+  // later held or evicted kept reading as running: nothing was looking.
+  const jobWatch = useJobWatch(jobIDForPoll ?? undefined);
   const jobQuery = useQuery({
     queryKey: ['job', jobIDForPoll],
     queryFn: () => api.jobs.get(jobIDForPoll!),
-    enabled: !!jobIDForPoll && data?.connected !== true,
-    refetchInterval: 3000,
+    enabled: !!jobIDForPoll,
+    // The stream makes the poll redundant. Without it, poll hard while
+    // the session is coming up and slowly afterwards -- slowly, but not
+    // never, which is what it used to be.
+    refetchInterval: () => {
+      if (jobWatch.connected) return false;
+      return data?.connected === true ? 10_000 : 3000;
+    },
     staleTime: 0,
   });
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -249,30 +250,51 @@ func splitAttrs(v string) []string {
 	return out
 }
 
-// projectAttrs renders the watched attributes to comparable strings.
-// Attributes the ad does not carry are omitted rather than recorded as
-// empty, so an attribute appearing for the first time reads as a change.
-func projectAttrs(ad *classad.ClassAd, attrs []string) map[string]string {
-	out := make(map[string]string, len(attrs))
+// projectAttrs picks the watched attributes out of the ad as JSON values.
+//
+// Through the ad's own JSON marshalling, not expr.String(): the values
+// have to be the same shape GET /api/v1/jobs/{id} returns, or a client
+// merging an update into the job it already has ends up with
+// "2" where it had 2, and \"slot1@host\" where it had slot1@host. The
+// stream is meant to save the page a poll, not hand it a second encoding
+// to decode.
+//
+// Attributes the ad does not carry are omitted rather than recorded
+// empty, so one appearing for the first time reads as a change.
+func projectAttrs(ad *classad.ClassAd, attrs []string) map[string]any {
+	out := make(map[string]any, len(attrs))
 	if ad == nil {
 		return out
 	}
+	b, err := json.Marshal(ad)
+	if err != nil {
+		return out
+	}
+	var all map[string]any
+	if err := json.Unmarshal(b, &all); err != nil {
+		return out
+	}
+	// ClassAd attribute names are case-insensitive; the JSON carries
+	// whatever case the ad stored, which is not necessarily the case the
+	// caller asked in.
+	lower := make(map[string]string, len(all))
+	for k := range all {
+		lower[strings.ToLower(k)] = k
+	}
 	for _, a := range attrs {
-		expr, ok := ad.Lookup(a)
-		if !ok || expr == nil {
-			continue
+		if k, ok := lower[strings.ToLower(a)]; ok {
+			out[a] = all[k]
 		}
-		out[a] = expr.String()
 	}
 	return out
 }
 
 // diffAttrs returns what changed between two projections, including
 // attributes that went away (as a JSON null) so a client can drop them.
-func diffAttrs(prev, cur map[string]string) map[string]any {
+func diffAttrs(prev, cur map[string]any) map[string]any {
 	changed := map[string]any{}
 	for k, v := range cur {
-		if old, had := prev[k]; !had || old != v {
+		if old, had := prev[k]; !had || !reflect.DeepEqual(old, v) {
 			changed[k] = v
 		}
 	}
