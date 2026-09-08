@@ -1793,6 +1793,46 @@ func waitForShutdown(server *httpserver.Server, errChan <-chan error) error {
 	return nil
 }
 
+// sshToJobTemplate locates condor_ssh_to_job's sshd config template.
+//
+// condor_ssh_to_job cannot work without it: the starter passes the path
+// to condor_ssh_to_job_sshd_setup, and the default is a compiled-in
+// /usr/lib location that several packagings do not use. On a container
+// built from an RPM the file is under /etc/condor and /usr/lib64, and
+// the starter fails with
+//
+//	slot1_1@localhost: /usr/lib/condor_ssh_to_job_sshd_config_template does not exist!
+//
+// which is why interactive sessions could not be exercised in demo mode
+// at all. Probed the same way LIBEXEC is, rather than hardcoded, because
+// the right answer differs per packaging.
+//
+// Returns "" when nothing is found, in which case the setting is omitted
+// and the built-in default applies -- no worse than before.
+func sshToJobTemplate() string {
+	const name = "condor_ssh_to_job_sshd_config_template"
+	candidates := []string{
+		"/usr/lib/" + name,
+		"/etc/condor/" + name,
+		"/usr/lib64/condor/" + name,
+		"/usr/share/condor/" + name,
+	}
+	// A build tree keeps it beside the other libexec bits.
+	if p, err := exec.LookPath("condor_master"); err == nil {
+		root := filepath.Dir(filepath.Dir(p))
+		candidates = append(candidates,
+			filepath.Join(root, "lib", name),
+			filepath.Join(root, "etc", name),
+		)
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
 func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
 	// Determine LIBEXEC directory by looking for condor_shared_port
@@ -1837,6 +1877,14 @@ func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
 	}
 
 	// Build SBIN line if we found it
+	// Omitted entirely when no template is found: the built-in default
+	// then applies, which is what happened before this existed.
+	sshTemplateLine := ""
+	if t := sshToJobTemplate(); t != "" {
+		sshTemplateLine = fmt.Sprintf("SSH_TO_JOB_SSHD_CONFIG_TEMPLATE = %s\n", t)
+		log.Printf("Using condor_ssh_to_job sshd template %s", t)
+	}
+
 	sbinLine := "SBIN = $(RELEASE_DIR)/sbin\n"
 	if sbinDir != "" {
 		sbinLine = fmt.Sprintf("SBIN = %s\n", sbinDir)
@@ -1865,6 +1913,7 @@ KILL = FALSE
 CONDOR_HOST = 127.0.0.1
 COLLECTOR_HOST = $(CONDOR_HOST):0
 DAEMON_SOCKET_DIR = $(LOCAL_DIR)/log
+%s
 SHARED_PORT_ADDRESS_FILE = $(LOG)/shared_port_ad
 SHARED_PORT_DEBUG = D_FULLDEBUG D_SECURITY D_NETWORK:2 D_COMMAND
 SHARED_PORT_MAX_WORKERS = 1000
@@ -1911,7 +1960,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, releaseDir, sbinLine, libexecLine)
+`, localDir, releaseDir, sbinLine, libexecLine, sshTemplateLine)
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
