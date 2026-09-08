@@ -47,6 +47,26 @@ interface InterpretInputs {
  * Pure: callers can call this from useEffect / useMemo / list rows
  * alike without coupling to react-query or other state machinery.
  */
+/**
+ * STATUS_AD_ATTRS are the job-ad attributes interpretJobStatus reads.
+ *
+ * Exported so a caller that only receives *some* of the ad -- the job
+ * watch stream sends a projection, not the whole thing -- can ask for
+ * the ones the state machine needs. Keeping this next to the function
+ * that reads them is the point: the first version of the watch hand-
+ * picked its projection and left out JobCurrentStartExecutingDate, so a
+ * running session sat on "Transferring input" forever while a fresh tab,
+ * which fetches the whole ad, rendered it correctly.
+ *
+ * Add to this list when interpretJobStatus starts reading a new
+ * attribute. jobStatus.test.ts fails if the two drift.
+ */
+export const STATUS_AD_ATTRS = [
+  'JobStatus',
+  'HoldReasonCode',
+  'JobCurrentStartExecutingDate',
+] as const;
+
 export function interpretJobStatus(inp: InterpretInputs): Status {
   if (inp.override === 'ready' || inp.override === 'closed' || inp.override === 'launching') {
     return inp.override;

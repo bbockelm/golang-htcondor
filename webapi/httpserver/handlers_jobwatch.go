@@ -44,6 +44,13 @@ var defaultWatchAttrs = []string{
 	"ExitSignal",
 	"RemoteHost",
 	"JobCurrentStartDate",
+	// Not the same attribute as JobCurrentStartDate: this one is set when
+	// the executable actually begins, after any image pull or input
+	// transfer. The UI's state machine leaves "transferring input" on it
+	// appearing, so a projection without it strands a running session on
+	// that state forever -- the stream healthy, carrying the wrong
+	// columns. See STATUS_AD_ATTRS in the frontend's jobStatus.ts.
+	"JobCurrentStartExecutingDate",
 	"CompletionDate",
 	"EnteredCurrentStatus",
 	"NumJobStarts",
