@@ -99,6 +99,26 @@ export default function JobsPage() {
     refetchInterval: loadAll ? REFRESH_MS_FULL : REFRESH_MS,
   });
 
+  // "Load all" for the paginated (htcondordb mirror) path: walk the cursor
+  // to exhaustion instead of making the user click "Load more" once per
+  // page. The mirror clamps a single request's limit (that is why it pages
+  // at all), so limit="*" would not pull everything -- the only way to get
+  // the whole answer is to follow every page token. Awaited sequentially so
+  // react-query never has two in-flight next-page fetches, with a generous
+  // iteration cap as a backstop against a cursor that never terminates.
+  const [loadingAllPages, setLoadingAllPages] = useState(false);
+  const loadAllPages = useCallback(async () => {
+    setLoadingAllPages(true);
+    try {
+      for (let i = 0; i < 10000; i++) {
+        const res = await fetchNextPage();
+        if (res.isError || !res.hasNextPage) break;
+      }
+    } finally {
+      setLoadingAllPages(false);
+    }
+  }, [fetchNextPage]);
+
   // Flatten the loaded pages, and read the truncation state off the
   // LAST one -- earlier pages always report has_more.
   const jobs = useMemo(
@@ -280,7 +300,9 @@ export default function JobsPage() {
           canPage={!!hasNextPage}
           fetchingMore={isFetchingNextPage}
           loadedAll={loadAll}
+          loadingAllPages={loadingAllPages}
           onLoadMore={() => fetchNextPage()}
+          onLoadAllPages={loadAllPages}
           onLoadAll={() => setLoadAll(true)}
         />
       )}
@@ -339,7 +361,9 @@ function TruncationNotice({
   canPage,
   fetchingMore,
   loadedAll,
+  loadingAllPages,
   onLoadMore,
+  onLoadAllPages,
   onLoadAll,
 }: {
   shown: number;
@@ -347,7 +371,9 @@ function TruncationNotice({
   canPage: boolean;
   fetchingMore: boolean;
   loadedAll: boolean;
+  loadingAllPages: boolean;
   onLoadMore: () => void;
+  onLoadAllPages: () => void;
   onLoadAll: () => void;
 }) {
   // A partial-result error is worth showing even when nothing was
@@ -379,17 +405,27 @@ function TruncationNotice({
     <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
       <span>
         Showing the first <strong>{shown.toLocaleString()}</strong> jobs. More
-        match this view.
+        jobs exist.
       </span>{' '}
       {canPage ? (
-        <button
-          type="button"
-          onClick={onLoadMore}
-          disabled={fetchingMore}
-          className="font-medium underline hover:text-amber-950 disabled:opacity-50"
-        >
-          {fetchingMore ? 'Loading…' : 'Load more'}
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={fetchingMore}
+            className="font-medium underline hover:text-amber-950 disabled:opacity-50"
+          >
+            {fetchingMore && !loadingAllPages ? 'Loading…' : 'Load more'}
+          </button>{' '}
+          <button
+            type="button"
+            onClick={onLoadAllPages}
+            disabled={fetchingMore}
+            className="font-medium underline hover:text-amber-950 disabled:opacity-50"
+          >
+            {loadingAllPages ? 'Loading all…' : 'Load all'}
+          </button>
+        </>
       ) : (
         <>
           {/* The server's own explanation. Better than paraphrasing it
