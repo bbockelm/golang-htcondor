@@ -454,6 +454,7 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 		s.writeError(w, http.StatusInternalServerError, "server does not support streaming")
 		return
 	}
+	defer s.streamOpened()()
 
 	events, cancel := inst.Subscribe(16)
 	defer cancel()
