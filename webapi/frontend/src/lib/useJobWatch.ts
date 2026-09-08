@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 
+import { STATUS_AD_ATTRS } from '@/lib/jobStatus';
+
 // Follow one job over Server-Sent Events instead of polling it.
 //
 // The pages that wait on a job used to poll every 2-3s while it started
@@ -15,6 +17,22 @@ import { useQueryClient } from '@tanstack/react-query';
 // already reads, so nothing downstream has to know where the data came
 // from. Values arrive in the shape GET /api/v1/jobs/{id} returns, so an
 // update merges into the cached ad directly.
+
+// WATCH_DISPLAY_ATTRS are what the session pages show beyond the status
+// itself: the hold text, where it ran, how it ended. Requested alongside
+// STATUS_AD_ATTRS so a change to either list is one edit.
+const WATCH_DISPLAY_ATTRS = [
+  'HoldReason',
+  'RemoteHost',
+  'JobCurrentStartDate',
+  'CompletionDate',
+  'EnteredCurrentStatus',
+  'ExitCode',
+  'ExitBySignal',
+  'ExitSignal',
+  'NumJobStarts',
+  'TransferringInput',
+];
 
 export type JobWatchState = {
   // connected says the stream is open. The pages use it to decide
@@ -43,7 +61,16 @@ export function useJobWatch(id: string | undefined, enabled = true): JobWatchSta
     if (!enabled || !id || id === '_') return;
 
     let closed = false;
-    const es = new EventSource(`/api/v1/jobs/${encodeURIComponent(id)}/watch`);
+    // Ask for the attributes this page's state machine reads, rather
+    // than trusting the server's default projection to include them.
+    // The two drifted once already: the default omitted
+    // JobCurrentStartExecutingDate, so a running session never left
+    // "Transferring input" -- the stream was healthy and carrying the
+    // wrong columns.
+    const attrs = [...new Set([...STATUS_AD_ATTRS, ...WATCH_DISPLAY_ATTRS])];
+    const es = new EventSource(
+      `/api/v1/jobs/${encodeURIComponent(id)}/watch?attrs=${encodeURIComponent(attrs.join(','))}`,
+    );
 
     const merge = (patch: Record<string, unknown>) => {
       qc.setQueryData(['job', id], (prev: Record<string, unknown> | undefined) => {
