@@ -146,9 +146,24 @@ queue %d
 		t.Errorf("procs_remaining = %v, want 0 (metadata: %+v)", got, meta)
 	}
 
-	// The claim that matters: every proc actually left the spool hold.
-	// The metadata above only says what we tried.
+	// Every proc actually left the spool hold. The metadata above only
+	// says what we tried.
 	waitForNoneHeldForSpooling(t, ctx, schedd, cluster)
+
+	// And the files actually arrived.
+	//
+	// Leaving the hold is not the same claim. The schedd computes an
+	// allow-set of filenames from the job ad -- TransferInput, plus the
+	// executable's basename when Cmd is relative and TransferExecutable
+	// is true -- and silently drops any tar entry outside it. Cmd and
+	// TransferExecutable live on the CLUSTER ad, so a query that fetches
+	// proc ads alone can produce an empty allow-set: the spool completes,
+	// the hold clears, and the job then fails at execute time on a
+	// missing file. See jobInputSpoolProjection in httpserver.
+	//
+	// A job that runs to ExitCode 0 needed its uploaded executable, so
+	// this is the assertion that distinguishes the two.
+	waitForAnyProcToSucceed(t, ctx, schedd, cluster)
 }
 
 // A second call on an already-spooled cluster must be a no-op rather than
@@ -254,4 +269,115 @@ func currentUserForTest(t *testing.T) string {
 		t.Fatalf("looking up the current user: %v", err)
 	}
 	return u.Username
+}
+
+// waitForAnyProcToSucceed waits for at least one proc of the cluster to
+// finish with ExitCode 0. One is enough: the procs are identical, and
+// waiting for all 25 to be scheduled would be waiting on the harness's
+// slot count rather than on the upload.
+func waitForAnyProcToSucceed(t *testing.T, ctx context.Context, schedd *htcondor.Schedd, cluster int) {
+	t.Helper()
+	var last string
+	for deadline := time.Now().Add(150 * time.Second); time.Now().Before(deadline); {
+		ads, _, err := schedd.QueryWithOptions(ctx,
+			fmt.Sprintf("ClusterId == %d", cluster),
+			&htcondor.QueryOptions{
+				Projection: []string{"ProcId", "JobStatus", "ExitCode", "HoldReason", "HoldReasonCode"},
+				Limit:      -1,
+			})
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		var held []string
+		for _, ad := range ads {
+			st, _ := ad.EvaluateAttrInt("JobStatus")
+			code, hasCode := ad.EvaluateAttrInt("ExitCode")
+			if st == 4 && hasCode && code == 0 {
+				return
+			}
+			if st == 5 {
+				hc, _ := ad.EvaluateAttrInt("HoldReasonCode")
+				reason, _ := ad.EvaluateAttrString("HoldReason")
+				p, _ := ad.EvaluateAttrInt("ProcId")
+				held = append(held, fmt.Sprintf("%d.%d held(%d): %s", cluster, p, hc, reason))
+			}
+		}
+		if len(held) > 0 {
+			last = strings.Join(held, "; ")
+			// A hold after spooling will not clear on its own -- the
+			// usual cause is that the uploaded file never landed.
+			t.Fatalf("procs went on hold after the upload instead of running: %s", last)
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("no proc of cluster %d reached ExitCode 0 (last seen: %s)", cluster, last)
+}
+
+// The allow-set case that TransferInput hides.
+//
+// The schedd accepts only the filenames its allow-set names, and drops
+// the rest of the tar silently. The executable's basename is in that set
+// only when Cmd is relative AND TransferExecutable is true -- and both
+// live on the CLUSTER ad, which a query for proc ads alone does not
+// return. jobInputSpoolProjection in httpserver documents this, and
+// fetchProcAdForSpool uses FetchIncludeClusterAd because of it.
+//
+// TestBulkUploadReleasesEveryProcOfACluster does not exercise it: its
+// submit file lists transfer_input_files, so the name is in the allow-set
+// via TransferInput on the proc ad whether the cluster attributes arrived
+// or not. This submission has no transfer_input_files, so the upload
+// lands only if the cluster attributes reached the fan-out.
+func TestBulkUploadWorksWhenOnlyTheExecutableIsTransferred(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test (forks a real HTCondor)")
+	}
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not in PATH")
+	}
+
+	harness := htcondor.SetupCondorHarness(t)
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("daemons failed to start: %v", err)
+	}
+	schedd := locateSchedd(t, harness)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithAuthenticatedUser(context.Background(), currentUserForTest(t)),
+		5*time.Minute)
+	defer cancel()
+	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
+	server := &Server{schedd: schedd, logger: logger}
+
+	// No transfer_input_files: the executable is the only thing to send,
+	// so the allow-set depends entirely on Cmd and TransferExecutable.
+	subRes, err := server.toolSubmitJob(ctx, map[string]interface{}{"submit_file": `
+universe = vanilla
+executable = onlyexec.sh
+transfer_executable = true
+log = onlyexec_test.log
+request_memory = 64
+queue 3
+`})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	cluster := subRes.(map[string]interface{})["metadata"].(map[string]interface{})["cluster_id"].(int)
+	waitForHeldForSpooling(t, ctx, schedd, cluster, 3)
+
+	if _, err := server.toolUploadJobInput(ctx, map[string]interface{}{
+		"job_id": fmt.Sprintf("%d", cluster),
+		"files": []interface{}{
+			map[string]interface{}{
+				"filename":      "onlyexec.sh",
+				"data":          "#!/bin/sh\nexit 0\n",
+				"is_executable": true,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("cluster-wide upload: %v", err)
+	}
+
+	waitForNoneHeldForSpooling(t, ctx, schedd, cluster)
+	// The hold clearing proves nothing here: an empty allow-set spools
+	// cleanly. Running is the claim.
+	waitForAnyProcToSucceed(t, ctx, schedd, cluster)
 }

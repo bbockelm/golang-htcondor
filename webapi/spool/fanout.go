@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -170,4 +172,40 @@ func SortByProc(ads []*classad.ClassAd) {
 		pj, _ := ads[j].EvaluateAttrInt("ProcId")
 		return pi < pj
 	})
+}
+
+// Target is what an upload's job id asked for.
+type Target struct {
+	Cluster int
+	Proc    int
+	// AllProcs is set when the id named a cluster with no proc, meaning
+	// every proc of it still waiting for input.
+	AllProcs bool
+}
+
+// ParseTarget accepts "cluster.proc" or a bare "cluster".
+//
+// Shared so both upload surfaces agree on what a bare cluster id means.
+// A bare cluster id was an error on both before, so accepting it adds a
+// meaning where there was none rather than changing one.
+func ParseTarget(s string) (Target, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return Target{}, fmt.Errorf("a job id is required")
+	}
+	cl, proc, found := strings.Cut(s, ".")
+	cluster, err := strconv.Atoi(cl)
+	if err != nil || cluster <= 0 {
+		return Target{}, fmt.Errorf(
+			"%q is neither a job id (\"123.0\") nor a cluster id (\"123\")", s)
+	}
+	if !found {
+		return Target{Cluster: cluster, AllProcs: true}, nil
+	}
+	p, err := strconv.Atoi(proc)
+	if err != nil || p < 0 {
+		return Target{}, fmt.Errorf(
+			"%q is neither a job id (\"123.0\") nor a cluster id (\"123\")", s)
+	}
+	return Target{Cluster: cluster, Proc: p}, nil
 }

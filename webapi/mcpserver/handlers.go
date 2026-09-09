@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/spool"
 )
 
 // Tool represents an MCP tool definition
@@ -1958,7 +1959,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 
 	// A bare cluster id means every proc still held for spooling; see
 	// bulkupload.go. "cluster.proc" keeps its exact meaning.
-	target, err := parseUploadTarget(jobID)
+	target, err := spool.ParseTarget(jobID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
@@ -1970,18 +1971,18 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	// keeps the failure legible ("not found" rather than a transfer
 	// error from the peer).
 	var jobAds []*classad.ClassAd
-	if target.allProcs {
-		jobAds, err = s.procsAwaitingInput(ctx, target.cluster)
+	if target.AllProcs {
+		jobAds, err = s.procsAwaitingInput(ctx, target.Cluster)
 		if err != nil {
 			return nil, err
 		}
 		if len(jobAds) == 0 {
 			// Not an error: the common cause is that the cluster's input
 			// is already spooled, which is the state the caller wanted.
-			return uploadNothingToDo(target.cluster), nil
+			return uploadNothingToDo(target.Cluster), nil
 		}
 	} else {
-		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.cluster, target.proc)
+		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.Cluster, target.Proc)
 		constraint, ok := s.scopeToOwner(ctx, idClause)
 		if !ok {
 			return nil, fmt.Errorf("authentication required")
@@ -2088,8 +2089,8 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	// the bytes rather than a consumed reader.
 	tarBytes := tarBuf.Bytes()
 
-	if target.allProcs {
-		return s.uploadToCluster(ctx, target.cluster, jobAds, tarBytes,
+	if target.AllProcs {
+		return s.uploadToCluster(ctx, target.Cluster, jobAds, tarBytes,
 			uploadedFiles, sizeWarning)
 	}
 

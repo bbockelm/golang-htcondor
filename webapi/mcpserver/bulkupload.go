@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -28,38 +27,6 @@ import (
 // The fan-out itself lives in webapi/spool, shared with the REST upload
 // endpoints, so both surfaces enforce the same limits and report the same
 // accounting.
-
-// uploadTarget is what a job_id argument asked for.
-type uploadTarget struct {
-	cluster int
-	proc    int
-	// allProcs is set when the caller gave a bare cluster id.
-	allProcs bool
-}
-
-// parseUploadTarget accepts "cluster.proc" or a bare "cluster".
-//
-// A bare cluster id was an error before, so accepting it adds a meaning
-// where there was none rather than changing one.
-func parseUploadTarget(s string) (uploadTarget, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return uploadTarget{}, fmt.Errorf("job_id is required")
-	}
-	if !strings.Contains(s, ".") {
-		cluster, err := strconv.Atoi(s)
-		if err != nil || cluster <= 0 {
-			return uploadTarget{}, fmt.Errorf(
-				"job_id %q is neither a job id (\"123.0\") nor a cluster id (\"123\")", s)
-		}
-		return uploadTarget{cluster: cluster, allProcs: true}, nil
-	}
-	cluster, proc, err := parseJobID(s)
-	if err != nil {
-		return uploadTarget{}, err
-	}
-	return uploadTarget{cluster: cluster, proc: proc}, nil
-}
 
 // procsAwaitingInput returns the cluster's procs that are held for
 // spooling, oldest proc first, confined to the caller's own jobs.

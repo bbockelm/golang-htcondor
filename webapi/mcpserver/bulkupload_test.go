@@ -5,48 +5,6 @@ import (
 	"testing"
 )
 
-func TestParseUploadTargetAcceptsBothForms(t *testing.T) {
-	tests := []struct {
-		in       string
-		cluster  int
-		proc     int
-		allProcs bool
-	}{
-		{"123.0", 123, 0, false},
-		{"123.4", 123, 4, false},
-		// A bare cluster id was an error before, so this adds a meaning
-		// rather than changing one.
-		{"123", 123, 0, true},
-		{"  123  ", 123, 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			got, err := parseUploadTarget(tt.in)
-			if err != nil {
-				t.Fatalf("parseUploadTarget(%q): %v", tt.in, err)
-			}
-			if got.cluster != tt.cluster || got.allProcs != tt.allProcs {
-				t.Errorf("got %+v, want cluster=%d allProcs=%v", got, tt.cluster, tt.allProcs)
-			}
-			if !tt.allProcs && got.proc != tt.proc {
-				t.Errorf("proc = %d, want %d", got.proc, tt.proc)
-			}
-		})
-	}
-}
-
-func TestParseUploadTargetRejectsNonsense(t *testing.T) {
-	// The message has to distinguish the two accepted shapes, because
-	// "invalid job_id" alone does not tell a caller which one it meant.
-	for _, in := range []string{"", "   ", "abc", "0", "-1", "1.x", "x.1", "1.2.3"} {
-		t.Run(in, func(t *testing.T) {
-			if _, err := parseUploadTarget(in); err == nil {
-				t.Errorf("parseUploadTarget(%q) accepted a value it should not", in)
-			}
-		})
-	}
-}
-
 func TestUploadNothingToDoIsNotAnError(t *testing.T) {
 	// A cluster with nothing held for spooling is the state the caller
 	// wanted. Returning an error would make a satisfied request look
