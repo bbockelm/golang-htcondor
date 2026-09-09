@@ -4,9 +4,9 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -86,8 +86,11 @@ queue
 		args := map[string]interface{}{
 			"job_id": jobID,
 			"attributes": map[string]interface{}{
+				// A stringified number on purpose: this is what an
+				// agent sends, and it used to be written as the STRING
+				// "256", which leaves the job unmatchable.
 				"RequestMemory": "256",
-				"MyMCPAttr":     "\"mcp_test\"",
+				"MyMCPAttr":     "mcp_test",
 			},
 		}
 
@@ -255,80 +258,50 @@ func TestMCPEditJobToolListedInTools(t *testing.T) {
 		t.Fatalf("Result is not a map: %T", result)
 	}
 
-	toolsData, ok := resultMap["tools"].([]interface{})
+	// handleListTools returns Go values, not decoded JSON: tools is a
+	// []Tool and a schema's "required" is a []string. Asserting
+	// []interface{} here failed on every run, and the integration build
+	// tag kept the failure out of CI.
+	tools, ok := resultMap["tools"].([]Tool)
 	if !ok {
-		t.Fatalf("Tools is not an array: %T", resultMap["tools"])
+		t.Fatalf("tools is not a []Tool: %T", resultMap["tools"])
 	}
 
-	// Check if edit_job is in the list
-	tools := toolsData
-
-	// Check if edit_job is in the list
-	editToolFound := false
-	for _, tool := range tools {
-		toolMap, ok := tool.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		name, ok := toolMap["name"].(string)
-		if !ok {
-			continue
-		}
-
-		if name == "edit_job" {
-			editToolFound = true
-
-			// Verify the tool has proper schema
-			inputSchema, ok := toolMap["inputSchema"].(map[string]interface{})
-			if !ok {
-				t.Error("edit_job tool missing inputSchema")
-			} else {
-				// Verify required parameters
-				required, ok := inputSchema["required"].([]interface{})
-				if !ok {
-					t.Error("edit_job tool missing required parameters")
-				} else {
-					hasJobID := false
-					hasAttributes := false
-					for _, req := range required {
-						if reqStr, ok := req.(string); ok {
-							if reqStr == "job_id" {
-								hasJobID = true
-							}
-							if reqStr == "attributes" {
-								hasAttributes = true
-							}
-						}
-					}
-					if !hasJobID {
-						t.Error("edit_job tool missing job_id in required parameters")
-					}
-					if !hasAttributes {
-						t.Error("edit_job tool missing attributes in required parameters")
-					}
-				}
-			}
-
-			// Log tool details
-			toolJSON, _ := json.MarshalIndent(tool, "", "  ")
-			t.Logf("Found edit_job tool:\n%s", string(toolJSON))
+	var editTool *Tool
+	for i := range tools {
+		if tools[i].Name == "edit_job" {
+			editTool = &tools[i]
 			break
 		}
 	}
-
-	if !editToolFound {
-		t.Error("edit_job tool not found in available tools")
-		t.Logf("Available tools:")
+	if editTool == nil {
+		names := make([]string, 0, len(tools))
 		for _, tool := range tools {
-			if toolMap, ok := tool.(map[string]interface{}); ok {
-				if name, ok := toolMap["name"].(string); ok {
-					t.Logf("  - %s", name)
-				}
-			}
+			names = append(names, tool.Name)
 		}
-	} else {
-		t.Log("✓ edit_job tool is properly listed in available tools")
+		t.Fatalf("edit_job is not in the tool list; got %v", names)
+	}
+
+	required, ok := editTool.InputSchema["required"].([]string)
+	if !ok {
+		t.Fatalf("edit_job's required parameters are not a []string: %T",
+			editTool.InputSchema["required"])
+	}
+	for _, want := range []string{"job_id", "attributes"} {
+		if !slices.Contains(required, want) {
+			t.Errorf("edit_job does not require %s: %v", want, required)
+		}
+	}
+
+	// The description has to tell an agent how a value is typed, or it
+	// will send "256" for RequestMemory and get an unmatchable job.
+	desc, _ := editTool.InputSchema["properties"].(map[string]interface{})
+	if desc != nil {
+		attrs, _ := desc["attributes"].(map[string]interface{})
+		text, _ := attrs["description"].(string)
+		if !strings.Contains(text, "number") {
+			t.Errorf("edit_job's attributes description does not mention typing: %q", text)
+		}
 	}
 }
 

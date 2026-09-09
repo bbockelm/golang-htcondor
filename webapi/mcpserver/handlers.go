@@ -270,8 +270,14 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
 					},
 					"attributes": map[string]interface{}{
-						"type":        "object",
-						"description": "Attributes to update as key-value pairs",
+						"type": "object",
+						"description": "Attributes to update as key-value pairs. " +
+							"JSON numbers and booleans become ClassAd numbers and " +
+							"booleans; JSON strings become ClassAd strings. Pass " +
+							"numbers as numbers: a numeric attribute set to a string " +
+							"would leave the job unmatchable, so \"256\" for an " +
+							"attribute that currently holds a number is written as 256 " +
+							"and reported, and a non-numeric string there is refused.",
 					},
 				},
 				"required": []string{"job_id", "attributes"},
@@ -1391,12 +1397,115 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		return nil, fmt.Errorf("attributes is required")
 	}
 
-	// Convert interface{} values to strings for SetAttribute
-	attributes := make(map[string]string)
-	for key, value := range updates {
-		switch v := value.(type) {
+	// The job's current values decide how a JSON string is read; see
+	// classAdValues. A failed lookup is not fatal -- it only costs the
+	// numeric coercion, and the edit itself is the schedd's to authorize.
+	var current *classad.ClassAd
+	if ads, _, err := s.schedd.QueryWithOptions(ctx,
+		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc),
+		&htcondor.QueryOptions{Projection: attrNames(updates), Limit: 1},
+	); err == nil && len(ads) > 0 {
+		current = ads[0]
+	}
+
+	attributes, notes, err := classAdValues(updates, current)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := &htcondor.EditJobOptions{
+		AllowProtectedAttrs: false,
+		Force:               false,
+	}
+
+	if err := s.schedd.EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+		return nil, fmt.Errorf("failed to edit job: %w", err)
+	}
+
+	text := fmt.Sprintf("Successfully edited job %s", jobID)
+	if len(notes) > 0 {
+		// Say what was reinterpreted. A silent coercion is the same
+		// hazard as the silent string it replaces, one step later.
+		text += "\n" + strings.Join(notes, "\n")
+	}
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": text,
+			},
+		},
+	}, nil
+}
+
+// attrNames is the projection for the pre-edit lookup: the attributes
+// about to be set, plus the two that identify the job.
+func attrNames(updates map[string]interface{}) []string {
+	names := make([]string, 0, len(updates)+2)
+	names = append(names, "ClusterId", "ProcId")
+	for key := range updates {
+		names = append(names, key)
+	}
+	sort.Strings(names[2:])
+	return names
+}
+
+// classAdValues renders JSON values as ClassAd literals, using the job's
+// current ad to decide what a string means.
+//
+// JSON numbers and booleans map to ClassAd numbers and booleans, and a
+// JSON string maps to a ClassAd string. That last mapping is a trap for
+// an agent, which stringifies numbers freely: {"RequestMemory": "256"}
+// used to be written as the STRING "256", and a job whose RequestMemory
+// is a string never matches -- the startd's requirements compare it
+// against Memory numerically, so the comparison is undefined. The edit
+// reported success, the job sat idle forever, and nothing pointed at the
+// cause.
+//
+// So when the attribute already holds a number, a numeric string is
+// written as a number and the caller is told. When it holds a number and
+// the string is not numeric, the edit is refused rather than performed:
+// there is no reading of "lots" that leaves the job matchable.
+//
+// A string still means a string everywhere else, including for an
+// attribute that does not exist yet -- that is the documented mapping,
+// and guessing at expressions would be a worse trap than this one.
+func classAdValues(
+	updates map[string]interface{},
+	current *classad.ClassAd,
+) (map[string]string, []string, error) {
+	attributes := make(map[string]string, len(updates))
+	var notes []string
+
+	for _, key := range sortedAttrNames(updates) {
+		switch v := updates[key].(type) {
 		case string:
-			attributes[key] = fmt.Sprintf("%q", v)
+			numericNow := false
+			if current != nil {
+				if _, ok := current.EvaluateAttrInt(key); ok {
+					numericNow = true
+				} else if _, ok := current.EvaluateAttrReal(key); ok {
+					numericNow = true
+				}
+			}
+			if !numericNow {
+				attributes[key] = fmt.Sprintf("%q", v)
+				continue
+			}
+			trimmed := strings.TrimSpace(v)
+			if _, err := strconv.ParseFloat(trimmed, 64); err != nil {
+				return nil, nil, fmt.Errorf(
+					"%s currently holds a number, and %q is not one; "+
+						"setting it to a string would leave the job unmatchable "+
+						"(the startd compares %s numerically). Pass a JSON number",
+					key, v, key)
+			}
+			attributes[key] = trimmed
+			notes = append(notes, fmt.Sprintf(
+				"Note: %s was given as the string %q and written as the number %s, "+
+					"because %s currently holds a number and a string there would "+
+					"leave the job unmatchable. Pass a JSON number to be explicit.",
+				key, v, trimmed, key))
 		case float64:
 			if v == float64(int64(v)) {
 				attributes[key] = fmt.Sprintf("%d", int64(v))
@@ -1414,29 +1523,24 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		default:
 			jsonBytes, err := json.Marshal(v)
 			if err != nil {
-				return nil, fmt.Errorf("cannot convert attribute %s to string: %w", key, err)
+				return nil, nil, fmt.Errorf("cannot convert attribute %s to string: %w", key, err)
 			}
 			attributes[key] = string(jsonBytes)
 		}
 	}
+	return attributes, notes, nil
+}
 
-	opts := &htcondor.EditJobOptions{
-		AllowProtectedAttrs: false,
-		Force:               false,
+// sortedAttrNames keeps the notes and any refusal deterministic; map
+// iteration order would otherwise decide which of two bad values is
+// reported.
+func sortedAttrNames(updates map[string]interface{}) []string {
+	names := make([]string, 0, len(updates))
+	for key := range updates {
+		names = append(names, key)
 	}
-
-	if err := s.schedd.EditJob(ctx, cluster, proc, attributes, opts); err != nil {
-		return nil, fmt.Errorf("failed to edit job: %w", err)
-	}
-
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": fmt.Sprintf("Successfully edited job %s", jobID),
-			},
-		},
-	}, nil
+	sort.Strings(names)
+	return names
 }
 
 // toolHoldJob handles holding a job
