@@ -220,7 +220,13 @@ type Handler struct {
 	// jobPolls backs GET /api/v1/jobs/{id}/watch on a pool with no usable
 	// mirror feed: one schedd poll per distinct owner-scoped constraint,
 	// however many browsers are watching that job.
-	jobPolls           *jobPollHub
+	jobPolls *jobPollHub
+	// spoolBufferDir is where a cluster-wide upload buffers its tar. A
+	// fan-out reads the tar once per proc and these endpoints accept up
+	// to a gigabyte, so it buffers to a file; empty means the system
+	// temp directory. Configurable because spilling a gigabyte into a
+	// small /tmp is a way to take the server down with it.
+	spoolBufferDir     string
 	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
@@ -481,6 +487,9 @@ type HandlerConfig struct {
 	MCPAdminUsers   []string
 	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	EnableIDP       bool   // Enable built-in IDP (always enabled in demo mode)
+	// SpoolBufferDir is where cluster-wide uploads buffer their tar.
+	// Empty selects the system temp directory.
+	SpoolBufferDir string
 	// SeedDemoUser additionally seeds a second, non-admin IDP account
 	// ("user") alongside "admin", printing its generated password the
 	// same way.
@@ -1207,6 +1216,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// cadence the session pages used to poll at on their own; the
 	// difference is that one poll now serves every viewer of a job, and
 	// none runs when nobody is watching.
+	h.spoolBufferDir = cfg.SpoolBufferDir
 	h.jobPolls = newJobPollHub(2*time.Second, h.logger, h.scheddJobQuery)
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })

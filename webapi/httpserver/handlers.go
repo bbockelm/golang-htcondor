@@ -20,6 +20,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -1356,6 +1357,80 @@ func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, 
 	return procAd, nil
 }
 
+// fetchProcAdsAwaitingInput looks up every proc of a cluster that is held
+// for input spooling.
+//
+// The projection is the load-bearing part. The schedd accepts only the
+// filenames in an allow-set it computes from the job ad and drops the
+// rest of the tar silently -- see jobInputSpoolProjection. The
+// executable's basename is in that set only when Cmd is relative and
+// TransferExecutable is true; without those two attributes the spool
+// completes against an empty allow-set, the hold clears, and the job
+// fails at execute time with "(errno 2) No such file or directory".
+// Verified by mutation in both bulk upload integration tests: dropping
+// them from the projection reproduces exactly that.
+//
+// The cluster-ad request and overlay below are belt and braces. Against
+// a 25.8 schedd they do nothing measurable: QUERY_JOB_ADS merges chained
+// cluster attributes into each proc ad, and the cluster ad itself does
+// not come back even with FetchIncludeClusterAd and an explicit
+// ProcId == -1 clause (observed: 12 ads for a 12-proc cluster, each
+// already carrying Cmd and TransferExecutable). They are kept because
+// the single-proc path does the same and because a schedd that does not
+// merge would otherwise fail in the silent way above. The owner scope
+// wraps the whole predicate so the cluster ad stays reachable where it
+// is returned.
+func fetchProcAdsAwaitingInput(
+	ctx context.Context,
+	schedd *htcondor.Schedd,
+	cluster int,
+	limit int,
+	ownerScope func(string) (string, error),
+) ([]*classad.ClassAd, error) {
+	constraint := fmt.Sprintf(
+		"ClusterId == %d && ((JobStatus == 5 && HoldReasonCode == %d) || ProcId == -1)",
+		cluster, spool.SpoolingHoldCode)
+	if ownerScope != nil {
+		scoped, err := ownerScope(constraint)
+		if err != nil {
+			return nil, err
+		}
+		constraint = scoped
+	}
+	// Past the limit so the caller can report a remainder rather than
+	// presenting a truncated list as the whole cluster; the cluster ad is
+	// not a proc, hence the extra slot.
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Projection: jobInputSpoolProjection,
+		FetchOpts:  htcondor.FetchIncludeClusterAd,
+		Limit:      limit + 2,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var clusterAd *classad.ClassAd
+	procs := make([]*classad.ClassAd, 0, len(ads))
+	for _, ad := range ads {
+		pid, ok := ad.EvaluateAttrInt("ProcId")
+		if !ok {
+			continue
+		}
+		if pid == -1 {
+			if clusterAd == nil {
+				clusterAd = ad
+			}
+			continue
+		}
+		procs = append(procs, ad)
+	}
+	for _, proc := range procs {
+		overlayClusterOntoProc(clusterAd, proc)
+	}
+	spool.SortByProc(procs)
+	return procs, nil
+}
+
 // overlayClusterOntoProc copies cluster-ad attributes onto the proc
 // ad, but only where the proc doesn't already define them — proc
 // wins on conflict, matching HTCondor's "cluster as defaults, proc
@@ -1503,26 +1578,37 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		return
 	}
 
-	// Parse job ID
-	cluster, proc, err := parseJobID(jobID)
+	// A bare cluster id spools every proc of the cluster that is still
+	// awaiting input; "cluster.proc" keeps its exact meaning. Same
+	// reasoning as the multipart handler -- HTCondor spools per job, so
+	// a `queue N` cluster needs N spools (af-mcp-platform#268).
+	target, err := spool.ParseTarget(jobID)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
 		return
 	}
 
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
-		return s.bulkOwnerScope(ctx, r, c)
-	})
+	// Note: We should limit the size to prevent abuse
+	limitedReader := io.LimitReader(r.Body, 1024*1024*1024) // 1GB limit
+
+	if target.AllProcs {
+		fanOut, err := s.spoolClusterFromStream(ctx, r, target.Cluster, limitedReader)
+		if err != nil {
+			s.writeSpoolError(w, err)
+			return
+		}
+		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
+			"Cluster input files uploaded successfully",
+			fmt.Sprintf("PUT again to /api/v1/jobs/%d/input", target.Cluster)))
+		return
+	}
+
+	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), target.Cluster, target.Proc,
+		func(c string) (string, error) {
+			return s.bulkOwnerScope(ctx, r, c)
+		})
 	if err != nil {
-		if ratelimit.IsRateLimitError(err) {
-			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
-			return
-		}
-		if isAuthenticationError(err) {
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+		s.writeSpoolError(w, err)
 		return
 	}
 	if procAd == nil {
@@ -1531,13 +1617,8 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	}
 	jobAds := []*classad.ClassAd{procAd}
 
-	// Read tarfile from request body
-	// Note: We should limit the size to prevent abuse
-	limitedReader := io.LimitReader(r.Body, 1024*1024*1024) // 1GB limit
-
 	// Spool job files from tar
-	err = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader)
-	if err != nil {
+	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader); err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
@@ -1550,6 +1631,50 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		"message": "Job input files uploaded successfully",
 		"job_id":  jobID,
 	})
+}
+
+// writeSpoolError maps the errors an upload lookup or fan-out can
+// return onto status codes. A rate limit and an authentication failure
+// are the caller's to act on and must not read as a server fault.
+func (s *Handler) writeSpoolError(w http.ResponseWriter, err error) {
+	switch {
+	case ratelimit.IsRateLimitError(err):
+		s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
+	case isAuthenticationError(err):
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	default:
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
+	}
+}
+
+// fanOutResponse renders what a cluster-wide upload did and what is
+// left over.
+//
+// A fan-out that could not finish is a 200 with a remainder, not a
+// failure: the procs it did spool are spooled, and the caller's next
+// step is to call again -- which it cannot know to do from a bare
+// success. retry names the call to repeat, since the two endpoints
+// differ in method and path.
+func fanOutResponse(res *spool.Result, cluster int, message, retry string) map[string]interface{} {
+	body := map[string]interface{}{
+		"message":         message,
+		"cluster_id":      cluster,
+		"procs_spooled":   len(res.Spooled),
+		"procs_failed":    len(res.Failed),
+		"procs_remaining": res.Remaining(),
+		"spooled":         res.Spooled,
+	}
+	if len(res.Failed) > 0 {
+		body["failed"] = res.Failed
+	}
+	if res.Remaining() > 0 {
+		body["next"] = fmt.Sprintf("%d proc(s) still await input; %s", res.Remaining(), retry)
+		if res.Capped {
+			body["limits"] = fmt.Sprintf("one call spools at most %d procs or %d bytes",
+				spool.DefaultLimits().MaxProcs, spool.DefaultLimits().MaxVolume)
+		}
+	}
+	return body
 }
 
 // handleJobInputMultipart handles POST /api/v1/jobs/{id}/input/multipart
@@ -1567,12 +1692,17 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Parse job ID
-	cluster, proc, err := parseJobID(jobID)
+	// A bare cluster id means every proc of the cluster still held for
+	// input spooling; "cluster.proc" keeps its exact meaning. HTCondor
+	// spools per job, so a `queue N` cluster needs N spools -- doing
+	// them one HTTP request at a time is what callers were surprised by
+	// (af-mcp-platform#268).
+	target, err := spool.ParseTarget(jobID)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
 		return
 	}
+	cluster, proc := target.Cluster, target.Proc
 
 	// Fetch the proc ad with cluster attributes overlaid; see
 	// fetchProcAdForSpool for why this is necessary (Cmd /
@@ -1593,7 +1723,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		return
 	}
-	if procAd == nil {
+	if procAd == nil && !target.AllProcs {
 		s.writeError(w, http.StatusNotFound, "Job not found")
 		return
 	}
@@ -1707,8 +1837,21 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 		errChan <- nil
 	}()
 
-	// Spool job files from the tar stream
-	spoolErr := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, pr)
+	// One proc: hand the schedd the stream, as before -- nothing is held
+	// in memory or on disk.
+	//
+	// A whole cluster: the tar has to be read once per proc, and a pipe
+	// cannot be replayed, so it is spilled to a buffer file first and
+	// each proc reads its own copy from there. The stream still streams;
+	// it just terminates in a file instead of the schedd. Buffering is
+	// what a fan-out costs, and the file is removed either way.
+	var spoolErr error
+	var fanOut *spool.Result
+	if target.AllProcs {
+		fanOut, spoolErr = s.spoolClusterFromStream(ctx, r, target.Cluster, pr)
+	} else {
+		spoolErr = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, pr)
+	}
 
 	// Wait for tar conversion to complete
 	conversionErr := <-errChan
@@ -1725,6 +1868,13 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", spoolErr))
+		return
+	}
+
+	if fanOut != nil {
+		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
+			"Cluster input files uploaded via multipart",
+			fmt.Sprintf("POST again to /api/v1/jobs/%d/input/multipart", target.Cluster)))
 		return
 	}
 
@@ -3562,4 +3712,54 @@ func scheddJobListTrailer(jobCount, limit int, errorMsg string) string {
 	// Name the backend that answered, so a caller can tell a live schedd
 	// read from a mirror-served one.
 	return trailer + `,"source":"schedd"}`
+}
+
+// spoolClusterFromStream buffers an upload and spools it to every proc of
+// the cluster still waiting for input.
+//
+// The buffer exists because a fan-out reads the tar once per proc and the
+// upload arrives as a stream. It goes to a file rather than memory: these
+// endpoints accept up to a gigabyte, which is not a []byte, and the
+// buffer directory is configurable so an operator can put it somewhere
+// with room -- spilling a gigabyte into a small /tmp is a way to take the
+// server down with it.
+//
+// Returns the fan-out's result so the caller can report what was spooled
+// and what remains; a fan-out that cannot finish says so rather than
+// doing a fraction silently.
+func (s *Handler) spoolClusterFromStream(
+	ctx context.Context,
+	r *http.Request,
+	cluster int,
+	tar io.Reader,
+) (*spool.Result, error) {
+	lim := spool.DefaultLimits()
+
+	ads, err := fetchProcAdsAwaitingInput(ctx, s.getSchedd(), cluster, lim.MaxProcs,
+		func(c string) (string, error) { return s.bulkOwnerScope(ctx, r, c) })
+	if err != nil {
+		return nil, err
+	}
+	if len(ads) == 0 {
+		// Not an error: the usual cause is that the input is already
+		// spooled, which is the state the caller was asking for. The
+		// stream still has to be drained, or the writer blocks forever.
+		_, _ = io.Copy(io.Discard, tar)
+		return &spool.Result{Failed: map[string]string{}}, nil
+	}
+
+	src, err := spool.Spill(tar, s.spoolBufferDir, lim.MaxVolume)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+
+	attempt, planned, err := spool.Plan(ads, src.Size(), lim)
+	if err != nil {
+		return nil, err
+	}
+	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+	res.NotAttempted = planned.NotAttempted
+	res.Capped = planned.Capped
+	return &res, nil
 }

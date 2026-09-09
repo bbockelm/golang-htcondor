@@ -141,6 +141,10 @@ type Config struct {
 	MCPInstructions         string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	MCPAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	WebUIAdminGroup         string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	// SpoolBufferDir is where a cluster-wide upload buffers its tar
+	// before fanning it out to each proc. Empty selects the system temp
+	// directory.
+	SpoolBufferDir string
 	// SuperuserGroup gates superuser mode. Empty disables it. See
 	// HandlerConfig.SuperuserGroup -- notably, it is NOT WebUIAdminGroup.
 	SuperuserGroup string
@@ -256,6 +260,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
+		SpoolBufferDir:              cfg.SpoolBufferDir,
 		SuperuserGroup:              cfg.SuperuserGroup,
 		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
