@@ -85,6 +85,11 @@ type Config struct {
 	// full documentation. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
+
+	// InteractiveRequirements is an optional ClassAd expression ANDed into
+	// the interactive terminal job's Requirements. See
+	// HandlerConfig.InteractiveRequirements.
+	InteractiveRequirements string
 	// SubmitFileDefaults and SubmitFileOverrides are the site-wide
 	// submit-file policy applied to EVERY submission -- REST, templates,
 	// interactive, Jupyter and MCP alike. Defaults apply only where the
@@ -232,6 +237,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
+		InteractiveRequirements:     cfg.InteractiveRequirements,
 		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,
 		SubmitFileDefaults:          cfg.SubmitFileDefaults,
 		SubmitFileOverrides:         cfg.SubmitFileOverrides,

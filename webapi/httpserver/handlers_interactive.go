@@ -218,6 +218,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		GpusMinimumRuntime:    req.GpusMinimumRuntime,
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
+		Requirements:          s.interactiveRequirements,
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
@@ -276,6 +277,10 @@ type interactiveTerminalSubmitArgs struct {
 	GpusMinimumRuntime    string
 	CudaVersion           string
 	RequireGpus           string
+
+	// Requirements is an operator-supplied ClassAd expression ANDed into
+	// the job's Requirements. From Handler.interactiveRequirements.
+	Requirements string
 
 	// ExtraSubmitLines is operator-supplied submit-file content
 	// merged in just before the `queue` directive. Empty when the
@@ -382,6 +387,16 @@ func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string 
 	fmt.Fprintf(&sb, "log    = interactive.log\n")
 	fmt.Fprintf(&sb, "output = interactive.out\n")
 	fmt.Fprintf(&sb, "error  = interactive.err\n")
+
+	// Emitted before the operator's extra block, not after: setRequirements
+	// ANDs a `requirements` command with the clauses submit derives for
+	// itself, so this narrows the match rather than replacing it. An
+	// operator who sets `requirements` in the extra block is spliced later
+	// and therefore still wins, which is the precedence they would expect
+	// from a verbatim escape hatch.
+	if req := strings.TrimSpace(a.Requirements); req != "" {
+		fmt.Fprintf(&sb, "requirements = (%s)\n\n", req)
+	}
 
 	// Operator-supplied extras get spliced in just before `queue`
 	// so they can override anything the builder emitted above. The

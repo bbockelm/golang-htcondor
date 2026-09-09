@@ -95,6 +95,12 @@ type Handler struct {
 	// are NOT validated against the GPU-string whitelist; the
 	// operator can write any submit-file directive.
 	interactiveExtraSubmit string
+
+	// interactiveRequirements is an operator-supplied ClassAd expression
+	// ANDed into the interactive terminal job's Requirements, to keep
+	// those jobs off machines where attaching to them cannot work.
+	// See HandlerConfig.InteractiveRequirements.
+	interactiveRequirements string
 	// submitPolicy is the operator's site-wide submit-file defaults and
 	// overrides, applied to EVERY job this API submits regardless of the
 	// surface it arrived on. Zero value applies nothing.
@@ -292,6 +298,21 @@ type HandlerConfig struct {
 	// disables the feature. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
+
+	// InteractiveRequirements is an optional ClassAd expression ANDed into
+	// the interactive terminal job's Requirements.
+	//
+	// It exists because a terminal is only useful if it can be attached to,
+	// and whether that works is a property of the machine. condor_ssh_to_job
+	// enters the job's namespace with setns, which fails when the container
+	// runtime made that namespace as root and HTCondor is not root -- the
+	// job runs, and every attempt to open a shell on it fails. Constraining
+	// where these jobs land is the only lever the submitter has.
+	//
+	// Operator-only configuration, never caller-supplied: it is an
+	// expression, and a submitter who could set it could widen their own
+	// match rather than narrow it.
+	InteractiveRequirements string
 	// SubmitFileDefaults are submit-file lines applied to every
 	// submission ONLY where the submit file is silent, so a user who
 	// sets the same command keeps their own value. Configure via
@@ -704,6 +725,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {
 		h.interactiveExtraSubmit = cfg.InteractiveExtraSubmit
+		h.interactiveRequirements = cfg.InteractiveRequirements
 		logger.Info(logging.DestinationHTTP,
 			"Interactive submit-file extras configured",
 			"bytes", len(cfg.InteractiveExtraSubmit))
