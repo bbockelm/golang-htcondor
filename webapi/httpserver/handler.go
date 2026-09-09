@@ -723,9 +723,24 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"overrides_bytes", len(cfg.SubmitFileOverrides))
 	}
 
+	// Independent of the extras block: an operator may constrain where
+	// terminals land without supplying any verbatim submit directives.
+	h.interactiveRequirements = strings.TrimSpace(cfg.InteractiveRequirements)
+	if h.interactiveRequirements != "" {
+		// Checked here rather than trusted, because the failure is
+		// silent: a discarded requirement yields a job that runs and
+		// then refuses every shell, which looks like a bug in
+		// ssh-to-job rather than a configuration conflict.
+		if err := verifyInteractiveRequirementsSurvive(cfg.InteractiveExtraSubmit, h.submitPolicy); err != nil {
+			return nil, err
+		}
+		logger.Info(logging.DestinationHTTP,
+			"Interactive terminal jobs carry an extra requirement",
+			"requirements", h.interactiveRequirements)
+	}
+
 	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {
 		h.interactiveExtraSubmit = cfg.InteractiveExtraSubmit
-		h.interactiveRequirements = cfg.InteractiveRequirements
 		logger.Info(logging.DestinationHTTP,
 			"Interactive submit-file extras configured",
 			"bytes", len(cfg.InteractiveExtraSubmit))
