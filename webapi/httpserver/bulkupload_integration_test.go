@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"testing"
 	"time"
@@ -300,14 +301,19 @@ func waitAnySucceeded(t *testing.T, ctx context.Context, schedd *htcondor.Schedd
 	t.Fatalf("no proc of cluster %d reached ExitCode 0", cluster)
 }
 
+// currentUser is the identity the header auth stands in for. It must
+// match the owner of the jobs the harness submits, which is whoever is
+// running the test.
+//
+// Deliberately a Fatal and not a Skip: $USER is unset in the CI
+// container, and the first version of this read the environment and
+// skipped -- so both subtests skipped in "Integration Test in Docker"
+// while the job reported green.
 func currentUser(t *testing.T) string {
 	t.Helper()
-	u := os.Getenv("USER")
-	if u == "" {
-		u = os.Getenv("LOGNAME")
+	u, err := user.Current()
+	if err != nil {
+		t.Fatalf("looking up the current user: %v", err)
 	}
-	if u == "" {
-		t.Skip("cannot determine the current user for header auth")
-	}
-	return u
+	return u.Username
 }
