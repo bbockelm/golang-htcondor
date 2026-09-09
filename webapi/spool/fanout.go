@@ -43,13 +43,13 @@ func DefaultLimits() Limits {
 	return Limits{MaxProcs: 1000, MaxVolume: 1000 << 20, Concurrency: 10}
 }
 
-// SpoolFunc is one proc's spool -- htcondor.Schedd.SpoolJobFilesFromTar,
+// Func is one proc's spool -- htcondor.Schedd.SpoolJobFilesFromTar,
 // or a stand-in. Taking it as an argument keeps this package independent
 // of either server, and makes the properties that matter about a fan-out
 // testable: that every proc is attempted, and that no more than the
 // intended number are in flight, neither of which is observable through
 // a real schedd.
-type SpoolFunc func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error
+type Func func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error
 
 // Result is the outcome of one fan-out.
 type Result struct {
@@ -104,7 +104,7 @@ func Plan(ads []*classad.ClassAd, size int64, lim Limits) ([]*classad.ClassAd, R
 // the first proc with the tar and the rest with nothing -- and the schedd
 // accepts a short tar without complaint, so those procs would leave their
 // hold and fail at run time on a missing file.
-func FanOut(ctx context.Context, ads []*classad.ClassAd, src Source, lim Limits, spool SpoolFunc) Result {
+func FanOut(ctx context.Context, ads []*classad.ClassAd, src Source, lim Limits, spool Func) Result {
 	res := Result{Failed: map[string]string{}}
 	conc := lim.Concurrency
 	if conc < 1 {

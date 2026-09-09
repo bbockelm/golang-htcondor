@@ -38,7 +38,7 @@ func TestFanOutRunsInWavesAndRespectsItsBound(t *testing.T) {
 
 	res := FanOut(context.Background(), ads, Bytes("tar"),
 		Limits{Concurrency: concurrency},
-		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+		func(_ context.Context, _ []*classad.ClassAd, _ io.Reader) error {
 			mu.Lock()
 			inFlight++
 			attempted++
@@ -76,7 +76,7 @@ func TestFanOutRunsInWavesAndRespectsItsBound(t *testing.T) {
 func TestFanOutReportsPerProcFailures(t *testing.T) {
 	ads := adsForProcs(t, 7, 5)
 	res := FanOut(context.Background(), ads, Bytes("tar"), Limits{Concurrency: 3},
-		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+		func(_ context.Context, ads []*classad.ClassAd, _ io.Reader) error {
 			if p, _ := ads[0].EvaluateAttrInt("ProcId"); p == 2 {
 				return fmt.Errorf("boom")
 			}
@@ -106,7 +106,7 @@ func TestFanOutGivesEveryProcTheWholeTar(t *testing.T) {
 	sizes := map[string]int{}
 
 	FanOut(context.Background(), ads, Bytes(payload), Limits{Concurrency: 4},
-		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+		func(_ context.Context, ads []*classad.ClassAd, r io.Reader) error {
 			b, err := io.ReadAll(r)
 			if err != nil {
 				return err

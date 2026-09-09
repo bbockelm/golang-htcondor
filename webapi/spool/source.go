@@ -44,11 +44,15 @@ type Source interface {
 // request that carried it.
 type Bytes []byte
 
+// Reader returns a reader over the bytes. Each call is independent.
 func (b Bytes) Reader() (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
-func (b Bytes) Size() int64  { return int64(len(b)) }
+// Size is the tar's length in bytes.
+func (b Bytes) Size() int64 { return int64(len(b)) }
+
+// Close is a no-op: nothing was allocated outside the slice.
 func (b Bytes) Close() error { return nil }
 
 // --- spilled to disk ---
@@ -103,6 +107,8 @@ func Spill(r io.Reader, dir string, limit int64) (*File, error) {
 	return &File{path: path, size: n}, nil
 }
 
+// Reader opens the buffer file afresh, so concurrent readers do not
+// share a file offset. The caller closes it.
 func (f *File) Reader() (io.ReadCloser, error) {
 	fh, err := os.Open(f.path)
 	if err != nil {
@@ -111,8 +117,12 @@ func (f *File) Reader() (io.ReadCloser, error) {
 	return fh, nil
 }
 
+// Size is the buffered tar's length in bytes.
 func (f *File) Size() int64 { return f.size }
 
+// Close removes the buffer file. It is safe to call twice, and a
+// fan-out that returns early must still call it or the file leaks for
+// as long as the process lives.
 func (f *File) Close() error {
 	if f.path == "" {
 		return nil
