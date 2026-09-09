@@ -74,7 +74,14 @@ func TestBulkUploadReleasesEveryProcOfACluster(t *testing.T) {
 	}
 	server := &Server{schedd: schedd, logger: logger}
 
-	const procs = 5
+	// More than bulkUploadConcurrency, so the fan-out actually runs in
+	// waves against a real schedd. At 5 (one wave) the bound was never
+	// exercised: every proc went in flight at once and a fan-out that
+	// ignored its limit would have passed.
+	//
+	// These do not need to run -- the assertion is that none is left
+	// held for spooling -- so 25 idle procs cost the harness nothing.
+	const procs = 25
 	// No transfer_executable = false: the point is that these procs are
 	// held for spooling and need input before they can run.
 	submitFile := fmt.Sprintf(`

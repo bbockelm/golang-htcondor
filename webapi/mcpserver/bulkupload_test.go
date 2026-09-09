@@ -1,8 +1,15 @@
 package mcpserver
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 )
 
 func TestParseUploadTargetAcceptsBothForms(t *testing.T) {
@@ -73,6 +80,128 @@ func TestSortedKeysIsDeterministic(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("sortedKeys = %v, want %v", got, want)
+		}
+	}
+}
+
+// adsForProcs builds proc ads for one cluster.
+func adsForProcs(t *testing.T, cluster, n int) []*classad.ClassAd {
+	t.Helper()
+	out := make([]*classad.ClassAd, n)
+	for i := 0; i < n; i++ {
+		ad, err := classad.Parse(fmt.Sprintf("[ClusterId = %d; ProcId = %d]", cluster, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[i] = ad
+	}
+	return out
+}
+
+// More procs than the concurrency limit, so the fan-out has to run in
+// waves. The integration test cannot see this: through a real schedd,
+// "all 25 spooled" looks the same whether 10 or 25 were in flight, and a
+// fan-out that ignored its bound would pass it.
+func TestFanOutRunsInWavesAndRespectsItsBound(t *testing.T) {
+	const (
+		procs       = 25
+		concurrency = 10
+	)
+	ads := adsForProcs(t, 7, procs)
+
+	var mu sync.Mutex
+	inFlight, maxInFlight, attempted := 0, 0, 0
+
+	res := fanOutSpool(context.Background(), ads, []byte("tar"), concurrency,
+		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+			mu.Lock()
+			inFlight++
+			attempted++
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			mu.Unlock()
+
+			// Hold the slot long enough that a bound violation shows up
+			// as overlap rather than being hidden by fast returns.
+			time.Sleep(20 * time.Millisecond)
+
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return nil
+		})
+
+	if attempted != procs {
+		t.Errorf("attempted %d procs, want %d", attempted, procs)
+	}
+	if len(res.Spooled) != procs {
+		t.Errorf("reported %d spooled, want %d", len(res.Spooled), procs)
+	}
+	if maxInFlight > concurrency {
+		t.Errorf("had %d uploads in flight, bound is %d", maxInFlight, concurrency)
+	}
+	// And it must actually use the concurrency it has: a serial
+	// implementation would pass every check above.
+	if maxInFlight < 2 {
+		t.Errorf("never had more than %d upload in flight; the fan-out is serial", maxInFlight)
+	}
+}
+
+// A proc that fails must not take the others with it, and must be named.
+func TestFanOutReportsPerProcFailures(t *testing.T) {
+	ads := adsForProcs(t, 7, 5)
+	res := fanOutSpool(context.Background(), ads, []byte("tar"), 3,
+		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+			p, _ := ads[0].EvaluateAttrInt("ProcId")
+			if p == 2 {
+				return fmt.Errorf("boom")
+			}
+			return nil
+		})
+
+	if len(res.Spooled) != 4 {
+		t.Errorf("spooled %d, want 4: %v", len(res.Spooled), res.Spooled)
+	}
+	if got, ok := res.Failed["7.2"]; !ok || !strings.Contains(got, "boom") {
+		t.Errorf("expected 7.2 to be reported failed with its reason, got %+v", res.Failed)
+	}
+	for _, id := range res.Spooled {
+		if id == "7.2" {
+			t.Error("a failed proc must not also be reported spooled")
+		}
+	}
+}
+
+// Each proc gets the whole tar, not a shared reader that the first proc
+// drains. A shared reader would leave every later proc with zero bytes,
+// and the schedd would accept an empty tar without complaint.
+func TestFanOutGivesEveryProcTheWholeTar(t *testing.T) {
+	ads := adsForProcs(t, 7, 6)
+	payload := []byte("the whole tar")
+
+	var mu sync.Mutex
+	sizes := map[string]int{}
+
+	fanOutSpool(context.Background(), ads, payload, 4,
+		func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error {
+			b, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			p, _ := ads[0].EvaluateAttrInt("ProcId")
+			mu.Lock()
+			sizes[fmt.Sprintf("7.%d", p)] = len(b)
+			mu.Unlock()
+			return nil
+		})
+
+	if len(sizes) != 6 {
+		t.Fatalf("saw %d procs, want 6", len(sizes))
+	}
+	for id, n := range sizes {
+		if n != len(payload) {
+			t.Errorf("proc %s received %d bytes, want %d", id, n, len(payload))
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -146,11 +147,34 @@ type bulkUploadResult struct {
 // match a job in the slice is silently skipped, so a mistake there leaves
 // procs held with no error to explain it. It also makes partial progress
 // exact: a failure names one proc.
+// spoolFunc is one proc's spool. Injectable so the fan-out can be tested
+// for the properties that matter about it -- that every proc is
+// attempted, and that no more than the intended number are in flight --
+// neither of which is observable through a real schedd. It is also the
+// seam the REST path needs: the fan-out itself does not depend on the MCP
+// server.
+type spoolFunc func(ctx context.Context, ads []*classad.ClassAd, r io.Reader) error
+
 func (s *Server) spoolToProcs(ctx context.Context, ads []*classad.ClassAd, tarBytes []byte) bulkUploadResult {
+	return fanOutSpool(ctx, ads, tarBytes, bulkUploadConcurrency, s.schedd.SpoolJobFilesFromTar)
+}
+
+// fanOutSpool uploads the same tar to each proc, at most concurrency in
+// flight at once.
+func fanOutSpool(
+	ctx context.Context,
+	ads []*classad.ClassAd,
+	tarBytes []byte,
+	concurrency int,
+	spool spoolFunc,
+) bulkUploadResult {
 	res := bulkUploadResult{Failed: map[string]string{}}
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
 	var mu sync.Mutex
-	sem := make(chan struct{}, bulkUploadConcurrency)
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
 	for _, ad := range ads {
@@ -165,7 +189,7 @@ func (s *Server) spoolToProcs(ctx context.Context, ads []*classad.ClassAd, tarBy
 			defer func() { <-sem }()
 
 			// A fresh reader per proc: the tar is replayed, not shared.
-			err := s.schedd.SpoolJobFilesFromTar(ctx, []*classad.ClassAd{ad}, bytes.NewReader(tarBytes))
+			err := spool(ctx, []*classad.ClassAd{ad}, bytes.NewReader(tarBytes))
 
 			mu.Lock()
 			defer mu.Unlock()
