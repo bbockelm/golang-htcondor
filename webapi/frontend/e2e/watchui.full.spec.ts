@@ -8,7 +8,7 @@ const password = adminPassword(serverLog());
 // its job once it is running, so a job held or removed afterwards keeps
 // reading as running.
 test('a running session notices its job being removed', async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   await loginAsAdmin(page, password);
 
   const submit = await page.request.post('/api/v1/jobs', {
@@ -27,18 +27,34 @@ test('a running session notices its job being removed', async ({ page }) => {
 
   // Watch the job the way the pages do, and count network reads so the
   // update cannot be explained by a poll.
+  // Wait for the running update rather than sampling a fixed window.
+  //
+  // A window assumes the negotiator matches within it. On a busy pool it
+  // does not -- the stream correctly reports the spool hold clearing to
+  // idle and the match simply has not happened yet -- so the test failed
+  // for a reason that had nothing to do with what it was checking. It
+  // returns as soon as it has what it needs, so the patience costs
+  // nothing on an idle pool.
   const result = await page.evaluate(
     async ({ jobID, ms }) => {
       const seen: string[] = [];
       const es = new EventSource(`/api/v1/jobs/${jobID}/watch`);
-      es.addEventListener('snapshot', (e) => seen.push('snapshot:' + (e as MessageEvent).data));
-      es.addEventListener('update', (e) => seen.push('update:' + (e as MessageEvent).data));
+      const record = (kind: string) => (e: Event) =>
+        seen.push(kind + ':' + (e as MessageEvent).data);
+      es.addEventListener('snapshot', record('snapshot'));
+      es.addEventListener('update', record('update'));
       es.addEventListener('gone', () => seen.push('gone'));
-      await new Promise((r) => setTimeout(r, ms));
+
+      const running = () =>
+        seen.some((s) => s.startsWith('update:') && /"JobStatus":2/.test(s));
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline && !running()) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
       es.close();
       return seen;
     },
-    { jobID: id, ms: 20_000 },
+    { jobID: id, ms: 180_000 },
   );
 
   // It should have reached running on its own.
