@@ -2090,7 +2090,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 
 	if target.allProcs {
 		return s.uploadToCluster(ctx, target.cluster, jobAds, tarBytes,
-			uploadedFiles, totalSize, sizeWarning)
+			uploadedFiles, sizeWarning)
 	}
 
 	// Spool the files to the schedd
