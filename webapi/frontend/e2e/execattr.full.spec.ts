@@ -9,7 +9,7 @@ const password = adminPassword(serverLog());
 // appears, and the projection did not carry it -- so the stream was
 // healthy and delivering the wrong columns.
 test('the stream carries the attribute that ends "transferring input"', async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   await loginAsAdmin(page, password);
 
   const submit = await page.request.post('/api/v1/jobs', {
@@ -34,11 +34,26 @@ test('the stream carries the attribute that ends "transferring input"', async ({
       for (const n of ['snapshot', 'update']) {
         es.addEventListener(n, (e) => seen.push(JSON.parse((e as MessageEvent).data)));
       }
-      await new Promise((r) => setTimeout(r, ms));
+      // Return as soon as the stream has said what this test asks
+      // about, rather than sleeping out a fixed window. The window was
+      // 40s and always cost 40s -- a third of the whole suite's runtime
+      // on its own -- while the data usually arrives in a few seconds.
+      // It also made the test depend on the negotiator matching inside
+      // that window, so a busy pool failed it for an unrelated reason.
+      const ready = () => {
+        const m: Record<string, unknown> = {};
+        for (const e of seen) Object.assign(m, e);
+        return Number(m.JobStatus) === 2 && Boolean(m.JobCurrentStartExecutingDate);
+      };
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline && !ready()) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
       es.close();
       return seen;
     },
-    { jobID: id, ms: 40_000 },
+    // Generous but only spent when something is wrong.
+    { jobID: id, ms: 180_000 },
   );
 
   const merged: Record<string, unknown> = {};
