@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -26,4 +27,21 @@ func newTestConfig(t *testing.T) Config {
 		Logger:       newTestLogger(t),
 		OAuth2DBPath: filepath.Join(t.TempDir(), "sessions.db"),
 	}
+}
+
+// writeTestSigningKey writes a POOL signing key and returns its path.
+// The key's content does not matter -- the server signs and verifies
+// with the same file -- but its presence does: without it the
+// user-header path cannot mint a token and declines to authenticate.
+func writeTestSigningKey(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "POOL")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := os.WriteFile(path, key, 0600); err != nil {
+		t.Fatalf("writing the signing key: %v", err)
+	}
+	return path
 }
