@@ -94,9 +94,14 @@ queue
 		t.Fatalf("Job did not complete: %v", err)
 	}
 
-	// Query job ad from history (job is removed from queue after completion)
-	// Include all attributes we need for sandbox creation
-	projection := []string{"Iwd", "TransferInput", "TransferExecutable", "Cmd"}
+	// Query job ad from history (job is removed from queue after
+	// completion).
+	//
+	// Owner is not optional: CreateInputSandboxTar resolves the user
+	// whose files it reads from OsUser or Owner, and fails outright
+	// without one. This projection omitted both, so the test failed on
+	// every run with "job ad missing both OsUser and Owner attributes".
+	projection := []string{"Iwd", "TransferInput", "TransferExecutable", "Cmd", "Owner", "OsUser"}
 	jobs, err := schedd.QueryHistory(ctx, fmt.Sprintf("ClusterId == %s && ProcId == 0", clusterID), projection)
 	if err != nil {
 		t.Fatalf("Failed to query job history: %v", err)

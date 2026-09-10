@@ -333,22 +333,10 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 				destPath = filepath.Join(iwd, stderrPath)
 			}
 		default:
-			// Check if this file should be extracted
-			if outputFiles != nil && !outputFiles[header.Name] {
+			var ok bool
+			destPath, ok = outputDestination(header.Name, iwd, outputFiles, remapDests, remaps)
+			if !ok {
 				continue
-			}
-
-			if remapDests[header.Name] {
-				// Already remapped upstream; the ad's target is where
-				// it goes, absolute or relative to Iwd.
-				if filepath.IsAbs(header.Name) {
-					destPath = header.Name
-				} else {
-					destPath = filepath.Join(iwd, header.Name)
-				}
-			} else {
-				// Determine destination path using normal rules
-				destPath = getDestinationPath(header.Name, iwd, remaps)
 			}
 		}
 
@@ -369,6 +357,53 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 // getDestinationPath determines where a file from the tar should be written.
 // Applies remaps if present (using prefix matching), otherwise writes to Iwd.
 // Remaps are checked in order; the first matching prefix is used.
+// outputDestination decides where one tar entry goes, or that it is not
+// to be written at all (ok == false).
+//
+// outputFiles is the allow-list from the job ad, nil meaning accept
+// everything; remapDests are the remap targets the ad declares, which is
+// what makes an absolute destination legitimate.
+func outputDestination(
+	name string,
+	iwd string,
+	outputFiles map[string]bool,
+	remapDests map[string]bool,
+	remaps []remap,
+) (string, bool) {
+	if outputFiles != nil && !outputFiles[name] {
+		return "", false
+	}
+
+	// A relative entry must stay under Iwd. Nothing upstream guarantees
+	// that: the name comes from the tarball, and "../../etc/x" would
+	// otherwise be joined onto Iwd and written wherever it points.
+	if !filepath.IsAbs(name) && escapesIwd(name) {
+		return "", false
+	}
+
+	if remapDests[name] {
+		// Already remapped upstream -- for a spooled job the AP applies
+		// the remaps when staging into the spool, so the tar carries
+		// the target name. The ad's target is where it goes.
+		if filepath.IsAbs(name) {
+			// Absolute only because this job ad declares it as a remap
+			// target; an undeclared absolute name falls through to
+			// getDestinationPath, which joins it onto Iwd and so keeps
+			// it contained.
+			return name, true
+		}
+		return filepath.Join(iwd, filepath.Clean(name)), true //nolint:gosec // guarded by escapesIwd above
+	}
+	return getDestinationPath(name, iwd, remaps), true
+}
+
+// escapesIwd reports whether a relative tar entry name would resolve
+// outside the directory it is joined onto.
+func escapesIwd(name string) bool {
+	cleaned := filepath.Clean(name)
+	return cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator))
+}
+
 func getDestinationPath(tarPath string, iwd string, remaps []remap) string {
 	// Check remaps in order (first match wins)
 	for _, remap := range remaps {

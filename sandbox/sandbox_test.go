@@ -1177,7 +1177,7 @@ func TestExtractOutputSandboxAcceptsTheFlattenedName(t *testing.T) {
 func TestExtractOutputSandboxReadsSubmitRemaps(t *testing.T) {
 	outputDir := t.TempDir()
 	finalDir := filepath.Join(outputDir, "final")
-	if err := os.MkdirAll(finalDir, 0755); err != nil {
+	if err := os.MkdirAll(finalDir, 0750); err != nil {
 		t.Fatalf("Failed to create final dir: %v", err)
 	}
 
@@ -1232,5 +1232,32 @@ func TestExtractOutputSandboxRefusesAnUndeclaredAbsolutePath(t *testing.T) {
 	}
 	if _, err := os.Stat(elsewhere); err == nil {
 		t.Errorf("an undeclared absolute tar entry was written to %s", elsewhere)
+	}
+}
+
+// A relative entry that climbs out of Iwd must not be written. Nothing
+// upstream of the extractor enforces this -- the name comes from the
+// tarball -- and with no TransferOutput list there is no allow-list to
+// stop it either.
+func TestExtractOutputSandboxRefusesPathTraversal(t *testing.T) {
+	outputDir := t.TempDir()
+	target := filepath.Join(outputDir, "escaped.txt")
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, "sub/../../escaped.txt", "should not land here")
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", filepath.Join(outputDir, "iwd"))
+	_ = jobAd.Set("Owner", getTestUsername())
+
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Errorf("a traversing tar entry was written to %s", target)
 	}
 }
