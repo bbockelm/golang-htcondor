@@ -109,8 +109,12 @@ type Config struct {
 	// in the DB. See HandlerConfig.KEKFilePath.
 	KEKFilePath string
 	// OAuth2DBPath is the legacy name for DBPath; kept for back-compat.
-	OAuth2DBPath        string
-	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
+	OAuth2DBPath string
+	OAuth2Issuer string // OAuth2 issuer URL (default: listen address)
+	// MCPCIMDEnabled resolves an https:// MCP client_id as a Client ID Metadata
+	// Document (public client); MCPCIMDAllowedHosts optionally restricts it.
+	MCPCIMDEnabled      bool
+	MCPCIMDAllowedHosts []string
 	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
 	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
 	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
@@ -237,6 +241,8 @@ func NewServer(cfg Config) (*Server, error) {
 		SubmitFileOverrides:         cfg.SubmitFileOverrides,
 		TemplateGlobalPath:          cfg.TemplateGlobalPath,
 		OAuth2Issuer:                cfg.OAuth2Issuer,
+		MCPCIMDEnabled:              cfg.MCPCIMDEnabled,
+		MCPCIMDAllowedHosts:         cfg.MCPCIMDAllowedHosts,
 		OAuth2ClientID:              cfg.OAuth2ClientID,
 		OAuth2ClientSecret:          cfg.OAuth2ClientSecret,
 		OAuth2AuthURL:               cfg.OAuth2AuthURL,

@@ -28,6 +28,10 @@ import (
 type OAuth2Storage struct {
 	db     *sql.DB
 	sealer *seal.Sealer
+	// cimd, when non-nil, resolves an https:// client_id as a Client ID
+	// Metadata Document (a public client) instead of a table lookup. See
+	// oauth2_cimd.go.
+	cimd *cimdResolver
 }
 
 // NewOAuth2Storage wraps an already-opened DB in the OAuth2 storage
@@ -170,6 +174,13 @@ func (s *OAuth2Storage) CreateClient(ctx context.Context, client *fosite.Default
 //
 //nolint:dupl // This method is similar to IDPStorage.GetClient but uses a different table
 func (s *OAuth2Storage) GetClient(ctx context.Context, clientID string) (fosite.Client, error) {
+	// A CIMD (Client ID Metadata Document) client_id is an https:// URL that is
+	// never in the table: resolve it by fetching its metadata document and
+	// treating it as a public client. See oauth2_cimd.go.
+	if s.cimd != nil && isCIMDClientID(clientID) {
+		return s.cimd.resolve(ctx, clientID)
+	}
+
 	var (
 		secret        string
 		redirectURIs  string

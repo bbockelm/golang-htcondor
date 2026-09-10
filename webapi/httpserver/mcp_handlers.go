@@ -1271,6 +1271,14 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
 	}
 
+	// Advertise Client ID Metadata Document support (an https:// client_id is
+	// resolved as a public client) so CIMD-aware MCP clients can skip DCR. Also
+	// surface "none" as a client-auth method, since a CIMD client is public.
+	if h.mcpCIMDEnabled {
+		metadata["client_id_metadata_document_supported"] = true
+		metadata["token_endpoint_auth_methods_supported"] = []string{"client_secret_basic", "client_secret_post", "none"}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(metadata); err != nil {
