@@ -148,6 +148,7 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 		strategy,
 		compose.OAuth2AuthorizeExplicitFactory,
 		compose.OAuth2RefreshTokenGrantFactory,
+		compose.OAuth2ClientCredentialsGrantFactory,
 		compose.OpenIDConnectExplicitFactory,
 		compose.OAuth2TokenIntrospectionFactory,
 		compose.OAuth2TokenRevocationFactory,

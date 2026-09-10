@@ -48,6 +48,15 @@ export default function AdminClientsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'clients'] }),
   });
 
+  const editPolicy = useMutation({
+    mutationFn: ({ id, grant_types, service_subject }: {
+      id: string;
+      grant_types: string[];
+      service_subject: string;
+    }) => api.admin.updateClient(id, { grant_types, service_subject }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'clients'] }),
+  });
+
   return (
     <div className="space-y-4 max-w-6xl">
       <div>
@@ -94,6 +103,17 @@ export default function AdminClientsPage() {
                   savingNotes={
                     annotate.isPending && annotate.variables?.id === c.id
                   }
+                  onSavePolicy={(grant_types, service_subject) =>
+                    editPolicy.mutate({ id: c.id, grant_types, service_subject })
+                  }
+                  savingPolicy={
+                    editPolicy.isPending && editPolicy.variables?.id === c.id
+                  }
+                  policyError={
+                    editPolicy.variables?.id === c.id && editPolicy.isError
+                      ? (editPolicy.error as Error).message
+                      : undefined
+                  }
                   busy={remove.isPending && remove.variables === c.id}
                 />
               ))}
@@ -127,12 +147,18 @@ function ClientRow({
   onDelete,
   onSaveNotes,
   savingNotes,
+  onSavePolicy,
+  savingPolicy,
+  policyError,
   busy,
 }: {
   client: AdminClient;
   onDelete: () => void;
   onSaveNotes: (notes: string) => void;
   savingNotes: boolean;
+  onSavePolicy: (grantTypes: string[], serviceSubject: string) => void;
+  savingPolicy: boolean;
+  policyError?: string;
   busy: boolean;
 }) {
   const named = !!client.name?.trim();
@@ -175,7 +201,12 @@ function ClientRow({
           expires. That shows up as "why does this app keep asking me to
           sign in?", and this column is the evidence. */}
       <td className="px-3 py-2 text-xs text-gray-700">
-        <ChipList items={client.grant_types} max={4} />
+        <GrantsEditor
+          client={client}
+          saving={savingPolicy}
+          error={policyError}
+          onSave={onSavePolicy}
+        />
         <RefreshWarning blockedBy={client.refresh_blocked_by} />
       </td>
       <td className="px-3 py-2 text-xs">
@@ -301,6 +332,123 @@ function Chip({
     >
       {children}
     </span>
+  );
+}
+
+// EDITABLE_GRANTS is the set an admin may toggle here — the grants this server
+// implements. device_code is a manual grant that is not per-client toggled, and
+// token-exchange is not built yet, so neither appears.
+const EDITABLE_GRANTS: { value: string; label: string }[] = [
+  { value: 'authorization_code', label: 'authorization_code' },
+  { value: 'refresh_token', label: 'refresh_token' },
+  { value: 'client_credentials', label: 'client_credentials' },
+];
+
+// GrantsEditor shows a client's permitted grant types and, on expand, lets an
+// admin change them. client_credentials is disabled for a public client (it has
+// no secret to authenticate the grant) and, when enabled, requires a service
+// identity — the subject a client_credentials token asserts, which the schedd
+// then authorizes. The server enforces the same rules; this just keeps the form
+// from submitting an obviously-invalid combination.
+function GrantsEditor({
+  client,
+  saving,
+  error,
+  onSave,
+}: {
+  client: AdminClient;
+  saving: boolean;
+  error?: string;
+  onSave: (grantTypes: string[], serviceSubject: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [grants, setGrants] = useState<string[]>([]);
+  const [subject, setSubject] = useState('');
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          // Seed drafts on entry (not via an effect syncing props — the row
+          // re-renders after a save, and that cascade is what the lint rule
+          // warns about).
+          setGrants(client.grant_types ?? []);
+          setSubject(client.service_subject ?? '');
+          setEditing(true);
+        }}
+        className="block text-left"
+        title="Edit permitted grant types"
+      >
+        <ChipList items={client.grant_types} max={4} />
+        <span className="mt-0.5 block text-[11px] text-gray-400 hover:text-gray-600">
+          edit grants
+        </span>
+      </button>
+    );
+  }
+
+  const toggle = (g: string) =>
+    setGrants((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
+
+  const hasClientCreds = grants.includes('client_credentials');
+  const subjectMissing = hasClientCreds && subject.trim() === '';
+
+  return (
+    <div className="mt-1 max-w-xs space-y-1">
+      {EDITABLE_GRANTS.map((g) => {
+        const disabled = g.value === 'client_credentials' && client.public;
+        return (
+          <label
+            key={g.value}
+            className={`flex items-center gap-1.5 text-xs ${disabled ? 'text-gray-300' : 'text-gray-700'}`}
+            title={disabled ? 'A public client has no secret to authenticate client_credentials.' : undefined}
+          >
+            <input
+              type="checkbox"
+              checked={grants.includes(g.value)}
+              disabled={disabled}
+              onChange={() => toggle(g.value)}
+            />
+            <span className="font-mono">{g.label}</span>
+          </label>
+        );
+      })}
+
+      {hasClientCreds && (
+        <input
+          type="text"
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          placeholder="service identity (IDTOKEN subject)"
+          className="w-full rounded-sm border border-gray-300 px-2 py-1 text-xs focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
+        />
+      )}
+
+      {error && <p className="text-[11px] text-red-600">{error}</p>}
+
+      <div className="flex gap-2 pt-0.5">
+        <button
+          type="button"
+          disabled={saving || grants.length === 0 || subjectMissing}
+          onClick={() => {
+            onSave(grants, subject.trim());
+            setEditing(false);
+          }}
+          className="rounded-sm bg-brand-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          title={subjectMissing ? 'client_credentials needs a service identity' : undefined}
+        >
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setEditing(false)}
+          className="text-xs text-gray-500 hover:text-gray-800"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
