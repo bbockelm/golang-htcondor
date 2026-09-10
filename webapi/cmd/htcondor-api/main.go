@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -552,6 +553,34 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 		return v
 	}
 	return ""
+}
+
+// loadInteractiveRequirements returns the ClassAd expression to AND into
+// every interactive terminal job's Requirements. Empty disables.
+//
+// A terminal is only worth starting if it can be attached to, and whether
+// that works is a property of the machine: condor_ssh_to_job enters the
+// job's namespace with setns, which fails when the container runtime built
+// that namespace as root and HTCondor is not root. The job runs and every
+// attempt to open a shell on it fails, so the only lever is to not match
+// those machines in the first place.
+//
+// Parsed here rather than trusted: an expression that does not parse fails
+// the submit, so a typo would break every terminal launch with an error
+// pointing at the submit rather than at the config that caused it. Failing
+// at startup puts the complaint next to the mistake.
+func loadInteractiveRequirements(cfg *config.Config, logger *logging.Logger) string {
+	raw, ok := cfg.Get("HTTP_API_INTERACTIVE_REQUIREMENTS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	expr := strings.TrimSpace(raw)
+	if _, err := classad.ParseExpr(expr); err != nil {
+		log.Fatalf("invalid HTTP_API_INTERACTIVE_REQUIREMENTS %q: not a ClassAd expression: %v", expr, err)
+	}
+	logger.Info(logging.DestinationHTTP,
+		"interactive terminal jobs carry an extra requirement", "requirements", expr)
+	return expr
 }
 
 // firstConfigValue returns a config value, or "" when unset.
@@ -1386,6 +1415,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
+		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
 		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
 		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
 		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),

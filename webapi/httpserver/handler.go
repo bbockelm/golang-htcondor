@@ -95,6 +95,12 @@ type Handler struct {
 	// are NOT validated against the GPU-string whitelist; the
 	// operator can write any submit-file directive.
 	interactiveExtraSubmit string
+
+	// interactiveRequirements is an operator-supplied ClassAd expression
+	// ANDed into the interactive terminal job's Requirements, to keep
+	// those jobs off machines where attaching to them cannot work.
+	// See HandlerConfig.InteractiveRequirements.
+	interactiveRequirements string
 	// submitPolicy is the operator's site-wide submit-file defaults and
 	// overrides, applied to EVERY job this API submits regardless of the
 	// surface it arrived on. Zero value applies nothing.
@@ -292,6 +298,21 @@ type HandlerConfig struct {
 	// disables the feature. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
+
+	// InteractiveRequirements is an optional ClassAd expression ANDed into
+	// the interactive terminal job's Requirements.
+	//
+	// It exists because a terminal is only useful if it can be attached to,
+	// and whether that works is a property of the machine. condor_ssh_to_job
+	// enters the job's namespace with setns, which fails when the container
+	// runtime made that namespace as root and HTCondor is not root -- the
+	// job runs, and every attempt to open a shell on it fails. Constraining
+	// where these jobs land is the only lever the submitter has.
+	//
+	// Operator-only configuration, never caller-supplied: it is an
+	// expression, and a submitter who could set it could widen their own
+	// match rather than narrow it.
+	InteractiveRequirements string
 	// SubmitFileDefaults are submit-file lines applied to every
 	// submission ONLY where the submit file is silent, so a user who
 	// sets the same command keeps their own value. Configure via
@@ -700,6 +721,22 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
 			"defaults_bytes", len(cfg.SubmitFileDefaults),
 			"overrides_bytes", len(cfg.SubmitFileOverrides))
+	}
+
+	// Independent of the extras block: an operator may constrain where
+	// terminals land without supplying any verbatim submit directives.
+	h.interactiveRequirements = strings.TrimSpace(cfg.InteractiveRequirements)
+	if h.interactiveRequirements != "" {
+		// Checked here rather than trusted, because the failure is
+		// silent: a discarded requirement yields a job that runs and
+		// then refuses every shell, which looks like a bug in
+		// ssh-to-job rather than a configuration conflict.
+		if err := verifyInteractiveRequirementsSurvive(cfg.InteractiveExtraSubmit, h.submitPolicy); err != nil {
+			return nil, err
+		}
+		logger.Info(logging.DestinationHTTP,
+			"Interactive terminal jobs carry an extra requirement",
+			"requirements", h.interactiveRequirements)
 	}
 
 	if strings.TrimSpace(cfg.InteractiveExtraSubmit) != "" {

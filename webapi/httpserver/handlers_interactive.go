@@ -34,6 +34,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -218,6 +219,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		GpusMinimumRuntime:    req.GpusMinimumRuntime,
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
+		Requirements:          s.interactiveRequirements,
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
@@ -276,6 +278,10 @@ type interactiveTerminalSubmitArgs struct {
 	GpusMinimumRuntime    string
 	CudaVersion           string
 	RequireGpus           string
+
+	// Requirements is an operator-supplied ClassAd expression ANDed into
+	// the job's Requirements. From Handler.interactiveRequirements.
+	Requirements string
 
 	// ExtraSubmitLines is operator-supplied submit-file content
 	// merged in just before the `queue` directive. Empty when the
@@ -382,6 +388,16 @@ func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string 
 	fmt.Fprintf(&sb, "log    = interactive.log\n")
 	fmt.Fprintf(&sb, "output = interactive.out\n")
 	fmt.Fprintf(&sb, "error  = interactive.err\n")
+
+	// Emitted before the operator's extra block, not after: setRequirements
+	// ANDs a `requirements` command with the clauses submit derives for
+	// itself, so this narrows the match rather than replacing it. An
+	// operator who sets `requirements` in the extra block is spliced later
+	// and therefore still wins, which is the precedence they would expect
+	// from a verbatim escape hatch.
+	if req := strings.TrimSpace(a.Requirements); req != "" {
+		fmt.Fprintf(&sb, "requirements = (%s)\n\n", req)
+	}
 
 	// Operator-supplied extras get spliced in just before `queue`
 	// so they can override anything the builder emitted above. The
@@ -726,3 +742,63 @@ func (s *Handler) sendInteractiveShutdownSignal(client *ssh.Client, jobID string
 // the only call site temporarily; remove once the SSH bridge edits
 // land in this same package.
 var _ = strconv.Itoa
+
+// requirementsProbeAttr is an attribute name no real machine ad carries,
+// used to check that an operator-supplied interactive requirement actually
+// survives into the submitted job.
+const requirementsProbeAttr = "HtcondorApiRequirementsProbe"
+
+// verifyInteractiveRequirementsSurvive reports whether an interactive
+// requirement still reaches the job ad once the operator's other submit
+// knobs have had their say.
+//
+// A submit file cannot express "and also": `requirements` is a command like
+// any other, so the last assignment wins outright. HTTP_API_INTERACTIVE_-
+// EXTRA_SUBMIT is spliced after ours, and the site policy's overrides are
+// inserted after that, so either can replace the constraint that decides
+// whether a terminal can be attached to at all -- silently, because
+// dropping it produces a job that runs perfectly and refuses every shell.
+//
+// Rather than scan the text for a `requirements` line, which means
+// reimplementing submit-file lexing and being wrong about continuations and
+// comments, this runs the real pipeline with a probe expression and asks
+// whether the probe came out the other end.
+func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolicy.Policy) error {
+	probe := fmt.Sprintf("%s =!= undefined", requirementsProbeAttr)
+	submitText := policy.Apply(buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+		InstanceID:       "probe",
+		BatchName:        "probe",
+		Cpus:             1,
+		MemoryMB:         1024,
+		DiskMB:           1024,
+		Requirements:     probe,
+		ExtraSubmitLines: extraSubmit,
+	}))
+
+	sf, err := htcondor.ParseSubmitFile(strings.NewReader(submitText))
+	if err != nil {
+		return fmt.Errorf("the generated interactive submit file does not parse: %w", err)
+	}
+	ad, err := sf.MakeJobAd(htcondor.JobID{Cluster: 1, Proc: 0}, nil)
+	if err != nil {
+		return fmt.Errorf("the generated interactive submit file does not produce a job ad: %w", err)
+	}
+	req, ok := ad.Lookup("Requirements")
+	if !ok || !strings.Contains(req.String(), requirementsProbeAttr) {
+		return fmt.Errorf(
+			"HTTP_API_INTERACTIVE_REQUIREMENTS would be discarded: another knob sets `requirements` "+
+				"later in the submit file (HTTP_API_INTERACTIVE_EXTRA_SUBMIT or HTTP_API_SUBMIT_FILE_OVERRIDES), "+
+				"and the last assignment wins. Combine them into one expression. Resulting requirements: %s",
+			requirementsSummary(req))
+	}
+	return nil
+}
+
+// requirementsSummary renders a Requirements expression for an error
+// message, or says so when there is none.
+func requirementsSummary(req interface{ String() string }) string {
+	if req == nil {
+		return "<none>"
+	}
+	return req.String()
+}
