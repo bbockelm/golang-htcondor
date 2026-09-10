@@ -234,14 +234,53 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 		outputFiles = make(map[string]bool, len(files))
 		for _, f := range files {
 			outputFiles[f] = true
+			// The names in the tarball are the names the sender used,
+			// and HTCondor flattens: a file the job listed as
+			// "results/data.json" arrives as "data.json". Matching only
+			// the listed name skipped it -- silently, since an
+			// unmatched entry is a `continue`, so extraction reported
+			// success having written nothing.
+			if base := filepath.Base(f); base != f {
+				outputFiles[base] = true
+			}
 		}
 	}
 
-	// Parse TransferOutputRemaps
+	// Parse TransferOutputRemaps.
+	//
+	// A spooled job does not have that attribute: the schedd consumes
+	// it at submission and keeps the original under
+	// SUBMIT_TransferOutputRemaps (it also rewrites Iwd to the spool
+	// directory). Reading only the live attribute meant every remapped
+	// output file was silently skipped below for exactly the jobs whose
+	// output has to be retrieved from the schedd. The download side of
+	// this already consults both names -- see processJobSandbox.
 	var remaps []remap
-	remapsStr, ok := classad.GetAs[string](jobAd, "TransferOutputRemaps")
-	if ok && remapsStr != "" {
-		remaps = parseRemaps(remapsStr)
+	for _, attr := range []string{"TransferOutputRemaps", "SUBMIT_TransferOutputRemaps"} {
+		remapsStr, ok := classad.GetAs[string](jobAd, attr)
+		if !ok || remapsStr == "" {
+			continue
+		}
+		// SUBMIT_-prefixed values can carry the quotes as part of the
+		// value.
+		remaps = parseRemaps(strings.Trim(remapsStr, "\""))
+		break
+	}
+
+	// A remap may already have been applied by whoever built the
+	// tarball: a spooled job's output reaches the schedd's spool under
+	// the remap TARGET, so that is the name in the tar, not the source
+	// the job ad lists. Those targets have to pass the allow-list
+	// below, and an absolute one has to be honored as written -- which
+	// is safe precisely because it is a target this job ad declares,
+	// and nothing else absolute is accepted.
+	remapDests := make(map[string]bool, len(remaps))
+	for _, rm := range remaps {
+		remapDests[rm.Dest] = true
+		if outputFiles != nil {
+			outputFiles[rm.Dest] = true
+			outputFiles[filepath.Base(rm.Dest)] = true
+		}
 	}
 
 	// Get standard output/error file paths
@@ -299,8 +338,18 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 				continue
 			}
 
-			// Determine destination path using normal rules
-			destPath = getDestinationPath(header.Name, iwd, remaps)
+			if remapDests[header.Name] {
+				// Already remapped upstream; the ad's target is where
+				// it goes, absolute or relative to Iwd.
+				if filepath.IsAbs(header.Name) {
+					destPath = header.Name
+				} else {
+					destPath = filepath.Join(iwd, header.Name)
+				}
+			} else {
+				// Determine destination path using normal rules
+				destPath = getDestinationPath(header.Name, iwd, remaps)
+			}
 		}
 
 		// Skip files that map to URLs (e.g., remapped to upload endpoints)

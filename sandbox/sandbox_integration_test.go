@@ -10,10 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -124,303 +126,168 @@ queue
 	t.Logf("Input sandbox roundtrip test passed")
 }
 
-// TestOutputSandboxRoundtrip tests that output files are placed correctly after extraction
+// TestOutputSandboxRoundtrip runs a job, retrieves its output from the
+// schedd, and extracts it.
 //
-// Test strategy:
-// 1. Submit a job that creates output files with specific structure
-// 2. Wait for job to complete
-// 3. Receive output sandbox from schedd
-// 4. Extract output sandbox using ExtractOutputSandbox()
-// 5. Verify files are in correct locations (including remaps)
+// This test was skipped for "a bug in schedd.ReceiveJobSandbox() --
+// files transfer but tarball is empty". There is no such bug. The test
+// submitted LOCALLY, and a locally submitted job writes its output into
+// the submit directory; nothing is staged in the schedd's spool, which
+// is what TRANSFER_DATA_WITH_PERMS serves. The empty 1024-byte tar was
+// the correct answer to the question the test was asking.
 //
-// KNOWN ISSUE: This test reveals a bug in schedd.ReceiveJobSandbox().
-// The job runs successfully and transfers output files back to the schedd
-// (verified in StarterLog), but ReceiveJobSandbox() returns an empty tarball.
-// The sandbox API itself is correct (verified by unit tests).
+// Submitted with spooling, the same call returns the output files. The
+// wrong diagnosis mattered because ReceiveJobSandbox is what four
+// webapi handlers use to serve job output and logs, so a comment
+// blaming it sends anyone auditing those paths after a bug that is not
+// there.
 func TestOutputSandboxRoundtrip(t *testing.T) {
-	t.Skip("Test reveals bug in schedd.ReceiveJobSandbox() - files transfer but tarball is empty")
-	// Setup HTCondor test harness
 	harness := htcondor.SetupCondorHarness(t)
-
-	// Wait for daemons to start
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
-
-	// Get schedd connection info
 	scheddLocation := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	// Create schedd client
 	schedd := htcondor.NewSchedd(scheddLocation.Name, scheddLocation.Address)
 
-	// Create temporary directories
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
 	tempDir := t.TempDir()
-	jobDir := filepath.Join(tempDir, "job")
-	resultsDir := filepath.Join(tempDir, "results")
-	if err := os.Mkdir(jobDir, 0755); err != nil {
-		t.Fatalf("Failed to create job dir: %v", err)
-	}
-	if err := os.Mkdir(resultsDir, 0755); err != nil {
-		t.Fatalf("Failed to create results dir: %v", err)
-	}
 
-	// Create script file
-	scriptPath := filepath.Join(jobDir, "job.sh")
-	scriptContent := `#!/bin/sh
-echo result > output.txt
-mkdir -p results
-echo '{"result":42}' > results/data.json
-`
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("Failed to create script: %v", err)
-	}
-
-	// Submit job that creates output files
-	// Use the script directly as executable to avoid bash transfer issues
-	submitFile := fmt.Sprintf(`
+	// A spooled job runs in the spool directory the schedd makes for
+	// it, so there is no initialdir and no file on disk to point at --
+	// the executable goes up with the input sandbox.
+	cluster := submitSpooledJob(t, ctx, schedd, `
 universe = vanilla
 executable = job.sh
 transfer_executable = true
 transfer_output_files = output.txt, results/data.json
-transfer_output_remaps = "output.txt=%s/final_output.txt"
-initialdir = %s
 output = job.out
 error = job.err
 log = job.log
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
+request_memory = 64
 queue
-`, resultsDir, jobDir)
+`, map[string]string{
+		"job.sh": "#!/bin/sh\necho result > output.txt\nmkdir -p results\necho '{\"result\":42}' > results/data.json\n",
+	})
+	t.Logf("Submitted spooled job %d.0", cluster)
 
-	t.Logf("Submitting job...")
-	clusterID, err := schedd.Submit(ctx, submitFile)
-	if err != nil {
-		harness.PrintScheddLog()
-		t.Fatalf("Failed to submit job: %v", err)
-	}
+	jobAd := waitForSpooledCompletion(t, ctx, schedd, cluster)
 
-	jobID := fmt.Sprintf("%s.0", clusterID)
-	t.Logf("Job submitted: %s", jobID)
-
-	// Wait for job to complete
-	t.Logf("Waiting for job to complete...")
-	if err := waitForJobCompletion(ctx, schedd, clusterID); err != nil {
-		t.Logf("Job failed to complete: %v", err)
-		t.Log("\n========== HTCondor Logs ==========")
-		harness.PrintScheddLog()
-
-		// Also print shadow and starter logs to see what's happening with job execution
-		t.Log("\n========== Shadow Log ==========")
-		harness.PrintShadowLog()
-
-		t.Log("\n========== Starter Logs ==========")
-		harness.PrintStarterLogs()
-
-		t.Fatalf("Job did not complete: %v", err)
-	}
-
-	// Query job ad from history (job is removed from queue after completion)
-	jobs, err := schedd.QueryHistory(ctx, fmt.Sprintf("ClusterId == %s && ProcId == 0", clusterID), nil)
-	if err != nil {
-		t.Fatalf("Failed to query job history: %v", err)
-	}
-	if len(jobs) == 0 {
-		t.Fatalf("Job not found in history")
-	}
-	jobAd := jobs[0]
-
-	// Receive output sandbox from schedd
-	t.Logf("Receiving output sandbox...")
 	var outputTarBuf bytes.Buffer
-	constraint := fmt.Sprintf("ClusterId == %s && ProcId == 0", clusterID)
-	errChan := schedd.ReceiveJobSandbox(ctx, constraint, &outputTarBuf)
-
-	// Wait for transfer to complete
-	if err := <-errChan; err != nil {
-		t.Log("\n========== HTCondor Logs on Transfer Failure ==========")
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", cluster)
+	if err := <-schedd.ReceiveJobSandbox(ctx, constraint, &outputTarBuf); err != nil {
 		harness.PrintScheddLog()
-		harness.PrintShadowLog()
-		harness.PrintStarterLogs()
 		t.Fatalf("Failed to receive output sandbox: %v", err)
 	}
 
-	t.Logf("Output sandbox received, size=%d bytes", outputTarBuf.Len())
+	tarFiles := readTarFiles(t, bytes.NewReader(outputTarBuf.Bytes()))
+	t.Logf("Files in the retrieved sandbox: %v", sortedKeys(tarFiles))
+	// The empty tarball this test was skipped for fails here, and so
+	// does one carrying only the job's stdout.
+	//
+	// data.json, not results/data.json: HTCondor flattens output file
+	// names on transfer, so a file the job listed with a directory
+	// component arrives under its basename and sits that way in the
+	// spool. Filtering the incoming names against the listed ones used
+	// to drop it silently -- see the basename handling in
+	// processJobSandbox.
+	for _, want := range []string{"output.txt", "data.json"} {
+		if _, ok := tarFiles[want]; !ok {
+			t.Errorf("%s is missing from the retrieved sandbox: %v", want, sortedKeys(tarFiles))
+		}
+	}
+	if got, ok := tarFiles["output.txt"]; ok && strings.TrimSpace(got) != "result" {
+		t.Errorf("output.txt = %q, want \"result\"", got)
+	}
 
-	// Debug: List files in tarball (use a copy so we don't consume the buffer)
-	tarCopy := bytes.NewReader(outputTarBuf.Bytes())
-	tarFiles := readTarFiles(t, tarCopy)
-	t.Logf("Files in tarball: %v", tarFiles)
-
-	// Create extraction directory
 	extractDir := filepath.Join(tempDir, "extracted")
 	if err := os.Mkdir(extractDir, 0755); err != nil {
 		t.Fatalf("Failed to create extraction dir: %v", err)
 	}
-
-	// Update job ad Iwd for extraction
+	// Iwd is where a relative output path lands on extraction.
 	_ = jobAd.Set("Iwd", extractDir)
-
-	// Extract output sandbox
-	t.Logf("Extracting output sandbox...")
 	if err := ExtractOutputSandbox(ctx, jobAd, &outputTarBuf); err != nil {
 		t.Fatalf("Failed to extract output sandbox: %v", err)
 	}
-
-	// Verify files are in correct locations
-	// Note: The remapped file should go to resultsDir, but since we changed Iwd to extractDir,
-	// the remap path needs to be interpreted correctly
-	// For this test, we'll verify files in extractDir since that's where they should extract
-
-	// Check that results/data.json exists
-	dataPath := filepath.Join(extractDir, "results", "data.json")
-	if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-		t.Errorf("Expected results/data.json not found at %s", dataPath)
-	} else {
-		content, err := os.ReadFile(dataPath)
-		if err != nil {
-			t.Errorf("Failed to read data.json: %v", err)
-		} else if !strings.Contains(string(content), "result") {
-			t.Errorf("Unexpected content in data.json: %s", string(content))
+	for _, want := range []string{"output.txt", "data.json"} {
+		if _, err := os.Stat(filepath.Join(extractDir, want)); err != nil {
+			t.Errorf("%s was not extracted into %s: %v", want, extractDir, err)
 		}
 	}
-
-	t.Logf("Output sandbox roundtrip test passed")
 }
 
-// TestOutputSandboxWithRemaps tests that remapped output files are placed correctly
-// TestOutputSandboxWithRemaps tests output remapping functionality
+// TestOutputSandboxWithRemaps checks that extraction honors
+// transfer_output_remaps: an absolute remap target is written where it
+// points, a relative one lands under Iwd.
 //
-// KNOWN ISSUE: This test reveals the same bug as TestOutputSandboxRoundtrip.
-// schedd.ReceiveJobSandbox() returns an empty tarball even though files are transferred.
+// Skipped alongside the test above for the same wrong reason. The
+// remaps are applied by ExtractOutputSandbox on this side, so what the
+// test needs from the schedd is only that the files come back at all.
 func TestOutputSandboxWithRemaps(t *testing.T) {
-	t.Skip("Test reveals bug in schedd.ReceiveJobSandbox() - files transfer but tarball is empty")
-	// Setup HTCondor test harness
 	harness := htcondor.SetupCondorHarness(t)
-
-	// Wait for daemons to start
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
-
-	// Get schedd connection info
 	scheddLocation := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddLocation.Address)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	// Create schedd client
 	schedd := htcondor.NewSchedd(scheddLocation.Name, scheddLocation.Address)
 
-	// Create temporary directory
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
 	tempDir := t.TempDir()
-	jobDir := filepath.Join(tempDir, "job")
 	finalDir := filepath.Join(tempDir, "final")
-	if err := os.Mkdir(jobDir, 0755); err != nil {
-		t.Fatalf("Failed to create job dir: %v", err)
-	}
 	if err := os.Mkdir(finalDir, 0755); err != nil {
 		t.Fatalf("Failed to create final dir: %v", err)
 	}
 
-	// Create script file
-	scriptPath := filepath.Join(jobDir, "job.sh")
-	scriptContent := `#!/bin/sh
-echo output1 > out1.txt
-echo output2 > out2.txt
-`
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("Failed to create script: %v", err)
-	}
-
-	// Submit job with output remaps
-	// Use script directly as executable to avoid bash transfer issues
-	submitFile := fmt.Sprintf(`
+	cluster := submitSpooledJob(t, ctx, schedd, fmt.Sprintf(`
 universe = vanilla
 executable = job.sh
 transfer_executable = true
 transfer_output_files = out1.txt, out2.txt
 transfer_output_remaps = "out1.txt=%s/remapped1.txt;out2.txt=subdir/remapped2.txt"
-initialdir = %s
 output = job.out
 error = job.err
 log = job.log
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
+request_memory = 64
 queue
-`, finalDir, jobDir)
+`, finalDir), map[string]string{
+		"job.sh": "#!/bin/sh\necho output1 > out1.txt\necho output2 > out2.txt\n",
+	})
+	t.Logf("Submitted spooled job %d.0", cluster)
 
-	t.Logf("Submitting job...")
-	clusterID, err := schedd.Submit(ctx, submitFile)
-	if err != nil {
-		harness.PrintScheddLog()
-		t.Fatalf("Failed to submit job: %v", err)
-	}
+	jobAd := waitForSpooledCompletion(t, ctx, schedd, cluster)
 
-	t.Logf("Job submitted: %s", clusterID)
-
-	// Wait for job to complete
-	t.Logf("Waiting for job to complete...")
-	if err := waitForJobCompletion(ctx, schedd, clusterID); err != nil {
-		harness.PrintScheddLog()
-		t.Fatalf("Job did not complete: %v", err)
-	}
-
-	// Query job ad from history (job is removed from queue after completion)
-	jobs, err := schedd.QueryHistory(ctx, fmt.Sprintf("ClusterId == %s && ProcId == 0", clusterID), nil)
-	if err != nil {
-		t.Fatalf("Failed to query job history: %v", err)
-	}
-	if len(jobs) == 0 {
-		t.Fatalf("Job not found in history")
-	}
-	jobAd := jobs[0]
-
-	// Receive output sandbox
-	t.Logf("Receiving output sandbox...")
 	var outputTarBuf bytes.Buffer
-	constraint := fmt.Sprintf("ClusterId == %s && ProcId == 0", clusterID)
-	errChan := schedd.ReceiveJobSandbox(ctx, constraint, &outputTarBuf)
-
-	if err := <-errChan; err != nil {
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", cluster)
+	if err := <-schedd.ReceiveJobSandbox(ctx, constraint, &outputTarBuf); err != nil {
 		harness.PrintScheddLog()
 		t.Fatalf("Failed to receive output sandbox: %v", err)
 	}
-
-	// Debug: List files in tarball (use a copy so we don't consume the buffer)
-	tarCopy := bytes.NewReader(outputTarBuf.Bytes())
-	tarFiles := readTarFiles(t, tarCopy)
-	t.Logf("Files in tarball: %v", tarFiles)
-
-	// Extract with remaps
+	t.Logf("Files in the retrieved sandbox: %v",
+		sortedKeys(readTarFiles(t, bytes.NewReader(outputTarBuf.Bytes()))))
 	extractDir := filepath.Join(tempDir, "extracted")
 	if err := os.Mkdir(extractDir, 0755); err != nil {
 		t.Fatalf("Failed to create extraction dir: %v", err)
 	}
-
 	_ = jobAd.Set("Iwd", extractDir)
-
 	if err := ExtractOutputSandbox(ctx, jobAd, &outputTarBuf); err != nil {
 		t.Fatalf("Failed to extract output sandbox: %v", err)
 	}
 
-	// Verify remapped files exist
-	// Note: Absolute path remap goes to that location, relative remap goes to Iwd
-	// Since we have an absolute path remap, it should go to finalDir
-	if _, err := os.Stat(filepath.Join(finalDir, "remapped1.txt")); os.IsNotExist(err) {
-		t.Errorf("Expected remapped1.txt in %s", finalDir)
+	// An absolute remap goes where it points, outside Iwd.
+	if _, err := os.Stat(filepath.Join(finalDir, "remapped1.txt")); err != nil {
+		t.Errorf("remapped1.txt is not in %s: %v", finalDir, err)
 	}
-
-	// Relative remap should go to extractDir/subdir
-	if _, err := os.Stat(filepath.Join(extractDir, "subdir", "remapped2.txt")); os.IsNotExist(err) {
-		t.Errorf("Expected subdir/remapped2.txt in %s", extractDir)
+	// A relative one is resolved against Iwd.
+	if _, err := os.Stat(filepath.Join(extractDir, "subdir", "remapped2.txt")); err != nil {
+		t.Errorf("subdir/remapped2.txt is not under %s: %v", extractDir, err)
 	}
-
-	t.Logf("Output sandbox with remaps test passed")
 }
 
 // Helper functions
@@ -438,6 +305,109 @@ func getScheddAddress(t *testing.T, harness *htcondor.CondorTestHarness) *htcond
 	}
 
 	return location
+}
+
+// submitSpooledJob submits with input spooling and sends files into the
+// spool, returning the cluster id.
+//
+// The distinction matters for anything that reads output back from the
+// schedd: TRANSFER_DATA_WITH_PERMS -- what ReceiveJobSandbox speaks --
+// serves the job's SPOOL directory. A locally submitted job writes its
+// output straight into the submit directory and leaves the spool empty,
+// so the schedd correctly has nothing to hand back. Only a spooled
+// submission stages output where transfer_data can reach it.
+func submitSpooledJob(
+	t *testing.T,
+	ctx context.Context,
+	schedd *htcondor.Schedd,
+	submitFile string,
+	files map[string]string,
+) int {
+	t.Helper()
+
+	cluster, _, err := schedd.SubmitRemote(ctx, submitFile)
+	if err != nil {
+		t.Fatalf("Failed to submit: %v", err)
+	}
+
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	for name, content := range files {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o755,
+			Size: int64(len(content)),
+		}); err != nil {
+			t.Fatalf("Failed to write tar header for %s: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("Failed to write %s into the tar: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close the tar: %v", err)
+	}
+
+	// The schedd accepts only the filenames in an allow-set it computes
+	// from the job ad, and silently drops the rest, so the projection
+	// has to carry Cmd and TransferExecutable -- without them the
+	// executable is dropped and the job fails at execute time with
+	// "No such file or directory".
+	ads, _, err := schedd.QueryWithOptions(ctx, fmt.Sprintf("ClusterId == %d", cluster),
+		&htcondor.QueryOptions{
+			Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
+			Limit:      -1,
+		})
+	if err != nil {
+		t.Fatalf("Failed to query the submitted job: %v", err)
+	}
+	if len(ads) == 0 {
+		t.Fatalf("Cluster %d has no procs", cluster)
+	}
+	if err := schedd.SpoolJobFilesFromTar(ctx, ads, bytes.NewReader(tarBuf.Bytes())); err != nil {
+		t.Fatalf("Failed to spool input files: %v", err)
+	}
+	return cluster
+}
+
+// waitForSpooledCompletion waits for a spooled job to finish and returns
+// its ad from the queue. A spooled job stays in the queue after it
+// completes -- its output is still in the spool, waiting to be
+// retrieved -- so there is no history lookup here.
+func waitForSpooledCompletion(
+	t *testing.T,
+	ctx context.Context,
+	schedd *htcondor.Schedd,
+	cluster int,
+) *classad.ClassAd {
+	t.Helper()
+
+	deadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(deadline) {
+		ads, _, err := schedd.QueryWithOptions(ctx,
+			fmt.Sprintf("ClusterId == %d && ProcId == 0", cluster),
+			&htcondor.QueryOptions{Limit: 1})
+		if err != nil {
+			t.Fatalf("Failed to query job %d.0: %v", cluster, err)
+		}
+		if len(ads) > 0 {
+			status, _ := ads[0].EvaluateAttrInt("JobStatus")
+			switch status {
+			case 4:
+				return ads[0]
+			case 5:
+				// Code 16 is the spooling hold every remote submission
+				// passes through; anything else will not clear itself.
+				if code, _ := ads[0].EvaluateAttrInt("HoldReasonCode"); code != 16 {
+					reason, _ := ads[0].EvaluateAttrString("HoldReason")
+					t.Fatalf("job %d.0 went on hold (%d): %s", cluster, code, reason)
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("job %d.0 did not complete", cluster)
+	return nil
 }
 
 func waitForJobCompletion(ctx context.Context, schedd *htcondor.Schedd, clusterID string) error {
@@ -550,4 +520,14 @@ func readTarFiles(t *testing.T, r io.Reader) map[string]string {
 	}
 
 	return files
+}
+
+// sortedKeys names what a tarball holds, in a stable order.
+func sortedKeys(files map[string]string) []string {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
