@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -126,10 +127,86 @@ func TestHandleWhoAmI(t *testing.T) {
 		}
 	})
 
+	// The user-header path, which this subtest asserted nothing about
+	// for as long as it has existed: its whole body was a t.Skip whose
+	// stated reason -- "requires proper signing key setup" -- is a
+	// 32-byte file. It appeared in CI as a skip and in the summary as a
+	// test.
+	//
+	// Worth covering for real: header authentication is how a
+	// deployment behind an authenticating proxy identifies every
+	// caller, and how the integration tests in this package
+	// authenticate. A break here reads as "authentication failed"
+	// everywhere downstream.
 	t.Run("Authenticated with user header", func(t *testing.T) {
-		// This test requires the signing key to exist, so we skip it
-		// In a real test environment, you would set up the key properly
-		t.Skip("Skipping user header test - requires proper signing key setup")
+		cfg := newTestConfig(t)
+		cfg.SigningKeyPath = writeTestSigningKey(t)
+		cfg.UserHeader = "X-Remote-User"
+		// The header is honored only from a trusted source; httptest
+		// requests come from 192.0.2.1, which is no proxy CIDR.
+		cfg.UserHeaderTrustAnyUnsafe = true
+		cfg.TrustDomain = "test.htcondor.org"
+		cfg.UIDDomain = "uid.test.htcondor.org"
+
+		s, err := NewServer(cfg)
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
+		}
+
+		req := httptest.NewRequestWithContext(context.Background(),
+			http.MethodGet, "/api/v1/whoami", nil)
+		req.Header.Set("X-Remote-User", "alice")
+
+		w := httptest.NewRecorder()
+		s.handleWhoAmI(w, req)
+
+		resp := w.Result()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Failed to close response body: %v", err)
+			}
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+		}
+
+		var whoamiResp WhoAmIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&whoamiResp); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+
+		if !whoamiResp.Authenticated {
+			t.Error("Expected authenticated=true for a trusted user header")
+		}
+		// The bare header value, not "alice@uid.test.htcondor.org".
+		// The two are deliberately different: the token minted for the
+		// schedd carries the UID domain, while the identity in context
+		// is what owner scoping compares against Owner, and HTCondor's
+		// Owner attribute is the bare username.
+		if want := "alice"; whoamiResp.User != want {
+			t.Errorf("User = %q, want %q", whoamiResp.User, want)
+		}
+	})
+
+	// The other half of the same contract, which turns out to be
+	// enforced earlier and harder than at request time: a UserHeader
+	// with no trust policy is refused at construction, so a deployment
+	// cannot come up in a state where anyone who reaches the listener
+	// directly authenticates as anyone.
+	t.Run("User header with no trust policy refuses to start", func(t *testing.T) {
+		cfg := newTestConfig(t)
+		cfg.SigningKeyPath = writeTestSigningKey(t)
+		cfg.UserHeader = "X-Remote-User"
+		cfg.TrustDomain = "test.htcondor.org"
+		cfg.UIDDomain = "uid.test.htcondor.org"
+		// Neither UserHeaderTrustedProxies nor UserHeaderTrustAnyUnsafe.
+
+		if _, err := NewServer(cfg); err == nil {
+			t.Fatal("NewServer accepted a user header with no trusted-proxy policy")
+		} else if !strings.Contains(err.Error(), "UserHeaderTrustedProxies") {
+			t.Errorf("the error does not name what is missing: %v", err)
+		}
 	})
 }
 
