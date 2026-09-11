@@ -330,7 +330,14 @@ jobs:
             # so following the skip message's advice never made the
             # test run. One build for this container's own platform is
             # what it needs.
-            (cd webapi && GOWORK=off go build -o bin/htcondor-jupyter-helper ./cmd/htcondor-jupyter-helper)
+            # -buildvcs=false because the workspace is a bind mount
+            # owned by the runner, so git inside the container refuses
+            # it as dubious ownership and the stamp fails with
+            # "error obtaining VCS status: exit status 128". The
+            # htcondordb build above and the TLS shared-port test pass
+            # the same flag for the same reason.
+            (cd webapi && GOWORK=off go build -buildvcs=false \
+              -o bin/htcondor-jupyter-helper ./cmd/htcondor-jupyter-helper)
 
             # Every webapi package with integration-tagged tests.
             #
