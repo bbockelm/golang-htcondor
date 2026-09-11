@@ -104,3 +104,16 @@ test('the chat surface mounts without page errors', async ({ page }) => {
 
   expect(errors, 'chat surface raised page errors').toEqual([]);
 });
+
+// The dashboard's activity panels are fed by a separate half of the
+// response from the status tiles, and they render conditionally. A page
+// that fetched the response, drew the tiles, and dropped every activity
+// list would pass the render check above -- so assert on a string only
+// the fixture's activity carries.
+test('dashboard binds the activity panels, not just the status tiles', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText(/smoke-submitted/).first()).toBeVisible();
+  // The hold breakdown is the panel most likely to be dropped: it is the
+  // only one keyed off a numeric code rather than a list of jobs.
+  await expect(page.getByText(/Failed to transfer output/).first()).toBeVisible();
+});

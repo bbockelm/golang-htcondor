@@ -19,10 +19,31 @@ import type {
 // This suite proves the pages render and bind data. Anything that
 // depends on the live contract belongs in the full suite.
 
+// Activity timestamps are relative to load time rather than frozen:
+// the panels render "3m ago", and a fixed 2024 epoch would render
+// "2y ago" on every row -- still a pass, but it stops looking like the
+// thing being tested. Nothing asserts the formatted age, only that the
+// rows bind.
+const minutesAgo = (m: number) => Math.floor(Date.now() / 1000) - m * 60;
+
 export const dashboardFixture: DashboardStats = {
   username: 'e2e',
-  jobs_by_status: { '1': 1, '2': 1 },
-  jobs_total: 2,
+  jobs_by_status: { '1': 1, '2': 1, '5': 3 },
+  jobs_total: 6,
+  activity: {
+    hold_reasons: [
+      { code: 13, label: 'Failed to transfer output', count: 2, example: 'smoke-transfer-error' },
+      { code: 3, label: 'Policy expression (periodic_hold)', count: 1 },
+    ],
+    recently_submitted: [{ cluster_id: 42, proc_id: 0, at: minutesAgo(2), detail: 'smoke-submitted' }],
+    recently_started: [{ cluster_id: 41, proc_id: 3, at: minutesAgo(5), detail: 'smoke-exec-host' }],
+    recently_held: [{ cluster_id: 40, proc_id: 1, at: minutesAgo(9), detail: 'smoke-transfer-error' }],
+    recently_completed: [{ cluster_id: 39, proc_id: 0, at: minutesAgo(20), detail: 'smoke-completed' }],
+    completed_available: true,
+    completed_partial: false,
+    source: 'smoke fixture',
+    computed_at: minutesAgo(1),
+  },
 };
 
 export const jobsFixture: JobListResponse = {
