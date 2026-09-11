@@ -14,6 +14,24 @@ import (
 
 // TestAPIRoutesWWWAuthenticateHeader verifies that /api routes return WWW-Authenticate header
 // when authentication fails, as required by RFC 6750
+// oauth2TestServer builds a server with OAuth2 configured, which is the
+// shape every subtest below needs.
+func oauth2TestServer(t *testing.T, logger *logging.Logger) *Server {
+	t.Helper()
+	server, err := NewServer(Config{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "localhost:9618",
+		Logger:       logger,
+		EnableMCP:    true,
+		OAuth2DBPath: t.TempDir() + "/oauth2-test.db",
+		OAuth2Issuer: "http://localhost:8080",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	return server
+}
+
 func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 	// Create a logger
 	logger, err := logging.New(&logging.Config{
@@ -145,22 +163,58 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 		}
 	})
 
-	t.Run("WithValidToken", func(t *testing.T) {
-		// Create server with OAuth2
-		server, err := NewServer(Config{
-			ScheddName:   "test-schedd",
-			ScheddAddr:   "localhost:9618",
-			Logger:       logger,
-			EnableMCP:    true,
-			OAuth2DBPath: t.TempDir() + "/oauth2-test.db",
-			OAuth2Issuer: "http://localhost:8080",
-		})
-		if err != nil {
-			t.Fatalf("Failed to create server: %v", err)
-		}
+	// A syntactically valid bearer token is not yet an identity.
+	//
+	// This server verifies no JWT signatures -- the schedd is the trust
+	// root and authenticates the forwarded token over CEDAR -- so the
+	// sub claim means nothing until a schedd op has succeeded with the
+	// token (TokenCache.MarkValidated) or the schedd has been asked who
+	// the caller is. /api/v1/jobs is owner-scoped, so with neither
+	// available it must fail closed.
+	//
+	// This subtest used to assert the opposite ("should not return 401
+	// with valid token"), which held only because TokenCache.Add marked
+	// every freshly parsed token validated -- the behaviour that made a
+	// forged signature resolve to its own sub.
+	t.Run("UnvalidatedTokenIsRefusedOnAnOwnerScopedRoute", func(t *testing.T) {
+		server := oauth2TestServer(t, logger)
 
-		// Create a valid test token
 		token := createTestJWTToken(3600)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+
+		server.handleJobs(w, req)
+
+		resp := w.Result()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Failed to close response body: %v", err)
+			}
+		}()
+		body, _ := io.ReadAll(resp.Body)
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("Status = %d, want 401: an owner-scoped listing must not run for a caller it cannot name. Body: %s",
+				resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "identity") {
+			t.Errorf("the refusal does not say why: %s", body)
+		}
+	})
+
+	// The other half: once the schedd has accepted the token, the same
+	// request is no longer refused for lack of an identity. It still
+	// fails here -- there is no schedd to query -- but not with a 401.
+	t.Run("ValidatedTokenPassesTheIdentityGate", func(t *testing.T) {
+		server := oauth2TestServer(t, logger)
+
+		token := createTestJWTToken(3600)
+		if _, err := server.tokenCache.Add(token); err != nil {
+			t.Fatalf("caching the token: %v", err)
+		}
+		// What a successful schedd op does for a real request.
+		server.tokenCache.MarkValidated(token, "alice@test.domain")
 
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -174,13 +228,9 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 				t.Errorf("Failed to close response body: %v", err)
 			}
 		}()
-
-		// With a valid token, we won't get 401
-		// (We might get 500 because we're not connected to a real schedd,
-		// but that's expected in this test)
 		if resp.StatusCode == http.StatusUnauthorized {
 			body, _ := io.ReadAll(resp.Body)
-			t.Errorf("Should not return 401 with valid token. Status: %d, Body: %s", resp.StatusCode, string(body))
+			t.Errorf("a validated token was refused for identity: %s", body)
 		}
 	})
 
