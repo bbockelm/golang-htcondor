@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"encoding/pem"
 	"fmt"
+	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
@@ -231,6 +233,33 @@ func setStandardTokenExpiries(ctx context.Context, cfg *fosite.Config, session f
 	now := time.Now().UTC()
 	session.SetExpiresAt(fosite.AccessToken, now.Add(cfg.GetAccessTokenLifespan(ctx)).Round(time.Second))
 	session.SetExpiresAt(fosite.RefreshToken, now.Add(cfg.GetRefreshTokenLifespan(ctx)).Round(time.Second))
+}
+
+// AuthenticateClient authenticates the client on a token request
+// (client_secret_basic / client_secret_post), for custom grant flows that
+// bypass fosite's NewAccessRequest pipeline -- notably RFC 8693 token exchange.
+// The concrete provider from compose.Compose is *fosite.Fosite, which exposes
+// the same client-authentication strategy the standard token endpoint uses.
+func (p *OAuth2Provider) AuthenticateClient(ctx context.Context, r *http.Request, form url.Values) (fosite.Client, error) {
+	f, ok := p.oauth2.(*fosite.Fosite)
+	if !ok {
+		return nil, fmt.Errorf("oauth2 provider does not expose client authentication")
+	}
+	return f.AuthenticateClient(ctx, r, form)
+}
+
+// IntrospectAccessToken validates one of our access tokens and returns the
+// requester behind it (subject via GetSession, and the granted scopes), or an
+// error if the token is unknown/expired/revoked. Used by token exchange to bind
+// a subject_token to its authorization. Unlike IntrospectToken it keeps the
+// requester, which is where the granted scopes live.
+func (p *OAuth2Provider) IntrospectAccessToken(ctx context.Context, token string) (fosite.AccessRequester, error) {
+	session := newEmptySession()
+	_, ar, err := p.oauth2.IntrospectToken(ctx, token, fosite.AccessToken, session)
+	if err != nil {
+		return nil, err
+	}
+	return ar, nil
 }
 
 // IntrospectToken validates an access token and returns the session

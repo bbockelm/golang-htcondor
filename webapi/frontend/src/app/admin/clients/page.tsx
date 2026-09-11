@@ -336,13 +336,22 @@ function Chip({
 }
 
 // EDITABLE_GRANTS is the set an admin may toggle here — the grants this server
-// implements. device_code is a manual grant that is not per-client toggled, and
-// token-exchange is not built yet, so neither appears.
+// implements. device_code is a manual grant that is not per-client toggled, so
+// it does not appear.
 const EDITABLE_GRANTS: { value: string; label: string }[] = [
   { value: 'authorization_code', label: 'authorization_code' },
   { value: 'refresh_token', label: 'refresh_token' },
   { value: 'client_credentials', label: 'client_credentials' },
+  { value: 'urn:ietf:params:oauth:grant-type:token-exchange', label: 'token_exchange' },
 ];
+
+// CONFIDENTIAL_ONLY_GRANTS may not be given to a public client — they either
+// authenticate with a secret or act on another principal's behalf. Kept in sync
+// with the server's confidentialOnlyGrants.
+const CONFIDENTIAL_ONLY_GRANTS = new Set([
+  'client_credentials',
+  'urn:ietf:params:oauth:grant-type:token-exchange',
+]);
 
 // GrantsEditor shows a client's permitted grant types and, on expand, lets an
 // admin change them. client_credentials is disabled for a public client (it has
@@ -397,12 +406,12 @@ function GrantsEditor({
   return (
     <div className="mt-1 max-w-xs space-y-1">
       {EDITABLE_GRANTS.map((g) => {
-        const disabled = g.value === 'client_credentials' && client.public;
+        const disabled = client.public && CONFIDENTIAL_ONLY_GRANTS.has(g.value);
         return (
           <label
             key={g.value}
             className={`flex items-center gap-1.5 text-xs ${disabled ? 'text-gray-300' : 'text-gray-700'}`}
-            title={disabled ? 'A public client has no secret to authenticate client_credentials.' : undefined}
+            title={disabled ? `A public client cannot use ${g.label} (it has no secret to authenticate it).` : undefined}
           >
             <input
               type="checkbox"
