@@ -357,19 +357,26 @@ func waitForServerStartup(stdout, stderr io.Reader, timeout time.Duration, t *te
 
 			// Look for IDP username
 			if matches := usernamePattern.FindStringSubmatch(line); len(matches) > 1 {
-				username = matches[1]
+				username = strings.Trim(matches[1], `"`)
 				t.Logf("Found IDP username: %s", username)
 			}
 
 			// Look for IDP password
 			if matches := passwordPattern.FindStringSubmatch(line); len(matches) > 1 {
-				password = matches[1]
+				password = strings.Trim(matches[1], `"`)
 				t.Logf("Found IDP password: %s", password)
 			}
 
 			// Look for CA certificate
 			if matches := caPattern.FindStringSubmatch(line); len(matches) > 1 {
-				caPath = matches[1]
+				// The structured logger wraps the whole message in
+				// quotes -- `msg="CA Certificate: /tmp/.../ca.crt"` --
+				// so \S+ swallows the closing one. The path then went
+				// into the client config, and the CLI failed with
+				// `failed to read CA certificate file /tmp/.../ca.crt"`
+				// before ever printing a device code, which surfaced
+				// only as `incomplete device code information`.
+				caPath = strings.Trim(matches[1], `"`)
 				t.Logf("Found CA certificate: %s", caPath)
 			}
 

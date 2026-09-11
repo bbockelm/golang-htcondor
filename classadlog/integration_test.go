@@ -7,65 +7,33 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
-) // parseScheddSinfulString extracts host:port from HTCondor sinful string
-func parseScheddSinfulString(sinful string) string {
-	// HTCondor sinful strings look like: <192.168.1.1:9618?addrs=...>
-	// We need to extract the host:port
-	sinful = strings.TrimPrefix(sinful, "<")
-	sinful = strings.TrimSuffix(sinful, ">")
+)
 
-	// Split on ? to get just the address part
-	parts := strings.Split(sinful, "?")
-	if len(parts) > 0 {
-		return parts[0]
-	}
-
-	return sinful
-}
-
-// getScheddAddress queries the collector for the schedd address
-func getScheddAddress(t *testing.T, harness *htcondor.CondorTestHarness) string {
+// locateSchedd asks the collector where the schedd is.
+//
+// The address it answers with has to be used whole. This test used to
+// query the collector and then truncate the schedd's MyAddress at the
+// "?", which drops the sock=schedd_... parameter that shared port
+// routes on -- so every submission went to the collector's own endpoint
+// and failed with
+//
+//	failed to parse server response: failed to read frame header: EOF
+//
+// which reads like an authentication failure and is not one. The same
+// truncation bug was fixed in webapi/mcpserver's edit test (PR #314).
+func locateSchedd(t *testing.T, harness *htcondor.CondorTestHarness) *htcondor.DaemonLocation {
 	t.Helper()
 
-	// Parse collector address
-	collectorAddr := harness.GetCollectorAddr()
-	addr := parseScheddSinfulString(collectorAddr)
-
-	t.Logf("Querying collector at %s for schedd location", addr)
-
-	collector := htcondor.NewCollector(addr)
-	ctx := context.Background()
-	scheddAds, err := collector.QueryAds(ctx, "ScheddAd", "")
+	collector := htcondor.NewCollector(harness.GetCollectorAddr())
+	loc, err := collector.LocateDaemon(context.Background(), "Schedd", "")
 	if err != nil {
-		t.Fatalf("Failed to query collector for schedd ads: %v", err)
+		t.Fatalf("Failed to locate the schedd: %v", err)
 	}
-
-	if len(scheddAds) == 0 {
-		t.Fatal("No schedd ads found in collector")
-	}
-
-	// Extract schedd address from ad
-	scheddAd := scheddAds[0]
-
-	// Get MyAddress attribute
-	myAddressExpr, ok := scheddAd.Lookup("MyAddress")
-	if !ok {
-		t.Fatal("Schedd ad does not have MyAddress attribute")
-	}
-
-	myAddress := myAddressExpr.String()
-	// Remove quotes if present
-	myAddress = strings.Trim(myAddress, "\"")
-
-	// Parse schedd sinful string
-	scheddAddr := parseScheddSinfulString(myAddress)
-
-	return scheddAddr
+	return loc
 }
 
 // TestWatchLogWithJobSubmission tests the Watch API by submitting a job and monitoring the log
@@ -85,8 +53,8 @@ func TestWatchLogWithJobSubmission(t *testing.T) {
 	}
 
 	// Get schedd connection info
-	scheddAddr := getScheddAddress(t, harness)
-	t.Logf("Schedd discovered at: %s", scheddAddr)
+	scheddLoc := locateSchedd(t, harness)
+	t.Logf("Schedd discovered: %s at %s", scheddLoc.Name, scheddLoc.Address)
 
 	// Get the job_queue.log path
 	logPath := filepath.Join(harness.GetSpoolDir(), "job_queue.log")
@@ -133,7 +101,7 @@ LogCreated:
 	updates := reader.Watch(watchCtx, 500*time.Millisecond)
 
 	// Create schedd client and submit a job
-	schedd := htcondor.NewSchedd(harness.GetScheddName(), scheddAddr)
+	schedd := htcondor.NewSchedd(scheddLoc.Name, scheddLoc.Address)
 
 	submitFile := `
 universe = vanilla

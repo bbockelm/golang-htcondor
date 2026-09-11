@@ -62,7 +62,19 @@ func TestSharedPortHTTPForwardingAndKeepalive(t *testing.T) {
 
 	// --- Step 2: configure condor with shared_port forwarding ---------
 
-	sockDir := filepath.Join(t.TempDir(), "spsock")
+	// The shared-port Unix-domain socket paths have to stay under the
+	// OS sun_path limit (~104 bytes on macOS), and t.TempDir()'s
+	// /var/folders/... paths blow that budget: the collector then never
+	// starts and the harness reports only "timeout waiting for
+	// collector to start". TestHTCondorAPIServesTLSOverSharedPort
+	// already carries this workaround and its explanation; this test
+	// used t.TempDir() and so could never pass on a Mac.
+	sockParent, err := os.MkdirTemp("/tmp", "spfw") //nolint:usetesting // need a short path, not t.TempDir()'s long one
+	if err != nil {
+		t.Fatalf("mkdir sockParent: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockParent) })
+	sockDir := filepath.Join(sockParent, "s")
 	if err := os.MkdirAll(sockDir, 0o700); err != nil {
 		t.Fatalf("mkdir sockDir: %v", err)
 	}

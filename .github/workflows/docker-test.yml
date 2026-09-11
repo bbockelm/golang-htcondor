@@ -318,10 +318,110 @@ jobs:
             set -e
             (cd .github/tools && GOWORK=off go build -o /workspace/.gocache/htcondordb github.com/bbockelm/htcondordb/cmd/htcondordb)
 
-            # Run integration tests (webapi module holds httpserver).
+            # The JupyterLab tunnel helper is a real binary the
+            # jupytertunnel integration test execs. Without it that
+            # test skips, and a skip is indistinguishable from a pass
+            # in the check list.
+            make build-jupyter-helper
+
+            # Every webapi package with integration-tagged tests.
+            #
+            # This named ./httpserver/ alone for a long time, so the
+            # tag was set for 1 of the repo's 8 such packages and the
+            # other 7 ran in no job at all -- which is how four tests
+            # in sandbox/ rotted, and how a silently-broken collector
+            # stream and an unusable device-code flow went unnoticed.
+            # The core module's packages run in their own job so the
+            # two halves do not serialize.
+            #
             # gotestsum comes from the image; GOCACHE/GOMODCACHE are the
             # restored caches under the bind-mounted workspace.
-            cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
+            cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=20m \
+              ./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/
+          "
+
+  docker-core-integration-test:
+    name: Core Module Integration Test in Docker
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+    - name: Derive the image cache key
+      id: imgcache
+      # The image is rebuilt at most once a day. hashFiles covers the
+      # changes somebody committed; the date covers the ones nobody did
+      # -- the Dockerfile runs `dnf update -y` and installs an unpinned
+      # `condor >= 25.7.2`, so a layer cached indefinitely would drift
+      # arbitrarily far from what those lines mean today.
+      #
+      # The rotation is not warmed by a scheduled run, deliberately: the
+      # nightly Actions minutes cost more than the rebuild they save.
+      # The first push to main each day therefore pays for that day's
+      # image, and everything after it -- including every pull request
+      # -- reads the result.
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
+    - name: Build Docker image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        tags: golang-htcondor:integration-test
+        # Same Dockerfile, same platform as the amd64 matrix job, so it
+        # reads that job's scope. It deliberately does not write: the two
+        # run concurrently, and a second writer of identical layers costs
+        # cache budget without adding anything readable.
+        cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
+
+    # Reads the amd64 matrix job's cache -- same platform, same code.
+    # It does not save, for the same reason it does not write the image
+    # cache: the two jobs run concurrently, so a second writer of the
+    # same content only spends budget.
+    - name: Restore the container Go cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-amd64-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          docker-gocache-amd64-
+
+    # The image runs as a non-root user (USER vscode in the Dockerfile)
+    # while the workspace bind mount is owned by the runner user, so the
+    # container cannot create its own cache directory inside it -- the
+    # first attempt failed with "mkdir /workspace/.gocache: permission
+    # denied". Nothing hit this before because the containers only read
+    # the mount; the Go caches used to live inside the container.
+    #
+    # The uid comes from the image rather than being hardcoded, so this
+    # keeps working if the Dockerfile's user ever changes.
+    - name: Prepare the container Go cache directory
+      run: |
+        ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
+        mkdir -p .gocache
+        sudo chown -R "$ids" .gocache
+
+    - name: Run core module integration tests with HTCondor
+      run: |
+        docker run --rm --privileged \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
+          golang-htcondor:integration-test \
+          /bin/bash -c "
+            # The core module's integration-tagged packages, which ran
+            # in no CI job until now. Separate from the webapi job
+            # because the root package alone takes ~6.5 minutes, and
+            # appending it would make one job the critical path.
+            GOWORK=off gotestsum -- -tags=integration -timeout=25m \
+              . ./sandbox/ ./classadlog/ ./metricsd/
           "
 
   # Superuser mode's fallback identity is condor@$(UID_DOMAIN), and that

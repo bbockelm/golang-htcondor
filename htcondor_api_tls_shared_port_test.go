@@ -100,9 +100,21 @@ func TestHTCondorAPIServesTLSOverSharedPort(t *testing.T) {
 	}
 
 	// Build the real htcondor-api binary into the short work dir.
+	//
+	// From ./webapi, not the root: cmd/htcondor-api moved into the
+	// webapi module when the web server was split out, and this kept
+	// building "./cmd/htcondor-api" relative to the root module, where
+	// it no longer exists. The failure was `build htcondor-api: exit
+	// status 1` with the real reason (directory not found) on the
+	// builder's stderr, and no CI job ran this test to show it.
+	//
+	// GOWORK=off matches how CI invokes the suite, so the build
+	// resolves against webapi/go.mod either way.
 	bin := filepath.Join(workDir, "htcondor-api")
 	// -buildvcs=false: CI checkouts can't always stamp VCS metadata.
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "./cmd/htcondor-api")
+	build.Dir = "webapi"
+	build.Env = append(os.Environ(), "GOWORK=off")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		t.Fatalf("build htcondor-api: %v", err)

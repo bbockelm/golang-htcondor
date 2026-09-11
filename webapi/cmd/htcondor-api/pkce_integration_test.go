@@ -152,19 +152,28 @@ SEC_PASSWORD_DIRECTORY = %s
 			}
 			if username == "" {
 				if matches := userPattern.FindStringSubmatch(line); len(matches) > 1 {
-					username = matches[1]
+					username = strings.Trim(matches[1], `"`)
 					t.Logf("DEBUG: Matched username: %s", username)
 				}
 			}
 			if password == "" {
 				if matches := passPattern.FindStringSubmatch(line); len(matches) > 1 {
-					password = matches[1]
+					password = strings.Trim(matches[1], `"`)
 					t.Logf("DEBUG: Matched password: %s", password)
 				}
 			}
 			if caPath == "" {
 				if matches := caPattern.FindStringSubmatch(line); len(matches) > 1 {
-					caPath = matches[1]
+					// Trim the quote the structured logger puts around
+					// the whole message. The line reads
+					//
+					//	level=INFO msg="CA Certificate: /tmp/.../ca.crt"
+					//
+					// so \S+ swallows the closing quote and every run
+					// failed with `open /tmp/.../ca.crt": no such file
+					// or directory` -- a path that looks right at a
+					// glance, which is why it survived.
+					caPath = strings.Trim(matches[1], `"`)
 					t.Logf("DEBUG: Matched CA path: %s", caPath)
 				}
 			}

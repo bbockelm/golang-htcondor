@@ -1643,6 +1643,33 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
+		// Method 3: the built-in IDP's own session.
+		//
+		// That IDP issues its own "idp_session" cookie against its own
+		// store, which is not the browser session getSessionFromRequest
+		// reads -- so a user who had just logged in through it was told
+		// "Authentication required" on the approval page, and the
+		// device flow could not be completed at all with the built-in
+		// IDP (demo mode, or HTTP_API_ENABLE_IDP). /idp/authorize has
+		// always read this cookie directly; this grants it the same
+		// trust, and only that: the session is one this server issued
+		// and is verified against its store.
+		if username == "" && h.idpProvider != nil {
+			if cookie, err := r.Cookie("idp_session"); err == nil && cookie.Value != "" {
+				if idpUser, err := h.idpProvider.storage.GetSession(ctx, cookie.Value); err == nil && idpUser != "" {
+					username = idpUser
+					// Same admin mapping the IDP's userinfo endpoint
+					// applies, so a WebUIAdminGroup of "admin" behaves
+					// the same on both paths.
+					if state, err := h.idpProvider.storage.GetUserState(ctx, username); err == nil && state == "admin" {
+						userGroups = []string{"admin"}
+					}
+					h.logger.Info(logging.DestinationHTTP,
+						"User authenticated via the built-in IDP session", "username", username)
+				}
+			}
+		}
+
 		// If still no username, authentication is required
 		if username == "" {
 			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")

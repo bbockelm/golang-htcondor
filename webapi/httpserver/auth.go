@@ -332,11 +332,19 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 
 	entry := &TokenCacheEntry{
 		Token: token,
-		// AddValidated is the constructor for tokens that the caller
-		// has already verified (e.g. opaque-token introspection
-		// against the OAuth2 storage succeeded). Mark Validated so
-		// callers using ValidatedUsername see this identity
-		// immediately without waiting for a schedd handshake.
+		// Username is the UNVERIFIED sub from parseJWTClaims.
+		//
+		// Validated: true here is load-bearing for owner-scoped
+		// endpoints -- without it an owner-scoped listing 401s until
+		// some schedd op has authenticated with the token -- but it
+		// also means that unverified sub drives owner scoping and
+		// admin checks on the first request, which is what
+		// createAuthenticatedContext's comment says the 2026-05
+		// "ParseUnverified trusts sub" audit removed. The two
+		// disagree, and resolving it is a security decision rather
+		// than a cleanup, so this is left as it stands and recorded
+		// here. The misplaced comment that used to explain this flag
+		// belonged to AddValidated and has moved there.
 		Username:      username,
 		Validated:     true,
 		Expiration:    expiration,
@@ -407,8 +415,18 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
-		Token:         token,
+		Token: token,
+		// The caller has already verified this token (opaque-token
+		// introspection against the OAuth2 storage succeeded), so mark
+		// it validated: ValidatedUsername is what callers read the
+		// identity from, and it returns "" for an unvalidated entry.
+		// Without this, a function named AddValidated stored its
+		// identity where nothing could see it, and every opaque OAuth2
+		// access token authenticated as nobody -- /api/v1/whoami
+		// answered {"authenticated":true,"user":""} and owner-scoped
+		// MCP tools refused the call.
 		Username:      username,
+		Validated:     true,
 		Expiration:    expiration,
 		SessionCache:  sessionCache,
 		cancelCleanup: cancel,

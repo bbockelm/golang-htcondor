@@ -344,7 +344,22 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 			return
 		}
 
-		// Stream response ads
+		// Stream response ads.
+		//
+		// One message for the whole response, not one per ad. The
+		// collector sends every (more, ad) pair inside a single CEDAR
+		// message, so building a new message per iteration made the
+		// second read look for a frame header that is not there:
+		//
+		//	failed to read 'more' flag: failed to read frame header: EOF
+		//
+		// Every streaming query therefore ended in an error -- after
+		// delivering its ads, so a caller that checks AdResult.Err (as
+		// metricsd's PoolCollector does) threw away a complete result
+		// set and reported a failure. The non-streaming path opposite
+		// has always reused one message; this now matches it.
+		responseMsg := message.NewMessageFromStream(cedarStream)
+
 		streamOptsApplied := streamOpts.ApplyStreamDefaults()
 		totalBlockTime := time.Duration(0)
 		adCount := 0
@@ -361,7 +376,6 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 			}
 
 			// Read "more" flag
-			responseMsg := message.NewMessageFromStream(cedarStream)
 			more, err := responseMsg.GetInt32(ctx)
 			if err != nil {
 				ch <- AdResult{Err: fmt.Errorf("failed to read 'more' flag: %w", err)}
