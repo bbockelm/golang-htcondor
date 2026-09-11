@@ -38,7 +38,19 @@ type Config struct {
 	ListenAddr string // Address to listen on (e.g., ":8080")
 	ScheddName string // Schedd name
 	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
-	UserHeader string // HTTP header to extract username from (optional)
+
+	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
+	// rather than set by an operator.
+	//
+	// It matters because the two look identical here and behave
+	// differently: a pinned address is honoured even when the collector
+	// disagrees, while a discovered one must follow the collector. The
+	// daemon resolves the address in main() and passes the result, so
+	// without this every deployment that only sets SCHEDD_NAME looked
+	// pinned -- and kept dialling the dead socket of a schedd that had
+	// restarted, forever. See issue #308.
+	ScheddAddrDiscovered bool
+	UserHeader           string // HTTP header to extract username from (optional)
 	// UserHeaderTrustedProxies is the CIDR list from which UserHeader
 	// is honored. See HandlerConfig.UserHeaderTrustedProxies for
 	// full docs and the security rationale. Configurable via
@@ -221,6 +233,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ScheddName:                  cfg.ScheddName,
 		ScheddHost:                  cfg.ScheddHost,
 		ScheddAddr:                  cfg.ScheddAddr,
+		ScheddAddrDiscovered:        cfg.ScheddAddrDiscovered,
 		UserHeader:                  cfg.UserHeader,
 		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
 		UserHeaderTrustAnyUnsafe:    cfg.UserHeaderTrustAnyUnsafe,

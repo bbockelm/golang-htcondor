@@ -1300,12 +1300,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	// Discover schedd if address not specified
 	// If a schedd name is provided, we'll search for that specific schedd
+	// Whether the address below was resolved here or configured by an
+	// operator decides whether the server may later follow the collector
+	// to a new one. They are indistinguishable by the time the server
+	// sees them, so say which it was.
+	scheddAddrDiscovered := false
 	if scheddAddrValue == "" {
 		if scheddNameValue != "" {
 			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
 		}
 		var discoveredName string
 		scheddAddrValue, discoveredName = discoverSchedd(cfg, collector, logger, scheddNameValue, scheddHostValue)
+		scheddAddrDiscovered = true
 		// If we discovered a name and didn't have one before, use it
 		if scheddNameValue == "" && discoveredName != "" {
 			scheddNameValue = discoveredName
@@ -1366,6 +1372,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		CCBStreaming:             loadCCBStreaming(cfg, logger),
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
+		ScheddAddrDiscovered:     scheddAddrDiscovered,
 		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,
 		UserHeaderTrustedProxies: loadUserHeaderTrustedProxies(cfg),

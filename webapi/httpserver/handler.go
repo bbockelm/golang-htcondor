@@ -282,6 +282,18 @@ type Handler struct {
 type HandlerConfig struct {
 	ScheddName string // Schedd name
 	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+
+	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
+	// rather than set by an operator.
+	//
+	// It matters because the two look identical here and behave
+	// differently: a pinned address is honoured even when the collector
+	// disagrees, while a discovered one must follow the collector. The
+	// daemon resolves the address in main() and passes the result, so
+	// without this every deployment that only sets SCHEDD_NAME looked
+	// pinned -- and kept dialling the dead socket of a schedd that had
+	// restarted, forever. See issue #308.
+	ScheddAddrDiscovered bool
 	// ScheddHost is the SCHEDD_HOST setting: the host (optionally
 	// "name@host", optionally with a port) whose schedd to talk to.
 	// Consulted when neither ScheddAddr nor ScheddName is set; it picks
@@ -620,7 +632,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	// Discover schedd address if not provided
 	scheddAddr := cfg.ScheddAddr
-	scheddDiscovered := false
+	scheddDiscovered := cfg.ScheddAddrDiscovered
 	if scheddAddr == "" {
 		if cfg.Collector == nil {
 			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
@@ -1271,7 +1283,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		Schedd:         h.schedd,
+		// A getter, not the handle: this server replaces its schedd when
+		// the collector reports a new address, and MCP holding the old
+		// pointer is how it kept dialling a socket that no longer existed.
+		ScheddProvider: h.getSchedd,
 		Credd:          h.credd,
 		Collector:      h.collector,
 		HTCondorConfig: h.htcondorConfig,
