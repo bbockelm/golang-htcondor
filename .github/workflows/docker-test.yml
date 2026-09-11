@@ -288,8 +288,8 @@ jobs:
     - name: Prepare the container Go cache directory
       run: |
         ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
-        mkdir -p .gocache
-        sudo chown -R "$ids" .gocache
+        mkdir -p .gocache webapi/bin
+        sudo chown -R "$ids" .gocache webapi/bin
 
     - name: Run integration tests with HTCondor
       run: |
@@ -322,7 +322,15 @@ jobs:
             # jupytertunnel integration test execs. Without it that
             # test skips, and a skip is indistinguishable from a pass
             # in the check list.
-            make build-jupyter-helper
+            #
+            # Built directly rather than with make build-jupyter-helper:
+            # that target cross-compiles arch-suffixed copies into the
+            # embed staging dir, which is not the plain
+            # webapi/bin/htcondor-jupyter-helper the test looks for --
+            # so following the skip message's advice never made the
+            # test run. One build for this container's own platform is
+            # what it needs.
+            (cd webapi && GOWORK=off go build -o bin/htcondor-jupyter-helper ./cmd/htcondor-jupyter-helper)
 
             # Every webapi package with integration-tagged tests.
             #
@@ -404,8 +412,8 @@ jobs:
     - name: Prepare the container Go cache directory
       run: |
         ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
-        mkdir -p .gocache
-        sudo chown -R "$ids" .gocache
+        mkdir -p .gocache webapi/bin
+        sudo chown -R "$ids" .gocache webapi/bin
 
     - name: Run core module integration tests with HTCondor
       run: |

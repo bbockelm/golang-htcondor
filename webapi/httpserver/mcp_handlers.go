@@ -1455,6 +1455,63 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	}
 }
 
+// deviceApprovalIdentity resolves who is approving a device code, in the
+// same order handleOAuth2Authorize uses:
+//
+//  1. the user header, when the request comes from a trusted proxy
+//  2. the browser session
+//  3. the built-in IDP's own session
+//
+// The third exists because that IDP issues its own "idp_session" cookie
+// against its own store, which is not the browser session
+// getSessionFromRequest reads -- so a user who had just logged in
+// through it was told "Authentication required" on the approval page,
+// and the device flow could not be completed at all with the built-in
+// IDP (demo mode, or HTTP_API_ENABLE_IDP). /idp/authorize has always
+// read that cookie directly; this grants it the same trust and only
+// that: a session this server issued, verified against its store.
+//
+// An empty username means none of the three applied.
+func (h *Handler) deviceApprovalIdentity(ctx context.Context, r *http.Request) (string, []string) {
+	// Method 1: User header (demo mode) — trusted-proxy gated.
+	if h.isUserHeaderTrustedSource(r) {
+		if username := r.Header.Get(h.userHeader); username != "" {
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", h.userHeader)
+			return username, nil
+		}
+	}
+
+	// Method 2: the browser session.
+	if session, ok := h.getSessionFromRequest(r); ok {
+		h.logger.Info(logging.DestinationHTTP, "User authenticated via session",
+			"username", session.Username)
+		return session.Username, session.Groups
+	}
+
+	// Method 3: the built-in IDP's session.
+	if h.idpProvider == nil {
+		return "", nil
+	}
+	cookie, err := r.Cookie("idp_session")
+	if err != nil || cookie.Value == "" {
+		return "", nil
+	}
+	username, err := h.idpProvider.storage.GetSession(ctx, cookie.Value)
+	if err != nil || username == "" {
+		return "", nil
+	}
+	// The same admin mapping the IDP's userinfo endpoint applies, so a
+	// WebUIAdminGroup of "admin" behaves the same on both paths.
+	var groups []string
+	if state, err := h.idpProvider.storage.GetUserState(ctx, username); err == nil && state == "admin" {
+		groups = []string{"admin"}
+	}
+	h.logger.Info(logging.DestinationHTTP,
+		"User authenticated via the built-in IDP session", "username", username)
+	return username, groups
+}
+
 // handleOAuth2DeviceVerify handles the user code verification page
 func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Request) {
 	if h.oauth2Provider == nil {
@@ -1618,57 +1675,7 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		// Determine authentication method (same as handleOAuth2Authorize):
-		// 1. If userHeader is configured, use that (for demo/testing mode)
-		// 2. If OAuth2 SSO is configured and no userHeader, check for session
-		// 3. If neither, authentication is required
-		username := ""
-
-		// Method 1: User header (demo mode) — trusted-proxy gated.
-		if h.isUserHeaderTrustedSource(r) {
-			username = r.Header.Get(h.userHeader)
-			if username != "" {
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-					"username", username, "header", h.userHeader)
-			}
-		}
-
-		// Method 2: Check for session
-		var userGroups []string
-		if username == "" {
-			if session, ok := h.getSessionFromRequest(r); ok {
-				username = session.Username
-				userGroups = session.Groups
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
-			}
-		}
-
-		// Method 3: the built-in IDP's own session.
-		//
-		// That IDP issues its own "idp_session" cookie against its own
-		// store, which is not the browser session getSessionFromRequest
-		// reads -- so a user who had just logged in through it was told
-		// "Authentication required" on the approval page, and the
-		// device flow could not be completed at all with the built-in
-		// IDP (demo mode, or HTTP_API_ENABLE_IDP). /idp/authorize has
-		// always read this cookie directly; this grants it the same
-		// trust, and only that: the session is one this server issued
-		// and is verified against its store.
-		if username == "" && h.idpProvider != nil {
-			if cookie, err := r.Cookie("idp_session"); err == nil && cookie.Value != "" {
-				if idpUser, err := h.idpProvider.storage.GetSession(ctx, cookie.Value); err == nil && idpUser != "" {
-					username = idpUser
-					// Same admin mapping the IDP's userinfo endpoint
-					// applies, so a WebUIAdminGroup of "admin" behaves
-					// the same on both paths.
-					if state, err := h.idpProvider.storage.GetUserState(ctx, username); err == nil && state == "admin" {
-						userGroups = []string{"admin"}
-					}
-					h.logger.Info(logging.DestinationHTTP,
-						"User authenticated via the built-in IDP session", "username", username)
-				}
-			}
-		}
+		username, userGroups := h.deviceApprovalIdentity(ctx, r)
 
 		// If still no username, authentication is required
 		if username == "" {
