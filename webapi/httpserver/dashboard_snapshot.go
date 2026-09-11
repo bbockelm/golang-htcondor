@@ -275,23 +275,41 @@ func (a *activityCollector) result(now time.Time) DashboardActivity {
 	for _, r := range a.holds {
 		rows = append(rows, *r)
 	}
+	act.HoldReasons = topHoldReasonRows(rows)
+	return act
+}
+
+// topHoldReasonRows orders the breakdown by weight and folds the tail
+// into one row.
+//
+// Shared by both sources on purpose: the rows sit beside the HELD tile,
+// so they have to add up to it, and a rule that drifted between the
+// mirror and the schedd would make the panel disagree with itself
+// depending on which answered.
+func topHoldReasonRows(rows []HoldReasonCount) []HoldReasonCount {
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Count != rows[j].Count {
 			return rows[i].Count > rows[j].Count
 		}
 		return rows[i].Code < rows[j].Code
 	})
-	if len(rows) > topHoldReasons {
-		// Sum the tail rather than dropping it, so the rows still add up
-		// to the HELD tile beside them.
-		other := HoldReasonCount{Code: -1, Label: "other reasons"}
-		for _, r := range rows[topHoldReasons:] {
-			other.Count += r.Count
-		}
-		rows = append(rows[:topHoldReasons:topHoldReasons], other)
+	if len(rows) <= topHoldReasons {
+		return rows
 	}
-	act.HoldReasons = rows
-	return act
+	other := HoldReasonCount{Code: -1, Label: "other reasons"}
+	for _, r := range rows[topHoldReasons:] {
+		other.Count += r.Count
+	}
+	return append(rows[:topHoldReasons:topHoldReasons], other)
+}
+
+// newestFirst sorts an activity list and trims it to limit.
+func newestFirst(jobs []RecentJob, limit int) []RecentJob {
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].At > jobs[j].At })
+	if len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs
 }
 
 // recentTop keeps the newest `limit` entries seen, by At.

@@ -305,11 +305,27 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		opts.FetchOpts = htcondor.FetchMyJobs
 		opts.Owner = owner
 	}
-	// One walk per interval for the whole deployment, not one per page
-	// load. The key is the scope, so an admin's pool-wide view and a
-	// user's own view are cached apart; everyone sharing a scope shares
-	// the answer, which is what makes the cost independent of how many
-	// people have the page open.
+	// With a mirror answering, the page is half a dozen bounded queries
+	// and needs no cache: the numbers are current rather than up to
+	// three minutes old, and nothing walks the queue. The cached walk
+	// below is the fallback for a deployment without one, or for a
+	// mirror that is not currently usable.
+	if snap, merr := s.dashboardFromMirror(ctx, owner, ownedByMe); merr == nil {
+		s.writeJSON(w, http.StatusOK, DashboardResponse{
+			Username:     owner,
+			JobsByStatus: snap.Counts,
+			JobsTotal:    snap.Total,
+			Activity:     snap.Activity,
+		})
+		return
+	} else if s.dbMirror.Enabled() {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
+	}
+
+	// One walk per interval per scope, not one per page load. The key
+	// carries the owner because most viewers see only their own jobs and
+	// a snapshot holds theirs; see dashboardCacheKey.
 	key := dashboardCacheKey(owner, ownedByMe)
 	snap, err := s.dashboards().get(key, func() (*dashboardSnapshot, error) {
 		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)

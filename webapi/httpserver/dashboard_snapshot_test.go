@@ -349,3 +349,66 @@ func TestFailedRefreshKeepsTheLastGoodAnswer(t *testing.T) {
 		t.Error("with no prior snapshot the failure must surface")
 	}
 }
+
+// TestBothSourcesFoldTheHoldTailTheSameWay. The breakdown sits beside
+// the HELD tile and has to add up to it whichever source answered. A
+// rule that drifted between the mirror and the schedd would make the
+// panel disagree with itself depending on which was reachable -- and
+// that disagreement would look like a data problem, not a code one.
+func TestBothSourcesFoldTheHoldTailTheSameWay(t *testing.T) {
+	// Built the way the mirror path builds them: counts from a GROUP BY,
+	// no example messages yet.
+	var fromMirror []HoldReasonCount
+	// And the same population through the collector, the way a queue
+	// walk builds it.
+	fromWalk := newActivityCollector()
+
+	total := 0
+	for code := int64(1); code <= 20; code++ {
+		fromMirror = append(fromMirror, HoldReasonCount{
+			Code: code, Label: holdReasonLabel(code), Count: int(code),
+		})
+		for i := int64(0); i < code; i++ {
+			fromWalk.observe(heldAd(code, i, code, 1000, "reason"))
+			total++
+		}
+	}
+
+	mirrorRows := topHoldReasonRows(fromMirror)
+	walkRows := fromWalk.result(time.Now()).HoldReasons
+
+	if len(mirrorRows) != len(walkRows) {
+		t.Fatalf("row counts differ by source: mirror %d, walk %d", len(mirrorRows), len(walkRows))
+	}
+	sum := 0
+	for i := range mirrorRows {
+		if mirrorRows[i].Code != walkRows[i].Code || mirrorRows[i].Count != walkRows[i].Count {
+			t.Errorf("row %d differs by source: mirror %+v, walk %+v", i, mirrorRows[i], walkRows[i])
+		}
+		sum += mirrorRows[i].Count
+	}
+	if sum != total {
+		t.Errorf("rows sum to %d but %d jobs are held", sum, total)
+	}
+}
+
+// TestNewestFirstTrims is the shared ordering both sources rely on: the
+// mirror over-fetches a window because a mutable table has no ordering
+// to push a limit into, and the walk collects in queue order, which is
+// no order at all.
+func TestNewestFirstTrims(t *testing.T) {
+	var jobs []RecentJob
+	for at := int64(1); at <= 30; at++ {
+		jobs = append(jobs, RecentJob{ClusterID: at, At: at})
+	}
+	got := newestFirst(jobs, recentPerList)
+	if len(got) != recentPerList {
+		t.Fatalf("kept %d, want %d", len(got), recentPerList)
+	}
+	if got[0].At != 30 {
+		t.Errorf("newest first: got %d", got[0].At)
+	}
+	if got[len(got)-1].At != 30-int64(recentPerList)+1 {
+		t.Errorf("trimmed the wrong end: %+v", got)
+	}
+}
