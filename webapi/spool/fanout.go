@@ -98,6 +98,55 @@ func Plan(ads []*classad.ClassAd, size int64, lim Limits) ([]*classad.ClassAd, R
 	return ads, res, nil
 }
 
+// NoLimit is the byte ceiling for "no ceiling", in the form Growing can
+// actually apply.
+const NoLimit int64 = 1 << 62
+
+// PlanStreaming is Plan for an upload whose size is not known yet.
+//
+// Pipelining forces this: the fan-out starts before the stream ends, so
+// the proc count has to be chosen first and the volume rule then applies
+// to the tar rather than to the number of procs. It returns the procs to
+// attempt and the largest tar those procs can be served within
+// lim.MaxVolume.
+//
+// The consequence is worth stating plainly: with a known size, an
+// over-large tar means "fewer procs, partial progress"; here it means
+// the call is refused once the stream passes maxTar. Refusing is the
+// safe direction -- the alternative is a truncated tar, which spools
+// cleanly and leaves the job missing files at run time -- and the procs
+// already in flight fail loudly and stay in their spooling hold, so a
+// retry is a retry rather than a repair.
+func PlanStreaming(ads []*classad.ClassAd, lim Limits) ([]*classad.ClassAd, Result, int64, error) {
+	res := Result{Failed: map[string]string{}}
+	awaiting := len(ads)
+
+	if lim.MaxProcs > 0 && len(ads) > lim.MaxProcs {
+		ads = ads[:lim.MaxProcs]
+		res.Capped = true
+	}
+	if len(ads) == 0 {
+		return ads, res, 0, nil
+	}
+
+	// NoLimit rather than -1: Growing compares `written > limit`, so a
+	// negative "no ceiling" would refuse the very first byte. The
+	// sentinel has to be a number that means "more than any upload".
+	maxTar := NoLimit
+	if lim.MaxVolume > 0 {
+		maxTar = lim.MaxVolume / int64(len(ads))
+		if maxTar < 1 {
+			return nil, res, 0, fmt.Errorf(
+				"%d procs await input and the %d byte limit for a single call "+
+					"leaves nothing for each; use HTTP/HTTPS URLs in "+
+					"transfer_input_files instead", len(ads), lim.MaxVolume)
+		}
+	}
+
+	res.NotAttempted = awaiting - len(ads)
+	return ads, res, maxTar, nil
+}
+
 // FanOut spools src to each proc in ads, at most lim.Concurrency at once.
 //
 // Each proc gets its own reader from src. Sharing one reader would leave

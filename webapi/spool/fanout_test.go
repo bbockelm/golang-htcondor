@@ -1,6 +1,7 @@
 package spool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -124,5 +125,97 @@ func TestFanOutGivesEveryProcTheWholeTar(t *testing.T) {
 		if n != len(payload) {
 			t.Errorf("proc %s received %d bytes, want %d", id, n, len(payload))
 		}
+	}
+}
+
+// PlanStreaming is what decides how many procs a streamed upload serves
+// and how large that upload may be. It had no test at all.
+
+func planAds(n int) []*classad.ClassAd {
+	ads := make([]*classad.ClassAd, 0, n)
+	for i := 0; i < n; i++ {
+		ad := classad.New()
+		_ = ad.Set("ClusterId", 9)
+		_ = ad.Set("ProcId", i)
+		ads = append(ads, ad)
+	}
+	return ads
+}
+
+func TestPlanStreamingDividesTheVolumeAcrossProcs(t *testing.T) {
+	attempt, res, maxTar, err := PlanStreaming(planAds(10),
+		Limits{MaxProcs: 1000, MaxVolume: 1000, Concurrency: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempt) != 10 {
+		t.Errorf("attempting %d procs, want 10", len(attempt))
+	}
+	if maxTar != 100 {
+		t.Errorf("maxTar = %d, want 100 (1000 bytes across 10 procs)", maxTar)
+	}
+	if res.Capped {
+		t.Error("nothing was capped")
+	}
+}
+
+func TestPlanStreamingCapsProcsAndReportsTheRemainder(t *testing.T) {
+	attempt, res, _, err := PlanStreaming(planAds(25),
+		Limits{MaxProcs: 10, MaxVolume: 1 << 30, Concurrency: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempt) != 10 {
+		t.Errorf("attempting %d procs, want 10", len(attempt))
+	}
+	if res.NotAttempted != 15 {
+		t.Errorf("NotAttempted = %d, want 15", res.NotAttempted)
+	}
+	if !res.Capped {
+		t.Error("Capped is false after capping")
+	}
+}
+
+// The ceiling has to be a number Growing can apply. A negative sentinel
+// would make `written > limit` true on the first byte, so an unlimited
+// call would refuse every upload.
+func TestPlanStreamingWithNoVolumeLimitAcceptsBytes(t *testing.T) {
+	_, _, maxTar, err := PlanStreaming(planAds(3),
+		Limits{MaxProcs: 1000, MaxVolume: 0, Concurrency: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxTar <= 0 {
+		t.Fatalf("maxTar = %d; Growing would refuse the first byte", maxTar)
+	}
+
+	g, err := NewGrowing(t.TempDir(), maxTar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+	if err := g.Fill(bytes.NewReader(bytes.Repeat([]byte("x"), 4096))); err != nil {
+		t.Errorf("an unlimited upload was refused: %v", err)
+	}
+}
+
+// More procs than MaxVolume has bytes for: there is no upload that
+// serves them, so the call is refused rather than serving a truncated
+// one.
+func TestPlanStreamingRefusesWhenNothingIsAffordable(t *testing.T) {
+	_, _, _, err := PlanStreaming(planAds(10),
+		Limits{MaxProcs: 1000, MaxVolume: 5, Concurrency: 10})
+	if err == nil {
+		t.Fatal("expected a refusal when the volume limit leaves under a byte per proc")
+	}
+}
+
+func TestPlanStreamingWithNoProcs(t *testing.T) {
+	attempt, _, _, err := PlanStreaming(nil, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempt) != 0 {
+		t.Errorf("attempting %d procs from an empty list", len(attempt))
 	}
 }
