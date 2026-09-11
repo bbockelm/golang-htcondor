@@ -285,7 +285,7 @@ func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string,
 	// ApplyDefaults, which sets the LISTING default of 50. A GROUP BY is
 	// not a listing.
 	opts.Limit = aggregateGroupLimit + 1
-	rows, err := s.schedd.AggregateJobs(ctx, constraint, groupBy, opts)
+	rows, err := s.getSchedd().AggregateJobs(ctx, constraint, groupBy, opts)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate query failed: %w", err)
 	}
@@ -305,7 +305,7 @@ func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string,
 		totalOpts, ok := s.selfScopedQueryOptions(ctx, nil)
 		if ok {
 			totalOpts.Limit = 2
-			if totalRows, terr := s.schedd.AggregateJobs(ctx, constraint, nil, totalOpts); terr == nil {
+			if totalRows, terr := s.getSchedd().AggregateJobs(ctx, constraint, nil, totalOpts); terr == nil {
 				exactTotal = 0
 				for _, r := range totalRows {
 					exactTotal += r.Count

@@ -863,7 +863,7 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 	// agent could not know about is exactly what it exists for. Applied
 	// AFTER the lint above, so the lint judges what the user wrote and
 	// the policy has the last word on what is submitted.
-	clusterID, procAds, err := s.schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 	if err != nil {
 		return nil, fmt.Errorf("job submission failed: %w", err)
 	}
@@ -1065,7 +1065,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		BufferSize:   100,
 		WriteTimeout: 5 * time.Second,
 	}
-	resultCh, err := s.schedd.QueryStreamWithOptions(ctx, scoped, opts, streamOpts)
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, scoped, opts, streamOpts)
 	if err != nil {
 		// Pre-request error
 		return nil, fmt.Errorf("failed to start query: %w", err)
@@ -1182,7 +1182,7 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -1267,7 +1267,7 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query job: %w", err)
 	}
@@ -1358,7 +1358,7 @@ func performJobAction(ctx context.Context, args map[string]interface{}, actionFu
 
 // toolRemoveJob handles removing a specific job
 func (s *Server) toolRemoveJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.schedd.RemoveJobs, "Removed via MCP", "remove")
+	return performJobAction(ctx, args, s.getSchedd().RemoveJobs, "Removed via MCP", "remove")
 }
 
 // toolRemoveJobs handles removing multiple jobs
@@ -1382,7 +1382,7 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	results, err := s.schedd.RemoveJobs(ctx, constraint, reason)
+	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
 	if err != nil {
 		return nil, fmt.Errorf("bulk job removal failed: %w", err)
 	}
@@ -1429,7 +1429,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 	// classAdValues. A failed lookup is not fatal -- it only costs the
 	// numeric coercion, and the edit itself is the schedd's to authorize.
 	var current *classad.ClassAd
-	if ads, _, err := s.schedd.QueryWithOptions(ctx,
+	if ads, _, err := s.getSchedd().QueryWithOptions(ctx,
 		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc),
 		&htcondor.QueryOptions{Projection: attrNames(updates), Limit: 1},
 	); err == nil && len(ads) > 0 {
@@ -1446,7 +1446,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		Force:               false,
 	}
 
-	if err := s.schedd.EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
 		return nil, fmt.Errorf("failed to edit job: %w", err)
 	}
 
@@ -1573,12 +1573,12 @@ func sortedAttrNames(updates map[string]interface{}) []string {
 
 // toolHoldJob handles holding a job
 func (s *Server) toolHoldJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.schedd.HoldJobs, "Held via MCP", "hold")
+	return performJobAction(ctx, args, s.getSchedd().HoldJobs, "Held via MCP", "hold")
 }
 
 // toolReleaseJob handles releasing a job
 func (s *Server) toolReleaseJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.schedd.ReleaseJobs, "Released via MCP", "release")
+	return performJobAction(ctx, args, s.getSchedd().ReleaseJobs, "Released via MCP", "release")
 }
 
 // handleListResources returns the list of available resources
@@ -1727,7 +1727,7 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
@@ -1754,7 +1754,7 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	defer cancel()
 
 	var sandboxBuf bytes.Buffer
-	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
 
 	if err := <-errChan; err != nil {
 		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
@@ -1995,7 +1995,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	}
 
 	// Execute query
-	records, err := s.schedd.QueryHistoryWithOptions(ctx, constraint, opts)
+	records, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
@@ -2097,7 +2097,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		if !ok {
 			return nil, fmt.Errorf("authentication required")
 		}
-		jobAds, _, err = s.schedd.QueryWithOptions(ctx, constraint, opts)
+		jobAds, _, err = s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query job: %w", err)
 		}
@@ -2199,7 +2199,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	}
 
 	// Spool the files to the schedd
-	if err := s.schedd.SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
+	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
 		return nil, fmt.Errorf("failed to spool job files: %w", err)
 	}
 
@@ -2251,7 +2251,7 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	defer cancel()
 
 	var sandboxBuf bytes.Buffer
-	errChan := s.schedd.ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
+	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
 
 	if err := <-errChan; err != nil {
 		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
@@ -2399,7 +2399,7 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 		Projection: projection,
 		FetchOpts:  htcondor.FetchMyJobs,
 	}
-	ads, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil || len(ads) == 0 {
 		return ""
 	}

@@ -22,7 +22,13 @@ import (
 
 // Server represents the MCP server
 type Server struct {
-	schedd             *htcondor.Schedd
+	schedd *htcondor.Schedd
+	// scheddProvider, when set, is consulted for every schedd call
+	// instead of the snapshot above. The HTTP server replaces its
+	// schedd handle when the collector reports a new address, and a
+	// copy of the old pointer keeps dialling a socket that no longer
+	// exists -- see getSchedd.
+	scheddProvider     func() *htcondor.Schedd
 	collector          *htcondor.Collector
 	credd              htcondor.CreddClient
 	instructions       string // Server-level instructions surfaced to agents in the initialize response
@@ -73,8 +79,14 @@ type Config struct {
 	// should talk to. Consulted when neither ScheddAddr nor ScheddName
 	// is set, and it selects that host's schedd rather than whichever
 	// one the collector lists first.
-	ScheddHost      string
-	Schedd          *htcondor.Schedd     // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
+	ScheddHost string
+	Schedd     *htcondor.Schedd // Pre-configured Schedd instance (optional, if provided, ScheddName/ScheddAddr are ignored)
+
+	// ScheddProvider returns the schedd to use for each call. Prefer it
+	// over Schedd when the address can change under you: a schedd that
+	// restarts comes back on a different shared-port socket, and a
+	// handle captured once then points at nothing.
+	ScheddProvider  func() *htcondor.Schedd
 	SigningKeyPath  string               // Path to token signing key (optional, for token generation)
 	TrustDomain     string               // Trust domain for token issuer (optional)
 	UIDDomain       string               // UID domain for generated token username (optional)
@@ -155,11 +167,19 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Use provided schedd or create new one
 	var schedd *htcondor.Schedd
-	if cfg.Schedd != nil {
+	switch {
+	case cfg.ScheddProvider != nil:
+		// A provider supersedes any snapshot: it is consulted per call,
+		// so it also answers "was a schedd supplied" here. Falling
+		// through to discovery instead would fail for a caller that
+		// supplied a provider and no address.
+		logger.Debug(logging.DestinationSchedd, "Using provided schedd getter")
+		schedd = cfg.ScheddProvider()
+	case cfg.Schedd != nil:
 		// Reuse provided schedd instance
 		logger.Debug(logging.DestinationSchedd, "Using provided schedd instance")
 		schedd = cfg.Schedd
-	} else {
+	default:
 		// Discover schedd address if not provided
 		scheddAddr := cfg.ScheddAddr
 		if scheddAddr == "" {
@@ -200,6 +220,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	s := &Server{
 		schedd:         schedd,
+		scheddProvider: cfg.ScheddProvider,
 		collector:      cfg.Collector,
 		credd:          cfg.Credd,
 		instructions:   buildInstructions(schedd.Name(), cfg.Instructions),
@@ -460,4 +481,20 @@ func toolNameFromParams(params json.RawMessage) string {
 		return "unknown"
 	}
 	return req.Name
+}
+
+// getSchedd returns the schedd to use for this call.
+//
+// The HTTP server replaces its schedd handle when the collector reports a
+// new address -- which happens whenever the schedd restarts, since that
+// changes its shared-port socket. Reading through the provider each time
+// is what keeps MCP from holding the handle that was correct at startup
+// and dialling a dead socket forever after.
+func (s *Server) getSchedd() *htcondor.Schedd {
+	if s.scheddProvider != nil {
+		if sc := s.scheddProvider(); sc != nil {
+			return sc
+		}
+	}
+	return s.schedd
 }
