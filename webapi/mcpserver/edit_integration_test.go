@@ -35,10 +35,7 @@ func TestMCPEditJobIntegration(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverScheddForTest(t, harness)
-
-	// Create Schedd instance
-	schedd := htcondor.NewSchedd("local", addr)
+	schedd := locateSchedd(t, harness)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -105,12 +102,21 @@ queue
 			t.Fatalf("Result is not a map: %T", result)
 		}
 
-		success, ok := resultMap["success"].(bool)
-		if !ok || !success {
-			t.Errorf("Result success = %v, want true", resultMap["success"])
+		// The tool returns the MCP content/metadata shape, like every
+		// other tool here; it has never had a "success" field. Asserting
+		// one meant this subtest failed against a working edit, and the
+		// build tag kept it out of the default CI job so nobody saw it.
+		//
+		// What the result must carry is a human-readable confirmation;
+		// whether the edit took is checked against the queue below,
+		// which is the stronger claim anyway.
+		content, ok := resultMap["content"].([]map[string]interface{})
+		if !ok || len(content) == 0 {
+			t.Fatalf("no content in edit result: %+v", resultMap)
 		}
-
-		t.Logf("✓ MCP edit_job tool returned success")
+		if text, _ := content[0]["text"].(string); text == "" {
+			t.Errorf("edit result carries no text: %+v", content[0])
+		}
 
 		// Verify the changes in HTCondor
 		ads, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %s", clusterID), []string{"RequestMemory", "MyMCPAttr"})
@@ -230,10 +236,7 @@ func TestMCPEditJobToolListedInTools(t *testing.T) {
 	}
 
 	// Discover schedd address
-	addr := discoverScheddForTest(t, harness)
-
-	// Create Schedd instance
-	schedd := htcondor.NewSchedd("local", addr)
+	schedd := locateSchedd(t, harness)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -306,12 +309,3 @@ func TestMCPEditJobToolListedInTools(t *testing.T) {
 }
 
 // Helper function to discover schedd address from harness
-func discoverScheddForTest(t *testing.T, harness *htcondor.CondorTestHarness) string {
-	addr := harness.GetCollectorAddr()
-	addr = strings.TrimPrefix(addr, "<")
-	if idx := strings.Index(addr, "?"); idx > 0 {
-		addr = addr[:idx]
-	}
-	addr = strings.TrimSuffix(addr, ">")
-	return addr
-}

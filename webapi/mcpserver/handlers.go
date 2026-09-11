@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/spool"
 )
 
 // Tool represents an MCP tool definition
@@ -485,14 +486,24 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			},
 		},
 		{
-			Name:        "upload_job_input",
-			Description: "Upload input files to a job's sandbox. Use this for small files (<100KB total). For larger files, use HTTP/HTTPS URLs in transfer_input_files instead.",
+			Name: "upload_job_input",
+			Description: "Upload input files to a job's sandbox. Use this for small files (<100KB total). " +
+				"For larger files, use HTTP/HTTPS URLs in transfer_input_files instead.\n\n" +
+				"HTCondor spools input PER PROC. A submission with `queue N` leaves N procs held, " +
+				"and each needs its own input before it will run. Pass a bare cluster id " +
+				"(job_id=\"2954964\") to spool every proc of the cluster that is still waiting, " +
+				"in one call; pass \"cluster.proc\" to spool exactly that proc. The cluster form " +
+				"reports how many procs it spooled and how many remain, and spools at most " +
+				"1000 procs per call — beyond that, HTTP/HTTPS URLs in transfer_input_files are " +
+				"the right pattern, since the workers fetch the input themselves.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"job_id": map[string]interface{}{
-						"type":        "string",
-						"description": "Job ID in format 'cluster.proc' (e.g., '123.0')",
+						"type": "string",
+						"description": "Either one job as 'cluster.proc' (e.g. '123.0'), or a bare " +
+							"cluster id (e.g. '123') to upload the same files to every proc of that " +
+							"cluster still held for input spooling.",
 					},
 					"files": map[string]interface{}{
 						"type":        "array",
@@ -865,6 +876,23 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
+	// Spooling is per proc, not per submission: `queue N` leaves N procs
+	// held, and each needs its own input before it will run. Saying so
+	// here is the whole of the surprise reported in af-mcp-platform#268 --
+	// one upload released proc 0 and procs 1-4 stayed held.
+	var fanOut string
+	if insp.needsSpooling && len(procAds) > 1 {
+		cluster, _ := procAds[0].EvaluateAttrInt("ClusterId")
+		fanOut = fmt.Sprintf(`
+   NOTE: this submission has %d procs, and HTCondor spools input PER PROC.
+   Uploading to "%s" releases that proc only; the rest stay HELD.
+   Either pass the bare cluster id — upload_job_input(job_id="%d") — to spool
+   every proc still waiting in one call, or use HTTP/HTTPS URLs in
+   transfer_input_files so the workers fetch shared inputs themselves
+   (the better pattern for a large fan-out).
+`, len(procAds), jobIDs[0], cluster)
+	}
+
 	var nextSteps string
 	if insp.needsSpooling {
 		nextSteps = fmt.Sprintf(`
@@ -874,7 +902,7 @@ NEXT STEPS:
 2. You MUST call upload_job_input to complete the spooling step, even if the
    only file to upload is the executable (and there are no other input files).
    DO NOT use release_job — the job cannot run until spooling is complete.
-   Releasing without spooling will cause the job to fail immediately.
+   Releasing without spooling will cause the job to fail immediately.%s
 3. After a successful upload_job_input, the job is automatically released to IDLE (JobStatus=1).
 4. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
 5. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
@@ -886,7 +914,7 @@ Job Status Values:
 - 4 = Completed
 - 5 = Held (waiting for input files or user action)
 
-First job ID for status checks: %s`, jobIDs[0])
+First job ID for status checks: %s`, fanOut, jobIDs[0])
 	} else {
 		nextSteps = fmt.Sprintf(`
 
@@ -2033,8 +2061,9 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("files array is required and must not be empty")
 	}
 
-	// Parse job ID
-	cluster, proc, err := parseJobID(jobID)
+	// A bare cluster id means every proc still held for spooling; see
+	// bulkupload.go. "cluster.proc" keeps its exact meaning.
+	target, err := spool.ParseTarget(jobID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid job_id: %w", err)
 	}
@@ -2045,24 +2074,36 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	// SPOOL_JOB_FILES; this keeps the attempt from getting that far and
 	// keeps the failure legible ("not found" rather than a transfer
 	// error from the peer).
-	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
-	}
-	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
-	})
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
-	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query job: %w", err)
-	}
-
-	if len(jobAds) == 0 {
-		return nil, fmt.Errorf("job %s not found", jobID)
+	var jobAds []*classad.ClassAd
+	if target.AllProcs {
+		jobAds, err = s.procsAwaitingInput(ctx, target.Cluster)
+		if err != nil {
+			return nil, err
+		}
+		if len(jobAds) == 0 {
+			// Not an error: the common cause is that the cluster's input
+			// is already spooled, which is the state the caller wanted.
+			return uploadNothingToDo(target.Cluster), nil
+		}
+	} else {
+		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.Cluster, target.Proc)
+		constraint, ok := s.scopeToOwner(ctx, idClause)
+		if !ok {
+			return nil, fmt.Errorf("authentication required")
+		}
+		opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
+			Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
+		})
+		if !ok {
+			return nil, fmt.Errorf("authentication required")
+		}
+		jobAds, _, err = s.schedd.QueryWithOptions(ctx, constraint, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query job: %w", err)
+		}
+		if len(jobAds) == 0 {
+			return nil, fmt.Errorf("job %s not found", jobID)
+		}
 	}
 
 	// Build a tarball from the input files
@@ -2148,9 +2189,17 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 			"For large files, consider using HTTP/HTTPS URLs in transfer_input_files instead.", totalSize)
 	}
 
+	// The tar is replayed once per proc in the cluster-wide case, so keep
+	// the bytes rather than a consumed reader.
+	tarBytes := tarBuf.Bytes()
+
+	if target.AllProcs {
+		return s.uploadToCluster(ctx, target.Cluster, jobAds, tarBytes,
+			uploadedFiles, sizeWarning)
+	}
+
 	// Spool the files to the schedd
-	err = s.schedd.SpoolJobFilesFromTar(ctx, jobAds, &tarBuf)
-	if err != nil {
+	if err := s.schedd.SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
 		return nil, fmt.Errorf("failed to spool job files: %w", err)
 	}
 

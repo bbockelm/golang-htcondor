@@ -66,7 +66,29 @@ func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string 
 }
 
 // handleMCPMessage handles MCP JSON-RPC messages over HTTP
+// maxMCPBody bounds an MCP request body.
+//
+// handleMCPMessage reads the body whole -- twice, on the OAuth path,
+// which restores it for the second read -- and did so with no limit at
+// all, so one authenticated caller could make the server allocate
+// however much it cared to send. Every other handler in this file bounds
+// bodies at 1 MB.
+//
+// Not 1 MB here. upload_job_input carries file content, and its 100 KB
+// guidance is advisory: a larger upload warns and succeeds today.
+// Bounding at 1 MB would silently turn that advice into a hard limit and
+// reject uploads that currently work. This is a backstop against
+// unbounded allocation, not a functional cap, so it sits well above
+// anything the tools advise -- base64 inflation and JSON escaping
+// included.
+const maxMCPBody = 16 << 20 // 16 MB
+
 func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
+	// Before anything reads it. The body is consumed whole below, and on
+	// the OAuth path it is read, buffered and re-read, so the limit has
+	// to be in place ahead of the first read rather than at each.
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBody)
+
 	// Validate OAuth2 token or detect HTCondor token
 	token, err := h.validateOAuth2Token(r)
 	if err != nil {

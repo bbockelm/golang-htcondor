@@ -74,6 +74,9 @@ cmd/htcondor-api/tmp/
 /test*.log
 /webapi/httpserver/job.log
 /webapi/httpserver/test*.log
+# mcpserver's integration tests submit real jobs, so they leave user logs
+# where they run.
+/webapi/mcpserver/*.log
 
 # Test databases
 oauth2.db
