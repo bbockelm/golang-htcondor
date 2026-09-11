@@ -65,9 +65,10 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the subject token to its subject and granted scopes. C1 accepts
-	// only access tokens this server issued.
-	subject, subjectScopes, subjectGroups, err := h.resolveSubjectToken(ctx, subjectToken, subjectTokenType)
+	// Resolve the subject token to its subject and the ceiling of scopes it may
+	// obtain. Access tokens this server issued and (when configured) JWTs from
+	// trusted external issuers are both accepted.
+	subject, subjectScopes, subjectGroups, err := h.resolveSubjectToken(ctx, subjectToken, subjectTokenType, client)
 	if err != nil {
 		// Deliberately terse: never echo token contents or introspection
 		// internals back to the caller.
@@ -139,24 +140,47 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resolveSubjectToken validates the subject token and returns the subject, its
-// granted scopes, and its group list. C1 handles only access tokens this server
-// issued; other subject_token_types (JWT / external id_token) are stage C2.
-func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType string) (string, []string, []string, error) {
-	if tokenType != tokenTypeAccessToken {
+// resolveSubjectToken validates the subject token and returns the subject, the
+// ceiling of scopes the exchanged token may obtain, and any group list.
+//
+//   - An access token this server issued: the ceiling is the subject's own
+//     granted scopes.
+//   - A JWT from a configured trusted external issuer (subject_token_type jwt or
+//     id_token): the ceiling is the issuer's allowed scopes, further bounded by
+//     the exchanging (actor) client's own scopes, and the subject is namespaced
+//     to the issuer's identity domain. Only available when issuers are
+//     configured (stage C2).
+func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType string, actor fosite.Client) (string, []string, []string, error) {
+	switch tokenType {
+	case tokenTypeAccessToken:
+		ar, err := h.oauth2Provider.IntrospectAccessToken(ctx, token)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("subject_token introspection failed: %w", err)
+		}
+		subject := ar.GetSession().GetSubject()
+		if subject == "" {
+			return "", nil, nil, fmt.Errorf("subject_token has no subject")
+		}
+		var groups []string
+		if s, ok := ar.GetSession().(*Session); ok {
+			groups = s.Groups
+		}
+		return subject, ar.GetGrantedScopes(), groups, nil
+
+	case tokenTypeJWT, tokenTypeIDToken:
+		if h.extIssuers == nil {
+			return "", nil, nil, fmt.Errorf("external subject tokens are not accepted")
+		}
+		identity, groups, issuerAllowed, err := h.extIssuers.validate(ctx, token)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		// The external token carries no authorization in our system: bound it by
+		// the issuer's declared ceiling AND the actor client's own scopes.
+		ceiling := intersectScopes(issuerAllowed, actor.GetScopes())
+		return identity, ceiling, groups, nil
+
+	default:
 		return "", nil, nil, fmt.Errorf("unsupported subject_token_type %q", tokenType)
 	}
-	ar, err := h.oauth2Provider.IntrospectAccessToken(ctx, token)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("subject_token introspection failed: %w", err)
-	}
-	subject := ar.GetSession().GetSubject()
-	if subject == "" {
-		return "", nil, nil, fmt.Errorf("subject_token has no subject")
-	}
-	var groups []string
-	if s, ok := ar.GetSession().(*Session); ok {
-		groups = s.Groups
-	}
-	return subject, ar.GetGrantedScopes(), groups, nil
 }

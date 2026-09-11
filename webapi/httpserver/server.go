@@ -132,15 +132,18 @@ type Config struct {
 	// Document (public client); MCPCIMDAllowedHosts optionally restricts it.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
-	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL      string   // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL   string   // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL   string   // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes        []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim string   // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim   string   // Claim name for groups in user info (default: "groups")
+	// MCPTokenExchangeIssuers: JSON list of trusted external issuers for token
+	// exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS).
+	MCPTokenExchangeIssuers string
+	OAuth2ClientID          string   // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret      string   // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL           string   // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL          string   // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL       string   // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL       string   // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -266,6 +269,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Issuer:                cfg.OAuth2Issuer,
 		MCPCIMDEnabled:              cfg.MCPCIMDEnabled,
 		MCPCIMDAllowedHosts:         cfg.MCPCIMDAllowedHosts,
+		MCPTokenExchangeIssuers:     cfg.MCPTokenExchangeIssuers,
 		OAuth2ClientID:              cfg.OAuth2ClientID,
 		OAuth2ClientSecret:          cfg.OAuth2ClientSecret,
 		OAuth2AuthURL:               cfg.OAuth2AuthURL,
