@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -82,17 +81,6 @@ func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
 	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
-	// Pin the collector's port. The pool gets restarted below, and the
-	// server's collector handle has to stay valid across it -- in
-	// production the collector is a fixed endpoint and only the schedd
-	// moves, which is precisely the situation being reproduced.
-	collectorPort := reserveLocalPort(t)
-	appendCondorConfig(t, configFile, fmt.Sprintf(`
-# --- schedd-restart test overrides ---
-COLLECTOR_HOST = 127.0.0.1:%d
-COLLECTOR_ARGS = -p %d
-`, collectorPort, collectorPort))
-
 	os.Setenv("CONDOR_CONFIG", configFile)
 	defer os.Unsetenv("CONDOR_CONFIG")
 
@@ -172,24 +160,23 @@ COLLECTOR_ARGS = -p %d
 	}
 	t.Logf("before: sock=%s addr=%s", beforeSock, beforeAddr)
 
-	// (a) Restart the pool and confirm the socket id actually changed.
+	// (a) Restart the schedd onto a different socket, and confirm the
+	// address really changed.
 	//
-	// The master is restarted rather than just the schedd: a schedd
-	// restarted under a live master comes back on the same shared-port
-	// socket, so the address would not change and the test would prove
-	// nothing. Production saw the socket change because the whole daemon
-	// tree came back.
-	t.Log("restarting the pool")
-	stopCondorMaster(condorMaster, t)
-	condorMaster, err = startCondorMaster(ctx, configFile, tempDir)
-	if err != nil {
-		t.Fatalf("Failed to restart condor_master: %v", err)
-	}
-	defer stopCondorMaster(condorMaster, t)
-	if err := waitForCondor(tempDir, 90*time.Second, t); err != nil {
-		t.Fatalf("Condor failed to restart: %v", err)
-	}
-	afterSock := waitForNewScheddSock(t, tempDir, beforeSock, 90*time.Second)
+	// A schedd restarted under a live master comes back on the socket it
+	// had, so simply bouncing it would leave the address identical and
+	// the rest of this test would prove nothing. The master passes each
+	// daemon its shared-port socket name, and takes extra arguments for
+	// a daemon from <SUBSYS>_ARGS, so naming the socket there reproduces
+	// what a real restart does to the address while leaving the schedd's
+	// name -- which is what discovery matches on -- alone.
+	newSock := fmt.Sprintf("schedd_moved_%d", time.Now().UnixNano()%100000)
+	t.Logf("restarting the schedd onto sock=%s", newSock)
+	appendCondorConfig(t, configFile, fmt.Sprintf("\nSCHEDD_ARGS = -sock %s\n", newSock))
+	runCondorTool(t, "condor_reconfig", "-master")
+	runCondorTool(t, "condor_restart", "-fast", "-schedd")
+
+	afterSock := waitForNewScheddSock(t, tempDir, beforeSock, 150*time.Second)
 	t.Logf("after:  sock=%s", afterSock)
 	if afterSock == beforeSock {
 		t.Fatal("the socket id did not change, so the rest of this test proves nothing")
@@ -372,19 +359,6 @@ func discoverScheddNameAndAddress(t *testing.T, collector *htcondor.Collector, t
 	return "", ""
 }
 
-// reserveLocalPort picks a free TCP port and releases it, so the config
-// written below can name it.
-func reserveLocalPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
-}
-
 // appendCondorConfig adds overrides after the shared mini-pool config, so
 // they win.
 func appendCondorConfig(t *testing.T, configFile, extra string) {
@@ -397,4 +371,16 @@ func appendCondorConfig(t *testing.T, configFile, extra string) {
 	if _, err := f.WriteString(extra); err != nil {
 		t.Fatalf("append config: %v", err)
 	}
+}
+
+// runCondorTool runs an HTCondor CLI against the test pool.
+func runCondorTool(t *testing.T, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Env = os.Environ() // CONDOR_CONFIG is already set for this process
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v: %s", name, args, err, out)
+	}
+	t.Logf("%s %v: %s", name, args, strings.TrimSpace(string(out)))
 }
