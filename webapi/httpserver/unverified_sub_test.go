@@ -133,8 +133,13 @@ func TestForgedTokenCannotReadAnotherUsersTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
+	// Fatal, not Skip: the store comes from newTestConfig, which this
+	// test controls, so a nil library means the fixture broke rather
+	// than that the environment lacks something. A security regression
+	// test that quietly skips is worse than one that fails -- it
+	// reports green while checking nothing.
 	if s.templateLibrary == nil {
-		t.Skip("no template store configured in this build")
+		t.Fatal("no template store: this test cannot demonstrate the exposure it exists for")
 	}
 
 	// The victim saves a template.
