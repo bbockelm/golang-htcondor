@@ -1142,3 +1142,122 @@ func parseGID(t *testing.T, gid string) uint32 {
 	}
 	return result
 }
+
+// The three ways a name can differ between what a job ad lists and what
+// arrives in the tarball. Each of these silently dropped a file:
+// extraction reported success having written nothing, because an
+// unmatched entry is a `continue`.
+
+// A job that lists "results/data.json" gets back "data.json" -- the
+// sender flattens output file names.
+func TestExtractOutputSandboxAcceptsTheFlattenedName(t *testing.T) {
+	outputDir := t.TempDir()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, "data.json", `{"result":42}`)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Owner", getTestUsername())
+	_ = jobAd.Set("TransferOutput", "results/data.json")
+
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	verifyFileContent(t, filepath.Join(outputDir, "data.json"), `{"result":42}`)
+}
+
+// A spooled job has no TransferOutputRemaps -- the schedd consumes it
+// and keeps the original under SUBMIT_TransferOutputRemaps -- while the
+// tarball's names are already remapped.
+func TestExtractOutputSandboxReadsSubmitRemaps(t *testing.T) {
+	outputDir := t.TempDir()
+	finalDir := filepath.Join(outputDir, "final")
+	if err := os.MkdirAll(finalDir, 0750); err != nil {
+		t.Fatalf("Failed to create final dir: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	// The names the schedd's spool holds after applying the remaps.
+	addTarFile(t, tw, filepath.Join(finalDir, "remapped1.txt"), "output1")
+	addTarFile(t, tw, "subdir/remapped2.txt", "output2")
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Owner", getTestUsername())
+	_ = jobAd.Set("TransferOutput", "out1.txt,out2.txt")
+	// Quoted, the way the SUBMIT_-prefixed copy carries it.
+	_ = jobAd.Set("SUBMIT_TransferOutputRemaps",
+		fmt.Sprintf(`"out1.txt=%s/remapped1.txt;out2.txt=subdir/remapped2.txt"`, finalDir))
+
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	// An absolute remap target is honored as written...
+	verifyFileContent(t, filepath.Join(finalDir, "remapped1.txt"), "output1")
+	// ...a relative one resolves against Iwd.
+	verifyFileContent(t, filepath.Join(outputDir, "subdir", "remapped2.txt"), "output2")
+}
+
+// An absolute path in the tarball is honored only because the job ad
+// declares it as a remap target. One that is not declared must not
+// steer a write outside Iwd.
+func TestExtractOutputSandboxRefusesAnUndeclaredAbsolutePath(t *testing.T) {
+	outputDir := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "escaped.txt")
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, elsewhere, "should not land here")
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Owner", getTestUsername())
+	// No TransferOutput, so nothing is filtered out by name: the only
+	// thing standing between this entry and an arbitrary write is the
+	// destination rule.
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	if _, err := os.Stat(elsewhere); err == nil {
+		t.Errorf("an undeclared absolute tar entry was written to %s", elsewhere)
+	}
+}
+
+// A relative entry that climbs out of Iwd must not be written. Nothing
+// upstream of the extractor enforces this -- the name comes from the
+// tarball -- and with no TransferOutput list there is no allow-list to
+// stop it either.
+func TestExtractOutputSandboxRefusesPathTraversal(t *testing.T) {
+	outputDir := t.TempDir()
+	target := filepath.Join(outputDir, "escaped.txt")
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, "sub/../../escaped.txt", "should not land here")
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", filepath.Join(outputDir, "iwd"))
+	_ = jobAd.Set("Owner", getTestUsername())
+
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Errorf("a traversing tar entry was written to %s", target)
+	}
+}

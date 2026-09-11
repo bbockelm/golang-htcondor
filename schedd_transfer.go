@@ -201,6 +201,16 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 			transferOutputFiles = make(map[string]bool)
 			for _, f := range fileList {
 				transferOutputFiles[f] = true
+				// The sender flattens: an output file the job listed as
+				// "results/data.json" arrives named "data.json", which
+				// is also how it sits in the schedd's spool. Filtering
+				// on the listed name alone dropped every output file
+				// with a directory component -- silently, since the
+				// sink logs the skip and returns no error, so the
+				// caller got a short tarball and no indication of it.
+				if base := path.Base(f); base != f {
+					transferOutputFiles[base] = true
+				}
 			}
 		}
 	}
