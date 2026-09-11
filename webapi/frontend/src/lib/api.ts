@@ -141,10 +141,47 @@ export interface SuperuserModeState {
   note?: string;
 }
 
+export interface RecentJob {
+  cluster_id: number;
+  proc_id: number;
+  owner?: string;
+  /** Unix seconds of the event this list is about. */
+  at: number;
+  /** The one fact worth showing beside it: hold reason, command, host. */
+  detail?: string;
+}
+
+/** One row of the hold breakdown: the code's meaning, how many, and an
+ *  example message — the code says the category, the message says which
+ *  file or which host. */
+export interface HoldReasonCount {
+  code: number;
+  label: string;
+  count: number;
+  example?: string;
+}
+
+export interface DashboardActivity {
+  hold_reasons?: HoldReasonCount[];
+  recently_submitted?: RecentJob[];
+  recently_started?: RecentJob[];
+  recently_held?: RecentJob[];
+  recently_completed?: RecentJob[];
+  /** False when nothing can answer "what finished recently": a finished
+   *  job has left the queue, so only the history archive knows. Absent
+   *  rather than empty, because empty reads as "nothing finished". */
+  completed_available: boolean;
+  /** What answered, and when. A cached snapshot is minutes old by
+   *  design; saying so is the difference between stale and wrong. */
+  source: string;
+  computed_at: number;
+}
+
 export interface DashboardStats {
   username: string;
   jobs_by_status: Record<string, number>;
   jobs_total: number;
+  activity: DashboardActivity;
 }
 
 // --- htcondordb mirror ---

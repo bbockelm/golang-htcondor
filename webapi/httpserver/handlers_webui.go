@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -188,6 +189,10 @@ type DashboardResponse struct {
 	Username     string         `json:"username"`
 	JobsByStatus map[string]int `json:"jobs_by_status"`
 	JobsTotal    int            `json:"jobs_total"`
+	// Activity is the "how is this access point doing" half: why jobs
+	// are held, and what changed recently. Computed from the same walk
+	// as the counts.
+	Activity DashboardActivity `json:"activity"`
 }
 
 // holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
@@ -276,19 +281,39 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// jobs page already draws that distinction (displayJobStatus in
 	// lib/api.ts); without it the dashboard's HELD tile makes a routine
 	// submit look like a failure.
+	//
+	// The rest of the projection pays for the activity view out of the
+	// walk this was already doing: the identity to name a job, the three
+	// timestamps the recent lists sort on, the hold text, and one detail
+	// each. Six more attributes on a read of the whole queue is a far
+	// better trade than a second query -- and none of it is worth
+	// anything without the walk, which is why it goes here rather than
+	// into an endpoint of its own.
 	opts := &htcondor.QueryOptions{
-		Limit:      -1,
-		Projection: []string{"JobStatus", "HoldReasonCode"},
+		Limit: -1,
+		Projection: []string{
+			"JobStatus", "HoldReasonCode", "HoldReason",
+			"ClusterId", "ProcId", "Owner",
+			"QDate", "JobCurrentStartDate", "JobStartDate", "EnteredCurrentStatus",
+			"Cmd", "RemoteHost",
+		},
 	}
 	if ownedByMe {
 		opts.FetchOpts = htcondor.FetchMyJobs
 		opts.Owner = owner
 	}
-	streamOpts := &htcondor.StreamOptions{
-		BufferSize:   s.streamBufferSize,
-		WriteTimeout: s.streamWriteTimeout,
+	// One walk per interval for the whole deployment, not one per page
+	// load. The key is the scope, so an admin's pool-wide view and a
+	// user's own view are cached apart; everyone sharing a scope shares
+	// the answer, which is what makes the cost independent of how many
+	// people have the page open.
+	key := "mine:" + owner
+	if !ownedByMe {
+		key = "all"
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+	snap, err := s.dashboards().get(key, dashboardRefresh, func() (*dashboardSnapshot, error) {
+		return s.walkQueueForDashboard(ctx, opts)
+	})
 	if err != nil {
 		switch {
 		case ratelimit.IsRateLimitError(err):
@@ -301,7 +326,32 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeJSON(w, http.StatusOK, DashboardResponse{
+		Username:     owner,
+		JobsByStatus: snap.Counts,
+		JobsTotal:    snap.Total,
+		Activity:     snap.Activity,
+	})
+}
+
+// walkQueueForDashboard reads the queue once and folds it into counts
+// and the activity view.
+//
+// It is the expensive thing the dashboard does, which is why the caller
+// runs it behind a cache: on a busy access point this reads tens of
+// thousands of ads, and it used to do so on every open of the page.
+func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
+	}
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+	if err != nil {
+		return nil, err
+	}
+
 	counts := make(map[string]int)
+	activity := newActivityCollector()
 	total := 0
 	for result := range resultCh {
 		if result.Err != nil {
@@ -324,12 +374,13 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			hrc = v
 		}
 		counts[dashboardStatusName(js, hrc)]++
+		activity.observe(result.Ad)
 		total++
 	}
 
-	s.writeJSON(w, http.StatusOK, DashboardResponse{
-		Username:     owner,
-		JobsByStatus: counts,
-		JobsTotal:    total,
-	})
+	return &dashboardSnapshot{
+		Counts:   counts,
+		Total:    total,
+		Activity: activity.result("schedd", time.Now()),
+	}, nil
 }

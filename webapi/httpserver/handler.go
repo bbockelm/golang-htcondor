@@ -254,6 +254,11 @@ type Handler struct {
 	// cache (~30s TTL) shared across all match-analysis calls.
 	matchAnalysisOnce  sync.Once
 	matchAnalysisSlots *matchanalyzer.CollectorSlotProvider
+	// dashboardCache holds the dashboard's queue walk, shared across
+	// viewers. Built lazily so a Handler assembled in a test without the
+	// full constructor still works.
+	dashboardCacheOnce sync.Once
+	dashboardCacheVal  *dashboardCache
 	token              string             // Token for daemon authentication
 	mux                *http.ServeMux     // HTTP request multiplexer
 	ctx                context.Context    // Context for background goroutines
