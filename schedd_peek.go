@@ -38,9 +38,7 @@ import (
 	"os"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/cedar/security"
 )
 
 // peekDebug toggles wire-level diagnostic logging via PEEK_DEBUG=1.
@@ -87,6 +85,13 @@ type PeekRequest struct {
 	// streams. The starter splits it across files internally.
 	// Zero or negative falls back to DefaultPeekMaxBytes.
 	MaxBytes int64
+
+	// CCBStreaming reaches a starter behind CCB by having the broker relay
+	// the connection instead of having the execute node dial back to us.
+	// Set it when this process cannot accept inbound connections -- see
+	// JobShellOptions.CCBStreaming, which is the same choice for the same
+	// reason on the shell path.
+	CCBStreaming bool
 }
 
 // PeekedStream is what came back for one of the requested streams.
@@ -123,35 +128,7 @@ func (s *Schedd) PeekJobOutput(ctx context.Context, cluster, proc int, req PeekR
 // peekOutput is the per-(starter,session) half of the call. Held as
 // a JobConnectInfo method for symmetry with startSSHDOnStarter.
 func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*PeekResult, error) {
-	claim := security.ParseClaimID(info.ClaimID)
-	if claim == nil || claim.SecSessionID() == "" {
-		return nil, fmt.Errorf("malformed ClaimId: missing session id")
-	}
-
-	// Reuse the schedd-minted starter session, same as the SSH
-	// flow. See schedd_ssh.go for why we pin AES — the starter
-	// always speaks it, but cedar's legacy CryptoMethods picker
-	// would otherwise land on Blowfish and silently disable
-	// encryption.
-	entry, err := buildAESStarterSession(claim, info.StarterAddr)
-	if err != nil {
-		return nil, fmt.Errorf("import starter session: %w", err)
-	}
-	cache := security.NewSessionCache()
-	cache.Store(entry)
-	cache.MapCommand("", info.StarterAddr,
-		fmt.Sprintf("%d", starterPeekCommand), claim.SecSessionID())
-
-	secConfig, err := NewClientSecurityConfig(ctx, "", info.StarterAddr, starterPeekCommand, "CLIENT", cache)
-	if err != nil {
-		return nil, fmt.Errorf("starter security config: %w", err)
-	}
-	secConfig.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
-	secConfig.Authentication = security.SecurityRequired
-	secConfig.Encryption = security.SecurityRequired
-	secConfig.Integrity = security.SecurityRequired
-
-	htcondorClient, err := client.ConnectAndAuthenticate(ctx, info.StarterAddr, secConfig)
+	htcondorClient, err := info.dialStarter(ctx, starterPeekCommand, req.CCBStreaming)
 	if err != nil {
 		return nil, fmt.Errorf("resume starter session at %s: %w", info.StarterAddr, err)
 	}

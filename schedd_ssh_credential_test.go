@@ -67,7 +67,7 @@ func TestStarterConfigKeepsTheClaimIDSessionWithoutTheCallerToken(t *testing.T) 
 
 	// Through the real constructor, so this covers the call site and not
 	// just the helper it calls: reverting it to pass ctx fails here.
-	secConfig, err := starterSecurityConfig(ctx, "<10.0.0.1:9618>", cache)
+	secConfig, err := starterSecurityConfig(ctx, "<10.0.0.1:9618>", startSSHDCommand, cache)
 	if err != nil {
 		t.Fatalf("failed to build the starter security config: %v", err)
 	}
