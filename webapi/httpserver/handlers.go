@@ -3748,17 +3748,35 @@ func (s *Handler) spoolClusterFromStream(
 		return &spool.Result{Failed: map[string]string{}}, nil
 	}
 
-	src, err := spool.Spill(tar, s.spoolBufferDir, lim.MaxVolume)
+	// The proc count is decided before the size is known, because the
+	// fan-out starts while the upload is still arriving -- see
+	// PlanStreaming for what that does to the volume rule.
+	attempt, planned, maxTar, err := spool.PlanStreaming(ads, lim)
+	if err != nil {
+		return nil, err
+	}
+
+	src, err := spool.NewGrowing(s.spoolBufferDir, maxTar)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = src.Close() }()
 
-	attempt, planned, err := spool.Plan(ads, src.Size(), lim)
-	if err != nil {
+	// Receive and spool at the same time. Each proc's reader consumes
+	// what has landed and blocks for the rest, so the call costs the
+	// slower of the two rather than the upload followed by N spools.
+	fillErr := make(chan error, 1)
+	go func() { fillErr <- src.Fill(tar) }()
+
+	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+
+	// A failed receive is the call's error, not a per-proc one: every
+	// reader saw it, so res is a list of procs that failed for the same
+	// upstream reason and reporting it per proc would bury the cause.
+	if err := <-fillErr; err != nil {
 		return nil, err
 	}
-	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+
 	res.NotAttempted = planned.NotAttempted
 	res.Capped = planned.Capped
 	return &res, nil
