@@ -1388,6 +1388,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		KEKFilePath:                loadKEKFilePath(cfg, logger),
 		OAuth2DBPath:               mcpCfg.oauth2DBPath,
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
+		MCPCIMDEnabled:             mcpCIMDEnabled(cfg),
+		MCPCIMDAllowedHosts:        config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_MCP_CIMD_ALLOWED_HOSTS")),
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
 		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
 		OAuth2AuthURL:              mcpCfg.oauth2AuthURL,
@@ -2318,6 +2320,22 @@ func httpAPIAdvertiseEnabled(cfg *config.Config) bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
 		log.Fatalf("invalid HTTP_API_ADVERTISE=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// mcpCIMDEnabled reports whether MCP client_id-metadata-document resolution is
+// on. Default true (the open-ecosystem posture; SSRF guards always apply and an
+// optional HTTP_API_MCP_CIMD_ALLOWED_HOSTS narrows it); HTTP_API_MCP_CIMD=false
+// turns it off entirely.
+func mcpCIMDEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_CIMD")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_CIMD=%q: must be a boolean", raw)
 	}
 	return v
 }

@@ -162,7 +162,11 @@ type Handler struct {
 	// their own gauge, exposed to Prometheus (a GaugeFunc reads this atomic)
 	// and to the collector ad (ActiveWatchStreams). streamOpened() is the
 	// single inc/dec choke point.
-	activeStreams       atomic.Int64
+	activeStreams atomic.Int64
+	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
+	// OAuth2 discovery document (the resolver itself lives in the provider's
+	// storage). See oauth2_cimd.go.
+	mcpCIMDEnabled      bool
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
 	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
@@ -411,8 +415,13 @@ type HandlerConfig struct {
 	// oauth.db is a guaranteed crash-loop (the legacy schema conflicts
 	// with goose 0001_init.sql), and the wrapper logs a deprecation
 	// warning instead. New code should set DBPath.
-	OAuth2DBPath        string
-	OAuth2Issuer        string   // OAuth2 issuer URL (default: listen address)
+	OAuth2DBPath string
+	OAuth2Issuer string // OAuth2 issuer URL (default: listen address)
+	// MCPCIMDEnabled resolves an https:// MCP client_id as a Client ID Metadata
+	// Document (a public client) instead of requiring DCR. MCPCIMDAllowedHosts,
+	// when set, restricts which hosts such a client_id may point at.
+	MCPCIMDEnabled      bool
+	MCPCIMDAllowedHosts []string
 	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
 	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
 	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
@@ -682,6 +691,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
+		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		ccbStreaming:              cfg.CCBStreaming,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
@@ -986,6 +996,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			AccessTokenLifespan:  oauth2AccessLifespan,
 			RefreshTokenLifespan: oauth2RefreshLifespan,
 			Sealer:               h.sealer,
+			CIMDEnabled:          cfg.MCPCIMDEnabled,
+			CIMDAllowedHosts:     cfg.MCPCIMDAllowedHosts,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)

@@ -38,6 +38,13 @@ type OAuth2ProviderOptions struct {
 	// non-nil, the storage adapter pulls/pushes ciphertext + wrapped
 	// DEK on the corresponding load/save calls. Nil = plaintext.
 	Sealer *seal.Sealer
+
+	// CIMDEnabled turns on Client ID Metadata Document resolution: an https://
+	// client_id is fetched and treated as a public client (see oauth2_cimd.go).
+	CIMDEnabled bool
+	// CIMDAllowedHosts optionally restricts which hosts a CIMD client_id may
+	// point at; empty means any host (the SSRF guards still apply).
+	CIMDAllowedHosts []string
 }
 
 // NewOAuth2Provider creates a new OAuth2 provider with SQLite storage.
@@ -65,6 +72,9 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 	// otherwise the RSA key persists in plaintext on first start
 	// even when a KEK is configured, defeating the whole point.
 	storage.SetSealer(opts.Sealer)
+	if opts.CIMDEnabled {
+		storage.cimd = newCIMDResolver(opts.CIMDAllowedHosts, cimdHTTPClient())
+	}
 
 	// Try to load existing RSA key from database
 	ctx := context.Background()
@@ -111,6 +121,9 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 		AccessTokenIssuer:        opts.Issuer,
 		ScopeStrategy:            fosite.HierarchicScopeStrategy,
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
+		// CIMD clients (and any other public client) hold no secret, so PKCE is
+		// the only thing binding the authorization code to the requester.
+		EnforcePKCEForPublicClients: true,
 	}
 
 	// Generate or load HMAC secret (32 bytes for HMAC-SHA512/256)
