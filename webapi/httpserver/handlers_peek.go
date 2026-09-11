@@ -132,6 +132,7 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 		Stderr:       wantStderr,
 		StderrOffset: stderrOffset,
 		MaxBytes:     maxBytes,
+		CCBStreaming: s.ccbStreaming,
 	})
 	if imp != nil {
 		s.auditSuperuserAction(r, imp, "peek", fmt.Sprintf("%d.%d", cluster, proc), err)

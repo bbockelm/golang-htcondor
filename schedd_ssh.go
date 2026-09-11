@@ -153,7 +153,7 @@ type sshKeyPair struct {
 // Split out from startSSHDOnStarter so the credential it ends up with can be
 // asserted directly. Which credential that is has been wrong before, and the
 // symptom appeared two hops away, on a machine behind a firewall.
-func starterSecurityConfig(ctx context.Context, starterAddr string, cache *security.SessionCache) (*security.SecurityConfig, error) {
+func starterSecurityConfig(ctx context.Context, starterAddr string, command int, cache *security.SessionCache) (*security.SecurityConfig, error) {
 	// Build the SecurityConfig from the configured CLIENT auth methods
 	// (so SSL/Kerberos/etc. are offered when configured) but keep the
 	// AES pin and the REQUIRED encryption/integrity levels — those
@@ -184,7 +184,7 @@ func starterSecurityConfig(ctx context.Context, starterAddr string, cache *secur
 	// execute node. Authenticating as the daemon uses the pool credential
 	// the broker does recognise, and does not widen what the caller can
 	// reach: the ClaimID is the capability, and it names one job.
-	secConfig, err := NewClientSecurityConfig(WithoutSecurityConfig(ctx), "", starterAddr, startSSHDCommand, "CLIENT", cache)
+	secConfig, err := NewClientSecurityConfig(WithoutSecurityConfig(ctx), "", starterAddr, command, "CLIENT", cache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build starter security config: %w", err)
 	}
@@ -195,49 +195,66 @@ func starterSecurityConfig(ctx context.Context, starterAddr string, cache *secur
 	return secConfig, nil
 }
 
-func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming bool) (net.Conn, *sshKeyPair, error) {
+// dialStarter resumes the schedd-minted starter session and returns a
+// connected client ready for one command.
+//
+// Every way of reaching into a running job goes through here -- opening a
+// shell, tailing output, anything added later. They had been separate
+// copies of the same twenty lines, which is how tailing kept the two bugs
+// that opening a shell had already been fixed for: it authenticated as the
+// caller rather than as this daemon, and it could not traverse CCB at all.
+// Sharing the dial means the next such feature inherits both by default
+// rather than by remembering.
+//
+// The caller owns the returned client and must Close it, except where it
+// hands the underlying conn to something else.
+func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbStreaming bool) (*client.HTCondorClient, error) {
 	claim := security.ParseClaimID(info.ClaimID)
 	if claim == nil || claim.SecSessionID() == "" {
-		return nil, nil, fmt.Errorf("malformed ClaimId: missing session id")
+		return nil, fmt.Errorf("malformed ClaimId: missing session id")
 	}
 
-	// Build a one-shot session cache pre-populated with the schedd-minted
-	// starter session so cedar's ClientHandshake can resume it by command
-	// code rather than performing a full DC_AUTHENTICATE round-trip.
+	// A one-shot session cache pre-populated with the schedd-minted starter
+	// session, so cedar's ClientHandshake resumes it by command code rather
+	// than performing a full DC_AUTHENTICATE round-trip.
 	//
-	// We construct the SessionEntry by hand instead of using cedar's
-	// CreateNonNegotiatedSession. The reason: HTCondor's ExportSecSessionInfo
-	// emits CryptoMethods with a *backwards-compat* preferred order
-	// (BLOWFISH > 3DES > AES — see condor_secman.cpp:getPreferredOldCryptProtocol)
-	// and the modern full list under CryptoMethodsList. cedar v0.0.23 picks
-	// from the legacy CryptoMethods field, lands on BLOWFISH, and then
-	// silently disables encryption because its setupStreamEncryption only
-	// arms AES-GCM. The starter encrypts; we don't; the body looks like
-	// noise to the starter and START_SSHD times out reading it.
-	//
-	// We pin AES-GCM here because the modern HTCondor stack always supports
-	// it (it's the only one in CryptoMethodsList that cedar's stream layer
-	// actually implements).
+	// The SessionEntry is built by hand instead of with cedar's
+	// CreateNonNegotiatedSession. HTCondor's ExportSecSessionInfo emits
+	// CryptoMethods in a backwards-compat preferred order (BLOWFISH > 3DES >
+	// AES -- see condor_secman.cpp:getPreferredOldCryptProtocol) with the
+	// modern list under CryptoMethodsList. cedar picks from the legacy field,
+	// lands on BLOWFISH, and then silently disables encryption because its
+	// setupStreamEncryption only arms AES-GCM. The starter encrypts and we do
+	// not; the body reads as noise and the command times out.
 	entry, err := buildAESStarterSession(claim, info.StarterAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to import starter session: %w", err)
+		return nil, fmt.Errorf("failed to import starter session: %w", err)
 	}
 	cache := security.NewSessionCache()
 	cache.Store(entry)
-	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", startSSHDCommand), claim.SecSessionID())
+	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", command), claim.SecSessionID())
 
-	secConfig, err := starterSecurityConfig(ctx, info.StarterAddr, cache)
+	secConfig, err := starterSecurityConfig(ctx, info.StarterAddr, command, cache)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	// DialSinful rather than ConnectAndAuthenticate: same behaviour for a
-	// directly reachable starter, but it can also be told how to traverse
-	// CCB. The two differ only in the options, so the plain call is the
-	// same call with none set.
-	htcondorClient, err := DialSinful(ctx, info.StarterAddr, secConfig, &DialOptions{
+	// CCB streaming when this process cannot accept inbound connections:
+	// the execute node is commonly firewalled, and the broker relays rather
+	// than asking the starter to dial back to an address nothing routes to.
+	return dialStarterConn(ctx, info.StarterAddr, secConfig, &DialOptions{
 		CCBRequireStreaming: ccbStreaming,
 	})
+}
+
+// dialStarterConn is DialSinful, indirected so tests can observe what
+// dialStarter asks for. Whether the streaming flag survives the trip is
+// otherwise invisible without a live starter behind a real broker -- and
+// it reaching the wire is the whole point of the call.
+var dialStarterConn = DialSinful
+
+func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming bool) (net.Conn, *sshKeyPair, error) {
+	htcondorClient, err := info.dialStarter(ctx, startSSHDCommand, ccbStreaming)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resume starter session at %s: %w", info.StarterAddr, err)
 	}
