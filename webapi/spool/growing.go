@@ -8,11 +8,21 @@ import (
 	"sync"
 )
 
+// ErrClosed is what readers get when the buffer is closed or aborted
+// before the upload finished. It is an error rather than io.EOF on
+// purpose: the schedd accepts a short tar without complaint, so a reader
+// that stopped early must never look like one that reached the end.
+var ErrClosed = errors.New("spool: buffer closed before the upload finished")
+
 // growChunk is how much of the incoming stream one write covers. Small
 // enough that a reader starts working on the first chunk while the rest
 // is still arriving, large enough that the per-write bookkeeping is
 // noise.
 const growChunk = 1 << 20 // 1 MiB
+
+// maxIdleReads bounds consecutive zero-byte, no-error reads before Fill
+// calls the upload stalled. io.ReadAll uses a similar guard.
+const maxIdleReads = 100
 
 // Growing is a Source whose bytes are still arriving.
 //
@@ -63,9 +73,22 @@ func NewGrowing(dir string, limit int64) (*Growing, error) {
 func (g *Growing) Fill(r io.Reader) error {
 	buf := make([]byte, growChunk)
 	var total int64
+	// io.Reader permits an occasional (0, nil). A reader that returns
+	// it forever would otherwise spin here at full tilt with every
+	// proc's reader blocked behind it.
+	idle := 0
 
 	for {
 		nr, readErr := r.Read(buf)
+		if nr == 0 && readErr == nil {
+			idle++
+			if idle > maxIdleReads {
+				return g.fail(fmt.Errorf(
+					"the upload stopped making progress after %d bytes", total))
+			}
+			continue
+		}
+		idle = 0
 		if nr > 0 {
 			if total+int64(nr) > g.limit {
 				return g.fail(fmt.Errorf(
@@ -123,17 +146,49 @@ func (g *Growing) Size() int64 {
 	return g.n
 }
 
-// Close removes the buffer file. Safe to call twice.
+// Close removes the buffer file and releases anyone still reading.
+// Safe to call twice.
+//
+// Waking the readers is not optional: they park on a condition variable
+// that only Fill signals, so a Close while one is blocked -- Fill
+// abandoned, a caller unwinding early, a future caller that does not
+// happen to close in the order this package's own does -- left that
+// goroutine parked for the life of the process.
 func (g *Growing) Close() error {
 	g.mu.Lock()
 	path := g.path
 	g.path = ""
+	if !g.done {
+		g.done = true
+		if g.err == nil {
+			g.err = ErrClosed
+		}
+	}
+	g.cond.Broadcast()
 	g.mu.Unlock()
 	if path == "" {
 		return nil
 	}
 	_ = g.w.Close()
 	return os.Remove(path)
+}
+
+// Abort fails the buffer early, waking every reader with err.
+//
+// The fan-out's readers block in Read with no context of their own, so
+// this is how a cancelled request or a caller that has given up gets
+// them to stop rather than waiting out the upload.
+func (g *Growing) Abort(err error) {
+	if err == nil {
+		err = ErrClosed
+	}
+	g.mu.Lock()
+	if g.err == nil {
+		g.err = err
+	}
+	g.done = true
+	g.cond.Broadcast()
+	g.mu.Unlock()
 }
 
 // wait blocks until there are bytes past off, the stream ended, or it

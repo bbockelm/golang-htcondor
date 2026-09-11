@@ -265,13 +265,14 @@ func TestGrowingReaderAfterTheStreamEnded(t *testing.T) {
 	}
 }
 
-// Larger than one mapping window, so the reader has to remap mid-file,
-// and trickled so the remaps happen against a moving watermark.
-func TestGrowingReadsAcrossMappingWindows(t *testing.T) {
+// A buffer far larger than one read, trickled in, so the reader
+// repeatedly catches up to a moving watermark and has to block, resume,
+// and resume again mid-file.
+func TestGrowingReadsAcrossManyChunks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates ~20MB")
 	}
-	total := mapWindow*2 + 123*1024
+	total := 16<<20 + 123*1024
 	chunks, want := chunksOf(total, 512*1024)
 	g, err := NewGrowing(t.TempDir(), int64(total)+1)
 	if err != nil {
@@ -305,42 +306,9 @@ func TestGrowingReadsAcrossMappingWindows(t *testing.T) {
 			t.Errorf("got %d bytes, want %d", len(got), len(want))
 		}
 	case err := <-errCh:
-		t.Fatalf("reading across windows: %v", err)
+		t.Fatalf("reading a trickled buffer: %v", err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("timed out reading across mapping windows")
-	}
-}
-
-// The fallback path has to produce the same bytes as the mapped one --
-// it is what runs if mmap is unavailable, and nothing else would notice.
-func TestGrowingFallbackMatchesTheMappedPath(t *testing.T) {
-	chunks, want := chunksOf(200*1024, 32*1024)
-	g, err := NewGrowing(t.TempDir(), 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = g.Close() }()
-	if err := g.Fill(&trickle{chunks: chunks}); err != nil {
-		t.Fatal(err)
-	}
-
-	rc, err := g.Reader()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = rc.Close() }()
-	gr, ok := rc.(*growingReader)
-	if !ok {
-		t.Fatalf("Reader returned %T, not a *growingReader", rc)
-	}
-	gr.fallback = true
-
-	got, err := io.ReadAll(gr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("the fallback read %d bytes, want %d", len(got), len(want))
+		t.Fatal("timed out reading a trickled buffer")
 	}
 }
 
@@ -391,4 +359,178 @@ func TestFanOutOverAGrowingSource(t *testing.T) {
 		t.Error(s)
 	}
 	mu.Unlock()
+}
+
+// A reader parked waiting for bytes must be released when the buffer is
+// closed. It parks on a condition variable that only Fill signals, so
+// without this it waits for the life of the process -- and the fan-out
+// is not the only possible caller.
+func TestGrowingCloseReleasesABlockedReader(t *testing.T) {
+	g, err := NewGrowing(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := g.Reader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	got := make(chan error, 1)
+	go func() {
+		_, rerr := io.ReadAll(r)
+		got <- rerr
+	}()
+
+	// Let the reader reach the blocking wait, then close underneath it.
+	time.Sleep(50 * time.Millisecond)
+	if err := g.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Error("the reader saw a clean end of stream after Close; " +
+				"a partial tar must never look finished")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close left the reader blocked; it would never wake")
+	}
+}
+
+// Abort is how a cancelled request releases readers that are waiting on
+// an upload nobody wants any more.
+func TestGrowingAbortReleasesReadersWithTheReason(t *testing.T) {
+	g, err := NewGrowing(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+
+	const readers = 5
+	got := make(chan error, readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			r, rerr := g.Reader()
+			if rerr != nil {
+				got <- rerr
+				return
+			}
+			defer func() { _ = r.Close() }()
+			_, rerr = io.ReadAll(r)
+			got <- rerr
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	g.Abort(context.Canceled)
+
+	for i := 0; i < readers; i++ {
+		select {
+		case err := <-got:
+			if err == nil {
+				t.Error("a reader saw a clean end of stream after Abort")
+			} else if !errors.Is(err, context.Canceled) {
+				t.Errorf("reader error = %v, want the abort reason", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Abort left a reader blocked")
+		}
+	}
+}
+
+// A reader that stops early must not wedge the upload: Fill keeps
+// going, and the other procs still get the whole tar.
+func TestGrowingReaderAbandoningEarlyDoesNotStallTheUpload(t *testing.T) {
+	chunks, want := chunksOf(200*1024, 16*1024)
+	g, err := NewGrowing(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+
+	// Fill runs alongside the readers; reading before it starts would
+	// simply block, which is the buffer working as intended.
+	fillErr := make(chan error, 1)
+	go func() { fillErr <- g.Fill(&trickle{chunks: chunks, pause: 2 * time.Millisecond}) }()
+
+	quitter, err := g.Reader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	if _, err := quitter.Read(buf); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("first read: %v", err)
+	}
+	_ = quitter.Close() // walks away mid-stream
+
+	done := make(chan []byte, 1)
+	go func() {
+		r, rerr := g.Reader()
+		if rerr != nil {
+			t.Error(rerr)
+			done <- nil
+			return
+		}
+		defer func() { _ = r.Close() }()
+		b, rerr := io.ReadAll(r)
+		if rerr != nil {
+			t.Error(rerr)
+		}
+		done <- b
+	}()
+
+	if err := <-fillErr; err != nil {
+		t.Fatalf("Fill: %v", err)
+	}
+	select {
+	case got := <-done:
+		if !bytes.Equal(got, want) {
+			t.Errorf("the surviving reader got %d bytes, want %d", len(got), len(want))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an abandoned reader stalled the upload")
+	}
+}
+
+// Reading and closing from two goroutines must not fault. The reader
+// used to hand out a pointer into an mmap'd region, so a Close during a
+// Read unmapped memory another goroutine was copying from -- an
+// unrecoverable SIGSEGV rather than an error.
+func TestGrowingConcurrentReadAndClose(t *testing.T) {
+	chunks, _ := chunksOf(4<<20, 64*1024)
+	g, err := NewGrowing(t.TempDir(), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+	if err := g.Fill(&trickle{chunks: chunks}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		r, rerr := g.Reader()
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 64*1024)
+			for {
+				if _, err := r.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Duration(i%5) * time.Millisecond)
+			_ = r.Close()
+		}()
+		wg.Wait()
+	}
 }

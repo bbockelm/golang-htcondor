@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -1560,6 +1561,12 @@ func (s *Handler) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) 
 	s.handleBulkJobAction(w, r, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
+// maxUploadBytes bounds a single raw-tar upload. The per-proc ceiling a
+// cluster-wide call applies (spool.PlanStreaming) is smaller still; this
+// is the backstop for the single-proc path and for a body that would
+// otherwise be read until the disk complained.
+const maxUploadBytes = 1024 * 1024 * 1024 // 1 GiB
+
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
 func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodPut {
@@ -1588,8 +1595,14 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		return
 	}
 
-	// Note: We should limit the size to prevent abuse
-	limitedReader := io.LimitReader(r.Body, 1024*1024*1024) // 1GB limit
+	// MaxBytesReader, not io.LimitReader: a LimitReader reports its cap
+	// as io.EOF, which is indistinguishable from the end of the upload
+	// -- so a body over the cap would spool as a silently truncated tar
+	// and release the jobs with files missing. Today spool's own,
+	// smaller per-proc ceiling always fires first, but that is an
+	// accident of the two numbers and not something to rely on.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	limitedReader := r.Body
 
 	if target.AllProcs {
 		fanOut, err := s.spoolClusterFromStream(ctx, r, target.Cluster, limitedReader)
@@ -1675,6 +1688,73 @@ func fanOutResponse(res *spool.Result, cluster int, message, retry string) map[s
 		}
 	}
 	return body
+}
+
+// writeMultipartTar streams a parsed multipart form into pw as a tar and
+// closes pw when it is done.
+//
+// A failed conversion closes the pipe WITH the error, so the reader sees
+// an error rather than the end of a shorter tar. Closing plainly was
+// doing the latter: tar.Writer.Close appends a valid end-of-archive
+// marker to whatever was written so far, and a plain pipe close then
+// gives the reader a clean io.EOF. The result parses as a well-formed
+// tar holding a prefix of the files, the schedd accepts it and releases
+// the jobs, and the 500 the handler returns afterwards comes too late --
+// so one failed conversion released every proc of the cluster with a
+// partial sandbox.
+func writeMultipartTar(pw *io.PipeWriter, form *multipart.Form) (convErr error) {
+	tw := tar.NewWriter(pw)
+	defer func() {
+		if convErr == nil {
+			// Success: the end-of-archive marker belongs on the end.
+			convErr = tw.Close()
+		}
+		if convErr != nil {
+			_ = pw.CloseWithError(convErr)
+			return
+		}
+		_ = pw.Close()
+	}()
+
+	for fieldName, fileHeaders := range form.File {
+		for _, fileHeader := range fileHeaders {
+			// Reject path-traversal-shaped filenames before opening the
+			// file. Mirrors the MCP-side check in toolUploadJobInput;
+			// both feed into the same schedd SpoolJobFilesFromTar
+			// receiver.
+			if err := validateTarEntryName(fileHeader.Filename); err != nil {
+				return fmt.Errorf("rejecting upload entry %q: %w", fileHeader.Filename, err)
+			}
+			file, err := fileHeader.Open()
+			if err != nil {
+				return fmt.Errorf("failed to open multipart file %s: %w", fileHeader.Filename, err)
+			}
+
+			// "executable" gets 0755, everything else 0644.
+			var fileMode int64 = 0644
+			if fieldName == "executable" {
+				fileMode = 0755
+			}
+			header := &tar.Header{
+				Name:    fileHeader.Filename,
+				Size:    fileHeader.Size,
+				Mode:    fileMode,
+				ModTime: time.Now(),
+			}
+			if err := tw.WriteHeader(header); err != nil {
+				_ = file.Close()
+				return fmt.Errorf("failed to write tar header for %s: %w", fileHeader.Filename, err)
+			}
+
+			// Stream file content directly to tar (no buffering).
+			_, err = io.Copy(tw, file)
+			_ = file.Close()
+			if err != nil {
+				return fmt.Errorf("failed to copy file %s to tar: %w", fileHeader.Filename, err)
+			}
+		}
+	}
+	return nil
 }
 
 // handleJobInputMultipart handles POST /api/v1/jobs/{id}/input/multipart
@@ -1773,69 +1853,10 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// Create a pipe for streaming tar conversion
 	pr, pw := io.Pipe()
 
-	// Start goroutine to convert multipart to tar
+	// Convert the multipart form into the tar on a goroutine; the
+	// reader below consumes it as it is written.
 	errChan := make(chan error, 1)
-	go func() {
-		defer func() {
-			_ = pw.Close()
-		}()
-		tw := tar.NewWriter(pw)
-		defer func() {
-			_ = tw.Close()
-		}()
-
-		// Process each file in the multipart form
-		for fieldName, fileHeaders := range r.MultipartForm.File {
-			for _, fileHeader := range fileHeaders {
-				// Reject path-traversal-shaped filenames before
-				// opening the file. Mirrors the MCP-side check in
-				// toolUploadJobInput; both feed into the same
-				// schedd SpoolJobFilesFromTar receiver.
-				if err := validateTarEntryName(fileHeader.Filename); err != nil {
-					errChan <- fmt.Errorf("rejecting upload entry %q: %w", fileHeader.Filename, err)
-					return
-				}
-				// Open the multipart file
-				file, err := fileHeader.Open()
-				if err != nil {
-					errChan <- fmt.Errorf("failed to open multipart file %s: %w", fileHeader.Filename, err)
-					return
-				}
-
-				// Determine file mode based on field name
-				// "executable" field gets 0755, all others get 0644
-				var fileMode int64 = 0644
-				if fieldName == "executable" {
-					fileMode = 0755
-				}
-
-				// Create tar header
-				header := &tar.Header{
-					Name:    fileHeader.Filename,
-					Size:    fileHeader.Size,
-					Mode:    fileMode,
-					ModTime: time.Now(),
-				}
-
-				// Write header
-				if err := tw.WriteHeader(header); err != nil {
-					_ = file.Close()
-					errChan <- fmt.Errorf("failed to write tar header for %s: %w", fileHeader.Filename, err)
-					return
-				}
-
-				// Stream file content directly to tar (no buffering)
-				_, err = io.Copy(tw, file)
-				_ = file.Close()
-				if err != nil {
-					errChan <- fmt.Errorf("failed to copy file %s to tar: %w", fileHeader.Filename, err)
-					return
-				}
-			}
-		}
-
-		errChan <- nil
-	}()
+	go func() { errChan <- writeMultipartTar(pw, r.MultipartForm) }()
 
 	// One proc: hand the schedd the stream, as before -- nothing is held
 	// in memory or on disk.
@@ -3768,13 +3789,36 @@ func (s *Handler) spoolClusterFromStream(
 	fillErr := make(chan error, 1)
 	go func() { fillErr <- src.Fill(tar) }()
 
+	// The readers park on a condition variable with no context of their
+	// own, so a cancelled request would otherwise leave the fan-out --
+	// and up to Concurrency schedd sessions -- pinned until the upload
+	// finished or the server's read timeout killed the body.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			src.Abort(ctx.Err())
+		case <-done:
+		}
+	}()
+
 	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
 
 	// A failed receive is the call's error, not a per-proc one: every
 	// reader saw it, so res is a list of procs that failed for the same
 	// upstream reason and reporting it per proc would bury the cause.
-	if err := <-fillErr; err != nil {
-		return nil, err
+	//
+	// Waiting on ctx as well: a stalled client can leave Fill blocked on
+	// the body long after the fan-out has given up, and the deferred
+	// Close then ends it.
+	select {
+	case err := <-fillErr:
+		if err != nil {
+			return nil, err
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	res.NotAttempted = planned.NotAttempted

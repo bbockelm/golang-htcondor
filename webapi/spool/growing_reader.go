@@ -3,31 +3,32 @@ package spool
 import (
 	"io"
 	"os"
+	"sync"
 )
-
-// mapWindow is how much of the buffer one mapping covers. The fan-out
-// has Concurrency readers over the same file, so the windows overlap in
-// the page cache and cost one copy of the pages between them regardless
-// of how many readers there are.
-const mapWindow = 8 << 20 // 8 MiB
 
 // growingReader reads a Growing buffer, blocking where the data has not
 // arrived yet.
 //
-// It reads through a mapping rather than copying into a buffer first:
-// the pages are already in the page cache (the writer just wrote them),
-// and every reader shares them. A mapping cannot extend past the file's
-// current length -- touching a page beyond it is a SIGBUS, not a short
-// read -- so the window is clamped to what Fill has published and
-// remapped as more lands.
+// It reads with ReadAt, which is a pread: no shared offset, so every
+// proc's reader is independent, and no mapping, so closing a reader
+// while another goroutine is mid-Read cannot fault.
+//
+// An earlier version mapped the file in 8 MiB windows on the theory
+// that N readers of one buffer should share pages rather than copy
+// them. Measured against the read size the schedd upload actually uses
+// -- filetransfer.defaultBufferSize, 256 KiB -- that was 2.8x SLOWER
+// (28.5ms vs 10.1ms for 64 MiB across 10 readers). mmap only won at
+// 8 KiB reads, which was an artifact of the benchmark: io.Copy to
+// io.Discard reads in 8 KiB chunks, so it was measuring syscall count
+// at a size nothing in the product uses. The pages are in the page
+// cache either way; at 256 KiB a pread costs one syscall per 32 pages
+// and beats the mapping's per-page minor faults.
 type growingReader struct {
 	g   *Growing
-	f   *os.File
 	off int64
 
-	m            mapping
-	mStart, mEnd int64
-	fallback     bool // mmap unavailable; read through the descriptor
+	mu sync.Mutex
+	f  *os.File // nil once closed
 }
 
 func newGrowingReader(g *Growing, f *os.File) *growingReader {
@@ -41,13 +42,18 @@ func (r *growingReader) Read(p []byte) (int, error) {
 
 	watermark, done, err := r.g.wait(r.off)
 	if r.off >= watermark {
-		// Nothing more is coming.
+		// Nothing more is coming. An error wins over EOF: a short read
+		// reported as a clean end is how a proc ends up spooled with
+		// files missing.
 		if err != nil {
 			return 0, err
 		}
 		if done {
 			return 0, io.EOF
 		}
+		// wait only returns with no bytes when the stream is done or
+		// failed, so this is unreachable; report it rather than
+		// spinning if that ever stops being true.
 		return 0, io.ErrNoProgress
 	}
 
@@ -56,67 +62,30 @@ func (r *growingReader) Read(p []byte) (int, error) {
 		want = avail
 	}
 
-	if r.fallback {
-		n, rerr := r.f.ReadAt(p[:want], r.off)
-		r.off += int64(n)
-		if rerr == io.EOF && n > 0 {
-			rerr = nil
-		}
-		return n, rerr
+	r.mu.Lock()
+	f := r.f
+	r.mu.Unlock()
+	if f == nil {
+		return 0, os.ErrClosed
 	}
 
-	if err := r.ensureMapped(watermark); err != nil {
-		// A mapping failure is not fatal: the bytes are in a file, and
-		// reading them through the descriptor is merely slower.
-		r.fallback = true
-		r.release()
-		return r.Read(p)
-	}
-
-	if end := r.mEnd - r.off; want > end {
-		want = end
-	}
-	n := copy(p[:want], r.m.bytes()[r.off-r.mStart:])
+	n, rerr := f.ReadAt(p[:want], r.off)
 	r.off += int64(n)
-	return n, nil
-}
-
-// ensureMapped makes the window cover r.off, clamped to the published
-// watermark.
-func (r *growingReader) ensureMapped(watermark int64) error {
-	if r.m.valid() && r.off >= r.mStart && r.off < r.mEnd {
-		return nil
+	if rerr == io.EOF && n > 0 {
+		// Short only because the writer is still catching up; the next
+		// Read blocks for the rest.
+		rerr = nil
 	}
-	r.release()
-
-	start := pageAlign(r.off)
-	end := start + mapWindow
-	if end > watermark {
-		end = watermark
-	}
-	if end <= start {
-		// Nothing to map yet; the caller only gets here with bytes
-		// available, so this means the window math and the watermark
-		// disagree -- fall back rather than map zero bytes.
-		return errShortWindow
-	}
-
-	m, err := mmapRegion(r.f, start, int(end-start))
-	if err != nil {
-		return err
-	}
-	r.m, r.mStart, r.mEnd = m, start, end
-	return nil
-}
-
-func (r *growingReader) release() {
-	if r.m.valid() {
-		_ = r.m.unmap()
-	}
-	r.m, r.mStart, r.mEnd = mapping{}, 0, 0
+	return n, rerr
 }
 
 func (r *growingReader) Close() error {
-	r.release()
-	return r.f.Close()
+	r.mu.Lock()
+	f := r.f
+	r.f = nil
+	r.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f.Close()
 }

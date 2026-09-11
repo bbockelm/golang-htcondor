@@ -98,6 +98,10 @@ func Plan(ads []*classad.ClassAd, size int64, lim Limits) ([]*classad.ClassAd, R
 	return ads, res, nil
 }
 
+// NoLimit is the byte ceiling for "no ceiling", in the form Growing can
+// actually apply.
+const NoLimit int64 = 1 << 62
+
 // PlanStreaming is Plan for an upload whose size is not known yet.
 //
 // Pipelining forces this: the fan-out starts before the stream ends, so
@@ -125,7 +129,10 @@ func PlanStreaming(ads []*classad.ClassAd, lim Limits) ([]*classad.ClassAd, Resu
 		return ads, res, 0, nil
 	}
 
-	maxTar := int64(-1) // no ceiling
+	// NoLimit rather than -1: Growing compares `written > limit`, so a
+	// negative "no ceiling" would refuse the very first byte. The
+	// sentinel has to be a number that means "more than any upload".
+	maxTar := NoLimit
 	if lim.MaxVolume > 0 {
 		maxTar = lim.MaxVolume / int64(len(ads))
 		if maxTar < 1 {
