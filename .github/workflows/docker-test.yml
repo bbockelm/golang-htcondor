@@ -288,8 +288,8 @@ jobs:
     - name: Prepare the container Go cache directory
       run: |
         ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
-        mkdir -p .gocache
-        sudo chown -R "$ids" .gocache
+        mkdir -p .gocache webapi/bin
+        sudo chown -R "$ids" .gocache webapi/bin
 
     - name: Run integration tests with HTCondor
       run: |
@@ -300,29 +300,84 @@ jobs:
           -e GOMODCACHE=/workspace/.gocache/mod \
           -e HTCONDORDB_BINARY=/workspace/.gocache/htcondordb \
           golang-htcondor:integration-test \
-          /bin/bash -c "
-            # Build the htcondordb the mirror integration test runs
-            # against. The version comes from .github/tools, an isolated
-            # module that exists so Dependabot has something to bump --
-            # a pin in a shell script here would age silently, and the
-            # test would go on passing against a release nobody uses.
-            #
-            # Built rather than downloaded because htcondordb publishes
-            # no container or release binary for this platform, and a
-            # 'go build' of a pinned module version is reproducible in
-            # the same way a pinned image tag would be.
-            #
-            # If this build fails the test SKIPS rather than fails, which
-            # would hide the gap it exists to close -- so fail the job
-            # here instead.
-            set -e
-            (cd .github/tools && GOWORK=off go build -o /workspace/.gocache/htcondordb github.com/bbockelm/htcondordb/cmd/htcondordb)
+          bash .github/scripts/integration-tests-webapi.sh
 
-            # Run integration tests (webapi module holds httpserver).
-            # gotestsum comes from the image; GOCACHE/GOMODCACHE are the
-            # restored caches under the bind-mounted workspace.
-            cd webapi && GOWORK=off gotestsum -- -tags=integration -timeout=10m ./httpserver/
-          "
+  docker-core-integration-test:
+    name: Core Module Integration Test in Docker
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+    - name: Derive the image cache key
+      id: imgcache
+      # The image is rebuilt at most once a day. hashFiles covers the
+      # changes somebody committed; the date covers the ones nobody did
+      # -- the Dockerfile runs `dnf update -y` and installs an unpinned
+      # `condor >= 25.7.2`, so a layer cached indefinitely would drift
+      # arbitrarily far from what those lines mean today.
+      #
+      # The rotation is not warmed by a scheduled run, deliberately: the
+      # nightly Actions minutes cost more than the rebuild they save.
+      # The first push to main each day therefore pays for that day's
+      # image, and everything after it -- including every pull request
+      # -- reads the result.
+      run: |
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+
+    - name: Build Docker image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        tags: golang-htcondor:integration-test
+        # Same Dockerfile, same platform as the amd64 matrix job, so it
+        # reads that job's scope. It deliberately does not write: the two
+        # run concurrently, and a second writer of identical layers costs
+        # cache budget without adding anything readable.
+        cache-from: type=gha,scope=img-amd64-${{ steps.imgcache.outputs.key }}
+
+    # Reads the amd64 matrix job's cache -- same platform, same code.
+    # It does not save, for the same reason it does not write the image
+    # cache: the two jobs run concurrently, so a second writer of the
+    # same content only spends budget.
+    - name: Restore the container Go cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .gocache
+        key: docker-gocache-amd64-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          docker-gocache-amd64-
+
+    # The image runs as a non-root user (USER vscode in the Dockerfile)
+    # while the workspace bind mount is owned by the runner user, so the
+    # container cannot create its own cache directory inside it -- the
+    # first attempt failed with "mkdir /workspace/.gocache: permission
+    # denied". Nothing hit this before because the containers only read
+    # the mount; the Go caches used to live inside the container.
+    #
+    # The uid comes from the image rather than being hardcoded, so this
+    # keeps working if the Dockerfile's user ever changes.
+    - name: Prepare the container Go cache directory
+      run: |
+        ids=$(docker run --rm golang-htcondor:integration-test sh -c 'echo $(id -u):$(id -g)')
+        mkdir -p .gocache webapi/bin
+        sudo chown -R "$ids" .gocache webapi/bin
+
+    - name: Run core module integration tests with HTCondor
+      run: |
+        docker run --rm --privileged \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
+          golang-htcondor:integration-test \
+          bash .github/scripts/integration-tests-core.sh
 
   # Superuser mode's fallback identity is condor@$(UID_DOMAIN), and that
   # default can only be checked against a pool whose daemons actually run as

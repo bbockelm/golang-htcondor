@@ -86,3 +86,7 @@ oauth2.db-*
 # Reference documentation files
 reference/
 examples/classadlog_reader/classadlog_reader
+
+# The JupyterLab tunnel helper, built here by the integration job (and
+# by hand) because that is where the test looks for it.
+/webapi/bin/

@@ -182,7 +182,13 @@ func findHelperBinary(t *testing.T) string {
 	root := filepath.Dir(wd)
 	bin := filepath.Join(root, "bin", "htcondor-jupyter-helper")
 	if _, err := os.Stat(bin); err != nil {
-		t.Skipf("helper binary not found at %s; run `make build-jupyter-helper`", bin)
+		// Not `make build-jupyter-helper`: that target cross-compiles
+		// arch-suffixed copies into the embed staging dir
+		// (webapi/httpserver/jupyterhelperbin/dist), not the plain name
+		// this looks for, so following the old advice left the test
+		// skipping anyway.
+		t.Skipf("helper binary not found at %s; build it with "+
+			"`cd webapi && go build -o bin/htcondor-jupyter-helper ./cmd/htcondor-jupyter-helper`", bin)
 	}
 	// We require the host OS to be linux; the helper's Setsid path is
 	// linux-only (and the binary itself is built for linux/<arch>).
