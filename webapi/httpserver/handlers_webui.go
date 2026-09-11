@@ -2,11 +2,14 @@ package httpserver
 
 import (
 	"context"
+
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -292,7 +295,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	opts := &htcondor.QueryOptions{
 		Limit: -1,
 		Projection: []string{
-			"JobStatus", "HoldReasonCode", "HoldReason",
+			"JobStatus", "HoldReasonCode", "HoldReason", "ExitCode", "CompletionDate",
 			"ClusterId", "ProcId", "Owner",
 			"QDate", "JobCurrentStartDate", "JobStartDate", "EnteredCurrentStatus",
 			"Cmd", "RemoteHost",
@@ -307,12 +310,9 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// user's own view are cached apart; everyone sharing a scope shares
 	// the answer, which is what makes the cost independent of how many
 	// people have the page open.
-	key := "mine:" + owner
-	if !ownedByMe {
-		key = "all"
-	}
-	snap, err := s.dashboards().get(key, dashboardRefresh, func() (*dashboardSnapshot, error) {
-		return s.walkQueueForDashboard(ctx, opts)
+	key := dashboardCacheKey(owner, ownedByMe)
+	snap, err := s.dashboards().get(key, func() (*dashboardSnapshot, error) {
+		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)
 	})
 	if err != nil {
 		switch {
@@ -340,7 +340,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // It is the expensive thing the dashboard does, which is why the caller
 // runs it behind a cache: on a busy access point this reads tens of
 // thousands of ads, and it used to do so on every open of the page.
-func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
+func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe bool) (*dashboardSnapshot, error) {
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
@@ -378,9 +378,70 @@ func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.Quer
 		total++
 	}
 
-	return &dashboardSnapshot{
-		Counts:   counts,
-		Total:    total,
-		Activity: activity.result("schedd", time.Now()),
-	}, nil
+	act := activity.result(time.Now())
+
+	// The queue's completed list only reaches back as far as the reaper
+	// has not got to. Ask the archive for the rest, when there is one:
+	// this is the mirror doing what it is for, and a failure here leaves
+	// the queue's shorter answer in place rather than emptying it.
+	if archived, aerr := s.recentlyCompletedFromArchive(ctx, owner, ownedByMe); aerr != nil {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: no archive for recently-completed; showing what the queue still holds", "error", aerr)
+	} else {
+		act.mergeArchivedCompletions(archived)
+		act.Source = "schedd + htcondordb archive"
+	}
+
+	return &dashboardSnapshot{Counts: counts, Total: total, Activity: act}, nil
+}
+
+// recentlyCompletedFromArchive reads the newest finished jobs from the
+// mirror's history table.
+//
+// Errors rather than returning empty when there is no mirror, so the
+// caller can tell "nothing finished" from "nothing could answer" -- the
+// distinction the dashboard shows the viewer.
+func (s *Handler) recentlyCompletedFromArchive(ctx context.Context, owner string, ownedByMe bool) ([]RecentJob, error) {
+	if !s.dbMirror.Enabled() {
+		return nil, fmt.Errorf("no htcondordb mirror is configured")
+	}
+	constraint := "true"
+	if ownedByMe {
+		constraint = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	}
+	dbc, closer, _, err := s.dbMirror.Client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer closer()
+
+	// The archive returns newest first with the limit pushed down, which
+	// is exactly this question -- no sort and no over-fetch.
+	rows, err := dbc.QueryRawProject(ctx, "history", constraint,
+		[]string{"ClusterId", "ProcId", "Owner", "CompletionDate", "EnteredCurrentStatus", "ExitCode", "ExitBySignal"},
+		recentPerList)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RecentJob, 0, len(rows))
+	for _, row := range rows {
+		ad, perr := classad.ParseOld(row)
+		if perr != nil {
+			// One unreadable row is not worth failing the dashboard for;
+			// the rest of the list is still an answer.
+			s.logger.Debug(logging.DestinationHTTP, "dashboard: skipping an unreadable history row", "error", perr)
+			continue
+		}
+		e := RecentJob{At: completionTime(ad)}
+		e.ClusterID, _ = ad.EvaluateAttrInt("ClusterId")
+		e.ProcID, _ = ad.EvaluateAttrInt("ProcId")
+		e.Owner, _ = ad.EvaluateAttrString("Owner")
+		if bySignal, ok := ad.EvaluateAttrBool("ExitBySignal"); ok && bySignal {
+			e.Detail = "killed by a signal"
+		} else if code, ok := ad.EvaluateAttrInt("ExitCode"); ok {
+			e.Detail = fmt.Sprintf("exit %d", code)
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }

@@ -35,7 +35,7 @@ func TestHoldReasonsTurnACountIntoADiagnosis(t *testing.T) {
 	}
 	a.observe(heldAd(44, 0, 1, 3000, "via condor_hold (by user alice)"))
 
-	got := a.result("schedd", time.Now())
+	got := a.result(time.Now())
 	if len(got.HoldReasons) != 3 {
 		t.Fatalf("expected three distinct reasons, got %+v", got.HoldReasons)
 	}
@@ -81,7 +81,7 @@ func TestHoldReasonTailIsSummedNotDropped(t *testing.T) {
 			total++
 		}
 	}
-	got := a.result("schedd", time.Now())
+	got := a.result(time.Now())
 	if len(got.HoldReasons) != topHoldReasons+1 {
 		t.Fatalf("expected %d rows plus an 'other', got %d", topHoldReasons, len(got.HoldReasons))
 	}
@@ -119,7 +119,7 @@ func TestRecentListsKeepTheNewest(t *testing.T) {
 	for _, at := range []int64{100, 900, 500, 800, 200, 700, 300, 600, 400, 1000, 50} {
 		a.observe(heldAd(42, at, 13, at, fmt.Sprintf("held at %d", at)))
 	}
-	got := a.result("schedd", time.Now())
+	got := a.result(time.Now())
 	if len(got.RecentlyHeld) != recentPerList {
 		t.Fatalf("kept %d entries, want %d", len(got.RecentlyHeld), recentPerList)
 	}
@@ -139,24 +139,138 @@ func TestRecentListsKeepTheNewest(t *testing.T) {
 	}
 }
 
-// TestCompletedIsAbsentNotEmpty. A finished job is destroyed from the
-// queue, so a queue walk cannot see one however recent. An empty list
-// would read as "nothing finished", which on a busy access point is the
-// opposite of the truth.
-func TestCompletedIsAbsentNotEmpty(t *testing.T) {
-	got := newActivityCollector().result("schedd", time.Now())
-	if got.CompletedAvailable {
-		t.Error("the schedd path cannot answer 'recently completed'; it must not claim to")
+// TestCompletedComesFromTheQueueAndTheArchive. A finished job is
+// destroyed from the queue by the reaper, but there is a window before
+// that where it sits in JobStatus == 4 -- so the walk catches the last
+// few. That is a real answer and the freshest one available, just
+// short-sighted, and the archive supplies the rest.
+func TestCompletedComesFromTheQueueAndTheArchive(t *testing.T) {
+	a := newActivityCollector()
+	done := classad.New()
+	done.InsertAttr("ClusterId", int64(42))
+	done.InsertAttr("ProcId", int64(0))
+	done.InsertAttr("JobStatus", int64(4))
+	done.InsertAttr("CompletionDate", int64(5000))
+	done.InsertAttr("ExitCode", int64(0))
+	done.InsertAttrString("Owner", "alice")
+	a.observe(done)
+
+	got := a.result(time.Now())
+	if !got.CompletedAvailable || len(got.RecentlyCompleted) != 1 {
+		t.Fatalf("a job caught before the reaper should be reported: %+v", got.RecentlyCompleted)
 	}
-	if len(got.RecentlyCompleted) != 0 {
-		t.Error("no completed entries should be invented from a queue walk")
+	if !got.CompletedPartial {
+		t.Error("queue-only covers the last seconds, not the last hour; it must say so")
+	}
+
+	// The archive fills in what the reaper already took, and wins the
+	// deduplication because it carries the outcome.
+	got.mergeArchivedCompletions([]RecentJob{
+		{ClusterID: 42, ProcID: 0, At: 5000, Detail: "exit 0"},
+		{ClusterID: 41, ProcID: 7, At: 4000, Detail: "exit 1"},
+		{ClusterID: 40, ProcID: 0, At: 6000, Detail: "killed by a signal"},
+	})
+	if got.CompletedPartial {
+		t.Error("with the archive merged it is no longer just what the queue held")
+	}
+	if len(got.RecentlyCompleted) != 3 {
+		t.Fatalf("the overlapping job should appear once, not twice: %+v", got.RecentlyCompleted)
+	}
+	if got.RecentlyCompleted[0].At != 6000 {
+		t.Errorf("merged list is not newest-first: %+v", got.RecentlyCompleted)
 	}
 }
 
-// TestOneWalkServesEveryViewer is the cost property. The dashboard's
-// queue walk is the most expensive thing the access point is asked for,
-// and it used to happen on every page load.
-func TestOneWalkServesEveryViewer(t *testing.T) {
+// TestNoCompletionsAnywhereIsReportedHonestly: with nothing in the queue
+// and no archive, the list is unavailable rather than empty. An empty
+// list reads as "nothing finished", which on a busy access point is the
+// opposite of the truth.
+func TestNoCompletionsAnywhereIsReportedHonestly(t *testing.T) {
+	got := newActivityCollector().result(time.Now())
+	if got.CompletedAvailable {
+		t.Error("nothing could answer; the panel must not claim it did")
+	}
+	if len(got.RecentlyCompleted) != 0 {
+		t.Error("no completions should be invented")
+	}
+	// An archive that returns nothing is still an answer: it means
+	// nothing finished, which is different from not knowing.
+	got.mergeArchivedCompletions(nil)
+	if got.CompletedAvailable {
+		t.Error("an empty archive result should not flip availability on its own")
+	}
+}
+
+// TestSnapshotsAreNeverSharedAcrossOwners is the property that matters
+// most here, and the one the cost test below does NOT cover.
+//
+// Most viewers are scoped to their own jobs, so each owner has their own
+// cache key and their own walk -- sharing is the exception, not the
+// rule. The danger in a shared cache is not a wasted query, it is
+// serving alice's snapshot to bob: the counts, the hold messages and the
+// recent job ids are all hers, and nothing downstream would notice.
+func TestSnapshotsAreNeverSharedAcrossOwners(t *testing.T) {
+	c := newDashboardCache()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	snapshotFor := func(owner string) *dashboardSnapshot {
+		t.Helper()
+		got, err := c.get("mine:"+owner, func() (*dashboardSnapshot, error) {
+			return &dashboardSnapshot{
+				Counts: map[string]int{"idle": 1},
+				Total:  len(owner), // a value only this owner's walk produces
+				Activity: DashboardActivity{
+					RecentlyHeld: []RecentJob{{ClusterID: 1, Owner: owner, At: 1}},
+				},
+			}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	alice := snapshotFor("alice")
+	bob := snapshotFor("bob")
+
+	if bob.Total == alice.Total {
+		t.Fatalf("bob was served alice's snapshot (total=%d)", bob.Total)
+	}
+	if got := bob.Activity.RecentlyHeld[0].Owner; got != "bob" {
+		t.Errorf("bob's recent activity names %q; one user's jobs leaked into another's dashboard", got)
+	}
+	// And alice keeps hers -- bob's walk must not have overwritten it.
+	if again := snapshotFor("alice"); again.Activity.RecentlyHeld[0].Owner != "alice" {
+		t.Error("alice's snapshot was replaced by bob's")
+	}
+}
+
+// TestHandlerKeysTheCacheByOwner checks the key the HANDLER builds, not
+// just the cache's behaviour given distinct keys. The leak, if it
+// happened, would be an owner missing from the key here -- the cache
+// itself is only as isolated as what it is asked for.
+func TestHandlerKeysTheCacheByOwner(t *testing.T) {
+	alice := dashboardCacheKey("alice", true)
+	bob := dashboardCacheKey("bob", true)
+	if alice == bob {
+		t.Fatalf("alice and bob share the cache key %q; one would be served the other's jobs", alice)
+	}
+	if pool := dashboardCacheKey("alice", false); pool == alice {
+		t.Error("the pool-wide view must not share a key with an owner-scoped one")
+	}
+	// Two admins on the pool-wide view genuinely do share.
+	if dashboardCacheKey("alice", false) != dashboardCacheKey("bob", false) {
+		t.Error("the pool-wide view is the same answer for everyone; it should share one walk")
+	}
+}
+
+// TestRepeatedLoadsShareOneWalk is the cost property, and it applies
+// PER SCOPE rather than per deployment: an owner-scoped viewer shares a
+// snapshot only with themselves reloading, while everyone on the admin
+// pool-wide view shares one. That still removes the old behaviour --
+// a full walk on every open of the page -- which is what it is for.
+func TestRepeatedLoadsShareOneWalk(t *testing.T) {
 	c := newDashboardCache()
 	now := time.Now()
 	c.now = func() time.Time { return now }
@@ -167,28 +281,39 @@ func TestOneWalkServesEveryViewer(t *testing.T) {
 		return &dashboardSnapshot{Total: walks}, nil
 	}
 	for i := 0; i < 25; i++ {
-		if _, err := c.get("mine:alice", dashboardRefresh, compute); err != nil {
+		if _, err := c.get("mine:alice", compute); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if walks != 1 {
-		t.Errorf("25 page loads caused %d queue walks, want 1", walks)
+		t.Errorf("25 reloads by one viewer caused %d walks, want 1", walks)
 	}
 
-	// A different scope is a different answer, so it gets its own walk.
-	if _, err := c.get("all", dashboardRefresh, compute); err != nil {
+	// A second owner is a second walk, by design -- see
+	// TestSnapshotsAreNeverSharedAcrossOwners. That walk is bounded by
+	// that owner's own jobs, because the query carries FetchMyJobs.
+	if _, err := c.get("mine:bob", compute); err != nil {
 		t.Fatal(err)
 	}
 	if walks != 2 {
-		t.Errorf("the pool-wide scope should not be served the owner-scoped snapshot (walks=%d)", walks)
+		t.Errorf("a second owner should get their own walk (walks=%d)", walks)
 	}
 
-	// And it does refresh, once the interval has passed.
-	now = now.Add(dashboardRefresh + time.Second)
-	if _, err := c.get("mine:alice", dashboardRefresh, compute); err != nil {
-		t.Fatal(err)
+	// The admin pool-wide scope is the one many viewers genuinely share.
+	for i := 0; i < 10; i++ {
+		if _, err := c.get("all", compute); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if walks != 3 {
+		t.Errorf("ten admins on the pool-wide view should share one walk (walks=%d)", walks)
+	}
+
+	now = now.Add(dashboardRefresh + time.Second)
+	if _, err := c.get("mine:alice", compute); err != nil {
+		t.Fatal(err)
+	}
+	if walks != 4 {
 		t.Errorf("the snapshot never refreshed (walks=%d)", walks)
 	}
 }
@@ -200,14 +325,14 @@ func TestFailedRefreshKeepsTheLastGoodAnswer(t *testing.T) {
 	now := time.Now()
 	c.now = func() time.Time { return now }
 
-	if _, err := c.get("k", dashboardRefresh, func() (*dashboardSnapshot, error) {
+	if _, err := c.get("k", func() (*dashboardSnapshot, error) {
 		return &dashboardSnapshot{Total: 7}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	now = now.Add(dashboardRefresh + time.Second)
-	got, err := c.get("k", dashboardRefresh, func() (*dashboardSnapshot, error) {
+	got, err := c.get("k", func() (*dashboardSnapshot, error) {
 		return nil, errors.New("schedd unreachable")
 	})
 	if err != nil {
@@ -218,7 +343,7 @@ func TestFailedRefreshKeepsTheLastGoodAnswer(t *testing.T) {
 	}
 
 	// With nothing cached at all, the error is the honest answer.
-	if _, err := c.get("fresh", dashboardRefresh, func() (*dashboardSnapshot, error) {
+	if _, err := c.get("fresh", func() (*dashboardSnapshot, error) {
 		return nil, errors.New("schedd unreachable")
 	}); err == nil {
 		t.Error("with no prior snapshot the failure must surface")

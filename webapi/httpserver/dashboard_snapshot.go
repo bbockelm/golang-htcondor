@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -19,11 +20,16 @@ import (
 // walked at most once per refreshInterval no matter how many people are
 // looking -- where before each open of the page was another full scan.
 //
-// "Recently completed" is deliberately absent from this path. A finished
-// job is destroyed from the queue by the schedd, so a queue walk cannot
-// see one however recent; it lives in the history archive. Reporting an
-// empty list would read as "nothing finished", which is the opposite of
-// the truth on a busy access point.
+// "Recently completed" is approximated rather than absent. A finished
+// job is destroyed from the queue by the schedd's reaper, but there is a
+// window between the terminal write and the destroy where it sits in
+// JobStatus == 4 -- so a queue walk catches the few that finished in the
+// last moments. That is a real answer, just a short-sighted one, and the
+// history archive supplies the rest when it is reachable.
+//
+// The two are reported as one list with a flag saying whether the
+// archive contributed, because the difference matters: queue-only means
+// "the last few seconds", not "all that finished".
 
 // dashboardRefresh is the floor between schedd walks. Every viewer
 // shares one snapshot, so this bounds the cost at one queue scan per
@@ -70,11 +76,15 @@ type DashboardActivity struct {
 	RecentlyHeld      []RecentJob `json:"recently_held,omitempty"`
 	RecentlyCompleted []RecentJob `json:"recently_completed,omitempty"`
 
-	// CompletedAvailable is false when nothing can answer "what finished
-	// recently": a finished job has left the queue, so only the history
-	// archive knows. Reported rather than left as an empty list, which
-	// would read as "nothing finished".
+	// CompletedAvailable is false when nothing could answer "what
+	// finished recently". Reported rather than left as an empty list,
+	// which would read as "nothing finished".
 	CompletedAvailable bool `json:"completed_available"`
+	// CompletedPartial says the list came from the queue alone -- the
+	// handful still in JobStatus == 4 before the reaper destroys them.
+	// That is minutes of history at best, and a viewer told otherwise
+	// would read a short list as a quiet access point.
+	CompletedPartial bool `json:"completed_partial"`
 
 	// Source is what answered, and ComputedAt when. A cached snapshot is
 	// minutes old by design; saying so is the difference between a stale
@@ -110,12 +120,13 @@ func newDashboardCache() *dashboardCache {
 	return &dashboardCache{byKey: make(map[string]*cachedDashboard), now: time.Now}
 }
 
-// get returns a snapshot no older than maxAge, computing one if needed.
+// get returns a snapshot no older than dashboardRefresh, computing one
+// if needed.
 //
 // The per-key lock is held across the computation on purpose: ten people
 // opening the dashboard at once should cost one queue walk, not ten.
 // The tenth waits for the first rather than starting its own.
-func (c *dashboardCache) get(key string, maxAge time.Duration, compute func() (*dashboardSnapshot, error)) (*dashboardSnapshot, error) {
+func (c *dashboardCache) get(key string, compute func() (*dashboardSnapshot, error)) (*dashboardSnapshot, error) {
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
@@ -126,7 +137,7 @@ func (c *dashboardCache) get(key string, maxAge time.Duration, compute func() (*
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if entry.snapshot != nil && c.now().Sub(entry.at) < maxAge {
+	if entry.snapshot != nil && c.now().Sub(entry.at) < dashboardRefresh {
 		return entry.snapshot, nil
 	}
 	snap, err := compute()
@@ -148,8 +159,8 @@ func (c *dashboardCache) get(key string, maxAge time.Duration, compute func() (*
 // walk, keeping only the newest few of each so the pass stays O(1) in
 // memory rather than O(queue).
 type activityCollector struct {
-	submitted, started, held recentTop
-	holds                    map[int64]*HoldReasonCount
+	submitted, started, held, completed recentTop
+	holds                               map[int64]*HoldReasonCount
 }
 
 func newActivityCollector() *activityCollector {
@@ -157,6 +168,7 @@ func newActivityCollector() *activityCollector {
 		submitted: recentTop{limit: recentPerList},
 		started:   recentTop{limit: recentPerList},
 		held:      recentTop{limit: recentPerList},
+		completed: recentTop{limit: recentPerList},
 		holds:     make(map[int64]*HoldReasonCount, 8),
 	}
 }
@@ -182,6 +194,19 @@ func (a *activityCollector) observe(ad *classad.ClassAd) {
 		e.Detail, _ = ad.EvaluateAttrString("RemoteHost")
 		a.started.add(e)
 	}
+	if status == jobStatusCompleted {
+		// Caught in the window before the reaper destroys it. Rare per
+		// walk, but on a busy access point there is usually something
+		// here, and it is the freshest possible answer -- fresher than
+		// the archive, which only learns once the schedd has written
+		// history and the syncer has read it.
+		e := id
+		e.At = completionTime(ad)
+		if code, ok := ad.EvaluateAttrInt("ExitCode"); ok {
+			e.Detail = fmt.Sprintf("exit %d", code)
+		}
+		a.completed.add(e)
+	}
 	if status == jobStatusHeld {
 		code, _ := ad.EvaluateAttrInt("HoldReasonCode")
 		reason, _ := ad.EvaluateAttrString("HoldReason")
@@ -203,7 +228,20 @@ func (a *activityCollector) observe(ad *classad.ClassAd) {
 	}
 }
 
-const jobStatusHeld = 5
+const (
+	jobStatusCompleted = 4
+	jobStatusHeld      = 5
+)
+
+// completionTime reads whichever stamp says when a job finished.
+func completionTime(ad *classad.ClassAd) int64 {
+	for _, attr := range []string{"CompletionDate", "EnteredCurrentStatus"} {
+		if v, ok := ad.EvaluateAttrInt(attr); ok && v > 0 {
+			return v
+		}
+	}
+	return 0
+}
 
 // jobStart reads whichever start stamp the ad carries.
 func jobStart(ad *classad.ClassAd) (int64, bool) {
@@ -216,13 +254,21 @@ func jobStart(ad *classad.ClassAd) (int64, bool) {
 }
 
 // result renders the collected activity, newest first.
-func (a *activityCollector) result(source string, now time.Time) DashboardActivity {
+func (a *activityCollector) result(now time.Time) DashboardActivity {
+	completed := a.completed.sorted()
 	act := DashboardActivity{
 		RecentlySubmitted: a.submitted.sorted(),
 		RecentlyStarted:   a.started.sorted(),
 		RecentlyHeld:      a.held.sorted(),
-		Source:            source,
-		ComputedAt:        now.Unix(),
+		RecentlyCompleted: completed,
+		// The queue can only show what has not been reaped yet, so this
+		// is available-but-partial until the archive is merged in.
+		CompletedAvailable: len(completed) > 0,
+		CompletedPartial:   true,
+		// The queue is what this collector walks; a caller that merges
+		// the archive in says so itself.
+		Source:     "schedd",
+		ComputedAt: now.Unix(),
 	}
 
 	rows := make([]HoldReasonCount, 0, len(a.holds))
@@ -286,4 +332,57 @@ func (r *recentTop) sorted() []RecentJob {
 func (s *Handler) dashboards() *dashboardCache {
 	s.dashboardCacheOnce.Do(func() { s.dashboardCacheVal = newDashboardCache() })
 	return s.dashboardCacheVal
+}
+
+// dashboardCacheKey names the snapshot a viewer may be served.
+//
+// The owner is in the key because most viewers see only their own jobs,
+// and a snapshot holds their counts, their hold messages and their job
+// ids. Leaving the owner out would not merely waste a query -- it would
+// serve one user's dashboard to another, and nothing downstream would
+// notice. The pool-wide admin view is the same answer for everybody, so
+// it shares a single key.
+func dashboardCacheKey(owner string, ownedByMe bool) string {
+	if !ownedByMe {
+		return "all"
+	}
+	return "mine:" + owner
+}
+
+// mergeArchivedCompletions folds history rows into the completed list.
+//
+// The queue can only show jobs the reaper has not destroyed yet -- the
+// last seconds, not the last hour. The archive holds the rest, and the
+// two together are what a viewer means by "recently completed". Rows are
+// deduplicated by job id because the window overlaps: a job can be in
+// both, the archive's copy being the one with the outcome attributes.
+//
+// A failure here leaves the queue's answer in place rather than emptying
+// the list: partial and labelled beats absent.
+func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
+	if len(archived) == 0 {
+		return
+	}
+	seen := make(map[[2]int64]struct{}, len(archived)+len(act.RecentlyCompleted))
+	merged := make([]RecentJob, 0, len(archived)+len(act.RecentlyCompleted))
+	// Archive first, so its row wins the deduplication: it is the
+	// durable record and carries the exit status, where the queue's copy
+	// may have been caught mid-flight.
+	for _, e := range append(archived, act.RecentlyCompleted...) {
+		k := [2]int64{e.ClusterID, e.ProcID}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		merged = append(merged, e)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].At > merged[j].At })
+	if len(merged) > recentPerList {
+		merged = merged[:recentPerList]
+	}
+	act.RecentlyCompleted = merged
+	act.CompletedAvailable = true
+	// The archive answered, so this is no longer just the last few
+	// seconds the queue happened to be holding.
+	act.CompletedPartial = false
 }

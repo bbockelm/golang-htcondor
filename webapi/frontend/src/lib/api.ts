@@ -167,10 +167,12 @@ export interface DashboardActivity {
   recently_started?: RecentJob[];
   recently_held?: RecentJob[];
   recently_completed?: RecentJob[];
-  /** False when nothing can answer "what finished recently": a finished
-   *  job has left the queue, so only the history archive knows. Absent
+  /** False when nothing could answer "what finished recently". Absent
    *  rather than empty, because empty reads as "nothing finished". */
   completed_available: boolean;
+  /** True when the list came from the queue alone — the handful still in
+   *  JobStatus 4 before the reaper destroys them. Minutes at best. */
+  completed_partial: boolean;
   /** What answered, and when. A cached snapshot is minutes old by
    *  design; saying so is the difference between stale and wrong. */
   source: string;

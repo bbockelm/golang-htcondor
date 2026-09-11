@@ -170,11 +170,25 @@ function HoldReasons({ activity }: { activity: DashboardActivity }) {
 // hour or a thousand jobs started in the last minute.
 function RecentActivity({ activity }: { activity: DashboardActivity }) {
   const lists = [
-    { title: 'Recently submitted', jobs: activity.recently_submitted, verb: 'submitted' },
-    { title: 'Recently started', jobs: activity.recently_started, verb: 'started' },
-    { title: 'Recently held', jobs: activity.recently_held, verb: 'held' },
+    { title: 'Recently submitted', jobs: activity.recently_submitted },
+    { title: 'Recently started', jobs: activity.recently_started },
+    { title: 'Recently held', jobs: activity.recently_held },
+    {
+      title: 'Recently completed',
+      jobs: activity.recently_completed,
+      // The queue only holds finished jobs until the reaper takes them,
+      // so without the archive this is the last few seconds rather than
+      // the last hour. Saying which keeps a short list from reading as a
+      // quiet access point.
+      note: activity.completed_available && activity.completed_partial
+        ? 'only what the queue still holds — the history mirror is not answering'
+        : undefined,
+      unavailable: !activity.completed_available
+        ? 'needs the htcondordb history mirror'
+        : undefined,
+    },
   ];
-  const anything = lists.some((l) => (l.jobs?.length ?? 0) > 0);
+  const anything = lists.some((l) => (l.jobs?.length ?? 0) > 0 || l.unavailable);
 
   return (
     <section>
@@ -195,35 +209,43 @@ function RecentActivity({ activity }: { activity: DashboardActivity }) {
       )}
 
       {anything && (
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {lists.map((list) => (
-            <RecentList key={list.title} title={list.title} jobs={list.jobs ?? []} />
+            <RecentList
+              key={list.title}
+              title={list.title}
+              jobs={list.jobs ?? []}
+              note={list.note}
+              unavailable={list.unavailable}
+            />
           ))}
         </div>
-      )}
-
-      {!activity.completed_available && (
-        // Not an empty list: a finished job is removed from the queue by
-        // the schedd, so a queue walk cannot see one however recent.
-        // Showing an empty "recently completed" would read as "nothing
-        // finished", which is the opposite of the truth here.
-        <p className="mt-3 text-xs text-gray-400">
-          Recently completed is not shown: finished jobs leave the queue, so this
-          needs the htcondordb history mirror, which is not answering.
-        </p>
       )}
     </section>
   );
 }
 
-function RecentList({ title, jobs }: { title: string; jobs: RecentJob[] }) {
+function RecentList({
+  title,
+  jobs,
+  note,
+  unavailable,
+}: {
+  title: string;
+  jobs: RecentJob[];
+  note?: string;
+  unavailable?: string;
+}) {
   return (
     <div className="rounded border border-gray-200">
       <div className="border-b border-gray-100 px-3 py-1.5 text-xs font-medium text-gray-600">
         {title}
       </div>
+      {note && <p className="px-3 pt-1.5 text-xs text-amber-700">{note}</p>}
       {jobs.length === 0 ? (
-        <p className="px-3 py-2 text-xs text-gray-400">none</p>
+        // "unavailable" and "none" are different answers: one means
+        // nothing could tell us, the other that nothing happened.
+        <p className="px-3 py-2 text-xs text-gray-400">{unavailable ?? 'none'}</p>
       ) : (
         <ul className="divide-y divide-gray-100">
           {jobs.map((job) => (
