@@ -332,21 +332,29 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 
 	entry := &TokenCacheEntry{
 		Token: token,
-		// Username is the UNVERIFIED sub from parseJWTClaims.
+		// Username is the sub from parseJWTClaims, which parses
+		// WITHOUT verifying the signature -- this server checks no JWT
+		// signatures at all, because the schedd is the trust root and
+		// authenticates the forwarded token over CEDAR.
 		//
-		// Validated: true here is load-bearing for owner-scoped
-		// endpoints -- without it an owner-scoped listing 401s until
-		// some schedd op has authenticated with the token -- but it
-		// also means that unverified sub drives owner scoping and
-		// admin checks on the first request, which is what
-		// createAuthenticatedContext's comment says the 2026-05
-		// "ParseUnverified trusts sub" audit removed. The two
-		// disagree, and resolving it is a security decision rather
-		// than a cleanup, so this is left as it stands and recorded
-		// here. The misplaced comment that used to explain this flag
-		// belonged to AddValidated and has moved there.
+		// So Validated stays false here, and the entry's Username is
+		// not an identity yet: ValidatedUsername returns "" until
+		// MarkValidated records that a schedd op succeeded with this
+		// token, and createAuthenticatedContext falls back to asking
+		// the schedd who the caller is. That costs one round trip on a
+		// token's first request and is what makes a forged token
+		// resolve to nobody instead of to whatever it claims.
+		//
+		// This field carried Validated: true until 2026-09, which made
+		// an unverified sub the request identity from the first
+		// request -- the "ParseUnverified trusts sub" issue
+		// createAuthenticatedContext's comment says the 2026-05 audit
+		// removed. It was reachable: a JWT with a garbage signature
+		// resolved to its own sub, and any endpoint deciding on
+		// identity alone, without a schedd round trip to re-check it
+		// (saved templates, Jupyter sessions, chat history), answered
+		// for that user.
 		Username:      username,
-		Validated:     true,
 		Expiration:    expiration,
 		SessionCache:  sessionCache,
 		cancelCleanup: cancel,

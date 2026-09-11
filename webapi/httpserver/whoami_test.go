@@ -11,6 +11,19 @@ import (
 
 // TestHandleWhoAmI tests the whoami endpoint handler
 func TestHandleWhoAmI(t *testing.T) {
+	// A bearer token authenticates the REQUEST; it does not by itself
+	// name the caller.
+	//
+	// This server verifies no JWT signatures -- the schedd is the trust
+	// root -- so the sub claim is not an identity until a schedd op has
+	// succeeded with the token or the schedd has been asked who the
+	// caller is. With no schedd reachable here, the honest answer is a
+	// request that carried a credential and a user we cannot name.
+	//
+	// This subtest used to assert the sub WAS the identity, which held
+	// only because TokenCache.Add marked every freshly parsed token
+	// validated -- the behaviour that let a forged signature resolve to
+	// its own sub.
 	t.Run("Authenticated with Bearer token", func(t *testing.T) {
 		// Create a server with token cache
 		s, err := NewServer(newTestConfig(t))
@@ -53,8 +66,9 @@ func TestHandleWhoAmI(t *testing.T) {
 			t.Error("Expected authenticated to be true")
 		}
 
-		if whoamiResp.User != "alice@test.domain" {
-			t.Errorf("Expected user 'alice@test.domain', got '%s'", whoamiResp.User)
+		if whoamiResp.User != "" {
+			t.Errorf("User = %q, want empty: the sub of an unvalidated token is not an identity",
+				whoamiResp.User)
 		}
 	})
 
