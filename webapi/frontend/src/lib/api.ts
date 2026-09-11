@@ -653,6 +653,11 @@ export interface AdminClient {
   public: boolean;
   created_at: string;
 
+  // Identity a client_credentials token from this client asserts (the
+  // IDTOKEN subject the schedd authorizes). Empty/absent unless an admin
+  // set it; required before client_credentials will issue a token.
+  service_subject?: string;
+
   // What the client called itself at registration (RFC 7591
   // client_name). Absent for seeded clients and for anything registered
   // before the server started keeping it.
@@ -1100,6 +1105,20 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ notes }),
+      }),
+    // updateClient edits the admin-settable policy on a client: its permitted
+    // grant types and (for client_credentials) the service identity its tokens
+    // assert. Only the provided fields are touched. The server enforces the
+    // guardrails (supported grants only, no client_credentials on a public
+    // client, a non-empty service_subject whenever client_credentials is set).
+    updateClient: (
+      id: string,
+      body: { grant_types?: string[]; service_subject?: string },
+    ): Promise<{ ok: boolean }> =>
+      fetchJSON(`${BASE}/admin/oauth2/clients/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       }),
     listTokens: (params?: {
       client_id?: string;

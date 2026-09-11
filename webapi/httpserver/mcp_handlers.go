@@ -897,6 +897,30 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// client_credentials has no end user, so fosite leaves the session subject
+	// empty. Stamp it with the client's configured service identity: that
+	// subject flows into the HTCondor IDTOKEN minted on later MCP requests, and
+	// the schedd enforces ALLOW_<LEVEL> against it. A client_credentials client
+	// with no service identity configured cannot mint an ambiguous token.
+	if grantType == "client_credentials" {
+		subject, serr := h.oauth2Provider.GetStorage().clientServiceSubject(ctx, accessRequest.GetClient().GetID())
+		if serr != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to load client service subject",
+				"client_id", accessRequest.GetClient().GetID(), "error", serr)
+			h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not resolve the client service identity")
+			return
+		}
+		if subject == "" {
+			h.writeOAuthError(w, http.StatusBadRequest, "invalid_client",
+				"client_credentials requires a service identity; set one on this client first")
+			return
+		}
+		// session is our *Session (from newEmptySession); SetSubject is promoted
+		// from the embedded openid.DefaultSession. fosite persists this same
+		// object with the response, so the token carries the service subject.
+		session.SetSubject(subject)
+	}
+
 	// Re-run the authorization decision before minting anything. fosite's
 	// refresh handler has by now replayed the stored grant verbatim — same
 	// session, same scopes — having checked only that the *client* is still
@@ -1285,7 +1309,7 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
 		"device_authorization_endpoint":         issuer + "/mcp/oauth2/device/authorize",
 		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      oauth2AdvertisedScopes,

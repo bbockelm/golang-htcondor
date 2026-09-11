@@ -164,7 +164,7 @@ func TestClientNotesRejectsUnknownAndOversized(t *testing.T) {
 	}
 
 	insertClient(t, server.oauth2Provider.GetStorage().GetDB(), "abc")
-	big, _ := json.Marshal(adminClientNotesRequest{Notes: strings.Repeat("x", maxClientNotesLen+1)})
+	big, _ := json.Marshal(map[string]string{"notes": strings.Repeat("x", maxClientNotesLen+1)})
 	rec = httptest.NewRecorder()
 	server.handleAdminUpdateClient(rec, req("PATCH", "/api/v1/admin/oauth2/clients/abc", string(big)))
 	if rec.Code != http.StatusBadRequest {

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ory/fosite"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -93,6 +96,11 @@ type AdminClient struct {
 	Public        bool      `json:"public"`
 	CreatedAt     time.Time `json:"created_at"`
 
+	// ServiceSubject is the identity a client_credentials token from this
+	// client asserts (the IDTOKEN subject the schedd authorizes). Empty unless
+	// set by an admin; required before client_credentials will issue a token.
+	ServiceSubject string `json:"service_subject,omitempty"`
+
 	// Name is what the client called itself at registration (RFC 7591
 	// client_name). Empty for seeded clients and for anything registered
 	// before we started keeping it.
@@ -165,7 +173,7 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 	db := s.oauth2Provider.GetStorage().GetDB()
 	rows, err := db.QueryContext(r.Context(),
 		`SELECT id, redirect_uris, grant_types, response_types, scopes, public, created_at,
-		        client_name, notes, origin, last_used_at, recent_users
+		        client_name, notes, origin, last_used_at, recent_users, service_subject
 		 FROM oauth2_clients ORDER BY created_at DESC`)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to list OAuth2 clients", "error", err)
@@ -183,7 +191,7 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 		var lastUsed sql.NullTime
 		if err := rows.Scan(&c.ID, &redirectURIs, &grantTypes, &responseTypes,
 			&scopes, &public, &c.CreatedAt,
-			&name, &notes, &origin, &lastUsed, &recentUsers); err != nil {
+			&name, &notes, &origin, &lastUsed, &recentUsers, &c.ServiceSubject); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "Skipping malformed client row", "error", err)
 			continue
 		}
@@ -206,21 +214,31 @@ func (s *Handler) handleAdminListClients(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, http.StatusOK, map[string]any{"clients": clients})
 }
 
-// adminClientNotesRequest is the PATCH body for annotating a client.
-type adminClientNotesRequest struct {
-	Notes string `json:"notes"`
+// adminClientUpdateRequest is the PATCH body for a client. Every field is a
+// pointer/nil-able so the handler can tell "set to empty" from "not provided"
+// and touch only what the caller sent.
+type adminClientUpdateRequest struct {
+	Notes          *string  `json:"notes"`
+	GrantTypes     []string `json:"grant_types"`
+	ServiceSubject *string  `json:"service_subject"`
 }
 
 // maxClientNotesLen bounds an operator annotation. Generous for a note
 // and small enough that the column cannot be used as a data store.
 const maxClientNotesLen = 4096
 
+// maxServiceSubjectLen bounds the client_credentials service identity. It
+// becomes a token subject claim, so it must be a plain single-line identity.
+const maxServiceSubjectLen = 256
+
 // handleAdminUpdateClient handles PATCH /api/v1/admin/oauth2/clients/{id}.
 //
-// The only editable field is the note. Everything else on a client row
-// is either the client's own assertion at registration or something this
-// server derived, and letting an admin rewrite those would turn the
-// provenance columns into a place to record a belief rather than a fact.
+// Editable fields are the operator's note, the permitted grant types, and the
+// client_credentials service identity. These are things an operator legitimately
+// SETS: policy, not provenance. The provenance columns (origin, last_used,
+// recent_users) and the client's own registration assertions (redirect_uris,
+// scopes, public) remain read-only -- letting an admin rewrite those would turn
+// a record of fact into a record of belief.
 func (s *Handler) handleAdminUpdateClient(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -235,30 +253,114 @@ func (s *Handler) handleAdminUpdateClient(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req adminClientNotesRequest
+	var req adminClientUpdateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
-	if len(req.Notes) > maxClientNotesLen {
+	if req.Notes != nil && len(*req.Notes) > maxClientNotesLen {
 		s.writeError(w, http.StatusBadRequest,
 			fmt.Sprintf("Notes are limited to %d characters", maxClientNotesLen))
 		return
 	}
+	if req.ServiceSubject != nil {
+		sub := strings.TrimSpace(*req.ServiceSubject)
+		if len(sub) > maxServiceSubjectLen || strings.ContainsAny(sub, "\r\n\t") {
+			s.writeError(w, http.StatusBadRequest, "Invalid service subject")
+			return
+		}
+		req.ServiceSubject = &sub
+	}
 
-	found, err := setClientNotes(r.Context(), s.oauth2Provider.GetStorage().GetDB(),
-		clientID, req.Notes)
+	storage := s.oauth2Provider.GetStorage()
+
+	if req.GrantTypes != nil || req.ServiceSubject != nil {
+		if err := s.updateClientPolicy(w, r, storage, clientID, req); err != nil {
+			return // updateClientPolicy already wrote the error
+		}
+	}
+
+	if req.Notes != nil {
+		found, err := setClientNotes(r.Context(), storage.GetDB(), clientID, *req.Notes)
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to update client notes",
+				"client_id", clientID, "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to update client")
+			return
+		}
+		if !found {
+			s.writeError(w, http.StatusNotFound, "Client not found")
+			return
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// updateClientPolicy applies a grant-types / service-subject change, enforcing
+// the guardrails: only supported grants, no client_credentials on a public
+// client, and a non-empty service identity whenever client_credentials is in
+// the resulting set. It writes an HTTP error and returns non-nil on failure.
+func (s *Handler) updateClientPolicy(w http.ResponseWriter, r *http.Request, storage *OAuth2Storage, clientID string, req adminClientUpdateRequest) error {
+	ctx := r.Context()
+	client, err := storage.GetClient(ctx, clientID)
 	if err != nil {
-		s.logger.Error(logging.DestinationHTTP, "Failed to update client notes",
+		if errors.Is(err, fosite.ErrNotFound) {
+			s.writeError(w, http.StatusNotFound, "Client not found")
+		} else {
+			s.writeError(w, http.StatusInternalServerError, "Failed to load client")
+		}
+		return err
+	}
+
+	grants := req.GrantTypes
+	if grants == nil {
+		grants = client.GetGrantTypes() // subject-only change keeps existing grants
+	}
+	if err := validateGrantTypes(grants, client.IsPublic()); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return err
+	}
+
+	// client_credentials is unusable without a service identity, so refuse to
+	// leave the client in that state: require one, either being set now or
+	// already stored.
+	if containsString(grants, "client_credentials") {
+		subject := ""
+		if req.ServiceSubject != nil {
+			subject = *req.ServiceSubject
+		} else if s, serr := storage.clientServiceSubject(ctx, clientID); serr == nil {
+			subject = s
+		}
+		if strings.TrimSpace(subject) == "" {
+			s.writeError(w, http.StatusBadRequest,
+				"client_credentials requires a non-empty service_subject")
+			return fmt.Errorf("service_subject required")
+		}
+	}
+
+	found, err := updateClientGrants(ctx, storage.GetDB(), clientID, grants, req.ServiceSubject)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to update client grants",
 			"client_id", clientID, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to update client")
-		return
+		return err
 	}
 	if !found {
 		s.writeError(w, http.StatusNotFound, "Client not found")
-		return
+		return fmt.Errorf("client not found")
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"notes": req.Notes})
+	return nil
+}
+
+// containsString reports whether s is in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // handleAdminDeleteClient handles DELETE /api/v1/admin/oauth2/clients/{id}.
