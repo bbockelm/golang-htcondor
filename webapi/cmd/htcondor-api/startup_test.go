@@ -13,7 +13,7 @@ func writeConfig(t *testing.T, root string, dropins map[string]string) {
 	t.Helper()
 	dir := t.TempDir()
 	confDir := filepath.Join(dir, "config.d")
-	if err := os.MkdirAll(confDir, 0o755); err != nil {
+	if err := os.MkdirAll(confDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	body := "LOCAL_CONFIG_DIR = " + confDir + "\n" + root
@@ -152,7 +152,7 @@ func TestStartupFailureIsWrittenToTheLogFile(t *testing.T) {
 	reportStartupFailureToLog(err)
 
 	logFile := filepath.Join(logDir, "HttpApiLog")
-	b, readErr := os.ReadFile(logFile)
+	b, readErr := os.ReadFile(logFile) //nolint:gosec // G304: a path this test just created
 	if readErr != nil {
 		t.Fatalf("nothing was written to %s: %v", logFile, readErr)
 	}

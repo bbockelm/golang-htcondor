@@ -1067,7 +1067,9 @@ func reportStartupFailureToLog(startupErr error) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	fmt.Fprintf(f, "%s FATAL: %v\n", time.Now().Format(time.RFC3339), startupErr)
+	// Nothing useful to do if even this write fails -- it is the
+	// last-resort reporting path.
+	_, _ = fmt.Fprintf(f, "%s FATAL: %v\n", time.Now().Format(time.RFC3339), startupErr)
 }
 
 // dropPrivilegesIfRoot transitions the process to the condor user
