@@ -5,12 +5,15 @@ package httpserver
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 )
 
@@ -301,6 +304,100 @@ func TestMirrorRawWatchDelivers(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("no upsert for 77.0 within 30s")
+		}
+	}
+}
+
+// TestWatchDoneFiresForCompletedJobStillInQueue is the end-to-end regression
+// guard for the AP40 bug. An OSPool access point leaves a completed job in
+// job_queue.log as JobStatus 4 (a LeaveJobInQueue policy), so it shows in the
+// mirror's `jobs` table as done and never reaches a `history` row -- exactly the
+// state a live probe found for job 15303250. The "done" event must fire from
+// that terminal queue ad, through the real mirror -> watchSource -> evaluator
+// path. The unit tests prove the fold resolves a terminal-in-queue ad; this
+// proves the source actually feeds it one the way the live mirror does, which is
+// the coverage that was missing when the bug shipped.
+func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	h, feed, write := mirrorFeed(t, ctx)
+
+	// An empty history table, so the archive read returns cleanly with zero
+	// rows: this job is only ever in the jobs table, as it is on AP40.
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		t.Fatalf("connecting to the mirror: %v", err)
+	}
+	if err := dbc.CreateTable(ctx, "history"); err != nil {
+		t.Fatalf("creating the history table: %v", err)
+	}
+	closer()
+
+	// Store + evaluator wired to the same mirror through watchSource, exactly
+	// as NewHandler does in production.
+	db, err := appdb.Open(filepath.Join(t.TempDir(), "watch.db"))
+	if err != nil {
+		t.Fatalf("appdb.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := appdb.Migrate(ctx, db); err != nil {
+		t.Fatalf("appdb.Migrate: %v", err)
+	}
+	store := jobwatch.NewStore(db)
+	src := watchSource{h: h, feed: feed}
+	eval := jobwatch.NewEvaluator(store, src, func(msg string, args ...any) { t.Logf(msg+" %v", args...) })
+
+	// An agent registers a "done" watch for the cluster.
+	w, err := jobwatch.New("tester", "done-9001", "ClusterId == 9001", jobwatch.EventDone, "", jobwatch.ModeAll)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if w, err = store.Register(ctx, w, 0); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Seed a Completed job that stays in the jobs table (JobStatus 4) with a
+	// clean exit and no history row -- the LeaveJobInQueue state.
+	write(ctx, func(tx *txWriter) {
+		tx.newJob("9001.0", 9001, 0, 4)
+		tx.set("9001.0", "ExitCode", "0")
+	})
+
+	// Confirm the row is readable through the same queue path the evaluator
+	// uses before firing, so a slow write cannot masquerade as a missed event.
+	waitFor(t, "the completed job to be visible in the mirror jobs table", 30*time.Second, func() bool {
+		found := false
+		if _, err := src.Queue(ctx, "tester", jobwatch.BaseAttrs, 10, func(ad *classad.ClassAd) {
+			if c, _ := ad.EvaluateAttrInt("ClusterId"); c == 9001 {
+				found = true
+			}
+		}); err != nil {
+			t.Logf("queue read: %v", err)
+		}
+		return found
+	})
+
+	fired, err := eval.CheckOwner(ctx, "tester")
+	if err != nil {
+		t.Fatalf("CheckOwner: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("done watch did not fire for a Completed-in-queue job (fired=%d); "+
+			"the mirror shows JobStatus 4 but the watch stayed WAITING -- the AP40 bug", fired)
+	}
+
+	// A fired watch leaves the live set.
+	live, err := store.Live(ctx)
+	if err != nil {
+		t.Fatalf("Live: %v", err)
+	}
+	for _, lw := range live {
+		if lw.ID == w.ID {
+			t.Errorf("watch %s is still live after firing", w.ID)
 		}
 	}
 }
