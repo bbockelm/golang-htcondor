@@ -1,11 +1,15 @@
 package httpserver
 
 import (
+	"context"
+
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -188,6 +192,14 @@ type DashboardResponse struct {
 	Username     string         `json:"username"`
 	JobsByStatus map[string]int `json:"jobs_by_status"`
 	JobsTotal    int            `json:"jobs_total"`
+	// Activity is the "how is this access point doing" half: why jobs
+	// are held, and what changed recently. Computed from the same walk
+	// as the counts.
+	Activity DashboardActivity `json:"activity"`
+	// Goodput is absent where nothing could answer it -- no history
+	// archive means no rate, and an omitted field says that where a
+	// zeroed one would read as "everything failed".
+	Goodput *GoodputSummary `json:"goodput,omitempty"`
 }
 
 // holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
@@ -276,19 +288,53 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// jobs page already draws that distinction (displayJobStatus in
 	// lib/api.ts); without it the dashboard's HELD tile makes a routine
 	// submit look like a failure.
+	//
+	// The rest of the projection pays for the activity view out of the
+	// walk this was already doing: the identity to name a job, the three
+	// timestamps the recent lists sort on, the hold text, and one detail
+	// each. Six more attributes on a read of the whole queue is a far
+	// better trade than a second query -- and none of it is worth
+	// anything without the walk, which is why it goes here rather than
+	// into an endpoint of its own.
 	opts := &htcondor.QueryOptions{
-		Limit:      -1,
-		Projection: []string{"JobStatus", "HoldReasonCode"},
+		Limit: -1,
+		Projection: []string{
+			"JobStatus", "HoldReasonCode", "HoldReason", "ExitCode", "CompletionDate",
+			"ClusterId", "ProcId", "Owner",
+			"QDate", "JobCurrentStartDate", "JobStartDate", "EnteredCurrentStatus",
+			"Cmd", "RemoteHost",
+		},
 	}
 	if ownedByMe {
 		opts.FetchOpts = htcondor.FetchMyJobs
 		opts.Owner = owner
 	}
-	streamOpts := &htcondor.StreamOptions{
-		BufferSize:   s.streamBufferSize,
-		WriteTimeout: s.streamWriteTimeout,
+	// With a mirror answering, the page is half a dozen bounded queries
+	// and needs no cache: the numbers are current rather than up to
+	// three minutes old, and nothing walks the queue. The cached walk
+	// below is the fallback for a deployment without one, or for a
+	// mirror that is not currently usable.
+	if snap, merr := s.dashboardFromMirror(ctx, owner, ownedByMe); merr == nil {
+		s.writeJSON(w, http.StatusOK, DashboardResponse{
+			Username:     owner,
+			JobsByStatus: snap.Counts,
+			JobsTotal:    snap.Total,
+			Activity:     snap.Activity,
+			Goodput:      snap.Goodput,
+		})
+		return
+	} else if s.dbMirror.Enabled() {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+
+	// One walk per interval per scope, not one per page load. The key
+	// carries the owner because most viewers see only their own jobs and
+	// a snapshot holds theirs; see dashboardCacheKey.
+	key := dashboardCacheKey(owner, ownedByMe)
+	snap, err := s.dashboards().get(key, func() (*dashboardSnapshot, error) {
+		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)
+	})
 	if err != nil {
 		switch {
 		case ratelimit.IsRateLimitError(err):
@@ -301,7 +347,32 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeJSON(w, http.StatusOK, DashboardResponse{
+		Username:     owner,
+		JobsByStatus: snap.Counts,
+		JobsTotal:    snap.Total,
+		Activity:     snap.Activity,
+	})
+}
+
+// walkQueueForDashboard reads the queue once and folds it into counts
+// and the activity view.
+//
+// It is the expensive thing the dashboard does, which is why the caller
+// runs it behind a cache: on a busy access point this reads tens of
+// thousands of ads, and it used to do so on every open of the page.
+func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe bool) (*dashboardSnapshot, error) {
+	streamOpts := &htcondor.StreamOptions{
+		BufferSize:   s.streamBufferSize,
+		WriteTimeout: s.streamWriteTimeout,
+	}
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+	if err != nil {
+		return nil, err
+	}
+
 	counts := make(map[string]int)
+	activity := newActivityCollector()
 	total := 0
 	for result := range resultCh {
 		if result.Err != nil {
@@ -324,12 +395,74 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			hrc = v
 		}
 		counts[dashboardStatusName(js, hrc)]++
+		activity.observe(result.Ad)
 		total++
 	}
 
-	s.writeJSON(w, http.StatusOK, DashboardResponse{
-		Username:     owner,
-		JobsByStatus: counts,
-		JobsTotal:    total,
-	})
+	act := activity.result(time.Now())
+
+	// The queue's completed list only reaches back as far as the reaper
+	// has not got to. Ask the archive for the rest, when there is one:
+	// this is the mirror doing what it is for, and a failure here leaves
+	// the queue's shorter answer in place rather than emptying it.
+	if archived, aerr := s.recentlyCompletedFromArchive(ctx, owner, ownedByMe); aerr != nil {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: no archive for recently-completed; showing what the queue still holds", "error", aerr)
+	} else {
+		act.mergeArchivedCompletions(archived)
+		act.Source = "schedd + htcondordb archive"
+	}
+
+	return &dashboardSnapshot{Counts: counts, Total: total, Activity: act}, nil
+}
+
+// recentlyCompletedFromArchive reads the newest finished jobs from the
+// mirror's history table.
+//
+// Errors rather than returning empty when there is no mirror, so the
+// caller can tell "nothing finished" from "nothing could answer" -- the
+// distinction the dashboard shows the viewer.
+func (s *Handler) recentlyCompletedFromArchive(ctx context.Context, owner string, ownedByMe bool) ([]RecentJob, error) {
+	if !s.dbMirror.Enabled() {
+		return nil, fmt.Errorf("no htcondordb mirror is configured")
+	}
+	constraint := "true"
+	if ownedByMe {
+		constraint = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	}
+	dbc, closer, _, err := s.dbMirror.Client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer closer()
+
+	// The archive returns newest first with the limit pushed down, which
+	// is exactly this question -- no sort and no over-fetch.
+	rows, err := dbc.QueryRawProject(ctx, "history", constraint,
+		[]string{"ClusterId", "ProcId", "Owner", "CompletionDate", "EnteredCurrentStatus", "ExitCode", "ExitBySignal"},
+		recentPerList)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RecentJob, 0, len(rows))
+	for _, row := range rows {
+		ad, perr := classad.ParseOld(row)
+		if perr != nil {
+			// One unreadable row is not worth failing the dashboard for;
+			// the rest of the list is still an answer.
+			s.logger.Debug(logging.DestinationHTTP, "dashboard: skipping an unreadable history row", "error", perr)
+			continue
+		}
+		e := RecentJob{At: completionTime(ad)}
+		e.ClusterID, _ = ad.EvaluateAttrInt("ClusterId")
+		e.ProcID, _ = ad.EvaluateAttrInt("ProcId")
+		e.Owner, _ = ad.EvaluateAttrString("Owner")
+		if bySignal, ok := ad.EvaluateAttrBool("ExitBySignal"); ok && bySignal {
+			e.Detail = "killed by a signal"
+		} else if code, ok := ad.EvaluateAttrInt("ExitCode"); ok {
+			e.Detail = fmt.Sprintf("exit %d", code)
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }

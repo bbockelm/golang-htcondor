@@ -104,3 +104,34 @@ test('the chat surface mounts without page errors', async ({ page }) => {
 
   expect(errors, 'chat surface raised page errors').toEqual([]);
 });
+
+// The dashboard's activity panels are fed by a separate half of the
+// response from the status tiles, and they render conditionally. A page
+// that fetched the response, drew the tiles, and dropped every activity
+// list would pass the render check above -- so assert on a string only
+// the fixture's activity carries.
+test('dashboard binds the activity panels, not just the status tiles', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText(/smoke-submitted/).first()).toBeVisible();
+  // The hold breakdown is the panel most likely to be dropped: it is the
+  // only one keyed off a numeric code rather than a list of jobs.
+  await expect(page.getByText(/Failed to transfer output/).first()).toBeVisible();
+});
+
+// The ticker is the one part of the dashboard fed by an EventSource
+// rather than by the query client, so it is the one part the other
+// assertions cannot reach. Its component tests render it from props;
+// this is what proves the stream is subscribed to, parsed and bound.
+test('dashboard live ticker renders events from the stream', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText(/smoke-live-host/).first()).toBeVisible();
+});
+
+test('dashboard goodput panel binds the history summary', async ({ page }) => {
+  await page.goto('/');
+  // The wall-clock share is computed in the component rather than sent,
+  // so this covers the arithmetic as well as the binding: 90000 good of
+  // 120000 total.
+  await expect(page.getByText(/75% of/)).toBeVisible();
+  await expect(page.getByText('exit 127')).toBeVisible();
+});

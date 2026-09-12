@@ -57,6 +57,9 @@ type Feed struct {
 	ended map[string]endedJob
 	// warm says a stream is connected and nothing has been missed since.
 	warm bool
+	// activitySubs are followers of the whole stream rather than of one
+	// job: the dashboard's live ticker. See activity.go.
+	activitySubs map[*activitySub]struct{}
 	// subs are per-job followers of this same stream. See subscribe.go.
 	// Keyed by job identity rather than storage key so the feed's refusal
 	// to parse that key does not leak out to callers.
@@ -192,6 +195,12 @@ func (f *Feed) Apply(ev WatchEvent) {
 			// history archive: later, not wrong.
 			return
 		}
+		// The transition is the difference between what is arriving and
+		// what is already held, so it has to be read before the
+		// overwrite.
+		if act, ok := f.activityFor(f.live[ev.Key], ad); ok {
+			f.publishActivityLocked(act)
+		}
 		f.live[ev.Key] = ad
 		// A job can come back -- a held job released, or a key reused
 		// after a compaction reload. Clear any terminal record so it is
@@ -206,6 +215,9 @@ func (f *Feed) Apply(ev WatchEvent) {
 		if ad, ok := f.live[ev.Key]; ok {
 			f.ended[ev.Key] = endedJob{ad: ad, at: f.now()}
 			delete(f.live, ev.Key)
+			if act, aok := f.activityForDelete(ad); aok {
+				f.publishActivityLocked(act)
+			}
 			if id, idok := identOf(ad); idok {
 				f.notifyLocked(id, KeyChange{Gone: true})
 			}

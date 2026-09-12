@@ -141,10 +141,77 @@ export interface SuperuserModeState {
   note?: string;
 }
 
+export interface RecentJob {
+  cluster_id: number;
+  proc_id: number;
+  owner?: string;
+  /** Unix seconds of the event this list is about. */
+  at: number;
+  /** The one fact worth showing beside it: hold reason, command, host. */
+  detail?: string;
+}
+
+/** One row of the hold breakdown: the code's meaning, how many, and an
+ *  example message — the code says the category, the message says which
+ *  file or which host. */
+export interface HoldReasonCount {
+  code: number;
+  label: string;
+  count: number;
+  example?: string;
+}
+
+export interface DashboardActivity {
+  hold_reasons?: HoldReasonCount[];
+  recently_submitted?: RecentJob[];
+  recently_started?: RecentJob[];
+  recently_held?: RecentJob[];
+  recently_completed?: RecentJob[];
+  /** False when nothing could answer "what finished recently". Absent
+   *  rather than empty, because empty reads as "nothing finished". */
+  completed_available: boolean;
+  /** True when the list came from the queue alone — the handful still in
+   *  JobStatus 4 before the reaper destroys them. Minutes at best. */
+  completed_partial: boolean;
+  /** What answered, and when. A cached snapshot is minutes old by
+   *  design; saying so is the difference between stale and wrong. */
+  source: string;
+  computed_at: number;
+}
+
+/** One way jobs finished badly. `signal` set means the job was killed,
+ *  in which case `code` carries no meaning -- the exit code recorded
+ *  beside a signal is whatever happened to be in the ad. */
+export interface ExitCodeCount {
+  code: number;
+  signal: boolean;
+  count: number;
+  /** Wall clock spent on jobs that ended this way. */
+  seconds: number;
+}
+
+/** Of the work this access point actually ran, how much was worth
+ *  running. Absent (rather than zeroed) where no history archive could
+ *  answer -- a zeroed summary would read as "everything failed". */
+export interface GoodputSummary {
+  window_hours: number;
+  succeeded: number;
+  failed: number;
+  /** Jobs that left without an outcome, which is what a removal looks
+   *  like from here. Not folded into failures: a job its owner
+   *  cancelled is not the access point going wrong. */
+  unfinished: number;
+  good_seconds: number;
+  bad_seconds: number;
+  top_failures?: ExitCodeCount[];
+}
+
 export interface DashboardStats {
   username: string;
   jobs_by_status: Record<string, number>;
   jobs_total: number;
+  activity: DashboardActivity;
+  goodput?: GoodputSummary;
 }
 
 // --- htcondordb mirror ---

@@ -9,7 +9,9 @@
     "e2e:smoke": "PLAYWRIGHT_SUITE=smoke playwright test",
     "e2e:full": "PLAYWRIGHT_SUITE=full playwright test",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.94",
@@ -26,13 +28,18 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.3.4",
+    "jsdom": "^29.1.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
-    "typescript": "~6.0.0"
+    "typescript": "~6.0.0",
+    "vitest": "^5.0.0"
   }
 }

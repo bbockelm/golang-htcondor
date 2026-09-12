@@ -179,6 +179,15 @@ jobs:
       working-directory: webapi/frontend
       run: npm run typecheck
 
+    # Component tests (Vitest + Testing Library). Separate from the
+    # Playwright suites in playwright.yml: those build, serve and drive a
+    # browser to prove the app works end to end, which is too expensive
+    # per case to cover a panel's several empty-vs-unavailable states.
+    # These run in a second and cover exactly that.
+    - name: Unit test
+      working-directory: webapi/frontend
+      run: npm test
+
     - name: Build
       working-directory: webapi/frontend
       run: npm run build

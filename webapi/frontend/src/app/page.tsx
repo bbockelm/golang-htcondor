@@ -2,7 +2,17 @@
 
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { api, JOB_STATUS_LABEL } from '@/lib/api';
+import { api } from '@/lib/api';
+import {
+  Goodput,
+  HoldReasons,
+  LiveTicker,
+  OtherStatuses,
+  RecentActivity,
+  StatCard,
+  STATUS_LABEL_BY_KEY,
+} from '@/components/DashboardPanels';
+import { useActivityStream } from '@/lib/useActivityStream';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 export default function Dashboard() {
@@ -56,10 +66,16 @@ function AuthenticatedDashboard({
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
+  // The live stream is independent of the snapshot query: it needs no
+  // data from it, and a mirror-less deployment simply renders no ticker.
+  const live = useActivityStream(ownedByMe);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', scope],
     queryFn: () => api.dashboard({ owned_by_me: ownedByMe }),
-    refetchInterval: 15_000,
+    // The snapshot behind this refreshes on its own interval
+    // server-side; polling faster only re-fetches the same bytes.
+    refetchInterval: 30_000,
   });
 
   return (
@@ -95,6 +111,14 @@ function AuthenticatedDashboard({
 
           <OtherStatuses byStatus={data.jobs_by_status} />
 
+          <LiveTicker {...live} />
+
+          <Goodput goodput={data.goodput} />
+
+          <HoldReasons activity={data.activity} />
+
+          <RecentActivity activity={data.activity} />
+
           <div>
             <Link
               href="/jobs"
@@ -105,79 +129,6 @@ function AuthenticatedDashboard({
           </div>
         </>
       )}
-    </div>
-  );
-}
-
-const STATUS_LABEL_BY_KEY: Record<string, string> = {
-  idle: JOB_STATUS_LABEL[1],
-  running: JOB_STATUS_LABEL[2],
-  removed: JOB_STATUS_LABEL[3],
-  completed: JOB_STATUS_LABEL[4],
-  held: JOB_STATUS_LABEL[5],
-  // Not a JobStatus: the server buckets held-because-spooling separately
-  // so a routine submit does not show up as HELD. Matches the label
-  // displayJobStatus gives the same job on the jobs page.
-  uploading: 'Uploading Inputs',
-  transferring_output: JOB_STATUS_LABEL[6],
-  suspended: JOB_STATUS_LABEL[7],
-};
-
-function StatCard({
-  label,
-  value,
-  primary,
-}: {
-  label: string;
-  value: number;
-  primary?: boolean;
-}) {
-  return (
-    <div
-      className={`rounded-lg border p-4 ${
-        primary ? 'border-brand-200 bg-brand-50' : 'border-gray-200 bg-white'
-      }`}
-    >
-      <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-gray-900">
-        {value.toLocaleString()}
-      </div>
-    </div>
-  );
-}
-
-function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }) {
-  const known = new Set([
-    'idle',
-    'running',
-    'held',
-    'completed',
-    'removed',
-    'transferring_output',
-    'suspended',
-    'uploading',
-  ]);
-  const extras = Object.entries(byStatus).filter(
-    ([key, n]) => n > 0 && !['idle', 'running', 'held', 'completed'].includes(key),
-  );
-  if (extras.length === 0) return null;
-
-  return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">
-        Other statuses
-      </div>
-      <ul className="text-sm text-gray-700 space-y-1">
-        {extras.map(([key, n]) => (
-          <li key={key} className="flex justify-between">
-            <span>{STATUS_LABEL_BY_KEY[key] ?? key}</span>
-            <span className="font-medium">{n.toLocaleString()}</span>
-            {!known.has(key) && (
-              <span className="ml-2 text-gray-400 text-xs">(unmapped)</span>
-            )}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
