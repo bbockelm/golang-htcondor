@@ -28,7 +28,11 @@ const minutesAgo = (m: number) => Math.floor(Date.now() / 1000) - m * 60;
 
 export const dashboardFixture: DashboardStats = {
   username: 'e2e',
-  jobs_by_status: { '1': 1, '2': 1, '5': 3 },
+  // Named keys, not JobStatus numbers: the handler buckets by name
+  // ("idle"/"running"/"held"...) and the tiles read those names. The
+  // original fixture used '1'/'2' here, which types as Record<string,
+  // number> just as happily and rendered every tile as 0.
+  jobs_by_status: { idle: 1, running: 1, held: 3, completed: 1 },
   jobs_total: 6,
   activity: {
     hold_reasons: [
