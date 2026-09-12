@@ -166,7 +166,11 @@ type Handler struct {
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
-	mcpCIMDEnabled      bool
+	mcpCIMDEnabled bool
+	// extIssuers verifies external trusted-issuer subject tokens for RFC 8693
+	// token exchange. Nil when no issuers are configured. See
+	// oauth2_token_exchange_ext.go.
+	extIssuers          *extIssuerValidator
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
 	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
@@ -434,15 +438,18 @@ type HandlerConfig struct {
 	// when set, restricts which hosts such a client_id may point at.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
-	OAuth2ClientID      string   // OAuth2 client ID for SSO (optional)
-	OAuth2ClientSecret  string   // OAuth2 client secret for SSO (optional)
-	OAuth2AuthURL       string   // OAuth2 authorization URL for SSO (optional)
-	OAuth2TokenURL      string   // OAuth2 token URL for SSO (optional)
-	OAuth2RedirectURL   string   // OAuth2 redirect URL for SSO (optional)
-	OAuth2UserInfoURL   string   // OAuth2 user info endpoint for SSO (optional)
-	OAuth2Scopes        []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
-	OAuth2UsernameClaim string   // Claim name for username in token (default: "sub")
-	OAuth2GroupsClaim   string   // Claim name for groups in user info (default: "groups")
+	// MCPTokenExchangeIssuers is the JSON list of trusted external issuers for
+	// RFC 8693 token exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS). Empty = off.
+	MCPTokenExchangeIssuers string
+	OAuth2ClientID          string   // OAuth2 client ID for SSO (optional)
+	OAuth2ClientSecret      string   // OAuth2 client secret for SSO (optional)
+	OAuth2AuthURL           string   // OAuth2 authorization URL for SSO (optional)
+	OAuth2TokenURL          string   // OAuth2 token URL for SSO (optional)
+	OAuth2RedirectURL       string   // OAuth2 redirect URL for SSO (optional)
+	OAuth2UserInfoURL       string   // OAuth2 user info endpoint for SSO (optional)
+	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
+	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
+	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1019,6 +1026,19 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+
+		// Trusted external issuers for RFC 8693 token exchange (optional).
+		// Fail closed on a bad config: log it and leave external exchange off
+		// rather than crashing the daemon or, worse, trusting a malformed entry.
+		if issuers, ierr := parseTrustedIssuers(cfg.MCPTokenExchangeIssuers); ierr != nil {
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS is invalid; external token exchange disabled",
+				"error", ierr)
+		} else if v := newExtIssuerValidator(issuers, nil); v != nil {
+			h.extIssuers = v
+			logger.Info(logging.DestinationHTTP, "Token exchange: external trusted issuers enabled",
+				"count", len(issuers))
+		}
 
 		// Debounced writer for the admin list's "last used" / "recent
 		// users" columns. Started here so it shares the provider's

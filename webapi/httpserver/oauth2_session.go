@@ -42,6 +42,13 @@ type Session struct {
 	// AuthTime is when the user authenticated and consented, in UTC.
 	// It is deliberately NOT refreshed when the grant is refreshed.
 	AuthTime time.Time `json:"authTime,omitempty"`
+
+	// Actor names the client that obtained this token by RFC 8693 token
+	// exchange on the subject's behalf (delegation): the token acts AS Subject
+	// but was minted FOR this actor. Empty for tokens obtained directly. It is
+	// the `act.sub` an exchanged token records, and is surfaced for audit and
+	// on the HTCondor IDTOKEN minted downstream.
+	Actor string `json:"actor,omitempty"`
 }
 
 // Clone deep-copies the session, including the fields declared above.
@@ -61,7 +68,7 @@ func (s *Session) Clone() fosite.Session {
 	if s == nil {
 		return nil
 	}
-	clone := &Session{AuthTime: s.AuthTime}
+	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor}
 	if s.DefaultSession != nil {
 		// DefaultSession.Clone returns a fosite.Session whose concrete
 		// type is *openid.DefaultSession.

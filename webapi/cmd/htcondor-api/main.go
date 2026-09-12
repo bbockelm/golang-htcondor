@@ -1397,6 +1397,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		MCPCIMDEnabled:             mcpCIMDEnabled(cfg),
 		MCPCIMDAllowedHosts:        config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_MCP_CIMD_ALLOWED_HOSTS")),
+		MCPTokenExchangeIssuers:    firstConfigValue(cfg, "HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS"),
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
 		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
 		OAuth2AuthURL:              mcpCfg.oauth2AuthURL,

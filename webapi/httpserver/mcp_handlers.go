@@ -858,6 +858,15 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Token exchange (RFC 8693) is dispatched before scope filtering and the
+	// fosite pipeline: it authenticates its own client, manages its own
+	// scope-down against the subject token, and fosite has no handler for the
+	// grant. Mirrors the device-code branch below.
+	if r.FormValue("grant_type") == tokenExchangeGrantType {
+		h.handleTokenExchange(w, r)
+		return
+	}
+
 	// Filter requested scopes to only those allowed for the client
 	filteredReq, err := h.filterRequestedScopes(ctx, r)
 	if err != nil {
@@ -1309,7 +1318,7 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
 		"device_authorization_endpoint":         issuer + "/mcp/oauth2/device/authorize",
 		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code", tokenExchangeGrantType},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      oauth2AdvertisedScopes,

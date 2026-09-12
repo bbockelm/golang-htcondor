@@ -131,6 +131,7 @@ require (
 require (
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/prometheus/client_model v0.6.2
 )
 

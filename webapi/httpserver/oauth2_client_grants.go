@@ -12,13 +12,22 @@ import (
 // token asserts. Unlike the provenance columns (origin, last_used, ...), these
 // ARE things an operator legitimately sets after registration.
 
-// supportedGrantTypes is the closed set the admin UI/PATCH may assign. It is
-// the grants this server actually implements; token-exchange is intentionally
-// absent until it is built.
+// supportedGrantTypes is the closed set the admin UI/PATCH may assign -- the
+// grants this server actually implements.
 var supportedGrantTypes = map[string]bool{
-	"authorization_code": true,
-	"refresh_token":      true,
-	"client_credentials": true,
+	"authorization_code":   true,
+	"refresh_token":        true,
+	"client_credentials":   true,
+	tokenExchangeGrantType: true,
+}
+
+// confidentialOnlyGrants may not be assigned to a public client: they either
+// authenticate the client with a secret (client_credentials) or act on another
+// principal's behalf and so must be a trusted, authenticated client (token
+// exchange).
+var confidentialOnlyGrants = map[string]bool{
+	"client_credentials":   true,
+	tokenExchangeGrantType: true,
 }
 
 // validateGrantTypes checks a requested grant set against what the server
@@ -37,8 +46,8 @@ func validateGrantTypes(grants []string, public bool) error {
 			return fmt.Errorf("duplicate grant type %q", g)
 		}
 		seen[g] = true
-		if g == "client_credentials" && public {
-			return fmt.Errorf("client_credentials cannot be granted to a public client")
+		if public && confidentialOnlyGrants[g] {
+			return fmt.Errorf("%s cannot be granted to a public client", g)
 		}
 	}
 	return nil
