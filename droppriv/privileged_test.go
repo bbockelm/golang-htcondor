@@ -221,7 +221,7 @@ func TestTemporaryPrivilegeElevation(t *testing.T) {
 
 	// Test MkdirAll as root
 	rootDir := tempDir + "/root_dir"
-	if err := mgr.MkdirAll("root", rootDir, 0o755); err != nil {
+	if err := mgr.MkdirAllAsRoot(rootDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll as root failed: %v", err)
 	}
 
@@ -249,11 +249,11 @@ func TestTemporaryPrivilegeElevation(t *testing.T) {
 	// Create a work directory for nobody that's accessible
 	// Create with proper permissions and chown to nobody
 	nobodyWorkDir := tempDir + "/nobody_work"
-	if err := mgr.MkdirAll("root", nobodyWorkDir, 0o755); err != nil {
+	if err := mgr.MkdirAllAsRoot(nobodyWorkDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll nobody work dir failed: %v", err)
 	}
 	// Chown to nobody so they can write to it
-	if err := mgr.Chown("root", nobodyWorkDir, 65534, 65534); err != nil {
+	if err := mgr.ChownAsRoot(nobodyWorkDir, 65534, 65534); err != nil {
 		t.Fatalf("Chown nobody work dir failed: %v", err)
 	}
 
@@ -396,11 +396,11 @@ func TestDefaultUserOperations(t *testing.T) {
 
 	// Create a work directory that's accessible (as root, with proper permissions)
 	workDir := tempDir + "/work"
-	if err := mgr.MkdirAll("root", workDir, 0o755); err != nil {
+	if err := mgr.MkdirAllAsRoot(workDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll work dir failed: %v", err)
 	}
 	// Chown to nobody so they can write to it
-	if err := mgr.Chown("root", workDir, 65534, 65534); err != nil {
+	if err := mgr.ChownAsRoot(workDir, 65534, 65534); err != nil {
 		t.Fatalf("Chown work dir failed: %v", err)
 	}
 

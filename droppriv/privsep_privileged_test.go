@@ -38,7 +38,21 @@ func TestPoolPrivilegedSwitchesCredentials(t *testing.T) {
 	ctx := context.Background()
 
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the target user must traverse into the temp dir
+	// Both the temp dir AND its parent: t.TempDir() nests the case
+	// directory inside a per-test root that is 0700 root, so the target
+	// user cannot traverse in to stat the leaf -- MkdirAll then decides
+	// the leaf does not exist and fails trying to create it. Only shows
+	// up when the suite runs as root, which until now it never did in
+	// CI.
+	// The parent must be traversable and the case directory writable by
+	// the target user: t.TempDir() nests the case directory inside a
+	// per-test root that is 0700 root, so nobody can neither stat the
+	// leaf nor create anything in it. Only shows up when the suite runs
+	// as root, which until now it never did in CI.
+	if err := os.Chmod(filepath.Dir(dir), 0o755); err != nil { //nolint:gosec // G302: the target user must traverse in
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // G302: the target user creates entries here
 		t.Fatal(err)
 	}
 
