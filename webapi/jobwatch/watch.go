@@ -328,6 +328,10 @@ type Fold struct {
 type placement struct {
 	inQueue   bool
 	inHistory bool
+	// hitDone guards against counting one job's satisfaction twice -- e.g. a
+	// terminal job observed both as a terminal ad still in the queue and as a
+	// history row in the same pass.
+	hitDone bool
 }
 
 // Fold starts an evaluation. now may be zero for time.Now.
@@ -355,6 +359,21 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 	}
 	id := jobIDOf(ad)
 	p := f.seen[id]
+
+	// A terminal ad seen in the queue (Completed or Removed) is as
+	// authoritative as a history row. HTCondor -- notably OSPool access points
+	// -- leaves completed jobs in job_queue.log with JobStatus 4 rather than
+	// archiving them to history at once, so a terminal event that only resolved
+	// from Finished() (the history read) would never fire for such a job even
+	// though the queue plainly shows it done. Resolve it here, and mark it
+	// accounted-for (not inQueue) so Done() does not count it as still running.
+	if isTerminalStatus(statusOf(ad)) {
+		p.inHistory = true
+		f.seen[id] = p
+		f.resolveTerminal(id, ad)
+		return
+	}
+
 	p.inQueue = true
 	f.seen[id] = p
 
@@ -385,7 +404,13 @@ func (f *Fold) Finished(ad *classad.ClassAd) {
 	p := f.seen[id]
 	p.inHistory = true
 	f.seen[id] = p
+	f.resolveTerminal(id, ad)
+}
 
+// resolveTerminal fires the terminal events (done / succeeded / failed) for a
+// job observed in a terminal state, whether that observation is a history row
+// (Finished) or a terminal ad still in the queue (Queued).
+func (f *Fold) resolveTerminal(id JobID, ad *classad.ClassAd) {
 	switch f.w.Event {
 	case EventDone:
 		f.hit(id, ad)
@@ -397,6 +422,15 @@ func (f *Fold) Finished(ad *classad.ClassAd) {
 }
 
 func (f *Fold) hit(id JobID, ad *classad.ClassAd) {
+	// Idempotent per job: a job can be observed terminal both in the queue and
+	// in history within one pass, and it must count once.
+	p := f.seen[id]
+	if p.hitDone {
+		return
+	}
+	p.hitDone = true
+	f.seen[id] = p
+
 	f.satisfied++
 	if len(f.matched) < MaxMatched {
 		f.matched = append(f.matched, jobRef(id, ad))
@@ -564,10 +598,18 @@ func (w *Watch) tracks(id JobID) bool {
 
 // HTCondor JobStatus values used here.
 const (
-	statusRunning = 2
-	statusRemoved = 3
-	statusHeld    = 5
+	statusRunning   = 2
+	statusRemoved   = 3
+	statusCompleted = 4
+	statusHeld      = 5
 )
+
+// isTerminalStatus reports whether a JobStatus means the job has reached a
+// terminal state -- Completed or Removed. Such a job is finished whether or not
+// it has been archived to history yet.
+func isTerminalStatus(s int64) bool {
+	return s == statusCompleted || s == statusRemoved
+}
 
 // succeeded reads a history ad's outcome. Anything that is not a clean
 // exit 0 counts as failure, so a job killed by a signal or removed
