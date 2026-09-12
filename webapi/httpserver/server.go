@@ -31,13 +31,29 @@ type Server struct {
 	logger     *logging.Logger    // Logger instance (duplicated for convenience)
 	handlerCtx context.Context    // Context for handler's lifetime
 	cancelFunc context.CancelFunc // Function to cancel handler context
+	// mcpServer serves the MCP surface on its own listener when the
+	// operator gave MCP a separate port. Nil when combined, which is the
+	// default.
+	mcpServer *http.Server
+	// mcpSplit records that MCP has its own listener, which is also what
+	// removes the protocol endpoint from the main one.
+	mcpSplit bool
 }
 
 // Config holds server configuration
 type Config struct {
 	ListenAddr string // Address to listen on (e.g., ":8080")
-	ScheddName string // Schedd name
-	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// MCPListenAddr, when set, serves MCP on its own listener instead of
+	// alongside the web UI and the REST API. Empty is the default and
+	// keeps everything on one port.
+	//
+	// A separate port is worth having only if the split is real, so the
+	// protocol endpoint then answers there and not on the main listener.
+	// The OAuth2 endpoints stay on both: a client that reaches either has
+	// to be able to finish authenticating.
+	MCPListenAddr string
+	ScheddName    string // Schedd name
+	ScheddAddr    string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
 
 	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
 	// rather than set by an operator.
@@ -339,12 +355,19 @@ func NewServer(cfg Config) (*Server, error) {
 			// available and is fine for our scale.
 			TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 		},
-		logger: handler.logger,
+		logger:   handler.logger,
+		mcpSplit: strings.TrimSpace(cfg.MCPListenAddr) != "",
 	}
 
 	// Wrap handler with access logging middleware
 	// Routes will be set up in Handler.Initialize()
-	s.httpServer.Handler = s.accessLogMiddleware(s.Handler)
+	var root http.Handler = s.Handler
+	if s.mcpSplit {
+		// MCP answers on its own listener now, so it must stop answering
+		// here -- a separate port that both ports serve is not a split.
+		root = withoutMCPProtocol(root)
+	}
+	s.httpServer.Handler = s.accessLogMiddleware(root)
 
 	return s, nil
 }
@@ -565,6 +588,38 @@ func (s *Server) ServeListenerWithCert(ln net.Listener, certFile, keyFile string
 	return s.httpServer.Serve(ln)
 }
 
+// ServeMCPListener serves only the MCP surface on its own listener.
+//
+// A second http.Server rather than another listener on the first: the two
+// ports deliberately expose different things, and that difference is the
+// whole point of asking for a separate port. The handler is the same one,
+// fronted by a filter.
+//
+// The handler is started by ServeListenerWithCert and must not be started
+// again, so call this after the primary listener is serving. Shutdown
+// closes both.
+func (s *Server) ServeMCPListener(ln net.Listener, certFile, keyFile string) error {
+	scheme := "http"
+	if certFile != "" && keyFile != "" {
+		scheme = "https"
+	}
+	srv := &http.Server{
+		Handler:           s.accessLogMiddleware(mcpSurfaceOnly(s.Handler)),
+		ReadHeaderTimeout: s.httpServer.ReadHeaderTimeout,
+		ReadTimeout:       s.httpServer.ReadTimeout,
+		WriteTimeout:      s.httpServer.WriteTimeout,
+		IdleTimeout:       s.httpServer.IdleTimeout,
+		TLSConfig:         s.httpServer.TLSConfig,
+	}
+	s.mcpServer = srv
+	s.logger.Info(logging.DestinationHTTP, "Serving MCP on its own listener",
+		"address", safeListenerAddr(ln), "scheme", scheme)
+	if scheme == "https" {
+		return srv.ServeTLS(ln, certFile, keyFile)
+	}
+	return srv.Serve(ln)
+}
+
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
@@ -606,6 +661,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.logger.Error(logging.DestinationHTTP, "Failed to stop handler", "error", err)
 	}
 
+	if s.mcpServer != nil {
+		if err := s.mcpServer.Shutdown(ctx); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to shut down the MCP listener", "error", err)
+		}
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 
