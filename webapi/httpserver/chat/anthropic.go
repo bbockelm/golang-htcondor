@@ -27,6 +27,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
 // AnthropicAPIVersion pins the Anthropic Messages API version we
@@ -93,7 +95,17 @@ func NewAnthropicClient(cfg AnthropicConfig) (*AnthropicClient, error) {
 	if strings.TrimSpace(cfg.APIKeyFile) == "" {
 		return nil, nil
 	}
-	info, err := os.Stat(cfg.APIKeyFile)
+	// See seal.LoadMasterKEKFromFile: an operator-staged credential is
+	// typically root-only while the daemon runs as condor, so the open
+	// re-raises if a plain one is refused.
+	f, err := droppriv.OpenMaybeAsRoot(cfg.APIKeyFile)
+	if err == nil {
+		defer func() { _ = f.Close() }()
+	}
+	var info os.FileInfo
+	if err == nil {
+		info, err = f.Stat()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("chat: stat api key file %s: %w", cfg.APIKeyFile, err)
 	}
@@ -103,7 +115,7 @@ func NewAnthropicClient(cfg AnthropicConfig) (*AnthropicClient, error) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("chat: api key file %s has world/group perms (mode %#o); must be 0600 or 0400", cfg.APIKeyFile, perm)
 	}
-	raw, err := os.ReadFile(cfg.APIKeyFile) //nolint:gosec // path is operator-controlled
+	raw, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("chat: read api key file: %w", err)
 	}

@@ -784,7 +784,10 @@ func loadOAuth2ClientSecret(cfg *config.Config, logger *logging.Logger) string {
 	}
 
 	// #nosec G304 -- Reading OAuth2 client secret from configured file path
-	secretData, err := os.ReadFile(secretFile)
+	// Through droppriv: a client secret staged on an access point is
+	// normally root-owned, and this daemon has dropped to condor by
+	// now. Re-raises only if the ordinary read is denied.
+	secretData, err := droppriv.ReadFileMaybeAsRoot(secretFile)
 	if err != nil {
 		logger.Warn(logging.DestinationHTTP, "Failed to read OAuth2 client secret file", "path", secretFile, "error", err)
 		return ""
