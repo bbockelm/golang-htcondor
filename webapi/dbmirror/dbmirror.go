@@ -104,7 +104,9 @@ var (
 	// older mirror that reports no LagBytes must not read as "0 bytes
 	// behind" and sail through, so an absent attribute leaves the strict
 	// CaughtUp requirement in force.
-	CaughtUpLagBytes int64 = 0
+	// (The zero value is the default; it is not written out because a var
+	// declaration may not restate it.)
+	CaughtUpLagBytes int64
 )
 
 // Info is a discovered mirror's location, capabilities and freshness,
