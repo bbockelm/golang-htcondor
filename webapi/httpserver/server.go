@@ -31,13 +31,29 @@ type Server struct {
 	logger     *logging.Logger    // Logger instance (duplicated for convenience)
 	handlerCtx context.Context    // Context for handler's lifetime
 	cancelFunc context.CancelFunc // Function to cancel handler context
+	// mcpServer serves the MCP surface on its own listener when the
+	// operator gave MCP a separate port. Nil when combined, which is the
+	// default.
+	mcpServer *http.Server
+	// mcpSplit records that MCP has its own listener, which is also what
+	// removes the protocol endpoint from the main one.
+	mcpSplit bool
 }
 
 // Config holds server configuration
 type Config struct {
 	ListenAddr string // Address to listen on (e.g., ":8080")
-	ScheddName string // Schedd name
-	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// MCPListenAddr, when set, serves MCP on its own listener instead of
+	// alongside the web UI and the REST API. Empty is the default and
+	// keeps everything on one port.
+	//
+	// A separate port is worth having only if the split is real, so the
+	// protocol endpoint then answers there and not on the main listener.
+	// The OAuth2 endpoints stay on both: a client that reaches either has
+	// to be able to finish authenticating.
+	MCPListenAddr string
+	ScheddName    string // Schedd name
+	ScheddAddr    string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
 
 	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
 	// rather than set by an operator.
@@ -61,18 +77,30 @@ type Config struct {
 	// HandlerConfig.UserHeaderTrustAnyUnsafe. Configurable via
 	// HTTP_API_USER_HEADER_TRUST_ANY.
 	UserHeaderTrustAnyUnsafe bool
-	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
-	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	CCBStreaming             bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
-	TLSCertFile              string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile               string              // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout              time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout             time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout              time.Duration       // HTTP idle timeout (default: 120s)
-	Collector                *htcondor.Collector // Collector for metrics (optional)
+	SigningKeyPath           string // Path to token signing key (optional, for token generation)
+	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+
+	// MCPBaseURL is the public base URL of the MCP listener, when MCP has
+	// its own port and that port is published under a different origin
+	// than the web UI. Empty means MCP is reached at the same base URL as
+	// everything else, which is true whenever the ports are combined and
+	// whenever a split is only local.
+	//
+	// It exists for one attribute: RFC 9728 requires the protected-resource
+	// document to name the resource the client asked about, and a client
+	// that reaches MCP on another origin asked about that origin. Naming
+	// the web UI's instead makes the document one the client must reject.
+	MCPBaseURL    string
+	CCBStreaming  bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
+	TLSCertFile   string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile    string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout   time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout  time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout   time.Duration       // HTTP idle timeout (default: 120s)
+	Collector     *htcondor.Collector // Collector for metrics (optional)
 	// JobQueueLogPath, if set, is the path to the schedd's job_queue.log; the
 	// server mirrors it into a watch-enabled collection and serves
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
@@ -244,6 +272,7 @@ func NewServer(cfg Config) (*Server, error) {
 		TrustDomain:                 cfg.TrustDomain,
 		UIDDomain:                   cfg.UIDDomain,
 		HTTPBaseURL:                 cfg.HTTPBaseURL,
+		MCPBaseURL:                  cfg.MCPBaseURL,
 		CCBStreaming:                cfg.CCBStreaming,
 		TLSCACertFile:               cfg.TLSCACertFile,
 		Collector:                   cfg.Collector,
@@ -339,12 +368,19 @@ func NewServer(cfg Config) (*Server, error) {
 			// available and is fine for our scale.
 			TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 		},
-		logger: handler.logger,
+		logger:   handler.logger,
+		mcpSplit: strings.TrimSpace(cfg.MCPListenAddr) != "",
 	}
 
 	// Wrap handler with access logging middleware
 	// Routes will be set up in Handler.Initialize()
-	s.httpServer.Handler = s.accessLogMiddleware(s.Handler)
+	var root http.Handler = s.Handler
+	if s.mcpSplit {
+		// MCP answers on its own listener now, so it must stop answering
+		// here -- a separate port that both ports serve is not a split.
+		root = withoutMCPProtocol(root)
+	}
+	s.httpServer.Handler = s.accessLogMiddleware(root)
 
 	return s, nil
 }
@@ -565,6 +601,38 @@ func (s *Server) ServeListenerWithCert(ln net.Listener, certFile, keyFile string
 	return s.httpServer.Serve(ln)
 }
 
+// ServeMCPListener serves only the MCP surface on its own listener.
+//
+// A second http.Server rather than another listener on the first: the two
+// ports deliberately expose different things, and that difference is the
+// whole point of asking for a separate port. The handler is the same one,
+// fronted by a filter.
+//
+// The handler is started by ServeListenerWithCert and must not be started
+// again, so call this after the primary listener is serving. Shutdown
+// closes both.
+func (s *Server) ServeMCPListener(ln net.Listener, certFile, keyFile string) error {
+	scheme := "http"
+	if certFile != "" && keyFile != "" {
+		scheme = "https"
+	}
+	srv := &http.Server{
+		Handler:           s.accessLogMiddleware(mcpSurfaceOnly(s.Handler)),
+		ReadHeaderTimeout: s.httpServer.ReadHeaderTimeout,
+		ReadTimeout:       s.httpServer.ReadTimeout,
+		WriteTimeout:      s.httpServer.WriteTimeout,
+		IdleTimeout:       s.httpServer.IdleTimeout,
+		TLSConfig:         s.httpServer.TLSConfig,
+	}
+	s.mcpServer = srv
+	s.logger.Info(logging.DestinationHTTP, "Serving MCP on its own listener",
+		"address", safeListenerAddr(ln), "scheme", scheme)
+	if scheme == "https" {
+		return srv.ServeTLS(ln, certFile, keyFile)
+	}
+	return srv.Serve(ln)
+}
+
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
@@ -606,6 +674,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.logger.Error(logging.DestinationHTTP, "Failed to stop handler", "error", err)
 	}
 
+	if s.mcpServer != nil {
+		if err := s.mcpServer.Shutdown(ctx); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to shut down the MCP listener", "error", err)
+		}
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 

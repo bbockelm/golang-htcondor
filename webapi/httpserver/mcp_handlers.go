@@ -1358,13 +1358,25 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 // correct for whichever of the registered paths asked for it, instead of
 // being right for one and wrong for the rest.
 func (h *Handler) protectedResourceIdentifier(metadataPath string) string {
+	resourcePath := strings.TrimPrefix(metadataPath, wellKnownProtectedResource)
+
+	// The MCP endpoint may live on a listener of its own, published under
+	// a different origin. RFC 9728 3.3 requires this document to name the
+	// resource the client asked about, and a client reaching MCP there
+	// asked about that origin -- naming the web UI's would produce a
+	// document the client is obliged to reject. Only the MCP resource
+	// moves; everything else is still reached at the main base URL.
+	if resourcePath == mcpMessagePath && h.mcpBaseURL != "" {
+		return strings.TrimRight(h.mcpBaseURL, "/") + resourcePath
+	}
+
 	base := strings.TrimRight(h.httpBaseURL, "/")
 	if base == "" {
 		// No public base URL configured. The issuer is the best guess
 		// available, and is what this reported before deriving anything.
 		base = strings.TrimRight(h.oauth2Provider.config.AccessTokenIssuer, "/")
 	}
-	return base + strings.TrimPrefix(metadataPath, wellKnownProtectedResource)
+	return base + resourcePath
 }
 
 // handleOAuth2ProtectedResourceMetadata handles OAuth 2.0 Protected Resource metadata discovery

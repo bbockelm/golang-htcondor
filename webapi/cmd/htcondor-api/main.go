@@ -1072,15 +1072,16 @@ func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue, sche
 }
 
 // getHTTPConfig extracts HTTP API configuration from config
-func getHTTPConfig(cfg *config.Config) (listenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
+func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
 	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
 		listenAddrResult = addr
 	}
+	mcpListenAddrResult, _ = cfg.Get("HTTP_API_MCP_LISTEN_ADDR")
 	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
 	tlsKeyFile, _ = cfg.Get("HTTP_API_TLS_KEY")
 	tlsCACertFile, _ = cfg.Get("HTTP_API_TLS_CA_CERT")
-	return listenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile
+	return listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile
 }
 
 // getTimeoutConfig parses timeout configuration with defaults
@@ -1253,7 +1254,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	scheddNameValue, scheddAddrValue, scheddHostValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
-	listenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
+	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
 
 	// Get timeout configuration
 	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
@@ -1377,6 +1378,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
+		MCPListenAddr:            mcpListenAddrFromConfig,
+		MCPBaseURL:               firstConfigValue(cfg, "HTTP_API_MCP_BASE_URL"),
 		CCBStreaming:             loadCCBStreaming(cfg, logger),
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
@@ -1503,6 +1506,25 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		if useTLS {
 			cert, key = tlsCertFile, tlsKeyFile
 		}
+		// MCP on its own port, when asked for. Bound before the primary
+		// listener starts serving so a bad address fails at startup
+		// rather than once the server is already up; it serves nothing
+		// until ServeListenerWithCert starts the handler below.
+		if addr := strings.TrimSpace(mcpListenAddrFromConfig); addr != "" {
+			mcpLn, lerr := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+			if lerr != nil {
+				return fmt.Errorf("binding HTTP_API_MCP_LISTEN_ADDR %s: %w", addr, lerr)
+			}
+			defer func() { _ = mcpLn.Close() }()
+			go func() {
+				if err := server.ServeMCPListener(mcpLn, cert, key); err != nil &&
+					!errors.Is(err, http.ErrServerClosed) {
+					logger.Error(logging.DestinationHTTP,
+						"the MCP listener stopped serving", "address", addr, "error", err)
+				}
+			}()
+		}
+
 		if err := server.ServeListenerWithCert(l, cert, key); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
