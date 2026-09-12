@@ -54,6 +54,12 @@ type RecentJob struct {
 	// Detail is the one fact worth showing beside it: a hold reason, the
 	// executable, the host it started on.
 	Detail string `json:"detail,omitempty"`
+	// Archived says this row came from the history archive rather than
+	// the live queue, which decides where a click on it should go. The
+	// queue destroys a finished job within seconds, so most completions
+	// shown here no longer have a job page -- linking them all to one
+	// sent people to "not found".
+	Archived bool `json:"archived,omitempty"`
 }
 
 // HoldReasonCount is one row of the hold breakdown.
@@ -412,13 +418,27 @@ func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
 	merged := make([]RecentJob, 0, len(archived)+len(act.RecentlyCompleted))
 	// Archive first, so its row wins the deduplication: it is the
 	// durable record and carries the exit status, where the queue's copy
-	// may have been caught mid-flight.
+	// may have been caught mid-flight. Winning the tie also decides
+	// where the row links: a job in both places is still in the queue,
+	// so it keeps a job page -- see the Archived reset below.
+	for i := range archived {
+		archived[i].Archived = true
+	}
+	inQueue := make(map[[2]int64]struct{}, len(act.RecentlyCompleted))
+	for _, e := range act.RecentlyCompleted {
+		inQueue[[2]int64{e.ClusterID, e.ProcID}] = struct{}{}
+	}
 	for _, e := range append(archived, act.RecentlyCompleted...) {
 		k := [2]int64{e.ClusterID, e.ProcID}
 		if _, dup := seen[k]; dup {
 			continue
 		}
 		seen[k] = struct{}{}
+		if _, live := inQueue[k]; live {
+			// Present in both: the queue has not reaped it yet, so the
+			// job page still resolves and is the better destination.
+			e.Archived = false
+		}
 		merged = append(merged, e)
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].At > merged[j].At })

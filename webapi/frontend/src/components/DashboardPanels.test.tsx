@@ -356,3 +356,101 @@ describe('duration', () => {
     expect(duration(3 * 86400)).toBe('3d');
   });
 });
+
+describe('drilling in from the dashboard', () => {
+  const act = (over: Partial<DashboardActivity> = {}): DashboardActivity => ({
+    completed_available: true,
+    completed_partial: false,
+    source: 'test',
+    computed_at: 1_700_000_000,
+    hold_window_seconds: 3600,
+    ...over,
+  });
+
+  it('a hold row links to the jobs that make it up', () => {
+    render(
+      <HoldReasons
+        activity={act({ hold_reasons: [{ code: 13, label: 'Transfer failed', count: 4 }] })}
+      />,
+    );
+    const href = screen.getByRole('link', { name: 'Transfer failed' }).getAttribute('href') ?? '';
+    const constraint = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint') ?? '');
+    expect(constraint).toContain('HoldReasonCode == 13');
+    expect(constraint).toContain('JobStatus == 5');
+    // The same window the row was counted over, or the drill-down shows
+    // a different (larger) set than the number that was clicked.
+    expect(constraint).toContain('EnteredCurrentStatus >= 1699996400');
+  });
+
+  it('the summed "other" row cannot name a code, and does not pretend to', () => {
+    render(
+      <HoldReasons activity={act({ hold_reasons: [{ code: -1, label: 'other reasons', count: 9 }] })} />,
+    );
+    const href = screen.getByRole('link', { name: 'other reasons' }).getAttribute('href') ?? '';
+    const constraint = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint') ?? '');
+    expect(constraint).not.toContain('HoldReasonCode == -1');
+    expect(constraint).toContain('JobStatus == 5');
+  });
+
+  it('says the holds are current, not merely recent', () => {
+    render(<HoldReasons activity={act({ hold_reasons: [{ code: 3, label: 'Policy', count: 1 }] })} />);
+    // The old wording read as a count of hold EVENTS, so a job released
+    // by policy leaving the count looked like data going missing.
+    expect(screen.getByText(/still held, entered in the last/)).toBeInTheDocument();
+  });
+
+  it('sends completed jobs to the archive when the queue no longer has them', () => {
+    render(
+      <RecentActivity
+        activity={act({
+          recently_completed: [
+            { cluster_id: 9, proc_id: 0, at: 1_700_000_000, archived: true },
+            { cluster_id: 10, proc_id: 1, at: 1_700_000_000 },
+          ],
+        })}
+      />,
+    );
+    // The queue destroys a finished job within seconds, so linking every
+    // completion to /jobs was a reliable "not found".
+    expect(screen.getByRole('link', { name: '9.0' })).toHaveAttribute('href', '/archive/9.0');
+    expect(screen.getByRole('link', { name: '10.1' })).toHaveAttribute('href', '/jobs/10.1');
+  });
+});
+
+describe('LiveTicker keys', () => {
+  // A job that finishes emits a status change and then a delete, often
+  // within the same second: identical in every field the event carries.
+  // Keyed on content those collide, and React reuses the wrong DOM node
+  // on the next update -- which is what made the ticker look like it
+  // inserted lines at random.
+  //
+  // Asserting on React's own duplicate-key warning rather than on the
+  // rendered output: duplicate keys still render both rows the first
+  // time, so an output assertion passes with the bug present. It is the
+  // reconciliation that breaks, and the warning is what names it.
+  const identical = { kind: 'completed' as const, cluster_id: 5, proc_id: 0, at: 1_700_000_000 };
+
+  it('gives identical events distinct keys', () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args.map(String).join(' '));
+    });
+
+    const { rerender } = render(
+      <LiveTicker events={[{ ...identical, seq: 2 }, { ...identical, seq: 1 }]} connected unavailable={false} />,
+    );
+    // Re-render with another one prepended: this is where a collision
+    // actually misplaces rows.
+    rerender(
+      <LiveTicker
+        events={[{ ...identical, seq: 3 }, { ...identical, seq: 2 }, { ...identical, seq: 1 }]}
+        connected
+        unavailable={false}
+      />,
+    );
+    spy.mockRestore();
+
+    expect(errors.filter((e) => /same key/i.test(e))).toEqual([]);
+    expect(screen.getAllByText('completed')).toHaveLength(3);
+  });
+});

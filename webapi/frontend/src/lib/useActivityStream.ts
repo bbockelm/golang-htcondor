@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 // The dashboard's live ticker.
 //
@@ -25,6 +25,10 @@ export type ActivityEvent = {
    *  not reading fast enough. Shown rather than hidden: a gap that looks
    *  like a quiet minute is worse than one that says it is a gap. */
   skipped?: number;
+  /** Arrival order, assigned here rather than by the server: it is the
+   *  React key, and nothing the event carries is unique. Two changes to
+   *  one job within a second are identical in every other field. */
+  seq?: number;
 };
 
 export type ActivityStreamState = {
@@ -56,49 +60,85 @@ export function useActivityStream(ownedByMe: boolean, enabled = true): ActivityS
   });
   const [connected, setConnected] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
-  // EventSource reconnects on its own, and a 501 is not a transient
-  // failure: without this the browser would retry an endpoint that will
-  // never exist on this deployment, forever.
-  const givenUp = useRef(false);
 
   useEffect(() => {
     if (!enabled) return;
-    givenUp.current = false;
 
-    const es = new EventSource(
-      `/api/v1/dashboard/activity/stream?owned_by_me=${ownedByMe ? 'true' : 'false'}`,
-    );
+    let stopped = false;
+    let es: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Whether this stream has ever delivered. It separates the two
+    // reasons a connection can fail: an endpoint that does not exist on
+    // this deployment (no mirror, answered 501) from one that worked and
+    // then dropped. The first is permanent; the second must be retried,
+    // and treating it as permanent is what made the ticker stop for good
+    // after a while.
+    let everConnected = false;
+    let backoff = 1000;
+    // A monotonic counter used as the React key. Keying on what an event
+    // says about itself collides -- two changes to one job inside the
+    // same second are equal in every field -- and React responds to
+    // duplicate keys by reusing the wrong DOM node, which reads as rows
+    // appearing in random places instead of a stream.
+    let seq = 0;
 
-    es.addEventListener('open', () => setConnected(true));
-    es.addEventListener('activity', (e) => {
-      setConnected(true);
-      let ev: ActivityEvent;
-      try {
-        ev = JSON.parse((e as MessageEvent).data);
-      } catch {
-        return;
-      }
-      setBuffer((prev) => ({
-        scope: ownedByMe,
-        // A scope change starts a new list: the events already held
-        // describe a different set of jobs.
-        events: [ev, ...(prev.scope === ownedByMe ? prev.events : [])].slice(0, MAX_EVENTS),
-      }));
-    });
-    es.onerror = () => {
-      setConnected(false);
-      // EventSource cannot see the status code, only that the
-      // connection failed while it was CLOSED rather than CONNECTING.
-      // That distinction is how a 501 is told apart from a dropped
-      // connection: the browser gives up on the former by itself.
-      if (es.readyState === EventSource.CLOSED) {
-        givenUp.current = true;
-        setUnavailable(true);
-      }
+    const connect = () => {
+      if (stopped) return;
+      es = new EventSource(
+        `/api/v1/dashboard/activity/stream?owned_by_me=${ownedByMe ? 'true' : 'false'}`,
+      );
+
+      es.addEventListener('open', () => {
+        everConnected = true;
+        backoff = 1000;
+        setConnected(true);
+      });
+
+      es.addEventListener('activity', (e) => {
+        everConnected = true;
+        setConnected(true);
+        let ev: ActivityEvent;
+        try {
+          ev = JSON.parse((e as MessageEvent).data);
+        } catch {
+          return;
+        }
+        seq += 1;
+        const keyed = { ...ev, seq };
+        setBuffer((prev) => ({
+          scope: ownedByMe,
+          // A scope change starts a new list: the events already held
+          // describe a different set of jobs.
+          events: [keyed, ...(prev.scope === ownedByMe ? prev.events : [])].slice(0, MAX_EVENTS),
+        }));
+      });
+
+      es.onerror = () => {
+        setConnected(false);
+        // CLOSED means the browser has STOPPED retrying -- it is not a
+        // state it recovers from on its own, so reconnecting is ours to
+        // do. CONNECTING means it is already retrying and we leave it
+        // alone.
+        if (es?.readyState !== EventSource.CLOSED) return;
+        es.close();
+        if (!everConnected) {
+          // Never worked: this deployment has no mirror to stream from.
+          // Retrying an endpoint that will keep answering 501 just
+          // burns requests.
+          setUnavailable(true);
+          return;
+        }
+        retry = setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, 30_000);
+      };
     };
 
+    connect();
+
     return () => {
-      es.close();
+      stopped = true;
+      if (retry) clearTimeout(retry);
+      es?.close();
       setConnected(false);
     };
   }, [ownedByMe, enabled]);
