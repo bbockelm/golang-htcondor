@@ -139,6 +139,8 @@ var readOnlyMCPTools = map[string]bool{
 	"watch_jobs":    true,
 	"check_watches": true,
 	"cancel_watch":  true,
+	// get_version reports only this binary's build identity.
+	"get_version": true,
 }
 
 // handleListTools returns the list of available tools, filtered by
@@ -551,6 +553,10 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 	}
 
+	// get_version has no dependencies — it reports this binary's own
+	// build — so it is always offered.
+	tools = append(tools, versionTool())
+
 	// Add HTCondor documentation tools if the docs are embedded.
 	// These are read-only, side-effect-free reference lookups; we
 	// register them under the read-only OAuth2 allowlist.
@@ -795,6 +801,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolQueryJobsAsOf(ctx, request.Arguments)
 	case "aggregate_jobs":
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
+	case "get_version":
+		result, err = s.toolGetVersion(ctx, request.Arguments)
 	default:
 		// Doc tools all share one handler — dispatching them here as
 		// a single default-arm fallback means the switch's

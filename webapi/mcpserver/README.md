@@ -168,6 +168,14 @@ Release a held HTCondor job.
 - `job_id` (string, required): Job ID in format 'cluster.proc'
 - `reason` (string, optional): Reason for release
 
+### get_version
+
+Report the build identity of the running server: its version, the git
+commit it was built from (and whether that tree was dirty), and the
+versions of the golang-htcondor, ClassAd, and CEDAR libraries linked in.
+Read-only, no arguments. Use it to confirm which code is actually
+deployed — for example, after a redeploy.
+
 ## MCP Resources
 
 ### condor://schedd/status
