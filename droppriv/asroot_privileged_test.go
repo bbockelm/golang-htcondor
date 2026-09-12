@@ -83,7 +83,7 @@ func TestOpenMaybeAsRootReadsARootOnlyCredentialAfterDrop(t *testing.T) {
 	dir := t.TempDir()
 	// 0700 root: the dropped user cannot even stat what is inside,
 	// which is how /etc/condor/htcondor-api is normally staged.
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: 0700 root is the fixture -- the dropped user must not be able to traverse it
 		t.Fatal(err)
 	}
 	kek := filepath.Join(dir, "kek")
