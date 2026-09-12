@@ -223,6 +223,52 @@ consent, so re-running group policy catches an operator changing
 upstream. Removals are caught by the oracles, by
 `POST /api/v1/admin/oauth2/revoke`, and ultimately by the lifetime cap.
 
+### Token exchange (RFC 8693)
+
+The MCP OAuth2 endpoint supports the token-exchange grant
+(`urn:ietf:params:oauth:grant-type:token-exchange`), so a gateway or agent can
+trade one token for another rather than re-running an interactive flow. It is
+**opt-in per client**: enable the `token_exchange` grant on a confidential
+client in the admin UI (`/admin/clients`). Exchange is always **delegation** —
+the issued token acts as the subject but records the exchanging client as its
+actor — and **scope-down only**: the result can never exceed the subject's
+authorization.
+
+Two kinds of `subject_token` are accepted:
+
+- **A token this server issued** (`subject_token_type` =
+  `urn:ietf:params:oauth:token-type:access_token`): the result acts as that
+  token's subject, bounded by that token's granted scopes. No configuration
+  needed.
+- **A JWT from a trusted external issuer** (`subject_token_type` =
+  `urn:ietf:params:oauth:token-type:jwt` or `…:id_token`): accepted only when
+  the issuer is listed in `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS`. The token's
+  signature is verified against the issuer's JWKS (RS256/ES256), and its
+  `iss`/`aud`/`exp`/`nbf` are checked. The local identity is namespaced as
+  `<sub>@<identity_domain>` (so two issuers cannot collide), and the result is
+  bounded by the issuer's `allowed_scopes` **and** the exchanging client's own
+  scopes.
+
+`HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` is a JSON array; unset disables external
+exchange (the our-own-token path still works). Each entry:
+
+```
+HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS = [ \
+  {"issuer":"https://idp.example.org", \
+   "jwks_uri":"https://idp.example.org/.well-known/jwks.json", \
+   "audience":"htcondor-mcp", \
+   "identity_domain":"idp.example.org", \
+   "allowed_scopes":["condor:/READ","mcp:read"]} ]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `issuer` | Exact `iss` the token must carry. Required. |
+| `jwks_uri` | HTTPS URL of the issuer's signing keys (fetched with SSRF protections, cached). Required. |
+| `audience` | Value the token's `aud` must include. Required. |
+| `identity_domain` | Local identity is `<sub>@this`. Defaults to the issuer's host. |
+| `allowed_scopes` | Ceiling of scopes a token from this issuer may obtain. |
+
 ## API surface
 
 Endpoint groupings — full reference + request/response shapes are in
@@ -346,6 +392,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_WEBUI_ADMIN_GROUP` | Group name whose members can reach the admin pages. Unset disables the admin UI. |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
+| `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
