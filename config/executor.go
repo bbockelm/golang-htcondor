@@ -60,9 +60,29 @@ func (c *Config) executeAssignment(a *Assignment) error {
 		}
 	}
 
+	// The NAME may itself contain a macro reference, which HTCondor
+	// expands before storing:
+	//
+	//	CLASSAD_USER_MAPFILE_$(1) = $(2)
+	//
+	// Unlike the value, a name is never lazy -- it decides which
+	// parameter is being defined, so it has to resolve now, while any
+	// metaknob arguments are still in scope.
+	name := a.Name
+	if strings.Contains(name, "$(") {
+		expanded, err := c.expandMacrosWithFunctions(name)
+		if err != nil {
+			return fmt.Errorf("error expanding parameter name %q: %w", name, err)
+		}
+		name = strings.TrimSpace(expanded)
+		if name == "" {
+			return fmt.Errorf("parameter name %q expanded to nothing", a.Name)
+		}
+	}
+
 	// Use Set() which handles self-references and stores unexpanded values
 	// This preserves lazy evaluation semantics (except in metaknobs)
-	c.Set(a.Name, value)
+	c.Set(name, value)
 	return nil
 }
 

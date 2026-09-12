@@ -297,13 +297,26 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 				macroContent := result[dollarIdx+2 : endIdx]
 
 				// Check if this is a function call (contains '(' after name)
-				// But not if it starts with '$' (that's a nested macro like $($(1)))
 				// Also not if it contains ':' before '(' (that's a default value like $(VAR:$(DEFAULT)))
 				colonIdx := strings.Index(macroContent, ":")
 				parenIdx := strings.Index(macroContent, "(")
 
+				// A '(' only starts a function call when everything
+				// before it is a plain name. A '$' in there means the
+				// paren belongs to a NESTED reference instead:
+				//
+				//	$(OUTER_$(INNER))
+				//
+				// whose content is "OUTER_$(INNER)" -- not a call to a
+				// function named "OUTER_$". This used to test only for
+				// a LEADING '$', which caught $($(1)) but not the
+				// common form above; that one failed as "unknown
+				// function: OUTER_$" in a parameter name, and in a
+				// VALUE it silently stayed unexpanded, so the config
+				// held the literal text where condor_config_val
+				// resolves it.
 				isFunctionMacro := parenIdx != -1 &&
-					!strings.HasPrefix(macroContent, "$") &&
+					!strings.Contains(macroContent[:parenIdx], "$") &&
 					(colonIdx == -1 || parenIdx < colonIdx)
 
 				if isFunctionMacro {
