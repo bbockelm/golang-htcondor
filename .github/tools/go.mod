@@ -2,7 +2,7 @@
 // a home Dependabot can bump. Nothing imports it.
 module github.com/bbockelm/golang-htcondor/citools
 
-go 1.25.7
+go 1.26.0
 
 require github.com/bbockelm/htcondordb v0.18.9
 

@@ -1,6 +1,6 @@
 module example
 
-go 1.25.7
+go 1.26.0
 
 replace github.com/bbockelm/golang-htcondor => ../..
 

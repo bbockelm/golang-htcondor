@@ -1,6 +1,6 @@
 module github.com/bbockelm/golang-htcondor/localcredmon
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000

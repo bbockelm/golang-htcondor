@@ -18,10 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Track the minimum Go version named in go.mod (currently 1.25).
-        # Add new minor versions here when go.mod's `go` directive moves
-        # forward; keep at least one version to exercise the matrix.
-        go-version: ['1.25']
+        # First entry is the floor named in every go.mod (currently
+        # 1.26) -- testing there is what makes that floor a real claim
+        # rather than an aspiration, since it catches accidental use of
+        # newer language features. Last entry is the toolchain we build
+        # and release with. Shift both when Go drops a release: the
+        # floor tracks the oldest version upstream still supports.
+        go-version: ['1.26', '1.27']
 
     steps:
     - name: Checkout code
@@ -70,7 +73,7 @@ jobs:
         (cd localcredmon && gotestsum --junitfile="$GITHUB_WORKSPACE/test-results-localcredmon.xml" -- -race ./...)
 
     - name: Upload coverage to Codecov
-      if: matrix.go-version == '1.25'
+      if: matrix.go-version == '1.27'
       uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
       with:
         files: ./coverage.out
@@ -95,14 +98,18 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.25'
+        go-version: '1.27'
         cache: true
         cache-dependency-path: ${{ matrix.module }}/go.sum
 
     - name: Run golangci-lint (${{ matrix.module }})
       uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
-        version: v2.6.1
+        # Must be built with a Go at least as new as the modules target:
+        # golangci-lint refuses to run otherwise ("the Go language version
+        # used to build golangci-lint is lower than the targeted Go
+        # version"). v2.13.2 is built with go1.27.0.
+        version: v2.13.2
         working-directory: ${{ matrix.module }}
         args: --timeout=5m
         # Skip `golangci-lint config verify`, which fetches a JSON schema from
@@ -121,7 +128,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.25'
+        go-version: '1.27'
         cache: true
 
     - name: Build
@@ -141,7 +148,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.25'
+        go-version: '1.27'
         cache: true
 
     # Fails when a PR leaves any module's go.mod/go.sum stale — notably the
