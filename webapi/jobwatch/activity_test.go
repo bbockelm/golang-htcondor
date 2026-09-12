@@ -12,13 +12,16 @@ import (
 // of invented submissions after every restart, and a completion claimed
 // for a job that may have been removed.
 
-// activityFixture returns a feed with a frozen clock and a subscriber.
-func activityFixture(t *testing.T, owner string) (*Feed, <-chan ActivityEvent, time.Time) {
+// activityFixture returns a feed with a frozen clock and an unscoped
+// subscriber. The owner-scoped case builds its own, since it needs two
+// subscribers to show the filter discriminating rather than just
+// dropping everything.
+func activityFixture(t *testing.T) (*Feed, <-chan ActivityEvent, time.Time) {
 	t.Helper()
 	now := time.Unix(1_700_000_000, 0)
 	f := NewFeed(nil)
 	f.now = func() time.Time { return now }
-	ch, cancel := f.SubscribeActivity(owner, 16)
+	ch, cancel := f.SubscribeActivity("", 16)
 	t.Cleanup(cancel)
 	return f, ch, now
 }
@@ -46,7 +49,7 @@ func jobAd(cluster int, owner string, status int, extra string) string {
 }
 
 func TestStatusChangesBecomeEvents(t *testing.T) {
-	f, ch, now := activityFixture(t, "")
+	f, ch, now := activityFixture(t)
 
 	// A job we already know about, idle.
 	applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
@@ -87,7 +90,7 @@ func TestStatusChangesBecomeEvents(t *testing.T) {
 // overwhelming majority of them, and it is the reason a stream of status
 // changes is cheap enough to leave open.
 func TestAttributeUpdatesAreNotEvents(t *testing.T) {
-	f, ch, now := activityFixture(t, "")
+	f, ch, now := activityFixture(t)
 	base := fmt.Sprintf("QDate = %d\nRemoteHost = \"slot1@ep\"", now.Add(-time.Hour).Unix())
 	applyUpsert(f, "1.0", jobAd(1, "alice", 2, base))
 	drainActivity(ch)
@@ -106,7 +109,7 @@ func TestAttributeUpdatesAreNotEvents(t *testing.T) {
 // submission. Reporting those would put thousands of fictional
 // submissions on the ticker moments after every restart.
 func TestFirstSightingOfAnOldJobIsSilent(t *testing.T) {
-	f, ch, now := activityFixture(t, "")
+	f, ch, now := activityFixture(t)
 	old := now.Add(-6 * time.Hour).Unix()
 
 	applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d", old)))
@@ -121,7 +124,7 @@ func TestFirstSightingOfAnOldJobIsSilent(t *testing.T) {
 // ...but a job that genuinely just arrived has to show up, or a fresh
 // submission is invisible until the next restart.
 func TestFirstSightingOfSomethingNewIsReported(t *testing.T) {
-	f, ch, now := activityFixture(t, "")
+	f, ch, now := activityFixture(t)
 
 	applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d\nCmd = \"/home/alice/run.sh\"", now.Add(-5*time.Second).Unix())))
 	got := drainActivity(ch)
@@ -160,7 +163,7 @@ func TestDeleteReportsTheOutcomeFromTheLastAd(t *testing.T) {
 		{"removed", 3, "", ActivityRemoved, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, ch, now := activityFixture(t, "")
+			f, ch, now := activityFixture(t)
 			applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
 			applyUpsert(f, "1.0", jobAd(1, "alice", tc.status, tc.extra))
 			drainActivity(ch)
@@ -181,7 +184,7 @@ func TestDeleteReportsTheOutcomeFromTheLastAd(t *testing.T) {
 // went. Calling that a completion would put a success on the ticker for
 // something that may have failed.
 func TestDeleteOfAnUnfinishedJobClaimsNothing(t *testing.T) {
-	f, ch, now := activityFixture(t, "")
+	f, ch, now := activityFixture(t)
 	applyUpsert(f, "1.0", jobAd(1, "alice", 2, fmt.Sprintf("QDate = %d\nRemoteHost = \"slot1@ep\"", now.Add(-time.Hour).Unix())))
 	drainActivity(ch)
 

@@ -196,10 +196,7 @@ func TestStreamActivitySendsAHeartbeat(t *testing.T) {
 	}()
 
 	deadline := time.After(5 * time.Second)
-	for {
-		if strings.Contains(rec.body(), ": keepalive") {
-			break
-		}
+	for !strings.Contains(rec.body(), ": keepalive") {
 		select {
 		case <-deadline:
 			t.Fatalf("no heartbeat on an idle stream: %q", rec.body())
