@@ -141,8 +141,12 @@ func TestUnwritableLogFallsBackWhenStandalone(t *testing.T) {
 // nowhere to write.
 func TestStartupFailureIsWrittenToTheLogFile(t *testing.T) {
 	logDir := t.TempDir()
+	// The same unambiguously-invalid line the refusal test uses. An
+	// earlier version used an unterminated macro reference, which is
+	// precisely the input whose lexing is being changed elsewhere --
+	// a test should not depend on a form whose handling is in flux.
 	writeConfig(t, "LOG = "+logDir+"\n", map[string]string{
-		"95-broken.conf": "BROKEN_$(UNCLOSED = x\n",
+		"95-broken.conf": "THIS IS NOT VALID = = =\n",
 	})
 
 	_, err := loadConfigWithDefaults()
