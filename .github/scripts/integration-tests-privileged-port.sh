@@ -19,3 +19,18 @@ GOWORK=off gotestsum -- \
   -tags=integration -timeout=10m \
   -run 'TestHTCondorAPIBindsPrivilegedPortUnderMaster$' \
   .
+
+# droppriv's privileged tests, which need root by definition: they drop
+# to another account and then re-raise to read a root-only credential.
+#
+# They ran in NO job until now. Every one of them skips under the
+# unprivileged Test in Docker job, so the guards for privilege
+# elevation -- including the one for "kek file: permission denied" on a
+# master-started daemon -- were never executed anywhere:
+#
+#   === SKIP: droppriv TestOpenAsRootElevatesAfterDrop
+#   === SKIP: droppriv TestOpenMaybeAsRootReadsARootOnlyCredentialAfterDrop
+#
+# The whole package runs here, not a filtered subset: as root it is
+# green, and a filter would quietly stop covering anything added later.
+GOWORK=off gotestsum -- -timeout=5m ./droppriv/
