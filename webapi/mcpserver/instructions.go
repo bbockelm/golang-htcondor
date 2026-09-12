@@ -39,7 +39,8 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("1. submit_job — submit a job with an HTCondor submit-file description.\n")
 	b.WriteString("2. upload_job_input — upload the executable and small input files (< 100 KB total recommended). " +
 		"For larger inputs, use HTTP/HTTPS URLs in transfer_input_files.\n")
-	b.WriteString("3. query_jobs — poll until JobStatus changes to 4 (Completed) or 5 (Held).\n")
+	b.WriteString("3. watch_jobs / check_watches — wait for the job to finish (or be held) without polling; " +
+		"a watch fires even if it already happened. Use query_jobs for a one-off status snapshot.\n")
 	b.WriteString("4. get_job_stdout / get_job_stderr — retrieve output after the job finishes.\n")
 	b.WriteString("5. get_job_output — retrieve any other output files.\n\n")
 
