@@ -449,3 +449,66 @@ func TestDashboardGoodputFromRealHistory(t *testing.T) {
 		t.Error("the job killed by a signal is not in the failure breakdown")
 	}
 }
+
+// TestDashboardMergesArchivedCompletions covers the other half of the
+// archive read: the completed list is the union of what the queue still
+// holds and what the history archive remembers.
+//
+// Without an archive the list is the handful of jobs the reaper has not
+// yet destroyed -- seconds of visibility -- and the page says so. With
+// one it is a real hour, and the flags have to flip. That transition
+// only happens against a real archive, so it cannot be covered
+// anywhere but here.
+func TestDashboardMergesArchivedCompletions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const owner = "dashuser"
+	h := mirrorForDashboard(ctx, t, owner, true)
+
+	snap, err := h.dashboardFromMirror(ctx, owner, false)
+	if err != nil {
+		t.Fatalf("dashboardFromMirror: %v", err)
+	}
+	act := snap.Activity
+
+	if !act.CompletedAvailable {
+		t.Error("completed marked unavailable with a history archive answering")
+	}
+	// The claim the flag makes: this is no longer just what the queue
+	// happened to be holding.
+	if act.CompletedPartial {
+		t.Error("completed still marked partial after the archive answered")
+	}
+
+	// Cluster 8 finished in the queue; 101-107 are in the archive. The
+	// list is the union, newest first, and must not repeat a job that
+	// appears in both.
+	if len(act.RecentlyCompleted) < 2 {
+		t.Fatalf("completed list has %d entries; the queue and the archive both had some: %+v",
+			len(act.RecentlyCompleted), act.RecentlyCompleted)
+	}
+	seen := map[string]bool{}
+	for _, e := range act.RecentlyCompleted {
+		id := fmt.Sprintf("%d.%d", e.ClusterID, e.ProcID)
+		if seen[id] {
+			t.Errorf("job %s appears twice in the completed list", id)
+		}
+		seen[id] = true
+	}
+	for i := 1; i < len(act.RecentlyCompleted); i++ {
+		if act.RecentlyCompleted[i-1].At < act.RecentlyCompleted[i].At {
+			t.Errorf("merged completions are not newest-first at %d", i)
+			break
+		}
+	}
+	// The job that completed three hours ago (cluster 108) is outside
+	// the activity window and must not be here, even though goodput
+	// counts a wider one.
+	if seen["108.0"] {
+		t.Error("a completion outside the activity window was listed")
+	}
+}
