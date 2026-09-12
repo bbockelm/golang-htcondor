@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -158,6 +159,33 @@ func (m *Manager) OpenAsRoot(path string) (*os.File, error) {
 	return f, err
 }
 
+// ListenAsRoot binds a listening socket as root.
+//
+// Binding a port below 1024 is privileged, and this process has already
+// dropped to the condor account by the time it knows which port to use --
+// HTCondor's daemons drop early and keep root only in the saved set, which
+// is what makes re-raising possible at all. The bind is the only privileged
+// step: the returned listener is an ordinary fd that keeps working after
+// the thread drops back.
+//
+// The elevation is scoped to one locked thread and undone before returning,
+// the same way OpenAsRoot reads a root-only credential. When the process
+// cannot elevate -- it never was root, or the platform has no support --
+// the bind is attempted as-is, so the caller sees the ordinary permission
+// error rather than a different one from here.
+func (m *Manager) ListenAsRoot(network, address string) (net.Listener, error) {
+	var ln net.Listener
+	err := withRoot(func() error {
+		var e error
+		ln, e = (&net.ListenConfig{}).Listen(context.Background(), network, address)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ln, nil
+}
+
 // OpenFileAsRoot opens a file as root user with specified flags and permissions.
 // WARNING: This bypasses all user validation. Use only when root access is required.
 func (m *Manager) OpenFileAsRoot(path string, flag int, perm os.FileMode) (*os.File, error) {
@@ -235,4 +263,10 @@ func ChownAsRoot(path string, uid, gid int) error {
 // RunAsCondor runs fn as the condor service account using the default manager.
 func RunAsCondor(fn func() error) error {
 	return DefaultManager().RunAsCondor(fn)
+}
+
+// ListenAsRoot binds a listening socket as root using the default manager.
+// See Manager.ListenAsRoot for when and why this is needed.
+func ListenAsRoot(network, address string) (net.Listener, error) {
+	return DefaultManager().ListenAsRoot(network, address)
 }

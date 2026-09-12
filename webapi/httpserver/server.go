@@ -633,6 +633,35 @@ func (s *Server) ServeMCPListener(ln net.Listener, certFile, keyFile string) err
 	return srv.Serve(ln)
 }
 
+// ServeAdditionalListener serves the already-running server on a second
+// listener.
+//
+// Under condor_master the daemon is handed a socket -- a shared-port
+// endpoint or a pre-created command socket -- and that is what carries
+// CEDAR commands. An operator who also wants the web UI on a port of their
+// choosing, 443 being the one people ask for, needs both at once: the
+// master's socket for the pool, and a directly dialable port for browsers.
+// The master cannot be told to hand down 443, so this process has to bind
+// it itself.
+//
+// The handler is started by ServeListenerWithCert and must not be started
+// again -- doing so would register every route a second time and start a
+// second copy of each background goroutine. This only feeds another
+// listener into the same server, so call it after the primary one is
+// serving.
+func (s *Server) ServeAdditionalListener(ln net.Listener, certFile, keyFile string) error {
+	scheme := "http"
+	if certFile != "" && keyFile != "" {
+		scheme = "https"
+	}
+	s.logger.Info(logging.DestinationHTTP, "Also listening on",
+		"address", safeListenerAddr(ln), "scheme", scheme)
+	if scheme == "https" {
+		return s.httpServer.ServeTLS(ln, certFile, keyFile)
+	}
+	return s.httpServer.Serve(ln)
+}
+
 // StartTLS starts the HTTPS server with TLS
 func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Starting HTCondor API server with TLS", "address", s.httpServer.Addr)
