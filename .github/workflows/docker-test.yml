@@ -479,8 +479,10 @@ jobs:
     # without touching the privileged path at all. The test restores the
     # floor itself and skips if it cannot.
     #
-    # This is also the only job that runs the root module's integration
-    # tests; the rest of CI runs webapi's.
+    # The core module's other integration tests run unprivileged in their
+    # own job, where this one skips. Only this test needs root, and only
+    # this test is run here: as root, 13 of the others fail, having been
+    # written for an ordinary user.
     - name: Run the privileged-port test as root
       run: |
         docker run --rm --privileged --user 0:0 \
@@ -489,9 +491,4 @@ jobs:
           -e GOCACHE=/workspace/.gocache/build \
           -e GOMODCACHE=/workspace/.gocache/mod \
           golang-htcondor:integration-test \
-          /bin/bash -c "
-            GOWORK=off gotestsum -- \
-              -tags=integration -timeout=10m \
-              -run 'TestHTCondorAPIBindsPrivilegedPortUnderMaster$' \
-              .
-          "
+          bash .github/scripts/integration-tests-privileged-port.sh
