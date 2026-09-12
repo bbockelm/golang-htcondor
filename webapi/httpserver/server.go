@@ -77,18 +77,30 @@ type Config struct {
 	// HandlerConfig.UserHeaderTrustAnyUnsafe. Configurable via
 	// HTTP_API_USER_HEADER_TRUST_ANY.
 	UserHeaderTrustAnyUnsafe bool
-	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
-	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	CCBStreaming             bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
-	TLSCertFile              string              // Path to TLS certificate file (optional, enables HTTPS)
-	TLSKeyFile               string              // Path to TLS key file (optional, enables HTTPS)
-	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	ReadTimeout              time.Duration       // HTTP read timeout (default: 30s)
-	WriteTimeout             time.Duration       // HTTP write timeout (default: 30s)
-	IdleTimeout              time.Duration       // HTTP idle timeout (default: 120s)
-	Collector                *htcondor.Collector // Collector for metrics (optional)
+	SigningKeyPath           string // Path to token signing key (optional, for token generation)
+	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+
+	// MCPBaseURL is the public base URL of the MCP listener, when MCP has
+	// its own port and that port is published under a different origin
+	// than the web UI. Empty means MCP is reached at the same base URL as
+	// everything else, which is true whenever the ports are combined and
+	// whenever a split is only local.
+	//
+	// It exists for one attribute: RFC 9728 requires the protected-resource
+	// document to name the resource the client asked about, and a client
+	// that reaches MCP on another origin asked about that origin. Naming
+	// the web UI's instead makes the document one the client must reject.
+	MCPBaseURL    string
+	CCBStreaming  bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
+	TLSCertFile   string              // Path to TLS certificate file (optional, enables HTTPS)
+	TLSKeyFile    string              // Path to TLS key file (optional, enables HTTPS)
+	TLSCACertFile string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	ReadTimeout   time.Duration       // HTTP read timeout (default: 30s)
+	WriteTimeout  time.Duration       // HTTP write timeout (default: 30s)
+	IdleTimeout   time.Duration       // HTTP idle timeout (default: 120s)
+	Collector     *htcondor.Collector // Collector for metrics (optional)
 	// JobQueueLogPath, if set, is the path to the schedd's job_queue.log; the
 	// server mirrors it into a watch-enabled collection and serves
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
@@ -260,6 +272,7 @@ func NewServer(cfg Config) (*Server, error) {
 		TrustDomain:                 cfg.TrustDomain,
 		UIDDomain:                   cfg.UIDDomain,
 		HTTPBaseURL:                 cfg.HTTPBaseURL,
+		MCPBaseURL:                  cfg.MCPBaseURL,
 		CCBStreaming:                cfg.CCBStreaming,
 		TLSCACertFile:               cfg.TLSCACertFile,
 		Collector:                   cfg.Collector,

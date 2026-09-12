@@ -120,3 +120,57 @@ func TestCombinedByDefault(t *testing.T) {
 		t.Error("MCPListenAddr was set but the server did not split")
 	}
 }
+
+// When MCP is published under its own origin, the protected-resource
+// document has to name that origin.
+//
+// RFC 9728 3.3 requires the `resource` value to match the identifier the
+// client used to build the metadata URL. A client reaching MCP at its own
+// base asked about that base, so naming the web UI's gives it a document
+// it is obliged to reject -- and the failure surfaces as an opaque
+// authorization error two hops away from the cause.
+func TestProtectedResourceNamesTheMCPOrigin(t *testing.T) {
+	const (
+		mainBase = "https://api.example.org"
+		mcpBase  = "https://mcp.example.org:9443"
+	)
+	s := mcpOriginTestServer(t, mainBase, mcpBase)
+
+	if got := s.protectedResourceIdentifier(wellKnownProtectedResource + mcpMessagePath); got != mcpBase+mcpMessagePath {
+		t.Errorf("MCP resource = %q, want %q", got, mcpBase+mcpMessagePath)
+	}
+
+	// Everything else is still reached at the main base; only the MCP
+	// endpoint moved.
+	if got := s.protectedResourceIdentifier(wellKnownProtectedResource); got != mainBase {
+		t.Errorf("root resource = %q, want %q", got, mainBase)
+	}
+}
+
+// With no MCP base configured -- the combined default, and a split that is
+// only local -- nothing moves.
+func TestProtectedResourceUnchangedWithoutAnMCPOrigin(t *testing.T) {
+	const mainBase = "https://api.example.org"
+	s := mcpOriginTestServer(t, mainBase, "")
+
+	if got := s.protectedResourceIdentifier(wellKnownProtectedResource + mcpMessagePath); got != mainBase+mcpMessagePath {
+		t.Errorf("MCP resource = %q, want %q", got, mainBase+mcpMessagePath)
+	}
+}
+
+func mcpOriginTestServer(t *testing.T, base, mcpBase string) *Server {
+	t.Helper()
+	s, err := NewServer(Config{
+		Logger:       testLogger(t),
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		OAuth2DBPath: t.TempDir() + "/oauth2.db",
+		EnableMCP:    true,
+		HTTPBaseURL:  base,
+		MCPBaseURL:   mcpBase,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	return s
+}

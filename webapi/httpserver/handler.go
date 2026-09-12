@@ -125,6 +125,7 @@ type Handler struct {
 	trustDomain              string
 	uidDomain                string
 	httpBaseURL              string // Base URL for HTTP API (for generating MCP file download links)
+	mcpBaseURL               string // public base URL of the MCP listener; see HandlerConfig.MCPBaseURL
 	tlsCACertFile            string
 	logger                   *logging.Logger
 	// db is the single SQLite file shared by OAuth2/MCP storage, the
@@ -379,13 +380,25 @@ type HandlerConfig struct {
 	// Configure via HTTP_API_USER_HEADER_TRUST_ANY=1 (loud warning
 	// at startup).
 	UserHeaderTrustAnyUnsafe bool
-	SigningKeyPath           string              // Path to token signing key (optional, for token generation)
-	TrustDomain              string              // Trust domain for token issuer (optional; only used if UserHeader is set)
-	UIDDomain                string              // UID domain for generated token username (optional; only used if UserHeader is set)
-	HTTPBaseURL              string              // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
-	CCBStreaming             bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
-	TLSCACertFile            string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
-	Collector                *htcondor.Collector // Collector for metrics (optional)
+	SigningKeyPath           string // Path to token signing key (optional, for token generation)
+	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
+	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
+
+	// MCPBaseURL is the public base URL of the MCP listener, when MCP has
+	// its own port and that port is published under a different origin
+	// than the web UI. Empty means MCP is reached at the same base URL as
+	// everything else, which is true whenever the ports are combined and
+	// whenever a split is only local.
+	//
+	// It exists for one attribute: RFC 9728 requires the protected-resource
+	// document to name the resource the client asked about, and a client
+	// that reaches MCP on another origin asked about that origin. Naming
+	// the web UI's instead makes the document one the client must reject.
+	MCPBaseURL    string
+	CCBStreaming  bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
+	TLSCACertFile string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
+	Collector     *htcondor.Collector // Collector for metrics (optional)
 
 	// htcondordb mirror routing. Empty/false is the default: discover
 	// whatever htcondordb advertises to the collector and use it as an
@@ -715,6 +728,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		trustDomain:               cfg.TrustDomain,
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
+		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		ccbStreaming:              cfg.CCBStreaming,
 		userHeader:                cfg.UserHeader,

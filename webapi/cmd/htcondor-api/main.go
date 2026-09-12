@@ -1371,6 +1371,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
 		MCPListenAddr:            mcpListenAddrFromConfig,
+		MCPBaseURL:               firstConfigValue(cfg, "HTTP_API_MCP_BASE_URL"),
 		CCBStreaming:             loadCCBStreaming(cfg, logger),
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
