@@ -35,6 +35,7 @@ func epochAd(t *testing.T, attrs map[string]any) *classad.ClassAd {
 func TestEpochDecisionServesACaughtUpMirror(t *testing.T) {
 	info := ParseAd(epochAd(t, map[string]any{
 		"EpochCaughtUp":         true,
+		"EpochLastSyncTime":     int64(1700000000),
 		"EpochSecondsSinceSync": int64(3),
 		"EpochLagBytes":         int64(0),
 		"EpochGapDetected":      false,
@@ -53,7 +54,8 @@ func TestEpochDecisionServesACaughtUpMirror(t *testing.T) {
 // up, no lag" -- the same trap JobQueueReported exists for.
 func TestEpochDecisionDeclinesAMirrorThatDoesNotTailEpochs(t *testing.T) {
 	info := ParseAd(epochAd(t, map[string]any{
-		"JobQueueCaughtUp": true, // syncs the queue, but not epochs
+		"JobQueueCaughtUp":     true,
+		"JobQueueLastSyncTime": int64(1700000000), // syncs the queue, but not epochs
 	}))
 	if info.EpochReported {
 		t.Fatal("EpochReported true for an ad with no Epoch attributes")
@@ -69,8 +71,9 @@ func TestEpochDecisionDeclinesAMirrorThatDoesNotTailEpochs(t *testing.T) {
 
 func TestEpochDecisionDeclinesOnGapAndStaleness(t *testing.T) {
 	gap := ParseAd(epochAd(t, map[string]any{
-		"EpochCaughtUp":    true,
-		"EpochGapDetected": true,
+		"EpochCaughtUp":     true,
+		"EpochLastSyncTime": int64(1700000000),
+		"EpochGapDetected":  true,
 	}))
 	if d := EpochDecision(gap); d.Use || d.Reason != ReasonHistoryGap {
 		t.Errorf("gap: Use=%v Reason=%q", d.Use, d.Reason)
@@ -78,6 +81,7 @@ func TestEpochDecisionDeclinesOnGapAndStaleness(t *testing.T) {
 
 	stale := ParseAd(epochAd(t, map[string]any{
 		"EpochCaughtUp":         true,
+		"EpochLastSyncTime":     int64(1700000000),
 		"EpochSecondsSinceSync": EpochToleranceSecs + 1,
 	}))
 	if d := EpochDecision(stale); d.Use || d.Reason != ReasonStale {
@@ -85,8 +89,9 @@ func TestEpochDecisionDeclinesOnGapAndStaleness(t *testing.T) {
 	}
 
 	behind := ParseAd(epochAd(t, map[string]any{
-		"EpochCaughtUp": false,
-		"EpochLagBytes": int64(4096),
+		"EpochCaughtUp":     false,
+		"EpochLastSyncTime": int64(1700000000),
+		"EpochLagBytes":     int64(4096),
 	}))
 	if d := EpochDecision(behind); d.Use || d.Reason != ReasonNotCaughtUp {
 		t.Errorf("behind: Use=%v Reason=%q", d.Use, d.Reason)
@@ -98,8 +103,9 @@ func TestEpochDecisionDeclinesOnGapAndStaleness(t *testing.T) {
 // strict behavior, which is what routing had before this existed.
 func TestCaughtUpLagBytesLeeway(t *testing.T) {
 	behind := ParseAd(epochAd(t, map[string]any{
-		"EpochCaughtUp": false,
-		"EpochLagBytes": int64(4096),
+		"EpochCaughtUp":     false,
+		"EpochLastSyncTime": int64(1700000000),
+		"EpochLagBytes":     int64(4096),
 	}))
 
 	if d := EpochDecision(behind); d.Use {
@@ -116,8 +122,9 @@ func TestCaughtUpLagBytesLeeway(t *testing.T) {
 
 	// Still bounded: past the tolerance it declines again.
 	wayBehind := ParseAd(epochAd(t, map[string]any{
-		"EpochCaughtUp": false,
-		"EpochLagBytes": int64(1 << 20),
+		"EpochCaughtUp":     false,
+		"EpochLastSyncTime": int64(1700000000),
+		"EpochLagBytes":     int64(1 << 20),
 	}))
 	if d := EpochDecision(wayBehind); d.Use {
 		t.Error("a 1 MB lag passed a 10 KB tolerance")
@@ -134,7 +141,8 @@ func TestLagLeewayIgnoresMirrorsThatDoNotReportIt(t *testing.T) {
 	CaughtUpLagBytes = 10 << 10
 
 	noLag := ParseAd(epochAd(t, map[string]any{
-		"EpochCaughtUp": false, // reports the flag, but not the byte count
+		"EpochCaughtUp":     false,
+		"EpochLastSyncTime": int64(1700000000), // reports the flag, but not the byte count
 	}))
 	if noLag.EpochLagReported {
 		t.Fatal("EpochLagReported true for an ad with no EpochLagBytes")
@@ -150,6 +158,7 @@ func TestLagLeewayIgnoresMirrorsThatDoNotReportIt(t *testing.T) {
 func TestLeewayAppliesToTheLiveQueueToo(t *testing.T) {
 	behind := ParseAd(epochAd(t, map[string]any{
 		"JobQueueCaughtUp":         false,
+		"JobQueueLastSyncTime":     int64(1700000000),
 		"JobQueueLagBytes":         int64(2048),
 		"JobQueueSecondsSinceSync": int64(1),
 	}))
