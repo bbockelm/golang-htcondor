@@ -223,6 +223,31 @@ consent, so re-running group policy catches an operator changing
 upstream. Removals are caught by the oracles, by
 `POST /api/v1/admin/oauth2/revoke`, and ultimately by the lifetime cap.
 
+### MCP OAuth2 clients
+
+Clients of the MCP OAuth2 endpoint can register and authenticate several ways.
+The admin UI at `/admin/clients` lists every client and lets an operator edit
+its permitted grant types (and, for `client_credentials`, its service
+identity); other fields are read-only.
+
+- **Dynamic Client Registration (DCR, RFC 7591)** — `POST /mcp/oauth2/register`.
+  A client registers itself and gets a confidential `client_id` + secret.
+- **Client ID Metadata Document (CIMD)** — instead of registering, a client
+  identifies itself by an `https://` URL as its `client_id`; the server fetches
+  a client-metadata document from that URL and treats it as a **public** client
+  (no secret, PKCE required). This is where the MCP spec is heading, away from
+  DCR. The fetch is hardened against SSRF (https-only, private/link-local/cloud-
+  metadata addresses refused, no redirects, timeout + size cap), and the
+  document must be self-consistent (its `client_id` equals the URL). On by
+  default; see the knobs below to disable or restrict it.
+- **`client_credentials`** — a confidential client acting as itself, with no end
+  user. Enable the grant in the admin UI and set a **service identity**: that
+  identity becomes the subject of the short-lived HTCondor IDTOKEN minted for
+  the client's requests, which the schedd then authorizes via `ALLOW_<LEVEL>`
+  like any other principal. A client with no service identity configured is
+  refused a `client_credentials` token rather than minting one for an ambiguous
+  subject. Not available to public clients.
+
 ### Token exchange (RFC 8693)
 
 The MCP OAuth2 endpoint supports the token-exchange grant
@@ -393,6 +418,9 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
+| `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
+| `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Optional comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). |
+| `HTTP_API_ADVERTISE` | Advertise this API server to the collector (a `HTCondorAPI` ad: endpoint, schedd, mirror health, versions). Default `true`; `daemon.Advertise` is a no-op without `COLLECTOR_HOST`, so this only matters to opt out when a collector is configured. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
