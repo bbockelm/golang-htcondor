@@ -61,3 +61,59 @@ func TestOpenAsRootElevatesAfterDrop(t *testing.T) {
 		t.Error("euid is root after OpenAsRoot; elevation was not restored")
 	}
 }
+
+// TestOpenMaybeAsRootReadsARootOnlyCredentialAfterDrop is the case an
+// access point actually presents: condor_master starts the daemon as
+// root, it drops to condor, and its credentials -- KEK, OAuth2 client
+// secret, pool signing key -- are root-owned and root-readable, often
+// under a directory the dropped user cannot even traverse.
+//
+// Reading them with a plain os.Open fails there with "permission
+// denied", which is what an operator saw as
+//
+//	Server failed: failed to create server: KEK setup: load master KEK:
+//	kek file: stat /etc/condor/htcondor-api/kek: permission denied
+//
+// Requires root; skipped otherwise.
+func TestOpenMaybeAsRootReadsARootOnlyCredentialAfterDrop(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("test requires root privileges")
+	}
+
+	dir := t.TempDir()
+	// 0700 root: the dropped user cannot even stat what is inside,
+	// which is how /etc/condor/htcondor-api is normally staged.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kek := filepath.Join(dir, "kek")
+	if err := os.WriteFile(kek, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewManager(Config{Enabled: true, CondorUser: "nobody"})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start (drop to nobody): %v", err)
+	}
+	defer func() { _ = mgr.Stop() }()
+
+	// Precondition: the ordinary read is refused, so the test is not
+	// passing for want of a real denial.
+	if _, err := os.ReadFile(kek); err == nil { //nolint:gosec // G304: test-controlled temp path
+		t.Fatal("a root-only credential was readable as nobody; the fixture proves nothing")
+	}
+
+	got, err := ReadFileMaybeAsRoot(kek)
+	if err != nil {
+		t.Fatalf("ReadFileMaybeAsRoot after drop: %v", err)
+	}
+	if string(got) != "0123456789abcdef" {
+		t.Errorf("read %q, want the credential", got)
+	}
+	if os.Geteuid() == 0 {
+		t.Error("euid is root afterwards; the elevation was not restored")
+	}
+}

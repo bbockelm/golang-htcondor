@@ -59,6 +59,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -112,7 +113,15 @@ const hkdfInfo = "htcondor-api/db-kek/v1"
 // persisted across restarts; see the package doc for the full
 // rationale.
 func LoadMasterKEKFromFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	// Opened rather than stat'd, and through droppriv, because the
+	// HTCondor convention for a credential is root-owned and
+	// root-readable while the daemon runs as condor. A plain stat of
+	// /etc/condor/htcondor-api/kek then fails with "permission denied"
+	// before any of the checks below get a chance to say anything
+	// useful. OpenMaybeAsRoot re-raises only when the ordinary open is
+	// refused, so a container running unprivileged with a mounted
+	// secret behaves exactly as before.
+	f, err := droppriv.OpenMaybeAsRoot(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf(
 			"kek file %s does not exist; this package never creates it. "+
@@ -125,13 +134,19 @@ func LoadMasterKEKFromFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kek file: %w", err)
 	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("kek file: %w", err)
+	}
 	if info.IsDir() {
 		return nil, fmt.Errorf("kek file %s: is a directory", path)
 	}
 	if perm := info.Mode().Perm(); perm&0o007 != 0 {
 		return nil, fmt.Errorf("kek file %s is world-accessible (mode %#o); must have no other-bits set (typical: 0600, 0400, or 0440 for kubelet+fsGroup mounts)", path, perm)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled
+	raw, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("read kek file: %w", err)
 	}
