@@ -8,14 +8,7 @@ import (
 // adAttrs renders a job ad and returns attribute -> value.
 func adAttrs(t *testing.T, submitFile string) map[string]string {
 	t.Helper()
-	sf, err := ParseSubmitFile(strings.NewReader(submitFile))
-	if err != nil {
-		t.Fatalf("ParseSubmitFile: %v", err)
-	}
-	ad, err := sf.MakeJobAd(JobID{Cluster: 1, Proc: 0}, nil)
-	if err != nil {
-		t.Fatalf("MakeJobAd: %v", err)
-	}
+	ad := mustMakeJobAd(t, submitFile)
 	out := map[string]string{}
 	for _, part := range strings.Split(strings.Trim(ad.String(), "[]"), ";") {
 		if i := strings.Index(part, "="); i > 0 {

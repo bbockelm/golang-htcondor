@@ -4,8 +4,10 @@
 package htcondor
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
@@ -57,6 +59,18 @@ type SubmitFile struct {
 	assigned map[string]bool
 	universe int
 
+	// flavor is the container mechanism `universe = docker` /
+	// `universe = container` asked for, if either did. It is kept so
+	// that an image command whose macros expand to nothing at job-ad
+	// time is an error rather than a job that quietly runs outside its
+	// image; see setContainerSettings.
+	flavor containerFlavor
+
+	// customAttrs are the `+Attr = expr` and `MY.Attr = expr` commands,
+	// in submit-file order. See customAttributes for why they cannot be
+	// recovered from cfg.
+	customAttrs []customAttr
+
 	// Queue statement information
 	queueCount    int
 	queueVars     []string
@@ -98,7 +112,26 @@ const (
 	UniverseParallel  = 11
 	UniverseLocal     = 12
 	UniverseVM        = 13
-	UniverseDocker    = 14 // Deprecated, use Vanilla + container
+
+	// Deprecated: there is no docker universe. HTCondor has no universe
+	// 14 (14 is CONDOR_UNIVERSE_MAX); condor_submit runs
+	// `universe = docker` as a vanilla job flagged with WantDocker, and
+	// so does this package, so no job ad ever carries this value. Use
+	// UniverseVanilla plus docker_image.
+	UniverseDocker = 14
+)
+
+// containerFlavor records which container mechanism a submit file asked
+// for. It is deliberately not a JobUniverse value: condor_submit runs
+// both `universe = docker` and `universe = container` as vanilla jobs
+// and distinguishes them with WantDocker / WantContainer, which is what
+// condor_starter keys off to invoke docker or apptainer.
+type containerFlavor int
+
+const (
+	flavorNone containerFlavor = iota
+	flavorDocker
+	flavorContainer
 )
 
 // SubmitParseOptions controls what a submit-file parse is allowed to do
@@ -181,6 +214,25 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 
 	// Create config and execute non-queue statements
 	cfg := config.NewEmptyWithOptions(config.ConfigOptions{NoLocalAccess: !opts.AllowLocalAccess})
+
+	// Custom attribute names have to be read off the statements (see
+	// customAttributes), which means a `+Attr` sitting in a conditional
+	// branch that never executes is collected along with the rest. Its
+	// key then resolves to the param_info default of the same name --
+	// the config bleed submitCommand exists to prevent -- so record
+	// those defaults before the submit file runs and, after it has,
+	// drop every attribute the file did not actually assign.
+	customAttrs, err := customAttributes(configStmts)
+	if err != nil {
+		return nil, err
+	}
+	for i := range customAttrs {
+		if v, ok := cfg.Get(customAttrs[i].key); ok {
+			customAttrs[i].configDefault = v
+			customAttrs[i].hasDefault = true
+		}
+	}
+
 	if err := cfg.ExecuteStatements(configStmts); err != nil {
 		return nil, fmt.Errorf("failed to execute submit file: %w", err)
 	}
@@ -196,9 +248,19 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 	// other submit command: there is no UNIVERSE knob in param_info
 	// today, but relying on that would make a future upstream addition
 	// silently change every job's universe.
+	flavor := flavorNone
 	if univ, ok := sf.submitCommand("universe"); ok {
-		sf.universe = parseUniverse(univ)
+		sf.universe, flavor = parseUniverse(univ)
 	}
+
+	// Reject a submit file whose image commands and universe disagree,
+	// so that the image and its Want* flag are always emitted together.
+	if err := sf.checkContainerCommands(flavor); err != nil {
+		return nil, err
+	}
+	sf.flavor = flavor
+
+	sf.customAttrs = assignedCustomAttributes(cfg, customAttrs)
 
 	// Create iterator from queue statement
 	if queueStmt != nil {
@@ -368,31 +430,208 @@ func quoteSubmitFilePath(p string) string {
 	return sb.String()
 }
 
-// parseUniverse converts universe string to integer constant
-func parseUniverse(univ string) int {
-	univ = strings.ToLower(strings.TrimSpace(univ))
-	switch univ {
-	case "standard":
-		return UniverseStandard
-	case "vanilla":
-		return UniverseVanilla
-	case "scheduler":
-		return UniverseScheduler
-	case "grid":
-		return UniverseGrid
-	case "java":
-		return UniverseJava
-	case "parallel", "mpi":
-		return UniverseParallel
-	case "local":
-		return UniverseLocal
-	case "vm":
-		return UniverseVM
-	case "docker":
-		return UniverseDocker
-	default:
-		return UniverseVanilla
+// Byte-size unit multipliers for submit commands that take a quantity of
+// storage. HTCondor treats the K/M/G/T suffixes as binary multiples, and
+// so does condor_submit's parse_int64_bytes.
+const (
+	bytesPerKiB int64 = 1 << 10
+	bytesPerMiB int64 = 1 << 20
+)
+
+// sizeSuffixes maps the unit suffix of a size-valued submit command to
+// its multiplier in bytes. A value with no suffix is denominated in the
+// command's own base unit (MiB for request_memory, KiB for request_disk),
+// which is why "" is absent here -- the caller supplies that.
+var sizeSuffixes = map[string]int64{
+	"b":   1,
+	"k":   1 << 10,
+	"kb":  1 << 10,
+	"kib": 1 << 10,
+	"m":   1 << 20,
+	"mb":  1 << 20,
+	"mib": 1 << 20,
+	"g":   1 << 30,
+	"gb":  1 << 30,
+	"gib": 1 << 30,
+	"t":   1 << 40,
+	"tb":  1 << 40,
+	"tib": 1 << 40,
+	"p":   1 << 50,
+	"pb":  1 << 50,
+	"pib": 1 << 50,
+}
+
+// parseSizeInUnits parses a size-valued submit command -- "4GB", "512 MB",
+// "1.5G", or a bare "1024" -- into whole units of unitBytes, the base unit
+// the corresponding job attribute is denominated in (MiB for RequestMemory,
+// KiB for RequestDisk). It reports false for anything that is not a size;
+// the caller decides what to do with it.
+//
+// Discarding the suffix and keeping the numeric prefix, as a bare
+// Sscanf("%d") does, is the dangerous reading: `request_disk = 4GB` becomes
+// a request for 4 KiB of scratch, the job matches anywhere, and it dies
+// partway through with ENOSPC instead of staying idle for a bigger slot.
+//
+// Partial units round up: a request is a floor, and rounding 1.5 KiB down
+// to 1 KiB would under-provision the job.
+func parseSizeInUnits(s string, unitBytes int64) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
 	}
+
+	// Split the numeric prefix from the unit suffix.
+	end := 0
+	for end < len(s) && (s[end] == '.' || s[end] == '+' || s[end] == '-' || (s[end] >= '0' && s[end] <= '9')) {
+		end++
+	}
+	num, suffix := s[:end], strings.TrimSpace(s[end:])
+
+	// num is drawn only from [0-9.+-], so ParseFloat can never return an
+	// infinity or a NaN here -- an out-of-range literal is an error.
+	//
+	// A negative quantity is still a quantity, and comes back as one so
+	// the caller can reject it. Reporting "not a size" instead would send
+	// it to the expression fallback, which parses `-5` happily and hands
+	// the negotiator RequestMemory = -5 -- unconverted, at that.
+	val, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	mult := unitBytes
+	if suffix != "" {
+		m, ok := sizeSuffixes[strings.ToLower(suffix)]
+		if !ok {
+			return 0, false
+		}
+		mult = m
+	}
+
+	// A finite val times a petabyte multiplier can still overflow.
+	bytes := val * float64(mult)
+	if bytes > math.MaxInt64/2 || bytes < -(math.MaxInt64/2) {
+		return 0, false
+	}
+
+	// Round up to the next whole unit.
+	return int64(math.Ceil(bytes / float64(unitBytes))), true
+}
+
+// setSizeRequest sets attr from a size-valued submit command, in whole
+// units of unitBytes. A value that is not a size is tried as a ClassAd
+// expression, which condor_submit also accepts for these commands
+// (`request_memory = 2 * TARGET.Memory`); anything else is an error
+// rather than a silent fallback to the default, which would hand the job
+// a resource allocation the submit file never asked for.
+//
+// The command being absent is not this function's business: callers that
+// have a default set it before calling.
+func (sf *SubmitFile) setSizeRequest(ad *classad.ClassAd, cmd, attr string, unitBytes int64) error {
+	raw, ok := sf.submitCommand(cmd)
+	if !ok {
+		return nil
+	}
+
+	if units, ok := parseSizeInUnits(raw, unitBytes); ok {
+		if units < 0 {
+			return fmt.Errorf("%s = %s: a resource request cannot be negative", cmd, strings.TrimSpace(raw))
+		}
+		_ = ad.Set(attr, units)
+		return nil
+	}
+
+	expr, err := classad.ParseExpr(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("%s = %s: not a size or a valid expression: %w", cmd, raw, err)
+	}
+	_ = ad.Set(attr, expr)
+	return nil
+}
+
+// parseUniverse converts a universe string to its JobUniverse constant
+// and, for the two container pseudo-universes, the container flavour
+// they ask for. `universe = docker` and `universe = container` are
+// vanilla jobs distinguished by WantDocker / WantContainer, so they come
+// back as UniverseVanilla plus a flavour rather than a universe of their
+// own.
+func parseUniverse(univ string) (int, containerFlavor) {
+	switch strings.ToLower(strings.TrimSpace(univ)) {
+	case "standard":
+		return UniverseStandard, flavorNone
+	case "vanilla":
+		return UniverseVanilla, flavorNone
+	case "scheduler":
+		return UniverseScheduler, flavorNone
+	case "grid":
+		return UniverseGrid, flavorNone
+	case "java":
+		return UniverseJava, flavorNone
+	case "parallel", "mpi":
+		return UniverseParallel, flavorNone
+	case "local":
+		return UniverseLocal, flavorNone
+	case "vm":
+		return UniverseVM, flavorNone
+	case "docker":
+		return UniverseVanilla, flavorDocker
+	case "container":
+		return UniverseVanilla, flavorContainer
+	default:
+		return UniverseVanilla, flavorNone
+	}
+}
+
+// containerImage returns the image this job should run in and the
+// mechanism that will run it, after per-job macro expansion.
+//
+// An image command that expands to nothing counts as no image: pairing a
+// Want* flag with an empty image name makes the job match a container
+// slot and then fail in the starter with no image to run.
+func (sf *SubmitFile) containerImage() (string, containerFlavor) {
+	if img, ok := sf.submitCommand("docker_image"); ok {
+		if img = strings.TrimSpace(img); img != "" {
+			return img, flavorDocker
+		}
+	}
+	if img, ok := sf.submitCommand("container_image"); ok {
+		if img = strings.TrimSpace(img); img != "" {
+			return img, flavorContainer
+		}
+	}
+	return "", flavorNone
+}
+
+// checkContainerCommands rejects the submit files whose image commands
+// and universe disagree.
+//
+// condor_submit accepts an image command in any universe and infers the
+// container flavour from it, so `container_image = ...` on its own is a
+// container job. What it must never produce is a job ad that names an
+// image but never asks for it: that job matches a container slot, runs
+// to completion outside the image, and reports no error anywhere. The
+// ambiguous combinations are rejected here so that setContainerSettings
+// can emit the image and its Want* flag together.
+func (sf *SubmitFile) checkContainerCommands(flavor containerFlavor) error {
+	_, hasDockerImage := sf.submitCommand("docker_image")
+	_, hasContainerImage := sf.submitCommand("container_image")
+
+	if hasDockerImage && hasContainerImage {
+		return errors.New("submit file sets both docker_image and container_image; use one or the other")
+	}
+
+	switch flavor {
+	case flavorDocker:
+		if !hasDockerImage {
+			return errors.New("universe = docker requires docker_image")
+		}
+	case flavorContainer:
+		if !hasContainerImage {
+			return errors.New("universe = container requires container_image")
+		}
+	}
+
+	return nil
 }
 
 // MakeJobAd creates a ClassAd for a single job
@@ -491,11 +730,6 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set any custom attributes (+ or MY.)
-	if err := sf.setCustomAttributes(ad); err != nil {
-		return nil, err
-	}
-
 	// Set universe-specific parameters
 	switch sf.universe {
 	case UniverseGrid:
@@ -536,8 +770,14 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set auto-generated attributes (should be last)
+	// Set auto-generated attributes
 	if err := sf.setAutoAttributes(ad); err != nil {
+		return nil, err
+	}
+
+	// Custom attributes (+Attr / MY.Attr) come last: condor_submit lets
+	// them override whatever the rest of the submit file produced.
+	if err := sf.setCustomAttributes(ad); err != nil {
 		return nil, err
 	}
 
@@ -827,18 +1067,34 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 
 // setContainerSettings sets container/docker related attributes
 func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
-	// docker_image or container_image
-	var containerImage string
-	if img, ok := sf.submitCommand("docker_image"); ok {
-		containerImage = img
-	} else if img, ok := sf.submitCommand("container_image"); ok {
-		containerImage = img
-	}
-
-	if containerImage != "" {
-		_ = ad.Set("DockerImage", containerImage)
-		// Also set container_image for newer HTCondor versions
-		_ = ad.Set("ContainerImage", containerImage)
+	// docker_image or container_image. Set only the attribute matching
+	// the image's flavour -- writing both tells the starter two
+	// contradictory things -- and set it together with its Want* flag.
+	// WantDocker / WantContainer are what condor_starter keys off to
+	// invoke docker or apptainer; an image attribute on its own is
+	// silently ignored and the job runs on the bare worker node, so the
+	// two are written in one branch and cannot come apart.
+	// checkContainerCommands has already rejected the ambiguous cases.
+	img, flavor := sf.containerImage()
+	switch flavor {
+	case flavorDocker:
+		_ = ad.Set("DockerImage", img)
+		_ = ad.Set("WantDocker", true)
+	case flavorContainer:
+		_ = ad.Set("ContainerImage", img)
+		_ = ad.Set("WantContainer", true)
+	default:
+		// checkContainerCommands runs before any per-job macro
+		// expansion, so `docker_image = $(image)` satisfies it and then
+		// expands to nothing here. Emitting WantDocker with an empty
+		// DockerImage would match a docker slot and fail in the starter,
+		// so say so at submit time instead.
+		switch sf.flavor {
+		case flavorDocker:
+			return errors.New("universe = docker requires a non-empty docker_image")
+		case flavorContainer:
+			return errors.New("universe = container requires a non-empty container_image")
+		}
 	}
 
 	// docker_network_type or container_network
@@ -954,10 +1210,14 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.Arch == %q)", reqArch))
 	}
 
-	// Add container requirement if container image is specified
-	if _, ok := sf.submitCommand("docker_image"); ok {
+	// Add container requirement if this is a container job. The image is
+	// the test, and it must match what setContainerSettings actually
+	// wrote: requiring HasDocker of a job that carries no WantDocker
+	// narrows the job to slots it has no use for.
+	switch _, flavor := sf.containerImage(); flavor {
+	case flavorDocker:
 		reqParts = append(reqParts, "(TARGET.HasDocker =?= true)")
-	} else if _, ok := sf.submitCommand("container_image"); ok {
+	case flavorContainer:
 		reqParts = append(reqParts, "(TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
 	}
 
@@ -1004,23 +1264,18 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	}
 	_ = ad.Set("RequestCpus", cpus)
 
-	// Request Memory in MB (default: 128)
-	memory := 128
-	if reqMem, ok := sf.submitCommand("request_memory"); ok {
-		if n, err := parseInt(reqMem); err == nil {
-			memory = n
-		}
+	// Request Memory, in MiB (default: 128). A bare number is already in
+	// MiB; a suffix ("1GB") is converted, not truncated.
+	_ = ad.Set("RequestMemory", 128)
+	if err := sf.setSizeRequest(ad, "request_memory", "RequestMemory", bytesPerMiB); err != nil {
+		return err
 	}
-	_ = ad.Set("RequestMemory", memory)
 
-	// Request Disk in KB (default: 1024)
-	disk := 1024
-	if reqDisk, ok := sf.submitCommand("request_disk"); ok {
-		if n, err := parseInt(reqDisk); err == nil {
-			disk = n
-		}
+	// Request Disk, in KiB (default: 1024).
+	_ = ad.Set("RequestDisk", 1024)
+	if err := sf.setSizeRequest(ad, "request_disk", "RequestDisk", bytesPerKiB); err != nil {
+		return err
 	}
-	_ = ad.Set("RequestDisk", disk)
 
 	// Request GPUs (default: 0)
 	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
@@ -1029,11 +1284,10 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 		}
 	}
 
-	// GPU memory per device (MB)
-	if gpuMem, ok := sf.submitCommand("request_gpu_memory"); ok {
-		if n, err := parseInt(gpuMem); err == nil {
-			_ = ad.Set("RequestGpuMemory", n)
-		}
+	// GPU memory per device, in MiB. No default: leave the attribute out
+	// when the submit file says nothing.
+	if err := sf.setSizeRequest(ad, "request_gpu_memory", "RequestGpuMemory", bytesPerMiB); err != nil {
+		return err
 	}
 
 	// Specific GPU properties
@@ -1196,64 +1450,35 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setCustomAttributes processes + or MY. prefixed attributes
+// setCustomAttributes sets the `+Attr = expr` and `MY.Attr = expr`
+// commands on the job ad.
+//
+// The value is a ClassAd expression, exactly as condor_submit treats it:
+// `+WantContainer = true` is a boolean, `+Project = "cms"` a string,
+// `+Rank = TARGET.Memory` an expression. These are set last so that a
+// custom attribute overrides what the rest of the submit file derived --
+// that is what makes them usable as an escape hatch for anything this
+// package does not model yet.
 func (sf *SubmitFile) setCustomAttributes(ad *classad.ClassAd) error {
-	// Iterate through all submit file keys
-	for _, key := range sf.cfg.Keys() {
-		var attrName string
-		isCustom := false
-
-		// Check for + prefix (adds attribute to job ad)
-		if strings.HasPrefix(key, "+") {
-			attrName = strings.TrimPrefix(key, "+")
-			isCustom = true
-		} else if strings.HasPrefix(key, "MY.") {
-			// MY. prefix adds attribute to job ad with MY. prefix
-			attrName = key // Keep the MY. prefix
-			isCustom = true
-		}
-
-		if !isCustom {
-			continue
-		}
-
-		// Get the value
-		value, ok := sf.cfg.Get(key)
+	for _, attr := range sf.customAttrs {
+		value, ok := sf.cfg.Get(attr.key)
 		if !ok {
 			continue
 		}
-
-		// Try to parse as different types
-		// First, check if it's a boolean
 		value = strings.TrimSpace(value)
-		if strings.ToLower(value) == "true" || strings.ToLower(value) == "false" {
-			_ = ad.Set(attrName, parseBool(value, false))
+		if value == "" {
+			// `+Attr =` with nothing after it, or a value whose macros
+			// expanded to nothing: there is no expression to set, and
+			// ParseExpr would report a syntax error naming its own
+			// internal wrapper attribute rather than the submit file.
 			continue
 		}
 
-		// Check if it's an integer
-		if intVal, err := strconv.ParseInt(value, 10, 64); err == nil {
-			_ = ad.Set(attrName, int(intVal))
-			continue
+		expr, err := classad.ParseExpr(value)
+		if err != nil {
+			return fmt.Errorf("custom attribute %s = %s is not a valid ClassAd expression: %w", attr.name, value, err)
 		}
-
-		// Check if it's a float
-		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
-			_ = ad.Set(attrName, floatVal)
-			continue
-		}
-
-		// Check if it's a ClassAd expression (contains operators, parentheses, etc.)
-		// For now, treat values with specific characters as expressions
-		if strings.ContainsAny(value, "()&|=<>!") {
-			// This is likely a ClassAd expression, store as string
-			// The ClassAd library will parse it as an expression
-			_ = ad.Set(attrName, value)
-			continue
-		}
-
-		// Default to string
-		_ = ad.Set(attrName, value)
+		_ = ad.Set(attr.name, expr)
 	}
 
 	return nil
@@ -2169,6 +2394,28 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 	return nil
 }
 
+// walkAssignments calls visit for every assignment in the submit file,
+// in submit-file order, descending into every branch of a conditional.
+//
+// Both callers want the branches that did not execute as well as the one
+// that did: over-counting yields a name the user did write somewhere,
+// while under-counting silently resurrects a config default (see
+// assignedNames) or drops a custom attribute (see customAttributes).
+func walkAssignments(stmts []config.Statement, visit func(*config.Assignment)) {
+	for _, stmt := range stmts {
+		switch st := stmt.(type) {
+		case *config.Assignment:
+			visit(st)
+		case *config.Conditional:
+			walkAssignments(st.ThenBlock, visit)
+			for _, ei := range st.ElseIfBlock {
+				walkAssignments(ei.Block, visit)
+			}
+			walkAssignments(st.ElseBlock, visit)
+		}
+	}
+}
+
 // assignedNames collects every name the submit file assigns, including
 // inside conditionals, upper-cased for case-insensitive lookup.
 //
@@ -2180,23 +2427,93 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 // under-counting would silently resurrect the config default.
 func assignedNames(stmts []config.Statement) map[string]bool {
 	names := make(map[string]bool)
-	var walk func([]config.Statement)
-	walk = func(list []config.Statement) {
-		for _, stmt := range list {
-			switch st := stmt.(type) {
-			case *config.Assignment:
-				names[strings.ToUpper(st.Name)] = true
-			case *config.Conditional:
-				walk(st.ThenBlock)
-				for _, ei := range st.ElseIfBlock {
-					walk(ei.Block)
-				}
-				walk(st.ElseBlock)
+	walkAssignments(stmts, func(st *config.Assignment) {
+		names[strings.ToUpper(st.Name)] = true
+	})
+	return names
+}
+
+// customAttr is one `+Attr = expr` or `MY.Attr = expr` submit command:
+// name is the job-ad attribute to set, key the config key holding the
+// (still unexpanded) value. The two differ for the `MY.` form, and the
+// key is what carries the per-job macro expansion.
+type customAttr struct {
+	name string
+	key  string
+
+	// configDefault is the value key already held in the param_info
+	// defaults before the submit file ran, and hasDefault whether it
+	// held one at all. See assignedCustomAttributes.
+	configDefault string
+	hasDefault    bool
+}
+
+// assignedCustomAttributes drops the collected custom attributes that the
+// submit file did not actually assign.
+//
+// customAttributes walks every branch of every conditional, so it also
+// returns the `+Attr` commands in branches that did not run. For a name
+// that happens to match a config knob -- `+MAX_JOBS_RUNNING`, say --
+// cfg.Get then answers with that knob's param_info default, and the job
+// ad grows an attribute the submit file never wrote (or the whole ad
+// fails to build, when the default is not a ClassAd expression). A key
+// still holding exactly the default it held before the file ran was not
+// assigned by the file.
+func assignedCustomAttributes(cfg *config.Config, attrs []customAttr) []customAttr {
+	kept := attrs[:0]
+	for _, attr := range attrs {
+		if attr.hasDefault {
+			if v, ok := cfg.Get(attr.key); ok && v == attr.configDefault {
+				continue
 			}
 		}
+		kept = append(kept, attr)
 	}
-	walk(stmts)
-	return names
+	return kept
+}
+
+// attrNameRe is a legal ClassAd attribute name. Dots are the notable
+// exclusion: passing "MY.WantContainer" through to the schedd as an
+// attribute name gets the whole SetAttribute rejected with EINVAL, which
+// surfaces as an opaque "error code 22" far from the submit file that
+// caused it.
+var attrNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// customAttributes collects the custom attribute commands from the parsed
+// submit file, stripping the `+` / `MY.` marker off the attribute name.
+//
+// They have to come from the statements rather than from cfg: the parser
+// strips the `+` before storing the value, so by the time it reaches the
+// config a custom attribute is indistinguishable from an ordinary submit
+// command. The parser records the `+` form with ClassAdExpr set; the
+// `MY.` form keeps its prefix in the name.
+func customAttributes(stmts []config.Statement) ([]customAttr, error) {
+	var attrs []customAttr
+	var walkErr error
+
+	walkAssignments(stmts, func(st *config.Assignment) {
+		name := st.Name
+		switch {
+		case st.ClassAdExpr:
+			// `+Attr = expr`; the parser already stripped the +.
+		case len(name) > 3 && strings.EqualFold(name[:3], "MY."):
+			name = name[3:]
+		default:
+			return
+		}
+		if !attrNameRe.MatchString(name) {
+			if walkErr == nil {
+				walkErr = fmt.Errorf("%q is not a valid job attribute name", st.Name)
+			}
+			return
+		}
+		attrs = append(attrs, customAttr{name: name, key: st.Name})
+	})
+
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return attrs, nil
 }
 
 // submitCommand reads a submit-file command.

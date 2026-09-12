@@ -197,15 +197,10 @@ var attributesToIgnore = map[string]bool{
 	"MaxHosts":         true,
 	"Rank":             true,
 
-	// Docker-specific
-	"WantDocker":  true,
-	"JobUniverse": true, // Docker may map to different universe numbers
-
 	// Go library may set these, but condor_submit may not
 	"TransferExecutable": true,
 	"EmailAttributes":    true,
 	"TransferInput":      true,
-	"ContainerImage":     true, // Docker universe
 	"Args":               true, // May use Arguments instead
 	"CopyToSpool":        true, // Handled via ::send_SpoolFile commands, not in ClassAd
 
@@ -213,7 +208,6 @@ var attributesToIgnore = map[string]bool{
 	"Environment":         true, // May be formatted differently
 	"Arguments":           true, // May use Args instead
 	"ShouldTransferFiles": true, // Default may differ
-	"RequestDisk":         true, // May be expression vs value
 	"Requirements":        true, // Complex expressions may not match
 }
 
