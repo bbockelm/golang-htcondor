@@ -52,6 +52,20 @@ func (s *Store) Register(ctx context.Context, w *Watch, ttl time.Duration) (*Wat
 	case ttl > MaxTTL:
 		ttl = MaxTTL
 	}
+
+	// Coalesce with an identical live watch instead of inserting a duplicate.
+	// A blocking register holds the request open while it waits, so a client
+	// (or a remote connector) whose transport times out mid-wait is told the
+	// call failed even though the row was already written; its retry would
+	// otherwise leak another watch with the same intent. Idempotency on
+	// (owner, label, constraint, event, condition, mode) makes the retry a
+	// no-op that returns the existing watch.
+	if existing, err := s.findLiveDuplicate(ctx, w); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
+
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -74,6 +88,33 @@ func (s *Store) Register(ctx context.Context, w *Watch, ttl time.Duration) (*Wat
 		return nil, fmt.Errorf("registering the watch: %w", err)
 	}
 	return w, nil
+}
+
+// findLiveDuplicate returns an existing live (unfired, unexpired) watch with the
+// same intent as w -- same owner, label, constraint, event, condition and mode
+// -- or nil if there is none. It is how Register stays idempotent under retries.
+func (s *Store) findLiveDuplicate(ctx context.Context, w *Watch) (*Watch, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json,
+		       all_ended_at, incomplete
+		  FROM job_watches
+		 WHERE fired_at IS NULL AND expires_at > ?
+		   AND owner = ? AND label = ? AND constraint_expr = ?
+		   AND event = ? AND condition_expr = ? AND mode = ?
+		 ORDER BY created_at
+		 LIMIT 1`,
+		s.now().UTC(), w.Owner, w.Label, w.Constraint, string(w.Event), w.Condition, string(w.Mode))
+	if err != nil {
+		return nil, err
+	}
+	watches, err := scanWatches(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(watches) == 0 {
+		return nil, nil
+	}
+	return watches[0], nil
 }
 
 // Live returns every watch the evaluator should still consider: not yet
