@@ -20,7 +20,7 @@ import (
 // makes the next divergence a test failure rather than a bug report from
 // someone behind a firewall.
 func TestStarterConfigIsTheSameForEveryStarterCommand(t *testing.T) {
-	callers := &security.SecurityConfig{
+	callers := &security.SecurityConfig{ //nolint:gosec // G101: not a real credential
 		Token:       "a.browser.session.jwt",
 		AuthMethods: []security.AuthMethod{security.AuthToken},
 	}

@@ -410,6 +410,21 @@ func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWri
 	}
 
 	proxy := &httputil.ReverseProxy{
+		// Director is deprecated in favour of Rewrite, and this stays on
+		// Director deliberately.
+		//
+		// Rewrite is not a drop-in here. ReverseProxy strips
+		// X-Forwarded-For, -Host and -Proto before calling it and expects
+		// SetXForwarded to put them back -- but SetXForwarded also sets
+		// -Host and -Proto, which Director mode never did, and JupyterLab
+		// builds URLs from those. Swapping the hook silently changes what
+		// the notebook thinks its own address is.
+		//
+		// Worth revisiting with a test that drives a real notebook: under
+		// Rewrite the upgrade type is computed and the Connection/Upgrade
+		// headers re-added before the hook runs, which makes the footgun
+		// described below impossible rather than merely avoided.
+		//nolint:staticcheck // SA1019: see above; migrating changes forwarded headers
 		Director: func(r *http.Request) {
 			r.URL = &target
 			r.Host = target.Host
@@ -444,10 +459,11 @@ type yamuxRoundTripper struct {
 func (t *yamuxRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.once.Do(func() {
 		t.tr = http.Transport{
+			// Dial was set to the same function alongside this one.
+			// http.Transport uses DialContext when both are present, so
+			// the second was never called -- it only kept a deprecated
+			// field alive.
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return t.session.Open()
-			},
-			Dial: func(_, _ string) (net.Conn, error) {
 				return t.session.Open()
 			},
 			DisableKeepAlives: true, // Each yamux stream is single-use.

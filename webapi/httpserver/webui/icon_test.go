@@ -16,7 +16,7 @@ func TestIconIsServed(t *testing.T) {
 		t.Skip("frontend not embedded in this build")
 	}
 	h := NewSPAHandler()
-	req := httptest.NewRequest(http.MethodGet, "/icon.svg", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/icon.svg", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

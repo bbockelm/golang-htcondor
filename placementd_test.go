@@ -120,6 +120,7 @@ func summaryAd(t *testing.T) *classad.ClassAd {
 
 func TestPlacementdLogin(t *testing.T) {
 	f := newFakePlacementd(t, map[int][]*classad.ClassAd{
+		//nolint:gosec // G101: not a real credential
 		PlacementUserLogin: {mustAd(t, map[string]any{"Token": "eyJhbGciOi.payload.sig"})},
 	})
 
