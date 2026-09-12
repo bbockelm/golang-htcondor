@@ -1,6 +1,6 @@
 module github.com/bbockelm/golang-htcondor/examples/file_transfer_demo
 
-go 1.25.7
+go 1.26.0
 
 replace github.com/bbockelm/golang-htcondor => ../..
 
