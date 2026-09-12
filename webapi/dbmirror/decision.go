@@ -35,6 +35,10 @@ const (
 	// ReasonNotCaughtUp is set when the mirror had not drained the schedd's
 	// job_queue.log at its last poll.
 	ReasonNotCaughtUp Reason = "not_caught_up"
+	// ReasonNeverSynced is set when the mirror has never completed a sync for this
+	// source, so it has nothing to serve from -- typically because the daemon was
+	// never pointed at that file.
+	ReasonNeverSynced Reason = "never_synced"
 	// ReasonHistoryGap is set when the mirror reported a history durability gap.
 	ReasonHistoryGap Reason = "history_gap"
 	// ReasonDialFailed is set when could not connect or authenticate to the mirror.

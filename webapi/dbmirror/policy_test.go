@@ -13,7 +13,7 @@ import (
 )
 
 func TestHistoryRouteDecision(t *testing.T) {
-	fresh := &Info{Address: "<10.0.0.1:9619>", SecondsSinceSync: 10}
+	fresh := &Info{Address: "<10.0.0.1:9619>", HistoryLastSyncTime: 1, SecondsSinceSync: 10}
 	plain := &htcondor.HistoryQueryOptions{Backwards: true}
 
 	cases := []struct {
@@ -26,8 +26,8 @@ func TestHistoryRouteDecision(t *testing.T) {
 		{"fresh mirror, plain query", fresh, plain, true, ReasonServed},
 		{"no info", nil, plain, false, ReasonNoMirror},
 		{"no address", &Info{SecondsSinceSync: 10}, plain, false, ReasonNoMirror},
-		{"history gap", &Info{Address: "<a>", HistoryGap: true}, plain, false, ReasonHistoryGap},
-		{"too stale", &Info{Address: "<a>", SecondsSinceSync: 999}, plain, false, ReasonStale},
+		{"history gap", &Info{Address: "<a>", HistoryLastSyncTime: 1, HistoryGap: true}, plain, false, ReasonHistoryGap},
+		{"too stale", &Info{Address: "<a>", HistoryLastSyncTime: 1, SecondsSinceSync: 999}, plain, false, ReasonStale},
 		{"since stop-scan", fresh, &htcondor.HistoryQueryOptions{Backwards: true, Since: "2026-01-01"}, false, ReasonUnsupportedQuery},
 		{"scan_limit budget", fresh, &htcondor.HistoryQueryOptions{Backwards: true, ScanLimit: 5000}, false, ReasonUnsupportedQuery},
 		{"forward scan", fresh, &htcondor.HistoryQueryOptions{Backwards: false}, false, ReasonUnsupportedQuery},
@@ -53,8 +53,8 @@ func TestHistoryRouteDecision(t *testing.T) {
 
 func TestHistoryRouteToleranceBoundary(t *testing.T) {
 	// Exactly at tolerance is still fresh; one past it is stale.
-	at := &Info{Address: "<a>", SecondsSinceSync: HistoryToleranceSecs}
-	over := &Info{Address: "<a>", SecondsSinceSync: HistoryToleranceSecs + 1}
+	at := &Info{Address: "<a>", HistoryLastSyncTime: 1, SecondsSinceSync: HistoryToleranceSecs}
+	over := &Info{Address: "<a>", HistoryLastSyncTime: 1, SecondsSinceSync: HistoryToleranceSecs + 1}
 	if d := HistoryDecision(at, nil); !d.Use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
@@ -98,10 +98,12 @@ func TestStalenessIsTheLagAtAdvertiseTime(t *testing.T) {
 	// A mirror whose syncer has actually fallen behind says so in its
 	// next ad, and that is what closes the gate.
 	lagging := &Info{
-		Address:             "<a>",
-		JobQueueCaughtUp:    true,
-		SecondsSinceSync:    HistoryToleranceSecs + 1,
-		JobQueueSecondsSync: JobsToleranceSecs + 1,
+		Address:              "<a>",
+		JobQueueCaughtUp:     true,
+		HistoryLastSyncTime:  1,
+		SecondsSinceSync:     HistoryToleranceSecs + 1,
+		JobQueueLastSyncTime: 1,
+		JobQueueSecondsSync:  JobsToleranceSecs + 1,
 	}
 	if d := HistoryDecision(lagging, nil); d.Use {
 		t.Error("a mirror reporting itself past the history tolerance must not be routed to")
@@ -163,7 +165,7 @@ func TestRecencyOrdering(t *testing.T) {
 }
 
 func TestJobsRouteDecision(t *testing.T) {
-	caughtUp := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueSecondsSync: 10}
+	caughtUp := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: 1, JobQueueSecondsSync: 10}
 
 	cases := []struct {
 		name       string
@@ -175,9 +177,9 @@ func TestJobsRouteDecision(t *testing.T) {
 		{"caught up, fresh", caughtUp, "", true, ReasonServed},
 		{"no info", nil, "", false, ReasonNoMirror},
 		{"no address", &Info{JobQueueCaughtUp: true}, "", false, ReasonNoMirror},
-		{"not caught up", &Info{Address: "<a>", JobQueueCaughtUp: false}, "", false, ReasonNotCaughtUp},
+		{"not caught up", &Info{Address: "<a>", JobQueueLastSyncTime: 1, JobQueueCaughtUp: false}, "", false, ReasonNotCaughtUp},
 		{"paginated", caughtUp, "tok", false, ReasonPageToken},
-		{"too stale", &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueSecondsSync: 999}, "", false, ReasonStale},
+		{"too stale", &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: 1, JobQueueSecondsSync: 999}, "", false, ReasonStale},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -207,8 +209,8 @@ func TestJobQueueStaleness(t *testing.T) {
 }
 
 func TestJobsRouteToleranceBoundary(t *testing.T) {
-	at := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueSecondsSync: JobsToleranceSecs}
-	over := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueSecondsSync: JobsToleranceSecs + 1}
+	at := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: 1, JobQueueSecondsSync: JobsToleranceSecs}
+	over := &Info{Address: "<a>", JobQueueCaughtUp: true, JobQueueLastSyncTime: 1, JobQueueSecondsSync: JobsToleranceSecs + 1}
 	if d := JobsDecision(at, ""); !d.Use {
 		t.Error("staleness exactly at tolerance should still route to the mirror")
 	}
@@ -252,7 +254,7 @@ func TestParseAd(t *testing.T) {
 // off, because that budget describes the schedd's scan of the history
 // file and the archive has no equivalent.
 func TestHistoryDecisionPaginationAndScanLimit(t *testing.T) {
-	fresh := &Info{Address: "<10.0.0.1:9619>", SecondsSinceSync: 5}
+	fresh := &Info{Address: "<10.0.0.1:9619>", HistoryLastSyncTime: 1, SecondsSinceSync: 5}
 
 	paged := &htcondor.HistoryQueryOptions{
 		Backwards: true,

@@ -68,7 +68,7 @@ func TestDecodeCursorRejectsGarbage(t *testing.T) {
 // issued and declines one the schedd issued, so neither backend
 // continues the other's walk.
 func TestJobsDecisionOwnsItsOwnTokens(t *testing.T) {
-	fresh := &Info{Name: "db", Address: "<1.2.3.4:9618>", JobQueueCaughtUp: true, JobQueueSecondsSync: 5}
+	fresh := &Info{Name: "db", Address: "<1.2.3.4:9618>", JobQueueCaughtUp: true, JobQueueLastSyncTime: 1, JobQueueSecondsSync: 5}
 
 	if d := JobsDecision(fresh, ""); !d.Use {
 		t.Error("a first page should route to a current mirror")

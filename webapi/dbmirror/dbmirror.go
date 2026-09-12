@@ -663,6 +663,9 @@ func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 	if info == nil || info.Address == "" {
 		return decline(ReasonNoMirror, "no htcondordb mirror is advertising")
 	}
+	if info.HistoryLastSyncTime <= 0 {
+		return decline(ReasonNeverSynced, "mirror has never synced history")
+	}
 	if info.HistoryGap {
 		return decline(ReasonHistoryGap, "mirror reported a history durability gap")
 	}
@@ -778,6 +781,9 @@ func JobsDecision(info *Info, pageToken string) Decision {
 	if pageToken != "" && !IsCursor(pageToken) {
 		return decline(ReasonPageToken, "the page token came from the schedd, which owns the rest of that walk")
 	}
+	if info.JobQueueLastSyncTime <= 0 {
+		return decline(ReasonNeverSynced, "mirror has never synced the job queue")
+	}
 	if !caughtUp(info.JobQueueCaughtUp, info.JobQueueLagBytes, info.JobQueueLagReported) {
 		return decline(ReasonNotCaughtUp, "mirror's job queue is not caught up to the schedd")
 	}
@@ -806,6 +812,9 @@ func EpochDecision(info *Info) Decision {
 	}
 	if !info.EpochReported {
 		return decline(ReasonNoMirror, "mirror does not tail JOB_EPOCH_HISTORY")
+	}
+	if info.EpochLastSyncTime <= 0 {
+		return decline(ReasonNeverSynced, "mirror has never synced epoch history")
 	}
 	if info.EpochGap {
 		return decline(ReasonHistoryGap, "mirror reported an epoch-history durability gap")
