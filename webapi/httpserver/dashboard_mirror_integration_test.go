@@ -185,6 +185,23 @@ func seedHistory(ctx context.Context, t *testing.T, dbc *dbrpc.Client, owner str
 	}
 }
 
+// dashboardFromMirror assembles what the page shows from the two halves
+// the browser now fetches separately. The split is about when each
+// arrives, not about what they contain, so the assertions below stay
+// whole-page.
+func (s *Handler) dashboardFromMirror(ctx context.Context, owner string, ownedByMe bool) (*dashboardSnapshot, error) {
+	counts, err := s.countsFromMirror(ctx, owner, ownedByMe)
+	if err != nil {
+		return nil, err
+	}
+	act, err := s.activityFromMirror(ctx, owner, ownedByMe)
+	if err != nil {
+		return nil, err
+	}
+	counts.Activity, counts.Goodput = act.Activity, act.Goodput
+	return counts, nil
+}
+
 // TestDashboardFromMirrorCountsRealRows runs the dashboard's own query
 // path against a real database holding a known population.
 func TestDashboardFromMirrorCountsRealRows(t *testing.T) {
@@ -254,8 +271,11 @@ func TestDashboardFromMirrorBreaksDownHolds(t *testing.T) {
 		t.Fatal("no hold breakdown for a population with four held jobs")
 	}
 	// Ordered by weight: the dominant cause is the one to act on.
-	if rows[0].Code != 13 || rows[0].Count != 4 {
-		t.Errorf("first hold row = code %d x%d, want code 13 x4 (all: %+v)", rows[0].Code, rows[0].Count, rows)
+	// Three of the four code-13 holds entered that state inside the
+	// window; the fourth was held three hours ago and belongs to the
+	// HELD tile, not to this panel.
+	if rows[0].Code != 13 || rows[0].Count != 3 {
+		t.Errorf("first hold row = code %d x%d, want code 13 x3 (all: %+v)", rows[0].Code, rows[0].Count, rows)
 	}
 	if rows[0].Label == "13" {
 		t.Error("hold code 13 rendered as its number, so the label table did not resolve it")
@@ -271,10 +291,20 @@ func TestDashboardFromMirrorBreaksDownHolds(t *testing.T) {
 	for _, r := range rows {
 		total += r.Count
 	}
-	// The breakdown sits beside the HELD tile and has to add up to the
-	// held population, spooling included.
-	if total != 5 {
-		t.Errorf("hold rows sum to %d, want 5: %+v", total, rows)
+	// Four of the five held jobs entered that state inside the window.
+	// This deliberately does NOT match the HELD tile: the tile is the
+	// standing total, the panel is what went wrong lately, and a job
+	// held three hours ago is in one and not the other.
+	if total != 4 {
+		t.Errorf("hold rows sum to %d, want 4 of the 5 held (one is outside the window): %+v", total, rows)
+	}
+	// Deliberately NOT asserting that the breakdown differs from the
+	// HELD tile. They count different populations -- the tile excludes
+	// jobs held only because input is spooling, the breakdown includes
+	// them -- so the two can tie by coincidence, as they do here at 4.
+	// The counts above are what pin the window.
+	if snap.Activity.HoldWindowSeconds == 0 {
+		t.Error("no hold window reported, so a reader cannot tell what the rows cover")
 	}
 }
 

@@ -70,6 +70,11 @@ function AuthenticatedDashboard({
   // data from it, and a mirror-less deployment simply renders no ticker.
   const live = useActivityStream(ownedByMe);
 
+  // Two queries, not one, so the page paints in stages: the tiles are a
+  // single aggregate against the mirror and land in a few milliseconds,
+  // while the panels below cost a hold breakdown and four windowed
+  // lookups. Combined, everything waited for the slowest of those --
+  // which is what made the page feel slow after the panels were added.
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', scope],
     queryFn: () => api.dashboard({ owned_by_me: ownedByMe }),
@@ -77,6 +82,17 @@ function AuthenticatedDashboard({
     // server-side; polling faster only re-fetches the same bytes.
     refetchInterval: 30_000,
   });
+
+  const { data: panels, isLoading: panelsLoading } = useQuery({
+    queryKey: ['dashboard-activity', scope],
+    queryFn: () => api.dashboardActivity({ owned_by_me: ownedByMe }),
+    refetchInterval: 30_000,
+  });
+
+  // An older server still answers /dashboard with both halves; prefer
+  // the dedicated response and fall back to what the tiles carried.
+  const activity = panels?.activity ?? data?.activity;
+  const goodput = panels?.goodput ?? data?.goodput;
 
   return (
     <div className="space-y-6">
@@ -113,11 +129,18 @@ function AuthenticatedDashboard({
 
           <LiveTicker {...live} />
 
-          <Goodput goodput={data.goodput} />
+          <Goodput goodput={goodput} />
 
-          <HoldReasons activity={data.activity} />
-
-          <RecentActivity activity={data.activity} />
+          {activity ? (
+            <>
+              <HoldReasons activity={activity} />
+              <RecentActivity activity={activity} />
+            </>
+          ) : (
+            panelsLoading && (
+              <p className="text-sm text-gray-400">Loading recent activity...</p>
+            )
+          )}
 
           <div>
             <Link

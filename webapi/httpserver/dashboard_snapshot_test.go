@@ -26,7 +26,7 @@ func heldAd(cluster, proc, code, at int64, reason string) *classad.ClassAd {
 // is one broken submission or ten thousand unrelated problems; the
 // breakdown is what tells them apart.
 func TestHoldReasonsTurnACountIntoADiagnosis(t *testing.T) {
-	a := newActivityCollector()
+	a := newActivityCollector(0)
 	for i := int64(0); i < 900; i++ {
 		a.observe(heldAd(42, i, 13, 1000+i, "Transfer input files failure: reading /home/alice/missing.dat"))
 	}
@@ -73,7 +73,7 @@ func TestSpoolingIsNotAFailure(t *testing.T) {
 // tile, so they have to add up to it. Dropping the tail would make the
 // panel quietly disagree with the number next to it.
 func TestHoldReasonTailIsSummedNotDropped(t *testing.T) {
-	a := newActivityCollector()
+	a := newActivityCollector(0)
 	total := 0
 	for code := int64(1); code <= 20; code++ {
 		for i := int64(0); i < code; i++ {
@@ -114,7 +114,7 @@ func TestUnknownHoldCodeSaysTheNumber(t *testing.T) {
 // have to hold the newest entries regardless of the order jobs arrive in
 // during the walk -- the queue is unordered.
 func TestRecentListsKeepTheNewest(t *testing.T) {
-	a := newActivityCollector()
+	a := newActivityCollector(0)
 	// Oldest first, then newest, then middle: the walk has no order.
 	for _, at := range []int64{100, 900, 500, 800, 200, 700, 300, 600, 400, 1000, 50} {
 		a.observe(heldAd(42, at, 13, at, fmt.Sprintf("held at %d", at)))
@@ -145,7 +145,7 @@ func TestRecentListsKeepTheNewest(t *testing.T) {
 // few. That is a real answer and the freshest one available, just
 // short-sighted, and the archive supplies the rest.
 func TestCompletedComesFromTheQueueAndTheArchive(t *testing.T) {
-	a := newActivityCollector()
+	a := newActivityCollector(0)
 	done := classad.New()
 	done.InsertAttr("ClusterId", int64(42))
 	done.InsertAttr("ProcId", int64(0))
@@ -186,7 +186,7 @@ func TestCompletedComesFromTheQueueAndTheArchive(t *testing.T) {
 // list reads as "nothing finished", which on a busy access point is the
 // opposite of the truth.
 func TestNoCompletionsAnywhereIsReportedHonestly(t *testing.T) {
-	got := newActivityCollector().result(time.Now())
+	got := newActivityCollector(0).result(time.Now())
 	if got.CompletedAvailable {
 		t.Error("nothing could answer; the panel must not claim it did")
 	}
@@ -361,7 +361,7 @@ func TestBothSourcesFoldTheHoldTailTheSameWay(t *testing.T) {
 	var fromMirror []HoldReasonCount
 	// And the same population through the collector, the way a queue
 	// walk builds it.
-	fromWalk := newActivityCollector()
+	fromWalk := newActivityCollector(0)
 
 	total := 0
 	for code := int64(1); code <= 20; code++ {
@@ -410,5 +410,39 @@ func TestNewestFirstTrims(t *testing.T) {
 	}
 	if got[len(got)-1].At != 30-int64(recentPerList)+1 {
 		t.Errorf("trimmed the wrong end: %+v", got)
+	}
+}
+
+// The hold breakdown is deliberately NOT the HELD tile.
+//
+// A job held last Tuesday is still held. Counting it here would let a
+// standing backlog drown out what is going wrong right now, which is the
+// only question this panel is useful for -- and it is why the panel and
+// the tile beside it are meant to disagree.
+func TestHoldBreakdownCountsOnlyRecentHolds(t *testing.T) {
+	now := time.Now()
+	since := now.Add(-time.Hour).Unix()
+	a := newActivityCollector(since)
+
+	// A long-standing backlog, held well before the window.
+	for i := int64(0); i < 500; i++ {
+		a.observe(heldAd(1, i, 13, now.Add(-30*time.Hour).Unix(), "yesterday's problem"))
+	}
+	// And what is going wrong now.
+	for i := int64(0); i < 3; i++ {
+		a.observe(heldAd(2, i, 7, now.Add(-5*time.Minute).Unix(), "today's problem"))
+	}
+
+	act := a.result(now)
+	if len(act.HoldReasons) != 1 {
+		t.Fatalf("expected only the recent reason, got %+v", act.HoldReasons)
+	}
+	if act.HoldReasons[0].Code != 7 || act.HoldReasons[0].Count != 3 {
+		t.Errorf("breakdown = %+v; the 500 old holds should not be in it", act.HoldReasons[0])
+	}
+	// And the window has to be reported, or a reader cannot tell why
+	// this disagrees with the tile.
+	if act.HoldWindowSeconds <= 0 {
+		t.Errorf("hold window = %d; the panel must say what span it covers", act.HoldWindowSeconds)
 	}
 }

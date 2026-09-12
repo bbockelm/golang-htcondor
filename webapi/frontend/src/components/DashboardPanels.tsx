@@ -32,9 +32,18 @@ export function HoldReasons({ activity }: { activity: DashboardActivity }) {
 
   return (
     <section>
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
-        Why jobs are held
-      </h2>
+      <div className="mb-2 flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          Why jobs were recently held
+        </h2>
+        {/* Stating the window is the difference between this panel and
+            the HELD tile. Without it the two look like they disagree. */}
+        <span className="text-xs text-gray-400">
+          {activity.hold_window_seconds
+            ? `entered hold in the last ${duration(activity.hold_window_seconds)}`
+            : 'recent'}
+        </span>
+      </div>
       <div className="overflow-hidden rounded border border-gray-200">
         <table className="min-w-full text-sm">
           <tbody className="divide-y divide-gray-100">
@@ -283,7 +292,11 @@ export function LiveTicker({ events, connected, unavailable }: ActivityStreamSta
         </span>
       </div>
 
-      <div className="rounded border border-gray-200">
+      {/* The list scrolls inside a fixed height instead of growing the
+          page. A busy access point produces events indefinitely, and an
+          uncapped ticker turns the dashboard into an endless document
+          where the panels below it drift out of reach. */}
+      <div className="max-h-64 overflow-y-auto rounded border border-gray-200">
         {events.length === 0 ? (
           <p className="px-3 py-2 text-xs text-gray-400">
             {connected ? 'Nothing has happened since this page loaded.' : 'Waiting for the stream...'}

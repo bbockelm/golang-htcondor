@@ -195,7 +195,11 @@ type DashboardResponse struct {
 	// Activity is the "how is this access point doing" half: why jobs
 	// are held, and what changed recently. Computed from the same walk
 	// as the counts.
-	Activity DashboardActivity `json:"activity"`
+	// Activity and Goodput are served by /api/v1/dashboard/activity and
+	// omitted here. They stay on the type so a client that has not moved
+	// yet gets a response missing two optional fields rather than one
+	// that fails to decode.
+	Activity DashboardActivity `json:"activity,omitzero"`
 	// Goodput is absent where nothing could answer it -- no history
 	// archive means no rate, and an omitted field says that where a
 	// zeroed one would read as "everything failed".
@@ -296,6 +300,84 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// better trade than a second query -- and none of it is worth
 	// anything without the walk, which is why it goes here rather than
 	// into an endpoint of its own.
+	opts := dashboardWalkOptions(owner, ownedByMe)
+
+	// The tiles are one aggregate against a mirror, so they do not wait
+	// on the panels. See countsFromMirror.
+	if snap, merr := s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
+		s.writeJSON(w, http.StatusOK, DashboardResponse{
+			Username:     owner,
+			JobsByStatus: snap.Counts,
+			JobsTotal:    snap.Total,
+		})
+		return
+	} else if s.dbMirror.Enabled() {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
+	}
+
+	// Without a mirror both halves come from one walk, and both
+	// endpoints read the same cached snapshot -- so splitting the
+	// response did not double the load on the access point. One walk per
+	// interval per scope, keyed by owner because most viewers see only
+	// their own jobs; see dashboardCacheKey.
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, opts)
+	if err != nil {
+		s.writeDashboardError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, DashboardResponse{
+		Username:     owner,
+		JobsByStatus: snap.Counts,
+		JobsTotal:    snap.Total,
+	})
+}
+
+// dashboardSnapshotFor is the cached queue walk both dashboard endpoints
+// share when no mirror is answering.
+func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe bool,
+	opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
+	key := dashboardCacheKey(owner, ownedByMe)
+	return s.dashboards().get(key, func() (*dashboardSnapshot, error) {
+		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)
+	})
+}
+
+func (s *Handler) writeDashboardError(w http.ResponseWriter, err error) {
+	switch {
+	case ratelimit.IsRateLimitError(err):
+		s.writeError(w, http.StatusTooManyRequests, err.Error())
+	case isAuthenticationError(err):
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed")
+	default:
+		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("Failed to query schedd: %v", err))
+	}
+}
+
+// DashboardActivityResponse is the slow half of the dashboard.
+type DashboardActivityResponse struct {
+	Activity DashboardActivity `json:"activity"`
+	// Goodput is absent where nothing could answer it -- no history
+	// archive means no rate, and an omitted field says that where a
+	// zeroed one would read as "everything failed".
+	Goodput *GoodputSummary `json:"goodput,omitempty"`
+}
+
+// dashboardWalkOptions is the projection the cached walk reads.
+//
+// HoldReasonCode rides along so a job held purely because its input is
+// still spooling can be counted separately from a real hold. The jobs
+// page already draws that distinction (displayJobStatus in lib/api.ts);
+// without it the dashboard's HELD tile makes a routine submit look like
+// a failure.
+//
+// The rest pays for the activity view out of the walk this was already
+// doing: the identity to name a job, the three timestamps the recent
+// lists sort on, the hold text, and one detail each. Six more attributes
+// on a read of the whole queue is a better trade than a second walk --
+// and none of it is worth anything without the walk, which is why both
+// endpoints share one cached snapshot rather than each doing their own.
+func dashboardWalkOptions(owner string, ownedByMe bool) *htcondor.QueryOptions {
 	opts := &htcondor.QueryOptions{
 		Limit: -1,
 		Projection: []string{
@@ -309,50 +391,60 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		opts.FetchOpts = htcondor.FetchMyJobs
 		opts.Owner = owner
 	}
-	// With a mirror answering, the page is half a dozen bounded queries
-	// and needs no cache: the numbers are current rather than up to
-	// three minutes old, and nothing walks the queue. The cached walk
-	// below is the fallback for a deployment without one, or for a
-	// mirror that is not currently usable.
-	if snap, merr := s.dashboardFromMirror(ctx, owner, ownedByMe); merr == nil {
-		s.writeJSON(w, http.StatusOK, DashboardResponse{
-			Username:     owner,
-			JobsByStatus: snap.Counts,
-			JobsTotal:    snap.Total,
-			Activity:     snap.Activity,
-			Goodput:      snap.Goodput,
+	return opts
+}
+
+// handleDashboardActivity handles GET /api/v1/dashboard/activity: the
+// hold breakdown, the recent lists and goodput.
+//
+// Split from the tiles because it is the slow half and they are the half
+// people read first. A browser asks for both at once and renders each as
+// it lands, rather than holding an empty page until the slowest query
+// finishes.
+func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	ownedByMe := true
+	if v := r.URL.Query().Get("owned_by_me"); v != "" {
+		if parsed, perr := strconv.ParseBool(v); perr == nil {
+			ownedByMe = parsed
+		}
+	}
+	if !ownedByMe && !s.isWebUIAdmin(r) {
+		ownedByMe = true
+	}
+
+	if snap, merr := s.activityFromMirror(ctx, owner, ownedByMe); merr == nil {
+		s.writeJSON(w, http.StatusOK, DashboardActivityResponse{
+			Activity: snap.Activity,
+			Goodput:  snap.Goodput,
 		})
 		return
 	} else if s.dbMirror.Enabled() {
 		s.logger.Debug(logging.DestinationHTTP,
-			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
+			"dashboard activity: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
 
-	// One walk per interval per scope, not one per page load. The key
-	// carries the owner because most viewers see only their own jobs and
-	// a snapshot holds theirs; see dashboardCacheKey.
-	key := dashboardCacheKey(owner, ownedByMe)
-	snap, err := s.dashboards().get(key, func() (*dashboardSnapshot, error) {
-		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)
-	})
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, dashboardWalkOptions(owner, ownedByMe))
 	if err != nil {
-		switch {
-		case ratelimit.IsRateLimitError(err):
-			s.writeError(w, http.StatusTooManyRequests, err.Error())
-		case isAuthenticationError(err):
-			s.writeError(w, http.StatusUnauthorized, "Authentication failed")
-		default:
-			s.writeError(w, http.StatusBadGateway, fmt.Sprintf("Failed to query schedd: %v", err))
-		}
+		s.writeDashboardError(w, err)
 		return
 	}
-
-	s.writeJSON(w, http.StatusOK, DashboardResponse{
-		Username:     owner,
-		JobsByStatus: snap.Counts,
-		JobsTotal:    snap.Total,
-		Activity:     snap.Activity,
-	})
+	// No goodput on this path: it needs a history archive, and the queue
+	// does not keep finished jobs long enough to have a rate.
+	s.writeJSON(w, http.StatusOK, DashboardActivityResponse{Activity: snap.Activity})
 }
 
 // walkQueueForDashboard reads the queue once and folds it into counts
@@ -372,7 +464,7 @@ func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.Quer
 	}
 
 	counts := make(map[string]int)
-	activity := newActivityCollector()
+	activity := newActivityCollector(time.Now().Add(-dashboardRecentWindow).Unix())
 	total := 0
 	for result := range resultCh {
 		if result.Err != nil {

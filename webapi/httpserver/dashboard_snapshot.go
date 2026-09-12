@@ -86,6 +86,13 @@ type DashboardActivity struct {
 	// would read a short list as a quiet access point.
 	CompletedPartial bool `json:"completed_partial"`
 
+	// HoldWindowSeconds is the span the hold breakdown covers. Reported
+	// rather than assumed: the rows answer "why did jobs BECOME held
+	// recently", which is a different question from the HELD tile beside
+	// them, and a reader who takes it for the latter will conclude the
+	// backlog vanished.
+	HoldWindowSeconds int64 `json:"hold_window_seconds,omitempty"`
+
 	// Source is what answered, and ComputedAt when. A cached snapshot is
 	// minutes old by design; saying so is the difference between a stale
 	// number and a wrong one.
@@ -165,10 +172,15 @@ func (c *dashboardCache) get(key string, compute func() (*dashboardSnapshot, err
 type activityCollector struct {
 	submitted, started, held, completed recentTop
 	holds                               map[int64]*HoldReasonCount
+	// since bounds the hold breakdown. The recent lists bound
+	// themselves by keeping only the newest few; the breakdown is a
+	// count, so it needs the window stated.
+	since int64
 }
 
-func newActivityCollector() *activityCollector {
+func newActivityCollector(since int64) *activityCollector {
 	return &activityCollector{
+		since:     since,
 		submitted: recentTop{limit: recentPerList},
 		started:   recentTop{limit: recentPerList},
 		held:      recentTop{limit: recentPerList},
@@ -214,6 +226,16 @@ func (a *activityCollector) observe(ad *classad.ClassAd) {
 	if status == jobStatusHeld {
 		code, _ := ad.EvaluateAttrInt("HoldReasonCode")
 		reason, _ := ad.EvaluateAttrString("HoldReason")
+		heldAt, _ := ad.EvaluateAttrInt("EnteredCurrentStatus")
+
+		// Recent holds only, matching the mirror path and the lists
+		// below. A job held last Tuesday is still held, and counting it
+		// here would make a long-standing backlog drown out what is
+		// going wrong right now -- which is the question this panel is
+		// for. The HELD tile is where the standing total lives.
+		if heldAt < a.since {
+			return
+		}
 
 		row := a.holds[code]
 		if row == nil {
@@ -226,7 +248,7 @@ func (a *activityCollector) observe(ad *classad.ClassAd) {
 		}
 
 		e := id
-		e.At, _ = ad.EvaluateAttrInt("EnteredCurrentStatus")
+		e.At = heldAt
 		e.Detail = reason
 		a.held.add(e)
 	}
@@ -271,8 +293,9 @@ func (a *activityCollector) result(now time.Time) DashboardActivity {
 		CompletedPartial:   true,
 		// The queue is what this collector walks; a caller that merges
 		// the archive in says so itself.
-		Source:     "schedd",
-		ComputedAt: now.Unix(),
+		Source:            "schedd",
+		ComputedAt:        now.Unix(),
+		HoldWindowSeconds: now.Unix() - a.since,
 	}
 
 	rows := make([]HoldReasonCount, 0, len(a.holds))
