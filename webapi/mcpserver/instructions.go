@@ -116,6 +116,8 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  get_credential_status / store_service_credential / list_service_credentials / " +
 		"delete_service_credential — manage stored credentials\n")
 	b.WriteString("  advertise_to_collector — publish a ClassAd to the HTCondor collector\n")
+	b.WriteString("  get_version — report this server's build (version, git commit, linked library versions); " +
+		"use it to confirm which code is deployed\n")
 
 	return b.String()
 }
