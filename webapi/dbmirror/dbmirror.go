@@ -59,7 +59,19 @@ const (
 	// accepts the connection and then hangs cannot wedge the loop for the
 	// life of the daemon.
 	PollTimeout = 10 * time.Second
+)
 
+// The routing tolerances. Process-wide policy, meant to be set once at
+// startup by a consumer with different needs from the default -- not
+// per-request knobs, and not safe to change while reads are in flight.
+//
+// They are variables rather than constants because the package now has
+// more than one consumer: an HTTP API fronting a schedd and a daemon
+// deciding whether to read history from the mirror at all want different
+// answers to "close enough", and the alternative is each growing its own
+// copy of the policy, which is how two components end up disagreeing
+// about whether the same mirror is caught up.
+var (
 	// HistoryToleranceSecs is the maximum mirror staleness at which
 	// completed-job reads still prefer the mirror. History is
 	// append-only, so minutes of lag are harmless; beyond this the
@@ -72,6 +84,27 @@ const (
 	// the mirror answers only when its job_queue.log tail is
 	// essentially current.
 	JobsToleranceSecs int64 = 60
+
+	// EpochToleranceSecs is the maximum epoch-history staleness at which
+	// per-run-instance reads still prefer the mirror. Append-only like
+	// history, so it gets history's tolerance rather than the live
+	// queue's.
+	EpochToleranceSecs int64 = 300
+
+	// CaughtUpLagBytes is how much unconsumed tail still counts as caught
+	// up, for the sources that gate on it.
+	//
+	// Zero -- the default -- means only a syncer that reached EOF at its
+	// last pass qualifies, which is what routing required before this knob
+	// existed. A consumer that would rather trade a little staleness for
+	// using the mirror at all can widen it: a syncer a few kilobytes
+	// behind a busy job_queue.log is, for most purposes, current.
+	//
+	// It applies only when the mirror actually advertises its lag. An
+	// older mirror that reports no LagBytes must not read as "0 bytes
+	// behind" and sail through, so an absent attribute leaves the strict
+	// CaughtUp requirement in force.
+	CaughtUpLagBytes int64 = 0
 )
 
 // Info is a discovered mirror's location, capabilities and freshness,
@@ -98,6 +131,31 @@ type Info struct {
 	JobQueueCaughtUp     bool
 	JobQueueLastSyncTime int64
 	JobQueueSecondsSync  int64
+	// JobQueueLagBytes is the unconsumed tail of job_queue.log at the
+	// ad's build time, and JobQueueLagReported whether the mirror said so
+	// at all -- the same absent-versus-zero distinction as
+	// JobQueueReported, and for the same reason: a mirror too old to
+	// advertise its lag would otherwise read as exactly caught up.
+	JobQueueLagBytes    int64
+	JobQueueLagReported bool
+
+	// HistoryLagBytes is the same for the completed-job history.
+	HistoryLagBytes    int64
+	HistoryLagReported bool
+
+	// Epoch-history (per-run-instance) freshness, for routing transfer
+	// and run-instance reads. Mirrors the History fields: a mirror that
+	// does not tail JOB_EPOCH_HISTORY advertises none of them, which
+	// EpochReported distinguishes from "caught up with no lag".
+	EpochCaughtUp     bool
+	EpochReported     bool
+	EpochGap          bool
+	EpochLastSyncTime int64
+	EpochSecondsSync  int64
+
+	EpochLagBytes    int64
+	EpochLagReported bool
+
 	// JobQueueReported is whether the ad carried live-queue sync
 	// information at all. A mirror that syncs only history advertises no
 	// JobQueueCaughtUp attribute, which parses to the zero value -- so
@@ -124,6 +182,17 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	// history-only mirror does not. That attribute's presence is the
 	// signal for whether the live-queue numbers above mean anything.
 	info.JobQueueReported = caughtUpOK
+	info.JobQueueLagBytes, info.JobQueueLagReported = ad.EvaluateAttrInt("JobQueueLagBytes")
+
+	info.EpochGap, _ = ad.EvaluateAttrBool("EpochGapDetected")
+	info.EpochLastSyncTime, _ = ad.EvaluateAttrInt("EpochLastSyncTime")
+	info.EpochSecondsSync, _ = ad.EvaluateAttrInt("EpochSecondsSinceSync")
+	var epochCaughtUpOK bool
+	info.EpochCaughtUp, epochCaughtUpOK = ad.EvaluateAttrBool("EpochCaughtUp")
+	info.EpochReported = epochCaughtUpOK
+	info.EpochLagBytes, info.EpochLagReported = ad.EvaluateAttrInt("EpochLagBytes")
+
+	info.HistoryLagBytes, info.HistoryLagReported = ad.EvaluateAttrInt("HistoryLagBytes")
 	return info
 }
 
@@ -630,6 +699,32 @@ func HistoryStaleness(info *Info) int64 {
 	return staleness(info.SecondsSinceSync)
 }
 
+// EpochStaleness is how far the mirror's epoch history was behind when
+// it last advertised. See staleness.
+func EpochStaleness(info *Info) int64 {
+	if info == nil {
+		return 0
+	}
+	return staleness(info.EpochSecondsSync)
+}
+
+// caughtUp reports whether a source counts as drained.
+//
+// A syncer that reached EOF always does. Short of that, a lag the mirror
+// actually advertised counts when it is within CaughtUpLagBytes -- which
+// is zero by default, so this reduces to the strict EOF test unless a
+// consumer widens it. A mirror that advertises no lag at all keeps the
+// strict test regardless: absent must not be read as zero.
+func caughtUp(atEOF bool, lagBytes int64, lagReported bool) bool {
+	if atEOF {
+		return true
+	}
+	if !lagReported || CaughtUpLagBytes <= 0 {
+		return false
+	}
+	return lagBytes >= 0 && lagBytes <= CaughtUpLagBytes
+}
+
 // staleness is the lag the mirror measured on itself at the moment it
 // built the ad, which is what every routing decision gates on.
 //
@@ -681,7 +776,7 @@ func JobsDecision(info *Info, pageToken string) Decision {
 	if pageToken != "" && !IsCursor(pageToken) {
 		return decline(ReasonPageToken, "the page token came from the schedd, which owns the rest of that walk")
 	}
-	if !info.JobQueueCaughtUp {
+	if !caughtUp(info.JobQueueCaughtUp, info.JobQueueLagBytes, info.JobQueueLagReported) {
 		return decline(ReasonNotCaughtUp, "mirror's job queue is not caught up to the schedd")
 	}
 	if stale := JobQueueStaleness(info); stale > JobsToleranceSecs {
@@ -691,6 +786,35 @@ func JobsDecision(info *Info, pageToken string) Decision {
 		return serve("resumed from the htcondordb mirror's cursor")
 	}
 	return serve("served from the htcondordb mirror (job queue caught up)")
+}
+
+// EpochDecision decides whether a read of per-run-instance records --
+// the mirrored JOB_EPOCH_HISTORY, which is also where transfer records
+// live -- may be served from the mirror's "epoch_history" table. Pure.
+//
+// Shaped like HistoryDecision, because the source is append-only in the
+// same way, with one addition: a caller reading epoch records
+// incrementally cares whether the tail has been drained, not only how
+// many seconds the syncer is behind. A mirror that does not tail
+// JOB_EPOCH_HISTORY at all advertises none of these attributes, and is
+// declined for that rather than mistaken for a caught-up one.
+func EpochDecision(info *Info) Decision {
+	if info == nil || info.Address == "" {
+		return decline(ReasonNoMirror, "no htcondordb mirror is advertising")
+	}
+	if !info.EpochReported {
+		return decline(ReasonNoMirror, "mirror does not tail JOB_EPOCH_HISTORY")
+	}
+	if info.EpochGap {
+		return decline(ReasonHistoryGap, "mirror reported an epoch-history durability gap")
+	}
+	if !caughtUp(info.EpochCaughtUp, info.EpochLagBytes, info.EpochLagReported) {
+		return decline(ReasonNotCaughtUp, "mirror's epoch history is not caught up to the schedd")
+	}
+	if stale := EpochStaleness(info); stale > EpochToleranceSecs {
+		return decline(ReasonStale, fmt.Sprintf("mirror's epoch history last synced %ds ago (> %ds tolerance)", stale, EpochToleranceSecs))
+	}
+	return serve("served from the htcondordb mirror (epoch history caught up)")
 }
 
 // RecencyKey ranks a completed-job ad for reverse-chronological
