@@ -149,10 +149,10 @@ test('status tiles render before the activity panels arrive', async ({ page }) =
 
   // Visible well inside the 3s the panels are held back for.
   await expect(page.getByText('Total')).toBeVisible({ timeout: 1500 });
-  await expect(page.getByText(/Why jobs were recently held/)).toBeHidden();
+  await expect(page.getByText(/Why jobs are held now/)).toBeHidden();
 
   // And they do arrive.
-  await expect(page.getByText(/Why jobs were recently held/)).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText(/Why jobs are held now/)).toBeVisible({ timeout: 10000 });
 });
 
 // The hold breakdown covers a window and the HELD tile does not, so the
@@ -160,5 +160,19 @@ test('status tiles render before the activity panels arrive', async ({ page }) =
 // a reader trusting the panel and filing a bug about it.
 test('hold breakdown states the window it covers', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/entered hold in the last/)).toBeVisible();
+  await expect(page.getByText(/still held, entered in the last/)).toBeVisible();
+});
+
+// Clicking a hold reason has to land on a jobs page that is actually
+// narrowed to those jobs, and that says so. A drill-down that silently
+// shows everything is worse than no drill-down.
+test('a hold reason drills into the jobs behind it', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('link', { name: 'Failed to transfer output' }).click();
+
+  await expect(page).toHaveURL(/\/jobs\?constraint=/);
+  await expect(page.getByText(/Showing jobs held: Failed to transfer output/)).toBeVisible();
+  // And a way back out: a narrowed list with no exit reads as a broken
+  // jobs page.
+  await expect(page.getByRole('link', { name: 'show all jobs' })).toBeVisible();
 });

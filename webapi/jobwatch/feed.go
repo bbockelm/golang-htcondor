@@ -60,6 +60,13 @@ type Feed struct {
 	// activitySubs are followers of the whole stream rather than of one
 	// job: the dashboard's live ticker. See activity.go.
 	activitySubs map[*activitySub]struct{}
+	// announced remembers the terminal transition already published for
+	// a key, so the delete that follows does not report it a second
+	// time. A finishing job produces both: the schedd writes JobStatus
+	// 4, then DestroyProc removes the ad, usually within the same
+	// second. Both say "completed", and publishing both puts the same
+	// line on the ticker twice.
+	announced map[string]ActivityKind
 	// subs are per-job followers of this same stream. See subscribe.go.
 	// Keyed by job identity rather than storage key so the feed's refusal
 	// to parse that key does not leak out to callers.
@@ -200,6 +207,17 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// overwrite.
 		if act, ok := f.activityFor(f.live[ev.Key], ad); ok {
 			f.publishActivityLocked(act)
+			if act.Kind == ActivityCompleted || act.Kind == ActivityRemoved {
+				if f.announced == nil {
+					f.announced = make(map[string]ActivityKind)
+				}
+				f.announced[ev.Key] = act.Kind
+			} else {
+				// Housekeeping, not correctness: a job that comes back
+				// would otherwise keep an entry until it is deleted, and
+				// the next terminal transition overwrites it anyway.
+				delete(f.announced, ev.Key)
+			}
 		}
 		f.live[ev.Key] = ad
 		// A job can come back -- a held job released, or a key reused
@@ -215,9 +233,10 @@ func (f *Feed) Apply(ev WatchEvent) {
 		if ad, ok := f.live[ev.Key]; ok {
 			f.ended[ev.Key] = endedJob{ad: ad, at: f.now()}
 			delete(f.live, ev.Key)
-			if act, aok := f.activityForDelete(ad); aok {
+			if act, aok := f.activityForDelete(ad); aok && f.announced[ev.Key] != act.Kind {
 				f.publishActivityLocked(act)
 			}
+			delete(f.announced, ev.Key)
 			if id, idok := identOf(ad); idok {
 				f.notifyLocked(id, KeyChange{Gone: true})
 			}
@@ -247,6 +266,7 @@ func (f *Feed) Reset() {
 func (f *Feed) clearLocked() {
 	f.live = make(map[string]*classad.ClassAd)
 	f.ended = make(map[string]endedJob)
+	f.announced = nil
 }
 
 func (f *Feed) setWarm(v bool) {

@@ -20,7 +20,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
@@ -55,6 +55,7 @@ const REFRESH_MS_FULL = 60_000;
 
 
 export default function JobsPage() {
+  const searchParams = useSearchParams();
   // Admin browser sessions can opt into a pool-wide view; non-admin
   // sessions can't (the server enforces it). We default admins to
   // "show only mine" too — admin views are explicit, not surprising.
@@ -67,6 +68,13 @@ export default function JobsPage() {
   // Shared with the dashboard and /archive; see lib/scope.ts.
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
+
+  // A server-side constraint handed over in the URL, which is how the
+  // dashboard's panels drill in: clicking a hold reason lands here
+  // showing exactly those jobs. `why` is the human sentence to put on
+  // the banner, because a raw ClassAd expression is not one.
+  const constraint = searchParams.get('constraint') ?? undefined;
+  const why = searchParams.get('why') ?? undefined;
 
   // "Load everything" is opt-in per scope: the default keeps a bounded
   // first page so opening /jobs on a 30k-job queue is not a multi-second
@@ -82,10 +90,11 @@ export default function JobsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<JobListResponse, Error>({
-    queryKey: ['jobs', scope, loadAll],
+    queryKey: ['jobs', scope, loadAll, constraint],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.jobs.list({
+        constraint,
         projection: PROJECTION,
         // "*" is the server's unlimited sentinel. Only ever sent because
         // the user asked for it after being told the answer was cut off.
@@ -309,6 +318,20 @@ export default function JobsPage() {
 
       {data && data.jobs.length > 0 && (
         <>
+          {constraint && (
+            <div className="mb-3 flex items-baseline gap-3 rounded border border-brand-200 bg-brand-50 px-3 py-2 text-sm">
+              <span className="text-gray-700">
+                Showing {why ?? 'a filtered set of jobs'}
+              </span>
+              {/* Without a way out, a narrowed list looks like a broken
+                  jobs page: the counts do not match anything and the
+                  jobs someone expected are simply absent. */}
+              <Link href="/jobs" className="ml-auto text-xs text-brand-700 underline">
+                show all jobs
+              </Link>
+            </div>
+          )}
+
           <FilterBar value={filter} onChange={setFilter} />
           <BatchTable
             jobs={data.jobs}

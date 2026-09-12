@@ -4,6 +4,7 @@ import Link from 'next/link';
 import {
   JOB_STATUS_LABEL,
   type DashboardActivity,
+  type HoldReasonCount,
   type GoodputSummary,
   type RecentJob,
 } from '@/lib/api';
@@ -34,28 +35,37 @@ export function HoldReasons({ activity }: { activity: DashboardActivity }) {
     <section>
       <div className="mb-2 flex items-baseline gap-2">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
-          Why jobs were recently held
+          Why jobs are held now
         </h2>
-        {/* Stating the window is the difference between this panel and
-            the HELD tile. Without it the two look like they disagree. */}
+        {/* "Recently held" was wrong twice over. These are jobs still
+            held, counted by when they entered that state -- so a job
+            released by policy since leaves the count, which is why the
+            numbers were seen to fall on their own. Saying both is also
+            what separates this panel from the HELD tile. */}
         <span className="text-xs text-gray-400">
           {activity.hold_window_seconds
-            ? `entered hold in the last ${duration(activity.hold_window_seconds)}`
-            : 'recent'}
+            ? `still held, entered in the last ${duration(activity.hold_window_seconds)}`
+            : 'still held, entered recently'}
         </span>
       </div>
       <div className="overflow-hidden rounded border border-gray-200">
         <table className="min-w-full text-sm">
           <tbody className="divide-y divide-gray-100">
             {rows.map((row) => (
-              <tr key={row.code} className="align-top">
+              <tr key={row.code} className="align-top hover:bg-gray-50">
                 <td className="px-3 py-2 text-right tabular-nums font-medium w-20">
                   {row.count.toLocaleString()}
                 </td>
                 <td className="px-3 py-2">
-                  <span className={row.code === 16 ? 'text-gray-600' : 'text-gray-900'}>
+                  {/* The count answers "how many"; the obvious next
+                      question is "which ones", and it should not require
+                      composing a ClassAd expression by hand. */}
+                  <Link
+                    href={holdRowHref(row, activity)}
+                    className={`hover:underline ${row.code === 16 ? 'text-gray-600' : 'text-gray-900'}`}
+                  >
                     {row.label}
-                  </span>
+                  </Link>
                   {row.code === 16 && (
                     <span className="ml-2 text-xs text-gray-400">
                       (a submit in progress, not a failure)
@@ -74,6 +84,36 @@ export function HoldReasons({ activity }: { activity: DashboardActivity }) {
       </div>
     </section>
   );
+}
+
+// jobHref points a row at a page that will actually resolve.
+//
+// A finished job survives in the queue for seconds before the schedd
+// destroys it, so nearly everything under "recently completed" is only
+// in the history archive by the time anyone clicks. Linking those to
+// /jobs was a guaranteed "not found".
+export function jobHref(job: RecentJob): string {
+  const id = `${job.cluster_id}.${job.proc_id}`;
+  return job.archived ? `/archive/${id}` : `/jobs/${id}`;
+}
+
+// holdRowHref drills from a row of the breakdown into the jobs that
+// make it up.
+//
+// The window is carried across so the list matches the count that was
+// clicked. Without it the page would show every job ever held for that
+// reason, which is a different and usually much larger number -- and a
+// drill-down whose total disagrees with the row above it reads as a bug.
+export function holdRowHref(row: HoldReasonCount, activity: DashboardActivity): string {
+  const parts = ['JobStatus == 5'];
+  // -1 is the synthesised "other reasons" row, which is a sum rather
+  // than a code and cannot be expressed as one.
+  if (row.code >= 0) parts.push(`HoldReasonCode == ${row.code}`);
+  if (activity.hold_window_seconds && activity.computed_at) {
+    parts.push(`EnteredCurrentStatus >= ${activity.computed_at - activity.hold_window_seconds}`);
+  }
+  const why = row.code >= 0 ? `jobs held: ${row.label}` : 'recently held jobs';
+  return `/jobs?constraint=${encodeURIComponent(parts.join(' && '))}&why=${encodeURIComponent(why)}`;
 }
 
 // RecentActivity shows what changed lately, which is how a burst becomes
@@ -163,7 +203,7 @@ function RecentList({
             <li key={`${job.cluster_id}.${job.proc_id}`} className="px-3 py-1.5">
               <div className="flex items-baseline justify-between gap-2">
                 <Link
-                  href={`/jobs/${job.cluster_id}.${job.proc_id}`}
+                  href={jobHref(job)}
                   className="font-mono text-xs text-brand-700 hover:underline"
                 >
                   {job.cluster_id}.{job.proc_id}
@@ -305,7 +345,11 @@ export function LiveTicker({ events, connected, unavailable }: ActivityStreamSta
           <ul className="divide-y divide-gray-100">
             {events.map((ev) => (
               <li
-                key={`${ev.at}-${ev.cluster_id}.${ev.proc_id}-${ev.kind}`}
+                // Arrival order, not event content: two changes to one
+                // job inside a second are identical in every field the
+                // event carries, and duplicate keys make React reuse the
+                // wrong row.
+                key={ev.seq ?? `${ev.at}-${ev.cluster_id}.${ev.proc_id}-${ev.kind}`}
                 className="flex items-baseline gap-2 px-3 py-1.5 text-xs"
               >
                 <span

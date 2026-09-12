@@ -149,6 +149,10 @@ export interface RecentJob {
   at: number;
   /** The one fact worth showing beside it: hold reason, command, host. */
   detail?: string;
+  /** True when the row came from the history archive rather than the
+   *  live queue. The queue destroys a finished job within seconds, so
+   *  most completions have no job page and belong on /archive. */
+  archived?: boolean;
 }
 
 /** One row of the hold breakdown: the code's meaning, how many, and an

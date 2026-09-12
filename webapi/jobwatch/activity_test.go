@@ -149,6 +149,12 @@ func TestFirstSightingOfSomethingNewIsReported(t *testing.T) {
 // A job leaves the queue moments after the schedd records how it went,
 // and the delete carries nothing. The outcome comes from the ad the feed
 // already had.
+//
+// Each case is set up as a FIRST SIGHTING of an already-finished job --
+// an old QDate, so the arrival itself reports nothing -- because that is
+// when the delete is the only thing that can speak. When the status
+// change was seen, it is the one that reports, and the delete stays
+// quiet; see TestAFinishingJobIsReportedOnce.
 func TestDeleteReportsTheOutcomeFromTheLastAd(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -164,9 +170,11 @@ func TestDeleteReportsTheOutcomeFromTheLastAd(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, ch, now := activityFixture(t)
-			applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
-			applyUpsert(f, "1.0", jobAd(1, "alice", tc.status, tc.extra))
-			drainActivity(ch)
+			applyUpsert(f, "1.0", jobAd(1, "alice", tc.status,
+				fmt.Sprintf("QDate = %d\n%s", now.Add(-6*time.Hour).Unix(), tc.extra)))
+			if got := drainActivity(ch); len(got) != 0 {
+				t.Fatalf("first sighting of an old finished job produced %+v", got)
+			}
 
 			f.Apply(WatchEvent{Kind: WatchDelete, Key: "1.0"})
 			got := drainActivity(ch)
@@ -266,5 +274,94 @@ func TestCancellingRemovesTheSubscription(t *testing.T) {
 	f.mu.Unlock()
 	if n != 0 {
 		t.Errorf("%d subscriptions remain after cancel", n)
+	}
+}
+
+// A job that finishes produces two changes moments apart: the schedd
+// writes JobStatus 4, then DestroyProc removes the ad. Both mean
+// "completed", and both used to be published -- so the same job appeared
+// on the ticker twice, usually with the same timestamp.
+//
+// That is not merely untidy. The browser keys rows by what the event
+// says about itself, so two identical events collide and React reuses
+// the wrong DOM node, which looks like lines appearing in random places
+// rather than a stream.
+func TestAFinishingJobIsReportedOnce(t *testing.T) {
+	f, ch, now := activityFixture(t)
+
+	applyUpsert(f, "1.0", jobAd(1, "alice", 1, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
+	applyUpsert(f, "1.0", jobAd(1, "alice", 4, "ExitCode = 0"))
+	f.Apply(WatchEvent{Kind: WatchDelete, Key: "1.0"})
+
+	got := drainActivity(ch)
+	if len(got) != 1 {
+		t.Fatalf("a job finishing produced %d events, want 1: %+v", len(got), got)
+	}
+	if got[0].Kind != ActivityCompleted {
+		t.Errorf("kind = %q, want completed", got[0].Kind)
+	}
+}
+
+// Same for a removal, which takes the same path.
+func TestARemovedJobIsReportedOnce(t *testing.T) {
+	f, ch, now := activityFixture(t)
+
+	applyUpsert(f, "2.0", jobAd(2, "alice", 2, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
+	applyUpsert(f, "2.0", jobAd(2, "alice", 3, ""))
+	f.Apply(WatchEvent{Kind: WatchDelete, Key: "2.0"})
+
+	got := drainActivity(ch)
+	if len(got) != 1 || got[0].Kind != ActivityRemoved {
+		t.Fatalf("a removal produced %+v, want one removed event", got)
+	}
+}
+
+// The delete still speaks when nothing else did. A job reaped without a
+// status change we saw is the case the delete path exists for, and
+// suppressing it would lose the outcome entirely.
+func TestADeleteStillReportsWhenTheStatusChangeWasMissed(t *testing.T) {
+	f, ch, now := activityFixture(t)
+
+	// First sighting is already JobStatus 4 -- no transition to report,
+	// because the ad does not claim it just happened.
+	applyUpsert(f, "3.0", jobAd(3, "alice", 4, fmt.Sprintf("QDate = %d\nExitCode = 3", now.Add(-6*time.Hour).Unix())))
+	if got := drainActivity(ch); len(got) != 0 {
+		t.Fatalf("first sighting of an old completed job produced %+v", got)
+	}
+
+	f.Apply(WatchEvent{Kind: WatchDelete, Key: "3.0"})
+	got := drainActivity(ch)
+	if len(got) != 1 || got[0].Kind != ActivityCompleted {
+		t.Fatalf("the delete produced %+v, want the completion", got)
+	}
+	if got[0].Detail != "exit 3" {
+		t.Errorf("detail = %q, want the outcome from the last ad", got[0].Detail)
+	}
+}
+
+// A job that comes back has to be announceable again: held then
+// released then finished is three events, not two plus a swallowed one.
+func TestAJobThatReturnsCanBeReportedAgain(t *testing.T) {
+	f, ch, now := activityFixture(t)
+
+	applyUpsert(f, "4.0", jobAd(4, "alice", 2, fmt.Sprintf("QDate = %d", now.Add(-time.Hour).Unix())))
+	applyUpsert(f, "4.0", jobAd(4, "alice", 3, "")) // removed...
+	applyUpsert(f, "4.0", jobAd(4, "alice", 2, "")) // ...and running again
+	applyUpsert(f, "4.0", jobAd(4, "alice", 4, "ExitCode = 0"))
+	f.Apply(WatchEvent{Kind: WatchDelete, Key: "4.0"})
+
+	got := drainActivity(ch)
+	kinds := make([]ActivityKind, 0, len(got))
+	for _, e := range got {
+		kinds = append(kinds, e.Kind)
+	}
+	want := []ActivityKind{ActivityRemoved, ActivityStarted, ActivityCompleted}
+	if len(kinds) != len(want) {
+		t.Fatalf("kinds = %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("kinds = %v, want %v", kinds, want)
+		}
 	}
 }
