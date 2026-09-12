@@ -53,6 +53,11 @@ type Lexer struct {
 	afterIfOrElif       bool // True if the previous token was IF or ELIF
 	afterErrorOrWarning bool // True if the previous token was ERROR or WARNING
 
+	// badMacroRef is set when a $(...) inside a parameter name ran to
+	// the end of the line unterminated, so the token can be reported as
+	// illegal on that line rather than confusing the next statement.
+	badMacroRef bool
+
 	// inInclude is true while lexing an include directive's type keywords
 	// (INCLUDE, and any continuation COMMAND/IFEXIST) up to its ':'. It lets the
 	// ':' know it terminates an include type, so the path/command that follows is
@@ -192,10 +197,22 @@ func (l *Lexer) readIdentifier() string {
 			continue
 		}
 
-		// Regular identifier characters
-		for isIdentChar(l.ch) {
-			l.buf.WriteRune(l.ch)
-			l.readChar()
+		// Regular identifier characters, plus any $(...) macro
+		// references embedded in the name.
+		for {
+			if isIdentChar(l.ch) {
+				l.buf.WriteRune(l.ch)
+				l.readChar()
+				continue
+			}
+			if l.ch == '$' && l.peekChar() == '(' {
+				if !l.readMacroRefInto(&l.buf) {
+					l.badMacroRef = true
+					return l.buf.String()
+				}
+				continue
+			}
+			break
 		}
 
 		// Check for another dot (subsystem.local.param)
@@ -610,6 +627,35 @@ func (l *Lexer) NextToken() *TokenInfo {
 		tok.Lit = l.readString(quote)
 
 	case '$':
+		if atStmtStart && l.peekChar() == '(' {
+			// A parameter NAME may start with a macro reference:
+			//	$(K) = value
+			// defines whatever $(K) expands to. Lexed as one IDENT so
+			// the parser sees NAME ASSIGN, the same as any other
+			// assignment.
+			l.buf.Reset()
+			ok := l.readMacroRefInto(&l.buf)
+			for ok {
+				if isIdentChar(l.ch) {
+					l.buf.WriteRune(l.ch)
+					l.readChar()
+					continue
+				}
+				if l.ch == '$' && l.peekChar() == '(' {
+					ok = l.readMacroRefInto(&l.buf)
+					continue
+				}
+				break
+			}
+			tok.Lit = l.buf.String()
+			if !ok {
+				tok.Token = ILLEGAL
+				break
+			}
+			tok.Token = IDENT
+			l.prevIdentAssignable = true
+			break
+		}
 		if l.peekChar() == '(' {
 			tok.Token = STRING
 			tok.Lit = l.readMacro()
@@ -623,6 +669,11 @@ func (l *Lexer) NextToken() *TokenInfo {
 		switch {
 		case isIdentStart(l.ch):
 			tok.Lit = l.readIdentifier()
+			if l.badMacroRef {
+				l.badMacroRef = false
+				tok.Token = ILLEGAL
+				return tok
+			}
 			// Check if it's a keyword
 			if kw, ok := keywords[strings.ToLower(tok.Lit)]; ok {
 				tok.Token = kw
@@ -679,6 +730,54 @@ func (l *Lexer) ReadValue() string {
 // isIdentStart returns true if the rune can start an identifier
 func isIdentStart(ch rune) bool {
 	return unicode.IsLetter(ch) || ch == '_'
+}
+
+// readMacroRefInto copies a $(...) macro reference into buf, brackets
+// included, tracking nesting so $(FOO$(BAR)) is taken whole.
+//
+// A parameter NAME may contain one: HTCondor expands the left-hand side
+// before storing, which is how the shipped metaknobs define per-argument
+// parameters --
+//
+//	CLASSAD_USER_MAPFILE_$(1) = $(2)
+//
+// from $FEATURE.ScheddUsermapFile, reached through
+// `use FEATURE : AssignAccountingGroup`. Without this the name lexed as
+// IDENT followed by a separate STRING and the parse failed with
+// "unexpected STRING, expecting ASSIGN", taking the whole config file
+// with it.
+func (l *Lexer) readMacroRefInto(buf *strings.Builder) bool {
+	// '$'
+	buf.WriteRune(l.ch)
+	l.readChar()
+	// '('
+	buf.WriteRune(l.ch)
+	l.readChar()
+
+	depth := 1
+	for depth > 0 && l.ch != 0 {
+		// A macro reference does not span lines; bail rather than
+		// swallow the rest of the file on an unbalanced '('. Reporting
+		// it here keeps the error on the offending line instead of
+		// surfacing as a confusing complaint about the next one.
+		if l.ch == '\n' {
+			return false
+		}
+		if l.ch == '$' && l.peekChar() == '(' {
+			depth++
+			buf.WriteRune(l.ch)
+			l.readChar()
+			buf.WriteRune(l.ch)
+			l.readChar()
+			continue
+		}
+		if l.ch == ')' {
+			depth--
+		}
+		buf.WriteRune(l.ch)
+		l.readChar()
+	}
+	return depth == 0
 }
 
 // isIdentChar returns true if the rune can be in an identifier

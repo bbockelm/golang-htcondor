@@ -43,16 +43,39 @@ func TestLexerMacroExpansion(t *testing.T) {
 }
 
 func TestLexerNestedMacros(t *testing.T) {
-	input := "$(FOO:$(BAR))"
-	lex := NewLexer(strings.NewReader(input))
-
+	// At the start of a statement a macro reference is a parameter
+	// NAME -- "$(K) = value" defines whatever $(K) expands to, which
+	// condor_config_val accepts -- so it lexes as IDENT. This test used
+	// to assert STRING here, from before names could contain macro
+	// references at all.
+	lex := NewLexer(strings.NewReader("$(FOO:$(BAR))"))
 	tok := lex.NextToken()
-	if tok.Token != STRING {
-		t.Errorf("Expected STRING, got %d", tok.Token)
+	if tok.Token != IDENT {
+		t.Errorf("at statement start: expected IDENT, got %d", tok.Token)
 	}
-
 	if tok.Lit != "$(FOO:$(BAR))" {
 		t.Errorf("Expected $(FOO:$(BAR)), got %q", tok.Lit)
+	}
+
+	// The nesting and the colon default are carried through whole
+	// either way -- the token's literal is the reference as written,
+	// and expansion happens later.
+	//
+	// (There is no "same reference, mid-statement" case to compare
+	// against here: an if/elif condition and a use directive are each
+	// read to end of line as a single token, and a value is carried in
+	// the ASSIGN token, so a bare $(...) does not stand alone
+	// elsewhere.)
+	lex = NewLexer(strings.NewReader("PREFIX_$(FOO:$(BAR))_SUFFIX = v"))
+	tok = lex.NextToken()
+	if tok.Token != IDENT {
+		t.Errorf("embedded reference: expected IDENT, got %d", tok.Token)
+	}
+	if tok.Lit != "PREFIX_$(FOO:$(BAR))_SUFFIX" {
+		t.Errorf("Expected the whole name, got %q", tok.Lit)
+	}
+	if tok := lex.NextToken(); tok.Token != ASSIGN || tok.Lit != "v" {
+		t.Errorf("expected ASSIGN with value \"v\", got %d %q", tok.Token, tok.Lit)
 	}
 }
 
