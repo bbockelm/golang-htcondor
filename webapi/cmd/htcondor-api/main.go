@@ -603,6 +603,64 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 // the submit, so a typo would break every terminal launch with an error
 // pointing at the submit rather than at the config that caused it. Failing
 // at startup puts the complaint next to the mistake.
+// listenMaybePrivileged binds the API's listen address, re-raising privilege
+// only if binding it unprivileged is refused.
+//
+// An operator serving the web UI on 443 hits this: under condor_master the
+// daemon has already dropped to the condor account by the time it binds, and
+// ports below 1024 need root. The drop leaves root in the saved set, so the
+// bind can be done as root and the listener used afterwards as condor --
+// binding is the only privileged step.
+//
+// The ordinary bind is tried first so that nothing changes for the common
+// case, and so the elevation is attempted only where it is the actual
+// explanation. A permission error on a port at or above 1024 is not about
+// privilege -- it is a sandbox or an SELinux policy -- and re-raising would
+// neither help nor be honest about what failed.
+func listenMaybePrivileged(addr string, logger *logging.Logger) (net.Listener, error) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
+	if err == nil {
+		return ln, nil
+	}
+	if !errors.Is(err, syscall.EACCES) && !errors.Is(err, syscall.EPERM) {
+		return nil, err
+	}
+	port, perr := privilegedPortOf(addr)
+	if perr != nil || port == 0 {
+		return nil, err
+	}
+
+	logger.Info(logging.DestinationHTTP,
+		"binding a privileged port requires root; re-raising for the bind only",
+		"address", addr, "port", port, "euid", os.Geteuid())
+	pln, perr2 := droppriv.ListenAsRoot("tcp", addr)
+	if perr2 != nil {
+		// Report the original refusal: it is what an operator without
+		// the saved-root privilege will see, and the second attempt
+		// failing the same way adds nothing.
+		return nil, fmt.Errorf("%w (retry as root also failed: %w)", err, perr2)
+	}
+	logger.Info(logging.DestinationHTTP, "bound privileged port", "address", addr, "euid", os.Geteuid())
+	return pln, nil
+}
+
+// privilegedPortOf returns the port of addr when it is one that needs root,
+// and 0 otherwise.
+func privilegedPortOf(addr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, err
+	}
+	if port <= 0 || port >= 1024 {
+		return 0, nil
+	}
+	return port, nil
+}
+
 func loadInteractiveRequirements(cfg *config.Config, logger *logging.Logger) string {
 	raw, ok := cfg.Get("HTTP_API_INTERACTIVE_REQUIREMENTS")
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -1556,7 +1614,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	}
 
 	ln, err := d.Listener(func() (net.Listener, error) {
-		return (&net.ListenConfig{}).Listen(context.Background(), "tcp", listenAddrFromConfig)
+		return listenMaybePrivileged(listenAddrFromConfig, logger)
 	})
 	if err != nil {
 		return fmt.Errorf("listener: %w", err)
@@ -1605,6 +1663,32 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 					!errors.Is(err, http.ErrServerClosed) {
 					logger.Error(logging.DestinationHTTP,
 						"the MCP listener stopped serving", "address", addr, "error", err)
+				}
+			}()
+		}
+
+		// Under condor_master the listener above is the master's socket,
+		// which carries CEDAR commands. It is not a port a browser can be
+		// pointed at, and the master cannot be asked to hand one down, so
+		// a configured HTTP_API_LISTEN_ADDR has to be bound here as well --
+		// including 443, which is why this may need to re-raise.
+		//
+		// Started before the primary listener so a failure to bind is
+		// reported at startup rather than after the server is already
+		// serving. It serves nothing until the handler is started, which
+		// is what ServeListenerWithCert does below.
+		if d.AdoptedInheritedListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
+			extra, lerr := listenMaybePrivileged(listenAddrFromConfig, logger)
+			if lerr != nil {
+				return fmt.Errorf("binding HTTP_API_LISTEN_ADDR %s: %w", listenAddrFromConfig, lerr)
+			}
+			defer func() { _ = extra.Close() }()
+			go func() {
+				if err := server.ServeAdditionalListener(extra, cert, key); err != nil &&
+					!errors.Is(err, http.ErrServerClosed) {
+					logger.Error(logging.DestinationHTTP,
+						"the additional listener stopped serving",
+						"address", listenAddrFromConfig, "error", err)
 				}
 			}()
 		}

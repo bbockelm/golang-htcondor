@@ -470,3 +470,25 @@ jobs:
               -run 'AsCondor$' \
               ./httpserver/
           "
+
+    # Binding a port below 1024 needs root, and under condor_master the
+    # daemon has dropped to the condor account long before it knows which
+    # port it was configured with. Only a root job can exercise that, and
+    # only with the container's unprivileged-port floor put back -- Docker
+    # sets it to 0, which lets anyone bind 443 and would make the test pass
+    # without touching the privileged path at all. The test restores the
+    # floor itself and skips if it cannot.
+    #
+    # The core module's other integration tests run unprivileged in their
+    # own job, where this one skips. Only this test needs root, and only
+    # this test is run here: as root, 13 of the others fail, having been
+    # written for an ordinary user.
+    - name: Run the privileged-port test as root
+      run: |
+        docker run --rm --privileged --user 0:0 \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
+          golang-htcondor:integration-test \
+          bash .github/scripts/integration-tests-privileged-port.sh
