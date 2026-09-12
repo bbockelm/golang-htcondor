@@ -109,7 +109,7 @@ require (
 	github.com/PelicanPlatform/classad/collections v0.29.6
 	github.com/PelicanPlatform/classad/db v0.29.6
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
-	github.com/bbockelm/cedar v0.6.14
+	github.com/bbockelm/cedar v0.6.15
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-jose/go-jose/v4 v4.1.4

@@ -241,6 +241,16 @@ func getRateLimitManager() *ratelimit.Manager {
 // wiring it unconditionally is safe for user tools too.
 var daemonCredentialCache = NewCredentialCache()
 
+// Package-level helpers in cedar that read a credential without a SecurityConfig
+// to consult -- security.GenerateJWT, which is handed a key directory and a key
+// id -- go through the same reader. Without this a daemon that has dropped to
+// the condor account mints tokens by reading /etc/condor/passwords.d/POOL with a
+// plain os.ReadFile, which is root:root 0600, and fails with "permission
+// denied" while every other credential read succeeds.
+func init() {
+	security.SetDefaultCredentialReader(daemonCredentialCache)
+}
+
 // runningAsDaemon reports whether this process is an HTCondor daemon that can read
 // root-only credentials (the SSL host key, the system token directory): it is running as
 // root, or it was launched by condor_master (CONDOR_INHERIT set) and therefore started as
