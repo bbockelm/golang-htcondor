@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -698,20 +699,90 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 		}
 	}
 
-	// Race connect+authenticate across configured collector addresses.
-	htcondorClient, err := c.dialAndAuthenticate(ctx, cmd)
+	// Ensure MyAddress is set in the ad before anyone sends it.
+	if err := ensureMyAddress(ad); err != nil {
+		return err
+	}
+
+	// An advertisement goes to EVERY configured collector, unlike a
+	// query, which goes to whichever answers first.
+	//
+	// Connecting and advertising are different operations. Racing is
+	// right for a query -- any collector can answer it, so the fastest
+	// wins -- but an update has to reach each collector, because each
+	// keeps its own copy of the ad and expires it on its own. C++ does
+	// this in CollectorList::sendUpdates, which loops the whole list
+	// and skips only unresolvable or blacklisted entries.
+	//
+	// This used to race for advertisements too, so a daemon configured
+	// with COLLECTOR_HOST = a,b advertised to exactly one of them --
+	// whichever won, which varies per process because NewCollector
+	// shuffles the list.
+	addrs := c.advertiseAddrs()
+	if len(addrs) == 1 {
+		return sendOneAd(c, ctx, addrs[0], cmd, ad, opts)
+	}
+
+	// Concurrently, so one unreachable collector's connect timeout does
+	// not delay the others.
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	res := &AdvertiseError{Failed: make(map[string]error, len(addrs))}
+	for _, addr := range addrs {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			err := sendOneAd(c, ctx, addr, cmd, ad, opts)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				res.Failed[addr] = err
+				return
+			}
+			res.Succeeded = append(res.Succeeded, addr)
+		}(addr)
+	}
+	wg.Wait()
+
+	if len(res.Failed) == 0 {
+		return nil
+	}
+	sort.Strings(res.Succeeded)
+	return res
+}
+
+// advertiseAddrs is the full set of collector addresses to update, in a
+// stable order. Unlike the query path it does not apply the sticky
+// preferred-address reordering: every address is used, so the order is
+// for reporting, not selection.
+func (c *Collector) advertiseAddrs() []string {
+	addrs := append([]string(nil), c.addresses...)
+	if len(addrs) == 0 {
+		// A hand-built &Collector{address: "..."} skips NewCollector.
+		addrs = splitCollectorList(c.address)
+		if len(addrs) == 0 {
+			addrs = []string{c.address}
+		}
+	}
+	sort.Strings(addrs)
+	return addrs
+}
+
+// sendOneAd is advertiseTo, indirected so tests can observe which
+// collectors an advertisement reaches without standing up a CEDAR peer
+// per address. Production always uses advertiseTo; the wire path it
+// runs is the same one the single-collector case has always used.
+var sendOneAd = (*Collector).advertiseTo
+
+// advertiseTo sends one ad to one collector over its own connection.
+func (c *Collector) advertiseTo(ctx context.Context, addr string, cmd commands.CommandType, ad *classad.ClassAd, opts *AdvertiseOptions) error {
+	htcondorClient, err := c.dialAddress(ctx, addr, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
 	defer func() { _ = htcondorClient.Close() }()
 
-	// Get CEDAR stream
 	cedarStream := htcondorClient.GetStream()
-
-	// Ensure MyAddress is set in the ad
-	if err := ensureMyAddress(ad); err != nil {
-		return err
-	}
 
 	// Send the ad (plus an optional private companion ad on the same message).
 	msg := message.NewMessageForStream(cedarStream)
@@ -752,6 +823,62 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 // the new one. Returns one error per ad (nil entries where the ad succeeded), or
 // nil if the batch was empty.
 func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassAd, opts *AdvertiseOptions) []error {
+	if len(ads) == 0 {
+		return nil
+	}
+
+	// Every collector gets the whole batch, for the same reason
+	// Advertise fans out: each collector keeps and expires its own copy.
+	// The connection amortization is per collector -- one authenticated
+	// socket carries that collector's run of updates.
+	addrs := c.advertiseAddrs()
+	if len(addrs) == 1 {
+		return c.advertiseMultipleTo(ctx, addrs[0], ads, opts)
+	}
+
+	type result struct {
+		addr string
+		errs []error
+	}
+	results := make(chan result, len(addrs))
+	for _, addr := range addrs {
+		go func(addr string) {
+			results <- result{addr: addr, errs: c.advertiseMultipleTo(ctx, addr, ads, opts)}
+		}(addr)
+	}
+
+	// Per ad, gather which collectors took it and which did not.
+	merged := make([]*AdvertiseError, len(ads))
+	for i := range merged {
+		merged[i] = &AdvertiseError{Failed: make(map[string]error, len(addrs))}
+	}
+	for range addrs {
+		r := <-results
+		for i := range ads {
+			var err error
+			if i < len(r.errs) {
+				err = r.errs[i]
+			}
+			if err != nil {
+				merged[i].Failed[r.addr] = err
+				continue
+			}
+			merged[i].Succeeded = append(merged[i].Succeeded, r.addr)
+		}
+	}
+
+	errs := make([]error, len(ads))
+	for i, m := range merged {
+		if len(m.Failed) == 0 {
+			continue
+		}
+		sort.Strings(m.Succeeded)
+		errs[i] = m
+	}
+	return errs
+}
+
+func (c *Collector) advertiseMultipleTo(ctx context.Context, addr string, ads []*classad.ClassAd, opts *AdvertiseOptions) []error {
 	if len(ads) == 0 {
 		return nil
 	}
@@ -808,7 +935,7 @@ func (c *Collector) AdvertiseMultiple(ctx context.Context, ads []*classad.ClassA
 		// (Re)establish the shared connection. The first ad's command is carried
 		// by the DC_AUTHENTICATE handshake, so it needs no command-int prefix.
 		if conn == nil {
-			hc, err := c.dialAndAuthenticate(ctx, cmd)
+			hc, err := c.dialAddress(ctx, addr, cmd)
 			if err != nil {
 				errs[i] = fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 				continue
@@ -1105,4 +1232,57 @@ type DaemonLocation struct {
 	Name    string
 	Address string
 	Pool    string
+}
+
+// AdvertiseError reports an advertisement that did not reach every
+// configured collector.
+//
+// It is returned whenever at least one collector failed, including when
+// others succeeded -- partial success is a real outcome and the caller
+// should be able to see it rather than have it collapsed into "ok" or
+// "failed". Use AllFailed to tell "the ad is nowhere" from "the ad is
+// in some collectors but not all", which is the distinction that
+// decides whether a daemon is invisible or merely under-advertised.
+type AdvertiseError struct {
+	// Succeeded lists the collectors that took the ad, sorted.
+	Succeeded []string
+	// Failed maps a collector address to why it did not.
+	Failed map[string]error
+}
+
+// AllFailed reports whether no collector took the ad.
+func (e *AdvertiseError) AllFailed() bool { return len(e.Succeeded) == 0 }
+
+func (e *AdvertiseError) Error() string {
+	addrs := make([]string, 0, len(e.Failed))
+	for addr := range e.Failed {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+
+	var b strings.Builder
+	if e.AllFailed() {
+		fmt.Fprintf(&b, "advertisement reached no collector (%d failed):", len(addrs))
+	} else {
+		fmt.Fprintf(&b, "advertisement reached %d of %d collectors (%s ok):",
+			len(e.Succeeded), len(e.Succeeded)+len(addrs), strings.Join(e.Succeeded, ", "))
+	}
+	for _, addr := range addrs {
+		fmt.Fprintf(&b, " %s: %v;", addr, e.Failed[addr])
+	}
+	return strings.TrimSuffix(b.String(), ";")
+}
+
+// Unwrap exposes the per-collector errors to errors.Is and errors.As.
+func (e *AdvertiseError) Unwrap() []error {
+	addrs := make([]string, 0, len(e.Failed))
+	for addr := range e.Failed {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+	errs := make([]error, 0, len(addrs))
+	for _, addr := range addrs {
+		errs = append(errs, e.Failed[addr])
+	}
+	return errs
 }

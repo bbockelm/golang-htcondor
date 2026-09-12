@@ -244,6 +244,23 @@ func raceDial[T raceCloseable](
 		len(addrs), errors.Join(errs...))
 }
 
+// dialAddress connects and authenticates to one specific collector.
+//
+// The advertise path needs this: an update goes to every collector, so
+// it addresses them one at a time rather than racing for a winner.
+func (c *Collector) dialAddress(ctx context.Context, addr string, cmd commands.CommandType) (*client.HTCondorClient, error) {
+	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create security config: %w", err)
+	}
+	cl, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
+	if err != nil {
+		return nil, err
+	}
+	c.notePreferred(addr)
+	return cl, nil
+}
+
 // dialAndAuthenticate races authenticated connect attempts across
 // every address the Collector knows about, returning the winning
 // client. Each attempt gets its own derived context so cancelling
@@ -271,17 +288,7 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 	// Single-address fast path — preserves the pre-multi-collector
 	// behaviour and error shape for callers that never set up a list.
 	if len(addrs) == 1 {
-		addr := addrs[0]
-		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", addr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create security config: %w", err)
-		}
-		cl, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
-		if err != nil {
-			return nil, err
-		}
-		c.notePreferred(addr)
-		return cl, nil
+		return c.dialAddress(ctx, addrs[0], cmd)
 	}
 
 	stagger := c.raceStagger
