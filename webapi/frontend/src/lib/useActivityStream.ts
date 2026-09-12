@@ -36,9 +36,13 @@ export type ActivityStreamState = {
   unavailable: boolean;
 };
 
-/** How many events the ticker keeps. Enough to scroll through a burst,
- *  bounded so a tab left open overnight does not grow without limit. */
-const MAX_EVENTS = 50;
+/** How many events the ticker keeps for scrollback.
+ *
+ *  The panel shows roughly ten at a time and scrolls; this is about ten
+ *  screens of history, which is enough to look back over a burst without
+ *  letting a tab left open overnight accumulate without limit. Beyond it
+ *  the oldest fall off. */
+const MAX_EVENTS = 100;
 
 export function useActivityStream(ownedByMe: boolean, enabled = true): ActivityStreamState {
   // Tagged with the scope they arrived under rather than cleared when

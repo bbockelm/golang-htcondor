@@ -135,3 +135,30 @@ test('dashboard goodput panel binds the history summary', async ({ page }) => {
   await expect(page.getByText(/75% of/)).toBeVisible();
   await expect(page.getByText('exit 127')).toBeVisible();
 });
+
+// The tiles and the panels are two requests now, and the point of the
+// split is that the first does not wait for the second. Delaying the
+// activity response proves the tiles are not behind it: before the
+// split this page rendered nothing until every query had finished.
+test('status tiles render before the activity panels arrive', async ({ page }) => {
+  await page.route('**/api/v1/dashboard/activity*', async (route) => {
+    await new Promise((r) => setTimeout(r, 3000));
+    await route.fallback();
+  });
+  await page.goto('/');
+
+  // Visible well inside the 3s the panels are held back for.
+  await expect(page.getByText('Total')).toBeVisible({ timeout: 1500 });
+  await expect(page.getByText(/Why jobs were recently held/)).toBeHidden();
+
+  // And they do arrive.
+  await expect(page.getByText(/Why jobs were recently held/)).toBeVisible({ timeout: 10000 });
+});
+
+// The hold breakdown covers a window and the HELD tile does not, so the
+// two are meant to disagree. Saying which span is the difference between
+// a reader trusting the panel and filing a bug about it.
+test('hold breakdown states the window it covers', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText(/entered hold in the last/)).toBeVisible();
+});

@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import type {
   AdminLogsResponse,
+  DashboardActivityResponse,
   DashboardStats,
   JobListResponse,
   Session,
@@ -26,19 +27,13 @@ import type {
 // rows bind.
 const minutesAgo = (m: number) => Math.floor(Date.now() / 1000) - m * 60;
 
-export const dashboardFixture: DashboardStats = {
-  username: 'e2e',
-  // Named keys, not JobStatus numbers: the handler buckets by name
-  // ("idle"/"running"/"held"...) and the tiles read those names. The
-  // original fixture used '1'/'2' here, which types as Record<string,
-  // number> just as happily and rendered every tile as 0.
-  jobs_by_status: { idle: 1, running: 1, held: 3, completed: 1 },
-  jobs_total: 6,
+export const dashboardActivityFixture: DashboardActivityResponse = {
   activity: {
     hold_reasons: [
       { code: 13, label: 'Failed to transfer output', count: 2, example: 'smoke-transfer-error' },
       { code: 3, label: 'Policy expression (periodic_hold)', count: 1 },
     ],
+    hold_window_seconds: 3600,
     recently_submitted: [{ cluster_id: 42, proc_id: 0, at: minutesAgo(2), detail: 'smoke-submitted' }],
     recently_started: [{ cluster_id: 41, proc_id: 3, at: minutesAgo(5), detail: 'smoke-exec-host' }],
     recently_held: [{ cluster_id: 40, proc_id: 1, at: minutesAgo(9), detail: 'smoke-transfer-error' }],
@@ -60,6 +55,16 @@ export const dashboardFixture: DashboardStats = {
       { code: 0, signal: true, count: 2, seconds: 5000 },
     ],
   },
+};
+
+export const dashboardFixture: DashboardStats = {
+  username: 'e2e',
+  // Named keys, not JobStatus numbers: the handler buckets by name
+  // ("idle"/"running"/"held"...) and the tiles read those names. The
+  // original fixture used '1'/'2' here, which types as Record<string,
+  // number> just as happily and rendered every tile as 0.
+  jobs_by_status: { idle: 1, running: 1, held: 3, completed: 1 },
+  jobs_total: 6,
 };
 
 // Two frames, in the wire format writeActivityEvent produces. Hand-built
@@ -150,6 +155,7 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/auth/me': sessionFixture,
     '/api/v1/jobs': jobsFixture,
     '/api/v1/dashboard': dashboardFixture,
+    '/api/v1/dashboard/activity': dashboardActivityFixture,
     '/api/v1/admin/logs': adminLogsFixture,
     '/api/v1/version': {
       version: 'e2e',

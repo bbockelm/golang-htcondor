@@ -163,6 +163,10 @@ export interface HoldReasonCount {
 
 export interface DashboardActivity {
   hold_reasons?: HoldReasonCount[];
+  /** The span the hold breakdown covers. These rows answer "why did jobs
+   *  become held recently", which is a different question from the HELD
+   *  tile beside them -- the tile is the standing total. */
+  hold_window_seconds?: number;
   recently_submitted?: RecentJob[];
   recently_started?: RecentJob[];
   recently_held?: RecentJob[];
@@ -210,6 +214,15 @@ export interface DashboardStats {
   username: string;
   jobs_by_status: Record<string, number>;
   jobs_total: number;
+  /** Served by /dashboard/activity now. Still declared because an older
+   *  server sends them here, and a client that reads both keeps working
+   *  across the upgrade. */
+  activity?: DashboardActivity;
+  goodput?: GoodputSummary;
+}
+
+/** The slow half of the dashboard: what the panels below the tiles show. */
+export interface DashboardActivityResponse {
   activity: DashboardActivity;
   goodput?: GoodputSummary;
 }
@@ -845,6 +858,17 @@ export const api = {
     }
     const q = qs.toString();
     return fetchJSON(`${BASE}/dashboard${q ? '?' + q : ''}`);
+  },
+
+  // The slow half, fetched separately so the status tiles are not held
+  // behind the hold breakdown and four windowed lookups.
+  dashboardActivity: (params?: { owned_by_me?: boolean }): Promise<DashboardActivityResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.owned_by_me !== undefined) {
+      qs.set('owned_by_me', String(params.owned_by_me));
+    }
+    const q = qs.toString();
+    return fetchJSON(`${BASE}/dashboard/activity${q ? '?' + q : ''}`);
   },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
