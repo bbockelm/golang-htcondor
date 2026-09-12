@@ -98,18 +98,34 @@ func main() {
 	// Default behavior: run as server
 	if *demoMode {
 		if err := runDemoMode(earlyBuf); err != nil {
-			// On the failure path, restore stdlib log to plain
-			// stderr so log.Fatalf below isn't swallowed by the
-			// buffer.
-			earlyBuf.Detach()
-			log.Fatalf("Demo mode failed: %v", err)
+			die(earlyBuf, "Demo mode failed", err)
 		}
 	} else {
 		if err := runNormalMode(earlyBuf); err != nil {
-			earlyBuf.Detach()
-			log.Fatalf("Server failed: %v", err)
+			die(earlyBuf, "Server failed", err)
 		}
 	}
+}
+
+// die reports a startup failure and exits 1.
+//
+// It writes to stderr DIRECTLY rather than through the stdlib log:
+// by this point the stdlib log may have been re-pointed at the
+// structured logger (EarlyBuffer.Replay does that once the daemon log
+// file is open, and Detach is a no-op afterwards). A log.Fatalf here
+// therefore went to the daemon log -- or nowhere at all, when the log
+// could not be opened -- and an operator running the binary by hand
+// got an exit status of 1 and not one word about why.
+//
+// runNormalMode's deferred error-logger already records the reason in
+// the daemon log when the structured logger exists; this is the half
+// that reaches the person at the terminal.
+func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
+	fmt.Fprintf(os.Stderr, "%s: %v\n", what, err)
+	if earlyBuf != nil {
+		earlyBuf.Detach()
+	}
+	os.Exit(1)
 }
 
 // mcpConfig holds MCP-related configuration
@@ -230,6 +246,16 @@ func createLogger(cfg *config.Config) (*logging.Logger, error) {
 
 	if hasLogPath && logPath != "" && logPath != "stdout" && logPath != "stderr" {
 		if err := checkLogPathWritable(logPath); err != nil {
+			// Under condor_master, stdout goes nowhere: falling back to
+			// it means the daemon runs (or fails) with no diagnostics
+			// an operator can find. Refuse instead, so the failure is
+			// visible as a daemon that will not start and a reason in
+			// the master's log.
+			if daemon.UnderCondorMaster() {
+				return nil, fmt.Errorf("log file %q is not writable: %w "+
+					"(started by condor_master, where stdout is discarded, so there is "+
+					"nowhere else to report anything)", logPath, err)
+			}
 			log.Printf("LOG directory '%s' is not writable: %v", logPath, err)
 			log.Println("Falling back to stdout logging (debug config preserved)")
 			needStdout = true
@@ -974,23 +1000,74 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 // to the bare key. condor_master always passes -local-name <NAME>
 // when starting custom DC daemons, so honoring it here keeps us
 // consistent with how every other HTCondor daemon resolves config.
-func loadConfigWithDefaults() *config.Config {
+func loadConfigWithDefaults() (*config.Config, error) {
 	cfg, err := config.NewWithOptions(config.ConfigOptions{
 		Subsystem: "HTTP_API",
 		LocalName: *localName,
 	})
 	if err != nil {
-		// If config loading fails, create an empty config with minimal defaults
-		log.Printf("Warning: failed to load HTCondor configuration: %v", err)
-		log.Println("Proceeding with minimal configuration...")
-		cfg = config.NewEmpty()
+		// Refuse to start. Continuing with an empty config used to be
+		// the behaviour here, and it is worse than not starting: the
+		// daemon comes up on compiled-in defaults, so UID_DOMAIN and
+		// TRUST_DOMAIN become the local hostname, the pool signing key
+		// and the schedd are wherever the defaults point, and every
+		// authorization decision is made against a configuration the
+		// operator never wrote. A daemon that will not start is a
+		// problem you can see; one running on invented configuration
+		// is one you find out about later.
+		//
+		// A MISSING config is not this case -- the loader returns no
+		// error when there is no config file to read, so a development
+		// box with no HTCondor install still works.
+		return nil, fmt.Errorf("failed to load HTCondor configuration: %w", err)
 	}
 
 	// Fix TILDE and LOCAL_DIR defaults if needed
 	// Enable debug messages in development (can be controlled by env var if needed)
 	debug := os.Getenv("HTCONDOR_API_DEBUG") != ""
 	fixConfigDefaults(cfg, debug)
-	return cfg
+	return cfg, nil
+}
+
+// reportStartupFailureToLog makes a best effort to record a failure
+// that happened before the daemon had a logger.
+//
+// This is the case condor_master makes painful: it discards a daemon's
+// stdout and stderr, so a daemon that dies before opening its log file
+// leaves nothing anywhere -- the master records only that the daemon
+// exited. That is exactly what an unparseable config produced, because
+// the failure takes LOG down with it.
+//
+// So re-read the configuration in the LENIENT mode (which drops the
+// lines it cannot parse instead of refusing the file) purely to recover
+// $(LOG), and append the reason there. The lenient result is never used
+// to run on -- that is the behaviour this change exists to remove -- it
+// only answers "where does this machine keep its logs".
+func reportStartupFailureToLog(startupErr error) {
+	// Deliberately ignoring the error: this is the same load that just
+	// failed, and it fails again. What matters is that it returns a
+	// partially-populated config anyway -- the root config is read
+	// before the config.d file that broke, and $(LOG) is normally
+	// defined there -- so it can still answer "where do logs go".
+	cfg, _ := config.NewWithOptions(config.ConfigOptions{
+		Subsystem: "HTTP_API",
+		LocalName: *localName,
+	})
+	if cfg == nil {
+		return
+	}
+	logPath, ok := cfg.Get("HTTP_API_LOG")
+	if !ok || logPath == "" || logPath == "stdout" || logPath == "stderr" {
+		return
+	}
+
+	//nolint:gosec // G304: the path comes from this machine's HTCondor config
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	fmt.Fprintf(f, "%s FATAL: %v\n", time.Now().Format(time.RFC3339), startupErr)
 }
 
 // dropPrivilegesIfRoot transitions the process to the condor user
@@ -1222,7 +1299,13 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	}()
 
 	// Load configuration
-	cfg := loadConfigWithDefaults()
+	cfg, err := loadConfigWithDefaults()
+	if err != nil {
+		// Under condor_master stderr goes nowhere, so put the reason
+		// somewhere an operator can find it. See the helper.
+		reportStartupFailureToLog(err)
+		return err
+	}
 
 	// Drop privileges to the condor user before we touch any
 	// daemon-owned resources (log file, app DB, listener). HTCondor
@@ -1276,9 +1359,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Create logger with reasonable defaults for unprivileged operation.
 	// Assigning to the OUTER `logger` (declared at the top of the
 	// function) is intentional — the deferred error-logger reads the
-	// same variable. If this fails, the defer is a no-op and main's
-	// log.Fatalf still surfaces the message to stderr.
-	var err error
+	// same variable. If this fails, the defer is a no-op and main
+	// still surfaces the message to stderr.
 	logger, err = createLogger(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
