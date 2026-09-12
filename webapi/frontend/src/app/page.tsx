@@ -5,11 +5,13 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import {
   HoldReasons,
+  LiveTicker,
   OtherStatuses,
   RecentActivity,
   StatCard,
   STATUS_LABEL_BY_KEY,
 } from '@/components/DashboardPanels';
+import { useActivityStream } from '@/lib/useActivityStream';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 export default function Dashboard() {
@@ -63,6 +65,10 @@ function AuthenticatedDashboard({
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
+  // The live stream is independent of the snapshot query: it needs no
+  // data from it, and a mirror-less deployment simply renders no ticker.
+  const live = useActivityStream(ownedByMe);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', scope],
     queryFn: () => api.dashboard({ owned_by_me: ownedByMe }),
@@ -103,6 +109,8 @@ function AuthenticatedDashboard({
           </div>
 
           <OtherStatuses byStatus={data.jobs_by_status} />
+
+          <LiveTicker {...live} />
 
           <HoldReasons activity={data.activity} />
 

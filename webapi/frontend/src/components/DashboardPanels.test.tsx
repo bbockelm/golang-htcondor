@@ -1,7 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { DashboardActivity } from '@/lib/api';
-import { HoldReasons, OtherStatuses, RecentActivity, ago } from './DashboardPanels';
+import { HoldReasons, LiveTicker, OtherStatuses, RecentActivity, ago } from './DashboardPanels';
+import type { ActivityEvent } from '@/lib/useActivityStream';
 
 // The dashboard's activity half has more distinct states than the
 // Playwright suite can afford a fixture each for: a list can be
@@ -178,5 +179,71 @@ describe('ago', () => {
     // Clock skew between the access point and the browser is normal and
     // "-4s ago" reads as a bug in the page.
     expect(ago(now + 60)).toBe('0s');
+  });
+});
+
+describe('LiveTicker', () => {
+  const base = { events: [], connected: true, unavailable: false };
+  const event = (over: Partial<ActivityEvent> = {}): ActivityEvent => ({
+    kind: 'started',
+    cluster_id: 5,
+    proc_id: 0,
+    at: Math.floor(Date.now() / 1000) - 10,
+    ...over,
+  });
+
+  it('renders nothing where there is no mirror to stream from', () => {
+    const { container } = render(<LiveTicker {...base} unavailable />);
+    // Not an empty panel. One that never moves reads as a broken
+    // feature rather than an absent one, and the deployments without a
+    // mirror are exactly the ones that cannot have this.
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('distinguishes a quiet stream from one that is not connected yet', () => {
+    const { rerender } = render(<LiveTicker {...base} connected />);
+    expect(screen.getByText(/Nothing has happened since this page loaded/)).toBeInTheDocument();
+
+    rerender(<LiveTicker {...base} connected={false} />);
+    expect(screen.getByText(/Waiting for the stream/)).toBeInTheDocument();
+  });
+
+  it('shows the kind, the job and its detail', () => {
+    render(
+      <LiveTicker
+        {...base}
+        events={[event({ kind: 'held', cluster_id: 12, proc_id: 3, detail: 'transfer failed', owner: 'alice' })]}
+      />,
+    );
+    expect(screen.getByText('held')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '12.3' })).toHaveAttribute('href', '/jobs/12.3');
+    expect(screen.getByText('transfer failed')).toBeInTheDocument();
+    expect(screen.getByText('alice')).toBeInTheDocument();
+  });
+
+  it('says when events were dropped rather than letting a gap look quiet', () => {
+    render(<LiveTicker {...base} events={[event({ skipped: 17 })]} />);
+    expect(screen.getByText(/\+17 not shown/)).toBeInTheDocument();
+  });
+
+  it('does not annotate an event that lost nothing', () => {
+    render(<LiveTicker {...base} events={[event({ skipped: 0 })]} />);
+    expect(screen.queryByText(/not shown/)).not.toBeInTheDocument();
+  });
+
+  it('renders two events for the same job without colliding', () => {
+    // A job that starts and then completes produces two lines. Keying
+    // on the job id alone would make React drop one of them.
+    render(
+      <LiveTicker
+        {...base}
+        events={[
+          event({ kind: 'completed', cluster_id: 5, proc_id: 0, at: 1_700_000_100 }),
+          event({ kind: 'started', cluster_id: 5, proc_id: 0, at: 1_700_000_000 }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('completed')).toBeInTheDocument();
+    expect(screen.getByText('started')).toBeInTheDocument();
   });
 });

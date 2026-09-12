@@ -50,6 +50,18 @@ export const dashboardFixture: DashboardStats = {
   },
 };
 
+// Two frames, in the wire format writeActivityEvent produces. Hand-built
+// rather than typed like the JSON fixtures: the point here is the
+// framing, which a typed object could not express.
+function activityStreamFixture(): string {
+  const at = Math.floor(Date.now() / 1000);
+  const frame = (ev: Record<string, unknown>) => `event: activity\ndata: ${JSON.stringify(ev)}\n\n`;
+  return (
+    frame({ kind: 'started', cluster_id: 77, proc_id: 0, owner: 'e2e', at, detail: 'smoke-live-host' }) +
+    frame({ kind: 'held', cluster_id: 76, proc_id: 1, owner: 'e2e', at: at - 5, detail: 'smoke-live-hold' })
+  );
+}
+
 export const jobsFixture: JobListResponse = {
   jobs: [
     {
@@ -141,6 +153,19 @@ export async function installApiFixtures(page: Page) {
 
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
+    // The dashboard's live ticker is an EventSource, so it needs a real
+    // SSE response rather than JSON. Falling through to the 501 below
+    // would be a truthful "this deployment has no mirror" -- but it also
+    // logs a failed-resource console error, and the smoke suite fails on
+    // those. Serving a short stream covers the wiring instead.
+    if (path === '/api/v1/dashboard/activity/stream') {
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+        body: activityStreamFixture(),
+      });
+      return;
+    }
     if (path in table) {
       await route.fulfill({ json: table[path] as object });
       return;

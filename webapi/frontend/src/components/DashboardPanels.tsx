@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { JOB_STATUS_LABEL, type DashboardActivity, type RecentJob } from '@/lib/api';
+import type { ActivityStreamState } from '@/lib/useActivityStream';
 
 // The dashboard's panels, split out of app/page.tsx so they can be
 // rendered one state at a time in a test. They cannot live in the page
@@ -251,3 +252,83 @@ export function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }
     </div>
   );
 }
+
+// LiveTicker is the dashboard's one moving part: transitions as they
+// happen, rather than a count that was true when the page loaded.
+//
+// It renders nothing at all where there is no mirror to stream from. An
+// empty panel that never moves is worse than no panel -- it reads as a
+// broken feature rather than an absent one -- and the deployments
+// without a mirror are exactly the ones that cannot have this.
+export function LiveTicker({ events, connected, unavailable }: ActivityStreamState) {
+  if (unavailable) return null;
+
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Live</h2>
+        <span className="flex items-center gap-1.5 text-xs text-gray-400">
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${
+              connected ? 'bg-green-500' : 'bg-gray-300'
+            }`}
+            aria-hidden="true"
+          />
+          {connected ? 'watching' : 'connecting'}
+        </span>
+      </div>
+
+      <div className="rounded border border-gray-200">
+        {events.length === 0 ? (
+          <p className="px-3 py-2 text-xs text-gray-400">
+            {connected ? 'Nothing has happened since this page loaded.' : 'Waiting for the stream...'}
+          </p>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {events.map((ev) => (
+              <li
+                key={`${ev.at}-${ev.cluster_id}.${ev.proc_id}-${ev.kind}`}
+                className="flex items-baseline gap-2 px-3 py-1.5 text-xs"
+              >
+                <span
+                  className={`w-20 shrink-0 font-medium ${ACTIVITY_TONE[ev.kind] ?? 'text-gray-600'}`}
+                >
+                  {ev.kind}
+                </span>
+                <Link
+                  href={`/jobs/${ev.cluster_id}.${ev.proc_id}`}
+                  className="font-mono text-brand-700 hover:underline"
+                >
+                  {ev.cluster_id}.{ev.proc_id}
+                </Link>
+                {ev.owner && <span className="text-gray-500">{ev.owner}</span>}
+                {ev.detail && (
+                  <span className="truncate text-gray-500" title={ev.detail}>
+                    {ev.detail}
+                  </span>
+                )}
+                {/* A gap that looks like a quiet minute is worse than one
+                    that says it is a gap. */}
+                {!!ev.skipped && (
+                  <span className="ml-auto shrink-0 text-gray-400">
+                    +{ev.skipped} not shown
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 tabular-nums text-gray-400">{ago(ev.at)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+const ACTIVITY_TONE: Record<string, string> = {
+  submitted: 'text-blue-700',
+  started: 'text-green-700',
+  held: 'text-amber-700',
+  released: 'text-blue-700',
+  completed: 'text-gray-700',
+  removed: 'text-gray-500',
+};

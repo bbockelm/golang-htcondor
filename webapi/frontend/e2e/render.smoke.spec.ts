@@ -117,3 +117,12 @@ test('dashboard binds the activity panels, not just the status tiles', async ({ 
   // only one keyed off a numeric code rather than a list of jobs.
   await expect(page.getByText(/Failed to transfer output/).first()).toBeVisible();
 });
+
+// The ticker is the one part of the dashboard fed by an EventSource
+// rather than by the query client, so it is the one part the other
+// assertions cannot reach. Its component tests render it from props;
+// this is what proves the stream is subscribed to, parsed and bound.
+test('dashboard live ticker renders events from the stream', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText(/smoke-live-host/).first()).toBeVisible();
+});
