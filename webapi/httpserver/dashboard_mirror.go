@@ -105,7 +105,18 @@ func (s *Handler) dashboardFromMirror(ctx context.Context, owner string, ownedBy
 		act.mergeArchivedCompletions(archived)
 	}
 
-	return &dashboardSnapshot{Counts: counts, Total: total, Activity: act}, nil
+	snap := &dashboardSnapshot{Counts: counts, Total: total, Activity: act}
+
+	// Goodput reads the archive, which may be absent or lagging while
+	// the live table is fine. That costs the panel, not the page.
+	if gp, gerr := mirrorGoodput(ctx, dbc, scope, time.Now().Add(-goodputWindow).Unix()); gerr != nil {
+		s.logger.Debug(logging.DestinationHTTP,
+			"dashboard: mirror has no history for goodput", "error", gerr)
+	} else {
+		snap.Goodput = gp
+	}
+
+	return snap, nil
 }
 
 // mirrorStatusCounts groups the live table by status and hold code, which

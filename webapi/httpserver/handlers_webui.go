@@ -196,6 +196,10 @@ type DashboardResponse struct {
 	// are held, and what changed recently. Computed from the same walk
 	// as the counts.
 	Activity DashboardActivity `json:"activity"`
+	// Goodput is absent where nothing could answer it -- no history
+	// archive means no rate, and an omitted field says that where a
+	// zeroed one would read as "everything failed".
+	Goodput *GoodputSummary `json:"goodput,omitempty"`
 }
 
 // holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
@@ -316,6 +320,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			JobsByStatus: snap.Counts,
 			JobsTotal:    snap.Total,
 			Activity:     snap.Activity,
+			Goodput:      snap.Goodput,
 		})
 		return
 	} else if s.dbMirror.Enabled() {

@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import {
+  Goodput,
   HoldReasons,
   LiveTicker,
   OtherStatuses,
@@ -111,6 +112,8 @@ function AuthenticatedDashboard({
           <OtherStatuses byStatus={data.jobs_by_status} />
 
           <LiveTicker {...live} />
+
+          <Goodput goodput={data.goodput} />
 
           <HoldReasons activity={data.activity} />
 

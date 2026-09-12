@@ -89,7 +89,7 @@ func seedJobs(ctx context.Context, t *testing.T, dbc *dbrpc.Client, owner string
 
 // mirrorForDashboard brings up a collector, a mirror and a seeded jobs
 // table, and returns a Handler wired to them.
-func mirrorForDashboard(ctx context.Context, t *testing.T, owner string) *Handler {
+func mirrorForDashboard(ctx context.Context, t *testing.T, owner string, withHistory bool) *Handler {
 	t.Helper()
 	bin := htcondordbBinary(t)
 	harness := htcondor.SetupCondorHarnessWithConfig(t, "DAEMON_LIST = MASTER, COLLECTOR\n")
@@ -122,7 +122,63 @@ func mirrorForDashboard(ctx context.Context, t *testing.T, owner string) *Handle
 	}
 	defer closer()
 	seedJobs(ctx, t, dbc, owner)
+	if withHistory {
+		if err := dbc.CreateTable(ctx, "history"); err != nil && !strings.Contains(err.Error(), "exists") {
+			t.Fatalf("creating the history table: %v", err)
+		}
+		seedHistory(ctx, t, dbc, owner)
+	}
 	return h
+}
+
+// seedHistory writes finished jobs, covering every way the summary has
+// to classify one: a clean exit, a bad exit, a fatal signal, and a job
+// that left without an outcome at all.
+func seedHistory(ctx context.Context, t *testing.T, dbc *dbrpc.Client, owner string) {
+	t.Helper()
+	now := time.Now().Unix()
+
+	type done struct {
+		cluster int
+		attrs   string
+	}
+	rows := []done{
+		// Two clean successes, cheap.
+		{101, "ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 100"},
+		{102, "ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 200"},
+		// A cheap, frequent failure and an expensive, rare one. The
+		// ranking must prefer the second.
+		{103, "ExitCode = 1\nExitBySignal = false\nRemoteWallClockTime = 5"},
+		{104, "ExitCode = 1\nExitBySignal = false\nRemoteWallClockTime = 5"},
+		{105, "ExitCode = 127\nExitBySignal = false\nRemoteWallClockTime = 40000"},
+		// Killed by a signal. The exit code recorded beside it means
+		// nothing.
+		{106, "ExitCode = 0\nExitBySignal = true\nExitSignal = 9\nRemoteWallClockTime = 60"},
+		// Removed before it finished: no exit code at all. This is the
+		// row that must not be counted as a success.
+		{107, "RemoteWallClockTime = 30"},
+		// Outside the window, so it must not be counted at all.
+		{108, "ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 999999"},
+	}
+
+	tx, err := dbc.BeginTable(ctx, "history")
+	if err != nil {
+		t.Fatalf("begin history: %v", err)
+	}
+	for _, r := range rows {
+		completed := now - 60
+		if r.cluster == 108 {
+			completed = now - 48*3600
+		}
+		ad := fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 4\nCompletionDate = %d\n%s",
+			r.cluster, owner, completed, r.attrs)
+		if err := tx.NewClassAd(ctx, fmt.Sprintf("h%d.0", r.cluster), ad); err != nil {
+			t.Fatalf("insert history %d: %v", r.cluster, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit history: %v", err)
+	}
 }
 
 // TestDashboardFromMirrorCountsRealRows runs the dashboard's own query
@@ -135,7 +191,7 @@ func TestDashboardFromMirrorCountsRealRows(t *testing.T) {
 	defer cancel()
 
 	const owner = "dashuser"
-	h := mirrorForDashboard(ctx, t, owner)
+	h := mirrorForDashboard(ctx, t, owner, false)
 
 	snap, err := h.dashboardFromMirror(ctx, owner, false)
 	if err != nil {
@@ -182,7 +238,7 @@ func TestDashboardFromMirrorBreaksDownHolds(t *testing.T) {
 	defer cancel()
 
 	const owner = "dashuser"
-	h := mirrorForDashboard(ctx, t, owner)
+	h := mirrorForDashboard(ctx, t, owner, false)
 
 	snap, err := h.dashboardFromMirror(ctx, owner, false)
 	if err != nil {
@@ -228,7 +284,7 @@ func TestDashboardFromMirrorReadsRecentActivity(t *testing.T) {
 	defer cancel()
 
 	const owner = "dashuser"
-	h := mirrorForDashboard(ctx, t, owner)
+	h := mirrorForDashboard(ctx, t, owner, false)
 
 	snap, err := h.dashboardFromMirror(ctx, owner, false)
 	if err != nil {
@@ -287,7 +343,7 @@ func TestDashboardFromMirrorScopesToOwner(t *testing.T) {
 	defer cancel()
 
 	const owner = "dashuser"
-	h := mirrorForDashboard(ctx, t, owner)
+	h := mirrorForDashboard(ctx, t, owner, false)
 
 	// Scoped to somebody with nothing in the table.
 	snap, err := h.dashboardFromMirror(ctx, "nobody-else", true)
@@ -310,5 +366,82 @@ func TestDashboardFromMirrorScopesToOwner(t *testing.T) {
 	}
 	if mine.Total != 10 {
 		t.Errorf("the owner sees %d of their own 10 jobs", mine.Total)
+	}
+}
+
+// TestDashboardGoodputFromRealHistory is the counterpart to the counts
+// test: it asks a real database to group and sum over attributes that
+// most rows have and some do not, and checks the classification that
+// rides on the answer.
+func TestDashboardGoodputFromRealHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const owner = "dashuser"
+	h := mirrorForDashboard(ctx, t, owner, true)
+
+	snap, err := h.dashboardFromMirror(ctx, owner, false)
+	if err != nil {
+		t.Fatalf("dashboardFromMirror: %v", err)
+	}
+	gp := snap.Goodput
+	if gp == nil {
+		t.Fatal("no goodput summary with a history table present")
+	}
+
+	if gp.Succeeded != 2 {
+		t.Errorf("succeeded = %d, want 2 (the two clean exits inside the window)", gp.Succeeded)
+	}
+	// Two exit-1, one exit-127, one signalled.
+	if gp.Failed != 4 {
+		t.Errorf("failed = %d, want 4", gp.Failed)
+	}
+	// The row with no exit code at all. Counting it as a success is the
+	// wrong answer this assertion exists to catch: it has no ExitCode
+	// attribute, and a parse that treats absent as zero would call it
+	// one.
+	if gp.Unfinished != 1 {
+		t.Errorf("unfinished = %d, want 1 (the job that left without an outcome)", gp.Unfinished)
+	}
+
+	// Wall clock, which is the half that makes the panel worth having.
+	if gp.GoodSeconds != 300 {
+		t.Errorf("good seconds = %d, want 300", gp.GoodSeconds)
+	}
+	if gp.BadSeconds != 5+5+40000+60+30 {
+		t.Errorf("bad seconds = %d, want %d", gp.BadSeconds, 5+5+40000+60+30)
+	}
+
+	// The window. The 999999-second success sits two days back; if it
+	// were counted the good total above would be wrong, so this is
+	// really asserted twice over.
+	if gp.GoodSeconds > 999999 {
+		t.Error("a completion outside the window was counted")
+	}
+
+	if len(gp.TopFailures) == 0 {
+		t.Fatal("failures were counted but none ranked")
+	}
+	// Ranked by wasted time: one job that burned eleven hours outranks
+	// two that failed in five seconds.
+	if gp.TopFailures[0].Code != 127 || gp.TopFailures[0].Seconds != 40000 {
+		t.Errorf("top failure is %+v, want exit 127 at 40000s", gp.TopFailures[0])
+	}
+	// And the signalled job is reported as killed rather than as exit 0,
+	// which is what its ExitCode attribute literally says.
+	sawSignal := false
+	for _, f := range gp.TopFailures {
+		if f.Signal {
+			sawSignal = true
+			if f.Count != 1 {
+				t.Errorf("signalled row counts %d jobs, want 1", f.Count)
+			}
+		}
+	}
+	if !sawSignal {
+		t.Error("the job killed by a signal is not in the failure breakdown")
 	}
 }

@@ -1,7 +1,15 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import type { DashboardActivity } from '@/lib/api';
-import { HoldReasons, LiveTicker, OtherStatuses, RecentActivity, ago } from './DashboardPanels';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DashboardActivity, GoodputSummary } from '@/lib/api';
+import {
+  Goodput,
+  HoldReasons,
+  LiveTicker,
+  OtherStatuses,
+  RecentActivity,
+  ago,
+  duration,
+} from './DashboardPanels';
 import type { ActivityEvent } from '@/lib/useActivityStream';
 
 // The dashboard's activity half has more distinct states than the
@@ -166,7 +174,16 @@ describe('OtherStatuses', () => {
 });
 
 describe('ago', () => {
-  const now = Math.floor(Date.now() / 1000);
+  // The clock is frozen because ago() reads it: capturing `now` here and
+  // letting the real clock advance between the two reads makes this fail
+  // roughly once per second of test runtime, which is a flake rather
+  // than a finding. (It did, once.)
+  const now = 1_700_000_000;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now * 1000);
+  });
+  afterEach(() => vi.useRealTimers());
 
   it('uses the largest unit that fits', () => {
     expect(ago(now - 5)).toBe('5s');
@@ -245,5 +262,97 @@ describe('LiveTicker', () => {
     );
     expect(screen.getByText('completed')).toBeInTheDocument();
     expect(screen.getByText('started')).toBeInTheDocument();
+  });
+});
+
+describe('Goodput', () => {
+  const summary = (over: Partial<GoodputSummary> = {}): GoodputSummary => ({
+    window_hours: 24,
+    succeeded: 10,
+    failed: 2,
+    unfinished: 0,
+    good_seconds: 3600,
+    bad_seconds: 400,
+    ...over,
+  });
+
+  it('renders nothing when no archive could answer', () => {
+    const { container } = render(<Goodput goodput={undefined} />);
+    // Absent means nothing could tell us, not that nothing succeeded.
+    // Zeros here would be a confident wrong answer.
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders nothing when nothing finished in the window', () => {
+    const { container } = render(
+      <Goodput goodput={summary({ succeeded: 0, failed: 0, unfinished: 0, good_seconds: 0, bad_seconds: 0 })} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('shows the split and the share of compute that survived', () => {
+    render(<Goodput goodput={summary({ good_seconds: 3000, bad_seconds: 1000 })} />);
+    expect(screen.getByText('10')).toBeInTheDocument();
+    // "succeeded" also appears in the sentence below the bar, so match
+    // the label exactly rather than by substring.
+    expect(screen.getByText('succeeded')).toBeInTheDocument();
+    // 3000 of 4000 seconds.
+    expect(screen.getByText(/75% of/)).toBeInTheDocument();
+  });
+
+  it('counts cancelled jobs apart from failures', () => {
+    render(<Goodput goodput={summary({ unfinished: 3 })} />);
+    // A job its owner removed is not the access point going wrong.
+    expect(screen.getByText(/did not finish/)).toBeInTheDocument();
+  });
+
+  it('omits the cancelled row when there are none', () => {
+    render(<Goodput goodput={summary({ unfinished: 0 })} />);
+    expect(screen.queryByText('did not finish')).not.toBeInTheDocument();
+  });
+
+  it('reports a signalled failure as killed rather than as an exit code', () => {
+    render(
+      <Goodput
+        goodput={summary({
+          top_failures: [{ code: 0, signal: true, count: 4, seconds: 900 }],
+        })}
+      />,
+    );
+    // The exit code recorded beside a signal is meaningless -- rendering
+    // "exit 0" for a killed job would report a success.
+    expect(screen.getByText(/killed by a signal/)).toBeInTheDocument();
+    expect(screen.queryByText(/exit 0/)).not.toBeInTheDocument();
+  });
+
+  it('lists failing exit codes with what they cost', () => {
+    render(
+      <Goodput
+        goodput={summary({
+          top_failures: [{ code: 127, signal: false, count: 10, seconds: 40000 }],
+        })}
+      />,
+    );
+    expect(screen.getByText('exit 127')).toBeInTheDocument();
+    expect(screen.getByText(/10 jobs/)).toBeInTheDocument();
+    expect(screen.getByText('11h')).toBeInTheDocument();
+  });
+
+  it('does not divide by zero when nothing reported wall clock', () => {
+    render(<Goodput goodput={summary({ good_seconds: 0, bad_seconds: 0 })} />);
+    // Counts still render; the compute line simply does not.
+    expect(screen.getByText('succeeded')).toBeInTheDocument();
+    expect(screen.queryByText(/of compute/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+  });
+});
+
+describe('duration', () => {
+  it('uses the unit an operator would say', () => {
+    expect(duration(45)).toBe('45s');
+    expect(duration(90)).toBe('2m');
+    expect(duration(5400)).toBe('1.5h');
+    expect(duration(40000)).toBe('11h');
+    expect(duration(3 * 86400)).toBe('3d');
   });
 });

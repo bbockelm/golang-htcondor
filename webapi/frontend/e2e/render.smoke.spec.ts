@@ -126,3 +126,12 @@ test('dashboard live ticker renders events from the stream', async ({ page }) =>
   await page.goto('/');
   await expect(page.getByText(/smoke-live-host/).first()).toBeVisible();
 });
+
+test('dashboard goodput panel binds the history summary', async ({ page }) => {
+  await page.goto('/');
+  // The wall-clock share is computed in the component rather than sent,
+  // so this covers the arithmetic as well as the binding: 90000 good of
+  // 120000 total.
+  await expect(page.getByText(/75% of/)).toBeVisible();
+  await expect(page.getByText('exit 127')).toBeVisible();
+});

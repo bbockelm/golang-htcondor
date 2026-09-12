@@ -48,6 +48,18 @@ export const dashboardFixture: DashboardStats = {
     source: 'smoke fixture',
     computed_at: minutesAgo(1),
   },
+  goodput: {
+    window_hours: 24,
+    succeeded: 120,
+    failed: 8,
+    unfinished: 1,
+    good_seconds: 90000,
+    bad_seconds: 30000,
+    top_failures: [
+      { code: 127, signal: false, count: 6, seconds: 25000 },
+      { code: 0, signal: true, count: 2, seconds: 5000 },
+    ],
+  },
 };
 
 // Two frames, in the wire format writeActivityEvent produces. Hand-built

@@ -1,7 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { JOB_STATUS_LABEL, type DashboardActivity, type RecentJob } from '@/lib/api';
+import {
+  JOB_STATUS_LABEL,
+  type DashboardActivity,
+  type GoodputSummary,
+  type RecentJob,
+} from '@/lib/api';
 import type { ActivityStreamState } from '@/lib/useActivityStream';
 
 // The dashboard's panels, split out of app/page.tsx so they can be
@@ -332,3 +337,104 @@ const ACTIVITY_TONE: Record<string, string> = {
   completed: 'text-gray-700',
   removed: 'text-gray-500',
 };
+
+// Goodput answers the question the tiles cannot: of the work that
+// actually ran, how much of it survived.
+//
+// The wall-clock split is the part worth reading. Ten thousand jobs
+// failing in two seconds each is a broken submission and costs nothing;
+// ten failing after twelve hours each is most of a day of a machine
+// thrown away. The counts alone cannot tell those apart.
+export function Goodput({ goodput }: { goodput?: GoodputSummary }) {
+  // Absent means no history archive answered, not that nothing
+  // succeeded. Rendering zeros there would be a confident wrong answer.
+  if (!goodput) return null;
+
+  const { succeeded, failed, unfinished, good_seconds, bad_seconds } = goodput;
+  const finished = succeeded + failed + unfinished;
+  if (finished === 0) {
+    return null;
+  }
+  const wall = good_seconds + bad_seconds;
+
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          Goodput
+        </h2>
+        <span className="text-xs text-gray-400">last {goodput.window_hours}h</span>
+      </div>
+
+      <div className="rounded border border-gray-200 p-3">
+        <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
+          <span>
+            <span className="font-medium text-green-700">{succeeded.toLocaleString()}</span>
+            <span className="ml-1.5 text-gray-500">succeeded</span>
+          </span>
+          <span>
+            <span className="font-medium text-red-700">{failed.toLocaleString()}</span>
+            <span className="ml-1.5 text-gray-500">failed</span>
+          </span>
+          {unfinished > 0 && (
+            <span>
+              <span className="font-medium text-gray-700">{unfinished.toLocaleString()}</span>
+              {/* A job its owner cancelled is not the access point going
+                  wrong, so it is counted apart from failures. */}
+              <span className="ml-1.5 text-gray-500">did not finish</span>
+            </span>
+          )}
+        </div>
+
+        {wall > 0 && (
+          <div className="mt-2.5">
+            <div className="flex h-1.5 overflow-hidden rounded-full bg-gray-100">
+              <div
+                className="bg-green-500"
+                style={{ width: `${(good_seconds / wall) * 100}%` }}
+                aria-hidden="true"
+              />
+              <div
+                className="bg-red-400"
+                style={{ width: `${(bad_seconds / wall) * 100}%` }}
+                aria-hidden="true"
+              />
+            </div>
+            <p className="mt-1.5 text-xs text-gray-500">
+              {Math.round((good_seconds / wall) * 100)}% of {duration(wall)} of compute went
+              to jobs that succeeded
+              {bad_seconds > 0 && <> · {duration(bad_seconds)} wasted</>}
+            </p>
+          </div>
+        )}
+
+        {!!goodput.top_failures?.length && (
+          <ul className="mt-2.5 space-y-0.5 border-t border-gray-100 pt-2 text-xs text-gray-600">
+            {goodput.top_failures.map((f) => (
+              <li key={f.signal ? 'signal' : `code-${f.code}`} className="flex gap-2">
+                <span className="font-medium">
+                  {f.signal ? 'killed by a signal' : `exit ${f.code}`}
+                </span>
+                <span className="text-gray-500">
+                  {f.count.toLocaleString()} {f.count === 1 ? 'job' : 'jobs'}
+                </span>
+                {/* Ranked by time rather than count: the expensive
+                    failure is frequently the rare one. */}
+                <span className="ml-auto tabular-nums text-gray-400">{duration(f.seconds)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// duration renders a span of seconds the way an operator says it.
+export function duration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  const hours = seconds / 3600;
+  if (hours < 48) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
+}

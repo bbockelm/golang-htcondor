@@ -99,6 +99,10 @@ type dashboardSnapshot struct {
 	Counts   map[string]int
 	Total    int
 	Activity DashboardActivity
+	// Goodput is nil where nothing could answer it. It needs a history
+	// archive, so the schedd path never fills it in: the queue does not
+	// keep finished jobs long enough to have a rate.
+	Goodput *GoodputSummary
 }
 
 // dashboardCache holds the most recent snapshot per scope key, and
