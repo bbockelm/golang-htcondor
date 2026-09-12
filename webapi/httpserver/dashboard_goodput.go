@@ -85,12 +85,31 @@ const goodputTopFailures = 5
 // fail the whole query rather than answer it.
 func mirrorGoodput(ctx context.Context, dbc *dbrpc.Client, scope string, since int64) (*GoodputSummary, error) {
 	constraint := fmt.Sprintf("(%s) && CompletionDate >= %d", scope, since)
-	rows, err := dbc.AggregateTable(ctx, "history", constraint,
-		[]string{"ExitCode", "ExitBySignal"},
-		[]dbrpc.AggSpec{
-			{Func: dbrpc.AggCount, Arg: "*"},
-			{Func: dbrpc.AggSum, Arg: "RemoteWallClockTime"},
-		})
+	groupBy := []string{"ExitCode", "ExitBySignal"}
+	aggs := []dbrpc.AggSpec{
+		{Func: dbrpc.AggCount, Arg: "*"},
+		{Func: dbrpc.AggSum, Arg: "RemoteWallClockTime"},
+	}
+
+	// The archive API, not the table one.
+	//
+	// htcondordb makes "history" an archive table -- append-only,
+	// zone-mapped on CompletionDate precisely so a windowed read prunes
+	// whole segments rather than scanning. The two APIs are not
+	// interchangeable and the difference is invisible from the outside:
+	// QueryRawProject on "history" reaches the archive (which is why
+	// every other history read here works), while AggregateTable on the
+	// same name answers "no such table". Written against the table API
+	// this returned an error on every call in production while passing
+	// every test, because the tests built a plain table.
+	rows, err := dbc.ArchiveAggregate(ctx, "history", constraint, groupBy, aggs)
+	if err != nil {
+		// A deployment whose history is an ordinary table rather than an
+		// archive. Not what htcondordb builds today, but the table API
+		// is what the rest of this file uses and falling back costs one
+		// failed round trip on a path that already tolerates errors.
+		rows, err = dbc.AggregateTable(ctx, "history", constraint, groupBy, aggs)
+	}
 	if err != nil {
 		return nil, err
 	}

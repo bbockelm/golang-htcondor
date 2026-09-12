@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/db"
 	"github.com/PelicanPlatform/classad/dbrpc"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -123,8 +124,16 @@ func mirrorForDashboard(ctx context.Context, t *testing.T, owner string, withHis
 	defer closer()
 	seedJobs(ctx, t, dbc, owner)
 	if withHistory {
-		if err := dbc.CreateTable(ctx, "history"); err != nil && !strings.Contains(err.Error(), "exists") {
-			t.Fatalf("creating the history table: %v", err)
+		// An ARCHIVE table, zone-mapped on CompletionDate: that is what
+		// htcondordb's schedd-sync creates, and it is not
+		// interchangeable with a plain table of the same name. Built as
+		// a plain table this suite passed while the feature under test
+		// errored on every call in production -- the aggregate reaches
+		// an archive only through the archive API.
+		if err := dbc.CreateArchiveTable(ctx, "history", db.ArchiveConfig{
+			ZoneAttrs: []string{"CompletionDate"},
+		}); err != nil && !strings.Contains(err.Error(), "exists") {
+			t.Fatalf("creating the history archive: %v", err)
 		}
 		seedHistory(ctx, t, dbc, owner)
 	}
@@ -161,10 +170,8 @@ func seedHistory(ctx context.Context, t *testing.T, dbc *dbrpc.Client, owner str
 		{108, "ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 999999"},
 	}
 
-	tx, err := dbc.BeginTable(ctx, "history")
-	if err != nil {
-		t.Fatalf("begin history: %v", err)
-	}
+	// Appended, not transacted: an archive is append-only and has no
+	// BeginTable.
 	for _, r := range rows {
 		completed := now - 60
 		if r.cluster == 108 {
@@ -172,12 +179,9 @@ func seedHistory(ctx context.Context, t *testing.T, dbc *dbrpc.Client, owner str
 		}
 		ad := fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 4\nCompletionDate = %d\n%s",
 			r.cluster, owner, completed, r.attrs)
-		if err := tx.NewClassAd(ctx, fmt.Sprintf("h%d.0", r.cluster), ad); err != nil {
-			t.Fatalf("insert history %d: %v", r.cluster, err)
+		if err := dbc.ArchiveAppend(ctx, "history", ad); err != nil {
+			t.Fatalf("append history %d: %v", r.cluster, err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit history: %v", err)
 	}
 }
 
