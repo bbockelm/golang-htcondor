@@ -452,7 +452,7 @@ executable = /bin/echo
 			if !ok {
 				t.Fatalf("Expected %s to be set", tt.attr)
 			}
-			if int64(got) != tt.want {
+			if got != tt.want {
 				t.Errorf("Expected %s = %d, got %d", tt.attr, tt.want, got)
 			}
 		})
