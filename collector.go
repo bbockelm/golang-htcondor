@@ -86,6 +86,7 @@ func NewCollector(address string) *Collector {
 		// rand/v2 is auto-seeded — no global rand.Seed needed and the
 		// result varies per process, which is exactly what we want
 		// for fleet-wide load spreading.
+		//nolint:gosec // G404: spreading load across collectors, not a secret
 		rand.Shuffle(len(addrs), func(i, j int) {
 			addrs[i], addrs[j] = addrs[j], addrs[i]
 		})

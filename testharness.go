@@ -299,7 +299,12 @@ ENABLE_WEB_SERVER = False
 				if err != nil {
 					return err
 				}
-				return os.Lchown(p, uid, gid) // Lchown: never follow a symlink out of the tree
+				// Lchown, not Chown: never follow a symlink out of the
+				// tree. That is the mitigation gosec asks for here; the
+				// tree is one this harness just created under its own
+				// temp dir, with no other writer to race.
+				//nolint:gosec // G122: Lchown does not follow symlinks
+				return os.Lchown(p, uid, gid)
 			})
 			if werr != nil {
 				t.Logf("harness: chowning tree to condor failed (continuing): %v", werr)

@@ -17,7 +17,7 @@ import (
 // Detaching the credential is what makes that leg authenticate as the
 // daemon, using the pool token the broker does recognise.
 func TestWithoutSecurityConfigDropsTheCallerCredential(t *testing.T) {
-	callers := &security.SecurityConfig{
+	callers := &security.SecurityConfig{ //nolint:gosec // G101: not a real credential
 		Token:       "a.browser.session.jwt",
 		AuthMethods: []security.AuthMethod{security.AuthToken},
 	}
@@ -59,7 +59,7 @@ func TestWithoutSecurityConfigKeepsCancellation(t *testing.T) {
 // leave that intact -- it is what the starter resumes on, and dropping it
 // would break ssh-to-job everywhere, not just behind CCB.
 func TestStarterConfigKeepsTheClaimIDSessionWithoutTheCallerToken(t *testing.T) {
-	ctx := WithSecurityConfig(context.Background(), &security.SecurityConfig{
+	ctx := WithSecurityConfig(context.Background(), &security.SecurityConfig{ //nolint:gosec // G101: not a real credential
 		Token:       "a.browser.session.jwt",
 		AuthMethods: []security.AuthMethod{security.AuthToken},
 	})
