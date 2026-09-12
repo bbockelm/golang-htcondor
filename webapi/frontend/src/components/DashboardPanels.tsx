@@ -4,11 +4,13 @@ import Link from 'next/link';
 import {
   JOB_STATUS_LABEL,
   type DashboardActivity,
+  type ExitCodeCount,
   type HoldReasonCount,
   type GoodputSummary,
   type RecentJob,
 } from '@/lib/api';
 import type { ActivityStreamState } from '@/lib/useActivityStream';
+import { archiveDrilldown, jobsDrilldown, statusConstraint } from '@/lib/drilldown';
 
 // The dashboard's panels, split out of app/page.tsx so they can be
 // rendered one state at a time in a test. They cannot live in the page
@@ -120,13 +122,34 @@ export function holdRowHref(row: HoldReasonCount, activity: DashboardActivity): 
 // visible: four counts look the same whether nothing has happened for an
 // hour or a thousand jobs started in the last minute.
 export function RecentActivity({ activity }: { activity: DashboardActivity }) {
+  // The window the lists were built over, so "see all" asks the same
+  // question rather than a broader one.
+  const since = activity.computed_at - (activity.hold_window_seconds ?? 3600);
   const lists = [
-    { title: 'Recently submitted', jobs: activity.recently_submitted },
-    { title: 'Recently started', jobs: activity.recently_started },
-    { title: 'Recently held', jobs: activity.recently_held },
+    {
+      title: 'Recently submitted',
+      jobs: activity.recently_submitted,
+      allHref: jobsDrilldown(`QDate >= ${since}`, 'recently submitted jobs'),
+    },
+    {
+      title: 'Recently started',
+      jobs: activity.recently_started,
+      allHref: jobsDrilldown(`JobCurrentStartDate >= ${since}`, 'recently started jobs'),
+    },
+    {
+      title: 'Recently held',
+      jobs: activity.recently_held,
+      allHref: jobsDrilldown(
+        `JobStatus == 5 && EnteredCurrentStatus >= ${since}`,
+        'jobs held recently',
+      ),
+    },
     {
       title: 'Recently completed',
       jobs: activity.recently_completed,
+      // The archive, not the queue: a finished job is gone from the
+      // queue within seconds, so "all of them" only exists in history.
+      allHref: archiveDrilldown(`CompletionDate >= ${since}`, 'recently completed jobs'),
       // The queue only holds finished jobs until the reaper takes them,
       // so without the archive this is the last few seconds rather than
       // the last hour. Saying which keeps a short list from reading as a
@@ -168,6 +191,7 @@ export function RecentActivity({ activity }: { activity: DashboardActivity }) {
               jobs={list.jobs ?? []}
               note={list.note}
               unavailable={list.unavailable}
+              allHref={list.allHref}
             />
           ))}
         </div>
@@ -181,16 +205,26 @@ function RecentList({
   jobs,
   note,
   unavailable,
+  allHref,
 }: {
   title: string;
   jobs: RecentJob[];
   note?: string;
   unavailable?: string;
+  allHref?: string;
 }) {
   return (
     <div className="rounded border border-gray-200">
-      <div className="border-b border-gray-100 px-3 py-1.5 text-xs font-medium text-gray-600">
-        {title}
+      <div className="flex items-baseline gap-2 border-b border-gray-100 px-3 py-1.5 text-xs font-medium text-gray-600">
+        <span>{title}</span>
+        {/* These lists are the newest handful, not everything in the
+            window. Without a way through to the rest, a truncated list
+            is indistinguishable from a complete one. */}
+        {allHref && jobs.length > 0 && (
+          <Link href={allHref} className="ml-auto font-normal text-brand-700 hover:underline">
+            see all
+          </Link>
+        )}
       </div>
       {note && <p className="px-3 pt-1.5 text-xs text-amber-700">{note}</p>}
       {jobs.length === 0 ? (
@@ -252,22 +286,34 @@ export function StatCard({
   label,
   value,
   primary,
+  href,
 }: {
   label: string;
   value: number;
   primary?: boolean;
+  href?: string;
 }) {
-  return (
-    <div
-      className={`rounded-lg border p-4 ${
-        primary ? 'border-brand-200 bg-brand-50' : 'border-gray-200 bg-white'
-      }`}
-    >
+  const body = (
+    <>
       <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
       <div className="mt-1 text-2xl font-semibold text-gray-900">
         {value.toLocaleString()}
       </div>
-    </div>
+    </>
+  );
+  const cls = `block rounded-lg border p-4 ${
+    primary ? 'border-brand-200 bg-brand-50' : 'border-gray-200 bg-white'
+  }`;
+
+  // A tile with nothing in it links nowhere: sending someone to an empty
+  // list is a worse answer than not offering the link.
+  if (!href || value === 0) {
+    return <div className={cls}>{body}</div>;
+  }
+  return (
+    <Link href={href} className={`${cls} transition-colors hover:border-brand-300 hover:bg-brand-50`}>
+      {body}
+    </Link>
   );
 }
 
@@ -295,7 +341,19 @@ export function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }
       <ul className="text-sm text-gray-700 space-y-1">
         {extras.map(([key, n]) => (
           <li key={key} className="flex justify-between">
-            <span>{STATUS_LABEL_BY_KEY[key] ?? key}</span>
+            {statusConstraint(key) ? (
+              <Link
+                href={jobsDrilldown(
+                  statusConstraint(key) as string,
+                  `${(STATUS_LABEL_BY_KEY[key] ?? key).toLowerCase()} jobs`,
+                )}
+                className="hover:underline"
+              >
+                {STATUS_LABEL_BY_KEY[key] ?? key}
+              </Link>
+            ) : (
+              <span>{STATUS_LABEL_BY_KEY[key] ?? key}</span>
+            )}
             <span className="font-medium">{n.toLocaleString()}</span>
             {!known.has(key) && (
               <span className="ml-2 text-gray-400 text-xs">(unmapped)</span>
@@ -469,9 +527,9 @@ export function Goodput({ goodput }: { goodput?: GoodputSummary }) {
           <ul className="mt-2.5 space-y-0.5 border-t border-gray-100 pt-2 text-xs text-gray-600">
             {goodput.top_failures.map((f) => (
               <li key={f.signal ? 'signal' : `code-${f.code}`} className="flex gap-2">
-                <span className="font-medium">
+                <Link href={failureDrilldown(f, goodput.since)} className="font-medium hover:underline">
                   {f.signal ? 'killed by a signal' : `exit ${f.code}`}
-                </span>
+                </Link>
                 <span className="text-gray-500">
                   {f.count.toLocaleString()} {f.count === 1 ? 'job' : 'jobs'}
                 </span>
@@ -485,6 +543,20 @@ export function Goodput({ goodput }: { goodput?: GoodputSummary }) {
       </div>
     </section>
   );
+}
+
+// failureDrilldown points at the finished jobs behind one failure row.
+//
+// The archive, always: these jobs ran to completion and the queue
+// destroyed them within seconds of recording how they went. It is also
+// the only place the exit status still exists.
+export function failureDrilldown(f: ExitCodeCount, since: number): string {
+  // A signalled job's ExitCode is whatever happened to be in the ad, so
+  // matching on it would select the wrong jobs -- often those that
+  // exited cleanly.
+  const what = f.signal ? 'ExitBySignal == true' : `ExitCode == ${f.code} && ExitBySignal =!= true`;
+  const why = f.signal ? 'jobs killed by a signal' : `jobs that exited ${f.code}`;
+  return archiveDrilldown(`${what} && CompletionDate >= ${since}`, why);
 }
 
 // duration renders a span of seconds the way an operator says it.

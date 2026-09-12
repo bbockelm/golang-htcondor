@@ -36,6 +36,12 @@ const goodputWindow = 24 * time.Hour
 // window.
 type GoodputSummary struct {
 	WindowHours int `json:"window_hours"`
+	// Since is the exact lower bound the numbers were computed over, so
+	// a drill-down can ask the archive the same question and get a list
+	// whose length matches the count that was clicked. Deriving it in
+	// the browser from WindowHours would drift by the age of the
+	// response.
+	Since int64 `json:"since"`
 
 	// Succeeded is jobs that ran to completion and said so: exit 0, not
 	// killed by a signal.
@@ -114,7 +120,7 @@ func mirrorGoodput(ctx context.Context, dbc *dbrpc.Client, scope string, since i
 		return nil, err
 	}
 
-	sum := &GoodputSummary{WindowHours: int(goodputWindow / time.Hour)}
+	sum := &GoodputSummary{WindowHours: int(goodputWindow / time.Hour), Since: since}
 	var failures []ExitCodeCount
 	for _, r := range rows {
 		if len(r.Group) < 2 || len(r.Values) < 2 {

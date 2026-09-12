@@ -426,6 +426,17 @@ func TestDashboardGoodputFromRealHistory(t *testing.T) {
 		t.Fatal("no goodput summary with a history table present")
 	}
 
+	// The window bound rides along so the dashboard can drill into the
+	// archive and get a list matching these counts. A zero here would
+	// widen the drill-down to all of history while the numbers beside
+	// it still described a day.
+	if gp.Since == 0 || gp.Since >= time.Now().Unix() {
+		t.Errorf("goodput reports since = %d, want the window's lower bound", gp.Since)
+	}
+	if want := int64(gp.WindowHours) * 3600; time.Now().Unix()-gp.Since > want+60 {
+		t.Errorf("since is %ds back but the window is %dh", time.Now().Unix()-gp.Since, gp.WindowHours)
+	}
+
 	if gp.Succeeded != 2 {
 		t.Errorf("succeeded = %d, want 2 (the two clean exits inside the window)", gp.Succeeded)
 	}

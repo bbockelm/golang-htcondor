@@ -7,6 +7,7 @@ import {
   LiveTicker,
   OtherStatuses,
   RecentActivity,
+  StatCard,
   ago,
   duration,
 } from './DashboardPanels';
@@ -268,6 +269,7 @@ describe('LiveTicker', () => {
 describe('Goodput', () => {
   const summary = (over: Partial<GoodputSummary> = {}): GoodputSummary => ({
     window_hours: 24,
+    since: 1_699_913_600,
     succeeded: 10,
     failed: 2,
     unfinished: 0,
@@ -452,5 +454,107 @@ describe('LiveTicker keys', () => {
 
     expect(errors.filter((e) => /same key/i.test(e))).toEqual([]);
     expect(screen.getAllByText('completed')).toHaveLength(3);
+  });
+});
+
+describe('drilling in from the tiles and the panels', () => {
+  const act = (over: Partial<DashboardActivity> = {}): DashboardActivity => ({
+    completed_available: true,
+    completed_partial: false,
+    source: 'test',
+    computed_at: 1_700_000_000,
+    hold_window_seconds: 3600,
+    ...over,
+  });
+
+  it('a populated tile links to its jobs', () => {
+    render(<StatCard label="Held" value={7} href="/jobs?constraint=x" />);
+    expect(screen.getByRole('link', { name: /Held/ })).toHaveAttribute('href', '/jobs?constraint=x');
+  });
+
+  it('an empty tile links nowhere', () => {
+    render(<StatCard label="Held" value={0} href="/jobs?constraint=x" />);
+    // Sending someone to an empty list is a worse answer than not
+    // offering the link.
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('offers a way from a truncated list to the whole window', () => {
+    render(
+      <RecentActivity
+        activity={act({
+          recently_submitted: [{ cluster_id: 1, proc_id: 0, at: 1_700_000_000 }],
+        })}
+      />,
+    );
+    const all = screen.getAllByRole('link', { name: 'see all' });
+    const href = all[0].getAttribute('href') ?? '';
+    // The same window the list was built over -- computed_at minus the
+    // window -- so the destination matches what was shown.
+    expect(decodeURIComponent(href)).toContain('QDate >= 1699996400');
+  });
+
+  it('sends "all recently completed" to the archive, not the queue', () => {
+    render(
+      <RecentActivity
+        activity={act({
+          recently_completed: [{ cluster_id: 2, proc_id: 0, at: 1_700_000_000, archived: true }],
+        })}
+      />,
+    );
+    const hrefs = screen.getAllByRole('link', { name: 'see all' }).map((a) => a.getAttribute('href'));
+    expect(hrefs.some((h) => h?.startsWith('/archive?'))).toBe(true);
+  });
+
+  it('does not offer "see all" for a list with nothing in it', () => {
+    render(<RecentActivity activity={act({ recently_submitted: [] })} />);
+    expect(screen.queryByRole('link', { name: 'see all' })).not.toBeInTheDocument();
+  });
+
+  it('a goodput failure row drills into the archive over the same window', () => {
+    render(
+      <Goodput
+        goodput={{
+          window_hours: 24,
+          since: 1_699_913_600,
+          succeeded: 1,
+          failed: 6,
+          unfinished: 0,
+          good_seconds: 10,
+          bad_seconds: 90,
+          top_failures: [{ code: 127, signal: false, count: 6, seconds: 90 }],
+        }}
+      />,
+    );
+    const href = screen.getByRole('link', { name: 'exit 127' }).getAttribute('href') ?? '';
+    expect(href).toMatch(/^\/archive\?/);
+    const c = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint') ?? '');
+    expect(c).toContain('ExitCode == 127');
+    expect(c).toContain('CompletionDate >= 1699913600');
+    // A signalled job's ExitCode is meaningless, so an exit-code row has
+    // to exclude them or it selects jobs that did something else.
+    expect(c).toContain('ExitBySignal =!= true');
+  });
+
+  it('a signalled failure row matches on the signal, never the exit code', () => {
+    render(
+      <Goodput
+        goodput={{
+          window_hours: 24,
+          since: 1_699_913_600,
+          succeeded: 1,
+          failed: 2,
+          unfinished: 0,
+          good_seconds: 10,
+          bad_seconds: 90,
+          top_failures: [{ code: 0, signal: true, count: 2, seconds: 90 }],
+        }}
+      />,
+    );
+    const href = screen.getByRole('link', { name: /killed by a signal/ }).getAttribute('href') ?? '';
+    const c = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint') ?? '');
+    expect(c).toContain('ExitBySignal == true');
+    // Matching ExitCode == 0 here would select the successes.
+    expect(c).not.toContain('ExitCode ==');
   });
 });
