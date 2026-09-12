@@ -82,3 +82,23 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # ESLint 10 removed the legacy rule-context API, and
+      # eslint-plugin-react -- which eslint-config-next pulls in and
+      # nests under itself -- still calls context.getFilename(). Every
+      # 10.x PR therefore fails the Frontend job before linting a single
+      # file of ours:
+      #
+      #   TypeError: Error while loading rule 'react/display-name':
+      #   contextOrFilename.getFilename is not a function
+      #
+      # There is no combination that works today: eslint-plugin-react
+      # 7.37.5 (latest) declares eslint "^3 || ... || ^9.7", and its
+      # `next` tag is a stale RC pinned to ^3/^4. Bumping
+      # eslint-config-next does not help -- the broken plugin is nested
+      # beneath it.
+      #
+      # REMOVE THIS once eslint-plugin-react's peer range includes ^10;
+      # 9.x updates keep flowing in the meantime.
+      - dependency-name: "eslint"
+        versions: ["10.x"]
