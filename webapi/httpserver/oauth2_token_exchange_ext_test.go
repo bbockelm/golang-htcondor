@@ -13,6 +13,9 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
+// testKID is the key id used across the external-issuer tests.
+const testKID = "k1"
+
 func TestParseTrustedIssuers(t *testing.T) {
 	// Valid; identity_domain defaults to the issuer host.
 	iss, err := parseTrustedIssuers(`[{"issuer":"https://idp.example.org","jwks_uri":"https://idp.example.org/jwks","audience":"htcondor-mcp","allowed_scopes":["condor:/READ"]}]`)
@@ -40,10 +43,10 @@ func TestParseTrustedIssuers(t *testing.T) {
 }
 
 // signedJWT signs claims with key/kid and returns the compact JWT.
-func signedJWT(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
+func signedJWT(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
 	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key},
-		(&jose.SignerOptions{}).WithHeader("kid", kid).WithType("JWT"))
+		(&jose.SignerOptions{}).WithHeader("kid", testKID).WithType("JWT"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +62,10 @@ func signedJWT(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]
 	return s
 }
 
-func jwksJSON(t *testing.T, key *rsa.PrivateKey, kid string) []byte {
+func jwksJSON(t *testing.T, key *rsa.PrivateKey) []byte {
 	t.Helper()
 	ks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
-		{Key: &key.PublicKey, KeyID: kid, Algorithm: "RS256", Use: "sig"},
+		{Key: &key.PublicKey, KeyID: testKID, Algorithm: "RS256", Use: "sig"},
 	}}
 	b, err := json.Marshal(ks)
 	if err != nil {
@@ -72,22 +75,22 @@ func jwksJSON(t *testing.T, key *rsa.PrivateKey, kid string) []byte {
 }
 
 // extValidatorFixture builds a validator whose JWKS fetch is served from memory.
-func extValidatorFixture(t *testing.T, key *rsa.PrivateKey, kid string) *extIssuerValidator {
+func extValidatorFixture(t *testing.T, key *rsa.PrivateKey) *extIssuerValidator {
 	t.Helper()
 	issuers, err := parseTrustedIssuers(`[{"issuer":"https://idp.example.org","jwks_uri":"https://idp.example.org/jwks","audience":"htcondor-mcp","identity_domain":"idp.example.org","allowed_scopes":["condor:/READ","mcp:read"]}]`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fetch := func(_ context.Context, _ string) ([]byte, error) { return jwksJSON(t, key, kid), nil }
+	fetch := func(_ context.Context, _ string) ([]byte, error) { return jwksJSON(t, key), nil }
 	return newExtIssuerValidator(issuers, fetch)
 }
 
 func TestExtIssuerValidate(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := extValidatorFixture(t, key, "k1")
+	v := extValidatorFixture(t, key)
 	now := time.Now()
 
-	good := signedJWT(t, key, "k1", map[string]any{
+	good := signedJWT(t, key, map[string]any{
 		"iss": "https://idp.example.org", "sub": "alice", "aud": "htcondor-mcp",
 		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "groups": []string{"cms"},
 	})
@@ -106,21 +109,21 @@ func TestExtIssuerValidate(t *testing.T) {
 	}
 
 	// Rejections.
-	untrusted := signedJWT(t, key, "k1", map[string]any{"iss": "https://evil.example", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(time.Hour).Unix()})
+	untrusted := signedJWT(t, key, map[string]any{"iss": "https://evil.example", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(time.Hour).Unix()})
 	if _, _, _, err := v.validate(context.Background(), untrusted); err == nil {
 		t.Error("untrusted issuer must be rejected")
 	}
-	badAud := signedJWT(t, key, "k1", map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "someone-else", "exp": now.Add(time.Hour).Unix()})
+	badAud := signedJWT(t, key, map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "someone-else", "exp": now.Add(time.Hour).Unix()})
 	if _, _, _, err := v.validate(context.Background(), badAud); err == nil {
 		t.Error("wrong audience must be rejected")
 	}
-	expired := signedJWT(t, key, "k1", map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(-time.Hour).Unix()})
+	expired := signedJWT(t, key, map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(-time.Hour).Unix()})
 	if _, _, _, err := v.validate(context.Background(), expired); err == nil {
 		t.Error("expired token must be rejected")
 	}
 	// Signed by a DIFFERENT key -> signature fails against the JWKS.
 	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	forged := signedJWT(t, otherKey, "k1", map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(time.Hour).Unix()})
+	forged := signedJWT(t, otherKey, map[string]any{"iss": "https://idp.example.org", "sub": "x", "aud": "htcondor-mcp", "exp": now.Add(time.Hour).Unix()})
 	if _, _, _, err := v.validate(context.Background(), forged); err == nil {
 		t.Error("a token signed by an unknown key must be rejected")
 	}
@@ -129,7 +132,7 @@ func TestExtIssuerValidate(t *testing.T) {
 func TestTokenExchangeExternalEndToEnd(t *testing.T) {
 	server, _ := newProvenanceServer(t)
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
-	server.extIssuers = extValidatorFixture(t, key, "k1")
+	server.extIssuers = extValidatorFixture(t, key)
 
 	// Actor client: token_exchange grant, scopes overlap the issuer's ceiling
 	// only on condor:/READ (so mcp:read is bounded out by the actor).
@@ -137,7 +140,7 @@ func TestTokenExchangeExternalEndToEnd(t *testing.T) {
 		[]string{tokenExchangeGrantType}, []string{"condor:/READ"})
 
 	now := time.Now()
-	extToken := signedJWT(t, key, "k1", map[string]any{
+	extToken := signedJWT(t, key, map[string]any{
 		"iss": "https://idp.example.org", "sub": "bob", "aud": "htcondor-mcp",
 		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 	})

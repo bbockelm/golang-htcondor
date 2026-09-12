@@ -53,12 +53,12 @@ func mintSubjectToken(t *testing.T, server *Server, subject string, scopes []str
 		ar.GrantScope(s)
 	}
 	setStandardTokenExpiries(ctx, server.oauth2Provider.config, session)
-	strat := server.oauth2Provider.GetStrategy()
-	tok, _, err := strat.GenerateAccessToken(ctx, ar)
+	strategy := server.oauth2Provider.GetStrategy()
+	tok, _, err := strategy.GenerateAccessToken(ctx, ar)
 	if err != nil {
 		t.Fatalf("mint subject token: %v", err)
 	}
-	sig := strat.AccessTokenSignature(ctx, tok)
+	sig := strategy.AccessTokenSignature(ctx, tok)
 	if err := server.oauth2Provider.GetStorage().CreateAccessTokenSession(ctx, sig, ar); err != nil {
 		t.Fatalf("store subject token: %v", err)
 	}

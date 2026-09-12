@@ -22,9 +22,11 @@ import (
 // expanded -- consistent with the "an IDTOKEN narrows, never expands" model the
 // schedd relies on. External trusted-issuer subject tokens are stage C2.
 
+//nolint:gosec // G101: an OAuth grant-type URN, not a credential
 const tokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
 
 const (
+	//nolint:gosec // G101: an OAuth token-type URN, not a credential
 	tokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
 )
 

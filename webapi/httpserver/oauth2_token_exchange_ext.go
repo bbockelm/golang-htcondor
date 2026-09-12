@@ -28,7 +28,9 @@ import (
 // from the JWKS URL fetched with the same SSRF-hardened client CIMD uses.
 
 const (
-	tokenTypeJWT     = "urn:ietf:params:oauth:token-type:jwt"
+	//nolint:gosec // G101: OAuth token-type URNs, not credentials
+	tokenTypeJWT = "urn:ietf:params:oauth:token-type:jwt"
+	//nolint:gosec // G101: OAuth token-type URNs, not credentials
 	tokenTypeIDToken = "urn:ietf:params:oauth:token-type:id_token"
 )
 
