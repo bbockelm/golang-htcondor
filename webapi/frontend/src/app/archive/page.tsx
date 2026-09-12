@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
   type ClassAd,
@@ -71,6 +71,14 @@ export default function ArchivePage() {
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
+  // A server-side constraint handed over in the URL, the same way /jobs
+  // takes one. It is how the dashboard drills into finished work: those
+  // jobs are gone from the queue, so the archive is the only page that
+  // can answer.
+  const searchParams = useSearchParams();
+  const constraint = searchParams.get('constraint') ?? undefined;
+  const why = searchParams.get('why') ?? undefined;
+
   const {
     data,
     isLoading,
@@ -79,11 +87,12 @@ export default function ArchivePage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<PageData, Error>({
-    queryKey: ['jobs', 'archive', scope],
+    queryKey: ['jobs', 'archive', scope, constraint],
     initialPageParam: { beforeCluster: undefined, beforeProc: undefined } as PageCursor,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as PageCursor;
       const resp: HistoryListResponse = await api.jobs.archive({
+        constraint,
         projection: PROJECTION,
         limit: PAGE_SIZE,
         before_cluster: cursor.beforeCluster,
@@ -201,6 +210,15 @@ export default function ArchivePage() {
         pageHelp={`Ask things like "show my failed jobs from yesterday", "how long did the training-run batch take?", or "find that python job I ran on Tuesday".`}
         onServerToolComplete={handleServerToolComplete}
       />
+
+      {constraint && (
+        <div className="mb-3 flex items-baseline gap-3 rounded border border-brand-200 bg-brand-50 px-3 py-2 text-sm">
+          <span className="text-gray-700">Showing {why ?? 'a filtered set of jobs'}</span>
+          <Link href="/archive" className="ml-auto text-xs text-brand-700 underline">
+            show all history
+          </Link>
+        </div>
+      )}
 
       <FilterBar value={filter} onChange={setFilter} />
 

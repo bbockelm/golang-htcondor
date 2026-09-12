@@ -176,3 +176,25 @@ test('a hold reason drills into the jobs behind it', async ({ page }) => {
   // jobs page.
   await expect(page.getByRole('link', { name: 'show all jobs' })).toBeVisible();
 });
+
+// Every figure on the dashboard should answer "which ones". These check
+// the two destinations exist and arrive narrowed -- a drill-down that
+// silently shows everything is worse than none.
+test('a status tile drills into the jobs in that state', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('link', { name: /Held/ }).first().click();
+
+  await expect(page).toHaveURL(/\/jobs\?constraint=/);
+  await expect(page.getByText(/Showing held jobs/)).toBeVisible();
+});
+
+test('a goodput failure drills into the archive, not the queue', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('link', { name: 'exit 127' }).click();
+
+  // The archive: these jobs ran to completion and the queue destroyed
+  // them seconds later.
+  await expect(page).toHaveURL(/\/archive\?constraint=/);
+  await expect(page.getByText(/Showing jobs that exited 127/)).toBeVisible();
+  await expect(page.getByRole('link', { name: 'show all history' })).toBeVisible();
+});

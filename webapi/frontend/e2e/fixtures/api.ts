@@ -45,6 +45,7 @@ export const dashboardActivityFixture: DashboardActivityResponse = {
   },
   goodput: {
     window_hours: 24,
+    since: Math.floor(Date.now() / 1000) - 24 * 3600,
     succeeded: 120,
     failed: 8,
     unfinished: 1,
@@ -156,6 +157,20 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/jobs': jobsFixture,
     '/api/v1/dashboard': dashboardFixture,
     '/api/v1/dashboard/activity': dashboardActivityFixture,
+    // The archive is where every drill-down into finished work lands.
+    '/api/v1/jobs/archive': {
+      ads: [
+        {
+          ClusterId: 39,
+          ProcId: 0,
+          Owner: 'e2e',
+          JobStatus: 4,
+          ExitCode: 127,
+          CompletionDate: Math.floor(Date.now() / 1000) - 600,
+          JobBatchName: 'smoke-archived-batch',
+        },
+      ],
+    },
     '/api/v1/admin/logs': adminLogsFixture,
     '/api/v1/version': {
       version: 'e2e',

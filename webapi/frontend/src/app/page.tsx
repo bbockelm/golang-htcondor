@@ -13,6 +13,7 @@ import {
   STATUS_LABEL_BY_KEY,
 } from '@/components/DashboardPanels';
 import { useActivityStream } from '@/lib/useActivityStream';
+import { jobsDrilldown, statusConstraint } from '@/lib/drilldown';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 
 export default function Dashboard() {
@@ -115,12 +116,16 @@ function AuthenticatedDashboard({
       {data && (
         <>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            <StatCard label="Total" value={data.jobs_total} primary />
+            <StatCard label="Total" value={data.jobs_total} primary href="/jobs" />
             {(['idle', 'running', 'held', 'completed'] as const).map((key) => (
               <StatCard
                 key={key}
                 label={STATUS_LABEL_BY_KEY[key]}
                 value={data.jobs_by_status[key] ?? 0}
+                href={jobsDrilldown(
+                  statusConstraint(key) as string,
+                  `${STATUS_LABEL_BY_KEY[key].toLowerCase()} jobs`,
+                )}
               />
             ))}
           </div>

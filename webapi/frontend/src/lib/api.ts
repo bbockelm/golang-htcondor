@@ -203,6 +203,10 @@ export interface ExitCodeCount {
  *  answer -- a zeroed summary would read as "everything failed". */
 export interface GoodputSummary {
   window_hours: number;
+  /** The exact lower bound the numbers were computed over, so a
+   *  drill-down asks the archive the same question. Deriving it from
+   *  window_hours in the browser would drift by the response's age. */
+  since: number;
   succeeded: number;
   failed: number;
   /** Jobs that left without an outcome, which is what a removal looks
