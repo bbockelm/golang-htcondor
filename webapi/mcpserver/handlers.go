@@ -170,7 +170,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		},
 		{
 			Name:        "query_jobs",
-			Description: "Query HTCondor jobs with optional constraints, projections, and pagination. Returns YOUR OWN jobs; MCP admins get every user's. Each answer states which scope it used. When a synchronized htcondordb mirror has a caught-up job queue this is served from the mirror to offload the schedd (transparently falling back to the schedd otherwise, e.g. when the mirror lags or the query is paginated); the result notes which source answered and how recently it synced.",
+			Description: "Query HTCondor jobs with optional constraints, projections, and pagination. Returns YOUR OWN jobs; MCP admins get every user's. Each answer states which scope it used. When a synchronized htcondordb mirror has a caught-up job queue this is served from the mirror to offload the schedd (transparently falling back to the schedd otherwise, e.g. when the mirror lags or the query is paginated); the result notes which source answered and how recently it synced. To WAIT for a job to reach a state (finished, held, running), do not call this in a loop — register a watch_jobs and collect it with check_watches; use query_jobs for a one-off snapshot.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -912,7 +912,7 @@ NEXT STEPS:
    DO NOT use release_job — the job cannot run until spooling is complete.
    Releasing without spooling will cause the job to fail immediately.%s
 3. After a successful upload_job_input, the job is automatically released to IDLE (JobStatus=1).
-4. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
+4. To wait for the job to finish, register a watch with watch_jobs (event="done") and collect it with check_watches — do not poll query_jobs in a loop. The watch fires even if the job has already finished. Use query_jobs for a one-off status check.
 5. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
 
 Job Status Values:
@@ -929,7 +929,7 @@ First job ID for status checks: %s`, fanOut, jobIDs[0])
 NEXT STEPS:
 1. The job has been submitted and should transition to IDLE (JobStatus=1) shortly.
    (No input file upload needed since the executable is a system command.)
-2. Poll job status using query_jobs to monitor progress. Poll no more than every 5 seconds.
+2. To wait for the job to finish, register a watch with watch_jobs (event="done") and collect it with check_watches — do not poll query_jobs in a loop. The watch fires even if the job has already finished. Use query_jobs for a one-off status check.
 3. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
 
 Job Status Values:
@@ -1127,7 +1127,7 @@ JOB STATUS REFERENCE:
 - JobStatus=5: Held (may need input files uploaded or user action)
 
 TIPS:
-- Poll job status no more frequently than every 5 seconds
+- To wait for a job to change state, use watch_jobs and check_watches instead of calling query_jobs in a loop — a watch wakes you when something happens and fires even if it already has
 - Use constraint queries instead of fetching many individual jobs (e.g., "ClusterId == 123")
 - For completed jobs (JobStatus=4), use get_job_stdout to retrieve output`
 
@@ -2218,7 +2218,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 				"text": fmt.Sprintf("Successfully uploaded %d file(s) to job %s: %s%s\n\n"+
 					"NEXT STEPS:\n"+
 					"1. The job should now be released from HELD state and transition to IDLE (JobStatus=1).\n"+
-					"2. Poll job status using query_jobs to monitor progress.\n"+
+					"2. To wait for it to finish, use watch_jobs (event=\"done\") and check_watches instead of polling query_jobs in a loop.\n"+
 					"3. When JobStatus=4 (Completed), use get_job_output to retrieve all output files.",
 					len(uploadedFiles), jobID, strings.Join(uploadedFiles, ", "), sizeWarning),
 			},

@@ -127,7 +127,7 @@ func (s *Server) uploadToCluster(
 	} else {
 		b.WriteString("\nNEXT STEPS:\n" +
 			"1. These procs should leave HELD and become IDLE (JobStatus=1).\n" +
-			"2. Poll with query_jobs to monitor progress.\n" +
+			"2. To wait for them to finish, use watch_jobs (event=\"done\") and check_watches instead of polling query_jobs in a loop.\n" +
 			"3. When JobStatus=4 (Completed), use get_job_output to retrieve output files.\n")
 	}
 	b.WriteString(sizeWarning)
