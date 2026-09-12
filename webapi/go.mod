@@ -24,7 +24,6 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/db v0.29.6 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
@@ -129,6 +128,7 @@ require (
 )
 
 require (
+	github.com/PelicanPlatform/classad/db v0.29.6
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_model v0.6.2
