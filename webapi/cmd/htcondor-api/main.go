@@ -32,6 +32,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 )
@@ -58,6 +59,8 @@ var (
 	// CONDOR_INHERIT regardless, so we only need to accept the flag without
 	// letting flag.Parse() reject our launch.
 	_ = flag.String("sock", "", "HTCondor shared-port endpoint name; passed by condor_master. Accepted for compatibility; the endpoint fd is inherited via CONDOR_INHERIT.")
+
+	showVersion = flag.Bool("version", false, "Print version and exit")
 )
 
 func main() {
@@ -76,6 +79,11 @@ func main() {
 	// runNormalMode via the shared daemon framework.
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("htcondor-api", version.Version)
+		return
+	}
 
 	// Check for subcommands
 	args := flag.Args()
