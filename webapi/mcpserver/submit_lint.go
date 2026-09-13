@@ -255,7 +255,11 @@ func collectSubmitAssignments(stmts []config.Statement) ([]*config.Assignment, m
 			switch v := stmt.(type) {
 			case *config.Assignment:
 				assignments = append(assignments, v)
-				defined[strings.ToLower(v.Name)] = true
+				// AssignedName, not v.Name: `+Foo = 1` defines
+				// $(MY.Foo), not $(Foo). Recording the bare name would
+				// keep this quiet about a $(Foo) that expands to
+				// nothing — the exact mistake this check exists for.
+				defined[strings.ToLower(config.AssignedName(v))] = true
 			case *config.QueueStatement:
 				for _, name := range v.VarNames {
 					defined[strings.ToLower(name)] = true

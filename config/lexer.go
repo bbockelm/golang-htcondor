@@ -612,10 +612,19 @@ func (l *Lexer) NextToken() *TokenInfo {
 		l.readChar()
 
 	case '+':
-		// For +Attribute syntax, require identifier to follow
+		// `+Attribute = expr` is submit-file syntax for setting a job
+		// ad attribute. Require an identifier to follow, so a stray '+'
+		// is an error rather than a token.
+		//
+		// The check is on l.ch, which after readChar is the character
+		// immediately after the '+'. Testing peekChar here instead
+		// looked at the SECOND character of the name, which made
+		// `+F = 1` illegal — and, because the parser has no error
+		// production for it, made the whole line disappear without a
+		// diagnostic.
 		tok.Lit = "+"
 		l.readChar()
-		if isIdentStart(l.peekChar()) {
+		if isIdentStart(l.ch) {
 			tok.Token = PLUS
 		} else {
 			tok.Token = ILLEGAL

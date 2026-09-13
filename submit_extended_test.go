@@ -490,5 +490,26 @@ queue
 		t.Fatal("Expected non-nil job ad")
 	}
 
-	// All features should work together
+	// The point of the test is that custom attributes survive being
+	// mixed with everything else in a realistic submit file, so check
+	// them rather than only checking that nothing errored.
+	for attr, want := range map[string]string{
+		"CustomString": `"test value"`,
+		"CustomNumber": "42",
+		"CustomBool":   "true",
+		"ProjectID":    `"project_123"`,
+	} {
+		expr, ok := ad.Lookup(attr)
+		if !ok {
+			t.Errorf("job ad is missing custom attribute %s (want %s)", attr, want)
+			continue
+		}
+		if got := expr.String(); got != want {
+			t.Errorf("%s = %s, want %s", attr, got, want)
+		}
+	}
+	// And the submit commands alongside them still took effect.
+	if expr, ok := ad.Lookup("JobBatchName"); !ok || expr.String() != `"custom_test"` {
+		t.Errorf("JobBatchName = %v (present=%v), want \"custom_test\"", expr, ok)
+	}
 }

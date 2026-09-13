@@ -173,8 +173,30 @@ MY.ProjectCode = 12345
 		t.Fatal("Expected non-nil job ad")
 	}
 
-	// Note: We can't easily verify the attributes without ClassAd.Get() being available,
-	// but we verify that the job ad was created successfully with custom attributes
+	// Verify the attributes actually landed. This test used to stop at
+	// "the ad was created", on the belief that the values could not be
+	// read back — they can, with Lookup — and it therefore passed
+	// throughout the period when every one of these attributes was
+	// being silently dropped.
+	for attr, want := range map[string]string{
+		"MyCustomAttr":   `"CustomValue"`,
+		"Priority":       "10",
+		"IsHighPriority": "true",
+		"Department":     `"Engineering"`, // MY. prefix is not part of the name
+		"ProjectCode":    "12345",
+	} {
+		expr, ok := ad.Lookup(attr)
+		if !ok {
+			t.Errorf("job ad is missing custom attribute %s (want %s)", attr, want)
+			continue
+		}
+		if got := expr.String(); got != want {
+			t.Errorf("%s = %s, want %s", attr, got, want)
+		}
+	}
+	if _, ok := ad.Lookup("MY.Department"); ok {
+		t.Error("job ad carries MY.Department; the prefix selects the namespace and is not part of the attribute name")
+	}
 }
 
 func TestFileTransferDetails(t *testing.T) {

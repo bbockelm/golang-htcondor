@@ -65,7 +65,7 @@ error: This is an error message
   - `MaxRetries`, `RetryUntil`, `SuccessExitCode`
   - `LeaveJobInQueue`, `KeepClaimIdle`, `JobLeaseDuration`
   - `ConcurrencyLimits`, `ConcurrencyLimitsExpr`
-- ✅ **Custom Attributes**: Support for `+` and `MY.` prefixed attributes with type detection
+- ✅ **Custom Attributes**: `+Attr = expr` and `MY.Attr = expr`; the value is parsed as a ClassAd expression
 - ✅ **Notification**: `EmailAttributes`, `NotifyUser`, `JobNotification`
 - ✅ **Rank**: `Rank` expression
 - ✅ **Ownership**: `Owner`, `AccountingGroup`, `AccountingGroupUser` (placeholder for Owner)
@@ -243,9 +243,22 @@ error: This is an error message
 ~~**Priority: HIGH**~~
 - ✅ `+AttributeName` syntax (job ClassAd attributes)
 - ✅ `MY.AttributeName` syntax (same as +)
-- ✅ Attribute validation and type detection
-- ✅ Expression vs string detection (boolean, integer, float, string)
-- ✅ Already implemented in `setCustomAttributes()`
+- ✅ The value is handed to the ClassAd parser, so strings, numbers,
+  booleans and expressions each reach the job ad as themselves
+- ✅ Implemented in `setCustomAttributes()`
+
+This section claimed to be complete for a long time while the feature did not
+work at all. What was there was "type detection": the value's type was guessed
+by inspecting its text, and the `+` form never reached the job ad in the first
+place, because the parser strips the `+` and the builder was looking for it.
+Fixed 2026-09-12 across the lexer (single-character attribute names), the
+config executor (canonicalize `+Foo` to `MY.Foo` so the flag the parser sets is
+not discarded) and `setCustomAttributes` (parse, do not guess).
+
+The tests named for the feature passed throughout — they asserted proc counts
+and non-nil ads. `TestIntegrationCustomAttributes` now compares against
+`condor_submit -dry-run`, which is the only oracle that can catch this class of
+mistake.
 
 **C++ Reference**: `SetForcedSubmitAttrs()`, `SetForcedAttributes()` (lines 8268-8274 in `make_job_ad`)
 
@@ -401,7 +414,7 @@ error: This is an error message
 
 ### Phase 2 (Essential Features) - TODO
 1. **Queue statement parsing** - Add to parser/lexer
-2. **Custom attributes** - `+` and `MY.` prefix handling
+2. **Custom attributes** - `+` and `MY.` prefix handling (ClassAd expression values)
 3. **File transfer lists** - Parse comma-separated file lists
 4. **Container support** - Docker/Apptainer image specification
 5. **Macro expansion** - Submit-specific macros like $(Process)
