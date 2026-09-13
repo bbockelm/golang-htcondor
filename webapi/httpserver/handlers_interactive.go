@@ -1,9 +1,14 @@
-// Interactive batch jobs: vanilla-universe shells the user attaches to via
-// the existing /api/v1/jobs/{id}/ssh WebSocket. The lifetime of the job is
-// gated by a heartbeat file in its scratch dir; the SSH bridge multiplexes
-// a side-channel session over the user's already-connected ssh.Client to
-// `touch .heartbeat` whenever the user has typed recently. If the file
-// goes stale the watchdog inside the job exits and the slot is released.
+// Interactive batch jobs: vanilla-universe shells the user attaches to
+// via the existing /api/v1/jobs/{id}/ssh WebSocket. The job itself --
+// submit file, watchdog script, heartbeat and shutdown commands -- is
+// built by webapi/interactive, which the MCP session tools share; this
+// file is the REST/SPA surface over it.
+//
+// The lifetime of the job is gated by a heartbeat file in its scratch
+// dir; the SSH bridge multiplexes a side-channel session over the
+// user's already-connected ssh.Client to `touch .heartbeat` while the
+// browser is attached. If the file goes stale the watchdog inside the
+// job exits and the slot is released.
 //
 // Why this design:
 //   - HTCondor's `condor_submit -i` produces a similar shape (sleep job +
@@ -21,12 +26,9 @@ package httpserver
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing/fstest"
@@ -34,29 +36,36 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"golang.org/x/crypto/ssh"
 )
 
-// Prefix on JobBatchName that marks a job as an interactive terminal
-// the SSH bridge should heartbeat. Public so the SPA could (later)
-// filter the global jobs list by it.
-const interactiveTerminalBatchPrefix = "htcondor-api-interactive-terminal-"
+// interactiveTerminalBatchPrefix is the JobBatchName prefix marking a
+// job as an interactive terminal the SSH bridge should heartbeat.
+const interactiveTerminalBatchPrefix = interactive.BatchPrefix
 
-// Watchdog timing.
+// Watchdog timing for browser terminals, and how often the bridge
+// heartbeats them.
 //
-// The script polls every InteractiveWatchdogPollSec; if .heartbeat is
-// older than InteractiveWatchdogFreshnessSec it exits. The webapp side
-// sends heartbeats every interactiveHeartbeatIntervalSec (handlers_ssh.go)
-// when the user has typed within interactiveHeartbeatIdleWindowSec.
+// The watchdog polls every InteractiveWatchdogPollSec; if .heartbeat is
+// older than InteractiveWatchdogFreshnessSec it exits. The bridge sends
+// a heartbeat every interactiveHeartbeatIntervalSec for as long as the
+// WebSocket is open, and gives up after interactiveMaxIdleSec without
+// a keystroke.
 //
-// Defaults give a ~120s eviction window once the user goes idle, with
-// 30s polling on each end. Tuned for "tab forgotten" not "user thinking".
+// That idle bound used to be 60s, which is where a bug lived: a user
+// who read output or thought for two minutes with the tab open stopped
+// being heartbeated and lost their shell to the watchdog. The socket
+// being open is the real "someone is there" signal -- a closed tab
+// closes it -- so the keystroke clock now only exists to reclaim a tab
+// left open and forgotten, and is set at the scale that behaviour
+// actually happens on.
 const (
-	InteractiveWatchdogPollSec        = 30
-	InteractiveWatchdogFreshnessSec   = 120
-	interactiveHeartbeatIntervalSec   = 20
-	interactiveHeartbeatIdleWindowSec = 60
+	InteractiveWatchdogPollSec      = interactive.DefaultTerminalWatchdogPollSec
+	InteractiveWatchdogFreshnessSec = interactive.DefaultTerminalWatchdogFreshnessSec
+	interactiveHeartbeatIntervalSec = 20
+	interactiveMaxIdleSec           = 4 * 60 * 60
 )
 
 // InteractiveCreateTerminalRequest is the optional JSON body of
@@ -207,7 +216,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 	}
 	batchName := interactiveTerminalBatchPrefix + instanceID
 
-	submitFile := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	submitFile := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID:            instanceID,
 		BatchName:             batchName,
 		Cpus:                  req.Cpus,
@@ -233,7 +242,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 
 	stage := fstest.MapFS{
 		"interactive-watchdog.sh": &fstest.MapFile{
-			Data: []byte(buildInteractiveWatchdogScript()),
+			Data: []byte(interactive.BuildWatchdogScript(interactive.DefaultTerminalWatchdog)),
 			Mode: 0o755,
 		},
 	}
@@ -266,243 +275,43 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 	})
 }
 
-type interactiveTerminalSubmitArgs struct {
-	InstanceID            string
-	BatchName             string
-	Cpus                  int
-	MemoryMB              int
-	DiskMB                int
-	Gpus                  int
-	GpusMinimumCapability string
-	GpusMinimumMemory     int
-	GpusMinimumRuntime    string
-	CudaVersion           string
-	RequireGpus           string
-
-	// Requirements is an operator-supplied ClassAd expression ANDed into
-	// the job's Requirements. From Handler.interactiveRequirements.
-	Requirements string
-
-	// ExtraSubmitLines is operator-supplied submit-file content
-	// merged in just before the `queue` directive. Empty when the
-	// operator hasn't configured InteractiveExtraSubmitFile. Plumbed
-	// from Handler.interactiveExtraSubmit.
-	ExtraSubmitLines string
+// buildInteractiveTerminalSubmitFile renders the terminal's submit
+// file. The shape lives in webapi/interactive so the MCP session tools
+// build the same job; this wrapper fixes the browser terminal's
+// watchdog timing.
+func buildInteractiveTerminalSubmitFile(a interactive.SubmitArgs) string {
+	a.Watchdog = interactive.DefaultTerminalWatchdog
+	return interactive.BuildSubmitFile(a)
 }
 
-// appendExtraSubmitLines writes operator-supplied extra submit-file
-// directives to sb, surrounded by a marker comment so the resulting
-// submit file makes the source obvious. No-op when extras is empty
-// or whitespace-only. The contents are passed through verbatim:
-// because the file is operator-only config (loaded at startup from
-// a path the operator chose), we trust whatever it contains the
-// same way HTCondor trusts its own site_local config.
-//
-// Always emits a leading newline so the marker line stands apart
-// from whatever directive immediately preceded it, and a trailing
-// newline so `queue` appears on its own line.
-func appendExtraSubmitLines(sb *strings.Builder, extras string) {
-	if strings.TrimSpace(extras) == "" {
-		return
-	}
-	sb.WriteString("\n# --- Operator-supplied extra submit directives ---\n")
-	sb.WriteString(extras)
-	if !strings.HasSuffix(extras, "\n") {
-		sb.WriteString("\n")
-	}
-	sb.WriteString("# --- End operator-supplied extras ---\n")
-}
-
-// resourceRequestLines emits the request_cpus / request_memory /
-// request_disk plus optional request_gpus + gpus_minimum_* / cuda_version
-// / require_gpus lines. Shared between the terminal and Jupyter submit
-// generators so they speak the same vocabulary.
-//
-// Unit note: HTCondor's bare-integer convention differs by attribute —
-// `request_memory` is interpreted as MiB, `request_disk` as KiB. The
-// API surface speaks MiB for both, so we multiply diskMB by 1024 on
-// the way out. Without this, asking for 4096 MB of scratch produced
-// jobs that died in transfer because the schedd actually allocated
-// 4 MiB.
+// resourceRequestLines and appendExtraSubmitLines are shared with the
+// Jupyter submit generator; both now come from webapi/interactive so
+// the three surfaces cannot drift.
 func resourceRequestLines(
 	cpus, memoryMB, diskMB int,
 	gpus int, gpusMinCapability string, gpusMinMemoryMB int,
 	gpusMinRuntime, cudaVersion, requireGpus string,
 ) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "request_cpus = %d\n", cpus)
-	fmt.Fprintf(&sb, "request_memory = %d\n", memoryMB)
-	fmt.Fprintf(&sb, "request_disk = %d\n", diskMB*1024)
-	if gpus > 0 {
-		fmt.Fprintf(&sb, "request_gpus = %d\n", gpus)
-		if gpusMinCapability != "" {
-			fmt.Fprintf(&sb, "gpus_minimum_capability = %s\n", gpusMinCapability)
-		}
-		if gpusMinMemoryMB > 0 {
-			fmt.Fprintf(&sb, "gpus_minimum_memory = %d\n", gpusMinMemoryMB)
-		}
-		if gpusMinRuntime != "" {
-			fmt.Fprintf(&sb, "gpus_minimum_runtime = %s\n", gpusMinRuntime)
-		}
-		if cudaVersion != "" {
-			fmt.Fprintf(&sb, "cuda_version = %s\n", cudaVersion)
-		}
-		if requireGpus != "" {
-			fmt.Fprintf(&sb, "require_gpus = %s\n", requireGpus)
-		}
-	}
-	sb.WriteString("\n")
-	return sb.String()
+	return interactive.ResourceRequestLines(cpus, memoryMB, diskMB, gpus,
+		gpusMinCapability, gpusMinMemoryMB, gpusMinRuntime, cudaVersion, requireGpus)
 }
 
-func buildInteractiveTerminalSubmitFile(a interactiveTerminalSubmitArgs) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "# Auto-generated by htcondor-api for interactive terminal %s\n", a.InstanceID)
-	fmt.Fprintf(&sb, "universe = vanilla\n\n")
-
-	fmt.Fprintf(&sb, "executable = interactive-watchdog.sh\n")
-	fmt.Fprintf(&sb, "transfer_executable = true\n\n")
-
-	fmt.Fprintf(&sb, "should_transfer_files = YES\n")
-	fmt.Fprintf(&sb, "when_to_transfer_output = ON_EXIT\n\n")
-
-	sb.WriteString(resourceRequestLines(
-		a.Cpus, a.MemoryMB, a.DiskMB,
-		a.Gpus, a.GpusMinimumCapability, a.GpusMinimumMemory,
-		a.GpusMinimumRuntime, a.CudaVersion, a.RequireGpus,
-	))
-
-	// JobBatchName lets handleJobSSH identify this as an interactive job
-	// at attach time (see ssh-bridge heartbeat plumbing). The prefix is
-	// also used to enumerate active terminals for the SPA.
-	//
-	// The submit-file key is `batch_name` (no `job_` prefix). Our
-	// in-process submit parser at submit.go's setExtendedJobExprs only
-	// recognises that exact spelling and maps it to the JobBatchName
-	// ad attribute; emitting `job_batch_name` here was silently
-	// no-oping, leaving JobBatchName unset and making
-	// handleInteractiveListTerminals's prefix filter skip every job
-	// the user submitted ("No active terminal sessions" in the SPA).
-	fmt.Fprintf(&sb, "batch_name = %s\n\n", a.BatchName)
-
-	fmt.Fprintf(&sb, "log    = interactive.log\n")
-	fmt.Fprintf(&sb, "output = interactive.out\n")
-	fmt.Fprintf(&sb, "error  = interactive.err\n")
-
-	// Emitted before the operator's extra block, not after: setRequirements
-	// ANDs a `requirements` command with the clauses submit derives for
-	// itself, so this narrows the match rather than replacing it. An
-	// operator who sets `requirements` in the extra block is spliced later
-	// and therefore still wins, which is the precedence they would expect
-	// from a verbatim escape hatch.
-	if req := strings.TrimSpace(a.Requirements); req != "" {
-		fmt.Fprintf(&sb, "requirements = (%s)\n\n", req)
-	}
-
-	// Operator-supplied extras get spliced in just before `queue`
-	// so they can override anything the builder emitted above. The
-	// banner comment makes it obvious in the schedd's spool which
-	// directives came from us vs the operator's site policy.
-	appendExtraSubmitLines(&sb, a.ExtraSubmitLines)
-
-	fmt.Fprintf(&sb, "queue\n")
-	return sb.String()
+func appendExtraSubmitLines(sb *strings.Builder, extras string) {
+	interactive.AppendExtraSubmitLines(sb, extras)
 }
 
-// buildInteractiveWatchdogScript emits the POSIX-shell watchdog that
-// runs as the interactive job's executable. It primes a heartbeat
-// file, then loops checking the file's age. If it goes stale the
-// script kills any sshd processes the user attached through and exits
-// — that combination releases the HTCondor slot.
-//
-// The bridge also drops a `.shutdown` file in the scratch dir when the
-// SSH session ends; the watchdog notices that on its next tick and
-// exits immediately, so the slot frees within POLL_INTERVAL seconds
-// instead of waiting out the full FRESHNESS_WINDOW. Either trigger
-// reaches the same stale_exit path.
-//
-// Implementation notes:
-//   - We use plain /bin/sh to avoid bash-isms.
-//   - `stat -c %Y` is GNU stat (Linux); `stat -f %m` is BSD stat
-//     (macOS). Try both so the same script runs on either pool.
-//   - Bootstrap touch happens BEFORE the loop so the user has up to
-//     one full freshness window to attach + start sending heartbeats.
-//   - On stale-exit we `pkill sshd` first. condor_ssh_to_job spawns
-//     an sshd inside the sandbox; if we just exit while the user
-//     still has the WebSocket open, the starter waits for sshd's
-//     descendants and the slot stays held. Killing sshd lets the
-//     starter actually wind the job down.
-//   - Startup log line goes to stderr (= the job's `error` file) so
-//     the operator can confirm the watchdog is running.
-func buildInteractiveWatchdogScript() string {
-	return fmt.Sprintf(`#!/bin/sh
-# Auto-generated by htcondor-api. Keeps an interactive terminal job
-# alive only while the webapp is actively heartbeating it.
-HEARTBEAT_FILE=".heartbeat"
-SHUTDOWN_FILE=".shutdown"
-POLL_INTERVAL=%d
-FRESHNESS_WINDOW=%d
-
-echo "[interactive-watchdog] starting pid=$$ scratch=${_CONDOR_SCRATCH_DIR:-(unset)} poll=${POLL_INTERVAL}s freshness=${FRESHNESS_WINDOW}s" >&2
-
-touch "$HEARTBEAT_FILE"
-
-stat_mtime() {
-  stat -c %%Y "$1" 2>/dev/null || stat -f %%m "$1" 2>/dev/null
-}
-
-stale_exit() {
-  echo "[interactive-watchdog] $1; killing sshd and exiting" >&2
-  # condor_ssh_to_job spawns an sshd inside the sandbox; killing it
-  # lets the starter actually finish the job once the heartbeat goes
-  # stale. Without this, an attached-but-idle browser holds the slot.
-  pkill -TERM sshd 2>/dev/null || true
-  sleep 1
-  pkill -KILL sshd 2>/dev/null || true
-  exit 0
-}
-
-while true; do
-  sleep "$POLL_INTERVAL"
-  if [ -f "$SHUTDOWN_FILE" ]; then
-    stale_exit "shutdown file present"
-  fi
-  now=$(date +%%s)
-  mt=$(stat_mtime "$HEARTBEAT_FILE")
-  if [ -z "$mt" ]; then
-    stale_exit "heartbeat file gone or stat failed"
-  fi
-  age=$(( now - mt ))
-  if [ "$age" -gt "$FRESHNESS_WINDOW" ]; then
-    stale_exit "heartbeat ${age}s old (>${FRESHNESS_WINDOW}s)"
-  fi
-done
-`, InteractiveWatchdogPollSec, InteractiveWatchdogFreshnessSec)
-}
-
-// generateInteractiveInstanceID returns a short hex token used both as
-// the user-facing instance id and as the JobBatchName suffix. 8 bytes
-// (16 hex chars) is plenty given that uniqueness is only needed across
-// the API server's lifetime.
+// generateInteractiveInstanceID returns the short hex token used both
+// as the user-facing instance id and as the JobBatchName suffix.
 func generateInteractiveInstanceID() (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
+	return interactive.GenerateInstanceID()
 }
 
-// jobIsInteractive returns true if the proc ad's JobBatchName marks it
-// as an interactive terminal we should heartbeat. The SSH bridge calls
-// this on attach to decide whether to run the heartbeat goroutine.
+// jobIsInteractive reports whether a job ad is one of our interactive
+// jobs, by JobBatchName prefix.
 func jobIsInteractive(ad interface {
 	EvaluateAttrString(name string) (string, bool)
 }) bool {
-	name, ok := ad.EvaluateAttrString("JobBatchName")
-	if !ok {
-		return false
-	}
-	return strings.HasPrefix(name, interactiveTerminalBatchPrefix)
+	return interactive.IsInteractiveAd(ad)
 }
 
 // handleInteractiveListTerminals handles GET /api/v1/interactive/terminal.
@@ -592,9 +401,17 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 
 // startInteractiveHeartbeat runs a goroutine that, while the SSH
 // bridge is up, periodically opens a fresh ssh.Session on the existing
-// client and runs `touch .heartbeat` — but only when the user has
-// typed within the activity window. Returns a stop function the bridge
-// must defer; the goroutine also exits if ctx is canceled.
+// client and runs `touch .heartbeat`. Returns a stop function the
+// bridge must defer; the goroutine also exits if ctx is canceled.
+//
+// The open WebSocket is the liveness signal. An earlier version also
+// required a keystroke within the last 60s before each beat, which
+// evicted anyone who spent two minutes reading their terminal instead
+// of typing into it — the watchdog's freshness window is 120s, so two
+// skipped beats were enough to lose the session. The keystroke clock
+// survives only as interactiveMaxIdleSec, a bound on a tab left open
+// and forgotten, which is measured in hours because that is the
+// timescale the behaviour it guards against happens on.
 //
 // We deliberately reuse the user's already-authenticated ssh.Client
 // instead of spawning another condor_ssh_to_job (which would require
@@ -602,9 +419,7 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 // the transport is up.
 //
 // Heartbeat sessions never read input or output; they just dispatch a
-// short command and close. Errors are logged at debug level — the
-// next tick will retry, and if every tick fails the watchdog inside
-// the job will eventually evict it, which is the right behavior.
+// short command and close.
 func (s *Handler) startInteractiveHeartbeat(
 	ctx context.Context,
 	sshClient *ssh.Client,
@@ -623,7 +438,7 @@ func (s *Handler) startInteractiveHeartbeat(
 		// otherwise let a slow-typing user fall behind.
 		s.sendInteractiveHeartbeat(sshClient, jobID)
 
-		idleWindow := time.Duration(interactiveHeartbeatIdleWindowSec) * time.Second
+		maxIdle := time.Duration(interactiveMaxIdleSec) * time.Second
 		for {
 			select {
 			case <-ctx.Done():
@@ -635,10 +450,14 @@ func (s *Handler) startInteractiveHeartbeat(
 				if lastNanos == 0 {
 					continue
 				}
-				if time.Since(time.Unix(0, lastNanos)) > idleWindow {
-					// User idle. Skip — let the watchdog reclaim the
-					// slot if this stays true long enough.
-					continue
+				if time.Since(time.Unix(0, lastNanos)) > maxIdle {
+					// Attached but untouched for hours: stop beating
+					// and let the watchdog reclaim the slot. Logged,
+					// because from the user's side this looks exactly
+					// like the session dying on its own.
+					s.logger.Info(logging.DestinationHTTP, "interactive heartbeat: idle limit reached, releasing slot",
+						"job_id", jobID, "idle_seconds", int(time.Since(time.Unix(0, lastNanos)).Seconds()))
+					return
 				}
 				s.sendInteractiveHeartbeat(sshClient, jobID)
 			}
@@ -685,35 +504,31 @@ func (s *Handler) removeJobOnDisconnect(jobIDStr string) {
 		"job_id", jobIDStr, "removed", results.Success, "not_found", results.NotFound)
 }
 
+// The heartbeat and shutdown commands come from webapi/interactive:
+// they must name the same files the watchdog script checks, and that
+// script is generated there.
+const (
+	interactiveHeartbeatCmd = interactive.HeartbeatCmd
+	interactiveShutdownCmd  = interactive.ShutdownCmd
+)
+
 // sendInteractiveHeartbeat opens a transient ssh.Session on the live
-// client, runs `touch <scratch>/.heartbeat`, and closes. Failures are
-// non-fatal: the next tick retries, and the watchdog inside the job
-// is the ultimate arbiter of liveness.
+// client, runs the heartbeat touch, and closes.
 //
-// The heartbeat command must use an absolute path to the heartbeat
-// file. SSH exec sessions don't necessarily inherit the per-job cwd
-// the user's shell sees — the OpenSSH server in condor_ssh_to_job
-// runs `$SHELL -c <cmd>` from the user's $HOME, not from the job
-// scratch dir. The starter sets _CONDOR_SCRATCH_DIR in the job's env;
-// we use that as the prefix and fall back to "." just in case.
-const interactiveHeartbeatCmd = `touch "${_CONDOR_SCRATCH_DIR:-.}/.heartbeat"`
-
-// interactiveShutdownCmd drops a sentinel the watchdog polls for. Used
-// on bridge teardown so the watchdog exits within POLL_INTERVAL seconds
-// instead of waiting out the heartbeat-stale window — and instead of
-// relying on condor_rm having already taken effect on the schedd.
-const interactiveShutdownCmd = `touch "${_CONDOR_SCRATCH_DIR:-.}/.shutdown"`
-
+// Failures are logged at Warn rather than Debug. A heartbeat that has
+// stopped working is invisible from the outside: the session simply
+// ends a couple of minutes later, with nothing at the default log
+// level to distinguish it from the user having closed the tab.
 func (s *Handler) sendInteractiveHeartbeat(client *ssh.Client, jobID string) {
 	sess, err := client.NewSession()
 	if err != nil {
-		s.logger.Debug(logging.DestinationHTTP, "interactive heartbeat: NewSession failed",
+		s.logger.Warn(logging.DestinationHTTP, "interactive heartbeat: NewSession failed",
 			"job_id", jobID, "error", err)
 		return
 	}
 	defer func() { _ = sess.Close() }()
 	if err := sess.Run(interactiveHeartbeatCmd); err != nil {
-		s.logger.Debug(logging.DestinationHTTP, "interactive heartbeat: touch failed",
+		s.logger.Warn(logging.DestinationHTTP, "interactive heartbeat: touch failed",
 			"job_id", jobID, "error", err)
 	}
 }
@@ -738,11 +553,6 @@ func (s *Handler) sendInteractiveShutdownSignal(client *ssh.Client, jobID string
 	}
 }
 
-// _ = strconv ensures the import survives unrelated edits that drop
-// the only call site temporarily; remove once the SSH bridge edits
-// land in this same package.
-var _ = strconv.Itoa
-
 // requirementsProbeAttr is an attribute name no real machine ad carries,
 // used to check that an operator-supplied interactive requirement actually
 // survives into the submitted job.
@@ -765,7 +575,7 @@ const requirementsProbeAttr = "HtcondorApiRequirementsProbe"
 // whether the probe came out the other end.
 func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolicy.Policy) error {
 	probe := fmt.Sprintf("%s =!= undefined", requirementsProbeAttr)
-	submitText := policy.Apply(buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	submitText := policy.Apply(buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID:       "probe",
 		BatchName:        "probe",
 		Cpus:             1,

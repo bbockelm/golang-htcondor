@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -32,7 +34,7 @@ func TestInteractiveTerminalSubmitFileSetsJobBatchName(t *testing.T) {
 		instanceID = "deadbeefdeadbeef"
 		batchName  = interactiveTerminalBatchPrefix + instanceID
 	)
-	src := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	src := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID: instanceID,
 		BatchName:  batchName,
 		Cpus:       1,

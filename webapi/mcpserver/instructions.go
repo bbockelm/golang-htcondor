@@ -44,6 +44,25 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("4. get_job_stdout / get_job_stderr — retrieve output after the job finishes.\n")
 	b.WriteString("5. get_job_output — retrieve any other output files.\n\n")
 
+	// Interactive sessions
+	b.WriteString("## Interactive sessions vs batch jobs\n\n")
+	b.WriteString("The workflow above is one job per command, with a queue wait each time. " +
+		"When several steps need the same machine and the same files — build then test, explore a " +
+		"dataset, reproduce a failure by hand — start an interactive session instead and run the " +
+		"steps inside it:\n\n")
+	b.WriteString("1. interactive_session_start — name the session; it queues like any other job.\n")
+	b.WriteString("2. interactive_session_exec — run a command in it (waits for the job to start). " +
+		"Repeat as needed; each call returns exit code, stdout and stderr.\n")
+	b.WriteString("3. interactive_session_stop — release the slot when finished.\n\n")
+	b.WriteString("Three things to know:\n")
+	b.WriteString("  - The session name is the only handle. Pass it on every call; " +
+		"interactive_session_list finds sessions from earlier conversations.\n")
+	b.WriteString("  - A session holds its CPUs and memory until stopped, and is reclaimed " +
+		"automatically after ~30 minutes with no calls. Stop sessions you are done with.\n")
+	b.WriteString("  - Each exec is a fresh shell: the working directory resets and environment " +
+		"changes do not carry over, so chain dependent steps in one command with '&&'. " +
+		"Files written into the sandbox do persist.\n\n")
+
 	// Submit file basics
 	b.WriteString("## Submit file basics\n\n")
 	b.WriteString("A minimal submit file that uploads a custom script:\n\n")
@@ -117,6 +136,8 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  get_credential_status / store_service_credential / list_service_credentials / " +
 		"delete_service_credential — manage stored credentials\n")
 	b.WriteString("  advertise_to_collector — publish a ClassAd to the HTCondor collector\n")
+	b.WriteString("  interactive_session_start / _exec / _list / _stop — run commands inside a " +
+		"long-lived job (see above)\n")
 	b.WriteString("  get_version — report this server's build (version, git commit, linked library versions); " +
 		"use it to confirm which code is deployed\n")
 

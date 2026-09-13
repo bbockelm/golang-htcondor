@@ -138,7 +138,10 @@ var readOnlyMCPTools = map[string]bool{
 	// tools can still ask to be told when something happens.
 	"watch_jobs":    true,
 	"check_watches": true,
-	"cancel_watch":  true,
+	// Listing sessions reads the queue; starting, running a command in
+	// and stopping one all change something.
+	"interactive_session_list": true,
+	"cancel_watch":             true,
 	// get_version reports only this binary's build identity.
 	"get_version": true,
 }
@@ -695,6 +698,10 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 	// insufficient_scope rejections — and a hostile relying
 	// party could enumerate the full attack surface to
 	// social-engineer a write upgrade.
+	// Interactive-session tools live in their own catalog (see
+	// handlers_interactive.go) so the exec surface reads as one piece.
+	tools = append(tools, interactiveTools()...)
+
 	scopes := grantedScopesFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
@@ -803,6 +810,14 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
+	case "interactive_session_start":
+		result, err = s.toolInteractiveSessionStart(ctx, request.Arguments)
+	case "interactive_session_exec":
+		result, err = s.toolInteractiveSessionExec(ctx, request.Arguments)
+	case "interactive_session_list":
+		result, err = s.toolInteractiveSessionList(ctx, request.Arguments)
+	case "interactive_session_stop":
+		result, err = s.toolInteractiveSessionStop(ctx, request.Arguments)
 	default:
 		// Doc tools all share one handler — dispatching them here as
 		// a single default-arm fallback means the switch's

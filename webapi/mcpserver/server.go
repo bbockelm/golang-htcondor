@@ -15,6 +15,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -68,6 +69,13 @@ type Server struct {
 	dbMirror     *dbmirror.Locator
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
+
+	// interactive owns the caller's named interactive sessions: the
+	// jobs behind them, their leases, and the SSH connections commands
+	// run over. One per server, because a session outlives the call
+	// that created it -- and, under a sessionless transport, the
+	// connection too.
+	interactive *interactive.Manager
 }
 
 // Config holds server configuration
@@ -149,6 +157,13 @@ type Config struct {
 	// and web surfaces: a site requirement an agent cannot know about is
 	// exactly the kind this exists to satisfy.
 	SubmitPolicy submitpolicy.Policy
+
+	// InteractiveExtraSubmit is the operator's interactive-specific
+	// submit-file block (HTTP_API_INTERACTIVE_EXTRA_SUBMIT), applied to
+	// interactive session jobs on top of SubmitPolicy. The REST
+	// terminal already honours it; an agent's session is the same kind
+	// of job on the same pool and gets the same treatment.
+	InteractiveExtraSubmit string
 }
 
 // NewServer creates a new MCP server
@@ -250,6 +265,23 @@ func NewServer(cfg Config) (*Server, error) {
 		})
 	}
 
+	// Interactive sessions. The manager holds a schedd accessor rather
+	// than the schedd itself so it follows any later rediscovery, and
+	// it is created unconditionally: an access point that cannot run
+	// condor_ssh_to_job reports that per call, which is a better
+	// answer than a tool that silently does not exist.
+	interactiveMgr, err := interactive.NewManager(interactive.Options{
+		Schedd:       func() interactive.ScheddClient { return s.schedd },
+		Logger:       logger,
+		LogDest:      logging.DestinationMCP,
+		SubmitPolicy: cfg.SubmitPolicy,
+		ExtraSubmit:  cfg.InteractiveExtraSubmit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create interactive session manager: %w", err)
+	}
+	s.interactive = interactiveMgr
+
 	// Setup metrics if collector is provided
 	enableMetrics := cfg.EnableMetrics
 	if cfg.Collector != nil && !cfg.EnableMetrics {
@@ -267,6 +299,21 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// Close releases what this server holds open beyond a single call:
+// today that is the interactive sessions' SSH connections and their
+// heartbeat goroutines.
+//
+// It deliberately leaves the session JOBS running. A daemon restart
+// should find them and re-adopt them, which is the property that makes
+// a named session usable across a restart at all; the in-job watchdog
+// is what reclaims a session whose server never comes back.
+func (s *Server) Close() {
+	if s == nil || s.interactive == nil {
+		return
+	}
+	s.interactive.Close()
 }
 
 // discoverSchedd discovers a schedd from the collector

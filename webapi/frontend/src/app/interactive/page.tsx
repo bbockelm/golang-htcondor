@@ -285,7 +285,7 @@ function TerminalSection() {
   return (
     <SectionCard
       title="Terminal"
-      hint="An interactive shell inside the pool. The session ends if you stop typing for ~2 minutes (the watchdog gates lifetime on browser activity)."
+      hint="An interactive shell inside the pool. The session lasts as long as this tab stays connected, and ends shortly after you close it."
     >
       {termsQuery.isLoading && (
         <p className="text-gray-400 text-sm">Loading sessions…</p>
