@@ -3,12 +3,12 @@ module github.com/bbockelm/golang-htcondor/examples/security_config
 go 1.26.0
 
 require (
-	github.com/bbockelm/cedar v0.6.15
+	github.com/bbockelm/cedar v0.6.16
 	github.com/bbockelm/golang-htcondor v0.0.0-20251113012241-ab2a8efb0537
 )
 
 require (
-	github.com/PelicanPlatform/classad v0.29.6 // indirect
+	github.com/PelicanPlatform/classad v0.29.11 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect

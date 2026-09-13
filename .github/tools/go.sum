@@ -1,7 +1,7 @@
 cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
-github.com/PelicanPlatform/classad v0.29.9 h1:cXJoiVROXFN0vufHu3kaCWifia/Fx6Pk7z8jwlV9SJ0=
-github.com/PelicanPlatform/classad v0.29.9/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad v0.29.11 h1:pftieUH7oTicXgLe+6AJK/31yYcSyB10k4t2BpHjDnw=
+github.com/PelicanPlatform/classad v0.29.11/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
 github.com/PelicanPlatform/classad/changefeed v0.29.9 h1:4bxydrqhkHd4WsRvNncFMvF7LvXNXesyG06rHySm4bg=
 github.com/PelicanPlatform/classad/changefeed v0.29.9/go.mod h1:5r5jBUkK9mepG7QQW5oXW15Y/dAACGDlZ2wzfyPqhIw=
 github.com/PelicanPlatform/classad/collections v0.29.9 h1:0EC+h1pF4ewUDcFNmyhQKR9CD2YEE4RQkHcM1y4Y40o=
@@ -19,8 +19,8 @@ github.com/alecthomas/units v0.0.0-20190717042225-c3de453c63f4/go.mod h1:ybxpYRF
 github.com/alecthomas/units v0.0.0-20190924025748-f65c72e2690d/go.mod h1:rBZYJk541a8SKzHPHnH3zbiI+7dagKZ0cgpgrD7Fyho=
 github.com/armon/go-metrics v0.4.1 h1:hR91U9KYmb6bLBYLQjyM+3j+rcd/UhE+G78SFnF8gJA=
 github.com/armon/go-metrics v0.4.1/go.mod h1:E6amYzXo6aW1tqzoZGT755KkbgrJsSdpwZ+3JqfkOG4=
-github.com/bbockelm/cedar v0.6.14 h1:Qeo2RlNQltsMd2CA4mz/rCZr9eqxHdeJ6LGxk93Ptm0=
-github.com/bbockelm/cedar v0.6.14/go.mod h1:C4u6CKJoweg3LZniOi7Yh8avQv1KZjHs9k1vTGa1+2w=
+github.com/bbockelm/cedar v0.6.16 h1:hYG1cbp+OFkmhxnnn4i2H4M4y3RHZX0m+V29O5sHXIA=
+github.com/bbockelm/cedar v0.6.16/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
 github.com/bbockelm/golang-htcondor v0.13.1 h1:ArnQgNxrZ6lJO3h/4G3xTmGLpvZPEjbimdtAvbIfzHc=
 github.com/bbockelm/golang-htcondor v0.13.1/go.mod h1:9Lci/LTWAK2QURmR/zalMjNMKLqWnD/5Qu798eYaIOo=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
