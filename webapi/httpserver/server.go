@@ -18,6 +18,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/ory/fosite"
@@ -596,7 +597,7 @@ func (s *Server) ServeListenerWithCert(ln net.Listener, certFile, keyFile string
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr, "scheme", scheme)
 	fmt.Printf("Server started on %s://%s\n", scheme, addrStr)
 	if scheme == "https" {
-		return s.httpServer.ServeTLS(ln, certFile, keyFile)
+		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
 	}
 	return s.httpServer.Serve(ln)
 }
@@ -628,9 +629,57 @@ func (s *Server) ServeMCPListener(ln net.Listener, certFile, keyFile string) err
 	s.logger.Info(logging.DestinationHTTP, "Serving MCP on its own listener",
 		"address", safeListenerAddr(ln), "scheme", scheme)
 	if scheme == "https" {
-		return srv.ServeTLS(ln, certFile, keyFile)
+		return serveTLSWithCredentials(srv, ln, certFile, keyFile)
 	}
 	return srv.Serve(ln)
+}
+
+// loadKeyPairMaybeAsRoot reads a TLS certificate and key through the
+// privileged credential path.
+//
+// http.Server.ServeTLS(ln, certFile, keyFile) reads those files itself,
+// with a plain os.ReadFile under the process's current identity. On an
+// access point the key is root-owned -- /etc/pki/tls/private/... is the
+// normal posture -- while the daemon has dropped to the condor account,
+// so the handshake setup fails at startup with "permission denied", the
+// same way the KEK and the token signing key did before they were
+// routed through droppriv.
+func loadKeyPairMaybeAsRoot(certFile, keyFile string) (tls.Certificate, error) {
+	certPEM, err := droppriv.ReadFileMaybeAsRoot(certFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("reading TLS certificate %s: %w", certFile, err)
+	}
+	keyPEM, err := droppriv.ReadFileMaybeAsRoot(keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("reading TLS key %s: %w", keyFile, err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parsing TLS keypair (%s, %s): %w", certFile, keyFile, err)
+	}
+	return cert, nil
+}
+
+// serveTLSWithCredentials is ServeTLS with the keypair already in hand.
+//
+// The certificate is installed on a clone of the server's TLSConfig and
+// the paths are then passed empty, which is how ServeTLS is told to use
+// the configured certificate rather than opening files itself.
+func serveTLSWithCredentials(srv *http.Server, ln net.Listener, certFile, keyFile string) error {
+	cert, err := loadKeyPairMaybeAsRoot(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	cfg := srv.TLSConfig.Clone()
+	if cfg == nil {
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if cfg.MinVersion == 0 {
+		cfg.MinVersion = tls.VersionTLS12
+	}
+	cfg.Certificates = []tls.Certificate{cert}
+	srv.TLSConfig = cfg
+	return srv.ServeTLS(ln, "", "")
 }
 
 // ServeAdditionalListener serves the already-running server on a second
@@ -657,7 +706,7 @@ func (s *Server) ServeAdditionalListener(ln net.Listener, certFile, keyFile stri
 	s.logger.Info(logging.DestinationHTTP, "Also listening on",
 		"address", safeListenerAddr(ln), "scheme", scheme)
 	if scheme == "https" {
-		return s.httpServer.ServeTLS(ln, certFile, keyFile)
+		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
 	}
 	return s.httpServer.Serve(ln)
 }
@@ -686,7 +735,7 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr)
 	// Print to stdout for integration tests to detect start up
 	fmt.Printf("Server started on https://%s\n", addrStr)
-	return s.httpServer.ServeTLS(ln, certFile, keyFile)
+	return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
 }
 
 // Shutdown gracefully shuts down the HTTP server
