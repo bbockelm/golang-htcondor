@@ -1366,7 +1366,7 @@ func (h *Handler) protectedResourceIdentifier(metadataPath string) string {
 	// asked about that origin -- naming the web UI's would produce a
 	// document the client is obliged to reject. Only the MCP resource
 	// moves; everything else is still reached at the main base URL.
-	if resourcePath == mcpMessagePath && h.mcpBaseURL != "" {
+	if (resourcePath == mcpPath || resourcePath == mcpMessagePath) && h.mcpBaseURL != "" {
 		return strings.TrimRight(h.mcpBaseURL, "/") + resourcePath
 	}
 
