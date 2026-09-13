@@ -73,7 +73,7 @@ func TestCertReloaderRefusesAMismatchedPair(t *testing.T) {
 	// old key is still on disk. This is exactly the mid-renewal window.
 	newDir := t.TempDir()
 	newCert, _ := writeKeyPairCN(t, newDir, "after")
-	b, err := os.ReadFile(newCert) //nolint:gosec // G304: test path
+	b, err := os.ReadFile(newCert) //nolint:gosec // G304,G703: a path this test just created
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,11 +93,11 @@ func TestCertReloaderRefusesAMismatchedPair(t *testing.T) {
 	// And once the matching key lands, the swap happens.
 	newCert2, newKey2 := writeKeyPairCN(t, t.TempDir(), "complete")
 	for _, f := range [][2]string{{newCert2, certPath}, {newKey2, keyPath}} {
-		b, err := os.ReadFile(f[0]) //nolint:gosec // G304: test path
+		b, err := os.ReadFile(f[0]) //nolint:gosec // G304,G703: a path this test just created
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(f[1], b, 0o600); err != nil {
+		if err := os.WriteFile(f[1], b, 0o600); err != nil { //nolint:gosec // G703: f[1] is certPath/keyPath, created by this test
 			t.Fatal(err)
 		}
 	}

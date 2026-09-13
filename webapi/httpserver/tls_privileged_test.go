@@ -3,6 +3,7 @@
 package httpserver
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"os"
@@ -52,7 +53,7 @@ func TestServeTLSReadsARootOnlyKeyAfterDrop(t *testing.T) {
 
 	// And it actually serves: the certificate is installed on TLSConfig
 	// rather than ServeTLS opening the (unreadable) files.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

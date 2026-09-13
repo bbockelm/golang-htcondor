@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -70,7 +71,7 @@ func writeKeyPairModed(t *testing.T, dir, cn, certName, keyName string, keyMode 
 func TestServeTLSWithCredentialsServesAReadableKeyPair(t *testing.T) {
 	certPath, keyPath := writeKeyPair(t, t.TempDir(), 0o600)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,12 @@ func TestServeTLSWithCredentialsServesAReadableKeyPair(t *testing.T) {
 	// rather than ServeTLS being asked to open the files.
 	var conn *tls.Conn
 	for i := 0; i < 50; i++ {
-		conn, err = tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // G402: self-signed fixture
+		d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // G402: self-signed fixture
+		var c net.Conn
+		c, err = d.DialContext(context.Background(), "tcp", ln.Addr().String())
+		if err == nil {
+			conn = c.(*tls.Conn)
+		}
 		if err == nil {
 			break
 		}
@@ -111,7 +117,7 @@ func TestServeTLSWithCredentialsReportsAnUnreadableKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
