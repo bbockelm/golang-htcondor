@@ -119,7 +119,14 @@ func TestWarnUndefinedMacrosQuiet(t *testing.T) {
 		"queue vars in list":   "arguments = $(sample)\nqueue sample in (a, b)\n",
 		"defaulted macro":      "arguments = $(extra_args:--verbose)\nqueue 1\n",
 		"deferred to match":    "arguments = $$(Cpus) $$([RequestMemory * 2])\nqueue 1\n",
-		"plus attribute":       "+MyLabel = \"x\"\narguments = $(MyLabel)\nqueue 1\n",
+		// `+MyLabel` defines $(MY.MyLabel), not $(MyLabel). Verified
+		// against condor_submit, which expands
+		// `bare[$(MyLabel)] prefixed[$(MY.MyLabel)]` to
+		// `bare[] prefixed["x"]`. This case used to reference the bare
+		// name and expect silence, which asserted the opposite of what
+		// HTCondor does — and silence about a $(...) that expands to
+		// nothing is the one thing this check exists to prevent.
+		"plus attribute":       "+MyLabel = \"x\"\narguments = $(MY.MyLabel)\nqueue 1\n",
 		"comment":              "# arguments = $(hostname)\narguments = fixed\nqueue 1\n",
 		"comment continued":    "# a comment ending in a backslash \\\narguments = fixed\nqueue 1\n",
 		"other dollar forms":   "arguments = $ENV(HOME) $(DOLLAR)\nqueue 1\n",
@@ -163,6 +170,10 @@ func TestWarnUndefinedMacrosReported(t *testing.T) {
 		"two keys": {
 			"arguments = $(hostname)\ntransfer_input_files = $(datafile)\nqueue 1\n",
 			[]string{"arguments references $(hostname); transfer_input_files references $(datafile)"},
+		},
+		"plus attribute referenced without its prefix": {
+			"+MyLabel = \"x\"\narguments = $(MyLabel)\nqueue 1\n",
+			[]string{"arguments references $(MyLabel)"},
 		},
 		"non-arguments key": {
 			"transfer_input_files = $(datafile)\nqueue 1\n",
@@ -274,4 +285,36 @@ func TestFormatSubmitWarnings(t *testing.T) {
 	if !strings.HasSuffix(got, "\n\n") {
 		t.Errorf("warning block should end with a blank line, got %q", got)
 	}
+}
+
+// TestUndefinedMacroWarningKnowsTheCustomAttrNamespace: `+Foo = 1`
+// defines $(MY.Foo), not $(Foo). The linter has to agree with the
+// executor about that, in both directions — otherwise it either warns
+// about a macro that works, or stays silent about one that silently
+// expands to nothing, which is the single mistake this check exists to
+// catch.
+func TestUndefinedMacroWarningKnowsTheCustomAttrNamespace(t *testing.T) {
+	t.Run("$(MY.Foo) resolves", func(t *testing.T) {
+		warnings := warnUndefinedMacros("executable = /bin/true\n+Tag = \"nightly\"\narguments = $(MY.Tag)\nqueue\n")
+		if len(warnings) != 0 {
+			t.Errorf("warned about a macro that expands: %v", warnings)
+		}
+	})
+
+	t.Run("$(Foo) does not", func(t *testing.T) {
+		warnings := warnUndefinedMacros("executable = /bin/true\n+Tag = \"nightly\"\narguments = $(Tag)\nqueue\n")
+		if len(warnings) == 0 {
+			t.Fatal("no warning for $(Tag); +Tag defines $(MY.Tag), so $(Tag) expands to an empty string")
+		}
+		if !strings.Contains(warnings[0], "$(Tag)") {
+			t.Errorf("warning does not name the reference: %v", warnings)
+		}
+	})
+
+	t.Run("a plain macro still resolves", func(t *testing.T) {
+		warnings := warnUndefinedMacros("executable = /bin/true\ntag = nightly\narguments = $(tag)\nqueue\n")
+		if len(warnings) != 0 {
+			t.Errorf("warned about an ordinary submit macro: %v", warnings)
+		}
+	})
 }

@@ -12,7 +12,13 @@ func TestSubmitWithPlusAttribute(t *testing.T) {
 		name          string
 		submitFile    string
 		expectedCount int
-		wantError     bool
+		// wantAttrs is what each generated proc ad must carry, as
+		// attribute name -> ClassAd rendering of the value. This is the
+		// half the test used to be missing: it checked only how many
+		// proc ads came out, so it passed just as happily while every
+		// + attribute was being silently dropped on the floor.
+		wantAttrs map[string]string
+		wantError bool
 	}{
 		{
 			name: "queue 3 with + attribute",
@@ -24,6 +30,7 @@ arguments = 300
 queue 3
 `,
 			expectedCount: 3,
+			wantAttrs:     map[string]string{"MyTestTag": `"bulk_test"`},
 			wantError:     false,
 		},
 		{
@@ -36,6 +43,7 @@ arguments = 300
 queue
 `,
 			expectedCount: 1,
+			wantAttrs:     map[string]string{"CustomAttr": `"test"`},
 			wantError:     false,
 		},
 		{
@@ -48,7 +56,12 @@ MyTestTag = "bulk_test"
 queue 5
 `,
 			expectedCount: 5,
-			wantError:     false,
+			// No '+' here: MyTestTag is an ordinary submit macro, and
+			// an ordinary macro must NOT land on the job ad. This is
+			// the case that keeps the fix honest in the other
+			// direction.
+			wantAttrs: map[string]string{"MyTestTag": ""},
+			wantError: false,
 		},
 		{
 			name: "multiple + attributes with queue 2",
@@ -62,7 +75,12 @@ arguments = 300
 queue 2
 `,
 			expectedCount: 2,
-			wantError:     false,
+			wantAttrs: map[string]string{
+				"Attr1": `"value1"`,
+				"Attr2": `"value2"`,
+				"Attr3": "123",
+			},
+			wantError: false,
 		},
 	}
 
@@ -95,7 +113,26 @@ queue 2
 				t.Logf("Submit file content:\n%s", tt.submitFile)
 			}
 
-			t.Logf("✓ Successfully parsed and generated %d proc ads", len(submitResult.ProcAds))
+			// Every proc carries the cluster's custom attributes.
+			for i, ad := range submitResult.ProcAds {
+				for attr, want := range tt.wantAttrs {
+					expr, ok := ad.Lookup(attr)
+					if want == "" {
+						if ok {
+							t.Errorf("proc %d: ad has %s = %s; a submit macro without '+' must not become a job attribute",
+								i, attr, expr.String())
+						}
+						continue
+					}
+					if !ok {
+						t.Errorf("proc %d: ad is missing %s (want %s)\nad: %s", i, attr, want, ad.String())
+						continue
+					}
+					if got := expr.String(); got != want {
+						t.Errorf("proc %d: %s = %s, want %s", i, attr, got, want)
+					}
+				}
+			}
 		})
 	}
 }

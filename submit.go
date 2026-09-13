@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1196,67 +1197,81 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setCustomAttributes processes + or MY. prefixed attributes
+// setCustomAttributes copies the submit file's custom job attributes
+// onto the job ad.
+//
+// Both spellings HTCondor accepts — `+Foo = expr` and `MY.Foo = expr` —
+// arrive here under one key, config.CustomAttrPrefix + name, because
+// the config executor canonicalizes the `+` form. The prefix is what
+// distinguishes "set this attribute on the job" from "this is a submit
+// command"; it is stripped on the way into the ad, so the job carries
+// `Foo`, which is the name the user wrote and the name they will query
+// by.
+//
+// The value is a ClassAd EXPRESSION, not a string. That is the whole
+// point of the syntax: `+Rank = Memory / 1024` has to reach the job as
+// arithmetic, `+Tag = "nightly"` as a string, `+Retry = 3` as an
+// integer. An earlier version guessed the type by inspecting the text
+// — bool, then int, then float, then "contains an operator, call it an
+// expression", then string — and got the common case wrong: the quotes
+// in `"nightly"` were kept as part of the value, so the job ad ended up
+// with Tag = "\"nightly\"". Handing the text to the ClassAd parser
+// makes every case the parser's job instead of a heuristic's.
 func (sf *SubmitFile) setCustomAttributes(ad *classad.ClassAd) error {
-	// Iterate through all submit file keys
-	for _, key := range sf.cfg.Keys() {
-		var attrName string
-		isCustom := false
+	// Sorted so a submit file with several custom attributes produces
+	// the same ad every time; map order would make the result depend on
+	// nothing in particular.
+	keys := sf.cfg.Keys()
+	sort.Strings(keys)
 
-		// Check for + prefix (adds attribute to job ad)
-		if strings.HasPrefix(key, "+") {
-			attrName = strings.TrimPrefix(key, "+")
-			isCustom = true
-		} else if strings.HasPrefix(key, "MY.") {
-			// MY. prefix adds attribute to job ad with MY. prefix
-			attrName = key // Keep the MY. prefix
-			isCustom = true
-		}
-
-		if !isCustom {
-			continue
-		}
-
-		// Get the value
-		value, ok := sf.cfg.Get(key)
+	for _, key := range keys {
+		attrName, ok := customAttrName(key)
 		if !ok {
 			continue
 		}
 
-		// Try to parse as different types
-		// First, check if it's a boolean
+		// Get expands $(...) macros, so $(Cluster), $(Process) and
+		// submit-file macros mean what they mean everywhere else.
+		value, ok := sf.cfg.Get(key)
+		if !ok {
+			continue
+		}
 		value = strings.TrimSpace(value)
-		if strings.ToLower(value) == "true" || strings.ToLower(value) == "false" {
-			_ = ad.Set(attrName, parseBool(value, false))
+		if value == "" {
+			// `+Foo =` with nothing after it: the user asked for no
+			// value, which is not the same as asking for an empty
+			// string. Leave the attribute off the ad entirely.
 			continue
 		}
 
-		// Check if it's an integer
-		if intVal, err := strconv.ParseInt(value, 10, 64); err == nil {
-			_ = ad.Set(attrName, int(intVal))
-			continue
+		expr, err := classad.ParseExpr(value)
+		if err != nil {
+			return fmt.Errorf("custom attribute %s: %q is not a valid ClassAd expression: %w", attrName, value, err)
 		}
-
-		// Check if it's a float
-		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
-			_ = ad.Set(attrName, floatVal)
-			continue
-		}
-
-		// Check if it's a ClassAd expression (contains operators, parentheses, etc.)
-		// For now, treat values with specific characters as expressions
-		if strings.ContainsAny(value, "()&|=<>!") {
-			// This is likely a ClassAd expression, store as string
-			// The ClassAd library will parse it as an expression
-			_ = ad.Set(attrName, value)
-			continue
-		}
-
-		// Default to string
-		_ = ad.Set(attrName, value)
+		_ = ad.Set(attrName, expr)
 	}
 
 	return nil
+}
+
+// customAttrName reports whether a submit-file key names a custom job
+// attribute, and if so what the attribute is called.
+//
+// The comparison is case-insensitive because the config layer is: a
+// user who writes `my.foo` or `My.Foo` has written the same key as
+// `MY.Foo`, and HTCondor treats all three alike.
+func customAttrName(key string) (string, bool) {
+	if len(key) <= len(config.CustomAttrPrefix) {
+		return "", false
+	}
+	if !strings.EqualFold(key[:len(config.CustomAttrPrefix)], config.CustomAttrPrefix) {
+		return "", false
+	}
+	name := key[len(config.CustomAttrPrefix):]
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 // Helper functions
@@ -2185,7 +2200,10 @@ func assignedNames(stmts []config.Statement) map[string]bool {
 		for _, stmt := range list {
 			switch st := stmt.(type) {
 			case *config.Assignment:
-				names[strings.ToUpper(st.Name)] = true
+				// AssignedName, not st.Name: `+Foo = 1` defines the
+				// macro MY.Foo and does NOT make Foo a submit command
+				// the file set.
+				names[strings.ToUpper(config.AssignedName(st))] = true
 			case *config.Conditional:
 				walk(st.ThenBlock)
 				for _, ei := range st.ElseIfBlock {

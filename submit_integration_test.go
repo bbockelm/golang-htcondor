@@ -558,6 +558,76 @@ queue
 	compareClassAds(t, goAd, condorAd, "Requirements")
 }
 
+// TestIntegrationCustomAttributes compares the two syntaxes for custom
+// job attributes against condor_submit itself.
+//
+// This is the check that matters for them: the Go library and its unit
+// tests can agree with each other and still both be wrong about what
+// `+Attr = expr` means. condor_submit is the definition, so ask it.
+func TestIntegrationCustomAttributes(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	submitContent := `
+universe = vanilla
+executable = /usr/bin/true
+output = test.out
+error = test.err
+log = test.log
++Tag = "nightly"
++Retries = 3
++WantGPU = true
++HalfMem = RequestMemory / 2
++X = 1
+MY.ProjectID = "project_123"
+queue
+`
+
+	condorAd, err := runCondorSubmit(submitContent)
+	if err != nil {
+		t.Fatalf("Failed to run condor_submit: %v", err)
+	}
+
+	sf, err := ParseSubmitFile(strings.NewReader(submitContent))
+	if err != nil {
+		t.Fatalf("Failed to parse submit file: %v", err)
+	}
+	result, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if len(result.ProcAds) == 0 {
+		t.Fatal("No proc ads generated")
+	}
+	goAd := result.ProcAds[0]
+
+	// Check the custom attributes explicitly as well as through the
+	// general comparison: compareClassAds tolerates attributes that
+	// only one side has in some categories, and an attribute silently
+	// missing from BOTH sides is exactly the failure being guarded
+	// against here.
+	for _, attr := range []string{"Tag", "Retries", "WantGPU", "HalfMem", "X", "ProjectID"} {
+		condorExpr, condorHas := condorAd.Lookup(attr)
+		if !condorHas {
+			t.Errorf("condor_submit did not set %s; the expectation in this test is wrong, not the library", attr)
+			continue
+		}
+		goExpr, goHas := goAd.Lookup(attr)
+		if !goHas {
+			t.Errorf("Go ad is missing %s (condor_submit has %s)", attr, condorExpr.String())
+			continue
+		}
+		// Both sides were parsed and are printed by the same ClassAd
+		// library, so equivalent expressions render identically.
+		if goExpr.String() != condorExpr.String() {
+			t.Errorf("%s: Go has %s, condor_submit has %s", attr, goExpr.String(), condorExpr.String())
+		}
+	}
+
+	compareClassAds(t, goAd, condorAd, "CustomAttributes")
+}
+
 func TestIntegrationDockerUniverse(t *testing.T) {
 	if !condorSubmitAvailable() {
 		t.Skip("condor_submit not available")

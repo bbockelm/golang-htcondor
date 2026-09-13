@@ -45,6 +45,16 @@ func (c *Config) executeStatement(stmt Statement) error {
 	}
 }
 
+// CustomAttrPrefix is the canonical spelling for a submit-file
+// assignment that sets a job ad attribute rather than a submit command.
+//
+// HTCondor accepts two syntaxes for it — `+Foo = expr` and
+// `MY.Foo = expr` — and they mean the same thing. Parsing stores both
+// under this prefix so everything downstream has one spelling to look
+// for. (It lives here rather than beside Assignment because parser.go
+// is generated from parser.y and regeneration would drop it.)
+const CustomAttrPrefix = "MY."
+
 // executeAssignment executes a variable assignment
 func (c *Config) executeAssignment(a *Assignment) error {
 	value := a.Value
@@ -80,10 +90,49 @@ func (c *Config) executeAssignment(a *Assignment) error {
 		}
 	}
 
+	// A `+Foo = <expr>` assignment defines MY.Foo, not Foo. Applied
+	// after name expansion so the two compose: `+$(TAG)_LIMIT = 4`
+	// expands the name first and then takes the prefix.
+	if a.ClassAdExpr {
+		name = CustomAttrPrefix + name
+	}
+
 	// Use Set() which handles self-references and stores unexpanded values
 	// This preserves lazy evaluation semantics (except in metaknobs)
 	c.Set(name, value)
 	return nil
+}
+
+// AssignedName returns the macro name an assignment actually defines.
+//
+// For `+Foo = <expr>` — a submit file asking for job ad attribute Foo —
+// that is MY.Foo, HTCondor's other spelling for the same thing. The
+// parser strips the '+' and records the intent in a flag, which left
+// the assignment indistinguishable from a submit command called Foo;
+// every consumer that asks "what did this file define?" has to apply
+// the same rule, or they disagree about the macro namespace:
+//
+//   - the executor stores it under that name (after expanding any
+//     macro reference in the name itself), so $(MY.Foo) expands as
+//     condor_submit expands it and the submit builder has a prefix to
+//     find;
+//   - SubmitFile.assignedNames uses it to decide which SUBMIT COMMANDS
+//     the file set. `+Max_Transfer_Input_Mb = 5` must not mark the
+//     submit command max_transfer_input_mb as assigned, or its
+//     param_info default is read as if the user had written it — the
+//     leak documented at submitCommand, which a schedd that protects
+//     the attribute rejects outright;
+//   - the MCP submit linter uses it to know which $(...) references
+//     resolve, so it neither warns about a live $(MY.Foo) nor stays
+//     quiet about a $(Foo) that expands to nothing.
+func AssignedName(a *Assignment) string {
+	if a == nil {
+		return ""
+	}
+	if a.ClassAdExpr {
+		return CustomAttrPrefix + a.Name
+	}
+	return a.Name
 }
 
 // executeConditional executes an if/elif/else/endif block
