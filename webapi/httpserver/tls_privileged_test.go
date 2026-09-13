@@ -59,7 +59,7 @@ func TestServeTLSReadsARootOnlyKeyAfterDrop(t *testing.T) {
 	srv := &http.Server{ReadHeaderTimeout: time.Second}
 	defer func() { _ = srv.Close() }()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveTLSWithCredentials(srv, ln, certPath, keyPath) }()
+	go func() { errCh <- serveTLSWithCredentials(srv, ln, certPath, keyPath, nil, time.Minute) }()
 
 	select {
 	case err := <-errCh:

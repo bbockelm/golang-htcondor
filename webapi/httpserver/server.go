@@ -597,7 +597,7 @@ func (s *Server) ServeListenerWithCert(ln net.Listener, certFile, keyFile string
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr, "scheme", scheme)
 	fmt.Printf("Server started on %s://%s\n", scheme, addrStr)
 	if scheme == "https" {
-		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
+		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile, s.logger, s.certReloadInterval())
 	}
 	return s.httpServer.Serve(ln)
 }
@@ -629,9 +629,17 @@ func (s *Server) ServeMCPListener(ln net.Listener, certFile, keyFile string) err
 	s.logger.Info(logging.DestinationHTTP, "Serving MCP on its own listener",
 		"address", safeListenerAddr(ln), "scheme", scheme)
 	if scheme == "https" {
-		return serveTLSWithCredentials(srv, ln, certFile, keyFile)
+		return serveTLSWithCredentials(srv, ln, certFile, keyFile, s.logger, s.certReloadInterval())
 	}
 	return srv.Serve(ln)
+}
+
+// certReloadInterval is how often the serving keypair is re-read. It is
+// a method rather than the constant inline so tests can drive the
+// reload without sleeping, and so an operator-facing knob has one place
+// to land if one is ever wanted.
+func (s *Server) certReloadInterval() time.Duration {
+	return defaultCertReloadInterval
 }
 
 // loadKeyPairMaybeAsRoot reads a TLS certificate and key through the
@@ -660,13 +668,17 @@ func loadKeyPairMaybeAsRoot(certFile, keyFile string) (tls.Certificate, error) {
 	return cert, nil
 }
 
-// serveTLSWithCredentials is ServeTLS with the keypair already in hand.
+// serveTLSWithCredentials is ServeTLS with the keypair read through the
+// privileged path and re-read as it changes.
 //
-// The certificate is installed on a clone of the server's TLSConfig and
-// the paths are then passed empty, which is how ServeTLS is told to use
-// the configured certificate rather than opening files itself.
-func serveTLSWithCredentials(srv *http.Server, ln net.Listener, certFile, keyFile string) error {
-	cert, err := loadKeyPairMaybeAsRoot(certFile, keyFile)
+// The certificate is served through TLSConfig.GetCertificate rather than
+// a fixed Certificates list, so a renewed keypair takes effect without
+// restarting the daemon -- see certReloader, including why a swap is
+// all-or-nothing. The paths are then passed to ServeTLS empty, which is
+// how it is told to use the configured certificate instead of opening
+// files itself.
+func serveTLSWithCredentials(srv *http.Server, ln net.Listener, certFile, keyFile string, logger *logging.Logger, interval time.Duration) error {
+	reloader, err := newCertReloader(certFile, keyFile, interval, logger)
 	if err != nil {
 		return err
 	}
@@ -677,7 +689,7 @@ func serveTLSWithCredentials(srv *http.Server, ln net.Listener, certFile, keyFil
 	if cfg.MinVersion == 0 {
 		cfg.MinVersion = tls.VersionTLS12
 	}
-	cfg.Certificates = []tls.Certificate{cert}
+	cfg.GetCertificate = reloader.GetCertificate
 	srv.TLSConfig = cfg
 	return srv.ServeTLS(ln, "", "")
 }
@@ -706,7 +718,7 @@ func (s *Server) ServeAdditionalListener(ln net.Listener, certFile, keyFile stri
 	s.logger.Info(logging.DestinationHTTP, "Also listening on",
 		"address", safeListenerAddr(ln), "scheme", scheme)
 	if scheme == "https" {
-		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
+		return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile, s.logger, s.certReloadInterval())
 	}
 	return s.httpServer.Serve(ln)
 }
@@ -735,7 +747,7 @@ func (s *Server) StartTLS(certFile, keyFile string) error {
 	s.logger.Info(logging.DestinationHTTP, "Listening on", "address", addrStr)
 	// Print to stdout for integration tests to detect start up
 	fmt.Printf("Server started on https://%s\n", addrStr)
-	return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile)
+	return serveTLSWithCredentials(s.httpServer, ln, certFile, keyFile, s.logger, s.certReloadInterval())
 }
 
 // Shutdown gracefully shuts down the HTTP server

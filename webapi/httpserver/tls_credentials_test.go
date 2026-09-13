@@ -21,13 +21,25 @@ import (
 // writeKeyPair writes a self-signed cert/key pair and returns their paths.
 func writeKeyPair(t *testing.T, dir string, keyMode os.FileMode) (certPath, keyPath string) {
 	t.Helper()
+	return writeKeyPairModed(t, dir, "localhost", "tls.crt", "tls.key", keyMode)
+}
+
+// writeKeyPairNamed writes a pair with a given CommonName and file names,
+// 0600 on the key.
+func writeKeyPairNamed(t *testing.T, dir, cn, certName, keyName string) (certPath, keyPath string) {
+	t.Helper()
+	return writeKeyPairModed(t, dir, cn, certName, keyName, 0o600)
+}
+
+func writeKeyPairModed(t *testing.T, dir, cn, certName, keyName string, keyMode os.FileMode) (certPath, keyPath string) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
+		Subject:      pkix.Name{CommonName: cn},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
@@ -36,8 +48,8 @@ func writeKeyPair(t *testing.T, dir string, keyMode os.FileMode) (certPath, keyP
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPath = filepath.Join(dir, "tls.crt")
-	keyPath = filepath.Join(dir, "tls.key")
+	certPath = filepath.Join(dir, certName)
+	keyPath = filepath.Join(dir, keyName)
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil { //nolint:gosec // G306: a certificate is public
@@ -67,7 +79,7 @@ func TestServeTLSWithCredentialsServesAReadableKeyPair(t *testing.T) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	done := make(chan error, 1)
-	go func() { done <- serveTLSWithCredentials(srv, ln, certPath, keyPath) }()
+	go func() { done <- serveTLSWithCredentials(srv, ln, certPath, keyPath, nil, time.Minute) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
 	// A handshake proves the certificate was installed on TLSConfig
@@ -105,7 +117,7 @@ func TestServeTLSWithCredentialsReportsAnUnreadableKey(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	err = serveTLSWithCredentials(&http.Server{ReadHeaderTimeout: time.Second}, ln, certPath, keyPath)
+	err = serveTLSWithCredentials(&http.Server{ReadHeaderTimeout: time.Second}, ln, certPath, keyPath, nil, time.Minute)
 	if err == nil {
 		t.Fatal("serving started with an unreadable key")
 	}
