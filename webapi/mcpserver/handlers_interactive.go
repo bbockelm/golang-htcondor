@@ -19,6 +19,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"os/user"
 	"strings"
 	"time"
 
@@ -124,7 +125,23 @@ func interactiveTools() []Tool {
 func (s *Server) interactiveCaller(ctx context.Context) (interactive.Caller, error) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
-		return interactive.Caller{}, fmt.Errorf("authentication required")
+		// No actor on the context means one of two very different
+		// things, and the difference is s.delegated. Behind HTTP every
+		// call is on somebody's behalf, so an unidentifiable caller
+		// must be refused. Run from a shell over stdio, the server IS
+		// the user -- it holds their credentials and the schedd
+		// authenticates it as them -- and refusing there made all four
+		// tools unusable on that transport while still listing them.
+		// Every other owner-scoped tool in this package already draws
+		// the line this way.
+		if s.delegated {
+			return interactive.Caller{}, fmt.Errorf("authentication required")
+		}
+		me, err := user.Current()
+		if err != nil || me.Username == "" {
+			return interactive.Caller{}, fmt.Errorf("cannot determine the local user to act as: %w", err)
+		}
+		return interactive.Caller{Actor: me.Username, Owner: me.Username}, nil
 	}
 	return interactive.Caller{Actor: actor, Owner: ownerFromActor(actor)}, nil
 }

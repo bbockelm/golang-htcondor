@@ -514,3 +514,113 @@ func TestUnauthenticatedCallerRefused(t *testing.T) {
 		t.Error("Stop allowed an unauthenticated caller")
 	}
 }
+
+// TestLeaseSurvivesALongRunningCommand covers the worst bug the review
+// found: Exec used to extend the lease only on the way OUT, so a
+// command started near the end of a lease had the lease expire
+// underneath it -- expiry drops the shutdown sentinel and condor_rm's
+// the job, so the sandbox the command was working in disappears
+// mid-write and the caller gets a transport error instead of output.
+func TestLeaseSurvivesALongRunningCommand(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, shell := testManager(t, schedd, Options{
+		HeartbeatInterval: 10 * time.Millisecond,
+		// Shorter than the command takes.
+		DefaultLease: 50 * time.Millisecond,
+	})
+	job := mustCreate(t, mgr, schedd, alice, "build")
+	schedd.setStatus(job, jobStatusRunning)
+
+	release := make(chan struct{})
+	shell.block = release
+	shell.stdout = "finished\n"
+
+	done := make(chan *ExecResult, 1)
+	go func() {
+		result, err := mgr.Exec(context.Background(), alice, "build", ExecRequest{
+			Command: "make",
+			Timeout: 10 * time.Second,
+		})
+		if err != nil {
+			t.Errorf("Exec: %v", err)
+			done <- nil
+			return
+		}
+		done <- result
+	}()
+
+	// Hold the command open well past the lease, then let it finish.
+	time.Sleep(250 * time.Millisecond)
+	if removed := schedd.removedJobs(); len(removed) != 0 {
+		t.Errorf("the job was removed while a command was still running: %v", removed)
+	}
+	if shell.countOf(ShutdownCmd) != 0 {
+		t.Error("a shutdown sentinel was dropped while a command was still running")
+	}
+	close(release)
+
+	result := <-done
+	if result == nil {
+		t.Fatal("the command did not complete")
+	}
+	if result.Stdout != "finished\n" {
+		t.Errorf("stdout = %q", result.Stdout)
+	}
+	// And the lease runs from when the command ENDED, not when it began.
+	if time.Until(result.LeaseExpires) <= 0 {
+		t.Errorf("lease expires at %v, which is already past", result.LeaseExpires)
+	}
+}
+
+// TestStaleHeartbeatDoesNotCloseItsSuccessor covers the second finding:
+// teardown used to be addressed by (owner, name), so a goroutine that
+// had already been superseded closed whatever now answered to that name
+// -- including the freshly dialed connection Exec's retry was running
+// its command on.
+func TestStaleHeartbeatDoesNotCloseItsSuccessor(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{DefaultLease: time.Hour})
+	job := mustCreate(t, mgr, schedd, alice, "build")
+	schedd.setStatus(job, jobStatusRunning)
+
+	// Attach, then capture the session the manager is tracking.
+	if _, err := mgr.Exec(context.Background(), alice, "build", ExecRequest{Command: "true"}); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	stale := mgr.sessionFor(alice.Owner, "build")
+	if stale == nil {
+		t.Fatal("no session registered")
+	}
+
+	// Replace it the way Create-after-reclaim does.
+	live := &session{
+		name:          "build",
+		owner:         alice.Owner,
+		cluster:       stale.cluster,
+		proc:          stale.proc,
+		leaseExpires:  time.Now().Add(time.Hour),
+		leaseDuration: time.Hour,
+		shell:         &fakeShell{},
+	}
+	mgr.mu.Lock()
+	mgr.sessions[sessionKey(alice.Owner, "build")] = live
+	mgr.mu.Unlock()
+
+	// The superseded holder tears itself down. It must not touch the
+	// session that replaced it.
+	mgr.detach(stale, "stale holder")
+	mgr.forget(stale, "stale holder")
+
+	mgr.mu.Lock()
+	current := mgr.sessions[sessionKey(alice.Owner, "build")]
+	mgr.mu.Unlock()
+	if current != live {
+		t.Fatal("the stale holder evicted its successor from the registry")
+	}
+	if live.shell == nil {
+		t.Fatal("the stale holder dropped its successor's connection")
+	}
+	if live.shell.(*fakeShell).closed {
+		t.Error("the stale holder closed its successor's connection")
+	}
+}

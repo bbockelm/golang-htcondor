@@ -1,6 +1,9 @@
 package interactive
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // cappedBuffer collects command output up to a byte limit and then
 // stops, remembering that it did.
@@ -12,7 +15,14 @@ import "strings"
 // past the cap are discarded rather than erroring — a command whose
 // output is long should still run to completion and report its exit
 // status.
+// It is mutex-guarded because x/crypto/ssh copies a session's output in
+// goroutines that finish only when Wait() drains them. On a command
+// timeout the manager stops waiting and reads what it has, so a copy
+// goroutine may still be writing here while the caller reads -- a data
+// race on strings.Builder, which can hand back a string built from a
+// stale slice header. The lock costs nothing next to an SSH round trip.
 type cappedBuffer struct {
+	mu      sync.Mutex
 	sb      strings.Builder
 	limit   int
 	written int
@@ -24,6 +34,8 @@ func newCappedBuffer(limit int) *cappedBuffer {
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if room := b.limit - b.written; room > 0 {
 		if len(p) <= room {
 			b.sb.Write(p)
@@ -41,10 +53,21 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *cappedBuffer) String() string  { return b.sb.String() }
-func (b *cappedBuffer) truncated() bool { return b.cut }
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.String()
+}
+
+func (b *cappedBuffer) truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cut
+}
 
 func (b *cappedBuffer) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.sb.Reset()
 	b.written = 0
 	b.cut = false

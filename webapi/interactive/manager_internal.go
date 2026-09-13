@@ -68,10 +68,14 @@ const liveSessionClause = `(JobStatus == 1 || JobStatus == 2 || JobStatus == 5)`
 // someone has ten thousand jobs quietly stops finding their session at
 // all once the row limit is reached.
 //
-// Confinement is the same pair the MCP tools use elsewhere: the schedd
-// filters on the identity it authenticated (FetchMyJobs), and the
-// constraint filters on Owner as well. Two mechanisms because one of
-// them silently degrading to "no filter" is a thing that has happened.
+// Confinement is this daemon's, not the schedd's. FetchMyJobs sounds
+// like a server-side check and is not: it sets Me to the owner string
+// the client supplied and asks the schedd to match Owner == Me, so
+// both it and the constraint below confine the query to the same name
+// this process chose. What makes that name trustworthy is upstream --
+// the transport resolved the caller's identity before the owner was
+// derived from it -- so the filters must be built from that identity
+// and never from anything the caller can set directly.
 func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]Info, error) {
 	schedd := m.opts.Schedd()
 	if schedd == nil {
@@ -174,7 +178,20 @@ func (m *Manager) lookup(ctx context.Context, caller Caller, name string) (*Info
 		m.mu.Unlock()
 		return &info, nil
 	}
+	// The name resolves to nothing live, so any entry still held for it
+	// describes a job that is gone -- reclaimed by its watchdog, removed
+	// from outside, or finished. Drop it: otherwise the map grows for
+	// the daemon's lifetime, and the stale entry is what lets a later
+	// Create collide with a heartbeat goroutine that outlived its job.
+	m.forgetNamed(caller.Owner, name, "no live job answers to this name")
 	return nil, fmt.Errorf("no interactive session named %q (it may have ended; start a new one)", name)
+}
+
+// sessionFor returns the session currently registered under a name.
+func (m *Manager) sessionFor(owner, name string) *session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessions[sessionKey(owner, name)]
 }
 
 func countNamed(infos []Info, name string) int {
@@ -352,21 +369,31 @@ func (m *Manager) heartbeatLoop(sess *session, stop chan struct{}) {
 		select {
 		case <-stop:
 			return
+		case <-m.done:
+			// The manager is shutting down. Whether or not this
+			// session is still the one registered under its name,
+			// this goroutine has to end.
+			return
 		case <-ticker.C:
 		}
 
 		m.mu.Lock()
 		shell := sess.shell
 		expires := sess.leaseExpires
+		inFlight := sess.running
+		cluster, proc := sess.cluster, sess.proc
 		m.mu.Unlock()
 
 		if shell == nil {
 			return
 		}
-		if !m.opts.Now().Before(expires) {
+		// A command in flight holds the session open past its lease:
+		// reclaiming it here would condor_rm the job out from under
+		// work that is still running.
+		if inFlight == 0 && !m.opts.Now().Before(expires) {
 			m.log().Info(m.opts.LogDest, "interactive session lease expired",
 				"session", sess.name, "owner", sess.owner,
-				"job_id", jobIDOf(sess.cluster, sess.proc))
+				"job_id", jobIDOf(cluster, proc))
 			m.expire(sess)
 			return
 		}
@@ -381,8 +408,8 @@ func (m *Manager) heartbeatLoop(sess *session, stop chan struct{}) {
 			// log at default level to say why.
 			m.log().Warn(m.opts.LogDest, "interactive session heartbeat failed",
 				"session", sess.name, "owner", sess.owner,
-				"job_id", jobIDOf(sess.cluster, sess.proc), "error", err)
-			m.detach(sess.owner, sess.name, "heartbeat failed")
+				"job_id", jobIDOf(cluster, proc), "error", err)
+			m.detach(sess, "heartbeat failed")
 			return
 		}
 	}
@@ -405,7 +432,7 @@ func (m *Manager) expire(sess *session) {
 		}
 		cancel()
 	}
-	m.forget(owner, name, "lease expired")
+	m.forget(sess, "lease expired")
 
 	// condor_rm as well as the sentinel: the sentinel only works if we
 	// are still attached, and an expired session is exactly the case
@@ -420,10 +447,16 @@ func (m *Manager) expire(sess *session) {
 
 // detach drops this process's connection to a session without ending
 // the session itself. The next call that names it dials again.
-func (m *Manager) detach(owner, name, why string) {
+//
+// It is keyed on the session VALUE. Addressing it by (owner, name) meant
+// a goroutine that had already been superseded -- the heartbeat of a
+// connection Exec's retry path had just replaced -- closed whatever now
+// answered to that name, which was the freshly dialed shell the retry
+// was running its command on.
+func (m *Manager) detach(sess *session, why string) {
 	m.mu.Lock()
-	sess, ok := m.sessions[sessionKey(owner, name)]
-	if !ok {
+	current, ok := m.sessions[sessionKey(sess.owner, sess.name)]
+	if !ok || current != sess {
 		m.mu.Unlock()
 		return
 	}
@@ -440,15 +473,17 @@ func (m *Manager) detach(owner, name, why string) {
 		_ = shell.Close()
 	}
 	m.log().Debug(m.opts.LogDest, "interactive session detached",
-		"session", name, "owner", owner, "reason", why)
+		"session", sess.name, "owner", sess.owner, "reason", why)
 }
 
-// forget drops a session from this process entirely.
-func (m *Manager) forget(owner, name, why string) {
-	key := sessionKey(owner, name)
+// forget drops a session from this process entirely. Like detach, it is
+// keyed on the session value so a stale holder cannot evict its
+// successor.
+func (m *Manager) forget(sess *session, why string) {
+	key := sessionKey(sess.owner, sess.name)
 	m.mu.Lock()
-	sess, ok := m.sessions[key]
-	if !ok {
+	current, ok := m.sessions[key]
+	if !ok || current != sess {
 		m.mu.Unlock()
 		return
 	}
@@ -466,10 +501,21 @@ func (m *Manager) forget(owner, name, why string) {
 		_ = shell.Close()
 	}
 	m.log().Info(m.opts.LogDest, "interactive session released",
-		"session", name, "owner", owner, "reason", why)
+		"session", sess.name, "owner", sess.owner, "reason", why)
 }
 
-// extendLease pushes a session's expiry out by the default lease and
+// forgetNamed drops whatever session currently answers to a name.
+func (m *Manager) forgetNamed(owner, name, why string) {
+	m.mu.Lock()
+	sess, ok := m.sessions[sessionKey(owner, name)]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	m.forget(sess, why)
+}
+
+// extendLease pushes a session's expiry out by ITS lease duration and
 // returns the new expiry. Every call that names a session extends it:
 // that is the whole liveness signal.
 func (m *Manager) extendLease(owner, name string) time.Time {
@@ -479,8 +525,46 @@ func (m *Manager) extendLease(owner, name string) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	sess.leaseExpires = m.opts.Now().Add(m.opts.DefaultLease)
+	m.extendLeaseLocked(sess)
 	return sess.leaseExpires
+}
+
+func (m *Manager) extendLeaseLocked(sess *session) {
+	d := sess.leaseDuration
+	if d <= 0 {
+		d = m.opts.DefaultLease
+	}
+	sess.leaseExpires = m.opts.Now().Add(d)
+}
+
+// beginCommand marks a command in flight on a session and extends its
+// lease, reporting false when the session is no longer tracked.
+func (m *Manager) beginCommand(owner, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionKey(owner, name)]
+	if !ok {
+		return false
+	}
+	sess.running++
+	m.extendLeaseLocked(sess)
+	return true
+}
+
+// endCommand releases the in-flight mark and extends the lease again,
+// so the countdown runs from when the command finished rather than from
+// when it started.
+func (m *Manager) endCommand(owner, name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionKey(owner, name)]
+	if !ok {
+		return
+	}
+	if sess.running > 0 {
+		sess.running--
+	}
+	m.extendLeaseLocked(sess)
 }
 
 func (m *Manager) clampLease(requested time.Duration) time.Duration {

@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os/user"
 	"strings"
 	"testing"
 	"time"
@@ -82,20 +83,64 @@ func TestInteractiveToolsAreListedAndDispatchable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// No authenticated caller on the context: every one of these
-		// must refuse, and must refuse for that reason rather than
-		// because the dispatcher does not know the name.
+		// Every tool must at least be dispatched. What happens next
+		// depends on the transport, which the next two tests pin.
 		_, err = s.handleCallTool(ctx, params)
-		if err == nil {
-			t.Errorf("%s accepted an unauthenticated call", name)
-			continue
-		}
-		if strings.Contains(err.Error(), "unknown tool") {
+		if err != nil && strings.Contains(err.Error(), "unknown tool") {
 			t.Errorf("%s is listed but not dispatched: %v", name, err)
+		}
+	}
+}
+
+// TestInteractiveCallerRefusedWhenDelegated: behind HTTP, every call is
+// on somebody's behalf, so a caller the transport could not identify
+// has to be refused rather than served as this daemon's own user.
+func TestInteractiveCallerRefusedWhenDelegated(t *testing.T) {
+	s := newTestServerWithInteractive(t)
+	s.delegated = true
+
+	for _, name := range []string{
+		"interactive_session_start",
+		"interactive_session_exec",
+		"interactive_session_list",
+		"interactive_session_stop",
+	} {
+		params, err := json.Marshal(map[string]interface{}{
+			"name":      name,
+			"arguments": map[string]interface{}{"session": "s", "command": "true"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.handleCallTool(context.Background(), params)
+		if err == nil {
+			t.Errorf("%s served an unidentifiable caller", name)
+			continue
 		}
 		if !strings.Contains(err.Error(), "authentication required") {
 			t.Errorf("%s refused for the wrong reason: %v", name, err)
 		}
+	}
+}
+
+// TestInteractiveCallerIsTheLocalUserOverStdio: run from a shell, the
+// server IS the user -- it holds their credentials and the schedd
+// authenticates it as them. Refusing there made all four tools unusable
+// on stdio while still advertising them in tools/list.
+func TestInteractiveCallerIsTheLocalUserOverStdio(t *testing.T) {
+	s := newTestServerWithInteractive(t)
+	s.delegated = false
+
+	caller, err := s.interactiveCaller(context.Background())
+	if err != nil {
+		t.Fatalf("stdio caller was refused: %v", err)
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	if caller.Owner != me.Username || caller.Actor != me.Username {
+		t.Errorf("caller = %+v, want the local user %q", caller, me.Username)
 	}
 }
 

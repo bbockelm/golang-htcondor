@@ -44,6 +44,12 @@ type Manager struct {
 	sessions map[string]*session
 	closed   bool
 	wg       sync.WaitGroup
+	// done is closed by Close and selected on by every heartbeat
+	// goroutine. Stopping them one-by-one through the session map is not
+	// enough: a session can be displaced from the map (replaced by a new
+	// one of the same name) while its goroutine is still live, and then
+	// nothing in the map can stop it -- Close would wait on it forever.
+	done chan struct{}
 }
 
 // Options configures a Manager. The zero value of every field has a
@@ -118,10 +124,10 @@ const (
 
 // Caller identifies who is asking. Actor is the authenticated identity
 // ("alice@uid.domain"); Owner is the value HTCondor puts in a job's
-// Owner attribute ("alice"). Both are needed because the schedd's
-// authenticated-query filter keys on the first and job ads carry the
-// second; the host computes the mapping, since it already owns that
-// rule.
+// Owner attribute ("alice"). The host computes the mapping between
+// them, since it already owns that rule. Every query and every removal
+// is confined to Owner; Actor is carried for logging and so a future
+// caller-identity check has the unstripped form to work with.
 type Caller struct {
 	Actor string
 	Owner string
@@ -139,8 +145,18 @@ type session struct {
 	cluster    int
 	proc       int
 
-	shell         Shell
-	leaseExpires  time.Time
+	shell        Shell
+	leaseExpires time.Time
+	// leaseDuration is what each call extends the lease BY. Held per
+	// session because a caller may ask for a longer one at create, and
+	// using the manager default here silently downgraded that choice on
+	// their first call.
+	leaseDuration time.Duration
+	// running counts commands in flight. A lease must not expire out
+	// from under one: expiry drops the shutdown sentinel and condor_rm's
+	// the job, so a command outliving its lease would lose the sandbox
+	// it is working in, mid-write.
+	running       int
 	heartbeatOn   bool
 	stopHeartbeat chan struct{}
 
@@ -256,7 +272,11 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.Dial == nil {
 		opts.Dial = sshDialer(opts.Schedd)
 	}
-	return &Manager{opts: opts, sessions: map[string]*session{}}, nil
+	return &Manager{
+		opts:     opts,
+		sessions: map[string]*session{},
+		done:     make(chan struct{}),
+	}, nil
 }
 
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
@@ -348,22 +368,33 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 
 	lease := m.clampLease(spec.Lease)
 	sess := &session{
-		name:         spec.Name,
-		owner:        caller.Owner,
-		instanceID:   instanceID,
-		cluster:      clusterID,
-		proc:         procID,
-		leaseExpires: m.opts.Now().Add(lease),
-		secConfig:    securityConfigFrom(ctx),
+		name:          spec.Name,
+		owner:         caller.Owner,
+		instanceID:    instanceID,
+		cluster:       clusterID,
+		proc:          procID,
+		leaseExpires:  m.opts.Now().Add(lease),
+		leaseDuration: lease,
+		secConfig:     securityConfigFrom(ctx),
 	}
 
+	key := sessionKey(caller.Owner, spec.Name)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("interactive session manager is shutting down")
 	}
-	m.sessions[sessionKey(caller.Owner, spec.Name)] = sess
+	// An entry can still be here when the job behind it has left the
+	// live set -- reclaimed by its watchdog, removed from outside -- so
+	// the duplicate-name check above passed. Overwriting it silently
+	// stranded its ssh.Client and its heartbeat goroutine, and that
+	// goroutine would go on to tear down THIS session by name.
+	displaced := m.sessions[key]
+	m.sessions[key] = sess
 	m.mu.Unlock()
+	if displaced != nil {
+		m.releaseSession(displaced, "replaced by a new session of the same name")
+	}
 
 	m.log().Info(m.opts.LogDest, "interactive session created",
 		"session", spec.Name, "owner", caller.Owner,
@@ -439,6 +470,18 @@ func (m *Manager) Exec(ctx context.Context, caller Caller, name string, req Exec
 		return nil, err
 	}
 
+	// Take the lease BEFORE running anything, and hold it for the whole
+	// call. Extending only on the way out meant a command started near
+	// the end of a lease could have the lease expire mid-run -- which
+	// drops the shutdown sentinel and condor_rm's the job, destroying
+	// the sandbox the command is working in. beginCommand also blocks
+	// expiry outright while the count is non-zero, so a command may
+	// outrun its lease without losing the session under it.
+	if !m.beginCommand(caller.Owner, name) {
+		return nil, fmt.Errorf("session %q is no longer tracked", name)
+	}
+	defer m.endCommand(caller.Owner, name)
+
 	shell, err := m.attach(ctx, caller, info)
 	if err != nil {
 		return nil, err
@@ -462,7 +505,9 @@ func (m *Manager) Exec(ctx context.Context, caller Caller, name string, req Exec
 		// its transport may have already done part of its work, and
 		// running it a second time would repeat it — the caller gets
 		// the error and decides.
-		m.detach(caller.Owner, name, "shell error: "+runErr.Error())
+		if sess := m.sessionFor(caller.Owner, name); sess != nil {
+			m.detach(sess, "shell error: "+runErr.Error())
+		}
 		shell, err = m.attach(ctx, caller, info)
 		if err != nil {
 			return nil, fmt.Errorf("command dispatch failed: %w; reconnecting to the session also failed: %w", runErr, err)
@@ -534,11 +579,33 @@ func (m *Manager) Stop(ctx context.Context, caller Caller, name string) (*Info, 
 		cancel()
 	}
 
-	m.forget(caller.Owner, name, "stopped by caller")
+	m.forgetNamed(caller.Owner, name, "stopped by caller")
 	m.removeJob(ctx, caller, info.ClusterID, info.ProcID, "Interactive session stopped")
 
 	info.Status = "stopping"
 	return info, nil
+}
+
+// releaseSession stops a specific session's heartbeat and closes its
+// shell. It takes the session VALUE, not its name, so a caller holding
+// a stale pointer cannot tear down whatever now answers to that name.
+func (m *Manager) releaseSession(sess *session, why string) {
+	m.mu.Lock()
+	stop := sess.stopHeartbeat
+	shell := sess.shell
+	sess.stopHeartbeat = nil
+	sess.shell = nil
+	sess.heartbeatOn = false
+	m.mu.Unlock()
+
+	if stop != nil {
+		close(stop)
+	}
+	if shell != nil {
+		_ = shell.Close()
+	}
+	m.log().Debug(m.opts.LogDest, "interactive session released",
+		"session", sess.name, "owner", sess.owner, "reason", why)
 }
 
 // Close stops every heartbeat and drops every attached shell. It
@@ -552,6 +619,7 @@ func (m *Manager) Close() {
 		return
 	}
 	m.closed = true
+	close(m.done)
 	// Take what has to be torn down while holding the lock -- the
 	// fields belong to it, and a heartbeat goroutine may be reading
 	// them right now.
