@@ -39,7 +39,7 @@ func isMCPSurfacePath(path string) bool {
 // isMCPProtocolPath reports whether path is the MCP protocol endpoint
 // itself, as opposed to the authorization endpoints around it.
 func isMCPProtocolPath(path string) bool {
-	return path == mcpMessagePath
+	return path == mcpPath || path == mcpMessagePath
 }
 
 // mcpSurfaceOnly restricts a handler to the MCP surface.

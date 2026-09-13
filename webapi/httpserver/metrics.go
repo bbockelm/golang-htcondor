@@ -339,6 +339,7 @@ var routePatterns = []routePattern{
 
 	// MCP / IDP — bucket aggressively; these aren't user-facing flows.
 	{re: regexp.MustCompile(`^/mcp/oauth2/.*$`), template: "/mcp/oauth2/*"},
+	{exact: "/mcp", template: "/mcp"},
 	{exact: "/mcp/message", template: "/mcp/message"},
 	{re: regexp.MustCompile(`^/idp/.*$`), template: "/idp/*"},
 	{re: regexp.MustCompile(`^/.well-known/.*$`), template: "/.well-known/*"},

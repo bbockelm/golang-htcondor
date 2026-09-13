@@ -25,8 +25,15 @@ import (
 // version info) and read responses, including any that leaked
 // upstream metadata.
 const (
-	// mcpMessagePath is the MCP protocol endpoint: the resource whose
-	// identifier OAuth clients validate against.
+	// mcpPath is the MCP protocol endpoint: the resource whose
+	// identifier OAuth clients validate against. A client is configured
+	// with this URL, so it is the one people type and paste --
+	// https://host/mcp.
+	mcpPath = "/mcp"
+	// mcpMessagePath is the original spelling of the same endpoint, kept
+	// so clients already configured with it keep working. Both are
+	// registered and both are valid resource identifiers; the metadata
+	// document names whichever one the client asked about.
 	mcpMessagePath = "/mcp/message"
 	// wellKnownProtectedResource is the RFC 9728 metadata path. The
 	// resource-specific document lives at this plus the resource's own
@@ -209,6 +216,7 @@ func (h *Handler) setupRoutes() {
 		// this URL from the server URL they were configured with, so
 		// without it they fetch a document that does not exist -- see
 		// handleOAuth2ProtectedResourceMetadata.
+		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
 		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
 		// OAuth2 endpoints
@@ -224,7 +232,10 @@ func (h *Handler) setupRoutes() {
 		mux.HandleFunc("/mcp/oauth2/device/authorize", h.handleOAuth2DeviceAuthorize)
 		mux.HandleFunc("/mcp/oauth2/device/verify", h.handleOAuth2DeviceVerify)
 
-		// MCP protocol endpoint
+		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
+		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays
+		// registered for clients configured before it moved.
+		mux.HandleFunc(mcpPath, h.handleMCPMessage)
 		mux.HandleFunc(mcpMessagePath, h.handleMCPMessage)
 
 		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
