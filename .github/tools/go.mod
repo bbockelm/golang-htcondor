@@ -7,14 +7,14 @@ go 1.26.0
 require github.com/bbockelm/htcondordb v0.18.9
 
 require (
-	github.com/PelicanPlatform/classad v0.29.9 // indirect
+	github.com/PelicanPlatform/classad v0.29.11 // indirect
 	github.com/PelicanPlatform/classad/changefeed v0.29.9 // indirect
 	github.com/PelicanPlatform/classad/collections v0.29.9 // indirect
 	github.com/PelicanPlatform/classad/db v0.29.9 // indirect
 	github.com/PelicanPlatform/classad/dbrpc v0.29.9 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
-	github.com/bbockelm/cedar v0.6.14 // indirect
+	github.com/bbockelm/cedar v0.6.16 // indirect
 	github.com/bbockelm/golang-htcondor v0.13.1 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

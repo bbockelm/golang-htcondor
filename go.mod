@@ -3,9 +3,9 @@ module github.com/bbockelm/golang-htcondor
 go 1.26.0
 
 require (
-	github.com/PelicanPlatform/classad v0.29.6
+	github.com/PelicanPlatform/classad v0.29.11
 	github.com/PelicanPlatform/classad/collections v0.29.6
-	github.com/bbockelm/cedar v0.6.15
+	github.com/bbockelm/cedar v0.6.16
 	github.com/bbockelm/gosssd v0.0.1
 	github.com/glebarez/go-sqlite v1.23.0
 	github.com/pressly/goose/v3 v3.27.3
