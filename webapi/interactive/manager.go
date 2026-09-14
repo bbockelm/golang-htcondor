@@ -94,6 +94,21 @@ type Options struct {
 	// MaxOutputBytes caps each of stdout and stderr per exec.
 	MaxOutputBytes int
 
+	// CCBStreaming reaches a starter behind CCB by having the broker
+	// relay the connection instead of having the execute node dial back
+	// to us.
+	//
+	// The dial-back default needs this process to be reachable FROM the
+	// execute node, which an access point's API server generally is not
+	// -- in a container, behind NAT, anywhere but a pool host. The
+	// broker then tells the starter to connect to an address nothing
+	// routes to and the dial fails with "ccb: broker failure: failed to
+	// connect". The REST terminal has carried this setting since it hit
+	// exactly that; a session is the same dial and needs the same
+	// answer, so the host passes the operator's one setting to both
+	// rather than having two that can disagree.
+	CCBStreaming bool
+
 	// Dial opens a Shell into a running job. Defaults to
 	// condor_ssh_to_job; tests substitute a fake.
 	Dial Dialer
@@ -270,7 +285,7 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Now = time.Now
 	}
 	if opts.Dial == nil {
-		opts.Dial = sshDialer(opts.Schedd)
+		opts.Dial = sshDialer(opts.Schedd, opts.CCBStreaming)
 	}
 	return &Manager{
 		opts:     opts,
@@ -321,6 +336,29 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		return nil, fmt.Errorf("generate instance id: %w", err)
 	}
 
+	lease := m.clampLease(spec.Lease)
+
+	// The job's watchdog window is the lease, not a fixed default.
+	//
+	// Nothing touches .heartbeat until a caller attaches, and attaching
+	// only happens on the first exec. With a fixed 900s window, a
+	// session created and left alone was reclaimed a quarter of an hour
+	// later while start had just promised it for the lease -- and after
+	// a restart of this daemon the same window, not the lease, was what
+	// actually bounded recovery. Handing the job the caller's number
+	// makes the promise and the job agree.
+	//
+	// Floored so the window always outlasts several heartbeats: a
+	// caller asking for a 60s lease must not be evicted by one slow
+	// round trip.
+	watchdog := m.opts.Watchdog
+	// The floor is built from THIS manager's timings, not the package
+	// defaults: the window has to outlast several of its own heartbeats
+	// and several of the job's own poll intervals, whatever those are
+	// configured to be.
+	floor := maxInt(3*int(m.opts.HeartbeatInterval.Seconds()), 4*watchdog.PollSec)
+	watchdog.FreshnessSec = maxInt(int(lease.Seconds()), floor)
+
 	submitFile := BuildSubmitFile(SubmitArgs{
 		InstanceID:            instanceID,
 		BatchName:             BatchNameForSession(spec.Name),
@@ -333,7 +371,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		GpusMinimumRuntime:    spec.GpusMinimumRuntime,
 		CudaVersion:           spec.CudaVersion,
 		RequireGpus:           spec.RequireGpus,
-		Watchdog:              m.opts.Watchdog,
+		Watchdog:              watchdog,
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
 	})
 
@@ -348,7 +386,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 
 	stage := fstest.MapFS{
 		"interactive-watchdog.sh": &fstest.MapFile{
-			Data: []byte(BuildWatchdogScript(m.opts.Watchdog)),
+			Data: []byte(BuildWatchdogScript(watchdog)),
 			Mode: 0o755,
 		},
 	}
@@ -366,7 +404,6 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		}
 	}
 
-	lease := m.clampLease(spec.Lease)
 	sess := &session{
 		name:          spec.Name,
 		owner:         caller.Owner,

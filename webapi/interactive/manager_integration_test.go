@@ -216,7 +216,15 @@ func TestInteractiveSessionIntegration(t *testing.T) {
 	// must not hold its slot forever: the watchdog evicts it once the
 	// heartbeat goes stale, which is what bounds the damage from a
 	// crashed API server.
-	if _, err := mgr.Create(ctx, caller, CreateSpec{Name: "abandoned", MemoryMB: 256, DiskMB: 256}); err != nil {
+	// A short lease, because the lease is what the job's watchdog window
+	// is built from: this stage is about what happens when nothing is
+	// heartbeating, so it wants a window it can outlive inside a test.
+	if _, err := mgr.Create(ctx, caller, CreateSpec{
+		Name:     "abandoned",
+		MemoryMB: 256,
+		DiskMB:   256,
+		Lease:    time.Duration(freshnessSec) * time.Second,
+	}); err != nil {
 		t.Fatalf("Create(abandoned): %v", err)
 	}
 	if _, err := mgr.Exec(ctx, caller, "abandoned", ExecRequest{
