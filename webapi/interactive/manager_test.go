@@ -3,9 +3,14 @@ package interactive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
 var alice = Caller{Actor: "alice@uid.example.com", Owner: "alice"}
@@ -622,5 +627,112 @@ func TestStaleHeartbeatDoesNotCloseItsSuccessor(t *testing.T) {
 	}
 	if live.shell.(*fakeShell).closed {
 		t.Error("the stale holder closed its successor's connection")
+	}
+}
+
+// TestCCBStreamingReachesTheDial pins the setting that decides whether a
+// session can be reached at all when the job is behind CCB.
+//
+// The dial-back default requires the execute node to connect back to
+// this process, which an access point's API server generally cannot
+// accept -- the broker then points the starter at an address nothing
+// routes to and the dial fails with "ccb: broker failure: failed to
+// connect". The REST terminal has passed this setting since it hit
+// exactly that; the session manager was built with nil options and
+// silently took the default, so every session on a CCB pool failed
+// while every local test passed.
+func TestCCBStreamingReachesTheDial(t *testing.T) {
+	for name, streaming := range map[string]bool{"enabled": true, "disabled": false} {
+		t.Run(name, func(t *testing.T) {
+			var captured *htcondor.JobShellOptions
+			restore := openJobShell
+			openJobShell = func(_ context.Context, _ *htcondor.Schedd, _, _ int, opts *htcondor.JobShellOptions) (*ssh.Client, error) {
+				captured = opts
+				return nil, errors.New("stop before dialing")
+			}
+			defer func() { openJobShell = restore }()
+
+			schedd := newFakeSchedd()
+			mgr, _ := testManager(t, schedd, Options{
+				CCBStreaming: streaming,
+				// Force the real dialer: the point is what IT asks for.
+				Dial: nil,
+			})
+			mgr.opts.Dial = sshDialer(func() ScheddClient {
+				return htcondor.NewSchedd("test", "127.0.0.1:1")
+			}, streaming)
+
+			_, _ = mgr.opts.Dial(context.Background(), 1, 0)
+
+			if captured == nil {
+				t.Fatal("the dialer passed no JobShellOptions; nil means CCB dial-back")
+			}
+			if captured.CCBStreaming != streaming {
+				t.Errorf("CCBStreaming = %v, want %v", captured.CCBStreaming, streaming)
+			}
+		})
+	}
+}
+
+// TestNewManagerHandsStreamingToTheDialer: the option has to survive the
+// trip from the host's config into the dialer the manager builds.
+func TestNewManagerHandsStreamingToTheDialer(t *testing.T) {
+	var captured *htcondor.JobShellOptions
+	restore := openJobShell
+	openJobShell = func(_ context.Context, _ *htcondor.Schedd, _, _ int, opts *htcondor.JobShellOptions) (*ssh.Client, error) {
+		captured = opts
+		return nil, errors.New("stop before dialing")
+	}
+	defer func() { openJobShell = restore }()
+
+	mgr, err := NewManager(Options{
+		Schedd:       func() ScheddClient { return htcondor.NewSchedd("test", "127.0.0.1:1") },
+		CCBStreaming: true,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	_, _ = mgr.opts.Dial(context.Background(), 1, 0)
+	if captured == nil || !captured.CCBStreaming {
+		t.Errorf("NewManager built a dialer that does not request CCB streaming: %+v", captured)
+	}
+}
+
+// TestWatchdogWindowFollowsTheLease: nothing touches .heartbeat until a
+// caller attaches, and attaching only happens on the first exec. With a
+// fixed window, a session created and left alone was reclaimed while
+// start had just promised it for the lease -- and after a restart of the
+// daemon that same window, not the lease, was what bounded recovery.
+func TestWatchdogWindowFollowsTheLease(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{HeartbeatInterval: 60 * time.Second})
+
+	if _, err := mgr.Create(context.Background(), alice, CreateSpec{
+		Name:  "long",
+		Lease: 2 * time.Hour,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(schedd.submitted) != 1 {
+		t.Fatalf("submitted %d jobs", len(schedd.submitted))
+	}
+	want := fmt.Sprintf("FRESHNESS_WINDOW=%d", int((2 * time.Hour).Seconds()))
+	if !strings.Contains(schedd.spooledScript(), want) {
+		t.Errorf("the job's watchdog does not honour the requested lease (want %s):\n%s",
+			want, schedd.spooledScript())
+	}
+
+	// A very short lease must still outlast several heartbeats, or one
+	// slow round trip evicts a session nobody abandoned.
+	if _, err := mgr.Create(context.Background(), alice, CreateSpec{
+		Name:  "short",
+		Lease: 10 * time.Second,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if strings.Contains(schedd.spooledScript(), "FRESHNESS_WINDOW=10") {
+		t.Error("a 10s lease produced a 10s watchdog window; one slow heartbeat would evict it")
 	}
 }

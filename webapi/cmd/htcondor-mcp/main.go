@@ -112,6 +112,12 @@ func runNormalMode() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Drop the SSH connections and heartbeat goroutines an interactive
+	// session holds. The session JOBS stay in the queue on purpose -- the
+	// next server to be asked for one by name adopts it -- but the
+	// process should not exit with those goroutines mid-beat.
+	defer server.Close()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -265,6 +271,10 @@ func runDemoMode() error {
 	// Set up signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Same reason as the normal path: drop the sessions' connections and
+	// goroutines, leave their jobs in the queue.
+	defer server.Close()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
