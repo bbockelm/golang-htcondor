@@ -69,6 +69,7 @@ type Server struct {
 	dbMirror     *dbmirror.Locator
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
+	watchMaxWait time.Duration
 
 	// interactive owns the caller's named interactive sessions: the
 	// jobs behind them, their leases, and the SSH connections commands
@@ -143,6 +144,13 @@ type Config struct {
 	// server cannot keep, and the agent would wait forever.
 	JobWatch     *jobwatch.Store
 	JobWatchEval *jobwatch.Evaluator
+
+	// WatchMaxWait caps how long watch_jobs may block in-call before
+	// returning (HTTP_API_MCP_WATCH_MAX_WAIT). It must stay under the
+	// gateway/connector timeout in front of this server: a block that
+	// outlives it loses the response carrying the watch id. Zero or
+	// negative uses the built-in MaxWaitSeconds default.
+	WatchMaxWait time.Duration
 
 	// DBMirror lets a host that already has a Locator share it instead
 	// of having a second one built from the three knobs above. The HTTP
@@ -253,6 +261,7 @@ func NewServer(cfg Config) (*Server, error) {
 		dbMirror:       cfg.DBMirror,
 		jobWatch:       cfg.JobWatch,
 		jobWatchEval:   cfg.JobWatchEval,
+		watchMaxWait:   cfg.WatchMaxWait,
 	}
 	if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{

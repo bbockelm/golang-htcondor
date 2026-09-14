@@ -645,7 +645,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 	// Watches let an agent stop polling: register a question, come back
 	// for the answer. Offered whenever the server can evaluate them.
 	if s.jobWatchEnabled() {
-		tools = append(tools, jobWatchTools()...)
+		tools = append(tools, jobWatchTools(s.maxWaitSeconds())...)
 	}
 
 	if s.htcondordbEnabled() {
@@ -2434,13 +2434,15 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 	hasCredd := s.credd != nil
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "\n\nOAUTH CREDENTIALS REQUIRED:\nThe job requires OAuth credentials for: %s\n", services)
-	sb.WriteString("OAuth services added by server-side job transforms typically work with an empty credential.\n")
 	if hasCredd {
-		sb.WriteString("Use 'get_credential_status' to check if credentials exist for each service.\n")
-		sb.WriteString("If missing, use 'store_service_credential' with an empty string as the credential value.\n")
+		sb.WriteString("Use 'get_credential_status' to check whether each service already has a credential.\n")
+		sb.WriteString("If one is missing, store it with 'store_service_credential'. The credential must be a JSON " +
+			"document (e.g. {\"access_token\":\"...\"}), not a bare token string; see that tool's description for the " +
+			"exact format and the credmon-minted option.\n")
 		sb.WriteString("The job will remain held until the required credentials are available.")
 	} else {
-		sb.WriteString("Use the HTTP credential API to store the required credentials.\n")
+		sb.WriteString("Use the HTTP credential API to store the required credentials as JSON documents " +
+			"(e.g. {\"access_token\":\"...\"}), not bare token strings.\n")
 		sb.WriteString("The job will remain held until the required credentials are available.")
 	}
 	return sb.String()

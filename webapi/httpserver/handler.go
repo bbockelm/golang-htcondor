@@ -586,7 +586,13 @@ type HandlerConfig struct {
 	// nothing to authenticate with there and can only fail. There is no
 	// implicit default — the shipped daemon sets this from
 	// HTTP_API_PING_INTERVAL (default 1m, 0 to disable).
-	PingInterval       time.Duration
+	PingInterval time.Duration
+	// MCPWatchMaxWait caps how long the MCP watch_jobs tool may block
+	// in-call before returning (HTTP_API_MCP_WATCH_MAX_WAIT). Keep it
+	// under the gateway/proxy timeout in front of this daemon: a block
+	// that outlives it loses the response carrying the watch id. Zero
+	// uses the mcpserver default.
+	MCPWatchMaxWait    time.Duration
 	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
 	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token              string               // Token for daemon authentication (optional)
@@ -1354,6 +1360,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// registered through one surface is visible from the other.
 		JobWatch:     h.jobWatch,
 		JobWatchEval: h.jobWatchEval,
+		// Cap in-call watch blocking below the gateway timeout in front
+		// of this daemon, so a block always returns before the gateway
+		// severs the connection. Zero leaves the mcpserver default.
+		WatchMaxWait: cfg.MCPWatchMaxWait,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)
