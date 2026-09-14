@@ -803,3 +803,97 @@ func (h *CondorTestHarness) GetLockDir() string {
 func (h *CondorTestHarness) GetConfigFile() string {
 	return h.configFile
 }
+
+// SSHToJobPrereqs locates what condor_ssh_to_job needs on this host:
+// the system sshd the starter spawns inside the sandbox, and the
+// sshd_config template HTCondor hands it.
+//
+// Both are found by searching, not by a fixed list of paths, because
+// the fixed list is how an integration test quietly stops running. A
+// developer whose HTCondor lives in a build tree (release_dir/lib/...)
+// rather than in /usr/lib had every ssh-to-job test skip on their
+// machine — which looks identical, in CI output and at a glance, to
+// the tests passing.
+//
+// Returns ok=false when either piece is missing, which is a genuine
+// "this host cannot run condor_ssh_to_job" and a legitimate skip.
+func SSHToJobPrereqs() (sshd string, configTemplate string, ok bool) {
+	sshd = findSSHD()
+	if sshd == "" {
+		return "", "", false
+	}
+	configTemplate = findSSHToJobConfigTemplate()
+	if configTemplate == "" {
+		return "", "", false
+	}
+	return sshd, configTemplate, true
+}
+
+func findSSHD() string {
+	if p, err := exec.LookPath("sshd"); err == nil {
+		return p
+	}
+	for _, p := range []string{"/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// findSSHToJobConfigTemplate looks in the packaged locations and then,
+// crucially, alongside whatever condor_master is actually on PATH — a
+// build tree installs it under <prefix>/lib rather than /usr/lib.
+func findSSHToJobConfigTemplate() string {
+	const name = "condor_ssh_to_job_sshd_config_template"
+
+	candidates := []string{
+		"/usr/lib/" + name,
+		"/usr/lib64/condor/" + name,
+		"/etc/condor/" + name,
+		"/usr/share/condor/" + name,
+	}
+
+	// Derive from the installation this host would actually run:
+	// condor_master lives in <prefix>/sbin or <prefix>/bin, and the
+	// template in <prefix>/lib or <prefix>/lib64/condor.
+	for _, tool := range []string{"condor_master", "condor_submit"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			p = resolved
+		}
+		prefix := filepath.Dir(filepath.Dir(p))
+		candidates = append(candidates,
+			filepath.Join(prefix, "lib", name),
+			filepath.Join(prefix, "lib", "condor", name),
+			filepath.Join(prefix, "lib64", "condor", name),
+			filepath.Join(prefix, "libexec", "condor", name),
+			filepath.Join(prefix, "share", "condor", name),
+		)
+	}
+
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// SSHToJobHarnessConfig returns the extra condor_config lines a test
+// harness needs so jobs in it accept condor_ssh_to_job, plus ok=false
+// when this host cannot support it.
+func SSHToJobHarnessConfig() (string, bool) {
+	sshd, template, ok := SSHToJobPrereqs()
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf(`
+ENABLE_SSH_TO_JOB = True
+SSH_TO_JOB_SSHD = %s
+SSH_TO_JOB_SSHD_CONFIG_TEMPLATE = %s
+`, sshd, template), true
+}

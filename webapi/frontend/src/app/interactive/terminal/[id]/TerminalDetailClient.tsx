@@ -11,10 +11,10 @@
 //      keystrokes <-> stdio. The server-side SSH bridge (handlers_ssh.go)
 //      detects this is an interactive job (by JobBatchName) and starts
 //      the heartbeat goroutine that multiplexes a "touch .heartbeat"
-//      session over the same ssh.Client when the user has typed
-//      recently.
+//      session over the same ssh.Client for as long as this socket is
+//      open -- reading output without typing does not end the session.
 //   3. The watchdog inside the job exits if the heartbeat goes stale
-//      (default ~120s of no user activity), which closes the SSH
+//      (~120s after the socket closes), which closes the SSH
 //      connection and surfaces as an exit frame in the terminal.
 
 import Link from 'next/link';

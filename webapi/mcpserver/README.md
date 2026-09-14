@@ -7,6 +7,7 @@ A Model Context Protocol (MCP) server for managing HTCondor jobs. This server ex
 - **Job Submission**: Submit jobs via MCP tool with HTCondor submit file
 - **Job Queries**: List and retrieve job details with ClassAd constraints and projections
 - **Job Management**: Remove, edit, hold, and release jobs
+- **Interactive Sessions**: Run commands inside a long-lived job, like `exec` on a remote machine
 - **Authentication**: Token-based authentication forwarded to HTCondor schedd
 - **Demo Mode**: Built-in mini HTCondor setup for testing and development
 - **MCP Protocol**: Full MCP protocol support for seamless AI integration
@@ -175,6 +176,65 @@ commit it was built from (and whether that tree was dirty), and the
 versions of the golang-htcondor, ClassAd, and CEDAR libraries linked in.
 Read-only, no arguments. Use it to confirm which code is actually
 deployed — for example, after a redeploy.
+
+## Interactive Sessions
+
+Four tools turn a job into something you can run commands in, rather than
+something you submit and wait for. Use them when several steps need the same
+machine and the same files -- compile then test, inspect a dataset, debug a
+job that keeps failing.
+
+### interactive_session_start
+
+Submits a job that holds a slot and waits, named by the caller.
+
+**Input:**
+- `session` (string, required): the session name, and the only handle to it
+- `cpus`, `memory_mb`, `disk_mb`, `gpus` (integers, optional): the resource request
+- `lease_seconds` (integer, optional): idle time before the session is reclaimed (default 1800)
+
+### interactive_session_exec
+
+Runs one command inside the session and returns its exit code, stdout and
+stderr. Waits for the job to start running if it has not yet.
+
+**Input:**
+- `session` (string, required)
+- `command` (string, required): run by `/bin/sh` inside the job's sandbox
+- `timeout_seconds` (integer, optional): default 300, max 1800
+- `wait_seconds` (integer, optional): how long to wait for a slot, default 120
+
+### interactive_session_list / interactive_session_stop
+
+List the caller's sessions, and end one. Stopping releases the slot and
+discards the sandbox.
+
+### How a session stays alive
+
+There is no connection to hang liveness on: an MCP client may be silent for
+minutes, and under a sessionless transport it may not even reach the same
+server process twice. So a session is addressed by **name**, and kept alive by
+a **lease**:
+
+- The name is stored on the job, as its `JobBatchName`
+  (`htcondor-api-interactive-session-<name>`), which makes the job queue the
+  registry -- and makes sessions visible in `condor_q -batch`. A server that
+  restarts re-adopts a session the first time a client names it; a session
+  started in one conversation is usable from the next.
+- Every call that names a session extends its lease. Silence past the lease
+  reclaims the slot. A heartbeat runs for as long as the lease does, regardless
+  of whether anyone is interacting with the session -- an agent thinking for ten
+  minutes is not an idle session.
+- Inside the job, a watchdog exits when the heartbeat file goes stale, which is
+  what bounds the damage if the API server dies holding sessions.
+
+### What a session is not
+
+Each `exec` is a fresh shell. The working directory resets to the job's scratch
+directory and environment changes do not carry over, so dependent steps belong
+in one call (`cd data && ls`), not two. Files written to the scratch directory
+do persist for the life of the session -- that is the part that makes a session
+worth having over a batch job per command.
 
 ## MCP Resources
 

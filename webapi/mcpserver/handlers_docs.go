@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 )
@@ -223,6 +225,15 @@ func intArg(args map[string]interface{}, key string, def int) int {
 		return v
 	case int64:
 		return int(v)
+	case string:
+		// A model that emits "50" where the schema says integer is
+		// describing the same number, and silently substituting the
+		// default for it produces a call that did something other than
+		// what was asked. Anything that is not a plain integer still
+		// falls through to the default.
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return def
 }

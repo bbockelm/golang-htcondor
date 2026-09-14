@@ -1332,11 +1332,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
 		SubmitPolicy:   h.submitPolicy,
-		SigningKeyPath: h.signingKeyPath,
-		TrustDomain:    h.trustDomain,
-		UIDDomain:      h.uidDomain,
-		HTTPBaseURL:    h.httpBaseURL,
-		Logger:         h.logger,
+		// An agent's interactive session is the same kind of job as the
+		// SPA's terminal, on the same pool, so it gets the same
+		// operator-supplied submit directives.
+		InteractiveExtraSubmit: h.interactiveExtraSubmit,
+		SigningKeyPath:         h.signingKeyPath,
+		TrustDomain:            h.trustDomain,
+		UIDDomain:              h.uidDomain,
+		HTTPBaseURL:            h.httpBaseURL,
+		Logger:                 h.logger,
 		// Behind HTTP every call is on behalf of somebody else, so an
 		// owner-scoped tool that cannot identify its caller must refuse
 		// rather than fall back to whoever this daemon authenticates as.
@@ -1919,6 +1923,15 @@ func (h *Handler) Stop(ctx context.Context) error {
 	// database underneath it. A debounced write that never lands is the
 	// one failure mode this ordering exists to prevent.
 	h.clientUsage.Close()
+
+	// Stop the MCP server's background work: interactive sessions hold
+	// SSH connections into running jobs and a heartbeat goroutine
+	// each, none of which should outlive the daemon. The session jobs
+	// themselves stay in the queue -- a restarted daemon re-adopts
+	// them, and their watchdogs reclaim the slots if it never does.
+	if h.mcpServer != nil {
+		h.mcpServer.Close()
+	}
 
 	// Close OAuth2 provider if enabled
 	if h.oauth2Provider != nil {

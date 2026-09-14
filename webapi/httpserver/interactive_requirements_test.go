@@ -7,6 +7,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 )
 
 func newReqServer(t *testing.T, cfg Config) (*Server, error) {
@@ -37,7 +38,7 @@ const noPrivilegedSingularity = `GWMS_SINGULARITY_MODE =!= "privileged"`
 // matches machines it cannot be attached to and the terminal starts and
 // then refuses every shell.
 func TestInteractiveSubmitCarriesOperatorRequirements(t *testing.T) {
-	out := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	out := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID:   "abc123",
 		BatchName:    "interactive-abc123",
 		Cpus:         1,
@@ -55,7 +56,7 @@ func TestInteractiveSubmitCarriesOperatorRequirements(t *testing.T) {
 // parse, turning an unconfigured server into one that cannot submit.
 func TestInteractiveSubmitOmitsEmptyRequirements(t *testing.T) {
 	for _, raw := range []string{"", "   ", "\n\t "} {
-		out := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+		out := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 			InstanceID: "abc123", BatchName: "b", Cpus: 1, MemoryMB: 1024, DiskMB: 1024,
 			Requirements: raw,
 		})
@@ -69,7 +70,7 @@ func TestInteractiveSubmitOmitsEmptyRequirements(t *testing.T) {
 // if it sets requirements itself. That is the precedence an escape hatch
 // should have, and it is only true if the ordering is right.
 func TestOperatorExtraBlockStillOverridesRequirements(t *testing.T) {
-	out := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	out := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID: "abc123", BatchName: "b", Cpus: 1, MemoryMB: 1024, DiskMB: 1024,
 		Requirements:     noPrivilegedSingularity,
 		ExtraSubmitLines: "requirements = (TARGET.Machine == \"pinned.example.org\")",
@@ -90,7 +91,7 @@ func TestOperatorExtraBlockStillOverridesRequirements(t *testing.T) {
 // the operator's expression must appear in the job ad's Requirements
 // alongside the machine-suitability clauses, not instead of them.
 func TestOperatorRequirementsAreAndedIntoTheJobAd(t *testing.T) {
-	out := buildInteractiveTerminalSubmitFile(interactiveTerminalSubmitArgs{
+	out := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID: "abc123", BatchName: "b", Cpus: 2, MemoryMB: 2048, DiskMB: 1024,
 		Requirements: noPrivilegedSingularity,
 	})
