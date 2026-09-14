@@ -420,6 +420,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Optional comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). |
+| `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `watch_jobs` tool may block in-call before returning (a duration, e.g. `15s`). Keep it under the gateway/proxy timeout in front of this server: a block that outlives it makes the gateway drop the connection, so the client never receives the watch id. Unset = built-in default (20s). |
 | `HTTP_API_ADVERTISE` | Advertise this API server to the collector (a `HTCondorAPI` ad: endpoint, schedd, mirror health, versions). Default `true`; `daemon.Advertise` is a no-op without `COLLECTOR_HOST`, so this only matters to opt out when a collector is configured. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |

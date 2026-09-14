@@ -25,21 +25,40 @@ import (
 // the common case a genuine one-shot: ask, and if the answer exists, get
 // it now.
 
-// MaxWaitSeconds caps the in-call wait. It is deliberately short: this
-// blocks an MCP request, and a remote connector's own timeout is the
-// real ceiling and is not something this server knows. Anything longer
-// belongs to check_watches, which does not depend on a connection
-// staying open.
-const MaxWaitSeconds = 55
+// MaxWaitSeconds caps the in-call wait when nothing else is configured.
+// It is deliberately short: this blocks an MCP request, and a remote
+// connector's or gateway's own timeout is the real ceiling and is not
+// something this server knows. A block that outlives that timeout is
+// worse than not blocking at all -- the gateway severs the connection,
+// so the client gets an error and never receives the watch id, even
+// though the watch was registered. 20s comfortably fits a 30s gateway;
+// deployments behind a tighter (or looser) one tune it with
+// HTTP_API_MCP_WATCH_MAX_WAIT. Anything longer belongs to check_watches,
+// which does not depend on a connection staying open.
+const MaxWaitSeconds = 20
 
 func (s *Server) jobWatchEnabled() bool {
 	return s != nil && s.jobWatch != nil && s.jobWatchEval != nil
 }
 
+// maxWaitSeconds is the effective in-call blocking cap: the configured
+// override (Config.WatchMaxWait) when positive, else the MaxWaitSeconds
+// default. A sub-second override still yields at least one second so the
+// cap never silently becomes "never block".
+func (s *Server) maxWaitSeconds() int {
+	if s.watchMaxWait > 0 {
+		if secs := int(s.watchMaxWait / time.Second); secs > 0 {
+			return secs
+		}
+		return 1
+	}
+	return MaxWaitSeconds
+}
+
 // jobWatchTools returns the tool definitions, with the event vocabulary
 // rendered from jobwatch.Events so what the agent is told and what the
 // evaluator implements cannot drift.
-func jobWatchTools() []Tool {
+func jobWatchTools(maxWait int) []Tool {
 	events := make([]interface{}, 0, len(jobwatch.Events))
 	for _, spec := range jobwatch.Events {
 		events = append(events, string(spec.Event))
@@ -85,7 +104,7 @@ func jobWatchTools() []Tool {
 					"wait_seconds": map[string]interface{}{
 						"type": "integer",
 						"description": fmt.Sprintf("Optionally block up to this many seconds (max %d) waiting for the event before returning. "+
-							"Use a small value only when you expect it imminently; otherwise return at once and use check_watches.", MaxWaitSeconds),
+							"Use a small value only when you expect it imminently; otherwise return at once and use check_watches.", maxWait),
 					},
 					"ttl_seconds": map[string]interface{}{
 						"type":        "integer",
@@ -167,7 +186,7 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 
 	// Evaluate before returning, so an already-satisfied condition is
 	// answered in this call rather than waited on forever.
-	deadline := time.Now().Add(time.Duration(clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
+	deadline := time.Now().Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
 	for {
 		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
 			s.logger.Warn(logging.DestinationGeneral, "evaluating a new job watch failed", "error", err)
@@ -265,12 +284,13 @@ func (s *Server) oneWatch(ctx context.Context, owner, id string) (*jobwatch.Watc
 	return nil, nil
 }
 
-func clampWait(n int) int {
+func (s *Server) clampWait(n int) int {
+	limit := s.maxWaitSeconds()
 	switch {
 	case n < 0:
 		return 0
-	case n > MaxWaitSeconds:
-		return MaxWaitSeconds
+	case n > limit:
+		return limit
 	}
 	return n
 }

@@ -231,10 +231,11 @@ func TestCancelIsScopedToTheCaller(t *testing.T) {
 // it writes when asked to wait for completion -- a condition the schedd
 // never leaves observable. The description has to say so.
 func TestToolDescriptionSteersAwayFromTheTrap(t *testing.T) {
+	tools := jobWatchTools(MaxWaitSeconds)
 	var watchTool *Tool
-	for i, tool := range jobWatchTools() {
+	for i, tool := range tools {
 		if tool.Name == "watch_jobs" {
-			watchTool = &jobWatchTools()[i]
+			watchTool = &tools[i]
 		}
 	}
 	if watchTool == nil {
@@ -265,4 +266,57 @@ func watchIDFrom(t *testing.T, s string) string {
 		end++
 	}
 	return s[i:end]
+}
+
+// TestWatchMaxWaitConfigurable pins the in-call blocking cap: the
+// built-in default when unset, a positive Config.WatchMaxWait override
+// otherwise, a 1s floor for a sub-second override, and clampWait honoring
+// whichever is effective. The bug this guards is a cap that outlives the
+// gateway timeout in front of the server — the block is severed and the
+// watch id never reaches the client — so the cap must be tunable below it.
+func TestWatchMaxWaitConfigurable(t *testing.T) {
+	// Unset: the built-in default, and clampWait floors at 0 / caps at it.
+	s := &Server{}
+	if got := s.maxWaitSeconds(); got != MaxWaitSeconds {
+		t.Fatalf("default maxWaitSeconds = %d, want %d", got, MaxWaitSeconds)
+	}
+	if got := s.clampWait(9999); got != MaxWaitSeconds {
+		t.Errorf("clampWait(9999) = %d, want %d", got, MaxWaitSeconds)
+	}
+	if got := s.clampWait(-5); got != 0 {
+		t.Errorf("clampWait(-5) = %d, want 0", got)
+	}
+	if got := s.clampWait(5); got != 5 {
+		t.Errorf("clampWait(5) = %d, want 5", got)
+	}
+
+	// A configured cap below the default wins, and clampWait honors it.
+	s2 := &Server{watchMaxWait: 8 * time.Second}
+	if got := s2.maxWaitSeconds(); got != 8 {
+		t.Fatalf("configured maxWaitSeconds = %d, want 8", got)
+	}
+	if got := s2.clampWait(30); got != 8 {
+		t.Errorf("clampWait(30) with 8s cap = %d, want 8", got)
+	}
+
+	// A sub-second override still yields at least 1s: the cap never
+	// silently becomes "never block".
+	s3 := &Server{watchMaxWait: 500 * time.Millisecond}
+	if got := s3.maxWaitSeconds(); got != 1 {
+		t.Errorf("sub-second cap maxWaitSeconds = %d, want 1", got)
+	}
+
+	// The advertised wait_seconds max reflects the effective cap, so the
+	// model is never told it may block longer than the server will.
+	var desc string
+	for _, tl := range jobWatchTools(s2.maxWaitSeconds()) {
+		if tl.Name == "watch_jobs" {
+			props, _ := tl.InputSchema["properties"].(map[string]interface{})
+			ws, _ := props["wait_seconds"].(map[string]interface{})
+			desc, _ = ws["description"].(string)
+		}
+	}
+	if !strings.Contains(desc, "max 8") {
+		t.Errorf("wait_seconds description should advertise the configured max 8, got: %s", desc)
+	}
 }

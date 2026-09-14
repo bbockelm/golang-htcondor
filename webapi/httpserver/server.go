@@ -219,7 +219,10 @@ type Config struct {
 	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
 	// PingInterval is the periodic collector/schedd ping cadence; zero
 	// or negative disables it. See HandlerConfig.PingInterval.
-	PingInterval       time.Duration
+	PingInterval time.Duration
+	// MCPWatchMaxWait caps in-call MCP watch_jobs blocking; keep it
+	// under the front gateway timeout. See HandlerConfig.MCPWatchMaxWait.
+	MCPWatchMaxWait    time.Duration
 	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
 	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
 	Token              string               // Token for daemon authentication (optional)
@@ -330,6 +333,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SessionTTL:                  cfg.SessionTTL,
 		HTCondorConfig:              cfg.HTCondorConfig,
 		PingInterval:                cfg.PingInterval,
+		MCPWatchMaxWait:             cfg.MCPWatchMaxWait,
 		StreamBufferSize:            cfg.StreamBufferSize,
 		StreamWriteTimeout:          cfg.StreamWriteTimeout,
 		Token:                       cfg.Token,

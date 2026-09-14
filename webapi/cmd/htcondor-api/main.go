@@ -1520,6 +1520,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Create and start server
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
+	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1600,6 +1601,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
 		PingInterval:                pingInterval,
+		MCPWatchMaxWait:             mcpWatchMaxWait,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -2597,6 +2599,42 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// loadMCPWatchMaxWait reads HTTP_API_MCP_WATCH_MAX_WAIT, the cap on how
+// long the MCP watch_jobs tool may block in-call before returning.
+//
+//	unset      the mcpserver built-in default (currently 20s)
+//	a duration that cap, e.g. 15s
+//
+// It must stay under the gateway/proxy timeout in front of this daemon:
+// a block that outlives it makes the gateway sever the connection, so
+// the client gets an error and never receives the watch id -- even
+// though the watch was registered. Returning zero here leaves the
+// mcpserver default in place.
+func loadMCPWatchMaxWait(cfg *config.Config, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get("HTTP_API_MCP_WATCH_MAX_WAIT")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	raw = strings.TrimSpace(raw)
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_MCP_WATCH_MAX_WAIT: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_MCP_WATCH_MAX_WAIT=%q: %v", raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse HTTP_API_MCP_WATCH_MAX_WAIT: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_MCP_WATCH_MAX_WAIT=%q: %v", raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "HTTP_API_MCP_WATCH_MAX_WAIT must be positive: refusing to start",
+			"value", raw)
+		log.Fatalf("invalid HTTP_API_MCP_WATCH_MAX_WAIT=%q: must be positive", raw)
+	}
+	return d
+}
 
 // loadPingInterval reads HTTP_API_PING_INTERVAL, the cadence of the
 // periodic collector/schedd ping behind /readyz.
