@@ -75,12 +75,16 @@ func TestMCPServerInitializeWithInstructions(t *testing.T) {
 	}
 
 	server := &Server{
-		schedd:       htcondor.NewSchedd("test_schedd", "localhost:9618"),
-		logger:       logger,
-		instructions: "Always submit jobs to the accounting group for physics.",
-		stdin:        stdin,
-		stdout:       stdout,
+		schedd: htcondor.NewSchedd("test_schedd", "localhost:9618"),
+		logger: logger,
+		stdin:  stdin,
+		stdout: stdout,
 	}
+	// Stored directly rather than through SetInstructions: this test is about
+	// the initialize response surfacing the field verbatim, not about how
+	// buildInstructions composes it.
+	instructions := "Always submit jobs to the accounting group for physics."
+	server.instructions.Store(&instructions)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

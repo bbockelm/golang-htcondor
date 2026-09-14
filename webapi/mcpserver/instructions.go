@@ -153,3 +153,21 @@ func buildInstructions(scheddName, customInstructions string) string {
 	}
 	return base + "\n## Deployment-specific notes\n\n" + customInstructions
 }
+
+// SetInstructions installs the deployment-specific instructions, combining them
+// with the generic HTCondor guidance the same way construction does. It is the
+// dynamic half of MCP_INSTRUCTIONS: a reconfigure calls this so an operator can
+// correct the guidance agents receive without restarting the daemon and
+// dropping every live session.
+//
+// Only sessions that initialize after this call see the new text. MCP delivers
+// instructions once, in the initialize response, so an agent already connected
+// keeps the text it was given -- there is no way to push a revision to it.
+func (s *Server) SetInstructions(custom string) {
+	name := ""
+	if sc := s.getSchedd(); sc != nil {
+		name = sc.Name()
+	}
+	built := buildInstructions(name, custom)
+	s.instructions.Store(&built)
+}

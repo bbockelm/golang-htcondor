@@ -1616,6 +1616,13 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		return fmt.Errorf("daemon bootstrap: %w", err)
 	}
 
+	// Decide what a reconfigure (SIGHUP, or condor_reconfig via DC_RECONFIG)
+	// does beyond reloading the file and re-applying log levels, which the
+	// framework already handles: apply the parameters that can be applied to a
+	// running server, and name the ones that changed but need a restart. See
+	// reconfig.go.
+	d.OnReconfig(newReconfigWatcher(cfg, server, logger).reconfigure)
+
 	ln, err := d.Listener(func() (net.Listener, error) {
 		return listenMaybePrivileged(listenAddrFromConfig, logger)
 	})
