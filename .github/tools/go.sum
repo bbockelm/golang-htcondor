@@ -19,8 +19,8 @@ github.com/alecthomas/units v0.0.0-20190717042225-c3de453c63f4/go.mod h1:ybxpYRF
 github.com/alecthomas/units v0.0.0-20190924025748-f65c72e2690d/go.mod h1:rBZYJk541a8SKzHPHnH3zbiI+7dagKZ0cgpgrD7Fyho=
 github.com/armon/go-metrics v0.4.1 h1:hR91U9KYmb6bLBYLQjyM+3j+rcd/UhE+G78SFnF8gJA=
 github.com/armon/go-metrics v0.4.1/go.mod h1:E6amYzXo6aW1tqzoZGT755KkbgrJsSdpwZ+3JqfkOG4=
-github.com/bbockelm/cedar v0.6.16 h1:hYG1cbp+OFkmhxnnn4i2H4M4y3RHZX0m+V29O5sHXIA=
-github.com/bbockelm/cedar v0.6.16/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
+github.com/bbockelm/cedar v0.6.17 h1:x75XlXjS1q4pPCLx5grtYpn15v7ZmEcfTc/H5lJvAqs=
+github.com/bbockelm/cedar v0.6.17/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
 github.com/bbockelm/golang-htcondor v0.13.1 h1:ArnQgNxrZ6lJO3h/4G3xTmGLpvZPEjbimdtAvbIfzHc=
 github.com/bbockelm/golang-htcondor v0.13.1/go.mod h1:9Lci/LTWAK2QURmR/zalMjNMKLqWnD/5Qu798eYaIOo=
 github.com/bbockelm/gosssd v0.0.1 h1:p9wJYl+GDn29W1it2ZE2RekriwUNs/1U16aUNNro5SM=
