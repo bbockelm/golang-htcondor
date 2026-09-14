@@ -1334,8 +1334,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		SubmitPolicy:   h.submitPolicy,
 		// An agent's interactive session is the same kind of job as the
 		// SPA's terminal, on the same pool, so it gets the same
-		// operator-supplied submit directives.
+		// operator-supplied submit directives -- and the same answer to
+		// how this server reaches a daemon behind CCB.
 		InteractiveExtraSubmit: h.interactiveExtraSubmit,
+		CCBStreaming:           h.ccbStreaming,
 		SigningKeyPath:         h.signingKeyPath,
 		TrustDomain:            h.trustDomain,
 		UIDDomain:              h.uidDomain,

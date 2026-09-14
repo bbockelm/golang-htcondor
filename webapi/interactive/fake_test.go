@@ -26,6 +26,7 @@ type fakeSchedd struct {
 	jobs        []*fakeJob
 
 	submitted   []string // submit files, in order
+	lastScript  string   // the watchdog script from the latest spool
 	spooled     [][]string
 	constraints []string // constraints the manager queried with
 	removed     []string
@@ -99,6 +100,9 @@ func (f *fakeSchedd) SpoolJobFilesFromFS(_ context.Context, _ []*classad.ClassAd
 		names = append(names, e.Name())
 	}
 	f.spooled = append(f.spooled, names)
+	if data, rerr := fs.ReadFile(fsys, "interactive-watchdog.sh"); rerr == nil {
+		f.lastScript = string(data)
+	}
 	return nil
 }
 
@@ -167,6 +171,13 @@ func (f *fakeSchedd) setStatus(job *fakeJob, status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	job.status = status
+}
+
+// spooledScript returns the watchdog script from the most recent spool.
+func (f *fakeSchedd) spooledScript() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastScript
 }
 
 func (f *fakeSchedd) removedJobs() []string {

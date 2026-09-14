@@ -158,6 +158,12 @@ type Config struct {
 	// exactly the kind this exists to satisfy.
 	SubmitPolicy submitpolicy.Policy
 
+	// CCBStreaming routes interactive sessions' CCB dials through the
+	// broker instead of having the execute node dial back. Same setting
+	// the REST terminal uses (HandlerConfig.CCBStreaming); an API server
+	// that cannot accept inbound connections needs it for both.
+	CCBStreaming bool
+
 	// InteractiveExtraSubmit is the operator's interactive-specific
 	// submit-file block (HTTP_API_INTERACTIVE_EXTRA_SUBMIT), applied to
 	// interactive session jobs on top of SubmitPolicy. The REST
@@ -276,6 +282,7 @@ func NewServer(cfg Config) (*Server, error) {
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
 		ExtraSubmit:  cfg.InteractiveExtraSubmit,
+		CCBStreaming: cfg.CCBStreaming,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interactive session manager: %w", err)

@@ -194,6 +194,13 @@ func (m *Manager) sessionFor(owner, name string) *session {
 	return m.sessions[sessionKey(owner, name)]
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func countNamed(infos []Info, name string) int {
 	n := 0
 	for i := range infos {

@@ -69,18 +69,29 @@ type ScheddClient interface {
 // one operation here that is not part of the narrow interface, because
 // nothing about it is faked in tests — the fake substitutes at the
 // Dialer instead.
-func sshDialer(scheddFn func() ScheddClient) Dialer {
+func sshDialer(scheddFn func() ScheddClient, ccbStreaming bool) Dialer {
 	return func(ctx context.Context, cluster, proc int) (Shell, error) {
 		schedd, ok := scheddFn().(*htcondor.Schedd)
 		if !ok || schedd == nil {
 			return nil, errors.New("condor_ssh_to_job needs a real schedd connection")
 		}
-		client, err := schedd.OpenJobShell(ctx, cluster, proc, nil)
+		client, err := openJobShell(ctx, schedd, cluster, proc, &htcondor.JobShellOptions{
+			CCBStreaming: ccbStreaming,
+		})
 		if err != nil {
 			return nil, err
 		}
 		return &sshShell{client: client}, nil
 	}
+}
+
+// openJobShell is the indirection that lets a test see what the dialer
+// asks for. The options it passes decide whether a job behind CCB is
+// reachable at all, and nothing short of a CCB pool exercises that --
+// which is how the manager came to pass nil (dial back) while the REST
+// terminal passed the operator's setting.
+var openJobShell = func(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, opts *htcondor.JobShellOptions) (*ssh.Client, error) {
+	return schedd.OpenJobShell(ctx, cluster, proc, opts)
 }
 
 // sshShell runs each command as its own SSH session on a shared
