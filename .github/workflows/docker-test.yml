@@ -3,6 +3,14 @@ name: Docker Tests
 # The token needs nothing beyond reading the checkout. The repository
 # default is already read-only, but declaring it here keeps that true if
 # the org default is ever widened, and documents the intent.
+# One in-flight run per pull request. Pushing a fixup used to leave the
+# previous run going to completion -- a full duplicate set of jobs holding
+# concurrency slots to test a commit nobody was waiting on any more.
+# Pushes to main are never cancelled: every commit that lands gets tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
