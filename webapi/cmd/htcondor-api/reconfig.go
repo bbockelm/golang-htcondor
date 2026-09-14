@@ -1,0 +1,185 @@
+package main
+
+import (
+	"sort"
+
+	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/logging"
+)
+
+// Reconfigure: what a running htcondor-api does with SIGHUP (or condor_reconfig,
+// which arrives as DC_RECONFIG and runs the same path).
+//
+// The daemon framework reloads the configuration file and re-applies log levels
+// on its own. Everything else about this server is read once at startup and
+// copied into the running objects, so until a parameter is listed here a change
+// to it either does nothing or is not noticed at all. The second case is the
+// one that costs an operator an afternoon: reconfigure appeared to succeed, and
+// the setting they edited simply never took.
+//
+// So every parameter in this table is one the daemon has an answer for. Those
+// with an apply function are installed on the running server; those without are
+// reported as needing a restart, naming the parameter. Making a parameter
+// dynamic means writing its setter (see httpserver/reconfig.go) and moving it
+// up into the dynamic group -- the reporting half then takes care of itself.
+type reconfigParam struct {
+	// name is the bare parameter name. Lookup goes through config.Get, so
+	// the daemon's subsystem and -local-name scoping applies, exactly as it
+	// did when the value was first read at startup.
+	name string
+	// apply installs a new value on the running server. Nil means the
+	// parameter is read only at startup and a change requires a restart.
+	apply func(reconfigTarget, string)
+}
+
+// reconfigTarget is the running server a reconfigure updates. It is an
+// interface, not *httpserver.Server, so the table and its bookkeeping can be
+// exercised without standing up an HTTP server; *httpserver.Server satisfies it
+// through the setters in httpserver/reconfig.go.
+type reconfigTarget interface {
+	SetMCPInstructions(string)
+}
+
+// reconfigParams is the table described above. It is deliberately a list of
+// parameters this daemon actually consumes rather than every key in the
+// configuration: a warning about a pool-wide knob htcondor-api never reads
+// would be noise, and noise is what teaches operators to ignore warnings.
+var reconfigParams = []reconfigParam{
+	// --- Applied on reconfigure ---
+
+	// Deployment-specific MCP guidance. Pure text handed to agents in the
+	// initialize response, with nothing built from it, which is what makes
+	// it safe to swap under live traffic.
+	{
+		name: "MCP_INSTRUCTIONS",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPInstructions(v)
+		},
+	},
+
+	// --- Restart required (read once at startup) ---
+
+	// The server's own identity. Beyond the links it builds, this is the
+	// OAuth2 and IDP issuer: it is the `iss` of every token already issued
+	// and the origin of the redirect URIs registered clients hold, so it
+	// cannot be swapped under live sessions without invalidating them.
+	{name: "HTTP_API_BASE_URL"},
+	{name: "HTTP_API_MCP_BASE_URL"},
+
+	// Listener and credentials, all bound or opened during startup.
+	{name: "HTTP_API_LISTEN_ADDR"},
+	{name: "HTTP_API_SIGNING_KEY"},
+	{name: "HTTP_API_KEK_FILE"},
+	{name: "HTTP_API_TLS_CERT"},
+	{name: "HTTP_API_TLS_KEY"},
+
+	// OAuth2 / IDP wiring, captured when the provider was constructed.
+	{name: "HTTP_API_OAUTH2_ISSUER"},
+	{name: "HTTP_API_OAUTH2_IDP"},
+	{name: "HTTP_API_OAUTH2_CLIENT_ID"},
+	{name: "HTTP_API_OAUTH2_CLIENT_SECRET_FILE"},
+	{name: "HTTP_API_OAUTH2_SCOPES"},
+	{name: "HTTP_API_OAUTH2_USERNAME_CLAIM"},
+	{name: "HTTP_API_OAUTH2_GROUPS_CLAIM"},
+
+	// Authorization groups. Worth making dynamic later -- they are consulted
+	// per request -- but some are also folded into policy objects at
+	// startup, so they need their setters before they can move up.
+	{name: "HTTP_API_MCP_ACCESS_GROUP"},
+	{name: "HTTP_API_WEBUI_ADMIN_GROUP"},
+	{name: "HTTP_API_SUPERUSER_GROUP"},
+	{name: "MCP_ADMIN_USERS"},
+
+	// Submit-time policy, compiled into the submit policy at startup.
+	{name: "HTTP_API_SUBMIT_FILE_DEFAULTS"},
+	{name: "HTTP_API_SUBMIT_FILE_OVERRIDES"},
+	{name: "HTTP_API_INTERACTIVE_REQUIREMENTS"},
+	{name: "HTTP_API_INTERACTIVE_EXTRA_SUBMIT"},
+
+	// Mirror routing, resolved into a discovery locator at startup.
+	{name: "HTTP_API_DBMIRROR_NAME"},
+	{name: "HTTP_API_DBMIRROR_ADDRESS"},
+	{name: "HTTP_API_DBMIRROR_REQUIRED"},
+}
+
+// reconfigWatcher remembers what each known parameter was set to, so a
+// reconfigure can report what actually changed rather than re-applying
+// everything blindly.
+type reconfigWatcher struct {
+	srv    reconfigTarget
+	logger *logging.Logger
+	params []reconfigParam
+	// prev is the value each parameter had the last time it was observed:
+	// at startup, then after each reconfigure.
+	prev map[string]string
+}
+
+// newReconfigWatcher snapshots the current value of every known parameter.
+// cfg must be the configuration the server was built from, so the first
+// reconfigure compares against what is actually running.
+func newReconfigWatcher(cfg *config.Config, srv reconfigTarget, logger *logging.Logger) *reconfigWatcher {
+	w := &reconfigWatcher{srv: srv, logger: logger, params: reconfigParams, prev: map[string]string{}}
+	for _, p := range w.params {
+		w.prev[p.name] = configValue(cfg, p.name)
+	}
+	return w
+}
+
+// reconfigure applies the parameters that can be applied and reports the ones
+// that cannot. It is registered with daemon.OnReconfig, so it runs on the
+// daemon's signal goroutine while requests are being served.
+func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
+	applied, needRestart := w.diff(cfg)
+
+	// Values can be secrets, so log which parameters changed, never what
+	// they changed to.
+	if len(applied) > 0 {
+		w.logger.Info(logging.DestinationGeneral, "reconfigure: applied configuration changes",
+			"parameters", applied)
+	}
+	if len(needRestart) > 0 {
+		w.logger.Warn(logging.DestinationGeneral,
+			"reconfigure: these parameters changed but are only read at startup; the running server still uses the old values. Restart htcondor-api to apply them",
+			"parameters", needRestart)
+	}
+	if len(applied) == 0 && len(needRestart) == 0 {
+		w.logger.Info(logging.DestinationGeneral, "reconfigure: no known parameter changed")
+	}
+}
+
+// diff applies every changed dynamic parameter and returns the names of what it
+// applied and what it could not, each sorted. It updates the remembered values,
+// so a restart-only parameter is reported when it changes and not on every
+// reconfigure thereafter.
+func (w *reconfigWatcher) diff(cfg *config.Config) (applied, needRestart []string) {
+	for _, p := range w.params {
+		newVal := configValue(cfg, p.name)
+		if newVal == w.prev[p.name] {
+			continue
+		}
+		// Record the new value either way. A restart-only parameter is
+		// reported once, when it changes, rather than on every
+		// reconfigure from here until the daemon is restarted.
+		w.prev[p.name] = newVal
+		if p.apply == nil {
+			needRestart = append(needRestart, p.name)
+			continue
+		}
+		p.apply(w.srv, newVal)
+		applied = append(applied, p.name)
+	}
+	sort.Strings(applied)
+	sort.Strings(needRestart)
+	return applied, needRestart
+}
+
+// configValue returns the resolved value of a parameter, or "" when it is
+// unset. Unset and empty compare equal on purpose: for every parameter here
+// they mean the same thing to the server, and distinguishing them would report
+// a change when a config file merely spells the default out.
+func configValue(cfg *config.Config, name string) string {
+	if v, ok := cfg.Get(name); ok {
+		return v
+	}
+	return ""
+}

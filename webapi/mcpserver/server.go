@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -29,10 +30,13 @@ type Server struct {
 	// schedd handle when the collector reports a new address, and a
 	// copy of the old pointer keeps dialling a socket that no longer
 	// exists -- see getSchedd.
-	scheddProvider     func() *htcondor.Schedd
-	collector          *htcondor.Collector
-	credd              htcondor.CreddClient
-	instructions       string // Server-level instructions surfaced to agents in the initialize response
+	scheddProvider func() *htcondor.Schedd
+	collector      *htcondor.Collector
+	credd          htcondor.CreddClient
+	// instructions is the built initialize-response text. It is swapped
+	// atomically because SetInstructions can run on a reconfigure while
+	// an initialize is being served.
+	instructions       atomic.Pointer[string]
 	signingKeyPath     string
 	trustDomain        string
 	uidDomain          string
@@ -246,7 +250,6 @@ func NewServer(cfg Config) (*Server, error) {
 		scheddProvider: cfg.ScheddProvider,
 		collector:      cfg.Collector,
 		credd:          cfg.Credd,
-		instructions:   buildInstructions(schedd.Name(), cfg.Instructions),
 		trustDomain:    cfg.TrustDomain,
 		uidDomain:      cfg.UIDDomain,
 		signingKeyPath: cfg.SigningKeyPath,
@@ -263,6 +266,7 @@ func NewServer(cfg Config) (*Server, error) {
 		jobWatchEval:   cfg.JobWatchEval,
 		watchMaxWait:   cfg.WatchMaxWait,
 	}
+	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
@@ -518,9 +522,9 @@ func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interfac
 			"version": "0.1.0",
 		},
 	}
-	if s.instructions != "" {
-		s.logger.Info(logging.DestinationMCP, "Including instructions in initialize response", "length", len(s.instructions))
-		result["instructions"] = s.instructions
+	if v := s.instructions.Load(); v != nil && *v != "" {
+		s.logger.Info(logging.DestinationMCP, "Including instructions in initialize response", "length", len(*v))
+		result["instructions"] = *v
 	}
 	return result
 }
