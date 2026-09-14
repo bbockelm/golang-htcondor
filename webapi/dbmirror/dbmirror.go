@@ -311,7 +311,19 @@ func NewLocatorWithOptions(collector *htcondor.Collector, cfg *config.Config, op
 
 // Enabled reports whether mirror routing can run at all.
 func (l *Locator) Enabled() bool {
-	return l != nil && l.collector != nil && l.cfg != nil
+	if l == nil || l.cfg == nil {
+		return false
+	}
+	// A collector is the usual way to find a mirror, and an explicitly
+	// configured address is the other: an operator who names the database
+	// has said where it is, and requiring a collector on top of that made
+	// the knob useless on its own.
+	//
+	// Deliberately not "an address file might exist": that path defaults to
+	// $(LOG)/.htcondordb_address, which resolves on every host whether or
+	// not a database runs there, and would turn routing on -- and poll
+	// failures on -- for deployments that never asked for it.
+	return l.collector != nil || l.opts.Address != ""
 }
 
 // Required reports whether a declined read must fail rather than fall
@@ -489,6 +501,29 @@ func (l *Locator) pollOnce(ctx context.Context, onResult func(*Info, error)) {
 }
 
 func (l *Locator) discover(ctx context.Context) (*Info, error) {
+	info, err := l.discoverFromCollector(ctx)
+	if err == nil {
+		return info, nil
+	}
+
+	// The collector had no usable answer. Ask the database itself, which is
+	// reachable whenever it is co-located (or pinned) even if its
+	// advertisement is not getting through -- a denied UPDATE_AD_GENERIC,
+	// a collector that is down, an ad that aged out.
+	local, localErr := l.discoverLocal(ctx)
+	if localErr == nil {
+		return local, nil
+	}
+	if l.collector == nil {
+		return nil, localErr
+	}
+	return nil, fmt.Errorf("%w (and locally: %w)", err, localErr)
+}
+
+func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
+	if l.collector == nil {
+		return nil, fmt.Errorf("no collector is configured")
+	}
 	constraint := ""
 	if l.opts.Name != "" {
 		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
@@ -878,6 +913,13 @@ func Provenance(info *Info, reason string) string {
 // misconfigured signing key is visible rather than silently reducing the
 // mirror to whatever else it can negotiate.
 func (l *Locator) securityConfig(ctx context.Context, address string) (*security.SecurityConfig, error) {
+	return l.securityConfigForCommand(ctx, address, SessionCommand)
+}
+
+// securityConfigForCommand is securityConfig for a specific command. The status
+// command is READ-authorized where a session is not, so they can land in
+// different ALLOW_* levels and must be negotiated as themselves.
+func (l *Locator) securityConfigForCommand(ctx context.Context, address string, command int) (*security.SecurityConfig, error) {
 	l.mu.Lock()
 	tokenSource := l.opts.TokenSource
 	l.mu.Unlock()
@@ -885,21 +927,21 @@ func (l *Locator) securityConfig(ctx context.Context, address string) (*security
 	if tokenSource != nil {
 		token, err := tokenSource(ctx)
 		if err == nil && token != "" {
-			sec, cerr := htcondor.NewClientSecurityConfig(ctx, token, address, SessionCommand, "CLIENT", nil)
+			sec, cerr := htcondor.NewClientSecurityConfig(ctx, token, address, command, "CLIENT", nil)
 			if cerr != nil {
 				return nil, fmt.Errorf("building htcondordb security config with a token: %w", cerr)
 			}
-			sec.Command = SessionCommand
+			sec.Command = command
 			return sec, nil
 		}
 		l.noteTokenFailure(err)
 	}
 
-	sec, err := htcondor.GetSecurityConfig(l.cfg, SessionCommand, "CLIENT")
+	sec, err := htcondor.GetSecurityConfig(l.cfg, command, "CLIENT")
 	if err != nil {
 		return nil, fmt.Errorf("building htcondordb security config: %w", err)
 	}
-	sec.Command = SessionCommand
+	sec.Command = command
 	return sec, nil
 }
 
