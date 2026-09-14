@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/config"
@@ -110,5 +111,38 @@ func TestGetScheddConfigReadsScheddHost(t *testing.T) {
 	}
 	if host != "submit@central.example.edu" {
 		t.Errorf("host = %q, want the SCHEDD_HOST value", host)
+	}
+}
+
+// TestLocalScheddAddressFileTakesFirstLineOnly is the reported failure: a
+// real HTCondor schedd address file carries the sinful string on line 1
+// and then metadata lines ($CondorVersion, CredDIpAddr, Machine, Name,
+// SubmitAlwaysCheckCreds). Slurping the whole file left those lines inside
+// the address, so the shared-port sock id parsed as
+// "schedd_6739_f8d1> $CondorVersion..." and the connection failed with
+// "invalid shared port ID". discoverSchedd must return only the sinful.
+func TestLocalScheddAddressFileTakesFirstLineOnly(t *testing.T) {
+	const sinful = "<128.105.68.12:9618?addrs=128.105.68.12-9618+[2607-f388-2200-100-216-3eff-fe63-f8d6]-9618&alias=ap1.facility.path-cc.io&noUDP&sock=schedd_6739_f8d1>"
+	content := sinful + "\n" +
+		"$CondorVersion: 25.14.0 2026-09-03 BuildID: 949436 PackageID: 25.14.0-0.949436 RC $\n" +
+		"$CondorPlatform: x86_64_AlmaLinux9 $\n" +
+		`CredDIpAddr = "<128.105.68.12:9618?sock=credd_6739_f8d1>"` + "\n" +
+		`Machine = "ap1.facility.path-cc.io"` + "\n" +
+		`Name = "ap1.facility.path-cc.io"` + "\n" +
+		"SubmitAlwaysCheckCreds = true\n"
+
+	spool := t.TempDir()
+	if err := os.WriteFile(filepath.Join(spool, ".schedd_address"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.NewEmpty()
+	cfg.Set("SPOOL", spool)
+
+	addr, _ := discoverSchedd(cfg, nil, testLogger(t), "", "")
+	if addr != sinful {
+		t.Errorf("addr = %q,\nwant only the first-line sinful %q", addr, sinful)
+	}
+	if strings.Contains(addr, "\n") || strings.Contains(addr, "CondorVersion") {
+		t.Errorf("addr carried trailing address-file metadata: %q", addr)
 	}
 }

@@ -324,37 +324,34 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 			"schedd_host", requestedHost)
 	}
 
-	// Try to find local schedd address file
+	// Try to find local schedd address file. Only the first line is the
+	// sinful address; an HTCondor address file follows it with metadata
+	// lines ($CondorVersion, CredDIpAddr, Machine, Name, ...), so read it
+	// through readAddressFile rather than slurping the whole file --
+	// otherwise the trailing lines land inside the sinful and the
+	// shared-port sock id parses as "schedd_6739_f8d1> $CondorVersion...".
 	if spoolDir, ok := cfg.Get("SPOOL"); ok && spoolDir != "" {
 		scheddAddrFile := filepath.Join(spoolDir, ".schedd_address")
-		// #nosec G304 -- Reading HTCondor schedd address file from configured SPOOL directory
-		if data, err := os.ReadFile(scheddAddrFile); err == nil {
-			addr = string(data)
-			addr = strings.TrimSpace(addr)
-			if addr != "" {
-				logger.Info(logging.DestinationSchedd, "Found local schedd address file", "path", scheddAddrFile, "address", addr)
-				// Try to extract name from address or use hostname
-				if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
-					name = hostname
-				}
-				return addr, name
+		if a, err := readAddressFile(scheddAddrFile); err == nil && a != "" {
+			addr = a
+			logger.Info(logging.DestinationSchedd, "Found local schedd address file", "path", scheddAddrFile, "address", addr)
+			// Try to extract name from address or use hostname
+			if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
+				name = hostname
 			}
+			return addr, name
 		}
 	}
 
 	// Try SCHEDD_ADDRESS_FILE directly if SPOOL isn't set
 	if addrFile, ok := cfg.Get("SCHEDD_ADDRESS_FILE"); ok && addrFile != "" {
-		// #nosec G304 -- Reading HTCondor schedd address file from SCHEDD_ADDRESS_FILE configuration
-		if data, err := os.ReadFile(addrFile); err == nil {
-			addr = string(data)
-			addr = strings.TrimSpace(addr)
-			if addr != "" {
-				logger.Info(logging.DestinationSchedd, "Found schedd address file", "path", addrFile, "address", addr)
-				if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
-					name = hostname
-				}
-				return addr, name
+		if a, err := readAddressFile(addrFile); err == nil && a != "" {
+			addr = a
+			logger.Info(logging.DestinationSchedd, "Found schedd address file", "path", addrFile, "address", addr)
+			if hostname, ok := cfg.Get("FULL_HOSTNAME"); ok && hostname != "" {
+				name = hostname
 			}
+			return addr, name
 		}
 	}
 
