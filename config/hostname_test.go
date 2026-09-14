@@ -54,3 +54,59 @@ endif
 		t.Errorf("TEST_GUARDED_KNOB = %q (set=%v); the FULL_HOSTNAME gate did not fire", got, ok)
 	}
 }
+
+// TestNetworkHostnameOverridesFullHostname reproduces the PATH AP1 failure:
+// the OS/DNS name is path-ap2101.chtc.wisc.edu, but a config.d file sets
+// NETWORK_HOSTNAME = ap1.facility.path-cc.io (gated on the current
+// FULL_HOSTNAME, checking both FQDNs). C++ HTCondor then recomputes
+// FULL_HOSTNAME to the NETWORK_HOSTNAME, so the schedd advertises -- and is
+// discovered as -- ap1.facility.path-cc.io. Before the fix the Go config left
+// FULL_HOSTNAME as the DNS name, so the derived schedd name never matched the
+// collector and discovery timed out.
+func TestNetworkHostnameOverridesFullHostname(t *testing.T) {
+	const dnsName = "path-ap2101.chtc.wisc.edu"
+	const advertised = "ap1.facility.path-cc.io"
+
+	txt := `PROD_HOSTNAME_CHECK_AP1 = "$(FULL_HOSTNAME)" == "ap1.facility.path-cc.io" || "$(FULL_HOSTNAME)" == "path-ap2101.chtc.wisc.edu"
+if $INT(PROD_HOSTNAME_CHECK_AP1)
+  NETWORK_HOSTNAME = ap1.facility.path-cc.io
+endif
+`
+	// Pin FULL_HOSTNAME to the DNS name the host boots under, so the gate
+	// evaluates against it exactly as it does on the real machine.
+	c := NewEmpty()
+	c.Set("FULL_HOSTNAME", dnsName)
+	if err := c.parseAndExecute(strings.NewReader(txt)); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Precondition: the gated knob fired.
+	if nh, _ := c.Get("NETWORK_HOSTNAME"); nh != advertised {
+		t.Fatalf("NETWORK_HOSTNAME = %q, want %q (gate did not fire)", nh, advertised)
+	}
+
+	// The fix: applying it rewrites FULL_HOSTNAME (and the short HOSTNAME).
+	c.applyNetworkHostname()
+
+	if got, _ := c.Get("FULL_HOSTNAME"); got != advertised {
+		t.Errorf("FULL_HOSTNAME = %q, want %q", got, advertised)
+	}
+	if got, _ := c.Get("HOSTNAME"); got != "ap1" {
+		t.Errorf("HOSTNAME = %q, want %q", got, "ap1")
+	}
+	// UID_DOMAIN defaults to $(FULL_HOSTNAME); it must follow the override,
+	// since a macro resolved lazily should see the new value.
+	if got, _ := c.Get("UID_DOMAIN"); got != advertised {
+		t.Errorf("UID_DOMAIN = %q, want %q (derived value did not follow FULL_HOSTNAME)", got, advertised)
+	}
+}
+
+// TestNetworkHostnameUnsetLeavesFullHostname: with no NETWORK_HOSTNAME, the
+// detected FULL_HOSTNAME must stand -- the override is opt-in.
+func TestNetworkHostnameUnsetLeavesFullHostname(t *testing.T) {
+	c := NewEmpty()
+	c.Set("FULL_HOSTNAME", "host.example.org")
+	c.applyNetworkHostname()
+	if got, _ := c.Get("FULL_HOSTNAME"); got != "host.example.org" {
+		t.Errorf("FULL_HOSTNAME = %q, want it unchanged", got)
+	}
+}

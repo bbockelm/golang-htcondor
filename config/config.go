@@ -1225,7 +1225,42 @@ func (c *Config) LoadFromEnvironment() error {
 		return err
 	}
 	c.applyCondorEnvOverrides()
+	c.applyNetworkHostname()
 	return nil
+}
+
+// applyNetworkHostname honors the NETWORK_HOSTNAME knob the way C++
+// HTCondor does: when it is set, it is the fully-qualified name this
+// machine calls itself, and it overrides the DNS-detected FULL_HOSTNAME.
+//
+// A site sets it when the OS/DNS hostname and the name HTCondor
+// advertises differ -- e.g. a host whose DNS name is
+// path-ap2101.chtc.wisc.edu but whose schedd advertises itself as
+// ap1.facility.path-cc.io. Without this, FULL_HOSTNAME stays the DNS
+// name, and everything derived from it -- most visibly the default
+// schedd/daemon name used to look the daemon up in the collector, but
+// also UID_DOMAIN, FILESYSTEM_DOMAIN and the rest -- fails to match what
+// the C++ daemons actually advertise, so discovery times out.
+//
+// It runs last, after the whole config-file chain and the _CONDOR_*
+// environment overrides, because NETWORK_HOSTNAME is normally set from a
+// config file and often gated on the current FULL_HOSTNAME (a host is
+// still coming up under its DNS name when the file is read, then renames
+// itself). Its value is therefore only known once the files have been
+// read. C++ real_config does the same recompute for the same reason.
+func (c *Config) applyNetworkHostname() {
+	nh, ok := c.Get("NETWORK_HOSTNAME")
+	if !ok {
+		return
+	}
+	nh = strings.TrimSpace(nh)
+	if nh == "" {
+		return
+	}
+	c.Set("FULL_HOSTNAME", nh)
+	// The short HOSTNAME is the first label of the full name, mirroring
+	// how C++ derives it and how detectHostnames splits the DNS name.
+	c.Set("HOSTNAME", shortFromFQDN(nh))
 }
 
 // loadConfigFileChain reads the root configuration file (CONDOR_CONFIG or a
