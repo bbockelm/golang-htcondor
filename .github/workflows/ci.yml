@@ -63,8 +63,17 @@ jobs:
     - name: Verify dependencies
       run: for d in . webapi localcredmon; do (cd "$d" && GOWORK=off go mod verify) || exit 1; done
 
-    - name: Install gotestsum
-      run: go install gotest.tools/gotestsum@latest
+    # Built from .github/tools, where the version is pinned and recorded
+    # in that module's go.sum. `go install ...@latest` resolved to
+    # whatever was published before the job started and verified it
+    # against nothing -- the Dockerfile already pins v1.13.0 for the
+    # container jobs for that reason; this closes the same hole on the
+    # host runner. Dependabot bumps it there under the usual cooldown.
+    - name: Install gotestsum (version pinned in .github/tools)
+      run: |
+        mkdir -p "$RUNNER_TEMP/bin"
+        (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/gotestsum" gotest.tools/gotestsum)
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
     - name: Run go vet
       run: make vet
