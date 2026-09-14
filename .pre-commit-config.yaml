@@ -19,8 +19,13 @@ repos:
         description: Ensures go.mod and go.sum are up to date
 
   # golangci-lint
+  #
+  # Must be built with a Go at least as new as the floor in go.mod, or it
+  # refuses to start: "the Go language version used to build golangci-lint
+  # is lower than the targeted Go version". v2.6.1 predates the 1.26 floor
+  # and so blocked every commit; v2.13.2 is built with go1.27.0.
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.6.1
+    rev: v2.13.2
     hooks:
       - id: golangci-lint
         name: Run golangci-lint
