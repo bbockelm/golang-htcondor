@@ -138,6 +138,8 @@ var readOnlyMCPTools = map[string]bool{
 	// tools can still ask to be told when something happens.
 	"watch_jobs":    true,
 	"check_watches": true,
+	// Tailing reads a running job's output; it changes nothing.
+	"tail_job_output": true,
 	// Listing sessions reads the queue; starting, running a command in
 	// and stopping one all change something.
 	"interactive_session_list": true,
@@ -702,6 +704,8 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 	// handlers_interactive.go) so the exec surface reads as one piece.
 	tools = append(tools, interactiveTools()...)
 
+	tools = append(tools, tailTool())
+
 	scopes := grantedScopesFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
@@ -810,6 +814,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
+	case "tail_job_output":
+		result, err = s.toolTailJobOutput(ctx, request.Arguments)
 	case "interactive_session_start":
 		result, err = s.toolInteractiveSessionStart(ctx, request.Arguments)
 	case "interactive_session_exec":

@@ -64,6 +64,13 @@ type Server struct {
 	// every authenticated caller is treated as a normal user).
 	adminUsers map[string]struct{}
 
+	// ccbStreaming routes dials at daemons behind a Condor Connection
+	// Broker through the broker, instead of having the remote daemon
+	// dial back. An API server that cannot accept inbound connections
+	// needs it; see HandlerConfig.CCBStreaming, which is where the
+	// operator sets it once for every surface.
+	ccbStreaming bool
+
 	// htcondorConfig is the ambient HTCondor configuration, used to build the CLIENT security
 	// config when dialing the htcondordb database for the DB-backed tools. nil disables them.
 	htcondorConfig *config.Config
@@ -170,10 +177,12 @@ type Config struct {
 	// exactly the kind this exists to satisfy.
 	SubmitPolicy submitpolicy.Policy
 
-	// CCBStreaming routes interactive sessions' CCB dials through the
-	// broker instead of having the execute node dial back. Same setting
-	// the REST terminal uses (HandlerConfig.CCBStreaming); an API server
-	// that cannot accept inbound connections needs it for both.
+	// CCBStreaming routes CCB dials through the broker rather than
+	// having the execute node dial back. Same setting the REST surface
+	// uses (HandlerConfig.CCBStreaming), and it applies to everything
+	// here that reaches a daemon behind CCB: an interactive session's
+	// shell, and tailing a running job through its starter. An API
+	// server that cannot accept inbound connections needs it for both.
 	CCBStreaming bool
 	// InteractiveRequirements is the operator's interactive-job
 	// Requirements expression (HTTP_API_INTERACTIVE_REQUIREMENTS). The
@@ -270,6 +279,7 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout:         stdout,
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
+		ccbStreaming:   cfg.CCBStreaming,
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
 		dbMirror:       cfg.DBMirror,

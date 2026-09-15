@@ -1340,9 +1340,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		SubmitPolicy:   h.submitPolicy,
 		// An agent's interactive session is the same kind of job as the
 		// SPA's terminal, on the same pool, so it gets the same
-		// operator-supplied submit directives, the same answer to how
-		// this server reaches a daemon behind CCB, and the same
-		// site-wide Requirements.
+		// operator-supplied submit directives, the same site-wide
+		// Requirements, and the same answer to how this server reaches a
+		// daemon behind CCB -- which tailing a running job through its
+		// starter needs just as much as a session's shell does.
 		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
 		InteractiveRequirements: h.interactiveRequirements,
 		CCBStreaming:            h.ccbStreaming,
