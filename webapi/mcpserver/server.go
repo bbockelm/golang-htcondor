@@ -305,7 +305,11 @@ func NewServer(cfg Config) (*Server, error) {
 	// condor_ssh_to_job reports that per call, which is a better
 	// answer than a tool that silently does not exist.
 	interactiveMgr, err := interactive.NewManager(interactive.Options{
-		Schedd:       func() interactive.ScheddClient { return s.schedd },
+		// getSchedd, not the s.schedd snapshot: this server replaces its
+		// schedd when the collector reports a new address, and holding
+		// the old pointer is how MCP kept dialling a socket that no
+		// longer existed. The accessor is why this is a function.
+		Schedd:       func() interactive.ScheddClient { return s.getSchedd() },
 		Logger:       logger,
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,

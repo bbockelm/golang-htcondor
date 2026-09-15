@@ -41,8 +41,14 @@ func defaultInstructions(scheddName string) string {
 		"For larger inputs, use HTTP/HTTPS URLs in transfer_input_files.\n")
 	b.WriteString("3. watch_jobs / check_watches — wait for the job to finish (or be held) without polling; " +
 		"a watch fires even if it already happened. Use query_jobs for a one-off status snapshot.\n")
-	b.WriteString("4. get_job_stdout / get_job_stderr — retrieve output after the job finishes.\n")
-	b.WriteString("5. get_job_output — retrieve any other output files.\n\n")
+	b.WriteString("4. tail_job_output — while it RUNS, read the end of its stdout/stderr straight from " +
+		"the execute node. This is how you watch progress or find out why a job is stuck, instead of " +
+		"waiting for it to finish. Pass the offsets it returns back on the next call to get only what " +
+		"is new, and poll no more than every 5 seconds.\n")
+	b.WriteString("5. get_job_stdout / get_job_stderr — retrieve output after the job FINISHES. " +
+		"These read the transferred files, so they are the right tools once a job is done and the " +
+		"wrong ones while it runs; tail_job_output is the reverse.\n")
+	b.WriteString("6. get_job_output — retrieve any other output files.\n\n")
 
 	// Interactive sessions
 	b.WriteString("## Interactive sessions vs batch jobs\n\n")
@@ -54,6 +60,11 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("2. interactive_session_exec — run a command in it (waits for the job to start). " +
 		"Repeat as needed; each call returns exit code, stdout and stderr.\n")
 	b.WriteString("3. interactive_session_stop — release the slot when finished.\n\n")
+	b.WriteString("To run a single command inside a job that is ALREADY running — including an " +
+		"ordinary batch job, not just a session — use exec_in_job. It connects, runs the command, " +
+		"and disconnects, which makes it the tool for inspecting a running job (ls the sandbox, " +
+		"check a process, read a file mid-run) without starting a session or disturbing the job. " +
+		"Use a session instead when several commands need the same shell.\n\n")
 	b.WriteString("Three things to know:\n")
 	b.WriteString("  - The session name is the only handle. Pass it on every call; " +
 		"interactive_session_list finds sessions from earlier conversations.\n")
@@ -130,6 +141,8 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  hold_job / release_job — pause and resume jobs\n")
 	b.WriteString("  edit_job — change job attributes (e.g. increase RequestMemory)\n")
 	b.WriteString("  remove_job / remove_jobs — cancel jobs\n")
+	b.WriteString("  analyze_job_match — explain why a job is or is not matching slots; the first " +
+		"stop for a job stuck idle\n")
 	b.WriteString("  query_job_epochs — view retry history for jobs that ran multiple times\n")
 	b.WriteString("  query_job_archive — search completed/removed jobs in the history\n")
 	b.WriteString("  query_transfer_history — view file transfer details\n")
@@ -138,6 +151,9 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  advertise_to_collector — publish a ClassAd to the HTCondor collector\n")
 	b.WriteString("  interactive_session_start / _exec / _list / _stop — run commands inside a " +
 		"long-lived job (see above)\n")
+	b.WriteString("  tail_job_output — read the end of a RUNNING job's stdout/stderr from the " +
+		"execute node\n")
+	b.WriteString("  exec_in_job — run one command inside a job that is already running\n")
 	b.WriteString("  get_version — report this server's build (version, git commit, linked library versions); " +
 		"use it to confirm which code is deployed\n")
 

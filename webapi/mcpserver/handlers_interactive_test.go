@@ -131,7 +131,7 @@ func TestInteractiveCallerIsTheLocalUserOverStdio(t *testing.T) {
 	s := newTestServerWithInteractive(t)
 	s.delegated = false
 
-	caller, err := s.interactiveCaller(context.Background())
+	caller, err := s.liveJobCaller(context.Background())
 	if err != nil {
 		t.Fatalf("stdio caller was refused: %v", err)
 	}
@@ -199,9 +199,9 @@ func TestInteractiveToolsRequireSessionName(t *testing.T) {
 func TestInteractiveCallerSplitsDomain(t *testing.T) {
 	s := newTestServerWithInteractive(t)
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.example.com")
-	caller, err := s.interactiveCaller(ctx)
+	caller, err := s.liveJobCaller(ctx)
 	if err != nil {
-		t.Fatalf("interactiveCaller: %v", err)
+		t.Fatalf("liveJobCaller: %v", err)
 	}
 	if caller.Actor != "alice@uid.example.com" || caller.Owner != "alice" {
 		t.Errorf("caller = %+v, want actor alice@uid.example.com / owner alice", caller)
@@ -211,9 +211,9 @@ func TestInteractiveCallerSplitsDomain(t *testing.T) {
 	// somebody's job, not a query result.
 	s.adminUsers = map[string]struct{}{"root@uid.example.com": {}}
 	adminCtx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.example.com")
-	adminCaller, err := s.interactiveCaller(adminCtx)
+	adminCaller, err := s.liveJobCaller(adminCtx)
 	if err != nil {
-		t.Fatalf("interactiveCaller(admin): %v", err)
+		t.Fatalf("liveJobCaller(admin): %v", err)
 	}
 	if adminCaller.Owner != "root" {
 		t.Errorf("admin caller owner = %q, want root", adminCaller.Owner)

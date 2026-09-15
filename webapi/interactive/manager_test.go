@@ -832,3 +832,264 @@ func TestCallerSubmitLinesCannotRedefineTheSession(t *testing.T) {
 		t.Errorf("the caller's submit commands are not in the file:\n%s", schedd.submitted[0])
 	}
 }
+
+// TestRunInJobLeavesNothingBehind is the design claim for the one-shot
+// path: a job this manager does not own gets no lease, no registry
+// entry, no heartbeat goroutine and no retained connection. Anything
+// left behind would be machinery acting on a job whose lifetime belongs
+// to somebody else.
+func TestRunInJobLeavesNothingBehind(t *testing.T) {
+	schedd := newFakeSchedd()
+	shell := &fakeShell{stdout: "from-the-job\n", exitCode: 0}
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			return shell, nil
+		},
+	})
+
+	result, err := mgr.RunInJob(context.Background(), 42, 0, ExecRequest{Command: "echo from-the-job"})
+	if err != nil {
+		t.Fatalf("RunInJob: %v", err)
+	}
+	if result.Stdout != "from-the-job\n" {
+		t.Errorf("stdout = %q", result.Stdout)
+	}
+	if result.JobID != "42.0" {
+		t.Errorf("JobID = %q, want 42.0", result.JobID)
+	}
+	if !shell.closed {
+		t.Error("the connection was left open; nothing will ever close it")
+	}
+
+	mgr.mu.Lock()
+	sessions := len(mgr.sessions)
+	mgr.mu.Unlock()
+	if sessions != 0 {
+		t.Errorf("the job was registered as a session (%d entries); it would then be leased and reclaimed", sessions)
+	}
+
+	// A second call dials again rather than reusing a closed client.
+	if _, err := mgr.RunInJob(context.Background(), 42, 0, ExecRequest{Command: "true"}); err != nil {
+		t.Fatalf("second RunInJob: %v", err)
+	}
+	if dialed != 2 {
+		t.Errorf("dialed %d times, want one per call", dialed)
+	}
+}
+
+// A non-zero exit is the command's answer, not a failure of the tool.
+func TestRunInJobReportsExitCode(t *testing.T) {
+	schedd := newFakeSchedd()
+	shell := &fakeShell{exitCode: 7, stderr: "boom\n"}
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) { return shell, nil },
+	})
+
+	result, err := mgr.RunInJob(context.Background(), 1, 0, ExecRequest{Command: "exit 7"})
+	if err != nil {
+		t.Fatalf("RunInJob: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Errorf("ExitCode = %d, want 7", result.ExitCode)
+	}
+	if result.Stderr != "boom\n" {
+		t.Errorf("Stderr = %q", result.Stderr)
+	}
+}
+
+// TestConcurrentExecSurvivesASiblingRedial: the commands in one session
+// share one connection, and a command whose dispatch fails detaches the
+// session before redialing. Closing the connection there closes it under
+// every sibling command still running on it -- they fail with a
+// transport error, which is not a case they retry, caused by a recovery
+// they had no part in.
+//
+// The connection may only close once the last command on it is done.
+func TestConcurrentExecSurvivesASiblingRedial(t *testing.T) {
+	schedd := newFakeSchedd()
+	first := &fakeShell{
+		block:         make(chan struct{}),
+		blockCmd:      "long-running",
+		failCmd:       "dispatch-fails",
+		runErr:        errors.New("channel open failed"),
+		notDispatched: true,
+		stdout:        "finished\n",
+	}
+	second := &fakeShell{stdout: "retried\n"}
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			if dialed == 1 {
+				return first, nil
+			}
+			return second, nil
+		},
+	})
+	caller := Caller{Actor: "alice@example.com", Owner: "alice"}
+	job := mustCreate(t, mgr, schedd, caller, "s")
+	schedd.setStatus(job, jobStatusRunning)
+
+	type outcome struct {
+		res *ExecResult
+		err error
+	}
+	longDone := make(chan outcome, 1)
+	go func() {
+		res, err := mgr.Exec(context.Background(), caller, "s", ExecRequest{Command: "long-running"})
+		longDone <- outcome{res, err}
+	}()
+
+	// Wait until the long command is actually on the shell; otherwise
+	// the sibling could detach before there is anything to disturb and
+	// the test would pass without exercising the race.
+	waitFor(t, "the long command to reach the shell", 2*time.Second, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		for _, cmd := range first.commands {
+			if cmd == "long-running" {
+				return true
+			}
+		}
+		return false
+	})
+
+	if _, err := mgr.Exec(context.Background(), caller, "s", ExecRequest{Command: "dispatch-fails"}); err != nil {
+		t.Fatalf("the sibling's retry did not succeed: %v", err)
+	}
+
+	first.mu.Lock()
+	closedEarly := first.closed
+	first.mu.Unlock()
+	if closedEarly {
+		t.Error("the shared connection was closed while a command was still running on it")
+	}
+
+	close(first.block)
+	got := <-longDone
+	if got.err != nil {
+		t.Fatalf("the running command failed because a sibling redialed: %v", got.err)
+	}
+	if got.res.Stdout != "finished\n" {
+		t.Errorf("stdout = %q, want the command's own output", got.res.Stdout)
+	}
+
+	// Once it is done, nothing is left holding the dead connection.
+	waitFor(t, "the detached connection to be closed once its last command finished", 2*time.Second, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		return first.closed
+	})
+}
+
+// A one-shot exec holds no session, but it does hold a connection into
+// a job, and Close means this manager is done reaching into jobs.
+func TestRunInJobRefusedAfterClose(t *testing.T) {
+	schedd := newFakeSchedd()
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			return &fakeShell{}, nil
+		},
+	})
+	mgr.Close()
+
+	if _, err := mgr.RunInJob(context.Background(), 1, 0, ExecRequest{Command: "true"}); err == nil {
+		t.Error("a one-shot ran after shutdown")
+	}
+	if dialed != 0 {
+		t.Errorf("dialed %d times after shutdown; the connection outlives the manager", dialed)
+	}
+}
+
+// TestAdoptedSessionKeepsItsLease: the queue is the session registry,
+// so a name still resolves after this process restarts -- but the lease
+// lived only in memory. A caller who asked for a long lease got the
+// default back after a restart and lost the session early, which is the
+// one failure a lease is supposed to prevent.
+func TestAdoptedSessionKeepsItsLease(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{DefaultLease: 30 * time.Minute, MaxLease: 8 * time.Hour})
+	caller := Caller{Actor: "alice@example.com", Owner: "alice"}
+
+	if _, err := mgr.Create(context.Background(), caller, CreateSpec{
+		Name: "s", Lease: 4 * time.Hour,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	schedd.setOwner(caller.Owner)
+	submitted := schedd.submittedFiles()
+	if len(submitted) != 1 || !strings.Contains(submitted[0], "+"+SessionLeaseAttr) {
+		t.Fatalf("the lease was never recorded on the job:\n%s", strings.Join(submitted, "\n"))
+	}
+
+	// A new manager over the same queue is what a restart looks like.
+	restarted, _ := testManager(t, schedd, Options{DefaultLease: 30 * time.Minute, MaxLease: 8 * time.Hour})
+	// Naming a session is what re-adopts it; that is the first thing a
+	// client does after a restart.
+	if _, err := restarted.lookup(context.Background(), caller, "s"); err != nil {
+		t.Fatalf("lookup after restart: %v", err)
+	}
+
+	restarted.mu.Lock()
+	sess := restarted.sessions[sessionKey("alice", "s")]
+	var got time.Duration
+	if sess != nil {
+		got = sess.leaseDuration
+	}
+	restarted.mu.Unlock()
+	if sess == nil {
+		t.Fatal("the session was never adopted")
+	}
+	if got != 4*time.Hour {
+		t.Errorf("adopted lease = %s, want the 4h the caller asked for", got)
+	}
+}
+
+// TestUnattachedSessionIsReaped: expiry used to be driven only by a
+// session's own heartbeat goroutine, which runs only while this process
+// is attached. A session created and never used had none, so nothing
+// here noticed its lease end -- the job was still reclaimed by its
+// watchdog, but the registry entry stayed, pruned only if someone
+// happened to name that session again.
+func TestUnattachedSessionIsReaped(t *testing.T) {
+	schedd := newFakeSchedd()
+	now := time.Now()
+	clock := func() time.Time { return now }
+	mgr, _ := testManager(t, schedd, Options{
+		Now:               clock,
+		HeartbeatInterval: 10 * time.Millisecond,
+		Watchdog:          WatchdogTiming{PollSec: 1, FreshnessSec: 3600},
+	})
+	caller := Caller{Actor: "alice@example.com", Owner: "alice"}
+	job := mustCreate(t, mgr, schedd, caller, "abandoned")
+
+	mgr.mu.Lock()
+	tracked := len(mgr.sessions)
+	mgr.mu.Unlock()
+	if tracked != 1 {
+		t.Fatalf("tracked %d sessions after create, want 1", tracked)
+	}
+
+	// Nothing ever attached, so no heartbeat goroutine exists to notice.
+	now = now.Add(2 * time.Hour)
+
+	waitFor(t, "the expired session to be reaped", 2*time.Second, func() bool {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.sessions) == 0
+	})
+
+	// Reaping is not just bookkeeping: the slot goes back too.
+	waitFor(t, "the expired session's job to be removed", 2*time.Second, func() bool {
+		for _, constraint := range schedd.removedJobs() {
+			if strings.Contains(constraint, fmt.Sprintf("ClusterId == %d", job.cluster)) {
+				return true
+			}
+		}
+		return false
+	})
+}

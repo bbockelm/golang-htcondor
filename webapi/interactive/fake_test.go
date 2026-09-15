@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +54,7 @@ type fakeJob struct {
 	status        int
 	holdReason    string
 	holdCode      int
+	leaseSeconds  int
 }
 
 func newFakeSchedd() *fakeSchedd { return &fakeSchedd{nextCluster: 100} }
@@ -72,6 +74,12 @@ func (f *fakeSchedd) SubmitRemote(_ context.Context, submitFile string) (int, []
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "batch_name = ") {
 			job.batchName = strings.TrimPrefix(line, "batch_name = ")
+		}
+		// The ad has to carry back what the submit file put on it, or a
+		// test cannot tell a value that survived the queue from one
+		// that was only ever in memory.
+		if rest, ok := strings.CutPrefix(line, "+"+SessionLeaseAttr+" = "); ok {
+			job.leaseSeconds, _ = strconv.Atoi(strings.TrimSpace(rest))
 		}
 	}
 	if name, ok := SessionNameFromBatchName(job.batchName); ok {
@@ -143,6 +151,9 @@ func (f *fakeSchedd) QueryWithOptions(_ context.Context, constraint string, opts
 		if job.holdCode != 0 {
 			ad.InsertAttr("HoldReasonCode", int64(job.holdCode))
 		}
+		if job.leaseSeconds > 0 {
+			ad.InsertAttr(SessionLeaseAttr, int64(job.leaseSeconds))
+		}
 		ads = append(ads, ad)
 	}
 	return ads, nil, nil
@@ -204,6 +215,13 @@ type fakeShell struct {
 	// block, when non-nil, is waited on before a non-heartbeat command
 	// returns -- for exercising timeouts.
 	block chan struct{}
+
+	// blockCmd and failCmd narrow the two above to one command, so a
+	// test can have two commands behave differently on one shell --
+	// which is the only way to reach the paths where concurrent execs
+	// in a single session interfere with each other.
+	blockCmd string
+	failCmd  string
 }
 
 func (s *fakeShell) Run(ctx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -223,8 +241,17 @@ func (s *fakeShell) Run(ctx context.Context, cmd string, stdout, stderr io.Write
 		}
 		return 0, nil
 	}
+	s.mu.Lock()
+	blockCmd, failCmd := s.blockCmd, s.failCmd
+	s.mu.Unlock()
+	if failCmd != "" && cmd != failCmd {
+		runErr = nil
+	}
 	if runErr != nil && notDispatched {
 		return -1, fmt.Errorf("%w: %w", errNotDispatched, runErr)
+	}
+	if blockCmd != "" && cmd != blockCmd {
+		block = nil
 	}
 	if block != nil {
 		select {
@@ -314,4 +341,10 @@ func mustCreate(t *testing.T, mgr *Manager, schedd *fakeSchedd, caller Caller, n
 		t.Fatalf("Create(%q): %v", name, err)
 	}
 	return schedd.setOwner(caller.Owner)
+}
+
+func (f *fakeSchedd) submittedFiles() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.submitted...)
 }

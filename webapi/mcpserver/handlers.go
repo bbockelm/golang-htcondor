@@ -704,7 +704,8 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 	// handlers_interactive.go) so the exec surface reads as one piece.
 	tools = append(tools, interactiveTools()...)
 
-	tools = append(tools, tailTool())
+	// The two tools that reach into a live job.
+	tools = append(tools, tailTool(), execInJobTool())
 
 	scopes := grantedScopesFromContext(ctx)
 	filtered := tools[:0:0]
@@ -816,6 +817,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetVersion(ctx, request.Arguments)
 	case "tail_job_output":
 		result, err = s.toolTailJobOutput(ctx, request.Arguments)
+	case "exec_in_job":
+		result, err = s.toolExecInJob(ctx, request.Arguments)
 	case "interactive_session_start":
 		result, err = s.toolInteractiveSessionStart(ctx, request.Arguments)
 	case "interactive_session_exec":

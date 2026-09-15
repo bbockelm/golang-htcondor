@@ -174,7 +174,15 @@ type session struct {
 	cluster    int
 	proc       int
 
-	shell        Shell
+	shell Shell
+	// deadShells holds connections detached while commands were still
+	// running on them. Commands in one session share a single
+	// connection, so the redial that follows a dispatch failure must
+	// not Close the connection a sibling command is mid-run on: that
+	// sibling would fail with a transport error it does not retry,
+	// caused by a recovery it had no part in. The last command out
+	// closes them (see endCommand).
+	deadShells   []Shell
 	leaseExpires time.Time
 	// leaseDuration is what each call extends the lease BY. Held per
 	// session because a caller may ask for a longer one at create, and
@@ -210,7 +218,12 @@ type Info struct {
 	HoldReasonCode int       `json:"hold_reason_code,omitempty"`
 	SubmittedAt    time.Time `json:"submitted_at,omitempty"`
 	LeaseExpires   time.Time `json:"lease_expires,omitempty"`
-	Attached       bool      `json:"attached"`
+	// LeaseDuration is what the session was created with, read back off
+	// the job ad. Zero when the ad does not carry it -- a session
+	// submitted before SessionLeaseAttr existed -- which falls back to
+	// the default the way it always did.
+	LeaseDuration time.Duration `json:"-"`
+	Attached      bool          `json:"attached"`
 }
 
 // CreateSpec describes a session to start.
@@ -325,12 +338,21 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.Dial == nil {
 		opts.Dial = sshDialer(opts.Schedd, opts.CCBStreaming)
 	}
-	return &Manager{
+	m := &Manager{
 		opts:     opts,
 		sessions: map[string]*session{},
 		done:     make(chan struct{}),
-	}, nil
+	}
+	m.wg.Add(1)
+	go m.reapLoop()
+	return m, nil
 }
+
+// ScheddForTest reports the schedd the manager would use right now. It
+// exists so a host can assert it handed over an accessor rather than a
+// snapshot -- the difference only shows up after a rediscovery, which
+// no unit test of this package can trigger on its own.
+func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
 
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
@@ -410,6 +432,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		CudaVersion:           spec.CudaVersion,
 		RequireGpus:           spec.RequireGpus,
 		Requirements:          combineRequirements(m.opts.Requirements, spec.Requirements),
+		LeaseSeconds:          int(lease.Seconds()),
 		CallerSubmitLines:     spec.SubmitLines,
 		Watchdog:              watchdog,
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
@@ -701,12 +724,14 @@ func (m *Manager) Close() {
 	// fields belong to it, and a heartbeat goroutine may be reading
 	// them right now.
 	type teardown struct {
-		stop  chan struct{}
-		shell Shell
+		stop   chan struct{}
+		shell  Shell
+		orphan []Shell
 	}
 	pending := make([]teardown, 0, len(m.sessions))
 	for _, sess := range m.sessions {
-		pending = append(pending, teardown{stop: sess.stopHeartbeat, shell: sess.shell})
+		pending = append(pending, teardown{stop: sess.stopHeartbeat, shell: sess.shell, orphan: sess.deadShells})
+		sess.deadShells = nil
 		sess.stopHeartbeat = nil
 		sess.shell = nil
 		sess.heartbeatOn = false
@@ -722,6 +747,9 @@ func (m *Manager) Close() {
 		// mid-command, so shutdown does not wait out its timeout.
 		if p.shell != nil {
 			_ = p.shell.Close()
+		}
+		for _, orphan := range p.orphan {
+			_ = orphan.Close()
 		}
 	}
 	m.wg.Wait()

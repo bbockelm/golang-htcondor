@@ -53,6 +53,7 @@ func jobIDOf(cluster, proc int) string { return fmt.Sprintf("%d.%d", cluster, pr
 var sessionAdAttrs = []string{
 	"ClusterId", "ProcId", "JobStatus", "JobBatchName", "Owner",
 	"QDate", "HoldReason", "HoldReasonCode", "JobCurrentStartExecutingDate",
+	SessionLeaseAttr,
 }
 
 // liveSessionClause restricts a lookup to jobs that could still be a
@@ -124,6 +125,7 @@ func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]In
 		holdReason, _ := ad.EvaluateAttrString("HoldReason")
 		holdCode, _ := ad.EvaluateAttrInt("HoldReasonCode")
 		qdate, _ := ad.EvaluateAttrInt("QDate")
+		leaseSecs, _ := ad.EvaluateAttrInt(SessionLeaseAttr)
 
 		info := Info{
 			Name:           sessionName,
@@ -134,6 +136,9 @@ func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]In
 			Status:         statusText(int(status), int(holdCode)),
 			HoldReason:     holdReason,
 			HoldReasonCode: int(holdCode),
+		}
+		if leaseSecs > 0 {
+			info.LeaseDuration = time.Duration(leaseSecs) * time.Second
 		}
 		if int(holdCode) == holdReasonSpoolingInput {
 			// Reported as "starting", so the hold text goes with it. A
@@ -241,12 +246,14 @@ func (m *Manager) adopt(ctx context.Context, caller Caller, info *Info) {
 	}
 	sess, ok := m.sessions[key]
 	if !ok {
+		lease := m.clampLease(info.LeaseDuration)
 		sess = &session{
-			name:         info.Name,
-			owner:        caller.Owner,
-			cluster:      info.ClusterID,
-			proc:         info.ProcID,
-			leaseExpires: m.opts.Now().Add(m.opts.DefaultLease),
+			name:          info.Name,
+			owner:         caller.Owner,
+			cluster:       info.ClusterID,
+			proc:          info.ProcID,
+			leaseDuration: lease,
+			leaseExpires:  m.opts.Now().Add(lease),
 		}
 		m.sessions[key] = sess
 		m.log().Info(m.opts.LogDest, "interactive session adopted",
@@ -471,6 +478,62 @@ func (m *Manager) expire(sess *session) {
 	m.removeJob(ctx, Caller{Actor: owner, Owner: owner}, cluster, proc, "Interactive session lease expired")
 }
 
+// reapLoop expires sessions whose lease has run out.
+//
+// Expiry was driven only by a session's own heartbeat goroutine, which
+// exists only while this process is attached. A session that was
+// created and never used -- the caller went away, or exec failed --
+// has no such goroutine, so nothing here ever noticed its lease end.
+// Its job was still reclaimed, by the watchdog it carries, but this
+// map kept the entry: an unbounded registry of sessions that no longer
+// exist, pruned only if someone happened to name one again.
+//
+// Sessions that ARE attached expire from their heartbeat as before;
+// this loop is what covers the ones that are not.
+func (m *Manager) reapLoop() {
+	defer m.wg.Done()
+	interval := m.opts.HeartbeatInterval
+	if interval <= 0 {
+		interval = DefaultHeartbeat
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+		}
+		for _, sess := range m.expiredSessions() {
+			m.log().Info(m.opts.LogDest, "interactive session lease expired",
+				"session", sess.name, "owner", sess.owner, "attached", false)
+			m.expire(sess)
+		}
+	}
+}
+
+// expiredSessions returns the unattached sessions past their lease. An
+// attached one is left to its own heartbeat, which has the connection
+// it needs to send the shutdown sentinel first.
+func (m *Manager) expiredSessions() []*session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	now := m.opts.Now()
+	var expired []*session
+	for _, sess := range m.sessions {
+		if sess.heartbeatOn || sess.running > 0 {
+			continue
+		}
+		if !now.Before(sess.leaseExpires) {
+			expired = append(expired, sess)
+		}
+	}
+	return expired
+}
+
 // detach drops this process's connection to a session without ending
 // the session itself. The next call that names it dials again.
 //
@@ -493,6 +556,13 @@ func (m *Manager) detach(sess *session, why string) {
 		sess.stopHeartbeat = nil
 	}
 	sess.heartbeatOn = false
+	// Clearing sess.shell is enough to stop anyone new from picking it
+	// up. Closing it is only safe once the commands already running on
+	// it have finished -- see deadShells.
+	if shell != nil && sess.running > 0 {
+		sess.deadShells = append(sess.deadShells, shell)
+		shell = nil
+	}
 	m.mu.Unlock()
 
 	if shell != nil {
@@ -591,6 +661,18 @@ func (m *Manager) endCommand(owner, name string) {
 		sess.running--
 	}
 	m.extendLeaseLocked(sess)
+	if sess.running > 0 || len(sess.deadShells) == 0 {
+		return
+	}
+	orphans := sess.deadShells
+	sess.deadShells = nil
+	// Close outside the lock: a dead connection can block on it, and
+	// this lock is shared with every other session.
+	go func() {
+		for _, shell := range orphans {
+			_ = shell.Close()
+		}
+	}()
 }
 
 func (m *Manager) clampLease(requested time.Duration) time.Duration {

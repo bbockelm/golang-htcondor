@@ -171,3 +171,29 @@ func (a fakeAd) EvaluateAttrString(name string) (string, bool) {
 	v, ok := a[name]
 	return v, ok
 }
+
+// TestWatchdogKillsOnlyThisJobsSshd: the watchdog kills sshd so the
+// starter can wind the job down, and a kill matched on the process name
+// alone is not confined to this job. Pools that run jobs as dedicated
+// slot users hide that -- where jobs run as the submitting user, the
+// same pkill reaches that user's login session on the execute node and
+// their other interactive jobs.
+func TestWatchdogKillsOnlyThisJobsSshd(t *testing.T) {
+	script := BuildWatchdogScript(WatchdogTiming{})
+
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "pkill") {
+			continue
+		}
+		if !strings.Contains(trimmed, "-f") || !strings.Contains(trimmed, "${scratch}") {
+			t.Errorf("pkill is not confined to this job's sandbox: %s", trimmed)
+		}
+	}
+	if !strings.Contains(script, `scratch="${_CONDOR_SCRATCH_DIR:-$PWD}"`) {
+		t.Error("the watchdog never resolves the sandbox path it matches on")
+	}
+	if !strings.Contains(script, "pkill -KILL") {
+		t.Error("no hard kill; a wedged sshd would hold the slot")
+	}
+}

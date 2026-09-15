@@ -129,15 +129,16 @@ func interactiveTools() []Tool {
 	}
 }
 
-// interactiveCaller resolves who is asking into the identity pair the
-// session manager needs.
+// liveJobCaller resolves who is asking into the identity pair the
+// session manager needs -- and, since they answer the same question,
+// every other tool that reaches into a running job.
 //
 // Admins are deliberately NOT exempted here, unlike the query tools.
 // Owner scope on a query is about what you may read; a session is a
 // live shell inside somebody else's job, and "troubleshooting" is not
 // a reason to hand an agent one. An admin who needs that has
 // condor_ssh_to_job.
-func (s *Server) interactiveCaller(ctx context.Context) (interactive.Caller, error) {
+func (s *Server) liveJobCaller(ctx context.Context) (interactive.Caller, error) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
 		// No actor on the context means one of two very different
@@ -175,7 +176,7 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.interactiveCaller(ctx)
+	caller, err := s.liveJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +217,7 @@ func (s *Server) toolInteractiveSessionExec(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.interactiveCaller(ctx)
+	caller, err := s.liveJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +253,7 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.interactiveCaller(ctx)
+	caller, err := s.liveJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +294,7 @@ func (s *Server) toolInteractiveSessionStop(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.interactiveCaller(ctx)
+	caller, err := s.liveJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
