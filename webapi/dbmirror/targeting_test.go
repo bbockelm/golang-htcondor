@@ -26,7 +26,7 @@ func TestPickMirrorIdentifiesTheScheddByHost(t *testing.T) {
 	theirs := mirrorAd("db-theirs", "<10.0.0.3:9619>", true, 400)
 
 	// The freshest ad is the stranger's; the host is what decides.
-	got, err := pickMirror([]*classad.ClassAd{theirs, ours}, "10.0.0.2")
+	got, err := pickMirror([]*classad.ClassAd{theirs, ours}, "10.0.0.2", false)
 	if err != nil {
 		t.Fatalf("expected the host to settle it: %v", err)
 	}
@@ -34,10 +34,28 @@ func TestPickMirrorIdentifiesTheScheddByHost(t *testing.T) {
 		t.Errorf("picked %q, want the mirror on this schedd's host", got.Name)
 	}
 
-	// A single advertiser is unambiguous and is taken whatever its host —
-	// a pool with one htcondordb needs no configuration.
-	if got, err = pickMirror([]*classad.ClassAd{theirs}, "10.0.0.2"); err != nil || got.Name != "db-theirs" {
-		t.Errorf("a lone advertiser must be used: %+v %v", got, err)
+	// A lone advertiser is NOT taken on trust when it runs somewhere else.
+	// This used to read "a pool with one htcondordb needs no configuration"
+	// and take it whatever its host, which contradicts the premise above:
+	// a mirror syncs by tailing job_queue.log off LOCAL disk, so one on
+	// another host is definitionally not this schedd's. It reached
+	// production -- an API server whose own mirror had stopped advertising
+	// silently served a different access point's queue.
+	if _, err = pickMirror([]*classad.ClassAd{theirs}, "10.0.0.2", false); err == nil {
+		t.Error("a lone advertiser on another host must be declined, not served")
+	}
+
+	// Declining is only safe because the caller falls back to the schedd.
+	// With no schedd address there is nothing to check against, so the
+	// lone advertiser is still all there is to go on.
+	if got, err = pickMirror([]*classad.ClassAd{theirs}, "", false); err != nil || got.Name != "db-theirs" {
+		t.Errorf("with no schedd host to compare, a lone advertiser must be used: %+v %v", got, err)
+	}
+
+	// An operator who names the mirror has overridden discovery; the host
+	// heuristic must not veto that.
+	if got, err = pickMirror([]*classad.ClassAd{theirs}, "10.0.0.2", true); err != nil || got.Name != "db-theirs" {
+		t.Errorf("a pinned name must win over the host check: %+v %v", got, err)
 	}
 }
 
@@ -51,7 +69,7 @@ func TestPickMirrorRefusesToGuess(t *testing.T) {
 	a := mirrorAd("db-a", "<10.0.0.3:9619>", true, 400)
 	b := mirrorAd("db-b", "<10.0.0.4:9619>", false, 900)
 
-	got, err := pickMirror([]*classad.ClassAd{a, b}, "10.0.0.2")
+	got, err := pickMirror([]*classad.ClassAd{a, b}, "10.0.0.2", false)
 	if err == nil {
 		t.Fatalf("picked %q when nothing identified it; a wrong pick serves another AP's jobs", got.Name)
 	}
@@ -62,12 +80,12 @@ func TestPickMirrorRefusesToGuess(t *testing.T) {
 	// Two on our own host is equally ambiguous.
 	c := mirrorAd("db-c", "<10.0.0.2:9619>", true, 400)
 	d := mirrorAd("db-d", "<10.0.0.2:9620>", true, 500)
-	if got, err = pickMirror([]*classad.ClassAd{c, d}, "10.0.0.2"); err == nil {
+	if got, err = pickMirror([]*classad.ClassAd{c, d}, "10.0.0.2", false); err == nil {
 		t.Errorf("two mirrors on one host is still a guess, picked %q", got.Name)
 	}
 
 	// With no schedd address configured there is nothing to match on.
-	if _, err = pickMirror([]*classad.ClassAd{a, b}, ""); err == nil {
+	if _, err = pickMirror([]*classad.ClassAd{a, b}, "", false); err == nil {
 		t.Error("an unknown schedd host cannot identify a mirror")
 	}
 }
@@ -76,13 +94,15 @@ func TestPickMirrorRefusesToGuess(t *testing.T) {
 // dialed, so choosing it would turn a working mirror into no mirror.
 func TestPickMirrorSkipsAddresslessAds(t *testing.T) {
 	noAddr := mirrorAd("db-broken", "", true, 900)
-	usable := mirrorAd("db-ok", "<10.0.0.9:9619>", true, 100)
+	// On this schedd's host: the point here is that the addressless ad is
+	// skipped, not that a mirror somewhere else would be accepted.
+	usable := mirrorAd("db-ok", "<10.0.0.2:9619>", true, 100)
 
-	got, err := pickMirror([]*classad.ClassAd{noAddr, usable}, "10.0.0.2")
+	got, err := pickMirror([]*classad.ClassAd{noAddr, usable}, "10.0.0.2", false)
 	if err != nil || got.Name != "db-ok" {
 		t.Fatalf("picked %+v (%v), want the only dialable ad", got, err)
 	}
-	if _, err = pickMirror([]*classad.ClassAd{noAddr}, "10.0.0.2"); err == nil {
+	if _, err = pickMirror([]*classad.ClassAd{noAddr}, "10.0.0.2", false); err == nil {
 		t.Error("an ad with no address must not be chosen")
 	}
 }
@@ -175,5 +195,31 @@ func TestDecisionStatus(t *testing.T) {
 		if got := d.Status(); got != want {
 			t.Errorf("%s: status = %d, want %d", reason, got, want)
 		}
+	}
+}
+
+// TestPickMirrorDeclinesAStrangersLoneMirror is the regression for an
+// upgraded API server that began reporting a mirror belonging to a
+// different access point entirely:
+//
+//	Mirror htcondordb@ospool-ap4043.chtc.wisc.edu
+//
+// on a deployment whose own database had stopped advertising. One
+// stranger was advertising, a lone advertiser was taken without an
+// identity check, and reads were served from another queue.
+func TestPickMirrorDeclinesAStrangersLoneMirror(t *testing.T) {
+	stranger := mirrorAd("htcondordb@ospool-ap4043.chtc.wisc.edu",
+		"<128.105.1.43:9619?alias=ospool-ap4043.chtc.wisc.edu>", true, 400)
+
+	got, err := pickMirror([]*classad.ClassAd{stranger}, "ap40.uw.osg-htc.org", false)
+	if err == nil {
+		t.Fatalf("served %q, which runs on %q rather than this schedd's host",
+			got.Name, hostOfSinful(got.Address))
+	}
+	// The message has to name the escape hatch: declining means falling
+	// back to the schedd, and an operator whose layout is legitimately
+	// split needs to know how to say so.
+	if !strings.Contains(err.Error(), "HTTP_API_DBMIRROR_NAME") {
+		t.Errorf("error does not point at the override: %v", err)
 	}
 }
