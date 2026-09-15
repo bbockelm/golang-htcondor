@@ -222,11 +222,14 @@ type Config struct {
 	PingInterval time.Duration
 	// MCPWatchMaxWait caps in-call MCP watch_jobs blocking; keep it
 	// under the front gateway timeout. See HandlerConfig.MCPWatchMaxWait.
-	MCPWatchMaxWait    time.Duration
-	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token              string               // Token for daemon authentication (optional)
-	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	MCPWatchMaxWait time.Duration
+	// MCPMaxRequestDuration is the hard stop on an MCP request that keeps
+	// making progress. See HandlerConfig.MCPMaxRequestDuration.
+	MCPMaxRequestDuration time.Duration
+	StreamBufferSize      int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout    time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token                 string               // Token for daemon authentication (optional)
+	Credd                 htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 	// Placementd is an optional condor_placementd client; nil means
 	// "discover one". See HandlerConfig.
 	Placementd htcondor.PlacementdClient
@@ -320,6 +323,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
 		MCPInstructions:             cfg.MCPInstructions,
+		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		SpoolBufferDir:              cfg.SpoolBufferDir,

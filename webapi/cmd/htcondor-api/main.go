@@ -1518,6 +1518,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
+	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1599,6 +1600,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		DBMirrorRequired:            dbMirrorRequired,
 		PingInterval:                pingInterval,
 		MCPWatchMaxWait:             mcpWatchMaxWait,
+		MCPMaxRequestDuration:       mcpMaxRequestDuration,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -2603,6 +2605,42 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// loadMCPMaxRequestDuration reads HTTP_API_MCP_MAX_REQUEST_DURATION, the hard
+// stop on an MCP request that is still making progress.
+//
+//	unset      httpserver.DefaultMCPMaxRequestDuration (15m)
+//	a duration that hard stop, e.g. 5m
+//
+// While an MCP request runs, its write deadline is moved forward rather than
+// being HTTP_API_WRITE_TIMEOUT, so a tool that is deliberately waiting is
+// bounded by this instead of by a timeout meant for ordinary replies. It is a
+// backstop against a hung tool holding a connection, not a tuning knob: the
+// cap an agent is told about is derived from it.
+func loadMCPMaxRequestDuration(cfg *config.Config, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get("HTTP_API_MCP_MAX_REQUEST_DURATION")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	raw = strings.TrimSpace(raw)
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_MCP_MAX_REQUEST_DURATION: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_MCP_MAX_REQUEST_DURATION=%q: %v", raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse HTTP_API_MCP_MAX_REQUEST_DURATION: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_MCP_MAX_REQUEST_DURATION=%q: %v", raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "HTTP_API_MCP_MAX_REQUEST_DURATION must be positive: refusing to start",
+			"value", raw)
+		log.Fatalf("invalid HTTP_API_MCP_MAX_REQUEST_DURATION=%q: must be positive", raw)
+	}
+	return d
+}
 
 // loadMCPWatchMaxWait reads HTTP_API_MCP_WATCH_MAX_WAIT, the cap on how
 // long the MCP watch_jobs tool may block in-call before returning.
