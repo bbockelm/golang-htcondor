@@ -60,6 +60,21 @@ func interactiveTools() []Tool {
 						"type":        "integer",
 						"description": "How long the session survives with no calls on it (default 1800). Each call resets the countdown.",
 					},
+					"requirements": map[string]interface{}{
+						"type": "string",
+						"description": "ClassAd expression narrowing which machines the session may run on, e.g. " +
+							"\"TARGET.HasCVMFS == true\" or \"GLIDEIN_Site == \\\"Wisconsin\\\"\". " +
+							"ANDed with any site-wide requirement the operator sets, which always applies. " +
+							"Narrowing too far leaves the session queued with nothing to match it.",
+					},
+					"submit_lines": map[string]interface{}{
+						"type": "string",
+						"description": "Extra HTCondor submit commands, one per line, for what the other arguments do not cover " +
+							"(e.g. \"container_image = docker://rockylinux:9\", \"+ProjectName = \\\"MyProject\\\"\"). " +
+							"The commands that make the job a session -- executable, batch_name, universe, the transfer " +
+							"settings and queue -- are refused, because redefining them produces a session that submits " +
+							"and then cannot be attached to.",
+					},
 				},
 				"required": []string{"session"},
 			},
@@ -167,12 +182,14 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 	name, _ := args["session"].(string)
 
 	spec := interactive.CreateSpec{
-		Name:     strings.TrimSpace(name),
-		Cpus:     intArg(args, "cpus", 0),
-		MemoryMB: intArg(args, "memory_mb", 0),
-		DiskMB:   intArg(args, "disk_mb", 0),
-		Gpus:     intArg(args, "gpus", 0),
-		Lease:    time.Duration(intArg(args, "lease_seconds", 0)) * time.Second,
+		Name:         strings.TrimSpace(name),
+		Cpus:         intArg(args, "cpus", 0),
+		MemoryMB:     intArg(args, "memory_mb", 0),
+		DiskMB:       intArg(args, "disk_mb", 0),
+		Gpus:         intArg(args, "gpus", 0),
+		Lease:        time.Duration(intArg(args, "lease_seconds", 0)) * time.Second,
+		Requirements: strings.TrimSpace(stringArg(args, "requirements")),
+		SubmitLines:  stringArg(args, "submit_lines"),
 	}
 	info, err := mgr.Create(ctx, caller, spec)
 	if err != nil {

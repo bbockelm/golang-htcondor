@@ -176,6 +176,11 @@ type SubmitArgs struct {
 	// ExtraSubmitLines is operator-supplied submit-file content merged
 	// in just before the `queue` directive.
 	ExtraSubmitLines string
+
+	// CallerSubmitLines are submit commands the SESSION's caller asked
+	// for. Emitted before the operator's block so the operator still has
+	// the last word, and validated by ValidateCallerSubmitLines first.
+	CallerSubmitLines string
 }
 
 // AppendExtraSubmitLines writes operator-supplied extra submit-file
@@ -291,6 +296,18 @@ func BuildSubmitFile(a SubmitArgs) string {
 		fmt.Fprintf(&sb, "requirements = (%s)\n\n", req)
 	}
 
+	// The caller's own submit commands come before the operator's block,
+	// so an operator override still wins -- same precedence the rest of
+	// this file follows, and the reason the operator block is last.
+	if lines := strings.TrimSpace(a.CallerSubmitLines); lines != "" {
+		sb.WriteString("\n# --- Caller-supplied submit commands ---\n")
+		sb.WriteString(lines)
+		if !strings.HasSuffix(lines, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("# --- End caller-supplied commands ---\n")
+	}
+
 	// Operator-supplied extras get spliced in just before `queue`
 	// so they can override anything the builder emitted above. The
 	// banner comment makes it obvious in the schedd's spool which
@@ -403,6 +420,49 @@ func IsInteractiveAd(ad interface {
 // with no syntax in it at all. It is also what a person types into an
 // agent prompt, so it stays readable.
 var sessionNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// sessionOwnedCommands are the submit commands that make the job a
+// session rather than an ordinary job. A caller who redefines one gets a
+// job that submits cleanly and then cannot be attached to -- the wrong
+// executable runs, or the batch name no longer carries the session's
+// identity, so nothing can find it by name again.
+var sessionOwnedCommands = map[string]string{
+	"executable":              "the session's executable is the watchdog that keeps the job alive",
+	"transfer_executable":     "the watchdog has to be transferred for the job to run at all",
+	"batch_name":              "the batch name carries the session's name; a session is found by it",
+	"queue":                   "the builder emits the queue statement",
+	"universe":                "a session is a vanilla-universe job",
+	"should_transfer_files":   "file transfer delivers the watchdog",
+	"when_to_transfer_output": "file transfer delivers the watchdog",
+}
+
+// ValidateCallerSubmitLines checks caller-supplied submit commands,
+// rejecting the ones the session itself depends on.
+//
+// This is not a privilege check -- the same caller can submit anything
+// through an ordinary submit -- it keeps a SESSION from being redefined
+// into something the session tools cannot use.
+func ValidateCallerSubmitLines(lines string) error {
+	for i, raw := range strings.Split(lines, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			// `queue` and friends have no '=' and are equally unwelcome.
+			if why, owned := sessionOwnedCommands[strings.ToLower(line)]; owned {
+				return fmt.Errorf("line %d: %q is set by the session builder: %s", i+1, line, why)
+			}
+			return fmt.Errorf("line %d: %q is not a submit command (expected name = value)", i+1, line)
+		}
+		name := strings.ToLower(strings.TrimSpace(line[:eq]))
+		if why, owned := sessionOwnedCommands[name]; owned {
+			return fmt.Errorf("line %d: %q is set by the session builder: %s", i+1, name, why)
+		}
+	}
+	return nil
+}
 
 // ValidateSessionName checks a caller-supplied session name.
 func ValidateSessionName(name string) error {

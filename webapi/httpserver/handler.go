@@ -1340,15 +1340,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		SubmitPolicy:   h.submitPolicy,
 		// An agent's interactive session is the same kind of job as the
 		// SPA's terminal, on the same pool, so it gets the same
-		// operator-supplied submit directives -- and the same answer to
-		// how this server reaches a daemon behind CCB.
-		InteractiveExtraSubmit: h.interactiveExtraSubmit,
-		CCBStreaming:           h.ccbStreaming,
-		SigningKeyPath:         h.signingKeyPath,
-		TrustDomain:            h.trustDomain,
-		UIDDomain:              h.uidDomain,
-		HTTPBaseURL:            h.httpBaseURL,
-		Logger:                 h.logger,
+		// operator-supplied submit directives, the same answer to how
+		// this server reaches a daemon behind CCB, and the same
+		// site-wide Requirements.
+		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
+		InteractiveRequirements: h.interactiveRequirements,
+		CCBStreaming:            h.ccbStreaming,
+		SigningKeyPath:          h.signingKeyPath,
+		TrustDomain:             h.trustDomain,
+		UIDDomain:               h.uidDomain,
+		HTTPBaseURL:             h.httpBaseURL,
+		Logger:                  h.logger,
 		// Behind HTTP every call is on behalf of somebody else, so an
 		// owner-scoped tool that cannot identify its caller must refuse
 		// rather than fall back to whoever this daemon authenticates as.

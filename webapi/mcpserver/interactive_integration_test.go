@@ -5,6 +5,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -112,10 +113,15 @@ func TestMCPInteractiveSessionIntegration(t *testing.T) {
 	}
 
 	// ---- Stage 2: start a session -----------------------------------
+	// requirements and submit_lines go in through the tool the way a
+	// model would send them, so the whole path -- JSON argument, spec,
+	// submit file, schedd -- is exercised rather than just the builder.
 	text, meta, isErr := callToolOverMCP(t, server, ctx, "interactive_session_start", map[string]interface{}{
-		"session":   session,
-		"memory_mb": 256,
-		"disk_mb":   256,
+		"session":      session,
+		"memory_mb":    256,
+		"disk_mb":      256,
+		"requirements": "TARGET.Memory >= 128",
+		"submit_lines": "+InteractiveITest = true\n",
 	})
 	if isErr {
 		t.Fatalf("interactive_session_start failed: %s", text)
@@ -128,6 +134,31 @@ func TestMCPInteractiveSessionIntegration(t *testing.T) {
 		t.Fatal("start returned no job_id")
 	}
 	t.Logf("session %q is job %s", session, jobID)
+
+	// The caller's requirement reached the job, and so did the extra
+	// submit command.
+	{
+		schedd := locateSchedd(t, harness)
+		cluster, proc := 0, 0
+		if _, serr := fmt.Sscanf(jobID, "%d.%d", &cluster, &proc); serr != nil {
+			t.Fatalf("parsing job id %q: %v", jobID, serr)
+		}
+		ads, _, qerr := schedd.QueryWithOptions(ctx,
+			fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc),
+			&htcondor.QueryOptions{Projection: []string{"Requirements", "InteractiveITest"}})
+		if qerr != nil {
+			t.Fatalf("querying the session job: %v", qerr)
+		}
+		if len(ads) == 0 {
+			t.Fatal("the session job is not in the queue")
+		}
+		if req, ok := ads[0].Lookup("Requirements"); !ok || !strings.Contains(req.String(), "Memory") {
+			t.Errorf("the caller's requirements did not reach the job: %v", req)
+		}
+		if v, ok := ads[0].EvaluateAttrBool("InteractiveITest"); !ok || !v {
+			t.Errorf("the caller's submit command did not reach the job ad")
+		}
+	}
 
 	// Always release the slot, even if a later stage fails.
 	defer func() {

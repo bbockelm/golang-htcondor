@@ -261,3 +261,43 @@ func TestIntArgAcceptsStringNumbers(t *testing.T) {
 		}
 	}
 }
+
+// TestStartAdvertisesRequirementsAndSubmitLines: an argument a model
+// cannot see is an argument it will not use. These two exist because a
+// session that cannot say where it runs is not much use on a
+// heterogeneous pool.
+func TestStartAdvertisesRequirementsAndSubmitLines(t *testing.T) {
+	for _, tool := range interactiveTools() {
+		if tool.Name != "interactive_session_start" {
+			continue
+		}
+		body, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]map[string]interface{} `json:"properties"`
+		}
+		if err := json.Unmarshal(body, &schema); err != nil {
+			t.Fatal(err)
+		}
+		for _, arg := range []string{"requirements", "submit_lines"} {
+			prop, ok := schema.Properties[arg]
+			if !ok {
+				t.Errorf("interactive_session_start does not advertise %q", arg)
+				continue
+			}
+			desc, _ := prop["description"].(string)
+			if desc == "" {
+				t.Errorf("%q has no description; a model cannot tell what belongs there", arg)
+			}
+		}
+		// The refusal is part of the contract, so say so where it is read.
+		desc, _ := schema.Properties["submit_lines"]["description"].(string)
+		if !strings.Contains(desc, "refused") {
+			t.Errorf("submit_lines does not mention that session-defining commands are refused: %q", desc)
+		}
+		return
+	}
+	t.Fatal("interactive_session_start is not in the catalog")
+}
