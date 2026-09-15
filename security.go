@@ -668,12 +668,16 @@ func mapAuthMethods(methods string) []security.AuthMethod {
 		case "FS_REMOTE":
 			// Cedar doesn't have FS_REMOTE as separate method, map to FS
 			result = append(result, security.AuthFS)
-		case "IDTOKENS", "TOKEN":
-			// Both config-language spellings collapse to cedar's
-			// AuthToken so cedar serializes as "TOKEN" on the wire.
-			// See doc comment above for the full rationale.
+		case "TOKEN", "TOKENS", "IDTOKEN", "IDTOKENS":
+			// All four config-language spellings collapse to cedar's
+			// AuthToken so cedar serializes as "TOKEN" on the wire. C++
+			// SecMan::sec_char_to_auth_method accepts every one of these
+			// as CAUTH_TOKEN, and real configs use the singular IDTOKEN
+			// too -- dropping it silently strips the only method that
+			// would succeed. See doc comment above for the full rationale.
 			result = append(result, security.AuthToken)
-		case "SCITOKENS":
+		case "SCITOKENS", "SCITOKEN":
+			// C++ accepts both spellings as CAUTH_SCITOKENS.
 			result = append(result, security.AuthSciTokens)
 		case "NTSSPI":
 			// NTSSPI not in cedar's current auth methods (Windows-specific)
