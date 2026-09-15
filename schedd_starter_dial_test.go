@@ -120,7 +120,7 @@ func TestPeekPassesStreamingToTheDial(t *testing.T) {
 		gotOpts = opts
 		return nil, errTestDialIntercepted
 	}
-	_, err := info.peekOutput(context.Background(), PeekRequest{Stdout: true, CCBStreaming: true})
+	_, _, err := info.peekOutput(context.Background(), PeekRequest{Stdout: true, CCBStreaming: true})
 	dialStarterConn = restore
 
 	if !errors.Is(err, errTestDialIntercepted) {
