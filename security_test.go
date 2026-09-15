@@ -335,9 +335,18 @@ func TestMapAuthMethods(t *testing.T) {
 		// HTCondor lists may be whitespace-separated (StringList delimiters are
 		// comma AND space). These are real deployed values that previously
 		// collapsed to one unrecognized token and dropped to NONE.
-		{"FS TOKEN SCITOKENS SSL", 4, true, true},         // SEC_DEFAULT_AUTHENTICATION_METHODS
-		{"FS SSL PASSWORD", 3, true, false},               // TOOL.SEC_CLIENT_AUTHENTICATION_METHODS
-		{"FS SSL PASSWORD,ANONYMOUS", 4, true, false},     // mixed space + appended comma
+		{"FS TOKEN SCITOKENS SSL", 4, true, true},     // SEC_DEFAULT_AUTHENTICATION_METHODS
+		{"FS SSL PASSWORD", 3, true, false},           // TOOL.SEC_CLIENT_AUTHENTICATION_METHODS
+		{"FS SSL PASSWORD,ANONYMOUS", 4, true, false}, // mixed space + appended comma
+		// Every token spelling C++ SecMan::sec_char_to_auth_method
+		// accepts must map to AuthToken; a real config of "FS, IDTOKEN,
+		// SSL" previously dropped the singular IDTOKEN and advertised
+		// only FS,SSL -- stripping the one method that would succeed.
+		{"FS, IDTOKEN, SSL", 3, true, true},
+		{"IDTOKEN", 1, false, true},
+		{"TOKENS", 1, false, true},
+		{"IDTOKENS", 1, false, true},
+		{"SCITOKEN", 1, false, false}, // maps to AuthSciTokens, not AuthToken
 	}
 
 	for _, tt := range tests {
