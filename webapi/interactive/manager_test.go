@@ -898,3 +898,109 @@ func TestRunInJobReportsExitCode(t *testing.T) {
 		t.Errorf("Stderr = %q", result.Stderr)
 	}
 }
+
+// TestConcurrentExecSurvivesASiblingRedial: the commands in one session
+// share one connection, and a command whose dispatch fails detaches the
+// session before redialing. Closing the connection there closes it under
+// every sibling command still running on it -- they fail with a
+// transport error, which is not a case they retry, caused by a recovery
+// they had no part in.
+//
+// The connection may only close once the last command on it is done.
+func TestConcurrentExecSurvivesASiblingRedial(t *testing.T) {
+	schedd := newFakeSchedd()
+	first := &fakeShell{
+		block:         make(chan struct{}),
+		blockCmd:      "long-running",
+		failCmd:       "dispatch-fails",
+		runErr:        errors.New("channel open failed"),
+		notDispatched: true,
+		stdout:        "finished\n",
+	}
+	second := &fakeShell{stdout: "retried\n"}
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			if dialed == 1 {
+				return first, nil
+			}
+			return second, nil
+		},
+	})
+	caller := Caller{Actor: "alice@example.com", Owner: "alice"}
+	job := mustCreate(t, mgr, schedd, caller, "s")
+	schedd.setStatus(job, jobStatusRunning)
+
+	type outcome struct {
+		res *ExecResult
+		err error
+	}
+	longDone := make(chan outcome, 1)
+	go func() {
+		res, err := mgr.Exec(context.Background(), caller, "s", ExecRequest{Command: "long-running"})
+		longDone <- outcome{res, err}
+	}()
+
+	// Wait until the long command is actually on the shell; otherwise
+	// the sibling could detach before there is anything to disturb and
+	// the test would pass without exercising the race.
+	waitFor(t, "the long command to reach the shell", 2*time.Second, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		for _, cmd := range first.commands {
+			if cmd == "long-running" {
+				return true
+			}
+		}
+		return false
+	})
+
+	if _, err := mgr.Exec(context.Background(), caller, "s", ExecRequest{Command: "dispatch-fails"}); err != nil {
+		t.Fatalf("the sibling's retry did not succeed: %v", err)
+	}
+
+	first.mu.Lock()
+	closedEarly := first.closed
+	first.mu.Unlock()
+	if closedEarly {
+		t.Error("the shared connection was closed while a command was still running on it")
+	}
+
+	close(first.block)
+	got := <-longDone
+	if got.err != nil {
+		t.Fatalf("the running command failed because a sibling redialed: %v", got.err)
+	}
+	if got.res.Stdout != "finished\n" {
+		t.Errorf("stdout = %q, want the command's own output", got.res.Stdout)
+	}
+
+	// Once it is done, nothing is left holding the dead connection.
+	waitFor(t, "the detached connection to be closed once its last command finished", 2*time.Second, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		return first.closed
+	})
+}
+
+// A one-shot exec holds no session, but it does hold a connection into
+// a job, and Close means this manager is done reaching into jobs.
+func TestRunInJobRefusedAfterClose(t *testing.T) {
+	schedd := newFakeSchedd()
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			return &fakeShell{}, nil
+		},
+	})
+	mgr.Close()
+
+	if _, err := mgr.RunInJob(context.Background(), 1, 0, ExecRequest{Command: "true"}); err == nil {
+		t.Error("a one-shot ran after shutdown")
+	}
+	if dialed != 0 {
+		t.Errorf("dialed %d times after shutdown; the connection outlives the manager", dialed)
+	}
+}

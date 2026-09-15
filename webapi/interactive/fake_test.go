@@ -204,6 +204,13 @@ type fakeShell struct {
 	// block, when non-nil, is waited on before a non-heartbeat command
 	// returns -- for exercising timeouts.
 	block chan struct{}
+
+	// blockCmd and failCmd narrow the two above to one command, so a
+	// test can have two commands behave differently on one shell --
+	// which is the only way to reach the paths where concurrent execs
+	// in a single session interfere with each other.
+	blockCmd string
+	failCmd  string
 }
 
 func (s *fakeShell) Run(ctx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -223,8 +230,17 @@ func (s *fakeShell) Run(ctx context.Context, cmd string, stdout, stderr io.Write
 		}
 		return 0, nil
 	}
+	s.mu.Lock()
+	blockCmd, failCmd := s.blockCmd, s.failCmd
+	s.mu.Unlock()
+	if failCmd != "" && cmd != failCmd {
+		runErr = nil
+	}
 	if runErr != nil && notDispatched {
 		return -1, fmt.Errorf("%w: %w", errNotDispatched, runErr)
+	}
+	if blockCmd != "" && cmd != blockCmd {
+		block = nil
 	}
 	if block != nil {
 		select {

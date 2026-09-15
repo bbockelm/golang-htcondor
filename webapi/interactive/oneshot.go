@@ -43,6 +43,17 @@ func (m *Manager) RunInJob(ctx context.Context, cluster, proc int, req ExecReque
 		timeout = MaxExecTimeout
 	}
 
+	// A one-shot keeps no session, but it still holds a connection into
+	// a job, and Close means this manager is done reaching into jobs.
+	// Without this a call landing during shutdown dials anyway and its
+	// connection outlives the manager that opened it.
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, fmt.Errorf("interactive manager is shut down")
+	}
+
 	shell, err := m.opts.Dial(ctx, cluster, proc)
 	if err != nil {
 		return nil, fmt.Errorf("connect to job %s: %w", jobIDOf(cluster, proc), err)

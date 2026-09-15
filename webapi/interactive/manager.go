@@ -174,7 +174,15 @@ type session struct {
 	cluster    int
 	proc       int
 
-	shell        Shell
+	shell Shell
+	// deadShells holds connections detached while commands were still
+	// running on them. Commands in one session share a single
+	// connection, so the redial that follows a dispatch failure must
+	// not Close the connection a sibling command is mid-run on: that
+	// sibling would fail with a transport error it does not retry,
+	// caused by a recovery it had no part in. The last command out
+	// closes them (see endCommand).
+	deadShells   []Shell
 	leaseExpires time.Time
 	// leaseDuration is what each call extends the lease BY. Held per
 	// session because a caller may ask for a longer one at create, and
@@ -707,12 +715,14 @@ func (m *Manager) Close() {
 	// fields belong to it, and a heartbeat goroutine may be reading
 	// them right now.
 	type teardown struct {
-		stop  chan struct{}
-		shell Shell
+		stop   chan struct{}
+		shell  Shell
+		orphan []Shell
 	}
 	pending := make([]teardown, 0, len(m.sessions))
 	for _, sess := range m.sessions {
-		pending = append(pending, teardown{stop: sess.stopHeartbeat, shell: sess.shell})
+		pending = append(pending, teardown{stop: sess.stopHeartbeat, shell: sess.shell, orphan: sess.deadShells})
+		sess.deadShells = nil
 		sess.stopHeartbeat = nil
 		sess.shell = nil
 		sess.heartbeatOn = false
@@ -728,6 +738,9 @@ func (m *Manager) Close() {
 		// mid-command, so shutdown does not wait out its timeout.
 		if p.shell != nil {
 			_ = p.shell.Close()
+		}
+		for _, orphan := range p.orphan {
+			_ = orphan.Close()
 		}
 	}
 	m.wg.Wait()

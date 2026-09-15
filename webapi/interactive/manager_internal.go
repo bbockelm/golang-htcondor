@@ -493,6 +493,13 @@ func (m *Manager) detach(sess *session, why string) {
 		sess.stopHeartbeat = nil
 	}
 	sess.heartbeatOn = false
+	// Clearing sess.shell is enough to stop anyone new from picking it
+	// up. Closing it is only safe once the commands already running on
+	// it have finished -- see deadShells.
+	if shell != nil && sess.running > 0 {
+		sess.deadShells = append(sess.deadShells, shell)
+		shell = nil
+	}
 	m.mu.Unlock()
 
 	if shell != nil {
@@ -591,6 +598,18 @@ func (m *Manager) endCommand(owner, name string) {
 		sess.running--
 	}
 	m.extendLeaseLocked(sess)
+	if sess.running > 0 || len(sess.deadShells) == 0 {
+		return
+	}
+	orphans := sess.deadShells
+	sess.deadShells = nil
+	// Close outside the lock: a dead connection can block on it, and
+	// this lock is shared with every other session.
+	go func() {
+		for _, shell := range orphans {
+			_ = shell.Close()
+		}
+	}()
 }
 
 func (m *Manager) clampLease(requested time.Duration) time.Duration {
