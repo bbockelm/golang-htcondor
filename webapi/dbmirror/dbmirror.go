@@ -543,7 +543,9 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.opts.ScheddAddress != nil {
 		scheddHost = hostOfSinful(l.opts.ScheddAddress())
 	}
-	info, err := pickMirror(ads, scheddHost)
+	// A pinned name is the operator overriding discovery; their choice
+	// wins over the host heuristic below.
+	info, err := pickMirror(ads, scheddHost, l.opts.Name != "")
 	if err != nil {
 		return nil, err
 	}
@@ -559,13 +561,20 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 // pickMirror chooses among the advertised mirrors, or returns nil with a
 // reason when it cannot choose safely.
 //
-// One advertiser is the normal case and is taken as-is. Several means the
-// pool runs more than one htcondordb, and picking the wrong one does not
-// return stale data -- it returns SOMEBODY ELSE'S JOBS, from another
-// access point's queue, to a caller who may not be entitled to see them.
-// So the tie is broken on the one thing that actually identifies a
-// mirror's schedd: the host it runs on, because syncing a schedd means
-// tailing its job_queue.log off local disk.
+// Picking the wrong one does not return stale data -- it returns SOMEBODY
+// ELSE'S JOBS, from another access point's queue, to a caller who may not
+// be entitled to see them. So the choice turns on the one thing that
+// actually identifies a mirror's schedd: the host it runs on, because
+// syncing a schedd means tailing its job_queue.log off local disk.
+//
+// That test applies however many are advertising, including one. A lone
+// advertiser used to be taken as-is on the grounds that a single-database
+// pool needs no configuration -- but "the only one advertising" is not
+// the same as "ours", and the two come apart exactly when this access
+// point's own mirror goes quiet. An upgraded deployment whose database
+// had stopped advertising then served a different access point's queue,
+// naming a mirror nobody had configured. A mirror on another host is not
+// this schedd's, whether or not it has company.
 //
 // When the host cannot settle it, this declines. The previous rule --
 // take the freshest job queue -- was a guess, and a bad one in a
@@ -573,18 +582,24 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 // mirror whose syncer had stopped while caught up outranked a live one
 // that was momentarily behind. A busy queue on this access point made
 // its own mirror look worse and handed the read to a stranger's.
-func pickMirror(ads []*classad.ClassAd, scheddHost string) (*Info, error) {
+func pickMirror(ads []*classad.ClassAd, scheddHost string, namePinned bool) (*Info, error) {
 	var usable []*Info
 	for _, ad := range ads {
 		if info := ParseAd(ad); info.Address != "" {
 			usable = append(usable, info)
 		}
 	}
-	switch len(usable) {
-	case 0:
+	if len(usable) == 0 {
 		return nil, fmt.Errorf("the htcondordb ad has no MyAddress; cannot connect")
-	case 1:
-		return usable[0], nil
+	}
+
+	// The operator named this mirror, or there is no schedd address to
+	// check one against. Either way the host cannot decide anything, so a
+	// lone advertiser is all there is to go on.
+	if namePinned || scheddHost == "" {
+		if len(usable) == 1 {
+			return usable[0], nil
+		}
 	}
 
 	var matched []*Info
@@ -597,8 +612,8 @@ func pickMirror(ads []*classad.ClassAd, scheddHost string) (*Info, error) {
 	case 1:
 		return matched[0], nil
 	case 0:
-		return nil, fmt.Errorf("%d htcondordb databases are advertising and none runs on this schedd's host (%q); "+
-			"set HTTP_API_DBMIRROR_NAME to say which one mirrors this access point, because the others hold a different queue",
+		return nil, fmt.Errorf("%d htcondordb database(s) are advertising and none runs on this schedd's host (%q); "+
+			"set HTTP_API_DBMIRROR_NAME (or _ADDRESS) to say which one mirrors this access point, because the others hold a different queue",
 			len(usable), scheddHost)
 	default:
 		return nil, fmt.Errorf("%d htcondordb databases are advertising on this schedd's host (%q); "+
