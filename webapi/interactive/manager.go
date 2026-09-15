@@ -72,6 +72,20 @@ type Options struct {
 	SubmitPolicy submitpolicy.Policy
 	ExtraSubmit  string
 
+	// Requirements is the operator's interactive-job Requirements
+	// expression (HTTP_API_INTERACTIVE_REQUIREMENTS), ANDed into every
+	// session's Requirements.
+	//
+	// The REST terminal has applied it since it was added. Sessions did
+	// not, because this manager built the submit file itself and nothing
+	// carried the value across -- so a session could land on exactly the
+	// machines an operator had excluded, which is how it was noticed.
+	// That is the second setting to go missing this way (CCBStreaming
+	// was the first); once both are in, they are worth collapsing into
+	// one operator-policy struct so the next knob cannot be forgotten by
+	// one surface.
+	Requirements string
+
 	// Watchdog is the timing baked into the job. Defaults to
 	// DefaultSessionWatchdog.
 	Watchdog WatchdogTiming
@@ -212,6 +226,30 @@ type CreateSpec struct {
 	GpusMinimumRuntime    string
 	CudaVersion           string
 	RequireGpus           string
+
+	// Requirements is a caller-supplied ClassAd expression ANDed into the
+	// job's Requirements, for the case a session needs a particular kind
+	// of machine -- a site, an OS, a filesystem, a GPU model the
+	// gpus_minimum_* knobs cannot express.
+	//
+	// It is validated as an expression rather than pasted in: the
+	// operator's own Requirements and submit policy go into the same
+	// file, and a value that does not parse would take them down with
+	// it. Refusing early also gives the caller a message naming their
+	// expression instead of a schedd transaction failure.
+	Requirements string
+
+	// SubmitLines are extra submit-file commands, one per line, for what
+	// the fields above do not cover.
+	//
+	// The caller can submit anything they like through submit_job, so
+	// this is not a privilege boundary -- it is a contract boundary. The
+	// builder owns a handful of commands that make the job a SESSION
+	// (its executable is the watchdog, its batch name carries the
+	// session's identity, its transfer settings deliver the script), and
+	// a line that redefines one of those produces a job that is accepted
+	// and then cannot be attached to. Those are refused by name.
+	SubmitLines string
 
 	Lease time.Duration
 }
@@ -371,6 +409,8 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		GpusMinimumRuntime:    spec.GpusMinimumRuntime,
 		CudaVersion:           spec.CudaVersion,
 		RequireGpus:           spec.RequireGpus,
+		Requirements:          combineRequirements(m.opts.Requirements, spec.Requirements),
+		CallerSubmitLines:     spec.SubmitLines,
 		Watchdog:              watchdog,
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
 	})

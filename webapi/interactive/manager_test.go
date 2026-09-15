@@ -736,3 +736,99 @@ func TestWatchdogWindowFollowsTheLease(t *testing.T) {
 		t.Error("a 10s lease produced a 10s watchdog window; one slow heartbeat would evict it")
 	}
 }
+
+// TestOperatorRequirementsReachEverySession is the bug this pins: the
+// REST terminal applied HTTP_API_INTERACTIVE_REQUIREMENTS and sessions
+// did not, because this manager builds its own submit file and nothing
+// carried the value across. A session then landed on exactly the
+// machines the operator had excluded.
+func TestOperatorRequirementsReachEverySession(t *testing.T) {
+	const operator = `GLIDEIN_Site =!= "BadSite"`
+
+	t.Run("with no caller expression", func(t *testing.T) {
+		schedd := newFakeSchedd()
+		mgr, _ := testManager(t, schedd, Options{Requirements: operator})
+		mustCreate(t, mgr, schedd, alice, "plain")
+		if !strings.Contains(schedd.submitted[0], "requirements = ("+operator+")") {
+			t.Errorf("the operator's requirements are not in the submit file:\n%s", schedd.submitted[0])
+		}
+	})
+
+	t.Run("anded with the caller's", func(t *testing.T) {
+		const caller = `TARGET.HasCVMFS == true`
+		schedd := newFakeSchedd()
+		mgr, _ := testManager(t, schedd, Options{Requirements: operator})
+		if _, err := mgr.Create(context.Background(), alice, CreateSpec{
+			Name:         "narrowed",
+			Requirements: caller,
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got := schedd.submitted[0]
+		if !strings.Contains(got, operator) || !strings.Contains(got, caller) {
+			t.Errorf("both expressions should apply:\n%s", got)
+		}
+		// The caller must not be able to widen past the operator: an OR
+		// would let them do exactly that.
+		if strings.Contains(got, "||") {
+			t.Errorf("the two expressions are not ANDed:\n%s", got)
+		}
+	})
+}
+
+// TestCallerRequirementsMustParse: the operator's expression and the
+// submit policy land in the same file, so a caller expression that does
+// not parse would take them down with it.
+func TestCallerRequirementsMustParse(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{})
+	_, err := mgr.Create(context.Background(), alice, CreateSpec{
+		Name:         "bad",
+		Requirements: "((",
+	})
+	if err == nil {
+		t.Fatal("an unparseable requirements expression was accepted")
+	}
+	if len(schedd.submitted) != 0 {
+		t.Error("a job was submitted despite the bad expression")
+	}
+}
+
+// TestCallerSubmitLinesCannotRedefineTheSession: a caller may add submit
+// commands, but not the handful that make the job a session -- those
+// produce a job that submits cleanly and then cannot be attached to.
+func TestCallerSubmitLinesCannotRedefineTheSession(t *testing.T) {
+	for _, bad := range []string{
+		"executable = /bin/bash",
+		"batch_name = something-else",
+		"universe = docker",
+		"transfer_executable = false",
+		"queue 5",
+	} {
+		schedd := newFakeSchedd()
+		mgr, _ := testManager(t, schedd, Options{})
+		_, err := mgr.Create(context.Background(), alice, CreateSpec{
+			Name:        "redefine",
+			SubmitLines: bad,
+		})
+		if err == nil {
+			t.Errorf("%q was accepted; the session would submit and then be unreachable", bad)
+		}
+		if len(schedd.submitted) != 0 {
+			t.Errorf("%q still submitted a job", bad)
+		}
+	}
+
+	// What a caller actually wants does go through.
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{})
+	if _, err := mgr.Create(context.Background(), alice, CreateSpec{
+		Name:        "ok",
+		SubmitLines: "+WantGPULab = true\ncontainer_image = docker://rockylinux:9\n",
+	}); err != nil {
+		t.Fatalf("ordinary submit commands were refused: %v", err)
+	}
+	if !strings.Contains(schedd.submitted[0], "container_image = docker://rockylinux:9") {
+		t.Errorf("the caller's submit commands are not in the file:\n%s", schedd.submitted[0])
+	}
+}

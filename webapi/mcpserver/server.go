@@ -175,6 +175,11 @@ type Config struct {
 	// the REST terminal uses (HandlerConfig.CCBStreaming); an API server
 	// that cannot accept inbound connections needs it for both.
 	CCBStreaming bool
+	// InteractiveRequirements is the operator's interactive-job
+	// Requirements expression (HTTP_API_INTERACTIVE_REQUIREMENTS). The
+	// REST terminal applies it; sessions are the same kind of job on the
+	// same pool and must not be able to land where it excludes.
+	InteractiveRequirements string
 
 	// InteractiveExtraSubmit is the operator's interactive-specific
 	// submit-file block (HTTP_API_INTERACTIVE_EXTRA_SUBMIT), applied to
@@ -296,6 +301,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SubmitPolicy: cfg.SubmitPolicy,
 		ExtraSubmit:  cfg.InteractiveExtraSubmit,
 		CCBStreaming: cfg.CCBStreaming,
+		Requirements: cfg.InteractiveRequirements,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interactive session manager: %w", err)

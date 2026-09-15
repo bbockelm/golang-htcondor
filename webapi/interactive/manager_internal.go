@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -199,6 +201,23 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// combineRequirements ANDs the operator's Requirements with the
+// caller's. The operator's is not optional: a caller narrowing where
+// their session runs must not be able to widen it past what the site
+// allows, so both apply and neither replaces the other.
+func combineRequirements(operator, caller string) string {
+	operator = strings.TrimSpace(operator)
+	caller = strings.TrimSpace(caller)
+	switch {
+	case operator == "":
+		return caller
+	case caller == "":
+		return operator
+	default:
+		return fmt.Sprintf("(%s) && (%s)", operator, caller)
+	}
 }
 
 func countNamed(infos []Info, name string) int {
@@ -645,6 +664,20 @@ func validateSpec(spec CreateSpec) error {
 	if spec.Gpus < 0 || spec.Gpus > 16 {
 		return fmt.Errorf("gpus must be between 0 and 16, got %d", spec.Gpus)
 	}
+	// A caller's Requirements must parse: the operator's own Requirements
+	// and submit policy land in the same file, and an expression that
+	// does not parse takes them down with it. Parsing here also names
+	// the offending expression instead of leaving a schedd transaction
+	// failure to interpret.
+	if req := strings.TrimSpace(spec.Requirements); req != "" {
+		if _, err := classad.ParseExpr(req); err != nil {
+			return fmt.Errorf("requirements %q is not a valid ClassAd expression: %w", req, err)
+		}
+	}
+	if err := ValidateCallerSubmitLines(spec.SubmitLines); err != nil {
+		return fmt.Errorf("submit_lines: %w", err)
+	}
+
 	// The GPU strings are concatenated raw into the submit file, so a
 	// value containing a newline would inject arbitrary submit
 	// directives. A caller could submit whatever they liked through
