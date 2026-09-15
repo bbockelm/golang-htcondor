@@ -138,15 +138,54 @@ func (s *Schedd) PeekJobOutput(ctx context.Context, cluster, proc int, req PeekR
 	if err != nil {
 		return nil, fmt.Errorf("get_job_connect_info: %w", err)
 	}
-	return info.peekOutput(ctx, req)
+	result, unread, err := info.peekOutput(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// An empty file frame ends the connection mid-response (see
+	// errEmptyFileFrame), so any stream the starter had not sent yet went
+	// unread. That is not a rare case: in follow mode a stream that has
+	// not grown since the last call sends exactly that frame, so a job
+	// writing only to stderr -- or any job whose stdout has gone quiet --
+	// would report "nothing new" on stderr forever, which is the one
+	// answer worse than an error here.
+	//
+	// The connection is dead but the starter contact is still good, so
+	// ask again for just the stream we missed. A single-stream retry has
+	// nothing queued behind it, so this does not chain.
+	for _, kind := range unread {
+		sub := req
+		sub.Stdout = kind == peekKindStdout
+		sub.Stderr = kind == peekKindStderr
+		more, _, err := info.peekOutput(ctx, sub)
+		if err != nil {
+			// Leave the stream absent rather than present-and-empty:
+			// a nil stream says "not read", a zero-byte one claims
+			// the file did not grow.
+			if peekDebug {
+				fmt.Fprintf(os.Stderr, "peek: retry for %v failed: %v\n", kind, err)
+			}
+			continue
+		}
+		if kind == peekKindStdout {
+			result.Stdout = more.Stdout
+		} else {
+			result.Stderr = more.Stderr
+		}
+	}
+	return result, nil
 }
 
 // peekOutput is the per-(starter,session) half of the call. Held as
 // a JobConnectInfo method for symmetry with startSSHDOnStarter.
-func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*PeekResult, error) {
+// peekOutput runs one STARTER_PEEK round trip. It also reports which
+// requested streams it never got to read, because an empty file frame
+// forces the connection closed before the later frames arrive.
+func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*PeekResult, []peekFileKind, error) {
 	htcondorClient, err := info.dialStarter(ctx, starterPeekCommand, req.CCBStreaming)
 	if err != nil {
-		return nil, fmt.Errorf("resume starter session at %s: %w", info.StarterAddr, err)
+		return nil, nil, fmt.Errorf("resume starter session at %s: %w", info.StarterAddr, err)
 	}
 	defer func() { _ = htcondorClient.Close() }()
 
@@ -172,17 +211,17 @@ func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*P
 
 	reqMsg := message.NewMessageForStream(stream)
 	if err := reqMsg.PutClassAd(ctx, reqAd); err != nil {
-		return nil, fmt.Errorf("send peek request ad: %w", err)
+		return nil, nil, fmt.Errorf("send peek request ad: %w", err)
 	}
 	if err := reqMsg.FinishMessage(ctx); err != nil {
-		return nil, fmt.Errorf("finish peek request: %w", err)
+		return nil, nil, fmt.Errorf("finish peek request: %w", err)
 	}
 
 	// --- Read the response ad ---------------------------------------
 	respMsg := message.NewMessageFromStream(stream)
 	respAd, err := respMsg.GetClassAd(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read peek response ad: %w", err)
+		return nil, nil, fmt.Errorf("read peek response ad: %w", err)
 	}
 	success, _ := respAd.EvaluateAttrBool("Result")
 	if !success {
@@ -190,7 +229,7 @@ func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*P
 		if errStr == "" {
 			errStr = "starter rejected peek request"
 		}
-		return nil, fmt.Errorf("starter peek failed: %s", errStr)
+		return nil, nil, fmt.Errorf("starter peek failed: %s", errStr)
 	}
 
 	// TransferFiles entries are *either* string filenames or
@@ -198,85 +237,17 @@ func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*P
 	// list of integer absolute file offsets.
 	files, err := lookupListValues(respAd, "TransferFiles")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	offsets, err := lookupListValues(respAd, "TransferOffsets")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	// Compute the *next* offset for each stream as
-	// (where-this-read-started) + (bytes-we-received). Where the
-	// read started depends on the request:
-	//
-	//   - If the caller passed a non-negative offset (follow
-	//     mode), the read started exactly there. We trust our own
-	//     value rather than the response's TransferOffsets[i],
-	//     because the C++ starter has an asymmetric quirk: for
-	//     stdout the response's offset is hardcoded to 0 in
-	//     follow mode (starter.cpp pushes a literal 0 for
-	//     stdout's slot but stderr_off for stderr), so trusting
-	//     the response would silently rewind stdout to byte
-	//     `bytes_received` on every follow call.
-	//
-	//   - If the caller passed -1 (tail), the starter chose the
-	//     start offset for us; it overrides the response slot
-	//     with the actual start position in that path, so we use
-	//     the response value.
-	result := &PeekResult{}
-	streamUnusable := false
-	for i, fileVal := range files {
-		kind := decodePeekFileKind(fileVal)
-		respOffset := int64(0)
-		if i < len(offsets) && offsets[i].IsInteger() {
-			if v, err := offsets[i].IntValue(); err == nil {
-				respOffset = v
-			}
-		}
-		var buf []byte
-		var err error
-		if !streamUnusable {
-			buf, err = readPeekFile(ctx, stream)
-			if errors.Is(err, errEmptyFileFrame) {
-				// Empty payload is a valid result; we just can't
-				// keep reading further frames on this connection
-				// (see errEmptyFileFrame for why). Treat as zero
-				// bytes for THIS stream, then mark subsequent
-				// streams as "couldn't fetch on this round".
-				buf = nil
-				err = nil
-				streamUnusable = true
-			}
-			if err != nil {
-				return nil, fmt.Errorf("read peek file %d: %w", i, err)
-			}
-		}
-		// streamUnusable: emit a zero-byte PeekedStream with the
-		// caller's offset so follow-mode polling stays consistent —
-		// the file didn't grow as far as we can tell.
-		nextOffset := func(reqOffset int64) int64 {
-			if streamUnusable {
-				if reqOffset < 0 {
-					return 0
-				}
-				return reqOffset
-			}
-			if reqOffset < 0 {
-				return respOffset + int64(len(buf))
-			}
-			return reqOffset + int64(len(buf))
-		}
-		switch kind {
-		case peekKindStdout:
-			result.Stdout = &PeekedStream{Bytes: buf, Offset: nextOffset(req.StdoutOffset)}
-		case peekKindStderr:
-			result.Stderr = &PeekedStream{Bytes: buf, Offset: nextOffset(req.StderrOffset)}
-		default:
-			// Named files: ignored for the stdout/stderr-only API
-			// surface. Drop the bytes on the floor; the wire is
-			// still positioned correctly for the next iteration.
-		}
+	walk, err := walkPeekFiles(ctx, stream, files, offsets, req)
+	if err != nil {
+		return nil, nil, err
 	}
+	result, unread, streamUnusable := walk.result, walk.unread, walk.connectionDead
 
 	// Final remote_file_count + EOM. We don't strictly need the
 	// number — our walk above is authoritative — and we skip it
@@ -289,7 +260,21 @@ func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*P
 		_, _ = tailMsg.GetInt32(ctx)
 	}
 
-	return result, nil
+	return result, unread, nil
+}
+
+// peekWalk separates "this stream reported no new bytes" from "we never
+// got to ask", and both from "the connection is spent". An empty frame
+// on the last file leaves nothing unread but still kills the socket.
+type peekWalk struct {
+	result *PeekResult
+	// unread lists requested streams whose frames were still queued
+	// when the connection died. Their PeekedStream is absent, not
+	// empty, so a caller cannot mistake them for an idle file.
+	unread []peekFileKind
+	// connectionDead reports that an empty frame was seen, so the
+	// trailing count must not be read.
+	connectionDead bool
 }
 
 type peekFileKind int
@@ -420,4 +405,93 @@ func readPeekFile(ctx context.Context, stream cedarStream) ([]byte, error) {
 // touch. Pulled out as an interface so tests can fake the wire.
 type cedarStream interface {
 	message.StreamInterface
+}
+
+// walkPeekFiles reads the file frames of one peek response in the order
+// the starter listed them, and reports the requested streams it could
+// not reach.
+//
+// It is a separate function so the empty-frame case can be tested
+// without a starter: an empty stdout frame kills the connection before
+// stderr's frame arrives, and reporting that stream as zero bytes
+// rather than unread is indistinguishable, to a caller, from a file
+// that did not grow.
+func walkPeekFiles(ctx context.Context, stream cedarStream, files, offsets []classad.Value, req PeekRequest) (peekWalk, error) {
+
+	// Compute the *next* offset for each stream as
+	// (where-this-read-started) + (bytes-we-received). Where the
+	// read started depends on the request:
+	//
+	//   - If the caller passed a non-negative offset (follow
+	//     mode), the read started exactly there. We trust our own
+	//     value rather than the response's TransferOffsets[i],
+	//     because the C++ starter has an asymmetric quirk: for
+	//     stdout the response's offset is hardcoded to 0 in
+	//     follow mode (starter.cpp pushes a literal 0 for
+	//     stdout's slot but stderr_off for stderr), so trusting
+	//     the response would silently rewind stdout to byte
+	//     `bytes_received` on every follow call.
+	//
+	//   - If the caller passed -1 (tail), the starter chose the
+	//     start offset for us; it overrides the response slot
+	//     with the actual start position in that path, so we use
+	//     the response value.
+	result := &PeekResult{}
+	streamUnusable := false
+	var unread []peekFileKind
+	for i, fileVal := range files {
+		kind := decodePeekFileKind(fileVal)
+		respOffset := int64(0)
+		if i < len(offsets) && offsets[i].IsInteger() {
+			if v, err := offsets[i].IntValue(); err == nil {
+				respOffset = v
+			}
+		}
+		var buf []byte
+		var err error
+		if streamUnusable {
+			// The connection died on an earlier frame, so this stream's
+			// bytes are still sitting at the starter. Say so instead of
+			// reporting it empty.
+			if (kind == peekKindStdout && req.Stdout) || (kind == peekKindStderr && req.Stderr) {
+				unread = append(unread, kind)
+			}
+		} else {
+			buf, err = readPeekFile(ctx, stream)
+			if errors.Is(err, errEmptyFileFrame) {
+				// Empty payload is a valid result; we just can't
+				// keep reading further frames on this connection
+				// (see errEmptyFileFrame for why). Treat as zero
+				// bytes for THIS stream, then mark subsequent
+				// streams as "couldn't fetch on this round".
+				buf = nil
+				err = nil
+				streamUnusable = true
+			}
+			if err != nil {
+				return peekWalk{}, fmt.Errorf("read peek file %d: %w", i, err)
+			}
+		}
+		if len(unread) > 0 && unread[len(unread)-1] == kind {
+			continue
+		}
+		nextOffset := func(reqOffset int64) int64 {
+			if reqOffset < 0 {
+				return respOffset + int64(len(buf))
+			}
+			return reqOffset + int64(len(buf))
+		}
+		switch kind {
+		case peekKindStdout:
+			result.Stdout = &PeekedStream{Bytes: buf, Offset: nextOffset(req.StdoutOffset)}
+		case peekKindStderr:
+			result.Stderr = &PeekedStream{Bytes: buf, Offset: nextOffset(req.StderrOffset)}
+		default:
+			// Named files: ignored for the stdout/stderr-only API
+			// surface. Drop the bytes on the floor; the wire is
+			// still positioned correctly for the next iteration.
+		}
+	}
+
+	return peekWalk{result: result, unread: unread, connectionDead: streamUnusable}, nil
 }

@@ -265,3 +265,51 @@ func writeBody(t *testing.T, s *fakeStream, data []byte) {
 		t.Fatalf("FinishMessage(body): %v", err)
 	}
 }
+
+// TestWalkPeekFilesReportsUnreadStreams pins the one case where the
+// empty-frame quirk stops being a protocol footnote and starts being a
+// wrong answer.
+//
+// The starter sends stdout first. An empty stdout frame -- which is what
+// a stream that has not grown since the last poll looks like in follow
+// mode -- closes the connection before stderr's frame arrives. Reporting
+// stderr as zero bytes there is indistinguishable from "the file did not
+// grow", so a job writing only to stderr looks silent forever, which is
+// precisely the job someone is tailing to find out why it is stuck.
+func TestWalkPeekFilesReportsUnreadStreams(t *testing.T) {
+	ctx := context.Background()
+	stderrText := []byte("Traceback (most recent call last):\n")
+
+	s := newFakeStream(t)
+	writeHdr(t, s, 0, 4096) // stdout: nothing new
+	writeHdr(t, s, int64(len(stderrText)), 256*1024)
+	writeBody(t, s, stderrText)
+
+	files := []classad.Value{classad.NewIntValue(0), classad.NewIntValue(1)}
+	offsets := []classad.Value{classad.NewIntValue(100), classad.NewIntValue(200)}
+
+	walk, err := walkPeekFiles(ctx, s, files, offsets, PeekRequest{
+		Stdout: true, StdoutOffset: 100,
+		Stderr: true, StderrOffset: 200,
+	})
+	if err != nil {
+		t.Fatalf("walkPeekFiles: %v", err)
+	}
+
+	if walk.result.Stdout == nil || len(walk.result.Stdout.Bytes) != 0 {
+		t.Errorf("stdout = %+v, want present and empty", walk.result.Stdout)
+	}
+	if walk.result.Stdout != nil && walk.result.Stdout.Offset != 100 {
+		t.Errorf("an idle stdout moved its offset to %d", walk.result.Stdout.Offset)
+	}
+	if !walk.connectionDead {
+		t.Error("the empty frame did not mark the connection spent")
+	}
+	if walk.result.Stderr != nil {
+		t.Errorf("stderr was reported as %q rather than left unread; a caller "+
+			"cannot tell that from an idle file", walk.result.Stderr.Bytes)
+	}
+	if len(walk.unread) != 1 || walk.unread[0] != peekKindStderr {
+		t.Fatalf("unread = %v, want [stderr] so the caller retries", walk.unread)
+	}
+}
