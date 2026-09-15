@@ -560,6 +560,12 @@ func getCommandForAdType(adType string) commands.CommandType {
 		return commands.QUERY_COLLECTOR_ADS
 	case "NegotiatorAd", "Negotiator":
 		return commands.QUERY_NEGOTIATOR_ADS
+	case "AccountingAd", "Accounting":
+		return commands.QUERY_ACCOUNTING_ADS
+	case "StorageAd", "Storage":
+		return commands.QUERY_STORAGE_ADS
+	case "Any":
+		return commands.QUERY_ANY_ADS
 	default:
 		// Unknown/custom ad type - use QUERY_GENERIC_ADS
 		return commands.QUERY_GENERIC_ADS
@@ -619,6 +625,12 @@ func getTargetTypeForAdType(adType string) string {
 		return "Negotiator"
 	case "CollectorAd", "Collector":
 		return "Collector"
+	case "AccountingAd", "Accounting":
+		return "Accounting"
+	case "StorageAd", "Storage":
+		return "Storage"
+	case "Any":
+		return "Any"
 	default:
 		return adType
 	}
@@ -1136,10 +1148,15 @@ const (
 	LicenseAdType    = "LicenseAd"
 	CollectorAdType  = "CollectorAd"
 	NegotiatorAdType = "NegotiatorAd"
+	AccountingAdType = "AccountingAd"
+	StorageAdType    = "StorageAd"
 	// PlacementdAdType is the placementd's ad. Unlike the types above it is
 	// the MyType the daemon publishes verbatim, because the collector stores
 	// placementd ads as generic ads keyed by that name.
 	PlacementdAdType = "PlacementD"
+	// AnyAdType is a catch-all: it queries the collector for every ad type
+	// (QUERY_ANY_ADS) rather than one specific kind.
+	AnyAdType = "Any"
 )
 
 // adType returns the collector-query ad type corresponding to the daemon type

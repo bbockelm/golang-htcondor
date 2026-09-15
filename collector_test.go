@@ -127,6 +127,31 @@ func TestGetCommandForAdType(t *testing.T) {
 			wantCommand: commands.QUERY_COLLECTOR_ADS,
 		},
 		{
+			name:        "AccountingAd",
+			adType:      "AccountingAd",
+			wantCommand: commands.QUERY_ACCOUNTING_ADS,
+		},
+		{
+			name:        "Accounting",
+			adType:      "Accounting",
+			wantCommand: commands.QUERY_ACCOUNTING_ADS,
+		},
+		{
+			name:        "StorageAd",
+			adType:      "StorageAd",
+			wantCommand: commands.QUERY_STORAGE_ADS,
+		},
+		{
+			name:        "Storage",
+			adType:      "Storage",
+			wantCommand: commands.QUERY_STORAGE_ADS,
+		},
+		{
+			name:        "Any",
+			adType:      "Any",
+			wantCommand: commands.QUERY_ANY_ADS,
+		},
+		{
 			name:        "Custom ad type",
 			adType:      "MyCustomType",
 			wantCommand: commands.QUERY_GENERIC_ADS,
@@ -168,6 +193,11 @@ func TestAdTypeCommandTargetConsistency(t *testing.T) {
 		{"Submitter", "Submitter"},
 		{"Collector", "Collector"},
 		{"Negotiator", "Negotiator"},
+		{"AccountingAd", "Accounting"},
+		{"Accounting", "Accounting"},
+		{"StorageAd", "Storage"},
+		{"Storage", "Storage"},
+		{"Any", "Any"},
 	}
 	for _, tc := range cases {
 		if got := getTargetTypeForAdType(tc.adType); got != tc.wantTarget {
