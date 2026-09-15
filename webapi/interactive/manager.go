@@ -218,7 +218,12 @@ type Info struct {
 	HoldReasonCode int       `json:"hold_reason_code,omitempty"`
 	SubmittedAt    time.Time `json:"submitted_at,omitempty"`
 	LeaseExpires   time.Time `json:"lease_expires,omitempty"`
-	Attached       bool      `json:"attached"`
+	// LeaseDuration is what the session was created with, read back off
+	// the job ad. Zero when the ad does not carry it -- a session
+	// submitted before SessionLeaseAttr existed -- which falls back to
+	// the default the way it always did.
+	LeaseDuration time.Duration `json:"-"`
+	Attached      bool          `json:"attached"`
 }
 
 // CreateSpec describes a session to start.
@@ -333,11 +338,14 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.Dial == nil {
 		opts.Dial = sshDialer(opts.Schedd, opts.CCBStreaming)
 	}
-	return &Manager{
+	m := &Manager{
 		opts:     opts,
 		sessions: map[string]*session{},
 		done:     make(chan struct{}),
-	}, nil
+	}
+	m.wg.Add(1)
+	go m.reapLoop()
+	return m, nil
 }
 
 // ScheddForTest reports the schedd the manager would use right now. It
@@ -424,6 +432,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		CudaVersion:           spec.CudaVersion,
 		RequireGpus:           spec.RequireGpus,
 		Requirements:          combineRequirements(m.opts.Requirements, spec.Requirements),
+		LeaseSeconds:          int(lease.Seconds()),
 		CallerSubmitLines:     spec.SubmitLines,
 		Watchdog:              watchdog,
 		ExtraSubmitLines:      m.opts.ExtraSubmit,

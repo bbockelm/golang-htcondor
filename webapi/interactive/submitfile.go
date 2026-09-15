@@ -49,6 +49,17 @@ const BatchPrefix = "htcondor-api-interactive-terminal-"
 // names in the queue without being told where to look.
 const SessionBatchPrefix = "htcondor-api-interactive-session-"
 
+// SessionLeaseAttr records a session's lease duration, in seconds, on
+// the job ad.
+//
+// The queue is the session registry -- a name resolves after this
+// process is gone -- but the lease itself lived only in memory, so a
+// session re-adopted after a restart silently fell back to the
+// default. A caller who asked for eight hours got thirty minutes and
+// found out when the slot was reclaimed. Anything the lease depends on
+// has to live where the session does.
+const SessionLeaseAttr = "HTCondorAPISessionLeaseSeconds"
+
 // BatchNameForSession is the JobBatchName carrying a session's name.
 func BatchNameForSession(name string) string { return SessionBatchPrefix + name }
 
@@ -169,6 +180,10 @@ type SubmitArgs struct {
 	// the job's Requirements (httpserver's Handler.interactiveRequirements).
 	Requirements string
 
+	// LeaseSeconds, when positive, is recorded on the job ad so the
+	// session's lease survives this process. See SessionLeaseAttr.
+	LeaseSeconds int
+
 	// Watchdog is the timing baked into the generated script. The zero
 	// value means DefaultTerminalWatchdog.
 	Watchdog WatchdogTiming
@@ -281,6 +296,17 @@ func BuildSubmitFile(a SubmitArgs) string {
 	// lives (SessionBatchPrefix + name), which is what makes a name
 	// resolvable after this process is gone.
 	fmt.Fprintf(&sb, "batch_name = %s\n\n", a.BatchName)
+
+	// The lease belongs on the job because the job outlives this
+	// process. A session adopted after a restart otherwise fell back to
+	// the default lease: a caller who asked for eight hours got thirty
+	// minutes, and only found out when the session was reclaimed.
+	//
+	// This is also the line that could not have been written before
+	// the submit parser stopped dropping `+Attr` entirely.
+	if a.LeaseSeconds > 0 {
+		fmt.Fprintf(&sb, "+%s = %d\n\n", SessionLeaseAttr, a.LeaseSeconds)
+	}
 
 	fmt.Fprintf(&sb, "log    = interactive.log\n")
 	fmt.Fprintf(&sb, "output = interactive.out\n")
