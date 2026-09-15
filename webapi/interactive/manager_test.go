@@ -832,3 +832,69 @@ func TestCallerSubmitLinesCannotRedefineTheSession(t *testing.T) {
 		t.Errorf("the caller's submit commands are not in the file:\n%s", schedd.submitted[0])
 	}
 }
+
+// TestRunInJobLeavesNothingBehind is the design claim for the one-shot
+// path: a job this manager does not own gets no lease, no registry
+// entry, no heartbeat goroutine and no retained connection. Anything
+// left behind would be machinery acting on a job whose lifetime belongs
+// to somebody else.
+func TestRunInJobLeavesNothingBehind(t *testing.T) {
+	schedd := newFakeSchedd()
+	shell := &fakeShell{stdout: "from-the-job\n", exitCode: 0}
+	dialed := 0
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			dialed++
+			return shell, nil
+		},
+	})
+
+	result, err := mgr.RunInJob(context.Background(), 42, 0, ExecRequest{Command: "echo from-the-job"})
+	if err != nil {
+		t.Fatalf("RunInJob: %v", err)
+	}
+	if result.Stdout != "from-the-job\n" {
+		t.Errorf("stdout = %q", result.Stdout)
+	}
+	if result.JobID != "42.0" {
+		t.Errorf("JobID = %q, want 42.0", result.JobID)
+	}
+	if !shell.closed {
+		t.Error("the connection was left open; nothing will ever close it")
+	}
+
+	mgr.mu.Lock()
+	sessions := len(mgr.sessions)
+	mgr.mu.Unlock()
+	if sessions != 0 {
+		t.Errorf("the job was registered as a session (%d entries); it would then be leased and reclaimed", sessions)
+	}
+
+	// A second call dials again rather than reusing a closed client.
+	if _, err := mgr.RunInJob(context.Background(), 42, 0, ExecRequest{Command: "true"}); err != nil {
+		t.Fatalf("second RunInJob: %v", err)
+	}
+	if dialed != 2 {
+		t.Errorf("dialed %d times, want one per call", dialed)
+	}
+}
+
+// A non-zero exit is the command's answer, not a failure of the tool.
+func TestRunInJobReportsExitCode(t *testing.T) {
+	schedd := newFakeSchedd()
+	shell := &fakeShell{exitCode: 7, stderr: "boom\n"}
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) { return shell, nil },
+	})
+
+	result, err := mgr.RunInJob(context.Background(), 1, 0, ExecRequest{Command: "exit 7"})
+	if err != nil {
+		t.Fatalf("RunInJob: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Errorf("ExitCode = %d, want 7", result.ExitCode)
+	}
+	if result.Stderr != "boom\n" {
+		t.Errorf("Stderr = %q", result.Stderr)
+	}
+}
