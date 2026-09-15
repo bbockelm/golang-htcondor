@@ -37,6 +37,8 @@ import (
 	"fmt"
 	"os"
 
+	"time"
+
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/message"
 )
@@ -108,6 +110,12 @@ type PeekResult struct {
 	Stderr *PeekedStream
 }
 
+// peekConnectInfoMaxWait bounds the wait for the starter's address to
+// show up. Shorter than the shell path's 30s: a tail is a poll, and a
+// caller polling every few seconds would rather be told "not yet" than
+// have one call block for half a minute.
+const peekConnectInfoMaxWait = 10 * time.Second
+
 // PeekJobOutput is the public entry point. It looks up the running
 // job's starter, resumes the schedd-minted session, runs one
 // STARTER_PEEK round, and returns whichever streams were requested.
@@ -118,7 +126,15 @@ func (s *Schedd) PeekJobOutput(ctx context.Context, cluster, proc int, req PeekR
 	if req.MaxBytes <= 0 {
 		req.MaxBytes = DefaultPeekMaxBytes
 	}
-	info, err := s.GetJobConnectInfo(ctx, cluster, proc)
+	// Same backoff the shell path uses, for the same race: a job that has
+	// just reached Running is not yet one the schedd can hand out a
+	// starter address for, and it answers "Failed to read address of
+	// starter for this job" until the startd has registered it. Calling
+	// straight through meant a caller who polled for Running and then
+	// tailed -- which is the obvious thing to do, and what both the SPA
+	// and an agent do -- got that error instead of the first few lines
+	// of output.
+	info, err := getJobConnectInfoWithBackoff(ctx, s, cluster, proc, peekConnectInfoMaxWait)
 	if err != nil {
 		return nil, fmt.Errorf("get_job_connect_info: %w", err)
 	}
