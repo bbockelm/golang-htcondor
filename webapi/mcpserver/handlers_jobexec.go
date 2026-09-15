@@ -21,12 +21,6 @@ import (
 // runningJobStatus is the only state either live-job tool can work in:
 // both reach the job through its starter, and the starter exists only
 // while the job runs.
-//
-// Named distinctly from the tail tool's copy on purpose. That change is
-// in flight on its own branch, and two files in one package declaring
-// the same symbol is the merge failure that produces no conflict
-// markers and a main that does not build. Whichever lands second should
-// delete one of them; until then they are two names for one number.
 const runningJobStatus = 2
 
 // describeJobStatus renders a JobStatus for an error a caller acts on.

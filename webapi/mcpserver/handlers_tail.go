@@ -37,11 +37,6 @@ const (
 	// tailTimeout bounds the round trip to the starter, which is a
 	// different machine that may be unreachable or busy.
 	tailTimeout = 30 * time.Second
-
-	// jobStatusRunning is the only state this tool can read from: the
-	// output lives on the execute node, reachable through the starter,
-	// and the starter exists only while the job runs.
-	jobStatusRunning = 2
 )
 
 func tailTool() Tool {
@@ -88,14 +83,6 @@ func tailTool() Tool {
 
 func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	jobID, _ := args["job_id"].(string)
-	if strings.TrimSpace(jobID) == "" {
-		return nil, fmt.Errorf("job_id is required")
-	}
-	cluster, proc, err := parseJobID(jobID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid job_id: %w", err)
-	}
-
 	wantStdout, wantStderr := true, true
 	switch strings.ToLower(strings.TrimSpace(stringArg(args, "stream"))) {
 	case "", "both":
@@ -117,37 +104,11 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 	stdoutOffset := int64(intArg(args, "stdout_offset", -1))
 	stderrOffset := int64(intArg(args, "stderr_offset", -1))
 
-	// Confine to the caller's own jobs before going near the starter.
-	// The schedd enforces this too -- GET_JOB_CONNECT_INFO checks
-	// ownership -- but asking here means somebody else's job id comes
-	// back "not found" rather than as a refusal that has already
-	// confirmed the job exists. The same query tells us whether the job
-	// is running, which is the difference between this tool and
-	// get_job_stdout.
-	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
-	}
-	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "JobStatus"},
-		Limit:      1,
-	})
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
-	}
-	ads, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	cluster, proc, err := s.requireOwnRunningJob(ctx, jobID,
+		"this tool reads from the execute node, so use get_job_stdout / get_job_stderr "+
+			"for a job that is not running")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query job: %w", err)
-	}
-	if len(ads) == 0 {
-		return nil, fmt.Errorf("job not found: %s", jobID)
-	}
-	status, _ := ads[0].EvaluateAttrInt("JobStatus")
-	if status != jobStatusRunning {
-		return nil, fmt.Errorf("job %s is %s, not running; this tool reads from the execute node, "+
-			"so use get_job_stdout / get_job_stderr for a job that is not running",
-			jobID, jobStatusName(int(status)))
+		return nil, err
 	}
 
 	peekCtx, cancel := context.WithTimeout(ctx, tailTimeout)
@@ -197,26 +158,4 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 		"content":  []map[string]interface{}{{"type": "text", "text": text.String()}},
 		"metadata": metadata,
 	}, nil
-}
-
-// jobStatusName renders a JobStatus for an error a caller has to act on.
-func jobStatusName(status int) string {
-	switch status {
-	case 1:
-		return "idle"
-	case 2:
-		return "running"
-	case 3:
-		return "removed"
-	case 4:
-		return "completed"
-	case 5:
-		return "held"
-	case 6:
-		return "transferring output"
-	case 7:
-		return "suspended"
-	default:
-		return fmt.Sprintf("in state %d", status)
-	}
 }

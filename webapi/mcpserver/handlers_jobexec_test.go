@@ -133,7 +133,8 @@ func TestExecInJobRequiresAuthentication(t *testing.T) {
 
 func TestDescribeJobStatus(t *testing.T) {
 	for status, want := range map[int]string{
-		1: "idle", 2: "running", 4: "completed", 5: "held", 7: "suspended",
+		1: "idle", 2: "running", 3: "removed", 4: "completed",
+		5: "held", 6: "transferring output", 7: "suspended",
 	} {
 		if got := describeJobStatus(status); got != want {
 			t.Errorf("describeJobStatus(%d) = %q, want %q", status, got, want)

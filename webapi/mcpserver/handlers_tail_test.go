@@ -116,13 +116,3 @@ func TestTailRequiresAuthentication(t *testing.T) {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
 }
-
-func TestJobStatusName(t *testing.T) {
-	for status, want := range map[int]string{
-		1: "idle", 2: "running", 4: "completed", 5: "held", 6: "transferring output",
-	} {
-		if got := jobStatusName(status); got != want {
-			t.Errorf("jobStatusName(%d) = %q, want %q", status, got, want)
-		}
-	}
-}
