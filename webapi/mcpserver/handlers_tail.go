@@ -114,7 +114,7 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 	peekCtx, cancel := context.WithTimeout(ctx, tailTimeout)
 	defer cancel()
 
-	result, err := s.schedd.PeekJobOutput(peekCtx, cluster, proc, htcondor.PeekRequest{
+	result, err := s.getSchedd().PeekJobOutput(peekCtx, cluster, proc, htcondor.PeekRequest{
 		Stdout:       wantStdout,
 		StdoutOffset: stdoutOffset,
 		Stderr:       wantStderr,

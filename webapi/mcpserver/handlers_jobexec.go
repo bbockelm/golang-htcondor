@@ -118,6 +118,37 @@ func (s *Server) toolExecInJob(ctx context.Context, args map[string]interface{})
 	}, nil
 }
 
+// liveJobQuery builds the owner-confined lookup for one job.
+//
+// It derives the caller the way the session tools do, not the way the
+// query tools do, and that difference is the point:
+//
+// scopeToOwner and selfScopedQueryOptions exempt MCP admins, which is
+// right for reading job ads and wrong here. Reaching into a running job
+// is a shell in somebody's process, and the session tools already
+// decided an admin does not get one by being an admin ("troubleshooting"
+// is not a reason). Routing the live-job tools through the query-tool
+// scoping quietly handed them the exemption the session tools had
+// refused -- and unlike the REST superuser path, nothing here audits it.
+//
+// It also answers the transport question: over stdio there is no actor
+// on the context because the server IS the user, and refusing there
+// would list these tools and then fail every call.
+func (s *Server) liveJobQuery(ctx context.Context, cluster, proc int) (string, *htcondor.QueryOptions, error) {
+	caller, err := s.liveJobCaller(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
+		cluster, proc, classadStringLit(caller.Owner))
+	return constraint, &htcondor.QueryOptions{
+		Projection: []string{"ClusterId", "ProcId", "JobStatus"},
+		Limit:      1,
+		FetchOpts:  htcondor.FetchMyJobs,
+		Owner:      caller.Owner,
+	}, nil
+}
+
 // requireOwnRunningJob resolves a job id to (cluster, proc) after
 // checking that it is the caller's and that it is running.
 //
@@ -140,19 +171,11 @@ func (s *Server) requireOwnRunningJob(ctx context.Context, jobID, whyRunning str
 		return 0, 0, fmt.Errorf("invalid job_id: %w", err)
 	}
 
-	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
-	if !ok {
-		return 0, 0, fmt.Errorf("authentication required")
+	constraint, opts, err := s.liveJobQuery(ctx, cluster, proc)
+	if err != nil {
+		return 0, 0, err
 	}
-	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "JobStatus"},
-		Limit:      1,
-	})
-	if !ok {
-		return 0, 0, fmt.Errorf("authentication required")
-	}
-	ads, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query job: %w", err)
 	}

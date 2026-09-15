@@ -332,6 +332,12 @@ func NewManager(opts Options) (*Manager, error) {
 	}, nil
 }
 
+// ScheddForTest reports the schedd the manager would use right now. It
+// exists so a host can assert it handed over an accessor rather than a
+// snapshot -- the difference only shows up after a rediscovery, which
+// no unit test of this package can trigger on its own.
+func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
+
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
 func (m *Manager) log() *logging.Logger { return m.opts.Logger }
