@@ -331,16 +331,30 @@ func BuildSubmitFile(a SubmitArgs) string {
 // reaches the same stale_exit path.
 //
 // Implementation notes:
+//
 //   - We use plain /bin/sh to avoid bash-isms.
+//
 //   - `stat -c %Y` is GNU stat (Linux); `stat -f %m` is BSD stat
 //     (macOS). Try both so the same script runs on either pool.
+//
 //   - Bootstrap touch happens BEFORE the loop so the caller has up to
 //     one full freshness window to attach + start sending heartbeats.
-//   - On stale-exit we `pkill sshd` first. condor_ssh_to_job spawns
-//     an sshd inside the sandbox; if we just exit while the caller
-//     still has a session open, the starter waits for sshd's
-//     descendants and the slot stays held. Killing sshd lets the
-//     starter actually wind the job down.
+//
+//   - On stale-exit we kill this job's sshd first. condor_ssh_to_job
+//     spawns an sshd inside the sandbox; if we just exit while the
+//     caller still has a session open, the starter waits for sshd's
+//     descendants and the slot stays held. Killing it lets the starter
+//     actually wind the job down.
+//
+//     The match is on the sandbox path, not the process name. A bare
+//     `pkill sshd` matches every sshd the job's UID may signal, and
+//     only a pool that runs jobs as dedicated slot users is saved by
+//     that: where jobs run as the submitting user, the set includes
+//     that user's login sshd on the same node and the sshd of their
+//     other interactive jobs. condor_ssh_to_job puts its config under
+//     _CONDOR_SCRATCH_DIR and passes it with -f, so the sandbox path
+//     is on the command line and tells this job's sshd from the rest.
+//
 //   - Startup log line goes to stderr (= the job's `error` file) so
 //     the operator can confirm the watchdog is running.
 func BuildWatchdogScript(t WatchdogTiming) string {
@@ -362,13 +376,16 @@ stat_mtime() {
 }
 
 stale_exit() {
-  echo "[interactive-watchdog] $1; killing sshd and exiting" >&2
-  # condor_ssh_to_job spawns an sshd inside the sandbox; killing it
-  # lets the starter actually finish the job once the heartbeat goes
-  # stale. Without this, an attached-but-idle caller holds the slot.
-  pkill -TERM sshd 2>/dev/null || true
+  echo "[interactive-watchdog] $1; killing this job's sshd and exiting" >&2
+  # Only the sshd condor_ssh_to_job started for THIS job: its config
+  # path is under our scratch directory and appears on its command
+  # line. Matching on the name alone would reach the user's login sshd
+  # and their other jobs' sessions wherever jobs run as the submitting
+  # user rather than a slot user.
+  scratch="${_CONDOR_SCRATCH_DIR:-$PWD}"
+  pkill -TERM -f "sshd.*${scratch}" 2>/dev/null || true
   sleep 1
-  pkill -KILL sshd 2>/dev/null || true
+  pkill -KILL -f "sshd.*${scratch}" 2>/dev/null || true
   exit 0
 }
 
