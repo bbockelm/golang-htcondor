@@ -269,6 +269,14 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 		"session_id", r.Header.Get("Mcp-Session-Id"),
 		"remote_addr", r.RemoteAddr)
 
+	// Keep the write deadline ahead of a call that is still running, so a
+	// tool that is deliberately waiting -- watch_jobs, an interactive exec --
+	// is bounded by the hard stop in mcp_deadline.go rather than by the
+	// server-wide HTTP_API_WRITE_TIMEOUT. Stopped after the response is
+	// written, since the write needs the deadline too.
+	ctx, stopExtending := h.progressiveWriteDeadline(ctx, w)
+	defer stopExtending()
+
 	// Handle the message directly using the MCP server's handler
 	response := h.mcpServer.HandleMessage(ctx, &mcpRequest)
 

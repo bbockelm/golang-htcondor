@@ -182,8 +182,14 @@ type Handler struct {
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
 	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
-	mcpReadGroup        string            // Group required for read access (empty = all users have read)
-	mcpWriteGroup       string            // Group required for write access (empty = all users have write)
+	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
+	// is being extended; see mcp_deadline.go.
+	mcpMaxRequest time.Duration
+	// mcpWriteWindow overrides how far ahead each extension moves the write
+	// deadline. Zero uses mcpWriteWindow; set only by tests.
+	mcpWriteWindow time.Duration
+	mcpReadGroup   string // Group required for read access (empty = all users have read)
+	mcpWriteGroup  string // Group required for write access (empty = all users have write)
 
 	// superuserGroup gates superuser mode: acting on another user's jobs
 	// as that user. Deliberately NOT the same knob as webuiAdminGroup,
@@ -592,11 +598,18 @@ type HandlerConfig struct {
 	// under the gateway/proxy timeout in front of this daemon: a block
 	// that outlives it loses the response carrying the watch id. Zero
 	// uses the mcpserver default.
-	MCPWatchMaxWait    time.Duration
-	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token              string               // Token for daemon authentication (optional)
-	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	MCPWatchMaxWait time.Duration
+	// MCPMaxRequestDuration is the hard stop on an MCP request that is
+	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
+	// request runs, its write deadline is moved forward rather than being
+	// the server-wide HTTP_API_WRITE_TIMEOUT, so a deliberately waiting
+	// tool is bounded by this instead. Zero uses
+	// DefaultMCPMaxRequestDuration.
+	MCPMaxRequestDuration time.Duration
+	StreamBufferSize      int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout    time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token                 string               // Token for daemon authentication (optional)
+	Credd                 htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 	// Placementd is an optional condor_placementd client. Nil means
 	// "discover one", and a failed discovery simply leaves the
 	// placement endpoints disabled. Tests inject a fake here.
@@ -1124,6 +1137,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
 
 		h.mcpAccessGroup = cfg.MCPAccessGroup
+		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
 		h.mcpReadGroup = cfg.MCPReadGroup
 		h.mcpWriteGroup = cfg.MCPWriteGroup
 		h.mcpInstructions = cfg.MCPInstructions
@@ -1365,10 +1379,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// registered through one surface is visible from the other.
 		JobWatch:     h.jobWatch,
 		JobWatchEval: h.jobWatchEval,
-		// Cap in-call watch blocking below the gateway timeout in front
-		// of this daemon, so a block always returns before the gateway
-		// severs the connection. Zero leaves the mcpserver default.
-		WatchMaxWait: cfg.MCPWatchMaxWait,
+		// How long watch_jobs may block in-call. An explicit
+		// HTTP_API_MCP_WATCH_MAX_WAIT wins, because only the operator
+		// knows the gateway timeout in front of this daemon; otherwise it
+		// is derived from the request hard stop, leaving room to write the
+		// response. The value reaches the agent in the tool's own
+		// description, so what it is told it may ask for is what the
+		// transport will actually allow.
+		WatchMaxWait: watchMaxWait(cfg),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP server: %w", err)
