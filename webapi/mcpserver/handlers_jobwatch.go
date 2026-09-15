@@ -59,6 +59,10 @@ func (s *Server) maxWaitSeconds() int {
 // rendered from jobwatch.Events so what the agent is told and what the
 // evaluator implements cannot drift.
 func jobWatchTools(maxWait int) []Tool {
+	// Rendered from the cap, so what the agent is told to do and how long it
+	// is allowed to do it cannot drift apart. See watch_advice.go.
+	advice := waitAdvice(maxWait)
+
 	events := make([]interface{}, 0, len(jobwatch.Events))
 	for _, spec := range jobwatch.Events {
 		events = append(events, string(spec.Event))
@@ -66,8 +70,7 @@ func jobWatchTools(maxWait int) []Tool {
 	return []Tool{
 		{
 			Name: "watch_jobs",
-			Description: "Wait for something to happen to your jobs WITHOUT polling. Registers a durable watch and returns immediately; " +
-				"call check_watches later (any time, even in a different session) to collect the answer.\n\n" +
+			Description: "Wait for something to happen to your jobs WITHOUT polling. " + advice.Strategy + "\n\n" +
 				"Use this instead of repeatedly calling query_jobs in a loop.\n\n" +
 				"IMPORTANT: do not write a constraint like 'JobStatus == 4' to wait for completion. A finished job is removed from " +
 				"the queue by the schedd, so that condition is never observed. Use event=\"done\" instead, which is resolved across " +
@@ -102,9 +105,8 @@ func jobWatchTools(maxWait int) []Tool {
 						"description": "A short name for this watch, echoed back so you can tell several apart.",
 					},
 					"wait_seconds": map[string]interface{}{
-						"type": "integer",
-						"description": fmt.Sprintf("Optionally block up to this many seconds (max %d) waiting for the event before returning. "+
-							"Use a small value only when you expect it imminently; otherwise return at once and use check_watches.", maxWait),
+						"type":        "integer",
+						"description": advice.WaitParam,
 					},
 					"ttl_seconds": map[string]interface{}{
 						"type":        "integer",
