@@ -67,8 +67,10 @@ func newLocalIdentity(strategies []idmap.Strategy, passwdFile string, ttl time.D
 	}
 	return &localIdentity{
 		resolver: idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...)),
-		groups:   idmap.NewCachedGroups(&idmap.IDCommand{}, ttl),
-		logger:   logger,
+		// SSSD first where it exists, then id(1) through NSS, then
+		// os/user. See idmap.DefaultGroupSource for why that order.
+		groups: idmap.NewCachedGroups(idmap.DefaultGroupSource(), ttl),
+		logger: logger,
 	}
 }
 

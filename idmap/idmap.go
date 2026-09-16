@@ -59,6 +59,11 @@ type Account struct {
 	Username string
 	Gecos    string
 	UID      uint32
+	// primaryGID is the gid from the passwd entry. Unexported because
+	// nothing outside this package needs it, but the "files" group
+	// source does: /etc/group lists only supplementary members, so the
+	// primary group is knowable only from here.
+	primaryGID uint32
 }
 
 // Enumerator lists the account database. Implementations differ in how

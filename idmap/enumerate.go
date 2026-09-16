@@ -146,7 +146,14 @@ func parsePasswd(r io.Reader) ([]Account, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, Account{Username: f[0], Gecos: f[4], UID: uint32(uid)})
+		gid, err := strconv.ParseUint(f[3], 10, 32)
+		if err != nil {
+			continue
+		}
+		out = append(out, Account{
+			Username: f[0], Gecos: f[4],
+			UID: uint32(uid), primaryGID: uint32(gid),
+		})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
