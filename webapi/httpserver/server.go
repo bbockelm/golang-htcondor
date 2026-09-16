@@ -19,6 +19,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/ory/fosite"
@@ -174,11 +175,12 @@ type Config struct {
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
 
-	// IdentityMapGecos turns on mapping an OIDC subject to a local
-	// account by the account's GECOS field, with group membership read
-	// from the system rather than from the token. When set, a caller
-	// that maps to no single account is refused a session.
-	IdentityMapGecos bool
+	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
+	// subject into a local account -- "gecos", "username", or both, as in
+	// "gecos,username". Empty disables mapping entirely. When set, group
+	// membership comes from the system rather than the token, and a
+	// caller that maps to no single account is refused a session.
+	IdentityMapStrategies []idmap.Strategy
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
 	IdentityMapPasswdFile string
@@ -327,7 +329,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
-		IdentityMapGecos:            cfg.IdentityMapGecos,
+		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,

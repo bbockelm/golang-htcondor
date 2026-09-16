@@ -34,7 +34,7 @@ func writePasswd(t *testing.T) string {
 }
 
 func TestLocalIdentityResolvesSubjectToAccount(t *testing.T) {
-	li := newLocalIdentity(writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
 	// Groups come from the running system, which knows nothing about
 	// these invented accounts, so exercise the resolver half directly.
 	account, err := li.resolver.Resolve(t.Context(), "tatannen")
@@ -49,7 +49,7 @@ func TestLocalIdentityResolvesSubjectToAccount(t *testing.T) {
 // The whole point of the feature: a caller whose token names them
 // "tannenba" is NOT the tannenba account. Only the GECOS maps.
 func TestLocalIdentityRejectsALoginNameAsSubject(t *testing.T) {
-	li := newLocalIdentity(writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
 
 	if _, err := li.resolver.Resolve(t.Context(), "tannenba"); err == nil {
 		t.Fatal("a login name was accepted as a subject")
@@ -57,7 +57,7 @@ func TestLocalIdentityRejectsALoginNameAsSubject(t *testing.T) {
 }
 
 func TestLocalIdentityRefusesAmbiguity(t *testing.T) {
-	li := newLocalIdentity(writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
 
 	_, err := li.resolver.Resolve(t.Context(), "shared.identity")
 	if err == nil {
@@ -99,7 +99,7 @@ func TestDescribeFailureSaysTheRightThing(t *testing.T) {
 // An unreadable account database must refuse logins, not admit everyone
 // with an empty group list -- which would read as a permissions decision.
 func TestLocalIdentityFailsClosedWhenTheDatabaseIsUnreadable(t *testing.T) {
-	li := newLocalIdentity(filepath.Join(t.TempDir(), "does-not-exist"), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, filepath.Join(t.TempDir(), "does-not-exist"), time.Minute, testLogger(t))
 
 	account, groups, err := li.resolve(t.Context(), "tatannen")
 	if err == nil {
@@ -113,7 +113,7 @@ func TestLocalIdentityFailsClosedWhenTheDatabaseIsUnreadable(t *testing.T) {
 // warmUp must not panic on a broken database, and must leave the mapper
 // refusing rather than permitting.
 func TestWarmUpSurvivesAnUnreadableDatabase(t *testing.T) {
-	li := newLocalIdentity(filepath.Join(t.TempDir(), "nope"), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, filepath.Join(t.TempDir(), "nope"), time.Minute, testLogger(t))
 	li.warmUp(t.Context())
 
 	if _, _, err := li.resolve(t.Context(), "tatannen"); err == nil {
@@ -122,11 +122,39 @@ func TestWarmUpSurvivesAnUnreadableDatabase(t *testing.T) {
 }
 
 func TestWarmUpReportsAmbiguousAccounts(t *testing.T) {
-	li := newLocalIdentity(writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
 	li.warmUp(t.Context())
 
 	amb := li.resolver.AmbiguousGecos()
 	if len(amb) != 1 || amb[0] != "shared.identity" {
 		t.Errorf("AmbiguousGecos() = %v, want [shared.identity] so an operator can fix it", amb)
+	}
+}
+
+// The configuration this was built for: most accounts carry their own
+// name in GECOS, a few do not, and one is a different string entirely.
+func TestLocalIdentityGecosThenUsername(t *testing.T) {
+	li := newLocalIdentity(
+		[]idmap.Strategy{idmap.StrategyGecos, idmap.StrategyUsername},
+		writePasswd(t), time.Minute, testLogger(t))
+
+	for subject, want := range map[string]string{
+		"tatannen":          "tannenba", // GECOS differs from the name
+		"brian.bockelman.1": "bbockelm", // likewise
+		"daemon":            "daemon",   // no GECOS, resolved by login name
+	} {
+		got, err := li.resolver.Resolve(t.Context(), subject)
+		if err != nil {
+			t.Errorf("Resolve(%q): %v", subject, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("Resolve(%q) = %q, want %q", subject, got, want)
+		}
+	}
+
+	// Ambiguity still refuses, rather than falling through to a login name.
+	if _, err := li.resolver.Resolve(t.Context(), "shared.identity"); err == nil {
+		t.Error("a contested GECOS fell through to the login-name strategy")
 	}
 }

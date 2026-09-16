@@ -41,7 +41,7 @@ type localIdentity struct {
 // enumeration goes through `getent passwd`, whose limits are documented
 // on idmap.Getent: SSSD lists directory accounts there only when its
 // domain has `enumerate = true`.
-func newLocalIdentity(passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
+func newLocalIdentity(strategies []idmap.Strategy, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
 	var (
 		enum idmap.Enumerator
 		ver  idmap.Verifier
@@ -62,8 +62,11 @@ func newLocalIdentity(passwdFile string, ttl time.Duration, logger *logging.Logg
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	if len(strategies) == 0 {
+		strategies = []idmap.Strategy{idmap.StrategyGecos}
+	}
 	return &localIdentity{
-		resolver: idmap.New(enum, ver, idmap.WithTTL(ttl)),
+		resolver: idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...)),
 		groups:   idmap.NewCachedGroups(&idmap.IDCommand{}, ttl),
 		logger:   logger,
 	}
@@ -88,6 +91,14 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		l.logger.Warn(logging.DestinationHTTP,
 			"The account database enumerated to nothing, so no login can be mapped. "+
 				"If accounts live in a directory, SSSD lists them only with `enumerate = true`")
+	}
+	// Only meaningful when the login-name strategy is also in play, and
+	// then worth saying out loud: the subject naming one of these
+	// resolves to somebody else's account.
+	if shadowed := l.resolver.ShadowedUsernames(); len(shadowed) > 0 {
+		l.logger.Warn(logging.DestinationHTTP,
+			"Some login names are also another account's GECOS; a subject naming one resolves to that other account",
+			"names", shadowed)
 	}
 	if ambiguous > 0 {
 		// Naming them is the difference between a fixable report and a

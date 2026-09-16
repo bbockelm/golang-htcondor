@@ -31,6 +31,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
@@ -154,7 +155,7 @@ type mcpConfig struct {
 	// identityMapGecos maps the OIDC subject to the local account whose
 	// GECOS equals it, and takes group membership from the system
 	// instead of the token. See webapi/httpserver/identity_local.go.
-	identityMapGecos      bool
+	identityMapStrategies []idmap.Strategy
 	identityMapPasswdFile string
 	identityMapTTL        time.Duration
 	mcpAccessGroup        string
@@ -1025,8 +1026,17 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	// Identity mapping: the provider's subject is not always the name of
 	// the account that owns the jobs, and what a person may do is not
 	// always in the token. Off unless asked for.
-	if v, ok := cfg.Get("HTTP_API_IDENTITY_MAP"); ok && strings.EqualFold(strings.TrimSpace(v), "gecos") {
-		config.identityMapGecos = true
+	if spec, ok := cfg.Get("HTTP_API_IDENTITY_MAP"); ok && strings.TrimSpace(spec) != "" {
+		strategies, err := idmap.ParseStrategies(spec)
+		if err != nil {
+			// Refusing to start beats starting with a mapping nobody
+			// asked for: this setting decides who may log in.
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_IDENTITY_MAP is not a valid strategy list; refusing to start",
+				"value", spec, "error", err)
+			os.Exit(1)
+		}
+		config.identityMapStrategies = strategies
 		config.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
 		config.identityMapTTL = 5 * time.Minute
 		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
@@ -1039,8 +1049,8 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 			}
 		}
 		logger.Info(logging.DestinationHTTP,
-			"Identity mapping: OIDC subjects resolve to local accounts by GECOS, groups come from the system",
-			"passwd_file", config.identityMapPasswdFile, "ttl", config.identityMapTTL)
+			"Identity mapping: OIDC subjects resolve to local accounts, groups come from the system",
+			"strategies", strategies, "passwd_file", config.identityMapPasswdFile, "ttl", config.identityMapTTL)
 	}
 
 	// Load username claim name (default: "sub")
@@ -1590,7 +1600,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
-		IdentityMapGecos:           mcpCfg.identityMapGecos,
+		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,

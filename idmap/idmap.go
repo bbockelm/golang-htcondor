@@ -81,18 +81,56 @@ type Verifier interface {
 	GecosOf(ctx context.Context, username string) (string, error)
 }
 
+// Strategy names one way of getting from a subject to an account.
+type Strategy string
+
+const (
+	// StrategyGecos matches the subject against accounts' GECOS fields.
+	StrategyGecos Strategy = "gecos"
+	// StrategyUsername treats the subject as a login name, and accepts it
+	// if such an account exists. Useful where most accounts carry their
+	// own name in GECOS anyway, and some carry nothing.
+	StrategyUsername Strategy = "username"
+)
+
+// ParseStrategies reads an ordered, comma-separated list such as
+// "gecos,username". Unknown names are an error rather than a skip: a
+// typo in this setting decides who may log in, so it should be loud.
+func ParseStrategies(spec string) ([]Strategy, error) {
+	var out []Strategy
+	for _, raw := range strings.Split(spec, ",") {
+		name := Strategy(strings.ToLower(strings.TrimSpace(raw)))
+		if name == "" {
+			continue
+		}
+		switch name {
+		case StrategyGecos, StrategyUsername:
+			out = append(out, name)
+		default:
+			return nil, fmt.Errorf("unknown identity-map strategy %q (want %q or %q)",
+				raw, StrategyGecos, StrategyUsername)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no identity-map strategy given")
+	}
+	return out, nil
+}
+
 // Resolver maps subjects to local account names.
 type Resolver struct {
-	enum     Enumerator
-	verifier Verifier
-	ttl      time.Duration
-	now      func() time.Time
+	enum       Enumerator
+	verifier   Verifier
+	strategies []Strategy
+	ttl        time.Duration
+	now        func() time.Time
 
-	mu        sync.RWMutex
-	byGecos   map[string]string // gecos -> username, absent when ambiguous
-	ambiguous map[string]int    // gecos -> how many accounts claim it
-	builtAt   time.Time
-	count     int
+	mu         sync.RWMutex
+	byGecos    map[string]string // gecos -> username, absent when ambiguous
+	ambiguous  map[string]int    // gecos -> how many accounts claim it
+	knownUsers map[string]bool   // every username the index saw
+	builtAt    time.Time
+	count      int
 }
 
 // Option configures a Resolver.
@@ -103,6 +141,12 @@ type Option func(*Resolver)
 // staleness against load on the directory.
 func WithTTL(d time.Duration) Option { return func(r *Resolver) { r.ttl = d } }
 
+// WithStrategies sets the ordered list of ways to resolve a subject.
+// The default is GECOS alone.
+func WithStrategies(s ...Strategy) Option {
+	return func(r *Resolver) { r.strategies = append([]Strategy(nil), s...) }
+}
+
 // WithClock replaces the clock, for tests.
 func WithClock(f func() time.Time) Option { return func(r *Resolver) { r.now = f } }
 
@@ -111,10 +155,11 @@ func WithClock(f func() time.Time) Option { return func(r *Resolver) { r.now = f
 // enumerator reads the same database the rest of the system does.
 func New(enum Enumerator, verifier Verifier, opts ...Option) *Resolver {
 	r := &Resolver{
-		enum:     enum,
-		verifier: verifier,
-		ttl:      5 * time.Minute,
-		now:      time.Now,
+		enum:       enum,
+		verifier:   verifier,
+		ttl:        5 * time.Minute,
+		now:        time.Now,
+		strategies: []Strategy{StrategyGecos},
 	}
 	for _, o := range opts {
 		o(r)
@@ -122,19 +167,61 @@ func New(enum Enumerator, verifier Verifier, opts ...Option) *Resolver {
 	return r
 }
 
-// Resolve returns the local account whose GECOS equals subject.
+// Resolve returns the local account this subject names, trying each
+// configured strategy in order and taking the first that answers.
 //
-// The subject is compared to the whole GECOS field, exactly. GECOS is
-// conventionally comma-separated, and matching only a component would
-// mean an account could carry somebody else's identity in a field nobody
-// reads -- so a comma is simply part of the string here, and a subject
-// containing one is as unlikely to match as it should be.
+// Ordering is the operator's, and it matters. Where most accounts carry
+// their own name in GECOS, "gecos,username" resolves nearly everyone by
+// GECOS and catches the rest -- accounts whose GECOS is blank -- by
+// login name. Reversing it would let a login name win over somebody
+// else's explicitly configured GECOS.
 func (r *Resolver) Resolve(ctx context.Context, subject string) (string, error) {
 	if subject == "" {
 		// An account with an empty GECOS is ordinary. A caller with an
 		// empty subject is not, and must never collide with one.
 		return "", fmt.Errorf("%w: empty subject", ErrNoMatch)
 	}
+
+	var firstErr error
+	for _, st := range r.strategies {
+		var (
+			username string
+			err      error
+		)
+		switch st {
+		case StrategyGecos:
+			username, err = r.resolveByGecos(ctx, subject)
+		case StrategyUsername:
+			username, err = r.resolveByUsername(ctx, subject)
+		default:
+			err = fmt.Errorf("unknown strategy %q", st)
+		}
+		if err == nil {
+			return username, nil
+		}
+		// Ambiguity stops the search. A later strategy answering for a
+		// subject that two accounts already claim would resolve exactly
+		// the case that most needs refusing.
+		if errors.Is(err, ErrAmbiguous) {
+			return "", err
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("%w: %q", ErrNoMatch, subject)
+	}
+	return "", firstErr
+}
+
+// resolveByGecos matches the subject against the whole GECOS field,
+// exactly. GECOS is conventionally comma-separated, and matching only a
+// component would mean an account could carry somebody else's identity
+// in a field nobody reads -- so a comma is simply part of the string
+// here, and a subject containing one is as unlikely to match as it
+// should be.
+func (r *Resolver) resolveByGecos(ctx context.Context, subject string) (string, error) {
 	if err := r.ensureFresh(ctx); err != nil {
 		return "", err
 	}
@@ -148,7 +235,7 @@ func (r *Resolver) Resolve(ctx context.Context, subject string) (string, error) 
 		return "", fmt.Errorf("%w: %q is the GECOS of %d accounts", ErrAmbiguous, subject, dupes)
 	}
 	if !ok {
-		return "", fmt.Errorf("%w: %q", ErrNoMatch, subject)
+		return "", fmt.Errorf("%w: %q is no account's GECOS", ErrNoMatch, subject)
 	}
 
 	if r.verifier != nil {
@@ -166,6 +253,36 @@ func (r *Resolver) Resolve(ctx context.Context, subject string) (string, error) 
 		}
 	}
 	return username, nil
+}
+
+// resolveByUsername accepts the subject as a login name if such an
+// account exists.
+//
+// The existence check goes through the verifier rather than the index,
+// so it answers for accounts the index never saw -- a directory that
+// will not enumerate still resolves a single name.
+func (r *Resolver) resolveByUsername(ctx context.Context, subject string) (string, error) {
+	if strings.ContainsAny(subject, ":/\\ \t\n") {
+		// Not a login name on any system this runs on, and worth
+		// refusing explicitly rather than handing to a lookup.
+		return "", fmt.Errorf("%w: %q is not a valid login name", ErrNoMatch, subject)
+	}
+	if r.verifier == nil {
+		if err := r.ensureFresh(ctx); err != nil {
+			return "", err
+		}
+		r.mu.RLock()
+		_, ok := r.knownUsers[subject]
+		r.mu.RUnlock()
+		if !ok {
+			return "", fmt.Errorf("%w: no account named %q", ErrNoMatch, subject)
+		}
+		return subject, nil
+	}
+	if _, err := r.verifier.GecosOf(ctx, subject); err != nil {
+		return "", fmt.Errorf("%w: no account named %q", ErrNoMatch, subject)
+	}
+	return subject, nil
 }
 
 // Stats reports what the current index holds, for logging and /readyz.
@@ -218,7 +335,9 @@ func (r *Resolver) build(ctx context.Context) error {
 
 	byGecos := make(map[string]string, len(accounts))
 	counts := make(map[string]int, len(accounts))
+	known := make(map[string]bool, len(accounts))
 	for _, a := range accounts {
+		known[a.Username] = true
 		g := strings.TrimSpace(a.Gecos)
 		if g == "" {
 			// Accounts with no GECOS are the overwhelming majority on a
@@ -239,8 +358,30 @@ func (r *Resolver) build(ctx context.Context) error {
 	r.mu.Lock()
 	r.byGecos = byGecos
 	r.ambiguous = counts
+	r.knownUsers = known
 	r.builtAt = r.now()
 	r.count = len(accounts)
 	r.mu.Unlock()
 	return nil
+}
+
+// ShadowedUsernames lists accounts whose login name is ALSO some other
+// account's GECOS.
+//
+// This only matters when both strategies are in use, and then it matters
+// a great deal: the subject that names one of these resolves by GECOS to
+// the other account, and the login-name strategy never gets to answer.
+// Whether that is correct is the operator's call -- but it should be a
+// call, not a surprise, so these are named at startup.
+func (r *Resolver) ShadowedUsernames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []string
+	for name := range r.knownUsers {
+		if owner, ok := r.byGecos[name]; ok && owner != name {
+			out = append(out, name+" (GECOS of "+owner+")")
+		}
+	}
+	sort.Strings(out)
+	return out
 }

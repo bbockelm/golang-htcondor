@@ -310,3 +310,117 @@ func TestResolverOverAPasswdFile(t *testing.T) {
 		t.Errorf("Stats() = %d accounts, %d ambiguous, built %v", accounts, amb, built)
 	}
 }
+
+func TestParseStrategies(t *testing.T) {
+	got, err := ParseStrategies(" GECOS , username ")
+	if err != nil {
+		t.Fatalf("ParseStrategies: %v", err)
+	}
+	if len(got) != 2 || got[0] != StrategyGecos || got[1] != StrategyUsername {
+		t.Errorf("parsed %v, want [gecos username]", got)
+	}
+	// A typo here decides who may log in, so it must not be skipped.
+	if _, err := ParseStrategies("gecos,uid"); err == nil {
+		t.Error("an unknown strategy was accepted")
+	}
+	if _, err := ParseStrategies("  "); err == nil {
+		t.Error("an empty strategy list was accepted")
+	}
+}
+
+// The common shape at a site where most accounts carry their own name in
+// GECOS: "gecos,username" resolves the ones that do by GECOS, and the
+// ones whose GECOS is blank by login name.
+func TestStrategyChainCoversBothShapes(t *testing.T) {
+	enum := &fakeEnum{accounts: []Account{
+		{Username: "tannenba", Gecos: "tatannen", UID: 20013}, // differs
+		{Username: "matyas", Gecos: "matyas", UID: 20020},     // same
+		{Username: "blank", Gecos: "", UID: 20021},            // no GECOS
+	}}
+	ver := &fakeVerifier{gecos: map[string]string{
+		"tannenba": "tatannen", "matyas": "matyas", "blank": "",
+	}}
+	r := New(enum, ver, WithStrategies(StrategyGecos, StrategyUsername))
+
+	for subject, want := range map[string]string{
+		"tatannen": "tannenba", // by GECOS
+		"matyas":   "matyas",   // by GECOS, which happens to equal the name
+		"blank":    "blank",    // by login name, GECOS being empty
+	} {
+		got, err := r.Resolve(context.Background(), subject)
+		if err != nil {
+			t.Errorf("Resolve(%q): %v", subject, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("Resolve(%q) = %q, want %q", subject, got, want)
+		}
+	}
+
+	// Still nobody: no GECOS and no such login.
+	if _, err := r.Resolve(context.Background(), "ghost"); !errors.Is(err, ErrNoMatch) {
+		t.Errorf("an unknown subject resolved: %v", err)
+	}
+}
+
+// With gecos first, a subject that is one account's login name and
+// another's GECOS resolves to the GECOS owner. That is the configured
+// order doing its job -- and it is why ShadowedUsernames exists.
+func TestGecosWinsOverALoginNameAndIsReported(t *testing.T) {
+	enum := &fakeEnum{accounts: []Account{
+		{Username: "carol", Gecos: "", UID: 20030},
+		{Username: "impersonator", Gecos: "carol", UID: 20031},
+	}}
+	ver := &fakeVerifier{gecos: map[string]string{"carol": "", "impersonator": "carol"}}
+	r := New(enum, ver, WithStrategies(StrategyGecos, StrategyUsername))
+
+	got, err := r.Resolve(context.Background(), "carol")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != "impersonator" {
+		t.Errorf("Resolve(carol) = %q; with gecos first the GECOS owner wins", got)
+	}
+
+	shadow := r.ShadowedUsernames()
+	if len(shadow) != 1 || !strings.Contains(shadow[0], "carol") {
+		t.Errorf("ShadowedUsernames() = %v, want carol reported", shadow)
+	}
+
+	// Reversed, the login name wins -- the operator's ordering decides.
+	r2 := New(enum, ver, WithStrategies(StrategyUsername, StrategyGecos))
+	if got, err := r2.Resolve(context.Background(), "carol"); err != nil || got != "carol" {
+		t.Errorf("username-first resolved to %q (%v), want carol", got, err)
+	}
+}
+
+// Ambiguity must stop the chain. A later strategy answering for a subject
+// two accounts already claim would resolve exactly the case that most
+// needs refusing.
+func TestAmbiguityStopsTheChain(t *testing.T) {
+	enum := &fakeEnum{accounts: []Account{
+		{Username: "dave", Gecos: "contested", UID: 20040},
+		{Username: "erin", Gecos: "contested", UID: 20041},
+		{Username: "contested", Gecos: "", UID: 20042},
+	}}
+	ver := &fakeVerifier{gecos: map[string]string{
+		"dave": "contested", "erin": "contested", "contested": "",
+	}}
+	r := New(enum, ver, WithStrategies(StrategyGecos, StrategyUsername))
+
+	if got, err := r.Resolve(context.Background(), "contested"); !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("Resolve = %q, %v; ambiguity must not fall through to the login name", got, err)
+	}
+}
+
+func TestUsernameStrategyRejectsNonNames(t *testing.T) {
+	enum := &fakeEnum{accounts: []Account{{Username: "ok", Gecos: "", UID: 1}}}
+	r := New(enum, &fakeVerifier{gecos: map[string]string{"ok": ""}},
+		WithStrategies(StrategyUsername))
+
+	for _, bad := range []string{"../etc/shadow", "a:b", "has space", "two\nlines"} {
+		if _, err := r.Resolve(context.Background(), bad); err == nil {
+			t.Errorf("accepted %q as a login name", bad)
+		}
+	}
+}

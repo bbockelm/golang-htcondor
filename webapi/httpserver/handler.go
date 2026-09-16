@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/jobqueue"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
@@ -481,11 +482,12 @@ type HandlerConfig struct {
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
 
-	// IdentityMapGecos turns on mapping an OIDC subject to a local
-	// account by the account's GECOS field, with group membership read
-	// from the system rather than from the token. When set, a caller
-	// that maps to no single account is refused a session.
-	IdentityMapGecos bool
+	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
+	// subject into a local account -- "gecos", "username", or both, as in
+	// "gecos,username". Empty disables mapping entirely. When set, group
+	// membership comes from the system rather than the token, and a
+	// caller that maps to no single account is refused a session.
+	IdentityMapStrategies []idmap.Strategy
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
 	IdentityMapPasswdFile string
@@ -1142,12 +1144,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// deployment says the two differ. Built before the first request
 		// so the account index is warm and its problems are in the
 		// startup log rather than in somebody's failed login.
-		if cfg.IdentityMapGecos {
-			h.localIdentity = newLocalIdentity(cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger)
+		if len(cfg.IdentityMapStrategies) > 0 {
+			h.localIdentity = newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger)
 			h.localIdentity.warmUp(context.Background())
 			logger.Info(logging.DestinationHTTP,
-				"Identity mapping enabled: subjects resolve to local accounts by GECOS, "+
-					"and groups come from the system rather than the token")
+				"Identity mapping enabled: subjects resolve to local accounts, "+
+					"and groups come from the system rather than the token",
+				"strategies", cfg.IdentityMapStrategies)
 		}
 
 		// Set groups claim name (default: "groups")
