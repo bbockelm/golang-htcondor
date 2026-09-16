@@ -293,7 +293,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// store, the consent and device-approval flows.
 	subject := userInfo.Subject
 	if s.localIdentity != nil {
-		account, groups, err := s.localIdentity.resolve(ctx, subject)
+		account, groups, err := s.localIdentity.resolve(ctx, subject, userGroups)
 		if err != nil {
 			// Refused, not degraded. See localIdentity's comment on why
 			// there is no fallback to the token's own claims.
@@ -303,8 +303,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusForbidden, describeFailure(err))
 			return
 		}
-		s.logger.Info(logging.DestinationHTTP, "Mapped an asserted identity to a local account",
-			"oidc_subject", subject, "account", account, "groups", groups)
+		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
+			"oidc_subject", subject, "account", account,
+			"groups", groups, "groups_from_system", s.localIdentity.sourcesGroups())
 		subject, userGroups = account, groups
 	}
 

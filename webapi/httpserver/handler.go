@@ -488,6 +488,12 @@ type HandlerConfig struct {
 	// membership comes from the system rather than the token, and a
 	// caller that maps to no single account is refused a session.
 	IdentityMapStrategies []idmap.Strategy
+	// IdentityGroupsFromSystem takes group membership from the account
+	// database instead of the token's groups claim. Independent of
+	// IdentityMapStrategies: a deployment may want either, both, or
+	// neither. The default -- neither -- is what a container wants,
+	// because it holds no account database to read.
+	IdentityGroupsFromSystem bool
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
 	IdentityMapPasswdFile string
@@ -1144,13 +1150,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// deployment says the two differ. Built before the first request
 		// so the account index is warm and its problems are in the
 		// startup log rather than in somebody's failed login.
-		if len(cfg.IdentityMapStrategies) > 0 {
-			h.localIdentity = newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger)
-			h.localIdentity.warmUp(context.Background())
-			logger.Info(logging.DestinationHTTP,
-				"Identity mapping enabled: subjects resolve to local accounts, "+
-					"and groups come from the system rather than the token",
-				"strategies", cfg.IdentityMapStrategies)
+		if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
+			cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
+			h.localIdentity = li
+			li.warmUp(context.Background())
+			logger.Info(logging.DestinationHTTP, "Local identity configured",
+				"subject_mapped_to_account", li.mapsAccount(),
+				"strategies", cfg.IdentityMapStrategies,
+				"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
 		}
 
 		// Set groups claim name (default: "groups")
@@ -1168,6 +1175,22 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
 
 		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+
+		// Where groups come from the system, membership can be re-read at
+		// refresh time -- which is the live-membership oracle the
+		// reauthorization comment describes as future work. It needs no
+		// upstream credential, which is exactly why it was not possible
+		// with token-sourced groups.
+		if h.localIdentity.sourcesGroups() {
+			h.revocationOracles = append(h.revocationOracles, &systemGroupOracle{
+				identity:  h.localIdentity,
+				validate:  h.validateGroupAccess,
+				scopesFor: h.getScopesForGroups,
+				logger:    logger,
+			})
+			logger.Info(logging.DestinationHTTP,
+				"Refresh grants will re-read group membership from the system")
+		}
 
 		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration

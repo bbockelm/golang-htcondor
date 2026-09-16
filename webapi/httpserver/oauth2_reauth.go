@@ -161,9 +161,14 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 	// ultimately by the lifetime cap above — which is the only mechanism
 	// that bounds exposure with no cooperation from anything else.
 	//
-	// A future live-membership source plugs in as a RevocationOracle: it
-	// would re-read the user's groups, run getScopesForGroups against
-	// them, and report the difference as DeniedScopes.
+	// That future live-membership source now exists, where the
+	// deployment has one: with HTTP_API_GROUP_SOURCE=system, groups come
+	// from the account database rather than the token, so they can be
+	// re-read here without any upstream credential. systemGroupOracle
+	// does exactly what this paragraph described -- see
+	// identity_group_oracle.go -- and is registered among the oracles
+	// below. The gap above remains real for token-sourced groups, which
+	// is the default and the only option in a container.
 	//
 	// A nil list means the user authenticated by a path that asserts no
 	// groups (the trusted user header, say), so there is no policy to

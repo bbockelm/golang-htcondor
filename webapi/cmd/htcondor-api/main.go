@@ -156,6 +156,7 @@ type mcpConfig struct {
 	// GECOS equals it, and takes group membership from the system
 	// instead of the token. See webapi/httpserver/identity_local.go.
 	identityMapStrategies []idmap.Strategy
+	identityGroupsSystem  bool
 	identityMapPasswdFile string
 	identityMapTTL        time.Duration
 	mcpAccessGroup        string
@@ -964,6 +965,66 @@ func loadAccessControlGroups(cfg *config.Config, config *mcpConfig, logger *logg
 	}
 }
 
+// loadIdentityMapping reads the two independent local-identity settings.
+//
+// They are separate because they answer to different deployments: a
+// container holds no account database and must keep the token's claims,
+// while a host whose accounts and groups are the real authority wants
+// both. Neither is on by default.
+func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.Logger) {
+	if spec, ok := cfg.Get("HTTP_API_IDENTITY_MAP"); ok && strings.TrimSpace(spec) != "" {
+		strategies, err := idmap.ParseStrategies(spec)
+		if err != nil {
+			// Refusing to start beats starting with a mapping nobody
+			// asked for: this setting decides who may log in.
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_IDENTITY_MAP is not a valid strategy list; refusing to start",
+				"value", spec, "error", err)
+			os.Exit(1)
+		}
+		mcpCfg.identityMapStrategies = strategies
+	}
+
+	// Where group membership comes from. Independent of the subject
+	// mapping above: a container has no account database to read and
+	// must keep the token's claim, which is why "token" is the default.
+	if v, ok := cfg.Get("HTTP_API_GROUP_SOURCE"); ok && strings.TrimSpace(v) != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "system", "unix":
+			mcpCfg.identityGroupsSystem = true
+		case "token", "oidc":
+			mcpCfg.identityGroupsSystem = false
+		default:
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_GROUP_SOURCE must be \"token\" or \"system\"; refusing to start",
+				"value", v)
+			os.Exit(1)
+		}
+	}
+
+	if len(mcpCfg.identityMapStrategies) > 0 || mcpCfg.identityGroupsSystem {
+		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
+		mcpCfg.identityMapTTL = 5 * time.Minute
+		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				mcpCfg.identityMapTTL = d
+			} else {
+				logger.Warn(logging.DestinationHTTP,
+					"HTTP_API_IDENTITY_MAP_TTL is not a duration; keeping the default",
+					"value", raw, "default", mcpCfg.identityMapTTL)
+			}
+		}
+		groupsFrom := "token"
+		if mcpCfg.identityGroupsSystem {
+			groupsFrom = "system"
+		}
+		logger.Info(logging.DestinationHTTP, "Local identity configured",
+			"strategies", mcpCfg.identityMapStrategies, "groups_from", groupsFrom,
+			"passwd_file", mcpCfg.identityMapPasswdFile, "ttl", mcpCfg.identityMapTTL)
+	}
+
+}
+
 // loadMCPConfig loads MCP configuration from HTCondor config
 func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logging.Logger) mcpConfig {
 	config := mcpConfig{}
@@ -1026,32 +1087,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	// Identity mapping: the provider's subject is not always the name of
 	// the account that owns the jobs, and what a person may do is not
 	// always in the token. Off unless asked for.
-	if spec, ok := cfg.Get("HTTP_API_IDENTITY_MAP"); ok && strings.TrimSpace(spec) != "" {
-		strategies, err := idmap.ParseStrategies(spec)
-		if err != nil {
-			// Refusing to start beats starting with a mapping nobody
-			// asked for: this setting decides who may log in.
-			logger.Error(logging.DestinationHTTP,
-				"HTTP_API_IDENTITY_MAP is not a valid strategy list; refusing to start",
-				"value", spec, "error", err)
-			os.Exit(1)
-		}
-		config.identityMapStrategies = strategies
-		config.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
-		config.identityMapTTL = 5 * time.Minute
-		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
-			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-				config.identityMapTTL = d
-			} else {
-				logger.Warn(logging.DestinationHTTP,
-					"HTTP_API_IDENTITY_MAP_TTL is not a duration; keeping the default",
-					"value", raw, "default", config.identityMapTTL)
-			}
-		}
-		logger.Info(logging.DestinationHTTP,
-			"Identity mapping: OIDC subjects resolve to local accounts, groups come from the system",
-			"strategies", strategies, "passwd_file", config.identityMapPasswdFile, "ttl", config.identityMapTTL)
-	}
+	loadIdentityMapping(cfg, &config, logger)
 
 	// Load username claim name (default: "sub")
 	if usernameClaim, ok := cfg.Get("HTTP_API_OAUTH2_USERNAME_CLAIM"); ok && usernameClaim != "" {
@@ -1601,6 +1637,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
+		IdentityGroupsFromSystem:   mcpCfg.identityGroupsSystem,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,

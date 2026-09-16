@@ -23,16 +23,35 @@ import (
 // and where what a person may do is expressed in Unix groups that the
 // token says nothing about.
 //
-// Both halves are deliberately all-or-nothing. When this is configured,
-// a caller who cannot be mapped does not get a session: falling back to
-// the token's own claims would mean the weaker authorization basis
-// engages exactly when the stronger one is broken, and the people most
-// likely to trip it are the ones whose accounts are misconfigured.
+// The two halves are configured INDEPENDENTLY, because they answer to
+// different deployments. A container that holds no account database
+// wants neither and keeps the token's own claims. A host whose accounts
+// and groups are the real authority wants both. A host where the subject
+// already IS the login name, but whose groups are in the directory,
+// wants only the second.
+//
+// Whichever halves are enabled are all-or-nothing at request time: a
+// caller the enabled halves cannot answer for does not get a session.
+// Falling back to the token's claims would mean the weaker authorization
+// basis engages exactly when the stronger one is broken, and the people
+// most likely to trip it are the ones whose accounts are misconfigured.
 type localIdentity struct {
+	// resolver maps the asserted subject to a local account. Nil leaves
+	// the subject alone, which is right when it is already a login name.
 	resolver *idmap.Resolver
-	groups   idmap.GroupSource
-	logger   *logging.Logger
+	// groups reads membership from the system. Nil keeps the token's
+	// groups claim, which is the default and the only thing that works
+	// where there is no account database to read.
+	groups idmap.GroupSource
+	logger *logging.Logger
 }
+
+// mapsAccount reports whether the asserted subject is translated.
+func (l *localIdentity) mapsAccount() bool { return l != nil && l.resolver != nil }
+
+// sourcesGroups reports whether membership comes from the system rather
+// than from the token.
+func (l *localIdentity) sourcesGroups() bool { return l != nil && l.groups != nil }
 
 // newLocalIdentity builds the mapper from operator configuration.
 //
@@ -41,7 +60,23 @@ type localIdentity struct {
 // enumeration goes through `getent passwd`, whose limits are documented
 // on idmap.Getent: SSSD lists directory accounts there only when its
 // domain has `enumerate = true`.
-func newLocalIdentity(strategies []idmap.Strategy, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
+func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
+	if len(strategies) == 0 && !systemGroups {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	l := &localIdentity{logger: logger}
+	if systemGroups {
+		// Order from nsswitch.conf, so this agrees with the rest of the
+		// machine rather than preferring a source of its own.
+		l.groups = idmap.NewCachedGroups(idmap.DefaultGroupSource(), ttl)
+	}
+	if len(strategies) == 0 {
+		return l
+	}
+
 	var (
 		enum idmap.Enumerator
 		ver  idmap.Verifier
@@ -59,19 +94,8 @@ func newLocalIdentity(strategies []idmap.Strategy, passwdFile string, ttl time.D
 		}}
 		ver = &idmap.GetentUser{}
 	}
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	if len(strategies) == 0 {
-		strategies = []idmap.Strategy{idmap.StrategyGecos}
-	}
-	return &localIdentity{
-		resolver: idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...)),
-		// SSSD first where it exists, then id(1) through NSS, then
-		// os/user. See idmap.DefaultGroupSource for why that order.
-		groups: idmap.NewCachedGroups(idmap.DefaultGroupSource(), ttl),
-		logger: logger,
-	}
+	l.resolver = idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...))
+	return l
 }
 
 // warmUp builds the index once at startup and says what it found.
@@ -80,6 +104,10 @@ func newLocalIdentity(strategies []idmap.Strategy, passwdFile string, ttl time.D
 // that two accounts claim the same identity, while reading the startup
 // log -- not from one user's failed login weeks later.
 func (l *localIdentity) warmUp(ctx context.Context) {
+	if !l.mapsAccount() {
+		// Only groups are being sourced locally; there is no index.
+		return
+	}
 	if err := l.resolver.Refresh(ctx); err != nil {
 		l.logger.Error(logging.DestinationHTTP,
 			"Could not read the account database; every login will be refused until this works",
@@ -111,15 +139,28 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	}
 }
 
-// resolve maps an asserted subject to a local account and its groups.
-func (l *localIdentity) resolve(ctx context.Context, subject string) (account string, groups []string, err error) {
-	account, err = l.resolver.Resolve(ctx, subject)
-	if err != nil {
-		return "", nil, err
+// resolve applies whichever halves are configured.
+//
+// tokenGroups is what the provider asserted; it is returned unchanged
+// unless this deployment reads membership from the system, in which case
+// the token's claim is not consulted at all.
+func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups []string) (account string, groups []string, err error) {
+	account, groups = subject, tokenGroups
+
+	if l.mapsAccount() {
+		account, err = l.resolver.Resolve(ctx, subject)
+		if err != nil {
+			return "", nil, err
+		}
 	}
-	groups, err = l.groups.GroupsFor(ctx, account)
-	if err != nil {
-		return "", nil, fmt.Errorf("reading groups for %q: %w", account, err)
+	if l.sourcesGroups() {
+		// Deliberately keyed on the mapped account: the groups that
+		// matter are the ones belonging to the account whose jobs this
+		// session will read.
+		groups, err = l.groups.GroupsFor(ctx, account)
+		if err != nil {
+			return "", nil, fmt.Errorf("reading groups for %q: %w", account, err)
+		}
 	}
 	return account, groups, nil
 }

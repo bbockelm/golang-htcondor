@@ -181,6 +181,12 @@ type Config struct {
 	// membership comes from the system rather than the token, and a
 	// caller that maps to no single account is refused a session.
 	IdentityMapStrategies []idmap.Strategy
+	// IdentityGroupsFromSystem takes group membership from the account
+	// database instead of the token's groups claim. Independent of
+	// IdentityMapStrategies: a deployment may want either, both, or
+	// neither. The default -- neither -- is what a container wants,
+	// because it holds no account database to read.
+	IdentityGroupsFromSystem bool
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
 	IdentityMapPasswdFile string
@@ -330,6 +336,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
+		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,

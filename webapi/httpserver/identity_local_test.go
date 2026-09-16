@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func writePasswd(t *testing.T) string {
 }
 
 func TestLocalIdentityResolvesSubjectToAccount(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, writePasswd(t), time.Minute, testLogger(t))
 	// Groups come from the running system, which knows nothing about
 	// these invented accounts, so exercise the resolver half directly.
 	account, err := li.resolver.Resolve(t.Context(), "tatannen")
@@ -49,7 +50,7 @@ func TestLocalIdentityResolvesSubjectToAccount(t *testing.T) {
 // The whole point of the feature: a caller whose token names them
 // "tannenba" is NOT the tannenba account. Only the GECOS maps.
 func TestLocalIdentityRejectsALoginNameAsSubject(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, writePasswd(t), time.Minute, testLogger(t))
 
 	if _, err := li.resolver.Resolve(t.Context(), "tannenba"); err == nil {
 		t.Fatal("a login name was accepted as a subject")
@@ -57,7 +58,7 @@ func TestLocalIdentityRejectsALoginNameAsSubject(t *testing.T) {
 }
 
 func TestLocalIdentityRefusesAmbiguity(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, writePasswd(t), time.Minute, testLogger(t))
 
 	_, err := li.resolver.Resolve(t.Context(), "shared.identity")
 	if err == nil {
@@ -99,9 +100,9 @@ func TestDescribeFailureSaysTheRightThing(t *testing.T) {
 // An unreadable account database must refuse logins, not admit everyone
 // with an empty group list -- which would read as a permissions decision.
 func TestLocalIdentityFailsClosedWhenTheDatabaseIsUnreadable(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, filepath.Join(t.TempDir(), "does-not-exist"), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, filepath.Join(t.TempDir(), "does-not-exist"), time.Minute, testLogger(t))
 
-	account, groups, err := li.resolve(t.Context(), "tatannen")
+	account, groups, err := li.resolve(t.Context(), "tatannen", nil)
 	if err == nil {
 		t.Fatalf("resolved %q with groups %v while the database was unreadable", account, groups)
 	}
@@ -113,16 +114,16 @@ func TestLocalIdentityFailsClosedWhenTheDatabaseIsUnreadable(t *testing.T) {
 // warmUp must not panic on a broken database, and must leave the mapper
 // refusing rather than permitting.
 func TestWarmUpSurvivesAnUnreadableDatabase(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, filepath.Join(t.TempDir(), "nope"), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, filepath.Join(t.TempDir(), "nope"), time.Minute, testLogger(t))
 	li.warmUp(t.Context())
 
-	if _, _, err := li.resolve(t.Context(), "tatannen"); err == nil {
+	if _, _, err := li.resolve(t.Context(), "tatannen", nil); err == nil {
 		t.Error("a mapper that failed to warm up is admitting callers")
 	}
 }
 
 func TestWarmUpReportsAmbiguousAccounts(t *testing.T) {
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, writePasswd(t), time.Minute, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, writePasswd(t), time.Minute, testLogger(t))
 	li.warmUp(t.Context())
 
 	amb := li.resolver.AmbiguousGecos()
@@ -135,7 +136,7 @@ func TestWarmUpReportsAmbiguousAccounts(t *testing.T) {
 // name in GECOS, a few do not, and one is a different string entirely.
 func TestLocalIdentityGecosThenUsername(t *testing.T) {
 	li := newLocalIdentity(
-		[]idmap.Strategy{idmap.StrategyGecos, idmap.StrategyUsername},
+		[]idmap.Strategy{idmap.StrategyGecos, idmap.StrategyUsername}, false,
 		writePasswd(t), time.Minute, testLogger(t))
 
 	for subject, want := range map[string]string{
@@ -156,5 +157,58 @@ func TestLocalIdentityGecosThenUsername(t *testing.T) {
 	// Ambiguity still refuses, rather than falling through to a login name.
 	if _, err := li.resolver.Resolve(t.Context(), "shared.identity"); err == nil {
 		t.Error("a contested GECOS fell through to the login-name strategy")
+	}
+}
+
+// The two halves are independent. A container keeps the token's groups
+// and does not translate the subject at all -- which must stay the
+// default, since there is no account database in there to read.
+func TestLocalIdentityHalvesAreIndependent(t *testing.T) {
+	logger := testLogger(t)
+	passwd := writePasswd(t)
+
+	if li := newLocalIdentity(nil, false, passwd, time.Minute, logger); li != nil {
+		t.Error("neither half configured should yield no mapper at all")
+	}
+
+	// Subject mapping only: groups stay whatever the token said.
+	mapOnly := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, passwd, time.Minute, logger)
+	if !mapOnly.mapsAccount() || mapOnly.sourcesGroups() {
+		t.Fatalf("map-only: maps=%v groups=%v", mapOnly.mapsAccount(), mapOnly.sourcesGroups())
+	}
+	tokenGroups := []string{"from-the-token"}
+	account, groups, err := mapOnly.resolve(t.Context(), "tatannen", tokenGroups)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if account != "tannenba" {
+		t.Errorf("account = %q, want tannenba", account)
+	}
+	if !reflect.DeepEqual(groups, tokenGroups) {
+		t.Errorf("groups = %v, want the token's claim %v untouched", groups, tokenGroups)
+	}
+
+	// Groups only: the subject is passed through unchanged, because it
+	// is already expected to be a login name.
+	groupsOnly := newLocalIdentity(nil, true, passwd, time.Minute, logger)
+	if groupsOnly.mapsAccount() || !groupsOnly.sourcesGroups() {
+		t.Fatalf("groups-only: maps=%v groups=%v", groupsOnly.mapsAccount(), groupsOnly.sourcesGroups())
+	}
+	// warmUp must not touch an index that was never built.
+	groupsOnly.warmUp(t.Context())
+}
+
+// With groups sourced from the system, a token claim must not leak
+// through even when the lookup fails: that would be the weaker basis
+// engaging exactly when the stronger one broke.
+func TestSystemGroupsNeverFallBackToTheToken(t *testing.T) {
+	li := newLocalIdentity(nil, true, writePasswd(t), time.Minute, testLogger(t))
+
+	_, groups, err := li.resolve(t.Context(), "no-such-account-anywhere", []string{"admin"})
+	if err == nil {
+		t.Fatalf("a failed system lookup returned groups %v", groups)
+	}
+	if groups != nil {
+		t.Errorf("groups %v returned alongside the error", groups)
 	}
 }
