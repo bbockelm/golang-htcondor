@@ -320,3 +320,124 @@ func TestWatchMaxWaitConfigurable(t *testing.T) {
 		t.Errorf("wait_seconds description should advertise the configured max 8, got: %s", desc)
 	}
 }
+
+// TestReRegisteringAWatchDoesNotWaitAgain: an agent that reads
+// watch_jobs as "tell me the state now" calls it again every time it
+// wants to check. Registration coalesces onto the watch it already has,
+// so the second call used to block all over again -- the polling loop
+// watches exist to replace, with a 20-second stall on each turn.
+//
+// It must answer from what is already known and name the tool that
+// actually checks.
+func TestReRegisteringAWatchDoesNotWaitAgain(t *testing.T) {
+	// A job that is running, so the watch cannot fire and the wait
+	// would run to its full deadline.
+	running := classad.New()
+	running.InsertAttr("ClusterId", int64(42))
+	running.InsertAttr("ProcId", int64(0))
+	running.InsertAttr("JobStatus", int64(2))
+	s := watchServer(t, &stubSource{queue: []*classad.ClassAd{running}})
+
+	args := map[string]interface{}{"constraint": "ClusterId == 42", "wait_seconds": 6}
+	first := text(t, mustWatch(t, s, args))
+	if !strings.Contains(first, "WAITING") {
+		t.Fatalf("first registration did not report waiting:\n%s", first)
+	}
+
+	started := time.Now()
+	second := text(t, mustWatch(t, s, args))
+	elapsed := time.Since(started)
+
+	if elapsed > 3*time.Second {
+		t.Errorf("re-registering blocked for %s; it waited on the watch it already had", elapsed)
+	}
+	if !strings.Contains(second, "ALREADY WATCHING") {
+		t.Errorf("the caller was not told this is the watch it already registered:\n%s", second)
+	}
+	if !strings.Contains(second, "check_watches") {
+		t.Errorf("the response does not name the tool that checks a watch:\n%s", second)
+	}
+
+	// And it is still one watch, not two.
+	report := text(t, mustCheck(t, s, map[string]interface{}{}))
+	if strings.Count(report, "still waiting") > 1 {
+		t.Errorf("more than one watch is waiting:\n%s", report)
+	}
+}
+
+// TestWatchMatchingNothingSaysSo: a constraint that selects no job is
+// registered rather than refused, because the tracked set grows as jobs
+// appear and watching for work not yet submitted is a real use. But it
+// is far more often a wrong ClusterId, and a watch selecting nothing is
+// indistinguishable from one waiting patiently on jobs that are still
+// running -- it would sit until its TTL expired having never been able
+// to fire.
+func TestWatchMatchingNothingSaysSo(t *testing.T) {
+	s := watchServer(t, &stubSource{})
+
+	res := text(t, mustWatch(t, s, map[string]interface{}{"constraint": "ClusterId == 999"}))
+	if !strings.Contains(res, "MATCHES NOTHING") {
+		t.Errorf("a watch that selects no job did not say so:\n%s", res)
+	}
+	if !strings.Contains(res, "query_jobs") {
+		t.Errorf("no suggestion for confirming the constraint:\n%s", res)
+	}
+	// Registered, not refused: it still has an id and can fire later.
+	if !strings.Contains(res, "WAITING") {
+		t.Errorf("the watch was not registered:\n%s", res)
+	}
+
+	// The same has to be visible later, when the caller comes back to
+	// ask why nothing has happened.
+	report := text(t, mustCheck(t, s, map[string]interface{}{}))
+	if !strings.Contains(report, "MATCHES NOTHING") {
+		t.Errorf("check_watches presented an empty watch as ordinary waiting:\n%s", report)
+	}
+}
+
+// The other half of the same rule. Where the cap is long enough that
+// blocking is the endorsed way to wait (watch_advice.go), a caller
+// asking to wait again is doing what the tool told it to -- a retry
+// after a transport timeout looks exactly like this -- so its wait is
+// honoured. Only the short-cap deployment, where blocking was advised
+// only for something imminent, treats a repeat call as polling.
+func TestReRegisteringStillWaitsWhereBlockingIsTheAdvice(t *testing.T) {
+	running := classad.New()
+	running.InsertAttr("ClusterId", int64(42))
+	running.InsertAttr("ProcId", int64(0))
+	running.InsertAttr("JobStatus", int64(2))
+	s := watchServer(t, &stubSource{queue: []*classad.ClassAd{running}})
+	s.watchMaxWait = 10 * time.Minute
+
+	args := map[string]interface{}{"constraint": "ClusterId == 42", "wait_seconds": 4}
+	mustWatch(t, s, args)
+
+	started := time.Now()
+	again := text(t, mustWatch(t, s, args))
+	if elapsed := time.Since(started); elapsed < 3*time.Second {
+		t.Errorf("the second call returned after %s; it was asked to wait, on a deployment where waiting is the advice", elapsed)
+	}
+	// Still told which watch this is -- the explanation does not depend
+	// on whether the wait was honoured.
+	if !strings.Contains(again, "ALREADY WATCHING") {
+		t.Errorf("the caller was not told this is the watch it already registered:\n%s", again)
+	}
+}
+
+func mustWatch(t *testing.T, s *Server, args map[string]interface{}) interface{} {
+	t.Helper()
+	res, err := s.toolWatchJobs(aliceCtx(), args)
+	if err != nil {
+		t.Fatalf("watch_jobs: %v", err)
+	}
+	return res
+}
+
+func mustCheck(t *testing.T, s *Server, args map[string]interface{}) interface{} {
+	t.Helper()
+	res, err := s.toolCheckWatches(aliceCtx(), args)
+	if err != nil {
+		t.Fatalf("check_watches: %v", err)
+	}
+	return res
+}

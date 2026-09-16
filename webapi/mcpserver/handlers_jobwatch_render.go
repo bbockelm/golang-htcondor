@@ -18,6 +18,11 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 	if w == nil {
 		w = registered
 	}
+	// Coalesced describes what this CALL did, and `got` is a fresh read
+	// from the store, which cannot know that. Carry it across.
+	if registered != nil && registered.Coalesced {
+		w.Coalesced = true
+	}
 	var b strings.Builder
 	if !w.FiredAt.IsZero() {
 		fmt.Fprintf(&b, "FIRED already — %s\n\n", describeFired(w))
@@ -25,6 +30,21 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 		b.WriteString(renderMatched(w))
 		return b.String()
 	}
+
+	// Re-registering an identical question returns the watch that
+	// already exists. Say so plainly: an agent that reads watch_jobs as
+	// "tell me the state now" will otherwise call it again and again,
+	// waiting each time for a thing it has already arranged to be told.
+	if w.Coalesced {
+		fmt.Fprintf(&b, "ALREADY WATCHING — this is the watch you registered %s ago (%s), not a new one: %s\n\n",
+			shortDuration(time.Since(w.CreatedAt)), w.ID, describeQuestion(w))
+		b.WriteString(renderWatchProgress(w))
+		fmt.Fprintf(&b, "\nTo ask again what has happened, call check_watches with {\"watch_id\": %q}. "+
+			"Calling watch_jobs again does not check this watch -- it re-registers the same question, "+
+			"and returns here.\n", w.ID)
+		return b.String()
+	}
+
 	fmt.Fprintf(&b, "WAITING — watch %s registered: %s\n\n", w.ID, describeQuestion(w))
 	if w.Incomplete {
 		b.WriteString("WARNING: this watch selects more jobs than one read of the queue covers, so it is " +
@@ -33,8 +53,34 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 			"Narrow the constraint — naming a cluster (ClusterId == N) is almost always what was meant — " +
 			"or use aggregate_jobs to follow bulk progress instead.\n\n")
 	}
-	b.WriteString("Nothing to report yet. Do not poll for this; carry on, and call check_watches when you next need to know.\n")
+	b.WriteString(renderWatchProgress(w))
+	fmt.Fprintf(&b, "\nThat is the whole of what watch_jobs does: it registers the question, and answers it "+
+		"if it can already be answered. Do not poll, and do not call watch_jobs again for this -- that "+
+		"returns this same watch rather than checking it. Carry on with other work, and when you next need "+
+		"to know, call check_watches with {\"watch_id\": %q} (or with no arguments to collect every answer "+
+		"at once).\n", w.ID)
 	return b.String()
+}
+
+// renderWatchProgress says what the watch currently selects.
+//
+// The zero case earns its own wording. A constraint that matches
+// nothing is registered rather than refused, because the tracked set
+// grows as jobs appear and watching for work not yet submitted is a
+// real use -- but it is far more often a wrong cluster id or a typo,
+// and a watch that silently selects nothing looks exactly like one
+// waiting patiently on jobs that are still running. It would sit there
+// until its TTL ran out, having never been able to fire.
+func renderWatchProgress(w *jobwatch.Watch) string {
+	if len(w.Tracked) > 0 {
+		return fmt.Sprintf("Watching %d job(s). Nothing to report yet.\n", len(w.Tracked))
+	}
+	return "MATCHES NOTHING: no job of yours in the queue, and none in the last 24h of history, " +
+		"satisfies this constraint. Nothing is wrong with the watch -- it stays registered and will " +
+		"fire if matching jobs appear, which is what you want if you have not submitted them yet.\n" +
+		"But if you expected jobs that already exist, the constraint is the thing to check: a wrong " +
+		"ClusterId, a quoted number, or an attribute that is not on the ad. Confirm with query_jobs " +
+		"(same constraint) before waiting on this.\n"
 }
 
 func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool) string {
@@ -60,8 +106,16 @@ func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool) s
 		b.WriteString("Still waiting:\n")
 		for _, w := range waiting {
 			fmt.Fprintf(&b, "- %s (%s), registered %s ago", w.ID, describeQuestion(w), shortDuration(time.Since(w.CreatedAt)))
-			if w.Incomplete {
+			switch {
+			case w.Incomplete:
 				b.WriteString("  [selects more jobs than one read covers; narrow the constraint]")
+			case len(w.Tracked) == 0:
+				// Indistinguishable from patient waiting unless it is
+				// said: this one has never selected a job, so it has
+				// never had anything to wait on.
+				b.WriteString("  [MATCHES NOTHING so far -- no such job in the queue or in recent history; check the constraint with query_jobs]")
+			default:
+				fmt.Fprintf(&b, "  [%d job(s)]", len(w.Tracked))
 			}
 			b.WriteString("\n")
 		}

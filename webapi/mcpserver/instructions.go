@@ -40,7 +40,9 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("2. upload_job_input — upload the executable and small input files (< 100 KB total recommended). " +
 		"For larger inputs, use HTTP/HTTPS URLs in transfer_input_files.\n")
 	b.WriteString("3. watch_jobs / check_watches — wait for the job to finish (or be held) without polling; " +
-		"a watch fires even if it already happened. Use query_jobs for a one-off status snapshot.\n")
+		"a watch fires even if it already happened. Call watch_jobs ONCE to register the question, then " +
+		"check_watches each time you want to know whether it has been answered — calling watch_jobs again " +
+		"returns the same watch rather than checking it. Use query_jobs for a one-off status snapshot.\n")
 	b.WriteString("4. tail_job_output — while it RUNS, read the end of its stdout/stderr straight from " +
 		"the execute node. This is how you watch progress or find out why a job is stuck, instead of " +
 		"waiting for it to finish. Pass the offsets it returns back on the next call to get only what " +

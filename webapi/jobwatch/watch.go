@@ -102,6 +102,14 @@ type Watch struct {
 	// out what happened.
 	DeliveredAt time.Time
 
+	// Coalesced marks a watch that Register returned instead of
+	// creating, because an identical unanswered one was already
+	// registered. Not persisted: it describes what happened in THIS
+	// call, and it is the difference between "here is your new watch"
+	// and "you already had this one" -- which is the whole answer an
+	// agent re-registering a watch to poll it needs to hear.
+	Coalesced bool
+
 	matchConstraint *vm.Query
 	matchCondition  *vm.Query
 	// trackedBlob is the stored form of Tracked as it was loaded, so a

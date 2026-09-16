@@ -63,6 +63,7 @@ func (s *Store) Register(ctx context.Context, w *Watch, ttl time.Duration) (*Wat
 	if existing, err := s.findLiveDuplicate(ctx, w); err != nil {
 		return nil, err
 	} else if existing != nil {
+		existing.Coalesced = true
 		return existing, nil
 	}
 
