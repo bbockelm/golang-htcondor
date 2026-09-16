@@ -150,11 +150,18 @@ type mcpConfig struct {
 	oauth2Scopes        []string
 	oauth2UsernameClaim string
 	oauth2GroupsClaim   string
-	mcpAccessGroup      string
-	mcpReadGroup        string
-	mcpWriteGroup       string
-	instructions        string
-	adminUsers          []string
+
+	// identityMapGecos maps the OIDC subject to the local account whose
+	// GECOS equals it, and takes group membership from the system
+	// instead of the token. See webapi/httpserver/identity_local.go.
+	identityMapGecos      bool
+	identityMapPasswdFile string
+	identityMapTTL        time.Duration
+	mcpAccessGroup        string
+	mcpReadGroup          string
+	mcpWriteGroup         string
+	instructions          string
+	adminUsers            []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -1015,6 +1022,27 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	}
 	logger.Info(logging.DestinationHTTP, "OAuth2 groups claim", "claim", config.oauth2GroupsClaim)
 
+	// Identity mapping: the provider's subject is not always the name of
+	// the account that owns the jobs, and what a person may do is not
+	// always in the token. Off unless asked for.
+	if v, ok := cfg.Get("HTTP_API_IDENTITY_MAP"); ok && strings.EqualFold(strings.TrimSpace(v), "gecos") {
+		config.identityMapGecos = true
+		config.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
+		config.identityMapTTL = 5 * time.Minute
+		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				config.identityMapTTL = d
+			} else {
+				logger.Warn(logging.DestinationHTTP,
+					"HTTP_API_IDENTITY_MAP_TTL is not a duration; keeping the default",
+					"value", raw, "default", config.identityMapTTL)
+			}
+		}
+		logger.Info(logging.DestinationHTTP,
+			"Identity mapping: OIDC subjects resolve to local accounts by GECOS, groups come from the system",
+			"passwd_file", config.identityMapPasswdFile, "ttl", config.identityMapTTL)
+	}
+
 	// Load username claim name (default: "sub")
 	if usernameClaim, ok := cfg.Get("HTTP_API_OAUTH2_USERNAME_CLAIM"); ok && usernameClaim != "" {
 		config.oauth2UsernameClaim = usernameClaim
@@ -1562,6 +1590,9 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
+		IdentityMapGecos:           mcpCfg.identityMapGecos,
+		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
+		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan: mcpCfg.oauth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:     mcpCfg.oauth2MaxGrantLifetime,

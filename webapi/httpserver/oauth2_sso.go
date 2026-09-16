@@ -281,12 +281,39 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Extract groups
 	userGroups := extractGroups(userInfo.Groups)
+
+	// The provider has said who this is. Where the deployment keeps that
+	// answer in the account database instead -- a subject that is not a
+	// login name, group membership that is not in the token -- translate
+	// here, once, before anything downstream reads either.
+	//
+	// Everything that follows takes its identity from `subject` rather
+	// than userInfo.Subject: the group policy below, the granted scopes,
+	// the browser session, the OAuth2 session, and through the state
+	// store, the consent and device-approval flows.
+	subject := userInfo.Subject
+	if s.localIdentity != nil {
+		account, groups, err := s.localIdentity.resolve(ctx, subject)
+		if err != nil {
+			// Refused, not degraded. See localIdentity's comment on why
+			// there is no fallback to the token's own claims.
+			s.logger.Warn(logging.DestinationHTTP,
+				"Refusing a login that maps to no single local account",
+				"oidc_subject", subject, "error", err)
+			s.writeError(w, http.StatusForbidden, describeFailure(err))
+			return
+		}
+		s.logger.Info(logging.DestinationHTTP, "Mapped an asserted identity to a local account",
+			"oidc_subject", subject, "account", account, "groups", groups)
+		subject, userGroups = account, groups
+	}
+
 	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO",
-		"subject", userInfo.Subject, "groups", userGroups)
+		"subject", subject, "groups", userGroups)
 
 	// Validate group-based access
 	if err := s.validateGroupAccess(userGroups); err != nil {
-		s.logger.Warn(logging.DestinationHTTP, "User denied access", "subject", userInfo.Subject, "error", err)
+		s.logger.Warn(logging.DestinationHTTP, "User denied access", "subject", subject, "error", err)
 
 		// For browser flow, show an error page instead of OAuth2 error
 		if isBrowserFlow {
@@ -303,16 +330,16 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// For browser flow, create session and redirect back to original URL
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
-		sessionID, sessionData, err := s.sessionStore.Create(userInfo.Subject, userGroups)
+		sessionID, sessionData, err := s.sessionStore.Create(subject, userGroups)
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
-				"error", err, "subject", userInfo.Subject)
+				"error", err, "subject", subject)
 			s.writeError(w, http.StatusInternalServerError, "Failed to create session")
 			return
 		}
 		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
 		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie for browser flow",
-			"subject", userInfo.Subject, "session_id", sessionID[:8]+"...",
+			"subject", subject, "session_id", sessionID[:8]+"...",
 			"expires_at", sessionData.ExpiresAt)
 
 		// Redirect back to original URL or default to root.
@@ -329,7 +356,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			redirectURL = "/"
 		}
 		s.logger.Info(logging.DestinationHTTP, "Browser authentication successful, redirecting",
-			"subject", userInfo.Subject, "redirect_url", redirectURL)
+			"subject", subject, "redirect_url", redirectURL)
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
@@ -339,7 +366,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	grantedScopes := s.getScopesForGroups(userGroups, requestedScopes)
 
 	s.logger.Info(logging.DestinationHTTP, "Granting scopes based on group membership",
-		"subject", userInfo.Subject,
+		"subject", subject,
 		"requested_scopes", requestedScopes,
 		"granted_scopes", grantedScopes)
 
@@ -352,7 +379,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// are persisted with the grant so reauthorizeRefreshGrant can re-run
 	// getScopesForGroups when the grant is refreshed — this is the only
 	// place they are ever read, and they would otherwise be dropped here.
-	session := DefaultOpenIDConnectSession(userInfo.Subject).WithGroups(userGroups)
+	session := DefaultOpenIDConnectSession(subject).WithGroups(userGroups)
 
 	// Generate OAuth2 response
 	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
@@ -367,13 +394,13 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response",
 			"error", err, "error_details", errorDetails,
-			"subject", userInfo.Subject, "client_id", ar.GetClient().GetID())
+			"subject", subject, "client_id", ar.GetClient().GetID())
 		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "OAuth2 callback completed successfully",
-		"subject", userInfo.Subject, "granted_scopes", grantedScopes)
+		"subject", subject, "granted_scopes", grantedScopes)
 
 	// OAuth2 client flow - write the standard OAuth2 response
 	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)

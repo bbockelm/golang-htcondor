@@ -181,7 +181,13 @@ type Handler struct {
 	oauth2UserInfoURL   string            // User info endpoint for SSO
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
-	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
+
+	// localIdentity maps an asserted OIDC subject to the local account
+	// that owns this user's jobs, and reads that account's groups from
+	// the system rather than from the token. Nil unless the deployment
+	// configures it; see identity_local.go.
+	localIdentity  *localIdentity
+	mcpAccessGroup string // Group required for any MCP access (empty = all authenticated users)
 	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
 	// is being extended; see mcp_deadline.go.
 	mcpMaxRequest time.Duration
@@ -474,6 +480,18 @@ type HandlerConfig struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+
+	// IdentityMapGecos turns on mapping an OIDC subject to a local
+	// account by the account's GECOS field, with group membership read
+	// from the system rather than from the token. When set, a caller
+	// that maps to no single account is refused a session.
+	IdentityMapGecos bool
+	// IdentityMapPasswdFile reads accounts from this file instead of
+	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
+	IdentityMapPasswdFile string
+	// IdentityMapTTL is how long the GECOS index and the group lookups
+	// are reused. Zero means five minutes.
+	IdentityMapTTL time.Duration
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1118,6 +1136,18 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 				// Client registration code remains the same...
 				h.ensureOAuth2ClientRegistered(cfg.OAuth2ClientID, cfg.OAuth2ClientSecret, cfg.OAuth2RedirectURL, scopes)
 			}
+		}
+
+		// Map the provider's subject onto a local account, where the
+		// deployment says the two differ. Built before the first request
+		// so the account index is warm and its problems are in the
+		// startup log rather than in somebody's failed login.
+		if cfg.IdentityMapGecos {
+			h.localIdentity = newLocalIdentity(cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger)
+			h.localIdentity.warmUp(context.Background())
+			logger.Info(logging.DestinationHTTP,
+				"Identity mapping enabled: subjects resolve to local accounts by GECOS, "+
+					"and groups come from the system rather than the token")
 		}
 
 		// Set groups claim name (default: "groups")

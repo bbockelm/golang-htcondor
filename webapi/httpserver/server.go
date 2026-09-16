@@ -173,6 +173,18 @@ type Config struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+
+	// IdentityMapGecos turns on mapping an OIDC subject to a local
+	// account by the account's GECOS field, with group membership read
+	// from the system rather than from the token. When set, a caller
+	// that maps to no single account is refused a session.
+	IdentityMapGecos bool
+	// IdentityMapPasswdFile reads accounts from this file instead of
+	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
+	IdentityMapPasswdFile string
+	// IdentityMapTTL is how long the GECOS index and the group lookups
+	// are reused. Zero means five minutes.
+	IdentityMapTTL time.Duration
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -315,6 +327,9 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
+		IdentityMapGecos:            cfg.IdentityMapGecos,
+		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
+		IdentityMapTTL:              cfg.IdentityMapTTL,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,

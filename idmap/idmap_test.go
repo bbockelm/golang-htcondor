@@ -274,3 +274,39 @@ func TestChainSurvivesAFailingSource(t *testing.T) {
 		t.Error("an all-failed chain reported an empty account list instead of an error")
 	}
 }
+
+// An end-to-end pass over a passwd file: index it, resolve a subject,
+// and confirm the answer against the same file.
+func TestResolverOverAPasswdFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "passwd")
+	body := strings.Join([]string{
+		"root:x:0:0:root:/root:/bin/bash",
+		"daemon:x:1:1::/usr/sbin:/usr/sbin/nologin",
+		realPasswdLine,
+		"bbockelm:x:20014:20014:brian.bockelman.1:/home/bbockelm:/bin/bash",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pf := NewPasswdFile(path)
+	r := New(pf, &PasswdFileVerifier{File: pf})
+
+	got, err := r.Resolve(context.Background(), "tatannen")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != "tannenba" {
+		t.Errorf("Resolve(tatannen) = %q, want tannenba", got)
+	}
+
+	if _, err := r.Resolve(context.Background(), "nobody.at.all"); !errors.Is(err, ErrNoMatch) {
+		t.Errorf("an unknown subject must not resolve: %v", err)
+	}
+
+	accounts, amb, built := r.Stats()
+	if accounts != 4 || amb != 0 || built.IsZero() {
+		t.Errorf("Stats() = %d accounts, %d ambiguous, built %v", accounts, amb, built)
+	}
+}
