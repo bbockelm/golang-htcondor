@@ -68,7 +68,7 @@ func decodeTracked(blob string) ([]JobID, error) {
 		return nil, nil
 	}
 	var ranges []jobRange
-	if err := json.Unmarshal([]byte(blob), &ranges); err == nil && looksLikeRanges(ranges) {
+	if err := json.Unmarshal([]byte(blob), &ranges); err == nil && looksLikeRanges(blob) {
 		out := make([]JobID, 0, 16)
 		for _, r := range ranges {
 			if r.To < r.From {
@@ -87,21 +87,34 @@ func decodeTracked(blob string) ([]JobID, error) {
 	return ids, nil
 }
 
-// looksLikeRanges distinguishes the two encodings. They are both JSON
-// arrays of objects, so the discriminator is the key set: a range has
-// "t", a bare JobID does not, and json.Unmarshal leaves it zero.
+// looksLikeRanges distinguishes the two encodings by KEY, not by the
+// values the keys decode to.
 //
-// An empty array is ambiguous and means the same thing either way.
-func looksLikeRanges(ranges []jobRange) bool {
-	if len(ranges) == 0 {
+// The values cannot tell them apart. Both are JSON arrays of objects,
+// and unmarshalling old-format rows (cluster_id/proc_id) into a
+// jobRange leaves every field zero -- but so does a perfectly ordinary
+// new-format row for a single job at proc 0, which is what
+// `[{"c":N,"f":0,"t":0}]` is. Deciding on zeroes therefore misread the
+// commonest submission there is (one job, proc 0) as the old format,
+// and decoding it as JobIDs -- whose keys do not match either -- turned
+// the tracked job into the ghost 0.0. The watch then tracked a job that
+// does not exist and can never satisfy anything, so an "all" watch over
+// an outcome that absence cannot resolve never fired.
+//
+// The key sets are disjoint, so the key is the honest discriminator.
+func looksLikeRanges(blob string) bool {
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(blob), &rows); err != nil {
+		return false
+	}
+	if len(rows) == 0 {
+		// An empty array means the same thing either way.
 		return true
 	}
-	for _, r := range ranges {
-		if r.To != 0 || r.From != 0 {
-			return true
+	for _, row := range rows {
+		if _, ok := row["cluster_id"]; ok {
+			return false
 		}
 	}
-	// Every range decoded to zeroes, which is what the old encoding
-	// produces: its keys are cluster_id/proc_id, and none of them match.
-	return false
+	return true
 }

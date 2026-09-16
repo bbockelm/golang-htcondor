@@ -129,3 +129,42 @@ func writeCount(t *testing.T, s *Store) int {
 	}
 	return n
 }
+
+// TestSingleJobAtProcZeroSurvivesReload: a watch's tracked set is its
+// memory, and the commonest submission there is -- one job, proc 0 --
+// was being forgotten across a pass.
+//
+// The two stored encodings are both JSON arrays of objects, and the old
+// one (cluster_id/proc_id) decodes into a jobRange as all zeroes. So did
+// a perfectly ordinary NEW row for proc 0: `[{"c":42,"f":0,"t":0}]`.
+// Deciding the format on those values misread it as the old encoding,
+// decoded it with keys that match nothing, and replaced the tracked job
+// with the ghost 0.0 -- a job that does not exist, cannot be observed,
+// and therefore can never be satisfied.
+func TestSingleJobAtProcZeroSurvivesReload(t *testing.T) {
+	blob, err := encodeTracked([]JobID{{Cluster: 42, Proc: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeTracked(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []JobID{{Cluster: 42, Proc: 0}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("tracked set %v round-tripped through %s to %v", want, blob, got)
+	}
+}
+
+// The old encoding still has to decode, or upgrading forgets every
+// watch's memory -- and for terminal events, a job's disappearance from
+// the queue is the evidence the watch is waiting on.
+func TestOldTrackedEncodingStillDecodes(t *testing.T) {
+	got, err := decodeTracked(`[{"cluster_id":42,"proc_id":0},{"cluster_id":42,"proc_id":1}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (JobID{42, 0}) || got[1] != (JobID{42, 1}) {
+		t.Errorf("old-format tracked set decoded to %v", got)
+	}
+}
