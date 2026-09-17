@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -390,5 +391,42 @@ func TestSplitArgs(t *testing.T) {
 				t.Errorf("splitArgs(%q): part %d expected %q, got %q", tt.input, i, tt.expected[i], result[i])
 			}
 		}
+	}
+}
+
+// TestFunctionSTRINGEvaluatesMacroExpr is the regression for the CHTC deployment bug:
+// $STRING(name) must look up the macro, evaluate its value as a ClassAd expression, and
+// return the string -- not echo the name. This is the exact shape a CHTC AP uses to derive
+// its per-host include file (and thus JOB_EPOCH_HISTORY): a toLower() over the hostname fed
+// through $STRING, then used to build LOCAL. The old no-op left LC_* as the literal name, so
+// LOCAL pointed at a nonexistent file and per-host settings fell back to defaults.
+func TestFunctionSTRINGEvaluatesMacroExpr(t *testing.T) {
+	body := `MY_HOST = AP2001.CHTC.WISC.EDU
+_LC_HOST = toLower("$(MY_HOST)")
+LC_HOST = $STRING(_LC_HOST)
+LOCAL = /etc/condor/hosts/$(LC_HOST).local`
+	cfg, err := NewFromReaderWithOptions(strings.NewReader(body), ConfigOptions{Subsystem: "SCHEDD"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, _ := cfg.Get("LC_HOST"); got != "ap2001.chtc.wisc.edu" {
+		t.Errorf("LC_HOST = %q, want ap2001.chtc.wisc.edu (STRING must evaluate toLower(), not echo the name)", got)
+	}
+	if got, _ := cfg.Get("LOCAL"); got != "/etc/condor/hosts/ap2001.chtc.wisc.edu.local" {
+		t.Errorf("LOCAL = %q, want the per-host include path", got)
+	}
+}
+
+// TestFunctionSTRINGPassesThroughPlainValue confirms a value that is not a ClassAd
+// expression (a bare path) passes through unchanged rather than becoming "undefined".
+func TestFunctionSTRINGPassesThroughPlainValue(t *testing.T) {
+	body := `SOMEPATH = /var/lib/condor/history/epoch_history
+P = $STRING(SOMEPATH)`
+	cfg, err := NewFromReaderWithOptions(strings.NewReader(body), ConfigOptions{Subsystem: "SCHEDD"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, _ := cfg.Get("P"); got != "/var/lib/condor/history/epoch_history" {
+		t.Errorf("P = %q, want the plain path passed through", got)
 	}
 }
