@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -272,23 +271,27 @@ func writeNSSwitch(t *testing.T, body string) string {
 
 // The chain must be the machine's own declared order, not one this
 // package prefers.
+//
+// This is platform-independent by design: the SSSD reader is ordinary Go
+// and is selected by what nsswitch.conf says, not by GOOS. A host
+// without SSSD simply never names sss on its group line -- and a host
+// without nsswitch.conf at all falls back to libc, which is covered
+// separately.
 func TestNSSwitchGroupSourceFollowsTheDeclaredOrder(t *testing.T) {
 	filesFirst := NSSwitchGroupSource(writeNSSwitch(t,
 		"passwd: files sss\ngroup:  files sss\n")).Name()
 	sssFirst := NSSwitchGroupSource(writeNSSwitch(t,
 		"passwd: sss files\ngroup:  sss files\n")).Name()
 
-	if runtime.GOOS == "linux" {
-		if !strings.HasPrefix(filesFirst, "chain(files,sssd") {
-			t.Errorf("files-first gave %q", filesFirst)
-		}
-		if !strings.HasPrefix(sssFirst, "chain(sssd,files") {
-			t.Errorf("sss-first gave %q", sssFirst)
-		}
-	} else if !strings.Contains(filesFirst, "files") || strings.Contains(filesFirst, "sssd") {
-		// SSSD's socket protocol is Linux-only; the rest of the order
-		// still has to be respected.
-		t.Errorf("off Linux, expected files without sssd: %q", filesFirst)
+	if filesFirst != "chain(files,sssd)" {
+		t.Errorf("files-first gave %q, want chain(files,sssd)", filesFirst)
+	}
+	if sssFirst != "chain(sssd,files)" {
+		t.Errorf("sss-first gave %q, want chain(sssd,files)", sssFirst)
+	}
+	// The order is the only difference, and it is the whole point.
+	if filesFirst == sssFirst {
+		t.Error("the declared order made no difference to the chain")
 	}
 }
 

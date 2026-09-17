@@ -1,5 +1,3 @@
-//go:build linux
-
 package idmap
 
 import (
@@ -21,6 +19,14 @@ import (
 // /etc/group alone will get nothing here and should fall through --
 // which is what GroupChain is for.
 type SSSDGroups struct {
+	// SocketPath overrides the SSSD NSS socket. Empty uses gosssd's
+	// default. Exposed so this can be pointed at a test double: the one
+	// bug that made this source unusable -- a client that reported a
+	// successful connection and then failed every request -- was
+	// invisible precisely because nothing could exercise it without a
+	// live SSSD.
+	SocketPath string
+
 	mu     sync.Mutex
 	client *gosssd.Client
 }
@@ -36,7 +42,11 @@ func (s *SSSDGroups) connect(ctx context.Context) (*gosssd.Client, error) {
 	if s.client != nil {
 		return s.client, nil
 	}
-	c := gosssd.NewClient(gosssd.WithContext(ctx))
+	opts := []gosssd.ClientOption{gosssd.WithContext(ctx)}
+	if s.SocketPath != "" {
+		opts = append(opts, gosssd.WithSocketPath(s.SocketPath))
+	}
+	c := gosssd.NewClient(opts...)
 	if err := c.ConnectContext(ctx); err != nil {
 		return nil, fmt.Errorf("SSSD not available: %w", err)
 	}
