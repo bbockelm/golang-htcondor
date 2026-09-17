@@ -86,5 +86,13 @@ func (n *NSSLookupStrategy) Name() string {
 
 // tryNSSStrategy attempts to create an NSS-based lookup strategy.
 func tryNSSStrategy() (LookupStrategy, error) {
-	return NewNSSLookup()
+	// The conversion is explicit so that a failure yields a nil INTERFACE.
+	// Returning the constructor's result directly would wrap a nil *T in a
+	// non-nil interface, which is why callers' "strategy != nil" guards were
+	// always true and could never have caught anything.
+	s, err := NewNSSLookup()
+	if err != nil || s == nil {
+		return nil, err
+	}
+	return s, nil
 }

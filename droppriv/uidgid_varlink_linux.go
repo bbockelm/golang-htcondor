@@ -118,5 +118,13 @@ func (s *SystemdUserDBLookupStrategy) Name() string {
 //
 //nolint:unused // infrastructure function, may be used in future implementations
 func trySystemdUserDB() (LookupStrategy, error) {
-	return NewSystemdUserDBLookup()
+	// The conversion is explicit so that a failure yields a nil INTERFACE.
+	// Returning the constructor's result directly would wrap a nil *T in a
+	// non-nil interface, which is why callers' "strategy != nil" guards were
+	// always true and could never have caught anything.
+	s, err := NewSystemdUserDBLookup()
+	if err != nil || s == nil {
+		return nil, err
+	}
+	return s, nil
 }

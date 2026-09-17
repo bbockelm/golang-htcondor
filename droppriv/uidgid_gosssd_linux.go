@@ -29,7 +29,11 @@ func NewSSSDLookup(ctx context.Context) (*SSSDLookupStrategy, error) {
 }
 
 // LookupUser looks up a user using SSSD via gosssd.
-func (s *SSSDLookupStrategy) LookupUser(ctx context.Context, username string) (*UserInfo, error) {
+//
+// The context is unused: gosssd's request calls take none, carrying
+// instead the one the client was constructed with. Named _ so that is
+// visible rather than looking like an oversight.
+func (s *SSSDLookupStrategy) LookupUser(_ context.Context, username string) (*UserInfo, error) {
 	user, err := s.client.GetUserByName(username)
 	if err != nil {
 		// Check if it's a "not found" error by examining the error message
@@ -64,5 +68,13 @@ func (s *SSSDLookupStrategy) Name() string {
 
 // trySSSD attempts to create an SSSD lookup strategy using gosssd.
 func trySSSD(ctx context.Context) (LookupStrategy, error) {
-	return NewSSSDLookup(ctx)
+	// The conversion is explicit so that a failure yields a nil INTERFACE.
+	// Returning the constructor's result directly would wrap a nil *T in a
+	// non-nil interface, which is why callers' "strategy != nil" guards were
+	// always true and could never have caught anything.
+	s, err := NewSSSDLookup(ctx)
+	if err != nil || s == nil {
+		return nil, err
+	}
+	return s, nil
 }
