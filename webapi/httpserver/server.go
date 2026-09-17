@@ -19,6 +19,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/ory/fosite"
@@ -173,6 +174,28 @@ type Config struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+
+	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
+	// subject into a local account -- "gecos", "username", or both, as in
+	// "gecos,username". Empty disables mapping entirely. When set, group
+	// membership comes from the system rather than the token, and a
+	// caller that maps to no single account is refused a session.
+	IdentityMapStrategies []idmap.Strategy
+	// IdentityGroupsFromSystem takes group membership from the account
+	// database instead of the token's groups claim. Independent of
+	// IdentityMapStrategies: a deployment may want either, both, or
+	// neither. The default -- neither -- is what a container wants,
+	// because it holds no account database to read.
+	IdentityGroupsFromSystem bool
+	// IdentityMapPasswdFile reads accounts from this file instead of
+	// /etc/passwd. Empty means /etc/passwd, which is the only account
+	// source that enumerates: the GECOS index cannot list accounts that
+	// live only in a directory. Accounts it does map are still verified
+	// against the live database, directory included.
+	IdentityMapPasswdFile string
+	// IdentityMapTTL is how long the GECOS index and the group lookups
+	// are reused. Zero means five minutes.
+	IdentityMapTTL time.Duration
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -315,6 +338,10 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
+		IdentityMapStrategies:       cfg.IdentityMapStrategies,
+		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
+		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
+		IdentityMapTTL:              cfg.IdentityMapTTL,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,

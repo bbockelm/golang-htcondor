@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/jobqueue"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
@@ -181,7 +182,13 @@ type Handler struct {
 	oauth2UserInfoURL   string            // User info endpoint for SSO
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
-	mcpAccessGroup      string            // Group required for any MCP access (empty = all authenticated users)
+
+	// localIdentity maps an asserted OIDC subject to the local account
+	// that owns this user's jobs, and reads that account's groups from
+	// the system rather than from the token. Nil unless the deployment
+	// configures it; see identity_local.go.
+	localIdentity  *localIdentity
+	mcpAccessGroup string // Group required for any MCP access (empty = all authenticated users)
 	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
 	// is being extended; see mcp_deadline.go.
 	mcpMaxRequest time.Duration
@@ -474,6 +481,28 @@ type HandlerConfig struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+
+	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
+	// subject into a local account -- "gecos", "username", or both, as in
+	// "gecos,username". Empty disables mapping entirely. When set, group
+	// membership comes from the system rather than the token, and a
+	// caller that maps to no single account is refused a session.
+	IdentityMapStrategies []idmap.Strategy
+	// IdentityGroupsFromSystem takes group membership from the account
+	// database instead of the token's groups claim. Independent of
+	// IdentityMapStrategies: a deployment may want either, both, or
+	// neither. The default -- neither -- is what a container wants,
+	// because it holds no account database to read.
+	IdentityGroupsFromSystem bool
+	// IdentityMapPasswdFile reads accounts from this file instead of
+	// /etc/passwd. Empty means /etc/passwd, which is the only account
+	// source that enumerates: the GECOS index cannot list accounts that
+	// live only in a directory. Accounts it does map are still verified
+	// against the live database, directory included.
+	IdentityMapPasswdFile string
+	// IdentityMapTTL is how long the GECOS index and the group lookups
+	// are reused. Zero means five minutes.
+	IdentityMapTTL time.Duration
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1032,6 +1061,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.templateLibrary = buildTemplateLibrary(cfg, logger, h.db)
 
 	// Setup OAuth2 provider if MCP is enabled
+	// Map the provider's subject onto a local account, where the
+	// deployment says the two differ. Built before the first request so
+	// the account index is warm and its problems are in the startup log
+	// rather than in somebody's failed login.
+	//
+	// Deliberately OUTSIDE the EnableMCP block. It used to sit inside,
+	// so a deployment with MCP off had HTTP_API_IDENTITY_MAP parsed,
+	// logged as configured, and then silently ignored -- the worst of
+	// both, because the log said the mapping was in force.
+	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
+		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
+		h.localIdentity = li
+		li.warmUp(context.Background())
+		logger.Info(logging.DestinationHTTP, "Local identity configured",
+			"subject_mapped_to_account", li.mapsAccount(),
+			"strategies", cfg.IdentityMapStrategies,
+			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
+	}
+
 	if cfg.EnableMCP {
 		oauth2Issuer := cfg.OAuth2Issuer
 		if oauth2Issuer == "" {
@@ -1135,6 +1183,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
 
 		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+
+		// Where groups come from the system, membership can be re-read at
+		// refresh time -- which is the live-membership oracle the
+		// reauthorization comment describes as future work. It needs no
+		// upstream credential, which is exactly why it was not possible
+		// with token-sourced groups.
+		h.registerSystemGroupOracle(logger)
 
 		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
@@ -3010,4 +3065,25 @@ func (h *Handler) initializeIDPClient(ctx context.Context, redirectURI string) e
 
 	h.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID)
 	return nil
+}
+
+// registerSystemGroupOracle adds the live-membership oracle when groups
+// are read from the system.
+//
+// A named method rather than an inline block so a test can exercise the
+// decision: both "never register" and "always register" used to pass,
+// and the second is a nil dereference on the first refresh, because with
+// token-sourced groups the oracle has no group source to consult.
+func (h *Handler) registerSystemGroupOracle(logger *logging.Logger) {
+	if !h.localIdentity.sourcesGroups() {
+		return
+	}
+	h.revocationOracles = append(h.revocationOracles, &systemGroupOracle{
+		identity:  h.localIdentity,
+		validate:  h.validateGroupAccess,
+		scopesFor: h.getScopesForGroups,
+		logger:    logger,
+	})
+	logger.Info(logging.DestinationHTTP,
+		"Refresh grants will re-read group membership from the system")
 }

@@ -15,10 +15,9 @@ type NSSLookupStrategy struct {
 }
 
 var (
-	nssInitOnce   sync.Once
-	nssMethods    []NSSSwitchMethod
-	nssParseErr   error
-	nssSwitchPath = "/etc/nsswitch.conf"
+	nssInitOnce sync.Once
+	nssMethods  []NSSSwitchMethod
+	nssParseErr error
 )
 
 // ResetNSSCache resets the nsswitch.conf parsing cache. This is intended for testing only.
@@ -28,18 +27,12 @@ func ResetNSSCache() {
 	nssParseErr = nil
 }
 
-// SetNSSSwitchPath sets the path to nsswitch.conf. This is intended for testing only.
-// Must be called before NewNSSLookup() and after ResetNSSCache() to take effect.
-func SetNSSSwitchPath(path string) {
-	nssSwitchPath = path
-}
-
 // NewNSSLookup creates a new NSS-based lookup strategy.
 // It parses /etc/nsswitch.conf and creates a chain of strategies based on the passwd configuration.
 func NewNSSLookup() (*NSSLookupStrategy, error) {
 	// Parse nsswitch.conf only once
 	nssInitOnce.Do(func() {
-		nssMethods, nssParseErr = ParseNSSwitch(nssSwitchPath)
+		nssMethods, nssParseErr = ParseNSSwitch(nsswitchPath())
 	})
 
 	if nssParseErr != nil {

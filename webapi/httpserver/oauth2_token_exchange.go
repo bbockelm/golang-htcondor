@@ -180,7 +180,18 @@ func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType stri
 		// The external token carries no authorization in our system: bound it by
 		// the issuer's declared ceiling AND the actor client's own scopes.
 		ceiling := intersectScopes(issuerAllowed, actor.GetScopes())
-		return identity, ceiling, groups, nil
+
+		// An external issuer names a user the same way the SSO provider
+		// does, so it gets the same treatment: where this deployment
+		// resolves identities locally, the asserted name is mapped to an
+		// account and that account's groups are read. Without this,
+		// enabling identity mapping would leave token exchange as a
+		// second, unmapped route to a session.
+		mapped, mappedGroups, err := h.mapAssertedIdentity(ctx, identity, groups)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("external subject %q does not resolve to a local account: %w", identity, err)
+		}
+		return mapped, ceiling, mappedGroups, nil
 
 	default:
 		return "", nil, nil, fmt.Errorf("unsupported subject_token_type %q", tokenType)
