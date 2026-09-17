@@ -71,11 +71,27 @@ func (g *Getent) Enumerate(ctx context.Context) ([]Account, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// getent exits 2 when the database is empty, which for our
-		// purposes is a legitimate (if alarming) answer, not a failure.
-		if stdout.Len() == 0 {
-			return nil, fmt.Errorf("running %s passwd: %w: %s", bin, err, strings.TrimSpace(stderr.String()))
+		// A non-zero exit means the listing did not complete. Earlier
+		// this was tolerated whenever stdout held anything, on the
+		// grounds that getent exits 2 for an empty database -- but a
+		// process killed part-way through also exits non-zero with
+		// partial output, and that partial output would have become the
+		// account index.
+		//
+		// That is the dangerous case, because the index is how duplicate
+		// GECOS values are detected: drop one of a colliding pair and the
+		// survivor resolves cleanly, and the forward verifier agrees,
+		// because that account really does carry that GECOS. A truncated
+		// enumeration silently converts "refuse, this is ambiguous" into
+		// "log in as whichever half survived".
+		//
+		// Exit 2 with no output is the genuinely empty database, and is
+		// reported as such rather than as a failure to run.
+		if stdout.Len() > 0 {
+			return nil, fmt.Errorf("%s passwd did not complete; refusing a partial account list: %w: %s",
+				bin, err, strings.TrimSpace(stderr.String()))
 		}
+		return nil, fmt.Errorf("running %s passwd: %w: %s", bin, err, strings.TrimSpace(stderr.String()))
 	}
 	return parsePasswd(&stdout)
 }

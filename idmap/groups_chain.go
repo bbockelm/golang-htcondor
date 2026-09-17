@@ -3,6 +3,7 @@ package idmap
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,21 +11,34 @@ import (
 	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
-// GroupChain asks each source in turn and takes the first real answer.
+// GroupChain consults every configured source and MERGES their answers,
+// which is what nsswitch.conf means.
 //
-// The order matters and is deliberate: a native SSSD query first where
-// it is available, then `id -Gn`, which resolves through NSS and so
-// covers /etc/group, systemd-userdbd and anything else nsswitch.conf
-// names. os/user is last because, built without cgo, it reads
-// /etc/group ALONE -- a directory-backed account would come back a
-// member of nothing, which reads as "no permissions" rather than as the
-// failure it is.
+// glibc's `group:` line is union semantics: getgrouplist/initgroups asks
+// each service and combines the supplementary groups it gets back. That
+// is the whole point of writing "files sss" -- a user is meant to end up
+// with their local groups AND their directory groups. An earlier version
+// of this took the first source that answered, which on any
+// files-first host silently dropped every directory group for every user
+// who happened to have a local passwd entry, and `id` would have
+// disagreed with us about who could do what.
 //
-// A source that errors is passed over; a source that returns no groups
-// at all is treated as not having answered, for the same reason.
+// A source that does not know the account (ErrUnknownUser) contributes
+// nothing and is not a failure; on a mixed host that is the normal case
+// for most users at most sources.
+//
+// A source that is BROKEN fails the whole lookup, even if another source
+// answered. The partial list that would otherwise be returned is the
+// dangerous case: it looks like a complete answer, so a caller cannot
+// tell that a user's directory groups are missing because SSSD is down
+// rather than because they were removed. Login then under-authorizes,
+// and -- far worse -- the refresh-time oracle would read it as lost
+// membership and REVOKE the grant. Refusing to answer at all keeps both
+// callers honest: login fails closed, and the oracle treats an error as
+// no opinion rather than as grounds to revoke.
 type GroupChain struct{ Sources []GroupSource }
 
-// Name lists the chained sources, so a log line says what was tried.
+// Name lists the chained sources, so a log line says what was consulted.
 func (c *GroupChain) Name() string {
 	names := make([]string, 0, len(c.Sources))
 	for _, s := range c.Sources {
@@ -33,31 +47,36 @@ func (c *GroupChain) Name() string {
 	return "chain(" + strings.Join(names, ",") + ")"
 }
 
-// GroupsFor returns the first non-empty membership any source reports.
+// GroupsFor returns the union of every source's answer.
 func (c *GroupChain) GroupsFor(ctx context.Context, username string) ([]string, error) {
-	var firstErr error
+	var (
+		merged []string
+		known  bool
+	)
 	for _, s := range c.Sources {
 		groups, err := s.GroupsFor(ctx, username)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: %w", s.Name(), err)
+			if errors.Is(err, ErrUnknownUser) {
+				// This service simply has no record of the account.
+				continue
 			}
-			continue
+			return nil, fmt.Errorf("%s could not answer for %q, so the group list would be incomplete: %w",
+				s.Name(), username, err)
 		}
-		if len(groups) == 0 {
-			// Not an answer: every account is in at least its primary
-			// group. Treat it as this source not knowing the user.
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: no groups for %q", s.Name(), username)
-			}
-			continue
-		}
-		return groups, nil
+		known = true
+		merged = append(merged, groups...)
 	}
-	if firstErr == nil {
-		firstErr = fmt.Errorf("no group source could answer for %q", username)
+	if !known {
+		return nil, fmt.Errorf("%w: no configured source knows %q", ErrUnknownUser, username)
 	}
-	return nil, firstErr
+	if len(merged) == 0 {
+		// Every source claimed to know the account and none named a
+		// group. No real account is in zero groups -- it is in at least
+		// its primary one -- so this is a malformed answer, not a
+		// permissions decision.
+		return nil, fmt.Errorf("sources knew %q but reported no groups at all", username)
+	}
+	return normalizeGroups(merged), nil
 }
 
 // NSSwitchGroupSource builds the chain from nsswitch.conf's `group:`

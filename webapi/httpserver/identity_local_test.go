@@ -2,10 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,5 +212,118 @@ func TestSystemGroupsNeverFallBackToTheToken(t *testing.T) {
 	}
 	if groups != nil {
 		t.Errorf("groups %v returned alongside the error", groups)
+	}
+}
+
+// The SSO callback is not the only way an outside party names a user. A
+// trusted proxy header and an RFC 8693 external subject token both do,
+// and both must be mapped -- otherwise turning identity mapping on
+// leaves a second, unmapped route to a session, which is the hole the
+// feature exists to close.
+func TestAssertedIdentitiesFromOtherPathsAreMappedToo(t *testing.T) {
+	h := &Handler{
+		localIdentity: newLocalIdentity(
+			[]idmap.Strategy{idmap.StrategyGecos}, false,
+			writePasswd(t), time.Minute, testLogger(t)),
+	}
+
+	// The asserted name is a subject, and must come back as the account.
+	got, _, err := h.mapAssertedIdentity(t.Context(), "tatannen", []string{"asserted-group"})
+	if err != nil {
+		t.Fatalf("mapAssertedIdentity: %v", err)
+	}
+	if got != "tannenba" {
+		t.Errorf("asserted %q resolved to %q, want the local account tannenba", "tatannen", got)
+	}
+
+	// An assertion naming nobody local must not yield an identity at all.
+	if got, _, err := h.mapAssertedIdentity(t.Context(), "nobody.local", nil); err == nil {
+		t.Errorf("an unmappable assertion produced the identity %q", got)
+	}
+
+	// A login name is still not a subject under the gecos strategy.
+	if got, _, err := h.mapAssertedIdentity(t.Context(), "tannenba", nil); err == nil {
+		t.Errorf("a login name was accepted as an assertion, yielding %q", got)
+	}
+}
+
+// With no local identity configured -- the default, and what a container
+// runs -- assertions pass through untouched.
+func TestAssertedIdentityIsUntouchedWhenMappingIsOff(t *testing.T) {
+	h := &Handler{}
+	groups := []string{"from-the-token"}
+
+	got, gotGroups, err := h.mapAssertedIdentity(t.Context(), "someone", groups)
+	if err != nil {
+		t.Fatalf("mapAssertedIdentity: %v", err)
+	}
+	if got != "someone" || !reflect.DeepEqual(gotGroups, groups) {
+		t.Errorf("mapping is off, so %q/%v should pass through; got %q/%v", "someone", groups, got, gotGroups)
+	}
+}
+
+// recordingGroups remembers which account it was asked about.
+type recordingGroups struct {
+	mu     sync.Mutex
+	asked  []string
+	byUser map[string][]string
+}
+
+func (r *recordingGroups) Name() string { return "recording" }
+func (r *recordingGroups) GroupsFor(_ context.Context, username string) ([]string, error) {
+	r.mu.Lock()
+	r.asked = append(r.asked, username)
+	r.mu.Unlock()
+	g, ok := r.byUser[username]
+	if !ok {
+		return nil, fmt.Errorf("no such user %q", username)
+	}
+	return g, nil
+}
+
+// Groups must be read for the MAPPED ACCOUNT, not for the subject the
+// provider asserted and not for any other account.
+//
+// Nothing pinned this before: the e2e only checked that the required
+// access group was satisfied, and the group it used happened to be one
+// almost every account on the host belongs to -- so reading root's
+// groups, or the raw subject's, passed just as well. That is the
+// difference between "this caller is in the right groups" and "this
+// caller's groups are the ones we read".
+func TestGroupsAreReadForTheMappedAccountOnly(t *testing.T) {
+	rec := &recordingGroups{byUser: map[string][]string{
+		"tannenba": {"osg"},
+		"root":     {"wheel"},
+		"tatannen": {"decoy"},
+	}}
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, true,
+		writePasswd(t), time.Minute, testLogger(t))
+	li.groups = rec // the resolver is real; only the group source is a stub
+
+	account, groups, err := li.resolve(t.Context(), "tatannen", []string{"token-group"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if account != "tannenba" {
+		t.Fatalf("account = %q, want tannenba", account)
+	}
+
+	rec.mu.Lock()
+	asked := append([]string(nil), rec.asked...)
+	rec.mu.Unlock()
+
+	if len(asked) != 1 || asked[0] != "tannenba" {
+		t.Errorf("groups were read for %v; they must be read for the mapped account %q alone",
+			asked, "tannenba")
+	}
+	if !reflect.DeepEqual(groups, []string{"osg"}) {
+		t.Errorf("groups = %v, want tannenba's [osg] -- not the subject's or root's", groups)
+	}
+	for _, wrong := range []string{"tatannen", "root"} {
+		for _, a := range asked {
+			if a == wrong {
+				t.Errorf("groups were read for %q, which is not the mapped account", wrong)
+			}
+		}
 	}
 }

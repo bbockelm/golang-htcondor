@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -413,14 +414,204 @@ func TestAmbiguityStopsTheChain(t *testing.T) {
 	}
 }
 
-func TestUsernameStrategyRejectsNonNames(t *testing.T) {
-	enum := &fakeEnum{accounts: []Account{{Username: "ok", Gecos: "", UID: 1}}}
-	r := New(enum, &fakeVerifier{gecos: map[string]string{"ok": ""}},
-		WithStrategies(StrategyUsername))
+// acceptAnything says every account exists, so the ONLY thing that can
+// reject a malformed login name is the syntax filter itself.
+//
+// The previous version of this test used a verifier that knew one
+// account, so every bad input failed with "no such user" whether the
+// filter existed or not -- deleting the filter entirely left the test
+// green.
+type acceptAnything struct{ asked []string }
 
-	for _, bad := range []string{"../etc/shadow", "a:b", "has space", "two\nlines"} {
-		if _, err := r.Resolve(context.Background(), bad); err == nil {
-			t.Errorf("accepted %q as a login name", bad)
+func (a *acceptAnything) GecosOf(_ context.Context, username string) (string, error) {
+	a.asked = append(a.asked, username)
+	return "whatever", nil
+}
+
+func TestUsernameStrategyRejectsNonNames(t *testing.T) {
+	ver := &acceptAnything{}
+	enum := &fakeEnum{accounts: []Account{{Username: "ok", Gecos: "", UID: 1}}}
+	r := New(enum, ver, WithStrategies(StrategyUsername))
+
+	for _, bad := range []string{"../etc/shadow", "a:b", "has space", "two\nlines", "tab\there"} {
+		if got, err := r.Resolve(context.Background(), bad); err == nil {
+			t.Errorf("accepted %q as a login name, resolving to %q", bad, got)
 		}
+	}
+	// The filter must reject these BEFORE they reach a lookup, so a
+	// malformed string never becomes an argv element.
+	if len(ver.asked) != 0 {
+		t.Errorf("malformed names reached the verifier: %v", ver.asked)
+	}
+
+	// A well-formed name still resolves, so the filter is not simply
+	// rejecting everything.
+	if got, err := r.Resolve(context.Background(), "ok"); err != nil || got != "ok" {
+		t.Errorf("a valid login name was rejected: %q %v", got, err)
+	}
+}
+
+// An empty subject must never resolve. build() skips accounts with a
+// blank GECOS, but the username strategy has no such protection: without
+// the guard an empty subject is handed straight to the verifier, and a
+// verifier that answers for "" would hand back an account.
+func TestEmptySubjectNeverReachesALookup(t *testing.T) {
+	ver := &acceptAnything{}
+	enum := &fakeEnum{accounts: []Account{{Username: "ok", Gecos: "", UID: 1}}}
+	r := New(enum, ver, WithStrategies(StrategyUsername, StrategyGecos))
+
+	for _, empty := range []string{"", "   ", "\t"} {
+		if got, err := r.Resolve(context.Background(), empty); err == nil {
+			t.Errorf("empty subject %q resolved to %q", empty, got)
+		}
+	}
+	if len(ver.asked) != 0 {
+		t.Errorf("an empty subject reached the verifier: %v", ver.asked)
+	}
+}
+
+// Subject matching is case-SENSITIVE, at the index AND at the re-check,
+// and the two must agree.
+//
+// The index is a plain map lookup, so it is exact by construction and a
+// differently-cased subject never even reaches the verifier. The
+// interesting case is the other side: an index hit whose LIVE GECOS now
+// differs only in case. A case-insensitive re-check would accept that,
+// making the verifier more permissive than the index it is supposed to
+// be confirming -- so the pair is pinned here rather than just the half
+// that is exact for free.
+func TestSubjectMatchingIsCaseSensitive(t *testing.T) {
+	enum := &fakeEnum{accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}}}
+
+	// Index side: a differently-cased subject is not a hit.
+	exact := New(enum, &fakeVerifier{gecos: map[string]string{"tannenba": "tatannen"}})
+	if got, err := exact.Resolve(context.Background(), "tatannen"); err != nil || got != "tannenba" {
+		t.Fatalf("exact match failed: %q %v", got, err)
+	}
+	for _, variant := range []string{"TATANNEN", "Tatannen", "tATANNEN"} {
+		if got, err := exact.Resolve(context.Background(), variant); err == nil {
+			t.Errorf("%q matched an account whose GECOS is %q, resolving to %q", variant, "tatannen", got)
+		}
+	}
+
+	// Re-check side: the index still says "tatannen", but the account's
+	// GECOS now differs in case. That is a different string, so it is a
+	// different identity, and the hit must be refused.
+	drifted := New(enum, &fakeVerifier{gecos: map[string]string{"tannenba": "TATANNEN"}})
+	if got, err := drifted.Resolve(context.Background(), "tatannen"); err == nil {
+		t.Errorf("the re-check accepted GECOS %q for subject %q, resolving to %q; "+
+			"it must compare exactly, like the index does", "TATANNEN", "tatannen", got)
+	}
+}
+
+// slowEnum counts concurrent enumerations, so a stampede is observable
+// rather than merely suspected.
+type slowEnum struct {
+	mu       sync.Mutex
+	calls    int
+	inFlight int
+	maxSeen  int
+	accounts []Account
+	delay    time.Duration
+	// errDuring records ctx.Err() observed WHILE enumerating. Checking
+	// the context after the call is meaningless: build() cancels its own
+	// derived context on return, which is cleanup, not interference.
+	errDuring []error
+}
+
+func (e *slowEnum) Name() string { return "slow" }
+func (e *slowEnum) Enumerate(ctx context.Context) ([]Account, error) {
+	e.mu.Lock()
+	e.calls++
+	e.inFlight++
+	if e.inFlight > e.maxSeen {
+		e.maxSeen = e.inFlight
+	}
+	e.mu.Unlock()
+
+	time.Sleep(e.delay)
+
+	e.mu.Lock()
+	e.inFlight--
+	e.errDuring = append(e.errDuring, ctx.Err())
+	e.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return e.accounts, nil
+}
+
+// N logins arriving at TTL expiry must cause ONE enumeration, not N. The
+// account database is read in full each time; on a 1500-account host
+// that is 1500 records per concurrent request.
+func TestConcurrentResolvesRebuildOnce(t *testing.T) {
+	enum := &slowEnum{
+		accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}},
+		delay:    50 * time.Millisecond,
+	}
+	r := New(enum, nil, WithTTL(time.Hour))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.Resolve(context.Background(), "tatannen"); err != nil {
+				t.Errorf("Resolve: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	enum.mu.Lock()
+	calls, maxConcurrent := enum.calls, enum.maxSeen
+	enum.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("enumerated %d times for 25 concurrent logins, want 1", calls)
+	}
+	if maxConcurrent > 1 {
+		t.Errorf("%d enumerations ran at once; rebuilds must be serialised", maxConcurrent)
+	}
+}
+
+// The index is process-wide; the context that happens to trigger a
+// rebuild belongs to one request. A client that disconnects mid-rebuild
+// must not cancel the shared enumeration -- that is how a truncated
+// account list used to get installed and served for the whole TTL.
+func TestRebuildSurvivesTheTriggeringRequestBeingCancelled(t *testing.T) {
+	enum := &slowEnum{
+		accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}},
+		delay:    80 * time.Millisecond,
+	}
+	r := New(enum, nil, WithTTL(time.Hour))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Resolve(ctx, "tatannen") // may fail; the caller gave up
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel() // the login is abandoned mid-enumeration
+	<-done
+
+	// While it was running, the enumeration's context must have been
+	// unaffected by the caller giving up.
+	enum.mu.Lock()
+	during := append([]error(nil), enum.errDuring...)
+	enum.mu.Unlock()
+	if len(during) == 0 {
+		t.Fatal("no enumeration was attempted")
+	}
+	for i, err := range during {
+		if err != nil {
+			t.Errorf("enumeration %d was cancelled mid-flight by the abandoned request (%v); "+
+				"a partial account list could be installed this way", i, err)
+		}
+	}
+
+	// And a later login sees a complete index.
+	if got, err := r.Resolve(context.Background(), "tatannen"); err != nil || got != "tannenba" {
+		t.Errorf("after the abandoned login: got %q, %v; want tannenba", got, err)
 	}
 }

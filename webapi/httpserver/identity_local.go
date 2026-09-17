@@ -35,6 +35,9 @@ import (
 // Falling back to the token's claims would mean the weaker authorization
 // basis engages exactly when the stronger one is broken, and the people
 // most likely to trip it are the ones whose accounts are misconfigured.
+// warmUpTimeout bounds the startup index build.
+const warmUpTimeout = 30 * time.Second
+
 type localIdentity struct {
 	// resolver maps the asserted subject to a local account. Nil leaves
 	// the subject alone, which is right when it is already a login name.
@@ -104,6 +107,14 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 // that two accounts claim the same identity, while reading the startup
 // log -- not from one user's failed login weeks later.
 func (l *localIdentity) warmUp(ctx context.Context) {
+	// Bounded: warmUp runs before the listener is open, so a directory
+	// that has stopped answering would otherwise hold the daemon in
+	// startup with no port, no /readyz and no log line. Failing here is
+	// survivable -- the index is rebuilt on first use -- whereas never
+	// returning is not.
+	ctx, cancel := context.WithTimeout(ctx, warmUpTimeout)
+	defer cancel()
+
 	if !l.mapsAccount() {
 		// Only groups are being sourced locally; there is no index.
 		return
@@ -178,4 +189,25 @@ func describeFailure(err error) string {
 	default:
 		return "The account database could not be consulted. Please try again shortly."
 	}
+}
+
+// mapAssertedIdentity applies local resolution to an identity asserted by
+// something OTHER than the SSO callback.
+//
+// The callback is not the only way an outside party names a user. A
+// trusted proxy can assert one in a header, and RFC 8693 token exchange
+// accepts a JWT from a trusted external issuer. Both are assertions of
+// the same kind as an OIDC subject, and both must therefore go through
+// the same mapping: otherwise enabling identity mapping would leave a
+// second, unmapped way to obtain a session, which is exactly the hole
+// the feature exists to close.
+//
+// Returns ("", nil, err) when the identity cannot be resolved, and the
+// caller must refuse. When no local identity is configured the inputs are
+// returned unchanged, so this is safe to call unconditionally.
+func (h *Handler) mapAssertedIdentity(ctx context.Context, subject string, assertedGroups []string) (string, []string, error) {
+	if h.localIdentity == nil {
+		return subject, assertedGroups, nil
+	}
+	return h.localIdentity.resolve(ctx, subject, assertedGroups)
 }

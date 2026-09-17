@@ -44,6 +44,11 @@ import (
 	"time"
 )
 
+// buildTimeout bounds one enumeration of the account database. A
+// directory that has stopped answering must not wedge every login behind
+// a rebuild that never returns.
+const buildTimeout = 30 * time.Second
+
 var (
 	// ErrNoMatch means no account carries this subject as its GECOS.
 	ErrNoMatch = errors.New("no account has this subject as its GECOS")
@@ -129,6 +134,11 @@ type Resolver struct {
 	strategies []Strategy
 	ttl        time.Duration
 	now        func() time.Time
+
+	// buildMu serialises rebuilds. mu guards the index itself and is held
+	// only briefly; buildMu is held across the whole enumeration so that N
+	// concurrent logins at TTL expiry cause ONE of them.
+	buildMu sync.Mutex
 
 	mu         sync.RWMutex
 	byGecos    map[string]string // gecos -> username, absent when ambiguous
@@ -323,17 +333,46 @@ func (r *Resolver) AmbiguousGecos() []string {
 func (r *Resolver) Refresh(ctx context.Context) error { return r.build(ctx) }
 
 func (r *Resolver) ensureFresh(ctx context.Context) error {
-	r.mu.RLock()
-	fresh := r.builtAt.After(time.Time{}) && r.now().Sub(r.builtAt) < r.ttl
-	r.mu.RUnlock()
-	if fresh {
+	if r.indexIsFresh() {
+		return nil
+	}
+
+	// One rebuild at a time. Without this, every request arriving at TTL
+	// expiry starts its own enumeration of the whole account database --
+	// measured at 50 concurrent logins producing 50 full `getent passwd`
+	// runs.
+	r.buildMu.Lock()
+	defer r.buildMu.Unlock()
+
+	// Re-check: whoever held the lock has probably just rebuilt it.
+	if r.indexIsFresh() {
 		return nil
 	}
 	return r.build(ctx)
 }
 
+func (r *Resolver) indexIsFresh() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.builtAt.After(time.Time{}) && r.now().Sub(r.builtAt) < r.ttl
+}
+
 func (r *Resolver) build(ctx context.Context) error {
-	accounts, err := r.enum.Enumerate(ctx)
+	// The index is process-wide, but the context that triggered this
+	// rebuild belongs to ONE request. Enumerating under it means a client
+	// that disconnects mid-rebuild kills `getent` part-way through --
+	// and, before the enumerator learned to refuse partial output, that
+	// truncated list was installed and served for the whole TTL. Detach
+	// the deadline while keeping cancellation of the process bounded by
+	// buildTimeout.
+	//
+	// The caller's context still governs how long the CALLER waits: it is
+	// checked on return, so an abandoned request stops waiting without
+	// taking the shared rebuild down with it.
+	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildTimeout)
+	defer cancel()
+
+	accounts, err := r.enum.Enumerate(buildCtx)
 	if err != nil {
 		return fmt.Errorf("enumerating accounts via %s: %w", r.enum.Name(), err)
 	}

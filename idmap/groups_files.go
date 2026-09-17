@@ -61,7 +61,10 @@ func (g *GroupFiles) GroupsFor(ctx context.Context, username string) ([]string, 
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("no account %q in %s", username, g.passwdPath())
+		// Not a failure: on a host whose accounts live in a directory,
+		// every one of them is absent from this file. The chain treats
+		// this as "nothing to contribute" and consults the next source.
+		return nil, fmt.Errorf("%w: no account %q in %s", ErrUnknownUser, username, g.passwdPath())
 	}
 
 	entries, err := parseGroupFile(g.groupPath())

@@ -38,16 +38,20 @@ func (g *GetentUser) GecosOf(ctx context.Context, username string) (string, erro
 			return "", fmt.Errorf("getent is not available: %w", err)
 		}
 	}
-	cmd := exec.CommandContext(ctx, bin, "passwd", username) //nolint:gosec // bin is from PATH or operator config; username is an argv element
+	// "--" so a subject beginning with "-" is an operand, not an option.
+	cmd := exec.CommandContext(ctx, bin, "passwd", "--", username) //nolint:gosec // bin is from PATH or operator config; username is an argv element
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		// getent exits 2 for "not found", which is the common case and
-		// deserves the clearer message.
+		// deserves the clearer message. Partial output from an
+		// interrupted run is refused rather than parsed: this answer
+		// decides whether an index hit is trusted.
 		if stdout.Len() == 0 {
 			return "", fmt.Errorf("no account %q: %w: %s", username, err, strings.TrimSpace(stderr.String()))
 		}
+		return "", fmt.Errorf("%s passwd %q did not complete: %w", bin, username, err)
 	}
 	accounts, err := parsePasswd(&stdout)
 	if err != nil {

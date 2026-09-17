@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,33 +168,96 @@ func TestIDCommandAgainstThisAccount(t *testing.T) {
 	t.Logf("%s is in %d groups", username, len(groups))
 }
 
-func TestGroupChainTakesTheFirstRealAnswer(t *testing.T) {
-	empty := &fakeGroups{groups: map[string][]string{}}
-	broken := &fakeGroups{err: errors.New("sssd socket missing")}
-	good := &fakeGroups{groups: map[string][]string{"tannenba": {"osg", "condor"}}}
+// unknownGroups reports ErrUnknownUser, the way a source behaves for an
+// account that lives in some other service.
+type unknownGroups struct{ calls int }
 
-	c := &GroupChain{Sources: []GroupSource{broken, empty, good}}
-	got, err := c.GroupsFor(context.Background(), "tannenba")
+func (u *unknownGroups) Name() string { return "unknown" }
+func (u *unknownGroups) GroupsFor(context.Context, string) ([]string, error) {
+	u.calls++
+	return nil, fmt.Errorf("%w: not here", ErrUnknownUser)
+}
+
+// nsswitch's `group:` line is UNION semantics: a user on a "files sss"
+// host is meant to end up with their local groups AND their directory
+// groups. Taking the first source that answered silently dropped the
+// rest, and `id` would then disagree with us about what the user may do.
+func TestGroupChainMergesEverySource(t *testing.T) {
+	local := &fakeGroups{groups: map[string][]string{"tannenba": {"staff", "shared"}}}
+	directory := &fakeGroups{groups: map[string][]string{"tannenba": {"osg", "shared"}}}
+
+	got, err := (&GroupChain{Sources: []GroupSource{local, directory}}).
+		GroupsFor(context.Background(), "tannenba")
 	if err != nil {
 		t.Fatalf("GroupsFor: %v", err)
 	}
-	if !reflect.DeepEqual(got, []string{"condor", "osg"}) {
-		t.Errorf("got %v, want [condor osg]", got)
+	want := []string{"osg", "shared", "staff"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v -- the union of both sources, de-duplicated", got, want)
 	}
-	if broken.calls != 1 || empty.calls != 1 || good.calls != 1 {
-		t.Errorf("each source should be tried once: %d %d %d", broken.calls, empty.calls, good.calls)
+	if local.calls != 1 || directory.calls != 1 {
+		t.Errorf("both sources must be consulted: local=%d directory=%d", local.calls, directory.calls)
 	}
 }
 
-// An empty list is not an answer. Every account is in at least its
-// primary group, so "no groups" means the source does not know the user
-// -- and accepting it would silently narrow what that user may do.
-func TestGroupChainTreatsEmptyAsNoAnswer(t *testing.T) {
-	empty := &fakeGroups{groups: map[string][]string{}}
-	c := &GroupChain{Sources: []GroupSource{empty}}
+// A source that has never heard of the account is the NORMAL case on a
+// mixed host, not a failure.
+func TestGroupChainSkipsSourcesThatDoNotKnowTheUser(t *testing.T) {
+	unknown := &unknownGroups{}
+	directory := &fakeGroups{groups: map[string][]string{"tannenba": {"osg"}}}
 
-	if got, err := c.GroupsFor(context.Background(), "tannenba"); err == nil {
-		t.Fatalf("an empty membership was returned as an answer: %v", got)
+	got, err := (&GroupChain{Sources: []GroupSource{unknown, directory}}).
+		GroupsFor(context.Background(), "tannenba")
+	if err != nil {
+		t.Fatalf("an unknown-to-one-source account must still resolve: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"osg"}) {
+		t.Errorf("got %v, want [osg]", got)
+	}
+	if unknown.calls != 1 {
+		t.Error("the unknown source should still have been asked")
+	}
+
+	// Unknown everywhere is ErrUnknownUser, so a caller can tell "no such
+	// account" from "the directory is down".
+	if _, err := (&GroupChain{Sources: []GroupSource{unknown, &unknownGroups{}}}).
+		GroupsFor(context.Background(), "ghost"); !errors.Is(err, ErrUnknownUser) {
+		t.Errorf("want ErrUnknownUser when nobody knows the account, got %v", err)
+	}
+}
+
+// THE important one. A broken source must fail the whole lookup even
+// though another source answered: the partial list looks complete, so
+// login would under-authorize and the refresh oracle would read it as
+// lost membership and REVOKE the grant.
+func TestGroupChainRefusesAPartialAnswer(t *testing.T) {
+	broken := &fakeGroups{err: errors.New("sssd socket timeout")}
+	local := &fakeGroups{groups: map[string][]string{"tannenba": {"staff"}}}
+
+	got, err := (&GroupChain{Sources: []GroupSource{local, broken}}).
+		GroupsFor(context.Background(), "tannenba")
+	if err == nil {
+		t.Fatalf("a partial group list was returned as if complete: %v", got)
+	}
+	if errors.Is(err, ErrUnknownUser) {
+		t.Error("a broken source must not be reported as an unknown account -- the caller would treat it as a real answer")
+	}
+	if got != nil {
+		t.Errorf("returned %v alongside the error; a partial list must not escape", got)
+	}
+	if !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("the error should say the list would be incomplete: %v", err)
+	}
+}
+
+// Every account is in at least its primary group, so an all-empty answer
+// is a malformed read rather than a permissions decision.
+func TestGroupChainRejectsAnAllEmptyAnswer(t *testing.T) {
+	empty := &fakeGroups{groups: map[string][]string{"tannenba": {}}}
+
+	if got, err := (&GroupChain{Sources: []GroupSource{empty}}).
+		GroupsFor(context.Background(), "tannenba"); err == nil {
+		t.Fatalf("an empty membership was accepted as an answer: %v", got)
 	}
 }
 
@@ -337,5 +401,35 @@ func TestGroupFilesRejectsAnUnknownAccount(t *testing.T) {
 	if got, err := (&GroupFiles{PasswdPath: passwd, GroupPath: group}).
 		GroupsFor(context.Background(), "ghost"); err == nil {
 		t.Errorf("an unknown account resolved to %v", got)
+	}
+}
+
+// Membership in /etc/group is matched EXACTLY. Prefix matching survived
+// the old fixture because its names were prefix-unrelated -- and would
+// have given "bob" every group that lists "bobby".
+func TestGroupFilesMatchesMembersExactly(t *testing.T) {
+	dir := t.TempDir()
+	passwd := filepath.Join(dir, "passwd")
+	group := filepath.Join(dir, "group")
+	if err := os.WriteFile(passwd,
+		[]byte("bob:x:20050:20050::/home/bob:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// "bobby" and "bobsleigh" both begin with "bob"; "bob" is a member of
+	// neither.
+	if err := os.WriteFile(group, []byte(
+		"bob:x:20050:\nbobby-only:x:5000:bobby\nbobsleigh-team:x:5001:bobsleigh,alice\nshared:x:5002:bob,bobby\n"),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (&GroupFiles{PasswdPath: passwd, GroupPath: group}).
+		GroupsFor(context.Background(), "bob")
+	if err != nil {
+		t.Fatalf("GroupsFor: %v", err)
+	}
+	want := []string{"bob", "shared"} // primary group, plus the one that really lists bob
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v -- a prefix of a member name is not membership", got, want)
 	}
 }

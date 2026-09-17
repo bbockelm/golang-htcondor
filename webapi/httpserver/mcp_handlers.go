@@ -1529,9 +1529,20 @@ func (h *Handler) deviceApprovalIdentity(ctx context.Context, r *http.Request) (
 	// Method 1: User header (demo mode) — trusted-proxy gated.
 	if h.isUserHeaderTrustedSource(r) {
 		if username := r.Header.Get(h.userHeader); username != "" {
+			// A proxy asserting a name is an assertion like any other, so
+			// it is resolved locally too where that is configured. A
+			// header naming somebody with no local account yields no
+			// identity rather than an unmapped one.
+			mapped, groups, err := h.mapAssertedIdentity(ctx, username, nil)
+			if err != nil {
+				h.logger.Warn(logging.DestinationHTTP,
+					"Refusing a header-asserted identity that does not resolve to a local account",
+					"asserted", username, "header", h.userHeader, "error", err)
+				return "", nil
+			}
 			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-				"username", username, "header", h.userHeader)
-			return username, nil
+				"asserted", username, "username", mapped, "header", h.userHeader)
+			return mapped, groups
 		}
 	}
 

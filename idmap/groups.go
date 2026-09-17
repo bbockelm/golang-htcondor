@@ -3,6 +3,7 @@ package idmap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"os/user"
@@ -11,6 +12,15 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrUnknownUser means a source does not know this account at all --
+// which is NOT a failure. nsswitch.conf lists several services precisely
+// because each knows a different part of the population: on a
+// "group: files sss" host, every directory user is unknown to files and
+// every local user is unknown to sss. Only a source that is BROKEN
+// returns some other error, and that distinction decides whether a group
+// list is complete enough to make an authorization decision from.
+var ErrUnknownUser = errors.New("this source does not know the account")
 
 // GroupSource reports the groups a local account belongs to.
 //
@@ -58,6 +68,13 @@ func (c *IDCommand) GroupsFor(ctx context.Context, username string) ([]string, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// id(1) says "no such user" for an account NSS cannot resolve at
+		// all. That is not this source failing; it is the account not
+		// existing anywhere, which the chain must not mistake for an
+		// outage.
+		if msg := stderr.String(); strings.Contains(msg, "no such user") || strings.Contains(msg, "cannot find name") {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownUser, strings.TrimSpace(msg))
+		}
 		return nil, fmt.Errorf("running %s -Gn %s: %w: %s", bin, username, err, strings.TrimSpace(stderr.String()))
 	}
 	return normalizeGroups(strings.Fields(stdout.String())), nil

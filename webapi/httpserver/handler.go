@@ -1058,6 +1058,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.templateLibrary = buildTemplateLibrary(cfg, logger, h.db)
 
 	// Setup OAuth2 provider if MCP is enabled
+	// Map the provider's subject onto a local account, where the
+	// deployment says the two differ. Built before the first request so
+	// the account index is warm and its problems are in the startup log
+	// rather than in somebody's failed login.
+	//
+	// Deliberately OUTSIDE the EnableMCP block. It used to sit inside,
+	// so a deployment with MCP off had HTTP_API_IDENTITY_MAP parsed,
+	// logged as configured, and then silently ignored -- the worst of
+	// both, because the log said the mapping was in force.
+	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
+		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
+		h.localIdentity = li
+		li.warmUp(context.Background())
+		logger.Info(logging.DestinationHTTP, "Local identity configured",
+			"subject_mapped_to_account", li.mapsAccount(),
+			"strategies", cfg.IdentityMapStrategies,
+			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
+	}
+
 	if cfg.EnableMCP {
 		oauth2Issuer := cfg.OAuth2Issuer
 		if oauth2Issuer == "" {
@@ -1146,20 +1165,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			}
 		}
 
-		// Map the provider's subject onto a local account, where the
-		// deployment says the two differ. Built before the first request
-		// so the account index is warm and its problems are in the
-		// startup log rather than in somebody's failed login.
-		if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
-			cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
-			h.localIdentity = li
-			li.warmUp(context.Background())
-			logger.Info(logging.DestinationHTTP, "Local identity configured",
-				"subject_mapped_to_account", li.mapsAccount(),
-				"strategies", cfg.IdentityMapStrategies,
-				"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
-		}
-
 		// Set groups claim name (default: "groups")
 		h.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
 		if h.oauth2GroupsClaim == "" {
@@ -1181,16 +1186,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// reauthorization comment describes as future work. It needs no
 		// upstream credential, which is exactly why it was not possible
 		// with token-sourced groups.
-		if h.localIdentity.sourcesGroups() {
-			h.revocationOracles = append(h.revocationOracles, &systemGroupOracle{
-				identity:  h.localIdentity,
-				validate:  h.validateGroupAccess,
-				scopesFor: h.getScopesForGroups,
-				logger:    logger,
-			})
-			logger.Info(logging.DestinationHTTP,
-				"Refresh grants will re-read group membership from the system")
-		}
+		h.registerSystemGroupOracle(logger)
 
 		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
@@ -3066,4 +3062,25 @@ func (h *Handler) initializeIDPClient(ctx context.Context, redirectURI string) e
 
 	h.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID)
 	return nil
+}
+
+// registerSystemGroupOracle adds the live-membership oracle when groups
+// are read from the system.
+//
+// A named method rather than an inline block so a test can exercise the
+// decision: both "never register" and "always register" used to pass,
+// and the second is a nil dereference on the first refresh, because with
+// token-sourced groups the oracle has no group source to consult.
+func (h *Handler) registerSystemGroupOracle(logger *logging.Logger) {
+	if !h.localIdentity.sourcesGroups() {
+		return
+	}
+	h.revocationOracles = append(h.revocationOracles, &systemGroupOracle{
+		identity:  h.localIdentity,
+		validate:  h.validateGroupAccess,
+		scopesFor: h.getScopesForGroups,
+		logger:    logger,
+	})
+	logger.Info(logging.DestinationHTTP,
+		"Refresh grants will re-read group membership from the system")
 }

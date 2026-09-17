@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/bbockelm/golang-htcondor/idmap"
 )
@@ -169,17 +170,54 @@ func TestSystemGroupOracleTreatsAMissingAccountAsNoOpinion(t *testing.T) {
 	}
 }
 
-// The oracle must only exist where there is something local to re-read.
-func TestOracleRegisteredOnlyWithSystemGroups(t *testing.T) {
-	logger := testLogger(t)
+// The oracle must be registered when -- and only when -- groups come
+// from the system.
+//
+// This is the whole membership-drift feature, and it had no coverage:
+// setting the registration to `if false` (never register) and to
+// `if true` (register even with token-sourced groups, where the oracle
+// has no group source and nil-derefs on the first refresh) both passed.
+// The tests constructed the oracle by hand and never built a Handler.
+func TestSystemGroupOracleIsWiredExactlyWhenGroupsAreLocal(t *testing.T) {
 	passwd := writePasswd(t)
 
-	tokenGroups := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, passwd, 0, logger)
-	if tokenGroups.sourcesGroups() {
-		t.Error("token-sourced groups must not report a system source")
+	cases := []struct {
+		name         string
+		strategies   []idmap.Strategy
+		systemGroups bool
+		wantOracle   bool
+	}{
+		{"groups from the system", []idmap.Strategy{idmap.StrategyGecos}, true, true},
+		{"groups from the system, no subject mapping", nil, true, true},
+		{"subject mapped, groups from the token", []idmap.Strategy{idmap.StrategyGecos}, false, false},
+		{"neither (the default, and what a container runs)", nil, false, false},
 	}
-	systemGroups := newLocalIdentity(nil, true, passwd, 0, logger)
-	if !systemGroups.sourcesGroups() {
-		t.Error("system-sourced groups must report one")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{logger: testLogger(t)}
+			if li := newLocalIdentity(tc.strategies, tc.systemGroups, passwd, time.Minute, h.logger); li != nil {
+				h.localIdentity = li
+			}
+			h.registerSystemGroupOracle(h.logger)
+
+			var found *systemGroupOracle
+			for _, o := range h.revocationOracles {
+				if sg, ok := o.(*systemGroupOracle); ok {
+					found = sg
+				}
+			}
+			if tc.wantOracle && found == nil {
+				t.Fatal("membership is read locally, so refreshes must re-check it -- no oracle was registered")
+			}
+			if !tc.wantOracle && found != nil {
+				t.Fatal("groups come from the token; there is nothing local to re-read, and the oracle would have no group source")
+			}
+			// A registered oracle must be usable: with no group source it
+			// would nil-deref on the first refresh.
+			if found != nil && found.identity.groups == nil {
+				t.Error("the registered oracle has no group source and would panic on the first refresh")
+			}
+		})
 	}
 }
