@@ -339,8 +339,7 @@ func (r *Resolver) ensureFresh(ctx context.Context) error {
 
 	// One rebuild at a time. Without this, every request arriving at TTL
 	// expiry starts its own enumeration of the whole account database --
-	// measured at 50 concurrent logins producing 50 full `getent passwd`
-	// runs.
+	// measured at 50 concurrent logins producing 50 full re-reads.
 	r.buildMu.Lock()
 	defer r.buildMu.Unlock()
 
@@ -401,11 +400,10 @@ func (r *Resolver) indexIsFresh() bool {
 func (r *Resolver) build(ctx context.Context) error {
 	// The index is process-wide, but the context that triggered this
 	// rebuild belongs to ONE request. Enumerating under it means a client
-	// that disconnects mid-rebuild kills `getent` part-way through --
+	// that disconnects mid-rebuild cancels the read part-way through --
 	// and, before the enumerator learned to refuse partial output, that
 	// truncated list was installed and served for the whole TTL. Detach
-	// the deadline while keeping cancellation of the process bounded by
-	// buildTimeout.
+	// the deadline while keeping the rebuild bounded by buildTimeout.
 	//
 	// The caller's context still governs how long the CALLER waits: it is
 	// checked on return, so an abandoned request stops waiting without

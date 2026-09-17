@@ -188,7 +188,10 @@ type Config struct {
 	// because it holds no account database to read.
 	IdentityGroupsFromSystem bool
 	// IdentityMapPasswdFile reads accounts from this file instead of
-	// asking NSS. Empty means use `getent passwd` plus /etc/passwd.
+	// /etc/passwd. Empty means /etc/passwd, which is the only account
+	// source that enumerates: the GECOS index cannot list accounts that
+	// live only in a directory. Accounts it does map are still verified
+	// against the live database, directory included.
 	IdentityMapPasswdFile string
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.

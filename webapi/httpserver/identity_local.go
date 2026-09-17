@@ -58,11 +58,11 @@ func (l *localIdentity) sourcesGroups() bool { return l != nil && l.groups != ni
 
 // newLocalIdentity builds the mapper from operator configuration.
 //
-// passwdFile, when set, is read instead of asking NSS -- useful where
-// accounts are local, and the only thing a test can point at. Otherwise
-// enumeration goes through `getent passwd`, whose limits are documented
-// on idmap.Getent: SSSD lists directory accounts there only when its
-// domain has `enumerate = true`.
+// passwdFile, when set, is read instead of /etc/passwd -- useful where
+// accounts are local, and the only thing a test can point at. Either
+// way the index can only hold accounts that something will enumerate,
+// which in practice means the ones present locally; see the comment in
+// idmap/enumerate.go for why that is not the limitation it looks like.
 func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
 	if len(strategies) == 0 && !systemGroups {
 		return nil
