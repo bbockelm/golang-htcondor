@@ -2,8 +2,10 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -48,6 +50,19 @@ func (o *systemGroupOracle) Name() string { return "system-groups" }
 // absolute grant lifetime cap is what bounds exposure meanwhile.
 func (o *systemGroupOracle) Check(ctx context.Context, username string, scopes []string) (ReauthDecision, error) {
 	groups, err := o.identity.groups.GroupsFor(ctx, username)
+
+	// A degraded read is the dangerous case for THIS caller. The list is
+	// usable enough to log somebody in -- it is what `id` would say --
+	// but it is indistinguishable from a list that shrank because the
+	// user really was removed from a group, and acting on that here
+	// means revoking their grant. An outage must not do that to
+	// everybody whose token happens to refresh during it.
+	var degraded *idmap.DegradedError
+	if errors.As(err, &degraded) {
+		return ReauthDecision{}, fmt.Errorf(
+			"not re-checking %q: %s was unavailable, so a shorter group list may be an outage rather than lost membership: %w",
+			username, degraded.Source, degraded.Err)
+	}
 	if err != nil {
 		// Deliberately an error, not a revocation: the caller logs it and
 		// treats it as no opinion.

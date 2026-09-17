@@ -225,27 +225,63 @@ func TestGroupChainSkipsSourcesThatDoNotKnowTheUser(t *testing.T) {
 	}
 }
 
-// THE important one. A broken source must fail the whole lookup even
-// though another source answered: the partial list looks complete, so
-// login would under-authorize and the refresh oracle would read it as
-// lost membership and REVOKE the grant.
-func TestGroupChainRefusesAPartialAnswer(t *testing.T) {
+// An unavailable source does NOT fail the lookup -- glibc's default
+// action for UNAVAIL is `continue`, so `id` on this host would return
+// the same shortened list, and refusing would deny every login whenever
+// a directory blinked while the rest of the machine carried on.
+//
+// But the result is MARKED, because a short list and a list that shrank
+// because the user lost a group are identical in the list itself. Only
+// the marker tells them apart, and one caller -- the refresh-time
+// oracle, which revokes -- must be able to.
+func TestGroupChainMarksADegradedAnswer(t *testing.T) {
 	broken := &fakeGroups{err: errors.New("sssd socket timeout")}
 	local := &fakeGroups{groups: map[string][]string{"tannenba": {"staff"}}}
 
 	got, err := (&GroupChain{Sources: []GroupSource{local, broken}}).
 		GroupsFor(context.Background(), "tannenba")
-	if err == nil {
-		t.Fatalf("a partial group list was returned as if complete: %v", got)
+
+	if !reflect.DeepEqual(got, []string{"staff"}) {
+		t.Errorf("got %v; the sources that DID answer must still be used, as id(1) would", got)
+	}
+	var degraded *DegradedError
+	if !errors.As(err, &degraded) {
+		t.Fatalf("err = %v, want a *DegradedError so a caller can tell this is incomplete", err)
+	}
+	if degraded.Source != "fake" {
+		t.Errorf("degraded.Source = %q, want the unavailable source named", degraded.Source)
+	}
+	if !reflect.DeepEqual(degraded.Groups, []string{"staff"}) {
+		t.Errorf("degraded.Groups = %v, want the partial list carried with the error", degraded.Groups)
 	}
 	if errors.Is(err, ErrUnknownUser) {
-		t.Error("a broken source must not be reported as an unknown account -- the caller would treat it as a real answer")
+		t.Error("an unavailable source must not read as an unknown account")
 	}
-	if got != nil {
-		t.Errorf("returned %v alongside the error; a partial list must not escape", got)
+}
+
+// Nothing answered AND something was broken is an outage, not an unknown
+// account -- and must never read as "this user belongs to nothing".
+func TestGroupChainDistinguishesOutageFromUnknownAccount(t *testing.T) {
+	broken := &fakeGroups{err: errors.New("sssd down")}
+	unknown := &unknownGroups{}
+
+	_, err := (&GroupChain{Sources: []GroupSource{unknown, broken}}).
+		GroupsFor(context.Background(), "tannenba")
+	if err == nil {
+		t.Fatal("an outage produced no error")
 	}
-	if !strings.Contains(err.Error(), "incomplete") {
-		t.Errorf("the error should say the list would be incomplete: %v", err)
+	if errors.Is(err, ErrUnknownUser) {
+		t.Error("an outage was reported as an unknown account; the caller would deny rather than retry")
+	}
+	var degraded *DegradedError
+	if !errors.As(err, &degraded) {
+		t.Errorf("err = %v, want the outage identified as degraded", err)
+	}
+
+	// With no broken source, the same shape really is an unknown account.
+	if _, err := (&GroupChain{Sources: []GroupSource{unknown}}).
+		GroupsFor(context.Background(), "ghost"); !errors.Is(err, ErrUnknownUser) {
+		t.Errorf("err = %v, want ErrUnknownUser", err)
 	}
 }
 

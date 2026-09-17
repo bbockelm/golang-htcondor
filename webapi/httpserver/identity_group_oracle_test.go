@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,5 +220,54 @@ func TestSystemGroupOracleIsWiredExactlyWhenGroupsAreLocal(t *testing.T) {
 				t.Error("the registered oracle has no group source and would panic on the first refresh")
 			}
 		})
+	}
+}
+
+// degradedGroups answers, but reports that a source was unavailable.
+type degradedGroups struct{ groups []string }
+
+func (d *degradedGroups) Name() string { return "degraded" }
+func (d *degradedGroups) GroupsFor(context.Context, string) ([]string, error) {
+	return d.groups, &idmap.DegradedError{
+		Groups: d.groups, Source: "sssd", Err: errors.New("socket timeout"),
+	}
+}
+
+// The destructive case. A degraded read is good enough to log somebody
+// in -- it is what id(1) would say -- but acting on it HERE revokes a
+// grant. An SSSD outage must not revoke everybody whose token happens to
+// refresh during it, and a short list is indistinguishable from real
+// lost membership.
+func TestSystemGroupOracleWillNotRevokeOnADegradedRead(t *testing.T) {
+	// The degraded list lacks the required group, so a naive reading
+	// would revoke.
+	o := oracleFor(t, &degradedGroups{groups: []string{"unrelated"}}, "condor-users")
+
+	got, err := o.Check(context.Background(), "tannenba", []string{"mcp:read", "mcp:write"})
+	if err == nil {
+		t.Fatalf("a degraded read produced a verdict (%+v); it must be no opinion", got)
+	}
+	if got.Status == UserStatusRevoked {
+		t.Error("REVOKED on a degraded read -- an outage would revoke every refreshing user")
+	}
+	if len(got.DeniedScopes) != 0 {
+		t.Errorf("narrowed scopes %v on a degraded read", got.DeniedScopes)
+	}
+	if !strings.Contains(err.Error(), "outage") {
+		t.Errorf("the error should say why it declined: %v", err)
+	}
+}
+
+// A COMPLETE read that lacks the group still revokes -- otherwise the
+// feature does nothing.
+func TestSystemGroupOracleStillRevokesOnACompleteRead(t *testing.T) {
+	o := oracleFor(t, &stubGroups{groups: map[string][]string{"tannenba": {"unrelated"}}}, "condor-users")
+
+	got, err := o.Check(context.Background(), "tannenba", []string{"mcp:read"})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if got.Status != UserStatusRevoked {
+		t.Errorf("status = %v; a complete read showing lost membership must revoke", got.Status)
 	}
 }

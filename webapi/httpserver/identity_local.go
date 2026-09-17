@@ -169,7 +169,23 @@ func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups
 		// matter are the ones belonging to the account whose jobs this
 		// session will read.
 		groups, err = l.groups.GroupsFor(ctx, account)
-		if err != nil {
+
+		var degraded *idmap.DegradedError
+		switch {
+		case errors.As(err, &degraded):
+			// Some source was unavailable. `id` on this host would
+			// return the same short list, so refusing here would deny
+			// every login whenever a directory blinked -- while the rest
+			// of the machine carried on. Proceed, loudly: the user may
+			// see fewer permissions than usual, and an operator should
+			// be able to find out why from the log rather than from a
+			// support ticket.
+			groups = degraded.Groups
+			l.logger.Warn(logging.DestinationHTTP,
+				"Group list is incomplete; this session may have fewer permissions than it should",
+				"account", account, "unavailable_source", degraded.Source,
+				"groups", groups, "error", degraded.Err)
+		case err != nil:
 			return "", nil, fmt.Errorf("reading groups for %q: %w", account, err)
 		}
 	}

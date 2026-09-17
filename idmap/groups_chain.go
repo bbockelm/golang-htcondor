@@ -11,6 +11,32 @@ import (
 	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
+// DegradedError reports a group list assembled while at least one
+// configured source was unavailable.
+//
+// It carries the groups anyway, because that is what the rest of the
+// system does: glibc's default action for UNAVAIL is `continue`, so `id`
+// on a host whose SSSD is down returns the files-only list without
+// complaint. Refusing outright would disagree with every other tool on
+// the machine and would deny every login whenever a directory blinked.
+//
+// But a caller that is about to do something IRREVERSIBLE must not treat
+// it as a complete answer. "Fewer groups than usual" and "this user was
+// removed from a group" look identical in the list itself; only this
+// error tells them apart. Login proceeds on a degraded list, with a
+// warning; the refresh-time oracle refuses to revoke on one.
+type DegradedError struct {
+	Groups []string
+	Source string
+	Err    error
+}
+
+func (e *DegradedError) Error() string {
+	return fmt.Sprintf("group list is incomplete: %s was unavailable: %v", e.Source, e.Err)
+}
+
+func (e *DegradedError) Unwrap() error { return e.Err }
+
 // GroupChain consults every configured source and MERGES their answers,
 // which is what nsswitch.conf means.
 //
@@ -18,24 +44,17 @@ import (
 // each service and combines the supplementary groups it gets back. That
 // is the whole point of writing "files sss" -- a user is meant to end up
 // with their local groups AND their directory groups. An earlier version
-// of this took the first source that answered, which on any
-// files-first host silently dropped every directory group for every user
-// who happened to have a local passwd entry, and `id` would have
-// disagreed with us about who could do what.
+// of this took the first source that answered, which on any files-first
+// host silently dropped every directory group for every user who
+// happened to have a local passwd entry.
 //
 // A source that does not know the account (ErrUnknownUser) contributes
 // nothing and is not a failure; on a mixed host that is the normal case
 // for most users at most sources.
 //
-// A source that is BROKEN fails the whole lookup, even if another source
-// answered. The partial list that would otherwise be returned is the
-// dangerous case: it looks like a complete answer, so a caller cannot
-// tell that a user's directory groups are missing because SSSD is down
-// rather than because they were removed. Login then under-authorizes,
-// and -- far worse -- the refresh-time oracle would read it as lost
-// membership and REVOKE the grant. Refusing to answer at all keeps both
-// callers honest: login fails closed, and the oracle treats an error as
-// no opinion rather than as grounds to revoke.
+// A source that is UNAVAILABLE does not fail the lookup either -- see
+// DegradedError for why -- but the result is marked, so the one caller
+// that must not act on a short list can decline.
 type GroupChain struct{ Sources []GroupSource }
 
 // Name lists the chained sources, so a log line says what was consulted.
@@ -48,10 +67,14 @@ func (c *GroupChain) Name() string {
 }
 
 // GroupsFor returns the union of every source's answer.
+//
+// The error is a *DegradedError when some sources answered and others
+// were unavailable; the groups are still returned with it.
 func (c *GroupChain) GroupsFor(ctx context.Context, username string) ([]string, error) {
 	var (
-		merged []string
-		known  bool
+		merged   []string
+		known    bool
+		degraded *DegradedError
 	)
 	for _, s := range c.Sources {
 		groups, err := s.GroupsFor(ctx, username)
@@ -60,23 +83,37 @@ func (c *GroupChain) GroupsFor(ctx context.Context, username string) ([]string, 
 				// This service simply has no record of the account.
 				continue
 			}
-			return nil, fmt.Errorf("%s could not answer for %q, so the group list would be incomplete: %w",
-				s.Name(), username, err)
+			// Unavailable. Keep going, as glibc does, but remember.
+			if degraded == nil {
+				degraded = &DegradedError{Source: s.Name(), Err: err}
+			}
+			continue
 		}
 		known = true
 		merged = append(merged, groups...)
 	}
+
 	if !known {
+		if degraded != nil {
+			// Nothing answered AND something was broken: this is an
+			// outage, not an unknown account, and must not be mistaken
+			// for "this user belongs to nothing".
+			return nil, fmt.Errorf("no source could answer for %q: %w", username, degraded)
+		}
 		return nil, fmt.Errorf("%w: no configured source knows %q", ErrUnknownUser, username)
 	}
 	if len(merged) == 0 {
-		// Every source claimed to know the account and none named a
-		// group. No real account is in zero groups -- it is in at least
-		// its primary one -- so this is a malformed answer, not a
-		// permissions decision.
+		// Every source that knew the account named no group. No real
+		// account is in zero groups -- it is in at least its primary one.
 		return nil, fmt.Errorf("sources knew %q but reported no groups at all", username)
 	}
-	return normalizeGroups(merged), nil
+
+	merged = normalizeGroups(merged)
+	if degraded != nil {
+		degraded.Groups = merged
+		return merged, degraded
+	}
+	return merged, nil
 }
 
 // NSSwitchGroupSource builds the chain from nsswitch.conf's `group:`
