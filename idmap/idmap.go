@@ -1,3 +1,17 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package idmap resolves an identity asserted by an OIDC provider to a
 // local Unix account, by matching the token's subject against accounts'
 // GECOS fields.
@@ -62,13 +76,13 @@ var (
 // this package needs.
 type Account struct {
 	Username string
-	Gecos    string
 	UID      uint32
-	// primaryGID is the gid from the passwd entry. Unexported because
-	// nothing outside this package needs it, but the "files" group
-	// source does: /etc/group lists only supplementary members, so the
-	// primary group is knowable only from here.
-	primaryGID uint32
+
+	// Gecos is the account's GECOS "full name": the field up to the first
+	// comma, as os/user reports it. droppriv.GecosOf explains why the
+	// whole field is not used, and truncates identically so that an index
+	// entry and a verification compare the same string.
+	Gecos string
 }
 
 // Enumerator lists the account database. Implementations differ in how

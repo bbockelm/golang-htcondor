@@ -1,3 +1,17 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
@@ -5,7 +19,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -49,7 +63,7 @@ func (o *systemGroupOracle) Name() string { return "system-groups" }
 // that hard-denies whenever NSS hiccups is an outage amplifier, and the
 // absolute grant lifetime cap is what bounds exposure meanwhile.
 func (o *systemGroupOracle) Check(ctx context.Context, username string, scopes []string) (ReauthDecision, error) {
-	groups, err := o.identity.groups.GroupsFor(ctx, username)
+	groups, err := o.identity.groups.LookupGroups(ctx, username)
 
 	// A degraded read is the dangerous case for THIS caller. The list is
 	// usable enough to log somebody in -- it is what `id` would say --
@@ -57,7 +71,7 @@ func (o *systemGroupOracle) Check(ctx context.Context, username string, scopes [
 	// user really was removed from a group, and acting on that here
 	// means revoking their grant. An outage must not do that to
 	// everybody whose token happens to refresh during it.
-	var degraded *idmap.DegradedError
+	var degraded *droppriv.DegradedError
 	if errors.As(err, &degraded) {
 		return ReauthDecision{}, fmt.Errorf(
 			"not re-checking %q: %s was unavailable, so a shorter group list may be an outage rather than lost membership: %w",

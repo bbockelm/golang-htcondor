@@ -1,3 +1,17 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package idmap
 
 import (
@@ -192,90 +206,6 @@ func TestResolveFailsClosedWhenEnumerationFails(t *testing.T) {
 	}
 }
 
-func TestPasswdFileParsesTheRealLine(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "passwd")
-	body := strings.Join([]string{
-		"root:x:0:0:root:/root:/bin/bash",
-		"# a comment",
-		"",
-		realPasswdLine,
-		"malformed-line-without-enough-fields",
-		"nouid:x:notanumber:0:x:/:/bin/sh",
-		"gecos:x:20015:20015:has:colons?no,but,commas:/home/g:/bin/sh",
-	}, "\n")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	accounts, err := NewPasswdFile(path).Enumerate(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	byName := map[string]Account{}
-	for _, a := range accounts {
-		byName[a.Username] = a
-	}
-	if len(accounts) != 3 {
-		t.Errorf("parsed %d accounts (%v), want 3 with the bad lines skipped", len(accounts), byName)
-	}
-	// A non-numeric uid makes the line malformed, and it is dropped
-	// rather than recorded with a defaulted uid -- a silent 0 there would
-	// be root's.
-	if _, ok := byName["nouid"]; ok {
-		t.Error("kept an entry whose uid did not parse")
-	}
-	got := byName["tannenba"]
-	if got.Gecos != "tatannen" || got.UID != 20013 {
-		t.Errorf("parsed %+v, want GECOS tatannen uid 20013", got)
-	}
-	// Commas are part of the string, not a split point.
-	if g := byName["gecos"].Gecos; g != "has" {
-		t.Errorf("GECOS field = %q; passwd is colon-separated, so the field stops at the next colon", g)
-	}
-}
-
-func TestChainPrefersTheEarlierSource(t *testing.T) {
-	local := &fakeEnum{accounts: []Account{{Username: "tannenba", Gecos: "local-wins", UID: 20013}}}
-	dir := &fakeEnum{accounts: []Account{
-		{Username: "tannenba", Gecos: "tatannen", UID: 20013},
-		{Username: "only-in-dir", Gecos: "dir-subject", UID: 30000},
-	}}
-	c := &Chain{Sources: []Enumerator{local, dir}}
-
-	accounts, err := c.Enumerate(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accounts) != 2 {
-		t.Fatalf("merged to %d accounts, want 2", len(accounts))
-	}
-	for _, a := range accounts {
-		if a.Username == "tannenba" && a.Gecos != "local-wins" {
-			t.Errorf("directory shadowed the local entry: %+v", a)
-		}
-	}
-}
-
-// One broken source must not blind the others.
-func TestChainSurvivesAFailingSource(t *testing.T) {
-	broken := &fakeEnum{err: errors.New("getent: not found")}
-	local := &fakeEnum{accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}}}
-
-	accounts, err := (&Chain{Sources: []Enumerator{broken, local}}).Enumerate(context.Background())
-	if err != nil {
-		t.Fatalf("a working source was discarded because another failed: %v", err)
-	}
-	if len(accounts) != 1 {
-		t.Fatalf("got %d accounts, want the one the working source knew", len(accounts))
-	}
-
-	// But if EVERY source fails, that is an error, not an empty database.
-	if _, err := (&Chain{Sources: []Enumerator{broken}}).Enumerate(context.Background()); err == nil {
-		t.Error("an all-failed chain reported an empty account list instead of an error")
-	}
-}
-
 // An end-to-end pass over a passwd file: index it, resolve a subject,
 // and confirm the answer against the same file.
 func TestResolverOverAPasswdFile(t *testing.T) {
@@ -291,8 +221,7 @@ func TestResolverOverAPasswdFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pf := NewPasswdFile(path)
-	r := New(pf, &PasswdFileVerifier{File: pf})
+	r := New(&SystemAccounts{Path: path}, FileGecos{Path: path})
 
 	got, err := r.Resolve(context.Background(), "tatannen")
 	if err != nil {

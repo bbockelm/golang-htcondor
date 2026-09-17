@@ -1,3 +1,17 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
@@ -6,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -45,7 +60,7 @@ type localIdentity struct {
 	// groups reads membership from the system. Nil keeps the token's
 	// groups claim, which is the default and the only thing that works
 	// where there is no account database to read.
-	groups idmap.GroupSource
+	groups droppriv.GroupLookup
 	logger *logging.Logger
 }
 
@@ -74,38 +89,26 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 	if systemGroups {
 		// Order from nsswitch.conf, so this agrees with the rest of the
 		// machine rather than preferring a source of its own.
-		l.groups = idmap.NewCachedGroups(idmap.DefaultGroupSource(), ttl)
+		l.groups = droppriv.NewSystemGroupLookup(ttl)
 	}
 	if len(strategies) == 0 {
 		return l
 	}
 
-	var (
-		enum idmap.Enumerator
-		ver  idmap.Verifier
-	)
+	// Both halves come from droppriv: enumeration to build the index, and
+	// a by-name lookup to re-check every hit before it is believed.
+	//
+	// The verifier must read the same database the index came from. With
+	// the system default, that re-check is os/user -- which under cgo is
+	// getpwnam_r, so it reaches a directory account that nothing could
+	// have enumerated. With an operator-supplied file it is that file,
+	// because the system would not know those accounts at all.
+	enum := &idmap.SystemAccounts{Path: passwdFile}
+	var ver idmap.Verifier = idmap.SystemGecos{}
 	if passwdFile != "" {
-		pf := idmap.NewPasswdFile(passwdFile)
-		enum, ver = pf, &idmap.PasswdFileVerifier{File: pf}
-	} else {
-		// The index is built from /etc/passwd, which is the only thing
-		// available that enumerates: the SSSD client protocol has no
-		// enumeration call, and SSSD answers `getent passwd` with
-		// directory accounts only under `enumerate = true`, which is off
-		// by default. So this is not a step down from shelling out.
-		enum = idmap.NewPasswdFile("")
-
-		// The re-check is the half that must reach the directory, and it
-		// can: a lookup BY NAME is what every backend supports whether or
-		// not it will enumerate. That asymmetry is why a mapping derived
-		// from an incomplete index is still safe -- the account it
-		// resolves to is confirmed against the live database before the
-		// caller is told who somebody is.
-		ver = &idmap.VerifierChain{Verifiers: []idmap.Verifier{
-			&idmap.PasswdFileVerifier{File: idmap.NewPasswdFile("")},
-			&idmap.SSSDUser{},
-		}}
+		ver = idmap.FileGecos{Path: passwdFile}
 	}
+
 	l.resolver = idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...))
 	return l
 }
@@ -177,9 +180,9 @@ func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups
 		// Deliberately keyed on the mapped account: the groups that
 		// matter are the ones belonging to the account whose jobs this
 		// session will read.
-		groups, err = l.groups.GroupsFor(ctx, account)
+		groups, err = l.groups.LookupGroups(ctx, account)
 
-		var degraded *idmap.DegradedError
+		var degraded *droppriv.DegradedError
 		switch {
 		case errors.As(err, &degraded) && len(degraded.Groups) > 0:
 			// Some source was unavailable. `id` on this host would

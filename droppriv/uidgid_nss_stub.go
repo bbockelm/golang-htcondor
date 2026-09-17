@@ -11,6 +11,3 @@ func tryNSSStrategy() (LookupStrategy, error) {
 
 // ResetNSSCache is a no-op on non-Linux systems or when CGO is enabled.
 func ResetNSSCache() {}
-
-// SetNSSSwitchPath is a no-op on non-Linux systems or when CGO is enabled.
-func SetNSSSwitchPath(_ string) {}

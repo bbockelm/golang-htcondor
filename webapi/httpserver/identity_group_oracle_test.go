@@ -1,3 +1,17 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
@@ -9,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/idmap"
 )
 
@@ -19,7 +34,7 @@ type stubGroups struct {
 }
 
 func (s *stubGroups) Name() string { return "stub" }
-func (s *stubGroups) GroupsFor(_ context.Context, username string) ([]string, error) {
+func (s *stubGroups) LookupGroups(_ context.Context, username string) ([]string, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -35,7 +50,7 @@ func (s *stubGroups) GroupsFor(_ context.Context, username string) ([]string, er
 // tests vary is a user's membership in it.
 const testWriteGroup = "condor-writers"
 
-func oracleFor(t *testing.T, src idmap.GroupSource, required string) *systemGroupOracle {
+func oracleFor(t *testing.T, src droppriv.GroupLookup, required string) *systemGroupOracle {
 	t.Helper()
 	return &systemGroupOracle{
 		identity: &localIdentity{groups: src},
@@ -227,8 +242,8 @@ func TestSystemGroupOracleIsWiredExactlyWhenGroupsAreLocal(t *testing.T) {
 type degradedGroups struct{ groups []string }
 
 func (d *degradedGroups) Name() string { return "degraded" }
-func (d *degradedGroups) GroupsFor(context.Context, string) ([]string, error) {
-	return d.groups, &idmap.DegradedError{
+func (d *degradedGroups) LookupGroups(context.Context, string) ([]string, error) {
+	return d.groups, &droppriv.DegradedError{
 		Groups: d.groups, Source: "sssd", Err: errors.New("socket timeout"),
 	}
 }
