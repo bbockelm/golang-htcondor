@@ -617,3 +617,34 @@ func TestGetSecurityMethodsAuth(t *testing.T) {
 		t.Errorf("explicit SEC_CLIENT = %q, want FS", got)
 	}
 }
+
+func TestGetSecurityConfig_FSLocalDir(t *testing.T) {
+	// A site that relocates the FS-auth marker directory (e.g. to a tmpfs). The value must
+	// reach SecurityConfig so cedar validates the peer's marker path against it rather than
+	// the hardcoded /tmp -- otherwise FS auth fails with "parent /dev/shm is not /tmp".
+	cfg, err := config.NewFromReader(strings.NewReader(
+		"FS_LOCAL_DIR = /dev/shm\nFS_REMOTE_DIR = /mnt/nfs/fsauth\n"))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	secConfig, err := GetSecurityConfig(cfg, 60000, "CLIENT")
+	if err != nil {
+		t.Fatalf("GetSecurityConfig: %v", err)
+	}
+	if secConfig.FSLocalDir != "/dev/shm" {
+		t.Errorf("FSLocalDir = %q, want /dev/shm", secConfig.FSLocalDir)
+	}
+	if secConfig.FSRemoteDir != "/mnt/nfs/fsauth" {
+		t.Errorf("FSRemoteDir = %q, want /mnt/nfs/fsauth", secConfig.FSRemoteDir)
+	}
+
+	// Unset -> empty (cedar defaults to /tmp).
+	cfg2, _ := config.NewFromReader(strings.NewReader("SEC_CLIENT_AUTHENTICATION = OPTIONAL\n"))
+	sc2, err := GetSecurityConfig(cfg2, 60000, "CLIENT")
+	if err != nil {
+		t.Fatalf("GetSecurityConfig: %v", err)
+	}
+	if sc2.FSLocalDir != "" || sc2.FSRemoteDir != "" {
+		t.Errorf("unset FS dirs = %q/%q, want empty", sc2.FSLocalDir, sc2.FSRemoteDir)
+	}
+}

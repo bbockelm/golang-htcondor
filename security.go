@@ -274,6 +274,19 @@ func condorUsername(cfg *config.Config) string {
 	return "condor"
 }
 
+// fsAuthDir reads an FS-auth base-directory knob (FS_LOCAL_DIR / FS_REMOTE_DIR), trimmed, or
+// "" when unset -- which leaves cedar's on-the-wire default (/tmp). Populating this is what
+// lets a site running e.g. FS_LOCAL_DIR=/dev/shm authenticate over FS: cedar validates the
+// peer's marker path against the configured base instead of a hardcoded /tmp.
+func fsAuthDir(cfg *config.Config, key string) string {
+	if cfg != nil {
+		if v, ok := cfg.Get(key); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 // fsRootToCondor reads FS_ROOT_TO_CONDOR as a tri-state: nil (unset) leaves cedar's
 // default (enabled, matching HTCondor); an explicit value overrides it.
 func fsRootToCondor(cfg *config.Config) *bool {
@@ -345,6 +358,12 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		CondorUsername:   condorUsername(cfg),
 		CondorPrivRunner: daemonCondorPrivRunner,
 		FSRootToCondor:   fsRootToCondor(cfg),
+		// FS_LOCAL_DIR / FS_REMOTE_DIR: the base directory the FS / FS_REMOTE marker is
+		// created under. Empty leaves cedar's default (/tmp). Without this a site running
+		// e.g. FS_LOCAL_DIR=/dev/shm fails FS auth -- the peer hands out a /dev/shm/FS_...
+		// path and the client rejects anything not under /tmp.
+		FSLocalDir:  fsAuthDir(cfg, "FS_LOCAL_DIR"),
+		FSRemoteDir: fsAuthDir(cfg, "FS_REMOTE_DIR"),
 	}
 
 	// Get authentication level
