@@ -26,6 +26,21 @@ import (
 // telling an agent to return immediately just buys it another round trip.
 const blockingIsPrimaryAbove = 2 * time.Minute
 
+// blockingIsPrimary reports whether this deployment's cap makes blocking
+// the endorsed way to wait, which decides more than the wording.
+//
+// Re-registering a watch resolves to the one already there. Below the
+// threshold that is an agent using watch_jobs to poll -- it was told to
+// block only for something imminent, it did, the event did not happen,
+// and calling again just stalls the next turn too; it should be handed
+// the current state and pointed at check_watches. Above it, blocking IS
+// the advice, so a caller asking to wait again (a retry after a
+// transport timeout, say) is doing what the tool told it to, and its
+// wait must be honoured.
+func blockingIsPrimary(maxWait int) bool {
+	return time.Duration(maxWait)*time.Second >= blockingIsPrimaryAbove
+}
+
 // watchWaitAdvice is the cap-dependent text for the watch_jobs tool.
 type watchWaitAdvice struct {
 	// Strategy opens the tool description: what to do with this tool given
@@ -39,7 +54,7 @@ type watchWaitAdvice struct {
 func waitAdvice(maxWait int) watchWaitAdvice {
 	human := humanizeSeconds(maxWait)
 
-	if time.Duration(maxWait)*time.Second < blockingIsPrimaryAbove {
+	if !blockingIsPrimary(maxWait) {
 		return watchWaitAdvice{
 			Strategy: "Registers a durable watch and returns immediately; " +
 				"call check_watches later (any time, even in a different session) to collect the answer. " +

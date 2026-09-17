@@ -71,7 +71,10 @@ func jobWatchTools(maxWait int) []Tool {
 		{
 			Name: "watch_jobs",
 			Description: "Wait for something to happen to your jobs WITHOUT polling. " + advice.Strategy + "\n\n" +
-				"Use this instead of repeatedly calling query_jobs in a loop.\n\n" +
+				"CALL THIS ONCE PER QUESTION. To see whether a watch has been answered, call check_watches: " +
+				"calling watch_jobs again resolves back to the same watch and does not check it.\n\n" +
+				"Use this instead of repeatedly calling query_jobs in a loop; query_jobs is for a one-off " +
+				"status snapshot.\n\n" +
 				"IMPORTANT: do not write a constraint like 'JobStatus == 4' to wait for completion. A finished job is removed from " +
 				"the queue by the schedd, so that condition is never observed. Use event=\"done\" instead, which is resolved across " +
 				"the queue and the history archive.\n\nEvents:\n" + jobwatch.DescribeEvents() +
@@ -84,8 +87,10 @@ func jobWatchTools(maxWait int) []Tool {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"constraint": map[string]interface{}{
-						"type":        "string",
-						"description": "ClassAd expression selecting which of YOUR jobs this is about, e.g. 'ClusterId == 42'. Always scoped to you.",
+						"type": "string",
+						"description": "ClassAd expression selecting which of YOUR jobs this is about, e.g. 'ClusterId == 42'. Always scoped to you. " +
+							"A constraint matching no job is accepted, not rejected -- it will fire if matching jobs appear later -- " +
+							"and the response says so explicitly, because far more often it means a wrong ClusterId or a typo.",
 					},
 					"event": map[string]interface{}{
 						"type": "string", "enum": events,
@@ -105,8 +110,9 @@ func jobWatchTools(maxWait int) []Tool {
 						"description": "A short name for this watch, echoed back so you can tell several apart.",
 					},
 					"wait_seconds": map[string]interface{}{
-						"type":        "integer",
-						"description": advice.WaitParam,
+						"type": "integer",
+						"description": advice.WaitParam + " Waiting again by re-calling watch_jobs is not " +
+							"how to check on a watch you already registered; that is check_watches.",
 					},
 					"ttl_seconds": map[string]interface{}{
 						"type":        "integer",
@@ -119,7 +125,8 @@ func jobWatchTools(maxWait int) []Tool {
 		{
 			Name: "check_watches",
 			Description: "Collect the answers to watches you registered with watch_jobs — 'what happened while I was gone'. " +
-				"Returns watches that have fired since you last looked, plus the progress of those still waiting. " +
+				"THIS is the tool to call every time you want to know whether a watch has been answered; watch_jobs only " +
+				"registers it. Returns watches that have fired since you last looked, plus the progress of those still waiting. " +
 				"Cheap to call at the start of a turn. Reading does not consume an answer; pass include_delivered to see ones you have already been shown.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
@@ -186,9 +193,17 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 		return nil, err
 	}
 
-	// Evaluate before returning, so an already-satisfied condition is
-	// answered in this call rather than waited on forever.
+	// A caller re-asking a question it already registered is not asking
+	// for another wait. Registration coalesces onto the existing watch,
+	// so without this the second call blocks all over again -- which is
+	// exactly the polling loop watches exist to replace, and it is what
+	// an agent does when it reads watch_jobs as "get me the state now".
+	// Answer from what is already known and name the tool that does
+	// this properly.
 	deadline := time.Now().Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
+	if w.Coalesced && !blockingIsPrimary(s.maxWaitSeconds()) {
+		deadline = time.Now()
+	}
 	for {
 		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
 			s.logger.Warn(logging.DestinationGeneral, "evaluating a new job watch failed", "error", err)
