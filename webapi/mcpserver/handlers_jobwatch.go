@@ -71,13 +71,10 @@ func jobWatchTools(maxWait int) []Tool {
 		{
 			Name: "watch_jobs",
 			Description: "Wait for something to happen to your jobs WITHOUT polling. " + advice.Strategy + "\n\n" +
-				"CALL THIS ONCE PER QUESTION. It registers the watch; it is not how you check on one you already " +
-				"have, and not how you read current state:\n" +
-				"  - to see whether a watch has been answered, call check_watches;\n" +
-				"  - to read job state right now, call query_jobs;\n" +
-				"  - calling watch_jobs again with the same arguments does NOT check the existing watch. It " +
-				"resolves back to that same watch and says so.\n\n" +
-				"Use this instead of repeatedly calling query_jobs in a loop.\n\n" +
+				"CALL THIS ONCE PER QUESTION. To see whether a watch has been answered, call check_watches: " +
+				"calling watch_jobs again resolves back to the same watch and does not check it.\n\n" +
+				"Use this instead of repeatedly calling query_jobs in a loop; query_jobs is for a one-off " +
+				"status snapshot.\n\n" +
 				"IMPORTANT: do not write a constraint like 'JobStatus == 4' to wait for completion. A finished job is removed from " +
 				"the queue by the schedd, so that condition is never observed. Use event=\"done\" instead, which is resolved across " +
 				"the queue and the history archive.\n\nEvents:\n" + jobwatch.DescribeEvents() +
