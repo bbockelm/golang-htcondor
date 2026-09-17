@@ -68,5 +68,13 @@ func (s *GoLookupStrategy) Name() string {
 // tryGoFallback attempts to create a Go lookup strategy.
 // This always succeeds as it's the ultimate fallback.
 func tryGoFallback() (LookupStrategy, error) {
-	return NewGoLookup()
+	// The conversion is explicit so that a failure yields a nil INTERFACE.
+	// Returning the constructor's result directly would wrap a nil *T in a
+	// non-nil interface, which is why callers' "strategy != nil" guards were
+	// always true and could never have caught anything.
+	s, err := NewGoLookup()
+	if err != nil || s == nil {
+		return nil, err
+	}
+	return s, nil
 }
