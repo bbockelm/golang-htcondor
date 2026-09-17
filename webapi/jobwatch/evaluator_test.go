@@ -337,3 +337,51 @@ func TestReadsAreProjected(t *testing.T) {
 		}
 	}
 }
+
+// TestSingleJobWatchFiresAcrossPasses is the consequence of the tracked
+// round trip, at the level someone experiences it: submit one job, ask
+// to be told when it succeeds, and be told.
+//
+// It takes two passes, because the bug was in RELOADING the tracked set
+// -- the first pass holds it in memory and looks fine. On the second
+// the watch had swapped its real job for the ghost 0.0, which never
+// appears in the queue or in history, so "all succeeded" could never be
+// claimed and the watch waited until it gave up.
+func TestSingleJobWatchFiresAcrossPasses(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	register(t, s, "alice", EventSucceeded, ModeAll)
+
+	// Pass one: the job is running, so the watch records it and waits.
+	src := &fakeSource{queue: map[string][]*classad.ClassAd{"alice": {job(42, 0, running)}}}
+	if _, err := NewEvaluator(s, src, nil).Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	live, err := s.Live(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("live watches = %d, want 1", len(live))
+	}
+	if len(live[0].Tracked) != 1 || live[0].Tracked[0] != (JobID{42, 0}) {
+		t.Fatalf("the watch remembers %v, not the job it selected", live[0].Tracked)
+	}
+
+	// Pass two: it succeeded.
+	src = &fakeSource{history: map[string][]*classad.ClassAd{"alice": {historyAd(0, completed, 0)}}}
+	st, err := NewEvaluator(s, src, nil).Pass(ctx)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if st.Fired != 1 {
+		t.Fatalf("Fired = %d; the watch never fired for a job that succeeded", st.Fired)
+	}
+	got := fired(t, s, "alice")
+	if len(got) != 1 || got[0].MatchedTotal != 1 {
+		t.Fatalf("expected one fired watch over one job: %+v", got)
+	}
+	if got[0].Undetermined {
+		t.Error("the watch fired without establishing the outcome")
+	}
+}
