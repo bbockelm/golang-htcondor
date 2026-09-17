@@ -88,14 +88,23 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 		pf := idmap.NewPasswdFile(passwdFile)
 		enum, ver = pf, &idmap.PasswdFileVerifier{File: pf}
 	} else {
-		// The index comes from whatever will enumerate; the re-check
-		// goes to getent, which answers for a single account even when
-		// the directory refuses to list them all.
-		enum = &idmap.Chain{Sources: []idmap.Enumerator{
-			&idmap.Getent{},
-			idmap.NewPasswdFile(""),
+		// The index is built from /etc/passwd, which is the only thing
+		// available that enumerates: the SSSD client protocol has no
+		// enumeration call, and SSSD answers `getent passwd` with
+		// directory accounts only under `enumerate = true`, which is off
+		// by default. So this is not a step down from shelling out.
+		enum = idmap.NewPasswdFile("")
+
+		// The re-check is the half that must reach the directory, and it
+		// can: a lookup BY NAME is what every backend supports whether or
+		// not it will enumerate. That asymmetry is why a mapping derived
+		// from an incomplete index is still safe -- the account it
+		// resolves to is confirmed against the live database before the
+		// caller is told who somebody is.
+		ver = &idmap.VerifierChain{Verifiers: []idmap.Verifier{
+			&idmap.PasswdFileVerifier{File: idmap.NewPasswdFile("")},
+			&idmap.SSSDUser{},
 		}}
-		ver = &idmap.GetentUser{}
 	}
 	l.resolver = idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...))
 	return l
@@ -172,7 +181,7 @@ func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups
 
 		var degraded *idmap.DegradedError
 		switch {
-		case errors.As(err, &degraded):
+		case errors.As(err, &degraded) && len(degraded.Groups) > 0:
 			// Some source was unavailable. `id` on this host would
 			// return the same short list, so refusing here would deny
 			// every login whenever a directory blinked -- while the rest
@@ -185,6 +194,16 @@ func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups
 				"Group list is incomplete; this session may have fewer permissions than it should",
 				"account", account, "unavailable_source", degraded.Source,
 				"groups", groups, "error", degraded.Err)
+		case degraded != nil:
+			// Degraded AND empty is not a short answer, it is no answer:
+			// every source that might have known this account was the one
+			// that was unavailable. Proceeding would hand the session an
+			// empty group list, which reads downstream as a real "belongs
+			// to nothing" and is indistinguishable from a user who was
+			// legitimately removed from everything.
+			return "", nil, fmt.Errorf(
+				"group lookup for %q learned nothing: %s was unavailable: %w",
+				account, degraded.Source, degraded.Err)
 		case err != nil:
 			return "", nil, fmt.Errorf("reading groups for %q: %w", account, err)
 		}

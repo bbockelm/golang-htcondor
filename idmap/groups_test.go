@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/gosssd"
 )
 
 type fakeGroups struct {
@@ -130,14 +133,29 @@ func TestForgetDropsTheEntry(t *testing.T) {
 }
 
 func TestGroupsForRejectsAnEmptyUsername(t *testing.T) {
-	if _, err := (&IDCommand{}).GroupsFor(context.Background(), ""); err == nil {
-		t.Error("an empty username must not be handed to id(1)")
+	if _, err := (&GroupFiles{}).GroupsFor(context.Background(), ""); err == nil {
+		t.Error("an empty username must not be looked up")
 	}
 }
 
-// Exercises the real id(1) against this machine's own account, which is
-// the only account a test can be sure exists.
-func TestIDCommandAgainstThisAccount(t *testing.T) {
+// idGroups asks id(1) what this account's groups are. It exists ONLY in
+// the test, as the oracle: the library itself must never fork, which is
+// the property the test below is here to hold it to.
+func idGroups(t *testing.T, username string) []string {
+	t.Helper()
+	if _, err := exec.LookPath("id"); err != nil {
+		t.Skip("id(1) not available to check against")
+	}
+	//nolint:gosec // a test-only oracle; username comes from id -un on this host
+	out, err := exec.CommandContext(t.Context(), "id", "-Gn", "--", username).Output()
+	if err != nil {
+		t.Skipf("id -Gn %q: %v", username, err)
+	}
+	return normalizeGroups(strings.Fields(string(out)))
+}
+
+func thisAccount(t *testing.T) string {
+	t.Helper()
 	if _, err := exec.LookPath("id"); err != nil {
 		t.Skip("id(1) not available")
 	}
@@ -149,22 +167,57 @@ func TestIDCommandAgainstThisAccount(t *testing.T) {
 	if username == "" {
 		t.Skip("current user has no name")
 	}
+	return username
+}
 
-	groups, err := (&IDCommand{}).GroupsFor(context.Background(), username)
-	if err != nil {
+// The load-bearing test for removing fork/exec: the pure-Go chain must
+// give the same answer libc does.
+//
+// This is what makes the replacement defensible rather than merely
+// smaller. Reimplementing NSS resolution in Go risks answering from a
+// subset of the configured sources and being confidently wrong in a way
+// nothing notices until somebody's permissions differ from `id`'s. So
+// the check is against id(1) itself, on a real account, through whatever
+// this host's nsswitch.conf actually says.
+func TestTheNativeChainAgreesWithID(t *testing.T) {
+	username := thisAccount(t)
+	want := idGroups(t, username)
+	if len(want) == 0 {
+		t.Skip("id reported no groups")
+	}
+
+	got, err := DefaultGroupSource().GroupsFor(context.Background(), username)
+
+	// A degraded read is a legitimate outcome, not a failure: it is this
+	// host telling us it resolves groups through a method the library
+	// does not speak. The answer is then a subset by construction, and
+	// the assertion below is the one that still must hold.
+	var degraded *DegradedError
+	if errors.As(err, &degraded) {
+		t.Logf("degraded via %s (%v); checking for fabrication only", degraded.Source, degraded.Err)
+		got = degraded.Groups
+	} else if err != nil {
 		t.Fatalf("GroupsFor(%q): %v", username, err)
 	}
-	if len(groups) == 0 {
-		t.Errorf("%q resolved to no groups at all, which no real account has", username)
-	}
-	// Sorted and unique, per normalizeGroups.
-	for i := 1; i < len(groups); i++ {
-		if groups[i-1] >= groups[i] {
-			t.Errorf("groups are not sorted and unique: %v", groups)
-			break
+
+	// Never invent membership. A group we report that id does not is a
+	// privilege this account does not have, which is the direction that
+	// actually hurts.
+	for _, g := range got {
+		if !slices.Contains(want, g) {
+			t.Errorf("reported group %q that id(1) does not: got %v, id says %v", g, got, want)
 		}
 	}
-	t.Logf("%s is in %d groups", username, len(groups))
+
+	if degraded != nil {
+		return
+	}
+	// A complete read must match exactly. Missing a group is a privilege
+	// the account should have had, and shows up as a mystifying denial.
+	if !slices.Equal(got, want) {
+		t.Errorf("complete read disagrees with id(1):\n  got %v\n  id  %v", got, want)
+	}
+	t.Logf("%s: %d groups, matching id(1)", username, len(got))
 }
 
 // unknownGroups reports ErrUnknownUser, the way a source behaves for an
@@ -347,30 +400,69 @@ func TestNSSwitchGroupSourceReadsTheGroupLineNotPasswd(t *testing.T) {
 
 // A method this package cannot speak must not be silently dropped: libc
 // can speak it, so id(1) is appended and the whole line is honoured.
-func TestNSSwitchGroupSourceDefersToLibcForUnknownMethods(t *testing.T) {
-	for _, line := range []string{
-		"group: files ldap\n",
-		"group: winbind files\n",
-		"group: nis\n",
-	} {
-		name := NSSwitchGroupSource(writeNSSwitch(t, line)).Name()
-		if !strings.Contains(name, "id -Gn") {
-			t.Errorf("for %q the chain was %q; expected id(1) so libc handles the unknown method",
-				strings.TrimSpace(line), name)
+// A method this package cannot speak must be RECORDED, not skipped.
+//
+// The old behaviour appended id(1) so libc could resolve the whole line.
+// That forked from a daemon that manipulates its own privileges. The
+// replacement keeps the property that mattered -- never silently
+// answering from a subset of the configured sources -- by contributing a
+// source that marks the read degraded instead.
+func TestNSSwitchGroupSourceRecordsMethodsItCannotSpeak(t *testing.T) {
+	for _, line := range []string{"group: files ldap", "group: winbind files", "group: nis"} {
+		path := writeNSSwitch(t, line)
+		name := NSSwitchGroupSource(path).Name()
+		if !strings.Contains(name, "unsupported:") {
+			t.Errorf("for %q the chain was %q; the unspeakable method must be recorded", line, name)
 		}
 	}
 }
 
-// An unreadable nsswitch.conf is not a licence to guess.
-func TestNSSwitchGroupSourceFallsBackToLibc(t *testing.T) {
-	name := NSSwitchGroupSource(filepath.Join(t.TempDir(), "absent")).Name()
-	if name != "chain(id -Gn)" {
-		t.Errorf("chain = %q, want libc alone when the config cannot be read", name)
+// And the recording must actually degrade a real lookup, not just show
+// up in a name. A caller deciding authorization has to be able to tell
+// that the answer may be short.
+func TestAnUnspeakableMethodDegradesTheAnswer(t *testing.T) {
+	dir := t.TempDir()
+	passwd := filepath.Join(dir, "passwd")
+	group := filepath.Join(dir, "group")
+	if err := os.WriteFile(passwd, []byte("tannenba:x:20013:20013:tatannen:/home/tannenba:/bin/bash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(group, []byte("tannenba:x:20013:\ncondor-users:x:900:tannenba\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	chain := &GroupChain{Sources: []GroupSource{
+		&GroupFiles{PasswdPath: passwd, GroupPath: group},
+		&unsupportedMethod{method: "ldap", reason: "test"},
+	}}
+
+	groups, err := chain.GroupsFor(context.Background(), "tannenba")
+
+	var degraded *DegradedError
+	if !errors.As(err, &degraded) {
+		t.Fatalf("err = %v, want a DegradedError so the caller knows the list may be short", err)
+	}
+	// The usable part still comes back -- a login should proceed.
+	if !slices.Contains(groups, "condor-users") {
+		t.Errorf("groups = %v, want the files half to still be returned", groups)
+	}
+	if degraded.Source != "unsupported:ldap" {
+		t.Errorf("degraded source = %q, want the unspeakable method named", degraded.Source)
 	}
 }
 
-// Actions like [NOTFOUND=return] are not sources and must not be counted
-// as methods we cannot speak.
+// An unreadable nsswitch.conf must not silently disable the re-check by
+// marking every read degraded on a host that has no SSSD at all.
+func TestAnUnreadableNSSwitchDoesNotBlindlyAddSSSD(t *testing.T) {
+	name := NSSwitchGroupSource(filepath.Join(t.TempDir(), "does-not-exist")).Name()
+	if !strings.Contains(name, "files") {
+		t.Errorf("chain = %q, want files to still be consulted", name)
+	}
+	if _, err := os.Stat(gosssd.DefaultNSSSocketPath); err != nil && strings.Contains(name, "sssd") {
+		t.Errorf("chain = %q, but there is no SSSD socket on this host", name)
+	}
+}
+
 func TestNSSwitchGroupSourceIgnoresActions(t *testing.T) {
 	name := NSSwitchGroupSource(writeNSSwitch(t,
 		"group: files [NOTFOUND=return] sss\n")).Name()

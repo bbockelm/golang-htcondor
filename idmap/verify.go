@@ -1,78 +1,64 @@
 package idmap
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 )
 
-// GetentUser answers the forward question -- what is this account's
-// GECOS -- by running `getent passwd <username>`.
+// SSSDUser answers the forward question -- what is this account's GECOS
+// -- over the SSSD socket protocol.
 //
-// This is the lookup every user database supports, including the ones
-// that will not enumerate: SSSD answers a single-name query for a
-// directory account whether or not `enumerate` is on. So a site whose
-// index is necessarily incomplete still gets its index hits confirmed,
-// and Resolver's re-check is not merely a formality.
-type GetentUser struct {
-	// Path to getent. Empty means look it up on PATH.
-	Path string
+// This is the lookup every directory supports for a single name, whether
+// or not it will enumerate, which is what makes the index's re-check
+// meaningful on a host whose index is necessarily incomplete.
+//
+// It speaks to SSSD directly rather than running `getent`: a daemon that
+// manipulates its own privileges should not be forking, and a library at
+// this level has no business doing so regardless.
+type SSSDUser struct {
+	// SocketPath overrides the SSSD NSS socket. Empty uses the default.
+	SocketPath string
+
+	groups SSSDGroups // reuses the lazily-connected client
 }
 
 // Name identifies this verifier in logs.
-func (g *GetentUser) Name() string { return "getent passwd <user>" }
+func (s *SSSDUser) Name() string { return "sssd" }
 
-// GecosOf returns the account's GECOS field. A missing account is an
-// error, never an empty GECOS: "deleted" and "no real name set" must not
-// look alike to a caller deciding who somebody is.
-func (g *GetentUser) GecosOf(ctx context.Context, username string) (string, error) {
+// GecosOf returns the account's GECOS field.
+//
+// A missing account is ErrUnknownUser, never an empty GECOS: "deleted"
+// and "no real name set" must not look alike to a caller deciding who
+// somebody is.
+func (s *SSSDUser) GecosOf(ctx context.Context, username string) (string, error) {
 	if username == "" {
 		return "", fmt.Errorf("no username to look up")
 	}
-	bin := g.Path
-	if bin == "" {
-		var err error
-		if bin, err = exec.LookPath("getent"); err != nil {
-			return "", fmt.Errorf("getent is not available: %w", err)
-		}
-	}
-	// "--" so a subject beginning with "-" is an operand, not an option.
-	cmd := exec.CommandContext(ctx, bin, "passwd", "--", username) //nolint:gosec // bin is from PATH or operator config; username is an argv element
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// getent exits 2 for "not found", which is the common case and
-		// deserves the clearer message. Partial output from an
-		// interrupted run is refused rather than parsed: this answer
-		// decides whether an index hit is trusted.
-		if stdout.Len() == 0 {
-			return "", fmt.Errorf("no account %q: %w: %s", username, err, strings.TrimSpace(stderr.String()))
-		}
-		return "", fmt.Errorf("%s passwd %q did not complete: %w", bin, username, err)
-	}
-	accounts, err := parsePasswd(&stdout)
+	s.groups.SocketPath = s.SocketPath
+	client, err := s.groups.connect(ctx)
 	if err != nil {
 		return "", err
 	}
-	for _, a := range accounts {
-		if a.Username == username {
-			return a.Gecos, nil
-		}
+	u, err := client.GetUserByName(username)
+	if err != nil {
+		// SSSD does not distinguish "no such user" from a transport
+		// failure in its error text reliably, so this is reported as a
+		// lookup failure and the chain decides.
+		return "", fmt.Errorf("SSSD lookup for %q: %w", username, err)
 	}
-	return "", fmt.Errorf("no account %q", username)
+	if u == nil || u.Name != username {
+		return "", fmt.Errorf("%w: SSSD has no account %q", ErrUnknownUser, username)
+	}
+	return u.Gecos, nil
 }
 
-// PasswdFileVerifier answers the same question from a passwd file. Useful
-// where the accounts are local, and in tests.
+// PasswdFileVerifier answers the same question from a passwd file.
 type PasswdFileVerifier struct{ File *PasswdFile }
 
 // Name identifies this verifier in logs.
 func (p *PasswdFileVerifier) Name() string { return "verify:" + p.File.Name() }
 
-// GecosOf returns the account's GECOS field, or an error if it is absent.
+// GecosOf returns the account's GECOS field, or ErrUnknownUser.
 func (p *PasswdFileVerifier) GecosOf(ctx context.Context, username string) (string, error) {
 	accounts, err := p.File.Enumerate(ctx)
 	if err != nil {
@@ -83,5 +69,27 @@ func (p *PasswdFileVerifier) GecosOf(ctx context.Context, username string) (stri
 			return a.Gecos, nil
 		}
 	}
-	return "", fmt.Errorf("no account %q in %s", username, p.File.Path)
+	return "", fmt.Errorf("%w: no account %q in %s", ErrUnknownUser, username, p.File.Path)
+}
+
+// VerifierChain tries each verifier until one answers, so a host with
+// local AND directory accounts can confirm either.
+type VerifierChain struct{ Verifiers []Verifier }
+
+// GecosOf returns the first definitive answer.
+func (c *VerifierChain) GecosOf(ctx context.Context, username string) (string, error) {
+	var firstErr error
+	for _, v := range c.Verifiers {
+		gecos, err := v.GecosOf(ctx, username)
+		if err == nil {
+			return gecos, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("%w: no verifier knows %q", ErrUnknownUser, username)
+	}
+	return "", firstErr
 }

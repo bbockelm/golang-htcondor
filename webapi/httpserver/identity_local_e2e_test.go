@@ -40,9 +40,15 @@ func e2eLocalAccount(t *testing.T) (username, passwdPath string, realGroups []st
 	if _, err := exec.LookPath("id"); err != nil {
 		t.Skip("id(1) is needed to read real group membership")
 	}
-	groups, err := (&idmap.IDCommand{}).GroupsFor(t.Context(), u.Username)
-	if err != nil || len(groups) == 0 {
+	// id(1) is the test's oracle for real membership. The server under
+	// test reaches the same answer without forking, which is the point.
+	out, err := exec.CommandContext(t.Context(), "id", "-Gn", "--", u.Username).Output()
+	if err != nil {
 		t.Skipf("cannot read groups for %q: %v", u.Username, err)
+	}
+	groups := strings.Fields(string(out))
+	if len(groups) == 0 {
+		t.Skipf("%q has no groups", u.Username)
 	}
 
 	path := filepath.Join(t.TempDir(), "passwd")
@@ -86,7 +92,7 @@ func TestIdentityMappingEndToEnd(t *testing.T) {
 		"groups": []string{"a-group-the-account-is-not-in"},
 	}
 
-	server, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, accessGroup)
+	server, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, accessGroup, "")
 	ssoStorage.callbackURL = baseURL + "/mcp/oauth2/callback"
 	_ = server
 
@@ -143,7 +149,7 @@ func TestIdentityMappingRefusesAnUnmappableLogin(t *testing.T) {
 		"groups": []string{"admins"},
 	}
 
-	_, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, realGroups[0])
+	_, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, realGroups[0], "")
 	ssoStorage.callbackURL = baseURL + "/mcp/oauth2/callback"
 
 	status, body := attemptSSOLogin(t, baseURL, ssoBaseURL, "ssouser", "ssopassword")
@@ -158,7 +164,7 @@ func TestIdentityMappingRefusesAnUnmappableLogin(t *testing.T) {
 
 // startIdentityMappedServer starts a server that resolves subjects by
 // GECOS and reads groups from the system.
-func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup string) (*Server, string) {
+func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup, usernameClaim string) (*Server, string) {
 	t.Helper()
 	tempDir := t.TempDir()
 
@@ -176,23 +182,24 @@ func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup
 
 	placeholder := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
-		ListenAddr:         "127.0.0.1:0",
-		ScheddName:         "local",
-		ScheddAddr:         "127.0.0.1:9618",
-		SigningKeyPath:     passwordsDir,
-		TrustDomain:        "test.local",
-		UIDDomain:          "test.local",
-		EnableMCP:          true,
-		OAuth2DBPath:       filepath.Join(tempDir, "oauth2.db"),
-		OAuth2Issuer:       placeholder,
-		OAuth2ClientID:     "mcp-client",
-		OAuth2ClientSecret: "mcp-secret",
-		OAuth2AuthURL:      ssoBaseURL + "/authorize",
-		OAuth2TokenURL:     ssoBaseURL + "/token",
-		OAuth2RedirectURL:  placeholder + "/mcp/oauth2/callback",
-		OAuth2UserInfoURL:  ssoBaseURL + "/userinfo",
-		OAuth2GroupsClaim:  "groups",
-		MCPAccessGroup:     accessGroup,
+		ListenAddr:          "127.0.0.1:0",
+		ScheddName:          "local",
+		ScheddAddr:          "127.0.0.1:9618",
+		SigningKeyPath:      passwordsDir,
+		TrustDomain:         "test.local",
+		UIDDomain:           "test.local",
+		EnableMCP:           true,
+		OAuth2DBPath:        filepath.Join(tempDir, "oauth2.db"),
+		OAuth2Issuer:        placeholder,
+		OAuth2ClientID:      "mcp-client",
+		OAuth2ClientSecret:  "mcp-secret",
+		OAuth2AuthURL:       ssoBaseURL + "/authorize",
+		OAuth2TokenURL:      ssoBaseURL + "/token",
+		OAuth2RedirectURL:   placeholder + "/mcp/oauth2/callback",
+		OAuth2UserInfoURL:   ssoBaseURL + "/userinfo",
+		OAuth2GroupsClaim:   "groups",
+		OAuth2UsernameClaim: usernameClaim,
+		MCPAccessGroup:      accessGroup,
 
 		// The thing under test.
 		IdentityMapStrategies:    []idmap.Strategy{idmap.StrategyGecos},
@@ -362,4 +369,62 @@ func location(t *testing.T, resp *http.Response, base string) string {
 		loc = base + loc
 	}
 	return loc
+}
+
+// Not every provider puts the name in `sub`. Federated identity commonly
+// carries it in eduPersonPrincipalName, and `sub` is then an opaque
+// pairwise identifier that matches no account anywhere.
+//
+// HTTP_API_OAUTH2_USERNAME_CLAIM selects which claim is read, and that
+// claim is the INPUT to everything else here -- so this asserts the
+// configured claim drives the mapping and that `sub` is ignored when it
+// does. Nothing covered that before, in either feature.
+func TestIdentityMappingReadsTheConfiguredClaim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spins up a server and an SSO provider")
+	}
+	localAccount, passwdPath, realGroups := e2eLocalAccount(t)
+
+	ssoServer, ssoStorage, ssoBaseURL := setupMockSSOServer(t, "")
+	t.Cleanup(func() { shutdownMockSSOServer(t, ssoServer) })
+
+	// eppn carries the identity this access point knows; sub is an
+	// opaque pairwise id that maps to nothing. If sub were read, the
+	// login would be refused -- which is what makes this discriminating.
+	ssoStorage.userInfos["ssouser"] = map[string]interface{}{
+		"sub":    "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+		"eppn":   e2eAssertedSubject,
+		"email":  "e2e@example.com",
+		"groups": []string{"a-group-the-account-is-not-in"},
+	}
+
+	_, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, realGroups[0], "eppn")
+	ssoStorage.callbackURL = baseURL + "/mcp/oauth2/callback"
+
+	token := completeSSOLogin(t, baseURL, ssoBaseURL, "ssouser", "ssopassword")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/api/v1/whoami", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var who WhoAmIResponse
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &who); err != nil {
+		t.Fatalf("whoami returned %d: %s", resp.StatusCode, string(body))
+	}
+	if !who.Authenticated || who.User != localAccount {
+		t.Fatalf("whoami = %+v, want the account %q reached via the eppn claim: %s",
+			who, localAccount, string(body))
+	}
+	if strings.Contains(who.User, "f47ac10b") {
+		t.Error("the opaque sub reached the session; the configured claim was not used")
+	}
+	t.Logf("eppn %q resolved to account %q while sub was ignored", e2eAssertedSubject, who.User)
 }

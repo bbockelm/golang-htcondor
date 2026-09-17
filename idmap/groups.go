@@ -1,12 +1,8 @@
 package idmap
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"os/exec"
-	"os/user"
 	"sort"
 	"strings"
 	"sync"
@@ -33,83 +29,13 @@ type GroupSource interface {
 	Name() string
 }
 
-// IDCommand reads group membership by running `id -Gn <user>`.
+// There is no `id -Gn` group source and no os/user one.
 //
-// It resolves through NSS, so it sees directory groups the same way the
-// rest of the system does. That matters more than it looks: Go's
-// os/user, built without cgo, reads /etc/group ALONE and would silently
-// report a directory-backed user as a member of nothing -- which reads
-// as "no permissions" rather than as an error.
-type IDCommand struct {
-	// Path to id. Empty means look it up on PATH.
-	Path string
-}
-
-// Name identifies this source in logs.
-func (c *IDCommand) Name() string { return "id -Gn" }
-
-// GroupsFor returns every group the account belongs to, primary included.
-func (c *IDCommand) GroupsFor(ctx context.Context, username string) ([]string, error) {
-	if username == "" {
-		return nil, fmt.Errorf("no username to look up groups for")
-	}
-	bin := c.Path
-	if bin == "" {
-		var err error
-		if bin, err = exec.LookPath("id"); err != nil {
-			return nil, fmt.Errorf("id is not available: %w", err)
-		}
-	}
-	// -Gn is "all group names, including the primary one". The username
-	// comes from the account database, never straight from a token, but
-	// it is passed as an argument rather than through a shell regardless.
-	cmd := exec.CommandContext(ctx, bin, "-Gn", "--", username) //nolint:gosec // bin is from PATH or operator config; username is an argv element
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// id(1) says "no such user" for an account NSS cannot resolve at
-		// all. That is not this source failing; it is the account not
-		// existing anywhere, which the chain must not mistake for an
-		// outage.
-		if msg := stderr.String(); strings.Contains(msg, "no such user") || strings.Contains(msg, "cannot find name") {
-			return nil, fmt.Errorf("%w: %s", ErrUnknownUser, strings.TrimSpace(msg))
-		}
-		return nil, fmt.Errorf("running %s -Gn %s: %w: %s", bin, username, err, strings.TrimSpace(stderr.String()))
-	}
-	return normalizeGroups(strings.Fields(stdout.String())), nil
-}
-
-// OSUser reads group membership through os/user. Complete only when the
-// binary was built with cgo and NSS is configured; see IDCommand.
-type OSUser struct{}
-
-// Name identifies this source in logs.
-func (OSUser) Name() string { return "os/user" }
-
-// GroupsFor returns the account's groups as os/user reports them.
-func (OSUser) GroupsFor(_ context.Context, username string) ([]string, error) {
-	u, err := user.Lookup(username)
-	if err != nil {
-		return nil, err
-	}
-	gids, err := u.GroupIds()
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(gids))
-	for _, gid := range gids {
-		g, err := user.LookupGroupId(gid)
-		if err != nil {
-			// A gid with no group entry is still a membership; report the
-			// number rather than dropping the fact.
-			names = append(names, gid)
-			continue
-		}
-		names = append(names, g.Name)
-	}
-	return normalizeGroups(names), nil
-}
+// The first forks, which a privilege-manipulating daemon should not do.
+// The second reads /etc/group ALONE when built without cgo, reporting a
+// directory-backed account as a member of nothing -- which reads as "no
+// permissions" rather than as the failure it is. Membership comes from
+// GroupFiles and SSSDGroups, composed in the order nsswitch.conf gives.
 
 // CachedGroups memoises a GroupSource. Group membership changes rarely
 // and is consulted on every authorization, so the uncached cost would be

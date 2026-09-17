@@ -2,12 +2,10 @@ package idmap
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -38,63 +36,21 @@ func (p *PasswdFile) Enumerate(_ context.Context) ([]Account, error) {
 	return parsePasswd(f)
 }
 
-// Getent enumerates through NSS by running `getent passwd`, so it sees
-// whatever the system sees -- local files plus SSSD, LDAP, and anything
-// else in nsswitch.conf.
+// The account index is built from /etc/passwd alone, deliberately.
 //
-// The catch is real and worth stating: SSSD answers `getent passwd` with
-// directory entries only when its domain has `enumerate = true`, which
-// is off by default and discouraged for large directories. A site whose
-// accounts live in LDAP and whose SSSD does not enumerate will get a
-// short list here and users will fail to resolve -- which is why
-// Resolver logs the count, and why that count is worth an operator's
-// attention on startup rather than at the first failed login.
-type Getent struct {
-	// Path to getent. Empty means look it up on PATH.
-	Path string
-}
-
-// Name identifies this source in logs.
-func (g *Getent) Name() string { return "getent passwd" }
-
-// Enumerate lists every account NSS will hand over.
-func (g *Getent) Enumerate(ctx context.Context) ([]Account, error) {
-	bin := g.Path
-	if bin == "" {
-		var err error
-		if bin, err = exec.LookPath("getent"); err != nil {
-			return nil, fmt.Errorf("getent is not available: %w", err)
-		}
-	}
-	cmd := exec.CommandContext(ctx, bin, "passwd") //nolint:gosec // bin is resolved from PATH or operator config
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// A non-zero exit means the listing did not complete. Earlier
-		// this was tolerated whenever stdout held anything, on the
-		// grounds that getent exits 2 for an empty database -- but a
-		// process killed part-way through also exits non-zero with
-		// partial output, and that partial output would have become the
-		// account index.
-		//
-		// That is the dangerous case, because the index is how duplicate
-		// GECOS values are detected: drop one of a colliding pair and the
-		// survivor resolves cleanly, and the forward verifier agrees,
-		// because that account really does carry that GECOS. A truncated
-		// enumeration silently converts "refuse, this is ambiguous" into
-		// "log in as whichever half survived".
-		//
-		// Exit 2 with no output is the genuinely empty database, and is
-		// reported as such rather than as a failure to run.
-		if stdout.Len() > 0 {
-			return nil, fmt.Errorf("%s passwd did not complete; refusing a partial account list: %w: %s",
-				bin, err, strings.TrimSpace(stderr.String()))
-		}
-		return nil, fmt.Errorf("running %s passwd: %w: %s", bin, err, strings.TrimSpace(stderr.String()))
-	}
-	return parsePasswd(&stdout)
-}
+// There is no `getent passwd` here and there must not be: this package
+// runs inside a daemon that manipulates its own privileges, and forking
+// from such a process is hazardous in ways that have nothing to do with
+// whether the command itself is correct.
+//
+// Little is lost. SSSD answers `getent passwd` with directory accounts
+// only when its domain sets `enumerate = true`, which is off by default
+// and discouraged for large directories -- so on the deployments this
+// targets, shelling out never listed directory accounts either. A site
+// whose accounts are NOT materialised locally cannot build a GECOS index
+// at all, by any means available here, because the SSSD client protocol
+// has no enumeration primitive. Such a site needs its accounts in
+// /etc/passwd, or an explicit map.
 
 // Chain enumerates several sources and merges them. The FIRST source to
 // claim a username wins, so a local override shadows a directory entry
