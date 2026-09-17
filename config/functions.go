@@ -163,9 +163,68 @@ func (c *Config) evalNumericMacro(args string, wantInt bool) (string, error) {
 	}
 }
 
-// evalSTRING converts a value to a string (essentially a no-op but validates)
+// evalSTRING implements HTCondor's $STRING(name [, format]): the argument is a macro
+// NAME (like $INT / $REAL), not a literal. Look it up, expand its value, evaluate that
+// value as a ClassAd expression, and render the result as a string. This is what makes
+// the common CHTC idiom work:
+//
+//	_LC_FULL_HOSTNAME = toLower("$(FULL_HOSTNAME)")
+//	LC_FULL_HOSTNAME  = $STRING(_LC_FULL_HOSTNAME)
+//
+// -- $STRING(_LC_FULL_HOSTNAME) must yield the lowercased host, not the literal name
+// "_LC_FULL_HOSTNAME". The old no-op returned the name verbatim, so any config keyed off
+// $STRING (e.g. LOCAL = $(ETC)/hosts/$(LC_FULL_HOSTNAME).local) pointed at a nonexistent
+// file and its settings (JOB_EPOCH_HISTORY, ...) silently fell back to defaults.
+//
+// An optional printf-style format is applied to the string result. A value that does not
+// parse as an expression, or evaluates to undefined/error in the empty context, is used
+// verbatim (its expanded literal) -- so a plain path or bareword passes through unchanged.
 func (c *Config) evalSTRING(args string) (string, error) {
-	return args, nil
+	name, format := args, ""
+	if i := strings.Index(args, ","); i >= 0 {
+		name = args[:i]
+		format = strings.TrimSpace(args[i+1:])
+	}
+	value := strings.TrimSpace(name)
+	if value == "" {
+		return "", nil
+	}
+
+	// The argument is a macro name: look it up (scoped, as Get does), else the literal.
+	if v, ok := c.values[c.scopedLookupKey(value)]; ok {
+		value = v
+	}
+	// Expand any macros in the resolved value ($(FULL_HOSTNAME), nested functions, ...).
+	if strings.Contains(value, "$") {
+		expanded, err := c.expandMacrosWithFunctions(value)
+		if err != nil {
+			return "", err
+		}
+		value = expanded
+	}
+	value = strings.TrimSpace(value)
+
+	// Evaluate the fully-expanded value as a ClassAd expression and render the result as
+	// a string. The value is already expanded to literals, so an empty context suffices.
+	out := value
+	if expr, err := classad.ParseExpr(value); err == nil {
+		result := expr.Eval(classad.New())
+		switch {
+		case result.IsString():
+			s, _ := result.StringValue()
+			out = s
+		case result.IsUndefined(), result.IsError():
+			// A bareword/path evaluates to undefined in the empty context; keep the
+			// expanded literal rather than the string "undefined".
+		default:
+			out = result.String()
+		}
+	}
+
+	if format != "" {
+		return fmt.Sprintf(format, out), nil
+	}
+	return out, nil
 }
 
 // evalRANDOM_INTEGER generates a random integer
