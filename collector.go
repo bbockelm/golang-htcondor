@@ -546,8 +546,12 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 // getCommandForAdType maps ad type to HTCondor command
 func getCommandForAdType(adType string) commands.CommandType {
 	switch adType {
-	case "StartdAd", "Machine", "Startd":
+	case "StartdAd", "Machine", "Startd", "StartD":
+		// "StartD" is the startd's daemon ad (STARTD_DAEMON_ADTYPE); it
+		// shares the startd query command with the "Machine" slot ads.
 		return commands.QUERY_STARTD_ADS
+	case "StartdPrivateAd", "MachinePrivate":
+		return commands.QUERY_STARTD_PVT_ADS
 	case "ScheddAd", "Schedd":
 		return commands.QUERY_SCHEDD_ADS
 	case "MasterAd", "Master":
@@ -560,6 +564,18 @@ func getCommandForAdType(adType string) commands.CommandType {
 		return commands.QUERY_COLLECTOR_ADS
 	case "NegotiatorAd", "Negotiator":
 		return commands.QUERY_NEGOTIATOR_ADS
+	case "AccountingAd", "Accounting":
+		return commands.QUERY_ACCOUNTING_ADS
+	case "StorageAd", "Storage":
+		return commands.QUERY_STORAGE_ADS
+	case "GridAd", "Grid":
+		return commands.QUERY_GRID_ADS
+	case "HADAd", "HAD":
+		return commands.QUERY_HAD_ADS
+	case "CkptServerAd", "CkptServer":
+		return commands.QUERY_CKPT_SRVR_ADS
+	case "Any":
+		return commands.QUERY_ANY_ADS
 	default:
 		// Unknown/custom ad type - use QUERY_GENERIC_ADS
 		return commands.QUERY_GENERIC_ADS
@@ -609,6 +625,12 @@ func getTargetTypeForAdType(adType string) string {
 	switch adType {
 	case "StartdAd", "Machine", "Startd":
 		return "Machine"
+	case "StartD":
+		// The startd daemon ad's own MyType, distinct from the "Machine"
+		// slot ads even though both use the startd query command.
+		return "StartD"
+	case "StartdPrivateAd", "MachinePrivate":
+		return "MachinePrivate"
 	case "ScheddAd", "Schedd":
 		return "Scheduler"
 	case "MasterAd", "Master":
@@ -619,6 +641,20 @@ func getTargetTypeForAdType(adType string) string {
 		return "Negotiator"
 	case "CollectorAd", "Collector":
 		return "Collector"
+	case "LicenseAd", "License":
+		return "License"
+	case "AccountingAd", "Accounting":
+		return "Accounting"
+	case "StorageAd", "Storage":
+		return "Storage"
+	case "GridAd", "Grid":
+		return "Grid"
+	case "HADAd", "HAD":
+		return "HAD"
+	case "CkptServerAd", "CkptServer":
+		return "CkptServer"
+	case "Any":
+		return "Any"
 	default:
 		return adType
 	}
@@ -1136,10 +1172,24 @@ const (
 	LicenseAdType    = "LicenseAd"
 	CollectorAdType  = "CollectorAd"
 	NegotiatorAdType = "NegotiatorAd"
+	AccountingAdType = "AccountingAd"
+	StorageAdType    = "StorageAd"
+	GridAdType       = "GridAd"
+	HADAdType        = "HADAd"
+	// StartdPrivateAdType is the startd's private ad (MyType
+	// "MachinePrivate"), queried via QUERY_STARTD_PVT_ADS.
+	StartdPrivateAdType = "StartdPrivateAd"
+	// CkptServerAdType is the (legacy) checkpoint server ad. Standard
+	// universe is gone, so this is rarely present, but the collector
+	// query command still exists.
+	CkptServerAdType = "CkptServerAd"
 	// PlacementdAdType is the placementd's ad. Unlike the types above it is
 	// the MyType the daemon publishes verbatim, because the collector stores
 	// placementd ads as generic ads keyed by that name.
 	PlacementdAdType = "PlacementD"
+	// AnyAdType is a catch-all: it queries the collector for every ad type
+	// (QUERY_ANY_ADS) rather than one specific kind.
+	AnyAdType = "Any"
 )
 
 // adType returns the collector-query ad type corresponding to the daemon type

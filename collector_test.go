@@ -127,6 +127,71 @@ func TestGetCommandForAdType(t *testing.T) {
 			wantCommand: commands.QUERY_COLLECTOR_ADS,
 		},
 		{
+			name:        "AccountingAd",
+			adType:      "AccountingAd",
+			wantCommand: commands.QUERY_ACCOUNTING_ADS,
+		},
+		{
+			name:        "Accounting",
+			adType:      "Accounting",
+			wantCommand: commands.QUERY_ACCOUNTING_ADS,
+		},
+		{
+			name:        "StorageAd",
+			adType:      "StorageAd",
+			wantCommand: commands.QUERY_STORAGE_ADS,
+		},
+		{
+			name:        "Storage",
+			adType:      "Storage",
+			wantCommand: commands.QUERY_STORAGE_ADS,
+		},
+		{
+			name:        "GridAd",
+			adType:      "GridAd",
+			wantCommand: commands.QUERY_GRID_ADS,
+		},
+		{
+			name:        "Grid",
+			adType:      "Grid",
+			wantCommand: commands.QUERY_GRID_ADS,
+		},
+		{
+			name:        "HADAd",
+			adType:      "HADAd",
+			wantCommand: commands.QUERY_HAD_ADS,
+		},
+		{
+			name:        "HAD",
+			adType:      "HAD",
+			wantCommand: commands.QUERY_HAD_ADS,
+		},
+		{
+			name:        "StartdPrivateAd",
+			adType:      "StartdPrivateAd",
+			wantCommand: commands.QUERY_STARTD_PVT_ADS,
+		},
+		{
+			name:        "MachinePrivate",
+			adType:      "MachinePrivate",
+			wantCommand: commands.QUERY_STARTD_PVT_ADS,
+		},
+		{
+			name:        "CkptServer",
+			adType:      "CkptServer",
+			wantCommand: commands.QUERY_CKPT_SRVR_ADS,
+		},
+		{
+			name:        "StartD daemon ad",
+			adType:      "StartD",
+			wantCommand: commands.QUERY_STARTD_ADS,
+		},
+		{
+			name:        "Any",
+			adType:      "Any",
+			wantCommand: commands.QUERY_ANY_ADS,
+		},
+		{
 			name:        "Custom ad type",
 			adType:      "MyCustomType",
 			wantCommand: commands.QUERY_GENERIC_ADS,
@@ -168,6 +233,25 @@ func TestAdTypeCommandTargetConsistency(t *testing.T) {
 		{"Submitter", "Submitter"},
 		{"Collector", "Collector"},
 		{"Negotiator", "Negotiator"},
+		{"AccountingAd", "Accounting"},
+		{"Accounting", "Accounting"},
+		{"StorageAd", "Storage"},
+		{"Storage", "Storage"},
+		{"GridAd", "Grid"},
+		{"Grid", "Grid"},
+		{"HADAd", "HAD"},
+		{"HAD", "HAD"},
+		{"StartdPrivateAd", "MachinePrivate"},
+		{"MachinePrivate", "MachinePrivate"},
+		{"CkptServerAd", "CkptServer"},
+		{"CkptServer", "CkptServer"},
+		// The startd daemon ad keeps its own MyType, distinct from the
+		// "Machine" slot ads it shares a query command with.
+		{"StartD", "StartD"},
+		// License had a command mapping but no target-type case before.
+		{"LicenseAd", "License"},
+		{"License", "License"},
+		{"Any", "Any"},
 	}
 	for _, tc := range cases {
 		if got := getTargetTypeForAdType(tc.adType); got != tc.wantTarget {
