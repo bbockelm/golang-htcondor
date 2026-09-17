@@ -344,3 +344,45 @@ docker-shell: ## Start interactive shell in Docker container
 docker-clean: ## Remove Docker image
 	@echo "Removing Docker image..."
 	docker rmi $(DOCKER_IMAGE) || true
+
+# --- RPM packaging -------------------------------------------------------
+#
+# `make rpm` packages an ALREADY BUILT binary; it does not build one. A
+# release RPM must contain the production binary, with the frontend, the
+# HTCondor docs and the JupyterLab helpers embedded (see build-prod), and
+# quietly packaging a plain `go build` output would produce an RPM that
+# installs and then serves no web UI.
+
+NFPM       ?= nfpm
+PKG_BINARY ?= bin/htcondor-api
+PKG_ARCH   ?= $(shell go env GOARCH)
+PKG_DIR    ?= dist
+PKG_MAINTAINER ?= Brian Bockelman <bbockelman@morgridge.org>
+PKG_VENDOR     ?= HTCondor / PATh
+
+.PHONY: rpm
+rpm: ## Build an RPM from a prebuilt binary (PKG_BINARY, PKG_ARCH=amd64|arm64)
+	@command -v $(NFPM) >/dev/null 2>&1 || { \
+		echo "nfpm not found. Build the pinned version:"; \
+		echo "  (cd .github/tools && GOWORK=off go build -o \"$$HOME/go/bin/nfpm\" github.com/goreleaser/nfpm/v2/cmd/nfpm)"; \
+		echo "or point NFPM at one you already have: make rpm NFPM=/path/to/nfpm"; \
+		exit 1; }
+	@test -f "$(PKG_BINARY)" || { \
+		echo "No binary at $(PKG_BINARY)."; \
+		echo "Build one first (make build-prod for a release binary), or set PKG_BINARY."; \
+		exit 1; }
+	@rm -rf $(PKG_DIR)/pkgroot && mkdir -p $(PKG_DIR)/pkgroot
+	@cp $(PKG_BINARY) $(PKG_DIR)/pkgroot/htcondor-api
+	@set -e; \
+	set -- $$(packaging/rpm-version.sh "$(VERSION)"); \
+	PKG_VERSION=$$1; PKG_RELEASE=$$2; \
+	echo "Packaging $(PKG_BINARY) as htcondor-api $$PKG_VERSION-$$PKG_RELEASE ($(PKG_ARCH))..."; \
+	PKG_VERSION=$$PKG_VERSION PKG_RELEASE=$$PKG_RELEASE \
+	PKG_ARCH=$(PKG_ARCH) PKG_BINARY=$(PKG_BINARY) \
+	PKG_MAINTAINER="$(PKG_MAINTAINER)" PKG_VENDOR="$(PKG_VENDOR)" \
+		$(NFPM) package --config packaging/nfpm.yaml --packager rpm --target $(PKG_DIR)
+	@ls -1 $(PKG_DIR)/*.rpm
+
+.PHONY: rpm-prod
+rpm-prod: build-prod ## Build the production binary, then package it
+	@$(MAKE) rpm PKG_BINARY=bin/htcondor-api
