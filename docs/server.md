@@ -105,6 +105,76 @@ A separate browser-session cookie is used for the SPA UI; it sits
 on top of (2) — the IDP issues the token; the cookie carries the
 session.
 
+### Local identity mapping
+
+By default a session's identity is the subject claim from the token, and
+group membership is whatever the token asserts. That suits a container,
+which holds no account database. On a host where this server runs under
+`condor_master` beside a real one, either half can come from the system
+instead. The two switches are independent.
+
+**Subject to local account.** `HTTP_API_IDENTITY_MAP` names an ordered
+list of strategies; the first to answer wins.
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
+| `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
+| `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
+
+Once mapping is on, the session's subject becomes the **local account
+name** -- the name HTCondor knows -- so owner-scoping matches actual job
+ownership. The asserted subject is logged beside it.
+
+Three behaviours worth knowing before turning this on:
+
+- **A mapping failure denies the login.** There is no fallback to the
+  token's claim and no bypass list: the weaker basis must not engage
+  exactly when the stronger one breaks.
+- **Ambiguity refuses rather than guesses.** If two accounts claim the
+  same identity, neither is chosen. Shadowed pairs are named in the
+  startup log, so an ordering like `gecos,username` is a choice rather
+  than a surprise.
+- **`gecos` matches the GECOS *name*, not the raw field** -- everything
+  up to the first comma, which is what `os/user` reports on every
+  platform. For `tannenba:x:20013:20013:tatannen:...` the value matched
+  is `tatannen`; for `...:Tannenbaum, Todd,,:...` it is `Tannenbaum`.
+
+The index can only contain accounts something will enumerate, which in
+practice means those present in the passwd file: no NSS enumeration call
+exists, and SSSD answers one only under `enumerate = true`, which is off
+by default. Every candidate it produces is re-checked by name against the
+live database before it is believed, and that lookup *does* reach a
+directory, so an incomplete index cannot promote anybody.
+
+**Group membership.** `HTTP_API_GROUP_SOURCE` decides where groups come
+from, independently of the mapping above.
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_GROUP_SOURCE` | `token` | `token` uses the token's groups claim -- correct for a container. `system` (or `unix`) reads Unix groups for the mapped account. |
+
+With `system`, membership is re-read on every refresh, so a user removed
+from a group upstream stops passing without waiting for their refresh
+token to lapse (see [Refresh-grant
+re-authorization](#refresh-grant-re-authorization)). A read that could
+not consult every configured NSS service is treated as *possibly
+incomplete*: the login proceeds, because that is what `id` would report,
+but it never revokes an existing grant -- an outage must not log out
+everyone whose token happens to refresh during it.
+
+Group resolution follows this host's `nsswitch.conf`. A build with cgo
+resolves through `getgrouplist(3)`, so every configured service is
+consulted; a build without cgo speaks `files` and `sss` natively and
+marks the answer incomplete if the line names anything else.
+
+**Which claim carries the username.** Some providers put the login-ish
+value somewhere other than `sub`.
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_OAUTH2_USERNAME_CLAIM` | `sub` | Claim read as the asserted subject, e.g. `eppn` or `preferred_username`. This is the value identity mapping receives. |
+
 ### Superuser mode
 
 An administrator can act on another user's jobs *as that user*: remove,
@@ -423,6 +493,11 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `watch_jobs` tool may block in-call before returning (a duration, e.g. `15s`). **Set this when a gateway or proxy sits in front of this server**, and keep it under that timeout: a block that outlives it makes the gateway drop the connection, so the client never receives the watch id. Unset = derived from `HTTP_API_MCP_MAX_REQUEST_DURATION` (14m30s by default), which assumes nothing in front of this server cuts the connection sooner. |
 | `HTTP_API_MCP_MAX_REQUEST_DURATION` | Hard stop on an MCP request that is still making progress (a duration, e.g. `5m`). Unset = 15m. While an MCP request runs its write deadline is moved forward, so `HTTP_API_WRITE_TIMEOUT` — which is an absolute deadline meant for ordinary replies — does not decide how long a deliberately waiting tool may wait. A request that stops making progress is still cut off on its last window; this is the backstop for one that never finishes at all. |
 | `HTTP_API_ADVERTISE` | Advertise this API server to the collector (a `HTCondorAPI` ad: endpoint, schedd, mirror health, versions). Default `true`; `daemon.Advertise` is a no-op without `COLLECTOR_HOST`, so this only matters to opt out when a collector is configured. |
+| `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
+| `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |
+| `HTTP_API_IDENTITY_MAP_TTL` | How long the account index and group answers are reused. Default `5m`. |
+| `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
+| `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
