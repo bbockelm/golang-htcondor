@@ -98,7 +98,9 @@ jobs:
         fail_ci_if_error: false
 
   lint:
-    name: Lint
+    # The label keeps these names stable ("Lint (.)", "Lint (webapi)") rather
+    # than letting the matrix append every dimension to them.
+    name: Lint (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -106,7 +108,19 @@ jobs:
         # Lint each module. `make lint` is the developer equivalent; CI uses the
         # official action (pinned to a commit SHA, with a pinned linter version)
         # for its install/caching, once per module directory.
-        module: ['.', 'webapi', 'localcredmon']
+        include:
+          - {module: '.', cgo: '1', label: '.'}
+          - {module: 'webapi', cgo: '1', label: 'webapi'}
+          - {module: 'localcredmon', cgo: '1', label: 'localcredmon'}
+          # droppriv compiles a DIFFERENT implementation without cgo: the
+          # SSSD client and the nsswitch-ordered chains are `!cgo` only, so
+          # a cgo-only lint never sees them. That is not hypothetical --
+          # this job was added after linting that side turned up a typed-nil
+          # interface return the cgo build cannot reach.
+          #
+          # Only the root module has cgo-tagged files, so this adds one job
+          # rather than doubling the matrix.
+          - {module: '.', cgo: '0', label: '., nocgo'}
 
     steps:
     - name: Checkout code
@@ -119,8 +133,12 @@ jobs:
         cache: true
         cache-dependency-path: ${{ matrix.module }}/go.sum
 
-    - name: Run golangci-lint (${{ matrix.module }})
+    - name: Run golangci-lint (${{ matrix.label }})
       uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+      env:
+        # Selects which side of the //go:build cgo split is compiled, and
+        # therefore linted.
+        CGO_ENABLED: ${{ matrix.cgo }}
       with:
         # Must be built with a Go at least as new as the modules target:
         # golangci-lint refuses to run otherwise ("the Go language version
