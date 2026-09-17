@@ -348,7 +348,48 @@ func (r *Resolver) ensureFresh(ctx context.Context) error {
 	if r.indexIsFresh() {
 		return nil
 	}
-	return r.build(ctx)
+
+	err := r.build(ctx)
+	if err == nil {
+		return nil
+	}
+
+	// The rebuild failed. An index we already hold is still usable, and
+	// using it is safe for a reason particular to this design: every hit
+	// is confirmed against the live account database before it is
+	// returned, so a stale entry cannot promote somebody to an account
+	// whose GECOS no longer matches. What staleness actually costs is
+	// that accounts created since the last successful build do not
+	// resolve yet -- a delay, not a wrong answer.
+	//
+	// So a directory that is briefly unreachable degrades to "new users
+	// must wait" rather than "nobody can log in".
+	if age, ok := r.indexAge(); ok && age < r.maxStale() {
+		return nil
+	}
+	return err
+}
+
+// indexAge reports how long ago the index was built, and whether there
+// is one at all.
+func (r *Resolver) indexAge() (time.Duration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.builtAt.IsZero() {
+		return 0, false
+	}
+	return r.now().Sub(r.builtAt), true
+}
+
+// maxStale bounds how long a failing rebuild may be papered over. Past
+// it, resolution fails rather than answering from an index nobody has
+// been able to refresh -- which is the point at which "new users wait"
+// has stopped being an adequate description of what is wrong.
+func (r *Resolver) maxStale() time.Duration {
+	if r.ttl <= 0 {
+		return 10 * 5 * time.Minute
+	}
+	return 10 * r.ttl
 }
 
 func (r *Resolver) indexIsFresh() bool {

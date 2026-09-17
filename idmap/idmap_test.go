@@ -615,3 +615,86 @@ func TestRebuildSurvivesTheTriggeringRequestBeingCancelled(t *testing.T) {
 		t.Errorf("after the abandoned login: got %q, %v; want tannenba", got, err)
 	}
 }
+
+// flakyEnum answers, then starts failing.
+type flakyEnum struct {
+	accounts []Account
+	failing  bool
+	calls    int
+}
+
+func (f *flakyEnum) Name() string { return "flaky" }
+func (f *flakyEnum) Enumerate(context.Context) ([]Account, error) {
+	f.calls++
+	if f.failing {
+		return nil, errors.New("directory unreachable")
+	}
+	return f.accounts, nil
+}
+
+// The index is refreshed on a TTL, so a process running for weeks keeps
+// up with the account database. When a refresh FAILS, the index we
+// already hold is still used -- which is safe here specifically because
+// every hit is confirmed against the live database before it is
+// returned, so staleness delays new accounts rather than producing wrong
+// ones.
+func TestAFailedRefreshKeepsServingTheVerifiedIndex(t *testing.T) {
+	enum := &flakyEnum{accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}}}
+	ver := &fakeVerifier{gecos: map[string]string{"tannenba": "tatannen"}}
+	now := time.Unix(1_700_000_000, 0)
+	r := New(enum, ver, WithTTL(time.Minute), WithClock(func() time.Time { return now }))
+
+	if got, err := r.Resolve(context.Background(), "tatannen"); err != nil || got != "tannenba" {
+		t.Fatalf("first resolve: %q %v", got, err)
+	}
+
+	// The directory goes away, and the TTL expires.
+	enum.failing = true
+	now = now.Add(2 * time.Minute)
+
+	got, err := r.Resolve(context.Background(), "tatannen")
+	if err != nil {
+		t.Fatalf("a transient enumeration failure denied a login that the existing index could answer: %v", err)
+	}
+	if got != "tannenba" {
+		t.Errorf("got %q, want tannenba from the retained index", got)
+	}
+	if enum.calls < 2 {
+		t.Error("no refresh was attempted")
+	}
+
+	// It is not papered over forever: past the staleness bound, resolution
+	// fails rather than answering from an index nobody can refresh.
+	now = now.Add(20 * time.Minute)
+	if got, err := r.Resolve(context.Background(), "tatannen"); err == nil {
+		t.Errorf("resolved %q from an index stale beyond the bound", got)
+	}
+
+	// And when the directory returns, so does normal service.
+	enum.failing = false
+	if got, err := r.Resolve(context.Background(), "tatannen"); err != nil || got != "tannenba" {
+		t.Errorf("after recovery: %q %v", got, err)
+	}
+}
+
+// A stale index must still not return an account whose GECOS has since
+// changed -- that is the property that makes serving stale safe at all.
+func TestAStaleIndexStillCannotPromoteAChangedAccount(t *testing.T) {
+	enum := &flakyEnum{accounts: []Account{{Username: "tannenba", Gecos: "tatannen", UID: 20013}}}
+	ver := &fakeVerifier{gecos: map[string]string{"tannenba": "tatannen"}}
+	now := time.Unix(1_700_000_000, 0)
+	r := New(enum, ver, WithTTL(time.Minute), WithClock(func() time.Time { return now }))
+
+	if _, err := r.Resolve(context.Background(), "tatannen"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refreshes fail, AND the account is re-pointed at somebody else.
+	enum.failing = true
+	ver.gecos["tannenba"] = "someone.else"
+	now = now.Add(2 * time.Minute)
+
+	if got, err := r.Resolve(context.Background(), "tatannen"); err == nil {
+		t.Errorf("the stale index promoted %q whose GECOS is now %q", got, "someone.else")
+	}
+}
