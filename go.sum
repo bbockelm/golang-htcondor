@@ -1,5 +1,5 @@
-github.com/PelicanPlatform/classad v0.29.11 h1:pftieUH7oTicXgLe+6AJK/31yYcSyB10k4t2BpHjDnw=
-github.com/PelicanPlatform/classad v0.29.11/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
+github.com/PelicanPlatform/classad v0.29.14 h1:8DHt6whdxGRaQqyqFubNVxgx6bmTD6h9sbGOH10Ijqw=
+github.com/PelicanPlatform/classad v0.29.14/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
 github.com/PelicanPlatform/classad/collections v0.29.6 h1:ybTfgNDWqlf0CtIphUrw6aVs8b9XJnVIyP0QdMHzYS0=
 github.com/PelicanPlatform/classad/collections v0.29.6/go.mod h1:AN/vsPuTvZqGRGbpdgQjme7UJEZqGS7Ra7New2/jKWY=
 github.com/RoaringBitmap/roaring/v2 v2.19.0 h1:zsWtVE+biht4eVl0YDLvykUqGkftR3Qc5UCbeKB4UQ4=

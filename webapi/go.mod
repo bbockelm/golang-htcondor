@@ -105,7 +105,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad v0.29.11
+	github.com/PelicanPlatform/classad v0.29.14
 	github.com/PelicanPlatform/classad/collections v0.29.6
 	github.com/PelicanPlatform/classad/db v0.29.6
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
