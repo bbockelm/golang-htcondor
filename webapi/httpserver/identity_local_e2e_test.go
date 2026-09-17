@@ -66,7 +66,21 @@ func e2eLocalAccount(t *testing.T) (username, passwdPath string, realGroups []st
 	}
 
 	path := filepath.Join(t.TempDir(), "passwd")
-	body := fmt.Sprintf("root:x:0:0:root:/root:/bin/bash\n%s:x:%s:%s:%s:%s:/bin/sh\n",
+
+	// The filler entry exists so the fixture is not a single line, but it
+	// must not name the account under test. Running the suite as root
+	// otherwise produces two "root" entries -- one with GECOS "root", one
+	// with the subject -- and the re-check, which matches the first entry
+	// for a username, reads back "root" and refuses a mapping that was
+	// correct. CI runs as a non-root user, so that collision would only
+	// ever appear for somebody running the tests in a plain container.
+	body := ""
+	if u.Username != "root" {
+		body = "root:x:0:0:root:/root:/bin/bash\n"
+	} else {
+		body = "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+	}
+	body += fmt.Sprintf("%s:x:%s:%s:%s:%s:/bin/sh\n",
 		u.Username, u.Uid, u.Gid, e2eAssertedSubject, u.HomeDir)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
