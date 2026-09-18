@@ -495,6 +495,75 @@ HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS = [ \
 | `identity_domain` | Local identity is `<sub>@this`. Defaults to the issuer's host. |
 | `allowed_scopes` | Ceiling of scopes a token from this issuer may obtain. |
 
+## Site skills
+
+A site can publish its own documentation to agents: how work is actually
+done here, which generic HTCondor knowledge does not cover. Point the
+server at a directory -- typically a checkout of the documentation
+repository -- and every Markdown file in it becomes a skill.
+
+```
+HTTP_API_MCP_SKILLS_DIR = /etc/condor/skills
+```
+
+```
+git clone https://git.example.edu/ap/skills /etc/condor/skills
+condor_reconfig            # picks up the checkout without a restart
+```
+
+**What is loaded.** Every `*.md` file underneath the directory, at any
+depth. Hidden directories and hidden files are skipped, so a git checkout
+works directly -- `.git` alone holds thousands of files, none of them
+documentation. Symbolic links are not followed: a link is the one way a
+file outside the configured directory could be served from inside it.
+Files larger than 1 MiB are skipped, as is anything past 2000 skills,
+which indicates the server has been pointed at the wrong directory.
+
+**Front matter.** An optional YAML header supplies the catalogue entry:
+
+```markdown
+---
+name: Submitting GPU jobs
+description: How to request a GPU on this access point.
+---
+
+Use `request_gpus = 1` and the local GPU partition...
+```
+
+`summary` is accepted as an alias for `description`. A file with no front
+matter still loads: its name falls back to the first Markdown heading and
+then the filename, and its description to the first paragraph. A file
+named `SKILL.md` takes its parent directory's name, so a skill laid out as
+a directory reads as `gpu-jobs` rather than `gpu-jobs/SKILL`.
+
+**How agents see them.** Both as tools and as resources, because a client
+that lists resources up front can show the catalogue without calling
+anything, while an agent that has decided it needs guidance looks for a
+tool:
+
+| Surface | What |
+| --- | --- |
+| `skills_list` | The catalogue, with an optional `query` filter. |
+| `skills_get` | One skill in full, by id or name. |
+| `skill://index.json` | The catalogue as a resource. |
+| `skill://<id>` | One skill as a Markdown resource. |
+
+When any skill is published, the MCP `initialize` response gains a **Site
+skills** section that names each one with its description and tells the
+agent to consult the relevant skill *before* using other tools. The
+catalogue is inlined rather than merely pointed at, because an agent reads
+the instructions before deciding anything -- a bare "call `skills_list`"
+is advice it has no reason to take until it has already guessed.
+
+**Reloading.** The library is re-read from disk on every
+`condor_reconfig` / SIGHUP, not only when the setting changes, since the
+usual reason to reload is that the checkout was updated while the path
+stayed the same. A reload that fails -- the directory momentarily missing,
+an automount that has not returned -- keeps the previously loaded set
+rather than leaving agents with nothing. Clearing the setting does
+unpublish them. Agents already connected keep the instructions they were
+given: MCP delivers those once, at initialize.
+
 ## API surface
 
 Endpoint groupings — full reference + request/response shapes are in
@@ -633,6 +702,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
 | `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |
+| `HTTP_API_MCP_SKILLS_DIR` | Directory of site-authored Markdown skills to publish to agents. Reloaded on SIGHUP. See [Site skills](#site-skills). |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |

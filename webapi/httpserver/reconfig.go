@@ -30,6 +30,22 @@ func (h *Handler) SetMCPInstructions(instructions string) {
 	h.mcpServer.SetInstructions(instructions)
 }
 
+// SetMCPSkillsDir reloads the site skill library.
+//
+// Called on every reconfigure, not only when the configured path changes:
+// the usual reason to reload is that the checkout the path points at has
+// been updated, which a diff of the setting cannot see. Reading a few
+// dozen Markdown files is cheap enough to do unconditionally.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPSkillsDir(dir string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpSkillsDir = dir
+	h.mcpServer.SetSkillsDir(dir)
+}
+
 // The authorization group lists are dynamic.
 //
 // They are the settings an operator most often gets wrong on a first

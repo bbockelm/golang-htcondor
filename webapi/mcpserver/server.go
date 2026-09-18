@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
 
@@ -36,7 +37,14 @@ type Server struct {
 	// instructions is the built initialize-response text. It is swapped
 	// atomically because SetInstructions can run on a reconfigure while
 	// an initialize is being served.
-	instructions       atomic.Pointer[string]
+	instructions atomic.Pointer[string]
+	// customInstructions is the operator's MCP_INSTRUCTIONS text, kept so
+	// the initialize text can be rebuilt when the skills library changes
+	// without the operator having to set it again.
+	customInstructions atomic.Pointer[string]
+	// skills is the site-authored skill library. Swapped atomically: a
+	// reconfigure reloads it from disk while requests are reading.
+	skills             atomic.Pointer[skills.Library]
 	signingKeyPath     string
 	trustDomain        string
 	uidDomain          string
@@ -106,19 +114,22 @@ type Config struct {
 	// over Schedd when the address can change under you: a schedd that
 	// restarts comes back on a different shared-port socket, and a
 	// handle captured once then points at nothing.
-	ScheddProvider  func() *htcondor.Schedd
-	SigningKeyPath  string               // Path to token signing key (optional, for token generation)
-	TrustDomain     string               // Trust domain for token issuer (optional)
-	UIDDomain       string               // UID domain for generated token username (optional)
-	HTTPBaseURL     string               // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
-	Collector       *htcondor.Collector  // Collector for metrics and discovery (optional)
-	Credd           htcondor.CreddClient // Optional credd client for credential management
-	Instructions    string               // Server-level instructions provided to all agents in the MCP initialize response
-	EnableMetrics   bool                 // Enable metrics collection (default: true if Collector is set)
-	MetricsCacheTTL time.Duration        // Metrics cache TTL (default: 10s)
-	Logger          *logging.Logger      // Logger instance (optional, creates default if nil)
-	Stdin           io.Reader            // Input stream (default: os.Stdin)
-	Stdout          io.Writer            // Output stream (default: os.Stdout)
+	ScheddProvider func() *htcondor.Schedd
+	SigningKeyPath string               // Path to token signing key (optional, for token generation)
+	TrustDomain    string               // Trust domain for token issuer (optional)
+	UIDDomain      string               // UID domain for generated token username (optional)
+	HTTPBaseURL    string               // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
+	Collector      *htcondor.Collector  // Collector for metrics and discovery (optional)
+	Credd          htcondor.CreddClient // Optional credd client for credential management
+	Instructions   string               // Server-level instructions provided to all agents in the MCP initialize response
+	// SkillsDir is a directory of site-authored Markdown skills to publish
+	// to agents. Empty disables the feature.
+	SkillsDir       string
+	EnableMetrics   bool            // Enable metrics collection (default: true if Collector is set)
+	MetricsCacheTTL time.Duration   // Metrics cache TTL (default: 10s)
+	Logger          *logging.Logger // Logger instance (optional, creates default if nil)
+	Stdin           io.Reader       // Input stream (default: os.Stdin)
+	Stdout          io.Writer       // Output stream (default: os.Stdout)
 	// AdminUsers is the list of authenticated subjects (JWT `sub` /
 	// authenticated username) who get admin treatment in tool
 	// dispatch — most importantly, they are exempt from the
@@ -286,6 +297,11 @@ func NewServer(cfg Config) (*Server, error) {
 		jobWatch:       cfg.JobWatch,
 		jobWatchEval:   cfg.JobWatchEval,
 		watchMaxWait:   cfg.WatchMaxWait,
+	}
+	// Load before the instructions are built: the initialize text names the
+	// skills, so building it first would advertise an empty library.
+	if dir := strings.TrimSpace(cfg.SkillsDir); dir != "" {
+		s.SetSkillsDir(dir)
 	}
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil {

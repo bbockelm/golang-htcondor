@@ -141,6 +141,7 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
 	enabled                bool
+	skillsDir              string
 	oauth2DBPath           string
 	oauth2Issuer           string
 	oauth2ClientID         string
@@ -1149,6 +1150,14 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	}
 
 	// Load server-level instructions for MCP agents
+	// A directory of site-authored Markdown skills to publish to agents.
+	// Typically a checkout of the site's documentation repository.
+	if dir, ok := cfg.Get("HTTP_API_MCP_SKILLS_DIR"); ok && strings.TrimSpace(dir) != "" {
+		config.skillsDir = strings.TrimSpace(dir)
+		logger.Info(logging.DestinationHTTP, "MCP site skills directory configured",
+			"dir", config.skillsDir)
+	}
+
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
 		logger.Info(logging.DestinationMCP, "MCP instructions configured", "length", len(instructions))
@@ -1681,6 +1690,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPReadGroup:               mcpCfg.mcpReadGroup,
 		MCPWriteGroup:              mcpCfg.mcpWriteGroup,
 		MCPInstructions:            mcpCfg.instructions,
+		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
