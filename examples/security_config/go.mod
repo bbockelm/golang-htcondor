@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad v0.29.11 // indirect
+	github.com/PelicanPlatform/classad v0.29.14 // indirect
 	github.com/bbockelm/gosssd v0.0.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
