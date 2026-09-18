@@ -150,9 +150,8 @@ type mcpConfig struct {
 	oauth2UserInfoURL       string
 	oauth2Scopes            []string
 	oauth2UsernameClaim     string
-	oauth2IDPClaim          string
+	oauth2Requirements      string
 	identityMapStripDomains []string
-	oauth2AllowedIDPs       []string
 	oauth2GroupsClaim       string
 
 	// identityMapGecos maps the OIDC subject to the local account whose
@@ -1102,20 +1101,13 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	loadIdentityMapping(cfg, &config, logger)
 
 	// Load username claim name (default: "sub")
-	// Which upstream identity providers may log in. A federation such as
-	// CILogon fronts many institutions behind one issuer, so restricting by
-	// issuer does not express "only this campus".
-	if v, ok := cfg.Get("HTTP_API_OAUTH2_ALLOWED_IDPS"); ok && strings.TrimSpace(v) != "" {
-		for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-			if f = strings.TrimSpace(f); f != "" {
-				config.oauth2AllowedIDPs = append(config.oauth2AllowedIDPs, f)
-			}
-		}
-		logger.Info(logging.DestinationHTTP, "OAuth2 identity providers restricted",
-			"allowed", config.oauth2AllowedIDPs)
-	}
-	if v, ok := cfg.Get("HTTP_API_OAUTH2_IDP_CLAIM"); ok && strings.TrimSpace(v) != "" {
-		config.oauth2IDPClaim = strings.TrimSpace(v)
+	// Login policy as a ClassAd expression over the token's claims. Parsed
+	// and validated in NewHandler, which refuses to start on a malformed
+	// one rather than letting it fail at the first login.
+	if v, ok := cfg.Get("HTTP_API_OAUTH2_REQUIREMENTS"); ok && strings.TrimSpace(v) != "" {
+		config.oauth2Requirements = strings.TrimSpace(v)
+		logger.Info(logging.DestinationHTTP, "OAuth2 login requirements configured",
+			"requirements", config.oauth2Requirements)
 	}
 
 	if usernameClaim, ok := cfg.Get("HTTP_API_OAUTH2_USERNAME_CLAIM"); ok && usernameClaim != "" {
@@ -1663,8 +1655,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2UserInfoURL:          mcpCfg.oauth2UserInfoURL,
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
-		OAuth2IDPClaim:             mcpCfg.oauth2IDPClaim,
-		OAuth2AllowedIDPs:          mcpCfg.oauth2AllowedIDPs,
+		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
 		IdentityGroupsFromSystem:   mcpCfg.identityGroupsSystem,

@@ -174,8 +174,9 @@ type Config struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
-	OAuth2IDPClaim          string   // Claim naming the upstream IDP (default: "idp")
-	OAuth2AllowedIDPs       []string // Accepted values of that claim; empty allows any
+	// OAuth2Requirements is a ClassAd expression evaluated against the
+	// token's claims at login. Empty means no policy.
+	OAuth2Requirements string
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -346,8 +347,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
-		OAuth2IDPClaim:              cfg.OAuth2IDPClaim,
-		OAuth2AllowedIDPs:           cfg.OAuth2AllowedIDPs,
+		OAuth2Requirements:          cfg.OAuth2Requirements,
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,

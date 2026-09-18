@@ -13,6 +13,8 @@ import (
 	"github.com/ory/fosite"
 	"golang.org/x/oauth2"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -274,11 +276,11 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restrict which upstream identity provider may log people in, before
-	// anything is derived from the claims it supplied.
-	if err := s.validateIdentityProvider(userInfo.Claims); err != nil {
-		s.logger.Warn(logging.DestinationHTTP, "Login refused: identity provider not allowed",
-			"error", err, "claim", s.oauth2IDPClaim)
+	// Apply the admin's login policy before anything is derived from the
+	// claims the IDP supplied.
+	if err := s.evaluateLoginRequirements(userInfo.Claims); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Login refused by OAuth2 requirements",
+			"requirements", s.oauth2RequirementsText, "claims_returned", claimNames(userInfo.Claims))
 		s.writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -459,27 +461,53 @@ func claimNames(claims map[string]any) []string {
 	return names
 }
 
-// validateIdentityProvider enforces the configured upstream IDP allow-list.
+// claimsToClassAd renders an IDP's claims as a ClassAd.
 //
-// Unconfigured, any provider is accepted, which is the behaviour before
-// this existed. Configured, it FAILS CLOSED: a token whose IDP claim is
-// missing or not a string is refused rather than allowed through, because
-// "cannot tell which provider this came from" is not a reason to trust it.
-// A federation like CILogon fronts many institutions behind one issuer, so
-// the issuer alone does not answer the question this asks.
-func (s *Handler) validateIdentityProvider(claims map[string]any) error {
-	if len(s.oauth2AllowedIDPs) == 0 {
+// Values arrive as encoding/json produces them, so a string stays a
+// string, a JSON array becomes a ClassAd list, a nested object becomes a
+// nested ad addressable as "outer.inner", and null becomes UNDEFINED. A
+// claim name that is not a bare identifier -- "urn:oid:..." or one with a
+// hyphen -- is kept and can be referenced with the quoted-attribute
+// syntax, 'urn:oid:1.3.6.1'.
+func claimsToClassAd(claims map[string]any) *classad.ClassAd {
+	ad := classad.New()
+	for name, value := range claims {
+		// A claim this library cannot represent is skipped rather than
+		// aborting the login: it leaves the attribute UNDEFINED, which a
+		// requirements expression can test for, and which fails closed
+		// under any comparison.
+		_ = ad.Set(name, value)
+	}
+	return ad
+}
+
+// evaluateLoginRequirements applies the admin's login policy to a token.
+//
+// The expression is evaluated against the claims, exactly as a schedd
+// evaluates Requirements against a machine ad, so a deployment can say
+// more than a list of providers can express -- an IDP AND an affiliation
+// AND an assurance level:
+//
+//	idp == "https://login.wisc.edu/idp/shibboleth" &&
+//	  regexp("MEMBER@wisc.edu", affiliation)
+//
+// It FAILS CLOSED. Only an expression evaluating to boolean TRUE admits
+// the login; UNDEFINED, ERROR, and a non-boolean result all refuse. That
+// is the important direction: a policy naming a claim the IDP stopped
+// sending -- or misspelling one -- evaluates to UNDEFINED, and the
+// alternative would be to silently admit everybody the moment the policy
+// stopped meaning anything.
+func (s *Handler) evaluateLoginRequirements(claims map[string]any) error {
+	if s.oauth2Requirements == nil {
 		return nil
 	}
 
-	idp, ok := claims[s.oauth2IDPClaim].(string)
-	if !ok || idp == "" {
-		return fmt.Errorf("this deployment accepts logins only from specific identity providers, and the token carries no %q claim to check", s.oauth2IDPClaim)
+	result := s.oauth2Requirements.Eval(claimsToClassAd(claims))
+	ok, err := result.BoolValue()
+	if err != nil || !ok {
+		// The expression text is the operator's own configuration, so it
+		// is safe to return; the claim VALUES are not, and are not.
+		return fmt.Errorf("this login does not satisfy the deployment's login requirements")
 	}
-	for _, allowed := range s.oauth2AllowedIDPs {
-		if idp == allowed {
-			return nil
-		}
-	}
-	return fmt.Errorf("identity provider %q is not permitted to log in to this deployment", idp)
+	return nil
 }

@@ -178,19 +178,49 @@ resolves through `getgrouplist(3)`, so every configured service is
 consulted; a build without cgo speaks `files` and `sss` natively and
 marks the answer incomplete if the line names anything else.
 
-**Which identity providers may log in.** A federation such as CILogon
-fronts many institutions behind a single issuer, so restricting by issuer
-does not express "only this campus".
+**Which logins are accepted.** `HTTP_API_OAUTH2_REQUIREMENTS` is a
+ClassAd expression evaluated against the token's claims, the same way a
+schedd evaluates a job's `Requirements` against a machine ad.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `HTTP_API_OAUTH2_ALLOWED_IDPS` | unset (any) | Comma-separated values of the IDP claim that may log in, e.g. `https://login.wisc.edu/idp/shibboleth`. |
-| `HTTP_API_OAUTH2_IDP_CLAIM` | `idp` | Which claim carries that value. |
+| `HTTP_API_OAUTH2_REQUIREMENTS` | unset (accept any) | ClassAd expression over the claims. The login proceeds only if it evaluates to `true`. |
 
-Once the allow-list is set it **fails closed**: a token whose IDP claim is
-missing, empty, or not a string is refused, because "cannot tell which
-provider this came from" is not a reason to trust it. A refused login gets
-403 and the reason is logged.
+The claims become the ad: a string stays a string, a JSON array becomes a
+list, a nested object becomes a nested ad addressable as `outer.inner`,
+and `null` becomes `UNDEFINED`. A claim name that is not a bare
+identifier is still available through the quoted-attribute syntax, as in
+`'urn:oid:1.3.6.1'`.
+
+```
+# Only this campus's IDP.
+HTTP_API_OAUTH2_REQUIREMENTS = idp == "https://login.wisc.edu/idp/shibboleth"
+
+# ...and only members, who authenticated with MFA.
+HTTP_API_OAUTH2_REQUIREMENTS = idp == "https://login.wisc.edu/idp/shibboleth" && \
+                               regexp("MEMBER@wisc.edu", affiliation) && \
+                               acr == "https://refeds.org/profile/mfa"
+
+# ...or by assurance level, which arrives as a list.
+HTTP_API_OAUTH2_REQUIREMENTS = member("https://refeds.org/assurance/IAP/low", eduPersonAssurance)
+```
+
+This expresses what an issuer check cannot: a federation such as CILogon
+fronts many institutions behind one issuer, so `iss` does not answer
+"which campus".
+
+Two properties worth knowing:
+
+- **It fails closed.** Only `true` admits a login. `UNDEFINED`, an error,
+  and a non-boolean result all refuse. So a policy naming a claim the IDP
+  stopped sending -- or misspelling one -- denies everybody rather than
+  silently admitting everybody the moment it stopped meaning anything.
+- **A malformed expression stops the daemon at startup**, rather than
+  failing at the first person's login.
+
+A refused login gets 403, and the log records the expression and which
+claims the IDP returned -- names only, since the values identify the user
+and the path is reachable unauthenticated.
 
 **Which claim carries the username.** Some providers put the login-ish
 value somewhere other than `sub`.
@@ -522,8 +552,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_IDENTITY_MAP_TTL` | How long the account index and group answers are reused. Default `5m`. |
 | `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
-| `HTTP_API_OAUTH2_ALLOWED_IDPS` | Restrict logins to specific upstream identity providers. See [Local identity mapping](#local-identity-mapping). |
-| `HTTP_API_OAUTH2_IDP_CLAIM` | Claim carrying the upstream IDP. Default `idp`. |
+| `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | Domains whose local part may also be matched, e.g. `wisc.edu`. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |

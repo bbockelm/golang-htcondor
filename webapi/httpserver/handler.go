@@ -18,11 +18,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/jobqueue"
+
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -182,11 +184,11 @@ type Handler struct {
 	oauth2UserInfoURL   string            // User info endpoint for SSO
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
-	// oauth2IDPClaim names the claim carrying the upstream identity
-	// provider, and oauth2AllowedIDPs is the set of values accepted from
-	// it. Empty allows any, which is the behaviour when unconfigured.
-	oauth2IDPClaim    string
-	oauth2AllowedIDPs []string
+	// oauth2Requirements is an admin-supplied ClassAd expression
+	// evaluated against the token's claims at login. Nil means no policy,
+	// which accepts any login the IDP authenticated.
+	oauth2Requirements     *classad.Expr
+	oauth2RequirementsText string
 
 	// localIdentity maps an asserted OIDC subject to the local account
 	// that owns this user's jobs, and reads that account's groups from
@@ -486,8 +488,9 @@ type HandlerConfig struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
-	OAuth2IDPClaim          string   // Claim naming the upstream IDP (default: "idp")
-	OAuth2AllowedIDPs       []string // Accepted values of that claim; empty allows any
+	// OAuth2Requirements is a ClassAd expression evaluated against the
+	// token's claims at login. Empty means no policy.
+	OAuth2Requirements string
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -1112,11 +1115,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if h.oauth2GroupsClaim == "" {
 		h.oauth2GroupsClaim = "groups"
 	}
-	h.oauth2IDPClaim = cfg.OAuth2IDPClaim
-	if h.oauth2IDPClaim == "" {
-		h.oauth2IDPClaim = "idp"
+	// Parsed once, here, so a malformed policy stops the daemon at startup
+	// rather than at the first person's login.
+	if req := strings.TrimSpace(cfg.OAuth2Requirements); req != "" {
+		expr, perr := classad.ParseExpr(req)
+		if perr != nil {
+			return nil, fmt.Errorf("HTTP_API_OAUTH2_REQUIREMENTS is not a valid ClassAd expression: %w", perr)
+		}
+		h.oauth2Requirements = expr
+		h.oauth2RequirementsText = req
+		logger.Info(logging.DestinationHTTP, "OAuth2 login requirements in effect", "requirements", req)
 	}
-	h.oauth2AllowedIDPs = cfg.OAuth2AllowedIDPs
 
 	if cfg.EnableMCP {
 		oauth2Issuer := cfg.OAuth2Issuer

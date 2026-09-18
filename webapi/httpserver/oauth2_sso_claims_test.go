@@ -18,7 +18,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/PelicanPlatform/classad/classad"
 )
+
+const wiscIDP = "https://login.wisc.edu/idp/shibboleth"
 
 func newClaimTestHandler(t *testing.T, cfg HandlerConfig) *Handler {
 	t.Helper()
@@ -78,55 +82,136 @@ func TestClaimNamesStillSetWithMCP(t *testing.T) {
 	}
 }
 
-// The allow-list answers "which campus", which the issuer cannot: a
-// federation like CILogon fronts many institutions behind one issuer.
-func TestValidateIdentityProvider(t *testing.T) {
-	const wisc = "https://login.wisc.edu/idp/shibboleth"
+// realClaims is the userinfo payload from the login that prompted this,
+// so the policy tests run against what an IDP actually sends.
+func realClaims() map[string]any {
+	return map[string]any{
+		"idp":         wiscIDP,
+		"eppn":        "bockelman@wisc.edu",
+		"affiliation": "AFFILIATE@wisc.edu;EMPLOYEE@wisc.edu;MEMBER@wisc.edu",
+		"acr":         "https://refeds.org/profile/mfa",
+		"sub":         "http://cilogon.org/serverA/users/9265706",
+		"eduPersonAssurance": []any{
+			"https://refeds.org/assurance/IAP/low",
+			"https://refeds.org/assurance/ATP/ePA-1m",
+		},
+	}
+}
 
+// The policy answers questions a provider list cannot: this IDP AND this
+// affiliation AND this assurance level.
+func TestLoginRequirements(t *testing.T) {
 	cases := []struct {
-		name    string
-		allowed []string
-		claims  map[string]any
-		wantErr bool
+		name         string
+		requirements string
+		wantAllowed  bool
 	}{
-		{"unconfigured accepts any provider", nil,
-			map[string]any{"idp": "https://elsewhere.example/idp"}, false},
-		{"listed provider is accepted", []string{wisc},
-			map[string]any{"idp": wisc}, false},
-		{"unlisted provider is refused", []string{wisc},
-			map[string]any{"idp": "https://elsewhere.example/idp"}, true},
-		// Fails closed: "cannot tell which provider this came from" is not
-		// a reason to trust it.
-		{"missing claim is refused once configured", []string{wisc},
-			map[string]any{"sub": "someone"}, true},
-		{"non-string claim is refused", []string{wisc},
-			map[string]any{"idp": 42}, true},
-		{"one of several listed providers", []string{"https://a.example", wisc},
-			map[string]any{"idp": wisc}, false},
+		{"no policy accepts any login", "", true},
+		{"matching provider", `idp == "` + wiscIDP + `"`, true},
+		{"different provider", `idp == "https://elsewhere.example/idp"`, false},
+		{"provider and affiliation", `idp == "` + wiscIDP + `" && regexp("MEMBER@wisc.edu", affiliation)`, true},
+		{"affiliation absent", `regexp("STUDENT@wisc.edu", affiliation)`, false},
+		{"list membership", `member("https://refeds.org/assurance/IAP/low", eduPersonAssurance)`, true},
+		{"MFA required and present", `acr == "https://refeds.org/profile/mfa"`, true},
+
+		// Fails closed: a policy naming a claim the IDP stopped sending
+		// evaluates to UNDEFINED, and must refuse rather than silently
+		// admit everybody the moment it stopped meaning anything.
+		{"claim the IDP does not send", `department == "physics"`, false},
+		{"misspelled claim name", `idpp == "x"`, false},
+
+		// A non-boolean result is not a pass.
+		{"non-boolean result", `eppn`, false},
+		{"explicitly false", `false`, false},
+		{"explicitly true", `true`, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &Handler{oauth2IDPClaim: "idp", oauth2AllowedIDPs: tc.allowed}
-			err := h.validateIdentityProvider(tc.claims)
-			if tc.wantErr && err == nil {
-				t.Fatal("expected the login to be refused")
+			h := &Handler{}
+			if tc.requirements != "" {
+				expr, err := classad.ParseExpr(tc.requirements)
+				if err != nil {
+					t.Fatalf("ParseExpr(%q): %v", tc.requirements, err)
+				}
+				h.oauth2Requirements = expr
+				h.oauth2RequirementsText = tc.requirements
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected refusal: %v", err)
+			err := h.evaluateLoginRequirements(realClaims())
+			if tc.wantAllowed && err != nil {
+				t.Fatalf("login refused: %v", err)
+			}
+			if !tc.wantAllowed && err == nil {
+				t.Fatal("login allowed; the requirements should have refused it")
 			}
 		})
 	}
 }
 
-func TestValidateIdentityProviderUsesTheConfiguredClaim(t *testing.T) {
-	h := &Handler{oauth2IDPClaim: "identity_provider", oauth2AllowedIDPs: []string{"campus"}}
-	if err := h.validateIdentityProvider(map[string]any{"identity_provider": "campus"}); err != nil {
-		t.Errorf("configured claim not consulted: %v", err)
+// A malformed policy must stop the daemon at startup, not at the first
+// person's login.
+func TestMalformedRequirementsRefuseToStart(t *testing.T) {
+	_, err := NewHandler(HandlerConfig{
+		ScheddName:         "test-schedd",
+		ScheddAddr:         "127.0.0.1:9618",
+		Logger:             testLogger(t),
+		OAuth2DBPath:       t.TempDir() + "/sessions.db",
+		OAuth2Requirements: `idp == `,
+	})
+	if err == nil {
+		t.Fatal("a malformed requirements expression was accepted")
 	}
-	// The default name must not be consulted when another was configured.
-	if err := h.validateIdentityProvider(map[string]any{"idp": "campus"}); err == nil {
-		t.Error("read the default claim name instead of the configured one")
+	if !strings.Contains(err.Error(), "HTTP_API_OAUTH2_REQUIREMENTS") {
+		t.Errorf("error should name the setting: %v", err)
+	}
+}
+
+// The refusal must not echo the claim values back to the caller: they
+// identify the person, and this path is reachable unauthenticated.
+func TestRefusalDoesNotLeakClaimValues(t *testing.T) {
+	expr, err := classad.ParseExpr(`idp == "https://elsewhere.example/idp"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{oauth2Requirements: expr}
+
+	err = h.evaluateLoginRequirements(realClaims())
+	if err == nil {
+		t.Fatal("expected refusal")
+	}
+	for _, secret := range []string{"bockelman@wisc.edu", "cilogon.org/serverA", "AFFILIATE@wisc.edu"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("refusal message leaked a claim value (%q): %s", secret, err)
+		}
+	}
+}
+
+// Claims become a ClassAd faithfully enough for a policy to be written
+// against them: lists stay lists, nested objects stay addressable.
+func TestClaimsToClassAd(t *testing.T) {
+	ad := claimsToClassAd(map[string]any{
+		"idp":    wiscIDP,
+		"list":   []any{"a", "b"},
+		"nested": map[string]any{"inner": "value"},
+		"null":   nil,
+		"number": float64(1789697789),
+	})
+
+	for _, e := range []string{
+		`idp == "` + wiscIDP + `"`,
+		`member("b", list)`,
+		`nested.inner == "value"`,
+		`null =?= UNDEFINED`,
+		`number > 0`,
+	} {
+		expr, err := classad.ParseExpr(e)
+		if err != nil {
+			t.Fatalf("ParseExpr(%q): %v", e, err)
+		}
+		got, err := expr.Eval(ad).BoolValue()
+		if err != nil || !got {
+			t.Errorf("%s => %v (err %v); the claim did not survive conversion", e, got, err)
+		}
 	}
 }
 
@@ -137,14 +222,12 @@ func TestClaimNamesListsKeysNotValues(t *testing.T) {
 	got := claimNames(map[string]any{
 		"sub":  "http://cilogon.org/serverA/users/9265706",
 		"eppn": "bockelman@wisc.edu",
-		"idp":  "https://login.wisc.edu/idp/shibboleth",
+		"idp":  wiscIDP,
 	})
 	want := []string{"eppn", "idp", "sub"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("claimNames = %v, want %v (sorted)", got, want)
 	}
-	// Values identify the person and must not be logged on a path an
-	// unauthenticated caller can reach repeatedly.
 	for _, n := range got {
 		if strings.Contains(n, "@") || strings.Contains(n, "cilogon.org") {
 			t.Errorf("claim VALUE leaked into the key list: %q", n)
