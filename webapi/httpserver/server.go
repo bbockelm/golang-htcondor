@@ -261,10 +261,14 @@ type Config struct {
 	// MCPMaxRequestDuration is the hard stop on an MCP request that keeps
 	// making progress. See HandlerConfig.MCPMaxRequestDuration.
 	MCPMaxRequestDuration time.Duration
-	StreamBufferSize      int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout    time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token                 string               // Token for daemon authentication (optional)
-	Credd                 htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	// RequiredCredentials names the OAuth service credentials that must
+	// exist before a job may be submitted. See
+	// HandlerConfig.RequiredCredentials.
+	RequiredCredentials []string
+	StreamBufferSize    int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout  time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token               string               // Token for daemon authentication (optional)
+	Credd               htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 	// Placementd is an optional condor_placementd client; nil means
 	// "discover one". See HandlerConfig.
 	Placementd htcondor.PlacementdClient
@@ -365,6 +369,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPWriteGroup:               cfg.MCPWriteGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
+		RequiredCredentials:         cfg.RequiredCredentials,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		WebUIAccessGroup:            cfg.WebUIAccessGroup,

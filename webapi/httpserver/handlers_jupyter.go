@@ -681,6 +681,12 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	// Remote-submit + spool from an in-memory fs.FS. No on-disk state
 	// to clean up if the request fails partway through.
+	// Some access points hold every job submitted without particular OAuth
+	// service credentials on file. Create them first, so a person using the
+	// web UI does not get a held job for a reason unrelated to what they
+	// asked for. Best effort: see ensureRequiredCredentials.
+	s.ensureRequiredCredentials(ctx)
+
 	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 	if err != nil {
 		reg.CloseInstance(instID)

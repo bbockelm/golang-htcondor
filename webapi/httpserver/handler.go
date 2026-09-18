@@ -205,6 +205,10 @@ type Handler struct {
 	// deployment which relied on the MCP group to gate the browser is not
 	// silently opened by this becoming its own knob.
 	webuiAccessGroups *groupSet
+	// requiredCredentials names the OAuth services this access point wants
+	// on file before a job is submitted; see required_creds.go.
+	requiredCredentials []string
+	requiredCredCache   *requiredCredCache
 	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
 	// is being extended; see mcp_deadline.go.
 	mcpMaxRequest time.Duration
@@ -658,6 +662,12 @@ type HandlerConfig struct {
 	// that outlives it loses the response carrying the watch id. Zero
 	// uses the mcpserver default.
 	MCPWatchMaxWait time.Duration
+	// RequiredCredentials names the OAuth service credentials that must
+	// exist before a job may be submitted (HTTP_API_REQUIRED_CREDENTIALS).
+	// Some access points hold every job submitted without them. Each submit
+	// path creates a placeholder for any that is missing; see
+	// required_creds.go.
+	RequiredCredentials []string
 	// MCPMaxRequestDuration is the hard stop on an MCP request that is
 	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
 	// request runs, its write deadline is moved forward rather than being
@@ -958,6 +968,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.registerStreamGauge()
 
 	// Discover credd if not provided
+	// Services this access point wants on file before a job is submitted.
+	// Initialised unconditionally so the submit paths never reach a nil
+	// cache; with no services configured the check is a length test.
+	h.requiredCredentials = cfg.RequiredCredentials
+	h.requiredCredCache = newRequiredCredCache(requiredCredentialTTL)
+	if len(h.requiredCredentials) > 0 {
+		logger.Info(logging.DestinationHTTP, "credentials required before submit",
+			"services", h.requiredCredentials)
+	}
+
 	if h.credd == nil {
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
 		creddAddr, err := discoverCredd(cfg.ScheddName, scheddAddr, cfg.Collector, logger)
