@@ -119,13 +119,51 @@ func TestJupyterRequirementsExpr_amd64(t *testing.T) {
 }
 
 // TestJupyterUniverseForGOOS confirms the policy: macOS → vanilla,
-// everything else → docker.
+// everything else → container (which matches Apptainer nodes too).
 func TestJupyterUniverseForGOOS(t *testing.T) {
 	if got := jupyterUniverseForGOOS("darwin"); got != "vanilla" {
 		t.Errorf("darwin → %q, want vanilla", got)
 	}
-	if got := jupyterUniverseForGOOS("linux"); got != "docker" {
-		t.Errorf("linux → %q, want docker", got)
+	if got := jupyterUniverseForGOOS("linux"); got != "container" {
+		t.Errorf("linux → %q, want container", got)
+	}
+}
+
+// TestBuildJupyterSubmitFile_Container is the default Linux path: a
+// container-universe job whose image is spelled docker:// so HTCondor
+// treats it as a repo image (Docker or Apptainer can pull it) rather
+// than a sandbox directory.
+func TestBuildJupyterSubmitFile_Container(t *testing.T) {
+	got := buildJupyterSubmitFile(jupyterSubmitArgs{
+		InstanceID:   "deadbeef",
+		Image:        "quay.io/jupyter/scipy-notebook:latest",
+		Cpus:         2,
+		MemoryMB:     4096,
+		DiskMB:       4096,
+		Universe:     "container",
+		HelperGOOS:   "linux",
+		HelperGOARCH: "amd64",
+	})
+	mustContain(t, got, "universe = container")
+	mustContain(t, got, "container_image = docker://quay.io/jupyter/scipy-notebook:latest")
+	if strings.Contains(got, "universe = docker") {
+		t.Errorf("container job should not declare docker universe:\n%s", got)
+	}
+}
+
+// TestJupyterContainerImageRef pins the container_image spelling rules.
+func TestJupyterContainerImageRef(t *testing.T) {
+	cases := map[string]string{
+		"quay.io/jupyter/scipy-notebook:latest": "docker://quay.io/jupyter/scipy-notebook:latest",
+		"docker://already/scheme":               "docker://already/scheme",
+		"oras://reg/img":                        "oras://reg/img",
+		"/pool/images/foo.sif":                  "/pool/images/foo.sif",
+		"/pool/images/sandbox/":                 "/pool/images/sandbox/",
+	}
+	for in, want := range cases {
+		if got := jupyterContainerImageRef(in); got != want {
+			t.Errorf("jupyterContainerImageRef(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

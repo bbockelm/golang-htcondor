@@ -99,7 +99,11 @@ const (
 	UniverseParallel  = 11
 	UniverseLocal     = 12
 	UniverseVM        = 13
-	UniverseDocker    = 14 // Deprecated, use Vanilla + container
+	// NB: there is deliberately no docker/container universe constant.
+	// HTCondor has no numeric docker or container universe (14 is
+	// CONDOR_UNIVERSE_MAX, a non-universe placeholder). Docker and
+	// container jobs run in VANILLA with the WantDocker/WantContainer
+	// toppings; see parseUniverse and setContainerSettings.
 )
 
 // SubmitParseOptions controls what a submit-file parse is allowed to do
@@ -389,8 +393,16 @@ func parseUniverse(univ string) int {
 		return UniverseLocal
 	case "vm":
 		return UniverseVM
-	case "docker":
-		return UniverseDocker
+	case "docker", "container":
+		// "docker" and "container" are not universes of their own -- in
+		// HTCondor they are vanilla-universe "toppings". condor_submit
+		// keeps JobUniverse == VANILLA and selects the runtime with the
+		// WantDocker/WantContainer flags plus DockerImage/ContainerImage
+		// (set in setContainerSettings). There is no numeric docker or
+		// container universe: 14 is CONDOR_UNIVERSE_MAX, a placeholder no
+		// shadow can run ("cannot support universe 14"), which is exactly
+		// what a JobUniverse of 14 produced.
+		return UniverseVanilla
 	default:
 		return UniverseVanilla
 	}
@@ -828,18 +840,18 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 
 // setContainerSettings sets container/docker related attributes
 func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
-	// docker_image or container_image
-	var containerImage string
-	if img, ok := sf.submitCommand("docker_image"); ok {
-		containerImage = img
-	} else if img, ok := sf.submitCommand("container_image"); ok {
-		containerImage = img
-	}
-
-	if containerImage != "" {
-		_ = ad.Set("DockerImage", containerImage)
-		// Also set container_image for newer HTCondor versions
-		_ = ad.Set("ContainerImage", containerImage)
+	// docker_image or container_image. These are distinct runtimes and
+	// must not be conflated: the starter selects the proc from the
+	// WantDocker / WantContainer flag (starter.cpp LookupBool), so a job
+	// that set DockerImage but not WantDocker would silently run as a
+	// plain vanilla job. Set exactly the image attribute and want-flag
+	// for the keyword the caller used, mirroring condor_submit.
+	if img, ok := sf.submitCommand("docker_image"); ok && img != "" {
+		_ = ad.Set("DockerImage", img)
+		_ = ad.Set("WantDocker", true)
+	} else if img, ok := sf.submitCommand("container_image"); ok && img != "" {
+		_ = ad.Set("ContainerImage", img)
+		_ = ad.Set("WantContainer", true)
 	}
 
 	// docker_network_type or container_network
@@ -905,6 +917,23 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	return nil
 }
 
+// containerImageCapability returns the TARGET capability a container
+// image's execute node must advertise, classifying the image the way
+// HTCondor's image_type_from_string does: a "docker:" repo needs
+// HasDockerURL, a ".sif" file needs HasSIF, and anything else (a sandbox
+// directory) needs HasSandboxImage.
+func containerImageCapability(image string) string {
+	img := strings.TrimSpace(image)
+	switch {
+	case strings.HasPrefix(img, "docker:"):
+		return "TARGET.HasDockerURL =?= true"
+	case strings.HasSuffix(img, ".sif"):
+		return "TARGET.HasSIF =?= true"
+	default:
+		return "TARGET.HasSandboxImage =?= true"
+	}
+}
+
 // setRequirements sets the Requirements expression
 func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 	var reqParts []string
@@ -955,17 +984,23 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.Arch == %q)", reqArch))
 	}
 
-	// Add container requirement if container image is specified
+	// Add the container/docker requirement, mirroring HTCondor's
+	// submit_utils.cpp SetRequirements. A docker job needs HasDocker; a
+	// container job needs HasContainer AND the capability for the image
+	// kind (HasDockerURL / HasSIF / HasSandboxImage). The container form
+	// is runtime-agnostic on purpose -- a node with Apptainer that can
+	// pull a docker repo advertises HasDockerURL -- so it is not pinned
+	// to Docker (or to Singularity/Apptainer specifically).
 	if _, ok := sf.submitCommand("docker_image"); ok {
 		reqParts = append(reqParts, "(TARGET.HasDocker =?= true)")
-	} else if _, ok := sf.submitCommand("container_image"); ok {
-		reqParts = append(reqParts, "(TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
+	} else if img, ok := sf.submitCommand("container_image"); ok {
+		reqParts = append(reqParts, "(TARGET.HasContainer =?= true && "+containerImageCapability(img)+")")
 	}
 
-	// Require container support if explicitly requested
+	// Require container support if explicitly requested.
 	if rc, ok := sf.submitCommand("require_container"); ok {
 		if parseBool(rc, false) {
-			reqParts = append(reqParts, "(TARGET.HasDocker =?= true || TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
+			reqParts = append(reqParts, "(TARGET.HasContainer =?= true)")
 		}
 	}
 
