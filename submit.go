@@ -917,6 +917,23 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	return nil
 }
 
+// containerImageCapability returns the TARGET capability a container
+// image's execute node must advertise, classifying the image the way
+// HTCondor's image_type_from_string does: a "docker:" repo needs
+// HasDockerURL, a ".sif" file needs HasSIF, and anything else (a sandbox
+// directory) needs HasSandboxImage.
+func containerImageCapability(image string) string {
+	img := strings.TrimSpace(image)
+	switch {
+	case strings.HasPrefix(img, "docker:"):
+		return "TARGET.HasDockerURL =?= true"
+	case strings.HasSuffix(img, ".sif"):
+		return "TARGET.HasSIF =?= true"
+	default:
+		return "TARGET.HasSandboxImage =?= true"
+	}
+}
+
 // setRequirements sets the Requirements expression
 func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 	var reqParts []string
@@ -967,17 +984,23 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, fmt.Sprintf("(TARGET.Arch == %q)", reqArch))
 	}
 
-	// Add container requirement if container image is specified
+	// Add the container/docker requirement, mirroring HTCondor's
+	// submit_utils.cpp SetRequirements. A docker job needs HasDocker; a
+	// container job needs HasContainer AND the capability for the image
+	// kind (HasDockerURL / HasSIF / HasSandboxImage). The container form
+	// is runtime-agnostic on purpose -- a node with Apptainer that can
+	// pull a docker repo advertises HasDockerURL -- so it is not pinned
+	// to Docker (or to Singularity/Apptainer specifically).
 	if _, ok := sf.submitCommand("docker_image"); ok {
 		reqParts = append(reqParts, "(TARGET.HasDocker =?= true)")
-	} else if _, ok := sf.submitCommand("container_image"); ok {
-		reqParts = append(reqParts, "(TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
+	} else if img, ok := sf.submitCommand("container_image"); ok {
+		reqParts = append(reqParts, "(TARGET.HasContainer =?= true && "+containerImageCapability(img)+")")
 	}
 
-	// Require container support if explicitly requested
+	// Require container support if explicitly requested.
 	if rc, ok := sf.submitCommand("require_container"); ok {
 		if parseBool(rc, false) {
-			reqParts = append(reqParts, "(TARGET.HasDocker =?= true || TARGET.HasSingularity =?= true || TARGET.HasApptainer =?= true)")
+			reqParts = append(reqParts, "(TARGET.HasContainer =?= true)")
 		}
 	}
 

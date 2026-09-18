@@ -318,16 +318,37 @@ container_image = docker://quay.io/jupyter/scipy-notebook:latest
 	if _, ok := ad.Lookup("WantDocker"); ok {
 		t.Error("a container_image job set WantDocker")
 	}
-	// The container requirement must accept an Apptainer/Singularity
-	// node, not only a Docker one -- that is the point of preferring the
-	// container topping on the OSPool. (HTCondor's own container-universe
-	// requirement is TARGET.HasContainer && TARGET.HasDockerURL; matching
-	// that exactly is a separate change, but either way it must not pin
-	// the job to Docker.)
+	// HTCondor's container-universe requirement: the node must support
+	// the container universe (HasContainer) and be able to pull the image
+	// kind. A docker:// repo needs HasDockerURL, which is runtime-agnostic
+	// -- an Apptainer node that can pull a docker repo advertises it -- so
+	// the job is not pinned to Docker or to a specific runtime attribute.
 	req := lookupStr(t, ad, "Requirements")
-	for _, want := range []string{"HasSingularity", "HasApptainer"} {
+	for _, want := range []string{"HasContainer", "HasDockerURL"} {
 		if !strings.Contains(req, want) {
-			t.Errorf("Requirements missing %s (should match a container runtime): %s", want, req)
+			t.Errorf("Requirements missing %s: %s", want, req)
+		}
+	}
+	for _, notWant := range []string{"HasSingularity", "HasApptainer", "HasDocker =", "HasSIF", "HasSandboxImage"} {
+		if strings.Contains(req, notWant) {
+			t.Errorf("Requirements should not contain %s for a docker:// image: %s", notWant, req)
+		}
+	}
+}
+
+// TestContainerImageCapability pins the image-kind -> node-capability
+// mapping, matching HTCondor's image_type_from_string.
+func TestContainerImageCapability(t *testing.T) {
+	cases := map[string]string{
+		"docker://quay.io/x:latest": "HasDockerURL",
+		"docker:x":                  "HasDockerURL",
+		"/pool/images/foo.sif":      "HasSIF",
+		"/pool/images/sandbox/":     "HasSandboxImage",
+		"just-a-name":               "HasSandboxImage",
+	}
+	for img, want := range cases {
+		if got := containerImageCapability(img); !strings.Contains(got, want) {
+			t.Errorf("containerImageCapability(%q) = %q, want it to name %s", img, got, want)
 		}
 	}
 }
