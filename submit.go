@@ -99,7 +99,11 @@ const (
 	UniverseParallel  = 11
 	UniverseLocal     = 12
 	UniverseVM        = 13
-	UniverseDocker    = 14 // Deprecated, use Vanilla + container
+	// NB: there is deliberately no docker/container universe constant.
+	// HTCondor has no numeric docker or container universe (14 is
+	// CONDOR_UNIVERSE_MAX, a non-universe placeholder). Docker and
+	// container jobs run in VANILLA with the WantDocker/WantContainer
+	// toppings; see parseUniverse and setContainerSettings.
 )
 
 // SubmitParseOptions controls what a submit-file parse is allowed to do
@@ -389,8 +393,16 @@ func parseUniverse(univ string) int {
 		return UniverseLocal
 	case "vm":
 		return UniverseVM
-	case "docker":
-		return UniverseDocker
+	case "docker", "container":
+		// "docker" and "container" are not universes of their own -- in
+		// HTCondor they are vanilla-universe "toppings". condor_submit
+		// keeps JobUniverse == VANILLA and selects the runtime with the
+		// WantDocker/WantContainer flags plus DockerImage/ContainerImage
+		// (set in setContainerSettings). There is no numeric docker or
+		// container universe: 14 is CONDOR_UNIVERSE_MAX, a placeholder no
+		// shadow can run ("cannot support universe 14"), which is exactly
+		// what a JobUniverse of 14 produced.
+		return UniverseVanilla
 	default:
 		return UniverseVanilla
 	}
@@ -828,18 +840,18 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 
 // setContainerSettings sets container/docker related attributes
 func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
-	// docker_image or container_image
-	var containerImage string
-	if img, ok := sf.submitCommand("docker_image"); ok {
-		containerImage = img
-	} else if img, ok := sf.submitCommand("container_image"); ok {
-		containerImage = img
-	}
-
-	if containerImage != "" {
-		_ = ad.Set("DockerImage", containerImage)
-		// Also set container_image for newer HTCondor versions
-		_ = ad.Set("ContainerImage", containerImage)
+	// docker_image or container_image. These are distinct runtimes and
+	// must not be conflated: the starter selects the proc from the
+	// WantDocker / WantContainer flag (starter.cpp LookupBool), so a job
+	// that set DockerImage but not WantDocker would silently run as a
+	// plain vanilla job. Set exactly the image attribute and want-flag
+	// for the keyword the caller used, mirroring condor_submit.
+	if img, ok := sf.submitCommand("docker_image"); ok && img != "" {
+		_ = ad.Set("DockerImage", img)
+		_ = ad.Set("WantDocker", true)
+	} else if img, ok := sf.submitCommand("container_image"); ok && img != "" {
+		_ = ad.Set("ContainerImage", img)
+		_ = ad.Set("WantContainer", true)
 	}
 
 	// docker_network_type or container_network

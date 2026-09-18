@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/version"
 )
 
@@ -82,7 +83,10 @@ func TestParseUniverse(t *testing.T) {
 		{"mpi", UniverseParallel},
 		{"local", UniverseLocal},
 		{"vm", UniverseVM},
-		{"docker", UniverseDocker},
+		// docker and container are vanilla-universe toppings, not
+		// universes of their own (there is no universe 14).
+		{"docker", UniverseVanilla},
+		{"container", UniverseVanilla},
 		{"unknown", UniverseVanilla}, // Default
 	}
 
@@ -230,35 +234,102 @@ transfer_plugins = http, https
 	// Verify the job ad was created successfully with file transfer settings
 }
 
+// adFromSubmit parses a submit description and returns the first proc's job ad.
+func adFromSubmit(t *testing.T, submit string) *classad.ClassAd {
+	t.Helper()
+	sf, err := ParseSubmitFile(strings.NewReader(submit))
+	if err != nil {
+		t.Fatalf("parse submit: %v", err)
+	}
+	ad, err := sf.MakeJobAd(JobID{Cluster: 100, Proc: 0}, map[string]string{})
+	if err != nil {
+		t.Fatalf("MakeJobAd: %v", err)
+	}
+	if ad == nil {
+		t.Fatal("nil job ad")
+	}
+	return ad
+}
+
+func lookupStr(t *testing.T, ad *classad.ClassAd, attr string) string {
+	t.Helper()
+	expr, ok := ad.Lookup(attr)
+	if !ok {
+		return ""
+	}
+	return expr.String()
+}
+
+// TestContainerSettings asserts the docker "topping" produces a job the
+// shadow can actually run: JobUniverse VANILLA (not the bogus universe
+// 14 that "cannot support universe" comes from), WantDocker set so the
+// starter selects the docker proc, the image, and a HasDocker
+// requirement. The previous version of this test only checked the ad was
+// non-nil, so it passed throughout the period JobUniverse was 14.
 func TestContainerSettings(t *testing.T) {
-	submit := `
-universe = vanilla
+	ad := adFromSubmit(t, `
+universe = docker
 executable = /bin/echo
 arguments = test
 docker_image = ubuntu:22.04
 docker_network_type = host
-docker_volumes = /data:/data, /home:/home
-docker_pull_policy = always
-container_target_dir = /workspace
-require_container = true
-`
+`)
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
-	if err != nil {
-		t.Fatalf("Failed to parse submit file: %v", err)
+	if got := lookupStr(t, ad, "JobUniverse"); got != "5" {
+		t.Errorf("JobUniverse = %q, want 5 (VANILLA)", got)
 	}
-
-	jobID := JobID{Cluster: 100, Proc: 0}
-	ad, err := sf.MakeJobAd(jobID, map[string]string{})
-	if err != nil {
-		t.Fatalf("Failed to create job ad: %v", err)
+	if got := lookupStr(t, ad, "WantDocker"); got != "true" {
+		t.Errorf("WantDocker = %q, want true", got)
 	}
-
-	if ad == nil {
-		t.Fatal("Expected non-nil job ad")
+	if got := lookupStr(t, ad, "DockerImage"); got != `"ubuntu:22.04"` {
+		t.Errorf("DockerImage = %q, want \"ubuntu:22.04\"", got)
 	}
+	// docker_image must not masquerade as a container job (that would set
+	// WantContainer and make the starter pick the wrong proc).
+	if _, ok := ad.Lookup("WantContainer"); ok {
+		t.Error("a docker_image job set WantContainer")
+	}
+	if req := lookupStr(t, ad, "Requirements"); !strings.Contains(req, "HasDocker") {
+		t.Errorf("Requirements does not require HasDocker: %s", req)
+	}
+}
 
-	// Verify the job ad was created successfully with container settings
+// TestContainerUniverse is the container topping, the shape the Jupyter
+// path now emits. It must also be VANILLA, set WantContainer, carry the
+// image, and require any of the container runtimes so it matches
+// Apptainer/Singularity nodes, not only Docker ones.
+func TestContainerUniverse(t *testing.T) {
+	ad := adFromSubmit(t, `
+universe = container
+executable = /bin/echo
+arguments = test
+container_image = docker://quay.io/jupyter/scipy-notebook:latest
+`)
+
+	if got := lookupStr(t, ad, "JobUniverse"); got != "5" {
+		t.Errorf("JobUniverse = %q, want 5 (VANILLA)", got)
+	}
+	if got := lookupStr(t, ad, "WantContainer"); got != "true" {
+		t.Errorf("WantContainer = %q, want true", got)
+	}
+	if got := lookupStr(t, ad, "ContainerImage"); got != `"docker://quay.io/jupyter/scipy-notebook:latest"` {
+		t.Errorf("ContainerImage = %q", got)
+	}
+	if _, ok := ad.Lookup("WantDocker"); ok {
+		t.Error("a container_image job set WantDocker")
+	}
+	// The container requirement must accept an Apptainer/Singularity
+	// node, not only a Docker one -- that is the point of preferring the
+	// container topping on the OSPool. (HTCondor's own container-universe
+	// requirement is TARGET.HasContainer && TARGET.HasDockerURL; matching
+	// that exactly is a separate change, but either way it must not pin
+	// the job to Docker.)
+	req := lookupStr(t, ad, "Requirements")
+	for _, want := range []string{"HasSingularity", "HasApptainer"} {
+		if !strings.Contains(req, want) {
+			t.Errorf("Requirements missing %s (should match a container runtime): %s", want, req)
+		}
+	}
 }
 
 func TestJobStatusControl(t *testing.T) {
