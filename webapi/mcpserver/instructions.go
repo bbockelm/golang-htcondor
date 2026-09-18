@@ -181,10 +181,25 @@ func buildInstructions(scheddName, customInstructions string) string {
 // instructions once, in the initialize response, so an agent already connected
 // keeps the text it was given -- there is no way to push a revision to it.
 func (s *Server) SetInstructions(custom string) {
+	s.customInstructions.Store(&custom)
+	s.rebuildInstructions()
+}
+
+// rebuildInstructions regenerates the initialize text from the operator's
+// instructions and the skills currently loaded.
+//
+// Both inputs can change independently at runtime -- MCP_INSTRUCTIONS on a
+// reconfigure, the library when a checkout is reloaded -- and the text has
+// to reflect whichever changed without discarding the other.
+func (s *Server) rebuildInstructions() {
 	name := ""
 	if sc := s.getSchedd(); sc != nil {
 		name = sc.Name()
 	}
-	built := buildInstructions(name, custom)
+	custom := ""
+	if p := s.customInstructions.Load(); p != nil {
+		custom = *p
+	}
+	built := buildInstructions(name, custom) + skillsInstructions(s.skillsLibrary())
 	s.instructions.Store(&built)
 }

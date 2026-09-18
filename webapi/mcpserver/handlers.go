@@ -569,6 +569,12 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 		tools = append(tools, condorDocTools()...)
 	}
 
+	// Site-authored skills, when this deployment publishes any. Read-only
+	// reference lookups, same as the documentation tools above.
+	if s.hasSkills() {
+		tools = append(tools, skillTools()...)
+	}
+
 	// Add credential management tools if credd is available
 	if s.credd != nil {
 		tools = append(tools,
@@ -832,10 +838,19 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		// a single default-arm fallback means the switch's
 		// cyclomatic-complexity score doesn't grow each time we add
 		// a new condor_doc_* tool.
-		if !isCondorDocTool(request.Name) {
+		// Site skills share this arm for the same reason: two more cases
+		// in the switch above would grow its complexity score without
+		// making the dispatch any clearer.
+		switch {
+		case request.Name == "skills_list":
+			result, err = s.toolSkillsList(ctx, request.Arguments)
+		case request.Name == "skills_get":
+			result, err = s.toolSkillsGet(ctx, request.Arguments)
+		case isCondorDocTool(request.Name):
+			result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
+		default:
 			return nil, protocolErrorf("unknown tool: %s", request.Name)
 		}
-		result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
 	}
 
 	// Log the outcome either way. A failing tool used to produce no log
@@ -1624,6 +1639,8 @@ func (s *Server) handleListResources(_ context.Context, _ json.RawMessage) inter
 		},
 	}
 
+	resources = append(resources, s.skillResources()...)
+
 	return map[string]interface{}{
 		"resources": resources,
 	}
@@ -1639,9 +1656,11 @@ func (s *Server) handleReadResource(ctx context.Context, params json.RawMessage)
 		return nil, fmt.Errorf("invalid resource read params: %w", err)
 	}
 
-	switch request.URI {
-	case "condor://schedd/status":
+	switch {
+	case request.URI == "condor://schedd/status":
 		return s.resourceScheddStatus(ctx)
+	case strings.HasPrefix(request.URI, skillURIPrefix):
+		return s.readSkillResource(request.URI)
 	default:
 		return nil, fmt.Errorf("unknown resource: %s", request.URI)
 	}

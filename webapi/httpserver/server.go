@@ -219,13 +219,16 @@ type Config struct {
 	// Nil selects the default set; see HandlerConfig.OAuth2RevocationOracles
 	// for the recognized names.
 	OAuth2RevocationOracles []string
-	MCPAccessGroup          string   // Group required for any MCP access (empty = all authenticated)
-	MCPReadGroup            string   // Group required for read operations (empty = all have read)
-	MCPWriteGroup           string   // Group required for write operations (empty = all have write)
-	ScheddHost              string   // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
-	MCPInstructions         string   // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
-	MCPAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
-	WebUIAdminGroup         string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
+	MCPReadGroup            string // Group required for read operations (empty = all have read)
+	MCPWriteGroup           string // Group required for write operations (empty = all have write)
+	ScheddHost              string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
+	MCPInstructions         string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPSkillsDir publishes a directory of site-authored Markdown skills
+	// to agents. Empty disables the feature.
+	MCPSkillsDir    string
+	MCPAdminUsers   []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	WebUIAdminGroup string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	// WebUIAccessGroup gates web interface login; empty falls back to
 	// MCPAccessGroup. Comma-separated.
 	WebUIAccessGroup string
@@ -364,6 +367,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
 		MCPInstructions:             cfg.MCPInstructions,
+		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
