@@ -121,6 +121,7 @@ list of strategies; the first to answer wins.
 | `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
 | `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | unset | Comma-separated domains whose local part may also be tried: with `wisc.edu`, the subject `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. `*` strips any domain. |
 
 Once mapping is on, the session's subject becomes the **local account
 name** -- the name HTCondor knows -- so owner-scoping matches actual job
@@ -139,6 +140,15 @@ Three behaviours worth knowing before turning this on:
   up to the first comma, which is what `os/user` reports on every
   platform. For `tannenba:x:20013:20013:tatannen:...` the value matched
   is `tatannen`; for `...:Tannenbaum, Todd,,:...` it is `Tannenbaum`.
+
+An ePPN is scoped (`bockelman@wisc.edu`) and a GECOS or login name
+usually is not, so the two cannot match without
+`HTTP_API_IDENTITY_MAP_STRIP_DOMAIN`. Domains are listed rather than
+stripped blindly because the local part is **not** unique across them:
+`bockelman@wisc.edu` and `bockelman@example.org` both reduce to
+`bockelman`, so a deployment accepting both would hand one person's
+account to the other. Use `*` only where something else already
+guarantees a single namespace -- an identity-provider allow-list, say.
 
 The index can only contain accounts something will enumerate, which in
 practice means those present in the passwd file: no NSS enumeration call
@@ -167,6 +177,20 @@ Group resolution follows this host's `nsswitch.conf`. A build with cgo
 resolves through `getgrouplist(3)`, so every configured service is
 consulted; a build without cgo speaks `files` and `sss` natively and
 marks the answer incomplete if the line names anything else.
+
+**Which identity providers may log in.** A federation such as CILogon
+fronts many institutions behind a single issuer, so restricting by issuer
+does not express "only this campus".
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_OAUTH2_ALLOWED_IDPS` | unset (any) | Comma-separated values of the IDP claim that may log in, e.g. `https://login.wisc.edu/idp/shibboleth`. |
+| `HTTP_API_OAUTH2_IDP_CLAIM` | `idp` | Which claim carries that value. |
+
+Once the allow-list is set it **fails closed**: a token whose IDP claim is
+missing, empty, or not a string is refused, because "cannot tell which
+provider this came from" is not a reason to trust it. A refused login gets
+403 and the reason is logged.
 
 **Which claim carries the username.** Some providers put the login-ish
 value somewhere other than `sub`.
@@ -498,6 +522,9 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_IDENTITY_MAP_TTL` | How long the account index and group answers are reused. Default `5m`. |
 | `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
+| `HTTP_API_OAUTH2_ALLOWED_IDPS` | Restrict logins to specific upstream identity providers. See [Local identity mapping](#local-identity-mapping). |
+| `HTTP_API_OAUTH2_IDP_CLAIM` | Claim carrying the upstream IDP. Default `idp`. |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | Domains whose local part may also be matched, e.g. `wisc.edu`. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
