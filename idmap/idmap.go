@@ -143,9 +143,9 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 
 // Resolver maps subjects to local account names.
 type Resolver struct {
-	// stripDomains lists the domains whose local part may be tried when a
-	// subject is scoped. See WithStripDomains.
-	stripDomains []string
+	// stripDomain enables trying the local part of a scoped subject. See
+	// WithStripDomain.
+	stripDomain bool
 
 	enum       Enumerator
 	verifier   Verifier
@@ -183,29 +183,19 @@ func WithStrategies(s ...Strategy) Option {
 // WithClock replaces the clock, for tests.
 func WithClock(f func() time.Time) Option { return func(r *Resolver) { r.now = f } }
 
-// WithStripDomains makes Resolve try the local part of a scoped subject
-// -- "bockelman@wisc.edu" as "bockelman" -- for the listed domains.
+// WithStripDomain makes Resolve also try the local part of a scoped
+// subject -- "bockelman@wisc.edu" as "bockelman".
 //
 // Scoped is the norm for an ePPN, while a GECOS or login name is not, so
-// without this the two can never match. The domains are listed rather
-// than stripped blindly because the local part alone is NOT unique across
-// them: "bockelman@wisc.edu" and "bockelman@example.org" both reduce to
-// "bockelman", and a deployment that accepts both would hand one person's
-// account to the other. A subject scoped to an unlisted domain is left
-// whole, so it simply fails to match instead.
+// without this the two can never match.
 //
-// "*" strips any domain. That is only safe where something else already
-// guarantees a single namespace -- an identity-provider allow-list, say.
-func WithStripDomains(domains ...string) Option {
-	return func(r *Resolver) {
-		r.stripDomains = make([]string, 0, len(domains))
-		for _, d := range domains {
-			d = strings.TrimSpace(strings.TrimPrefix(d, "@"))
-			if d != "" {
-				r.stripDomains = append(r.stripDomains, strings.ToLower(d))
-			}
-		}
-	}
+// The local part alone is NOT unique across domains: "bockelman@wisc.edu"
+// and "bockelman@example.org" both reduce to "bockelman". Enabling this
+// therefore only makes sense where something else already constrains
+// which identity providers may log in. The full subject is tried first,
+// so an account whose GECOS really is the scoped form still wins.
+func WithStripDomain(enabled bool) Option {
+	return func(r *Resolver) { r.stripDomain = enabled }
 }
 
 // New returns a Resolver over the given account source. verifier may be
@@ -288,20 +278,17 @@ func (r *Resolver) Resolve(ctx context.Context, subject string) (string, error) 
 // localPart returns the part of a scoped subject before its "@", when the
 // domain is one this resolver was told to strip.
 func (r *Resolver) localPart(subject string) (string, bool) {
-	if len(r.stripDomains) == 0 {
+	if !r.stripDomain {
 		return "", false
 	}
+	// Bounds matter: "@domain" has no local part and "user@" no domain,
+	// and neither is a subject anybody asserted. Returning "" from either
+	// would match an account whose GECOS is empty.
 	at := strings.LastIndex(subject, "@")
 	if at <= 0 || at == len(subject)-1 {
 		return "", false
 	}
-	local, domain := subject[:at], strings.ToLower(subject[at+1:])
-	for _, d := range r.stripDomains {
-		if d == "*" || d == domain {
-			return local, true
-		}
-	}
-	return "", false
+	return subject[:at], true
 }
 
 // resolveByGecos matches the subject against the whole GECOS field,

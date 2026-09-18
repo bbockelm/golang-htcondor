@@ -212,7 +212,7 @@ func TestSystemGroupOracleIsWiredExactlyWhenGroupsAreLocal(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &Handler{logger: testLogger(t)}
-			if li := newLocalIdentity(tc.strategies, tc.systemGroups, passwd, time.Minute, nil, h.logger); li != nil {
+			if li := newLocalIdentity(tc.strategies, tc.systemGroups, passwd, time.Minute, false, h.logger); li != nil {
 				h.localIdentity = li
 			}
 			h.registerSystemGroupOracle(h.logger)

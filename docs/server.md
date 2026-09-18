@@ -121,7 +121,7 @@ list of strategies; the first to answer wins.
 | `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
 | `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
-| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | unset | Comma-separated domains whose local part may also be tried: with `wisc.edu`, the subject `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. `*` strips any domain. |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `false` | Also try the local part of a scoped subject: `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. |
 
 Once mapping is on, the session's subject becomes the **local account
 name** -- the name HTCondor knows -- so owner-scoping matches actual job
@@ -143,12 +143,14 @@ Three behaviours worth knowing before turning this on:
 
 An ePPN is scoped (`bockelman@wisc.edu`) and a GECOS or login name
 usually is not, so the two cannot match without
-`HTTP_API_IDENTITY_MAP_STRIP_DOMAIN`. Domains are listed rather than
-stripped blindly because the local part is **not** unique across them:
-`bockelman@wisc.edu` and `bockelman@example.org` both reduce to
-`bockelman`, so a deployment accepting both would hand one person's
-account to the other. Use `*` only where something else already
-guarantees a single namespace -- an identity-provider allow-list, say.
+`HTTP_API_IDENTITY_MAP_STRIP_DOMAIN`.
+
+It strips **whatever** domain the token carried, so
+`bockelman@wisc.edu` and `bockelman@elsewhere.example` reach the same
+account. Which providers may issue such a token is decided by
+[`HTTP_API_OAUTH2_REQUIREMENTS`](#local-identity-mapping), not here --
+enable this only alongside one. The server logs a warning at startup if
+stripping is on with no requirements expression configured.
 
 The index can only contain accounts something will enumerate, which in
 practice means those present in the passwd file: no NSS enumeration call
@@ -553,7 +555,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
 | `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
-| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | Domains whose local part may also be matched, e.g. `wisc.edu`. |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |

@@ -23,22 +23,19 @@ import (
 )
 
 // writeAccounts builds a passwd fixture and returns a resolver over it.
-func stripResolver(t *testing.T, body string, domains ...string) *Resolver {
+func stripResolver(t *testing.T, body string, strip bool) *Resolver {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "passwd")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts := []Option{WithStrategies(StrategyGecos)}
-	if len(domains) > 0 {
-		opts = append(opts, WithStripDomains(domains...))
-	}
-	return New(&SystemAccounts{Path: path}, FileGecos{Path: path}, opts...)
+	return New(&SystemAccounts{Path: path}, FileGecos{Path: path},
+		WithStrategies(StrategyGecos), WithStripDomain(strip))
 }
 
 // The case this exists for: an ePPN is scoped, a GECOS is not.
 func TestScopedSubjectMatchesAnUnscopedGecos(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", "wisc.edu")
+	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", true)
 
 	got, err := r.Resolve(context.Background(), "bockelman@wisc.edu")
 	if err != nil {
@@ -49,28 +46,25 @@ func TestScopedSubjectMatchesAnUnscopedGecos(t *testing.T) {
 	}
 }
 
-// A domain that was not listed is left whole, so it simply does not
-// match. Stripping blindly would let bockelman@anywhere.example claim
-// this account.
-func TestAnUnlistedDomainIsNotStripped(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", "wisc.edu")
+// The flag strips WHATEVER domain the token carried, so two providers'
+// "bockelman" reach the same account. That is the property the deployment
+// must constrain elsewhere -- by restricting which providers may log in --
+// and asserting it here keeps it from being mistaken for per-domain
+// filtering that this option does not do.
+func TestAnyDomainIsStripped(t *testing.T) {
+	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", true)
 
-	if _, err := r.Resolve(context.Background(), "bockelman@elsewhere.example"); !errors.Is(err, ErrNoMatch) {
-		t.Errorf("err = %v, want ErrNoMatch: an unlisted domain must not be stripped", err)
-	}
-}
-
-func TestStripDomainsWildcard(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", "*")
-	got, err := r.Resolve(context.Background(), "bockelman@anywhere.example")
-	if err != nil || got != "bbockelm" {
-		t.Errorf("Resolve = %q, %v; \"*\" should strip any domain", got, err)
+	for _, subject := range []string{"bockelman@wisc.edu", "bockelman@anywhere.example"} {
+		got, err := r.Resolve(context.Background(), subject)
+		if err != nil || got != "bbockelm" {
+			t.Errorf("Resolve(%q) = %q, %v; the flag strips any domain", subject, got, err)
+		}
 	}
 }
 
 // Without the option configured at all, nothing changes.
 func TestScopedSubjectDoesNotMatchWhenStrippingIsOff(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n")
+	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", false)
 	if _, err := r.Resolve(context.Background(), "bockelman@wisc.edu"); !errors.Is(err, ErrNoMatch) {
 		t.Errorf("err = %v, want ErrNoMatch when stripping is not configured", err)
 	}
@@ -82,7 +76,7 @@ func TestTheFullSubjectWinsOverTheStrippedOne(t *testing.T) {
 	body := "" +
 		"scoped:x:20015:20015:bockelman@wisc.edu:/home/scoped:/bin/sh\n" +
 		"bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n"
-	r := stripResolver(t, body, "wisc.edu")
+	r := stripResolver(t, body, true)
 
 	got, err := r.Resolve(context.Background(), "bockelman@wisc.edu")
 	if err != nil {
@@ -93,18 +87,24 @@ func TestTheFullSubjectWinsOverTheStrippedOne(t *testing.T) {
 	}
 }
 
-// Domain comparison is case-insensitive, as DNS is.
-func TestStripDomainIsCaseInsensitive(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", "WISC.edu")
-	if got, err := r.Resolve(context.Background(), "bockelman@wisc.EDU"); err != nil || got != "bbockelm" {
-		t.Errorf("Resolve = %q, %v; domain matching should ignore case", got, err)
+// The local part is passed through exactly as asserted; only the domain
+// is discarded. Matching of the local part itself is the resolver's
+// ordinary, case-sensitive comparison.
+func TestOnlyTheDomainIsDiscarded(t *testing.T) {
+	r := stripResolver(t, "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/bash\n", true)
+
+	if got, err := r.Resolve(context.Background(), "bockelman@WISC.EDU"); err != nil || got != "bbockelm" {
+		t.Errorf("Resolve = %q, %v; the domain's case must not matter", got, err)
+	}
+	if _, err := r.Resolve(context.Background(), "BOCKELMAN@wisc.edu"); err == nil {
+		t.Error("a differently-cased local part matched; only the domain is discarded")
 	}
 }
 
 // Degenerate scoped forms must not produce an empty local part, which
 // would be a subject nobody asserted.
 func TestDegenerateScopedSubjects(t *testing.T) {
-	r := stripResolver(t, "bbockelm:x:20014:20014::/home/bbockelm:/bin/bash\n", "*")
+	r := stripResolver(t, "bbockelm:x:20014:20014::/home/bbockelm:/bin/bash\n", true)
 	for _, subject := range []string{"@wisc.edu", "bockelman@", "@"} {
 		if _, err := r.Resolve(context.Background(), subject); err == nil {
 			t.Errorf("Resolve(%q) succeeded; a degenerate subject must not match the empty GECOS", subject)

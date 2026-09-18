@@ -514,11 +514,11 @@ type HandlerConfig struct {
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
 
-	// IdentityMapStripDomains lists the domains whose local part may be
-	// tried when a subject is scoped -- "bockelman@wisc.edu" as
-	// "bockelman". Listed rather than stripped blindly because the local
-	// part is not unique across domains. "*" strips any.
-	IdentityMapStripDomains []string
+	// IdentityMapStripDomain also tries the local part of a scoped
+	// subject -- "bockelman@wisc.edu" as "bockelman". Only sound where
+	// something else constrains which identity providers may log in,
+	// since the local part is not unique across domains.
+	IdentityMapStripDomain bool
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1087,7 +1087,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// logged as configured, and then silently ignored -- the worst of
 	// both, because the log said the mapping was in force.
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
-		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomains, logger); li != nil {
+		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
 		li.warmUp(context.Background())
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
@@ -1095,6 +1095,18 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"strategies", cfg.IdentityMapStrategies,
 			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()],
 			"group_source", li.groupSourceName())
+
+		// Stripping the domain makes "bockelman@wisc.edu" and
+		// "bockelman@anywhere.example" resolve to the SAME account. That is
+		// fine when only one provider can issue a token at all, and a
+		// privilege hole when any can, so say so rather than leaving it to
+		// the documentation.
+		if cfg.IdentityMapStripDomain && strings.TrimSpace(cfg.OAuth2Requirements) == "" {
+			logger.Warn(logging.DestinationHTTP,
+				"Identity mapping strips the subject's domain but no login requirements are configured; "+
+					"any identity provider that can authenticate a matching local part reaches that account. "+
+					"Set HTTP_API_OAUTH2_REQUIREMENTS to constrain which providers may log in")
+		}
 	}
 
 	// Which claims carry the username and the groups.

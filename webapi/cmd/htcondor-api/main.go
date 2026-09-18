@@ -139,20 +139,20 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled                 bool
-	oauth2DBPath            string
-	oauth2Issuer            string
-	oauth2ClientID          string
-	oauth2ClientSecret      string
-	oauth2AuthURL           string
-	oauth2TokenURL          string
-	oauth2RedirectURL       string
-	oauth2UserInfoURL       string
-	oauth2Scopes            []string
-	oauth2UsernameClaim     string
-	oauth2Requirements      string
-	identityMapStripDomains []string
-	oauth2GroupsClaim       string
+	enabled                bool
+	oauth2DBPath           string
+	oauth2Issuer           string
+	oauth2ClientID         string
+	oauth2ClientSecret     string
+	oauth2AuthURL          string
+	oauth2TokenURL         string
+	oauth2RedirectURL      string
+	oauth2UserInfoURL      string
+	oauth2Scopes           []string
+	oauth2UsernameClaim    string
+	oauth2Requirements     string
+	identityMapStripDomain bool
+	oauth2GroupsClaim      string
 
 	// identityMapGecos maps the OIDC subject to the local account whose
 	// GECOS equals it, and takes group membership from the system
@@ -1006,14 +1006,19 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 	if len(mcpCfg.identityMapStrategies) > 0 || mcpCfg.identityGroupsSystem {
 		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
+		// Whether a scoped subject may also be matched by its local part.
+		// A boolean, because the domain it strips is whichever the token
+		// carried; which providers may issue such a token is decided by
+		// HTTP_API_OAUTH2_REQUIREMENTS, not here.
 		if v, ok := cfg.Get("HTTP_API_IDENTITY_MAP_STRIP_DOMAIN"); ok && strings.TrimSpace(v) != "" {
-			for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-				if f = strings.TrimSpace(f); f != "" {
-					mcpCfg.identityMapStripDomains = append(mcpCfg.identityMapStripDomains, f)
-				}
+			parsed, perr := strconv.ParseBool(strings.TrimSpace(v))
+			if perr != nil {
+				logger.Error(logging.DestinationHTTP,
+					"HTTP_API_IDENTITY_MAP_STRIP_DOMAIN must be a boolean; refusing to start",
+					"value", v)
+				os.Exit(1)
 			}
-			logger.Info(logging.DestinationHTTP, "Identity mapping will try the local part of scoped subjects",
-				"domains", mcpCfg.identityMapStripDomains)
+			mcpCfg.identityMapStripDomain = parsed
 		}
 		mcpCfg.identityMapTTL = 5 * time.Minute
 		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
@@ -1661,7 +1666,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IdentityGroupsFromSystem:   mcpCfg.identityGroupsSystem,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
-		IdentityMapStripDomains:    mcpCfg.identityMapStripDomains,
+		IdentityMapStripDomain:     mcpCfg.identityMapStripDomain,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan: mcpCfg.oauth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:     mcpCfg.oauth2MaxGrantLifetime,

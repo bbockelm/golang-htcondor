@@ -200,11 +200,11 @@ type Config struct {
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
 
-	// IdentityMapStripDomains lists the domains whose local part may be
-	// tried when a subject is scoped -- "bockelman@wisc.edu" as
-	// "bockelman". Listed rather than stripped blindly because the local
-	// part is not unique across domains. "*" strips any.
-	IdentityMapStripDomains []string
+	// IdentityMapStripDomain also tries the local part of a scoped
+	// subject -- "bockelman@wisc.edu" as "bockelman". Only sound where
+	// something else constrains which identity providers may log in,
+	// since the local part is not unique across domains.
+	IdentityMapStripDomain bool
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -352,7 +352,7 @@ func NewServer(cfg Config) (*Server, error) {
 		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
-		IdentityMapStripDomains:     cfg.IdentityMapStripDomains,
+		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,
