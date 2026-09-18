@@ -38,7 +38,7 @@ func newDBMirrorServer(t *testing.T, method, path string) (*Server, func(user st
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	server.webuiAdminGroup = "condor-admins"
+	server.webuiAdminGroups = newGroupSet("condor-admins")
 
 	return server, func(user string, groups []string) *http.Request {
 		sid, _, err := server.sessionStore.Create(user, groups)

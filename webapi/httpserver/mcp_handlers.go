@@ -548,7 +548,11 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx := r.Context()
+	// Note the redirect_uri so a CIMD client can be resolved knowing which
+	// loopback port the native app opened this time; see
+	// withLoopbackRedirect. Recorded before any client lookup, since that
+	// lookup is what consumes it.
+	ctx := WithRequestedRedirectURI(r.Context(), r.URL.Query().Get("redirect_uri"))
 
 	// Filter requested scopes to only those allowed for the client
 	filteredReq, err := h.filterRequestedScopes(ctx, r)
@@ -857,6 +861,11 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size for form parsing
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
+	// The token request repeats redirect_uri, and fosite resolves the
+	// client again to validate it, so the same loopback allowance the
+	// authorize step made must hold here or the exchange fails after a
+	// successful consent. ParseForm below has not run yet, so read it
+	// from the raw form values rather than FormValue.
 	ctx := r.Context()
 
 	// Parse form data
@@ -865,6 +874,7 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request")
 		return
 	}
+	ctx = WithRequestedRedirectURI(ctx, r.FormValue("redirect_uri"))
 
 	// Token exchange (RFC 8693) is dispatched before scope filtering and the
 	// fosite pipeline: it authenticates its own client, manages its own

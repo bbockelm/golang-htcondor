@@ -196,8 +196,8 @@ func TestSuperuserModeRequiresBothGroupAndSigningKey(t *testing.T) {
 			if got := h.superuserModeAvailable(); got != tc.want {
 				t.Errorf("superuserModeAvailable() = %v, want %v", got, tc.want)
 			}
-			if !tc.want && h.superuserGroup != "" {
-				t.Errorf("disabled mode left a group set: %q", h.superuserGroup)
+			if !tc.want && h.superuserGroups.configured() {
+				t.Errorf("disabled mode left a group set: %q", h.superuserGroups.String())
 			}
 		})
 	}
@@ -209,11 +209,11 @@ func TestSuperuserModeRequiresBothGroupAndSigningKey(t *testing.T) {
 func TestSuperuserGroupIsNotTheAdminGroup(t *testing.T) {
 	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
 	h := &Handler{
-		logger:          logger,
-		uidDomain:       "example.org",
-		signingKeyPath:  "/etc/condor/passwords.d/POOL",
-		trustDomain:     "example.org",
-		webuiAdminGroup: "web-admins",
+		logger:           logger,
+		uidDomain:        "example.org",
+		signingKeyPath:   "/etc/condor/passwords.d/POOL",
+		trustDomain:      "example.org",
+		webuiAdminGroups: newGroupSet("web-admins"),
 	}
 	h.initSuperuserMode(HandlerConfig{SuperuserGroup: ""}, logger)
 	if h.superuserModeAvailable() {

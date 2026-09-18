@@ -66,7 +66,7 @@ func newPlacementTestServer(t *testing.T, fake htcondor.PlacementdClient) (*Serv
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	server.webuiAdminGroup = "condor-admins"
+	server.webuiAdminGroups = newGroupSet("condor-admins")
 
 	req := func(user string, groups []string) func(method, target, body string) *http.Request {
 		return func(method, target, body string) *http.Request {

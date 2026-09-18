@@ -207,7 +207,7 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 		return
 	}
 
-	h.superuserGroup = group
+	h.superuserGroups = newGroupSet(group)
 	h.superuserArmed = newSuperuserSessions(cfg.SuperuserArmTTL)
 	h.superuserPolicy = newSuperuserPolicy(
 		scheddSuperUserSource{get: h.getSchedd},
@@ -226,7 +226,7 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
 func (h *Handler) superuserModeAvailable() bool {
-	return h.superuserGroup != "" && h.superuserPolicy != nil && h.superuserArmed != nil
+	return h.superuserGroups.configured() && h.superuserPolicy != nil && h.superuserArmed != nil
 }
 
 // mayUseSuperuserMode reports whether this request's session is allowed to act
@@ -243,7 +243,7 @@ func (h *Handler) mayUseSuperuserMode(r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	return hasGroup(session.Groups, h.superuserGroup)
+	return h.superuserGroups.allows(session.Groups)
 }
 
 // scheddSuperUserSource adapts the handler's schedd accessor to the narrow

@@ -195,3 +195,171 @@ func TestCIMDResolveRejections(t *testing.T) {
 		t.Error("host off the allowlist must be rejected")
 	}
 }
+
+// claudeCodeMetadata is the document Claude Code publishes, verbatim as
+// fetched on 2026-09-18. It declares loopback redirects with NO port, then
+// requests one with an ephemeral port -- which is the whole of RFC 8252's
+// loopback allowance, and what this exercises.
+func claudeCodeMetadata(u string) any {
+	return map[string]any{
+		"client_id":                  u,
+		"client_name":                "Claude Code",
+		"client_uri":                 "https://claude.ai",
+		"redirect_uris":              []string{"http://localhost/callback", "http://127.0.0.1/callback"},
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"token_endpoint_auth_method": "none",
+	}
+}
+
+// The reported failure: an authorize request from Claude Code was refused
+// with "The 'redirect_uri' parameter does not match any of the OAuth 2.0
+// Client's pre-registered redirect urls."
+//
+// This asserts through fosite's OWN matcher rather than the helper, because
+// fosite is what actually rejected the request: its port-independent rule
+// tests net.ParseIP(host).IsLoopback(), which is false for the NAME
+// "localhost", so neither declared URI could ever match.
+func TestCIMDAcceptsEphemeralLoopbackPort(t *testing.T) {
+	srv, _ := cimdTestServer(t, claudeCodeMetadata)
+	defer srv.Close()
+	r := newTestResolver(srv)
+	clientURL := srv.URL + "/client"
+
+	for _, requested := range []string{
+		"http://localhost:60253/callback",
+		"http://127.0.0.1:54321/callback",
+	} {
+		ctx := WithRequestedRedirectURI(context.Background(), requested)
+		c, err := r.resolve(ctx, clientURL)
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if _, err := fosite.MatchRedirectURIWithClientRedirectURIs(requested, c); err != nil {
+			t.Errorf("fosite refused %s: %v", requested, err)
+		}
+	}
+}
+
+// The allowance must not widen anything else. The client may vary only the
+// PORT of a loopback URI it already published.
+func TestCIMDLoopbackAllowanceIsNarrow(t *testing.T) {
+	srv, _ := cimdTestServer(t, claudeCodeMetadata)
+	defer srv.Close()
+	r := newTestResolver(srv)
+	clientURL := srv.URL + "/client"
+
+	for _, requested := range []string{
+		"http://localhost:60253/evil",         // different path
+		"http://evil.example:60253/callback",  // different host
+		"https://localhost:60253/callback",    // different scheme
+		"http://localhost:60253/callback?x=1", // extra query
+		"http://10.0.0.5:60253/callback",      // not loopback
+		// Hosts that merely LOOK loopback: net.ParseIP rejects them and
+		// they are not the literal name, so none is treated as loopback.
+		"http://127.0.0.1.evil.example:60253/callback",
+		"http://localhost.evil.example:60253/callback",
+		"http://0.0.0.0:60253/callback",
+	} {
+		ctx := WithRequestedRedirectURI(context.Background(), requested)
+		c, err := r.resolve(ctx, clientURL)
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if _, err := fosite.MatchRedirectURIWithClientRedirectURIs(requested, c); err == nil {
+			t.Errorf("fosite ACCEPTED %s; the allowance is meant to vary the port only", requested)
+		}
+	}
+}
+
+// The cached client is shared by every request for this client_id. Baking
+// one app's ephemeral port into it would hand that port to the next user.
+func TestCIMDLoopbackAllowanceDoesNotPoisonTheCache(t *testing.T) {
+	srv, _ := cimdTestServer(t, claudeCodeMetadata)
+	defer srv.Close()
+	r := newTestResolver(srv)
+	clientURL := srv.URL + "/client"
+
+	first := "http://localhost:1111/callback"
+	if _, err := r.resolve(WithRequestedRedirectURI(context.Background(), first), clientURL); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later request with no redirect_uri at all must see only what the
+	// document declared.
+	c, err := r.resolve(context.Background(), clientURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range c.GetRedirectURIs() {
+		if got == first {
+			t.Fatalf("the cached client kept another request's port: %v", c.GetRedirectURIs())
+		}
+	}
+
+	// And a different port must still be accepted on its own request.
+	second := "http://localhost:2222/callback"
+	c2, err := r.resolve(WithRequestedRedirectURI(context.Background(), second), clientURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fosite.MatchRedirectURIWithClientRedirectURIs(second, c2); err != nil {
+		t.Errorf("second port refused: %v", err)
+	}
+}
+
+// A client that declares a non-loopback redirect gets no allowance at all.
+func TestCIMDNoAllowanceForNonLoopbackClients(t *testing.T) {
+	srv, _ := cimdTestServer(t, func(u string) any {
+		return map[string]any{
+			"client_id":     u,
+			"redirect_uris": []string{"https://app.example.org/cb"},
+		}
+	})
+	defer srv.Close()
+	r := newTestResolver(srv)
+
+	requested := "https://app.example.org:8443/cb"
+	ctx := WithRequestedRedirectURI(context.Background(), requested)
+	c, err := r.resolve(ctx, srv.URL+"/client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fosite.MatchRedirectURIWithClientRedirectURIs(requested, c); err == nil {
+		t.Error("a non-loopback redirect was allowed to vary its port")
+	}
+}
+
+// The allowance is confined to loopback by construction, not by what the
+// client declared: a document naming a non-loopback http URI gets no port
+// variance either.
+func TestLoopbackPortVariantIsLoopbackOnly(t *testing.T) {
+	cases := []struct {
+		requested, declared string
+		want                bool
+	}{
+		{"http://localhost:60253/callback", "http://localhost/callback", true},
+		{"http://127.0.0.1:60253/callback", "http://127.0.0.1/callback", true},
+		{"http://[::1]:60253/callback", "http://[::1]/callback", true},
+
+		// Not loopback -- the port must match exactly for these.
+		{"http://example.org:8080/cb", "http://example.org/cb", false},
+		{"http://10.0.0.5:8080/cb", "http://10.0.0.5/cb", false},
+		{"http://127.0.0.1.evil.example:80/cb", "http://127.0.0.1.evil.example/cb", false},
+		{"http://0.0.0.0:8080/cb", "http://0.0.0.0/cb", false},
+
+		// https never gets the allowance: the rule exists for native apps
+		// on plain http loopback, and a TLS client can register its port.
+		{"https://localhost:8443/cb", "https://localhost/cb", false},
+
+		// Cross-host, even when both sides are loopback forms.
+		{"http://localhost:60253/callback", "http://127.0.0.1/callback", false},
+		{"http://127.0.0.1:60253/callback", "http://localhost/callback", false},
+	}
+	for _, tc := range cases {
+		if got := loopbackPortVariant(tc.requested, tc.declared); got != tc.want {
+			t.Errorf("loopbackPortVariant(%q, %q) = %v, want %v",
+				tc.requested, tc.declared, got, tc.want)
+		}
+	}
+}

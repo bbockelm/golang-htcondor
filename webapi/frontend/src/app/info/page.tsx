@@ -57,6 +57,22 @@ export default function InfoPage() {
         )}
       </Section>
 
+      <Section title="API documentation">
+        <p className="text-sm text-gray-600">
+          This access point serves an interactive OpenAPI browser: every
+          endpoint, its parameters, and a form to call it against this
+          server with your current session.
+        </p>
+        <p className="mt-3">
+          <a
+            href="/docs"
+            className="text-brand-700 hover:text-brand-900 underline"
+          >
+            Open the API docs
+          </a>
+        </p>
+      </Section>
+
       <Section title="Signed-in user">
         {sessionLoading && <p className="text-gray-400 text-sm">Loading...</p>}
         {sessionError && (

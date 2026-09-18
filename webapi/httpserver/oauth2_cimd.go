@@ -165,6 +165,95 @@ func (r *cimdResolver) hostAllowed(host string) bool {
 // resolve turns a CIMD URL into a public client, caching the result (and, briefly,
 // failures). Returns fosite.ErrInvalidClient for a URL that is structurally or
 // policy-invalid, so the token/authorize endpoints surface a clean OAuth error.
+// requestedRedirectURIKey carries the redirect_uri of the request being
+// authorized, so a CIMD client can be resolved knowing which loopback port
+// the native app opened this time. See withLoopbackRedirect.
+type requestedRedirectURIKey struct{}
+
+// WithRequestedRedirectURI notes the redirect_uri of the request being
+// handled, for the loopback allowance described on withLoopbackRedirect.
+func WithRequestedRedirectURI(ctx context.Context, uri string) context.Context {
+	if uri == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestedRedirectURIKey{}, uri)
+}
+
+// loopbackHost reports whether a hostname denotes the loopback interface.
+//
+// RFC 8252 section 7.3 describes loopback redirects in terms of the IP
+// literals, and says clients SHOULD use them rather than the name
+// "localhost", because that name can resolve somewhere else. fosite
+// implements exactly that: its port-independent matching tests
+// net.ParseIP(host).IsLoopback(), which is false for "localhost".
+//
+// Real native clients nonetheless register and request "localhost" --
+// Claude Code's published metadata document declares BOTH
+// http://localhost/callback and http://127.0.0.1/callback, then asks for
+// http://localhost:<ephemeral>/callback. Treating the name as loopback is
+// what lets such a client work at all. The redirect still goes to the
+// user's own machine, which is the property that makes the variable port
+// acceptable in the first place.
+func loopbackHost(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+// loopbackPortVariant reports whether requested is the redirect declared,
+// differing only in its port.
+//
+// Everything else must match exactly: scheme, host, path and query. The
+// client may therefore only vary the port of a loopback URI it already
+// published, which is precisely the allowance RFC 8252 grants and nothing
+// more -- it cannot introduce a new host, path, or scheme.
+func loopbackPortVariant(requested, declared string) bool {
+	req, err := url.Parse(requested)
+	if err != nil {
+		return false
+	}
+	dec, err := url.Parse(declared)
+	if err != nil {
+		return false
+	}
+	return req.Scheme == "http" && dec.Scheme == "http" &&
+		loopbackHost(req.Hostname()) &&
+		strings.EqualFold(req.Hostname(), dec.Hostname()) &&
+		req.Path == dec.Path &&
+		req.RawQuery == dec.RawQuery
+}
+
+// withLoopbackRedirect returns a client that also accepts the exact
+// loopback redirect this request asked for.
+//
+// fosite matches a redirect_uri against the registered list itself, so a
+// port-independent rule cannot be expressed on the client. What can be
+// done is to register the precise URI being requested, once it is shown to
+// be a port-variant of one the document already declared.
+//
+// The base client is left untouched: it is the cached one, shared by every
+// request for this client_id, and baking one app's ephemeral port into it
+// would hand that port to the next user.
+func withLoopbackRedirect(base *fosite.DefaultClient, requested string) fosite.Client {
+	if base == nil || requested == "" {
+		return base
+	}
+	for _, declared := range base.RedirectURIs {
+		if declared == requested {
+			return base // already registered; nothing to add
+		}
+	}
+	for _, declared := range base.RedirectURIs {
+		if loopbackPortVariant(requested, declared) {
+			clone := *base
+			clone.RedirectURIs = append(append([]string{}, base.RedirectURIs...), requested)
+			return &clone
+		}
+	}
+	return base
+}
+
 func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Client, error) {
 	now := r.now()
 	r.mu.Lock()
@@ -173,7 +262,7 @@ func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Cli
 		if e.err != nil {
 			return nil, e.err
 		}
-		return e.client, nil
+		return r.withRequestedRedirect(ctx, e.client), nil
 	}
 	r.mu.Unlock()
 
@@ -189,7 +278,14 @@ func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Cli
 	if err != nil {
 		return nil, err
 	}
-	return client, nil
+	return r.withRequestedRedirect(ctx, client), nil
+}
+
+// withRequestedRedirect applies the loopback port allowance to a resolved
+// client, using the redirect_uri recorded on the context.
+func (r *cimdResolver) withRequestedRedirect(ctx context.Context, client *fosite.DefaultClient) fosite.Client {
+	requested, _ := ctx.Value(requestedRedirectURIKey{}).(string)
+	return withLoopbackRedirect(client, requested)
 }
 
 func (r *cimdResolver) fetch(ctx context.Context, clientID string) (*fosite.DefaultClient, error) {

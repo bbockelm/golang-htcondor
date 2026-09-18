@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -11,9 +12,26 @@ import (
 // fakeTarget records what a reconfigure applied to the running server.
 type fakeTarget struct {
 	instructions []string
+	// groups records each authorization list the reconfigure installed,
+	// keyed by knob, so a test can assert what actually reached the server.
+	groups map[string][]string
 }
 
 func (f *fakeTarget) SetMCPInstructions(s string) { f.instructions = append(f.instructions, s) }
+
+func (f *fakeTarget) record(knob, v string) {
+	if f.groups == nil {
+		f.groups = map[string][]string{}
+	}
+	f.groups[knob] = append(f.groups[knob], v)
+}
+
+func (f *fakeTarget) SetMCPAccessGroups(v string)   { f.record("mcp_access", v) }
+func (f *fakeTarget) SetMCPReadGroups(v string)     { f.record("mcp_read", v) }
+func (f *fakeTarget) SetMCPWriteGroups(v string)    { f.record("mcp_write", v) }
+func (f *fakeTarget) SetWebUIAccessGroups(v string) { f.record("webui_access", v) }
+func (f *fakeTarget) SetWebUIAdminGroups(v string)  { f.record("webui_admin", v) }
+func (f *fakeTarget) SetSuperuserGroups(v string)   { f.record("superuser", v) }
 
 // configFrom builds a Config from literal file contents, the way the daemon
 // builds one from CONDOR_CONFIG on reconfigure.
@@ -126,5 +144,62 @@ func TestReconfigParamsAreUnique(t *testing.T) {
 			t.Errorf("duplicate entry for %s", p.name)
 		}
 		seen[p.name] = true
+	}
+}
+
+// The authorization group lists must reach the running server on SIGHUP.
+//
+// These are the settings most often wrong on a first deployment -- somebody
+// is locked out, or somebody is not -- and before this they were in the
+// restart-required group, so every correction cost a daemon restart.
+func TestReconfigAppliesAccessGroups(t *testing.T) {
+	before := "" +
+		"HTTP_API_MCP_ACCESS_GROUP = ap2001-login\n" +
+		"HTTP_API_WEBUI_ACCESS_GROUP = chtc_staff\n" +
+		"HTTP_API_WEBUI_ADMIN_GROUP = chtc_admin\n" +
+		"HTTP_API_SUPERUSER_GROUP = chtc_admin\n"
+	after := "" +
+		"HTTP_API_MCP_ACCESS_GROUP = ap2001-login, ap2002-login\n" +
+		"HTTP_API_WEBUI_ACCESS_GROUP = chtc_staff, chtc_guests\n" +
+		"HTTP_API_WEBUI_ADMIN_GROUP = chtc_admin\n" +
+		"HTTP_API_SUPERUSER_GROUP = chtc_admin\n"
+
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, before), target, nil)
+
+	applied, needRestart := w.diff(configFrom(t, after))
+
+	want := []string{"HTTP_API_MCP_ACCESS_GROUP", "HTTP_API_WEBUI_ACCESS_GROUP"}
+	sort.Strings(applied)
+	sort.Strings(want)
+	if !reflect.DeepEqual(applied, want) {
+		t.Errorf("applied = %v, want %v", applied, want)
+	}
+	// The two that did not change must not be reported, and above all must
+	// not be reported as needing a restart.
+	if len(needRestart) != 0 {
+		t.Errorf("needRestart = %v; these are all dynamic now", needRestart)
+	}
+	if got := target.groups["mcp_access"]; !reflect.DeepEqual(got, []string{"ap2001-login, ap2002-login"}) {
+		t.Errorf("server received mcp_access %v", got)
+	}
+	if got := target.groups["webui_access"]; !reflect.DeepEqual(got, []string{"chtc_staff, chtc_guests"}) {
+		t.Errorf("server received webui_access %v", got)
+	}
+}
+
+// Clearing a group must reach the server too: that is how an operator
+// turns the admin surface off without a restart.
+func TestReconfigAppliesAnEmptiedGroup(t *testing.T) {
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, "HTTP_API_WEBUI_ADMIN_GROUP = chtc_admin\n"), target, nil)
+
+	applied, _ := w.diff(configFrom(t, "HTTP_API_WEBUI_ADMIN_GROUP =\n"))
+
+	if want := []string{"HTTP_API_WEBUI_ADMIN_GROUP"}; !reflect.DeepEqual(applied, want) {
+		t.Errorf("applied = %v, want %v", applied, want)
+	}
+	if got := target.groups["webui_admin"]; !reflect.DeepEqual(got, []string{""}) {
+		t.Errorf("server received %v, want the empty value", got)
 	}
 }
