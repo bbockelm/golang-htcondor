@@ -91,7 +91,8 @@ examples/classadlog_reader/classadlog_reader
 # by hand) because that is where the test looks for it.
 /webapi/bin/
 
-# Packaging output: `make rpm` stages into dist/ (or PKG_DIR) and writes the
-# package beside it.
+# Packaging: `make rpm` assembles the payload in packaging/staging and writes
+# the package into PKG_DIR.
 /dist/
 /artifacts/
+/packaging/staging/

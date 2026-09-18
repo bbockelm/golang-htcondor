@@ -187,8 +187,6 @@ jobs:
             PKG_DIR=artifacts \
             VERSION="${VERSION}"
           (cd artifacts && for f in *.rpm; do sha256sum "$f" > "$f.sha256"; done)
-          # pkgroot is staging, not an artifact.
-          rm -rf artifacts/pkgroot
           ls -l artifacts
 
       - name: Upload build artifact

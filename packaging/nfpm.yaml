@@ -24,10 +24,11 @@ depends:
   - condor
 
 contents:
-  # Staged here by `make rpm` rather than named through a variable: nfpm
-  # expands environment variables in its scalar fields but globs contents.src
-  # literally, so a ${...} here silently finds no files.
-  - src: dist/pkgroot/htcondor-api
+  # Staged here by `make rpm` (PKG_STAGE) rather than named through a
+  # variable: nfpm expands environment variables in its scalar fields but
+  # globs contents.src literally, so a ${...} here silently finds no files.
+  # This path and PKG_STAGE are one fact written twice; keep them together.
+  - src: packaging/staging/htcondor-api
     dst: /usr/sbin/htcondor-api
     file_info:
       mode: 0755
