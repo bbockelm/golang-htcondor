@@ -71,6 +71,22 @@ func (l *localIdentity) mapsAccount() bool { return l != nil && l.resolver != ni
 // than from the token.
 func (l *localIdentity) sourcesGroups() bool { return l != nil && l.groups != nil }
 
+// groupSourceName names the lookup chain membership will be read from,
+// e.g. "cached(stdlib)" or "cached(chain(stdlib,sssd))".
+//
+// Worth logging at startup because the chain is chosen per build: with
+// cgo it is getgrouplist(3), which consults every service in
+// nsswitch.conf; without cgo -- which is how the release binaries and
+// container are built -- it is this package's own chain, which speaks
+// files and sss and marks anything else degraded. An operator whose
+// directory groups are not arriving needs to see which of those they got.
+func (l *localIdentity) groupSourceName() string {
+	if !l.sourcesGroups() {
+		return ""
+	}
+	return l.groups.Name()
+}
+
 // newLocalIdentity builds the mapper from operator configuration.
 //
 // passwdFile, when set, is read instead of /etc/passwd -- useful where
@@ -78,7 +94,7 @@ func (l *localIdentity) sourcesGroups() bool { return l != nil && l.groups != ni
 // way the index can only hold accounts that something will enumerate,
 // which in practice means the ones present locally; see the comment in
 // idmap/enumerate.go for why that is not the limitation it looks like.
-func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
+func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, stripDomain bool, logger *logging.Logger) *localIdentity {
 	if len(strategies) == 0 && !systemGroups {
 		return nil
 	}
@@ -109,7 +125,10 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 		ver = idmap.FileGecos{Path: passwdFile}
 	}
 
-	l.resolver = idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...))
+	l.resolver = idmap.New(enum, ver,
+		idmap.WithTTL(ttl),
+		idmap.WithStrategies(strategies...),
+		idmap.WithStripDomain(stripDomain))
 	return l
 }
 

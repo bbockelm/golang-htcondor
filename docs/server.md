@@ -151,6 +151,7 @@ list of strategies; the first to answer wins.
 | `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
 | `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `false` | Also try the local part of a scoped subject: `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. |
 
 Once mapping is on, the session's subject becomes the **local account
 name** -- the name HTCondor knows -- so owner-scoping matches actual job
@@ -169,6 +170,17 @@ Three behaviours worth knowing before turning this on:
   up to the first comma, which is what `os/user` reports on every
   platform. For `tannenba:x:20013:20013:tatannen:...` the value matched
   is `tatannen`; for `...:Tannenbaum, Todd,,:...` it is `Tannenbaum`.
+
+An ePPN is scoped (`bockelman@wisc.edu`) and a GECOS or login name
+usually is not, so the two cannot match without
+`HTTP_API_IDENTITY_MAP_STRIP_DOMAIN`.
+
+It strips **whatever** domain the token carried, so
+`bockelman@wisc.edu` and `bockelman@elsewhere.example` reach the same
+account. Which providers may issue such a token is decided by
+[`HTTP_API_OAUTH2_REQUIREMENTS`](#local-identity-mapping), not here --
+enable this only alongside one. The server logs a warning at startup if
+stripping is on with no requirements expression configured.
 
 The index can only contain accounts something will enumerate, which in
 practice means those present in the passwd file: no NSS enumeration call
@@ -197,6 +209,50 @@ Group resolution follows this host's `nsswitch.conf`. A build with cgo
 resolves through `getgrouplist(3)`, so every configured service is
 consulted; a build without cgo speaks `files` and `sss` natively and
 marks the answer incomplete if the line names anything else.
+
+**Which logins are accepted.** `HTTP_API_OAUTH2_REQUIREMENTS` is a
+ClassAd expression evaluated against the token's claims, the same way a
+schedd evaluates a job's `Requirements` against a machine ad.
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_OAUTH2_REQUIREMENTS` | unset (accept any) | ClassAd expression over the claims. The login proceeds only if it evaluates to `true`. |
+
+The claims become the ad: a string stays a string, a JSON array becomes a
+list, a nested object becomes a nested ad addressable as `outer.inner`,
+and `null` becomes `UNDEFINED`. A claim name that is not a bare
+identifier is still available through the quoted-attribute syntax, as in
+`'urn:oid:1.3.6.1'`.
+
+```
+# Only this campus's IDP.
+HTTP_API_OAUTH2_REQUIREMENTS = idp == "https://login.wisc.edu/idp/shibboleth"
+
+# ...and only members, who authenticated with MFA.
+HTTP_API_OAUTH2_REQUIREMENTS = idp == "https://login.wisc.edu/idp/shibboleth" && \
+                               regexp("MEMBER@wisc.edu", affiliation) && \
+                               acr == "https://refeds.org/profile/mfa"
+
+# ...or by assurance level, which arrives as a list.
+HTTP_API_OAUTH2_REQUIREMENTS = member("https://refeds.org/assurance/IAP/low", eduPersonAssurance)
+```
+
+This expresses what an issuer check cannot: a federation such as CILogon
+fronts many institutions behind one issuer, so `iss` does not answer
+"which campus".
+
+Two properties worth knowing:
+
+- **It fails closed.** Only `true` admits a login. `UNDEFINED`, an error,
+  and a non-boolean result all refuse. So a policy naming a claim the IDP
+  stopped sending -- or misspelling one -- denies everybody rather than
+  silently admitting everybody the moment it stopped meaning anything.
+- **A malformed expression stops the daemon at startup**, rather than
+  failing at the first person's login.
+
+A refused login gets 403, and the log records the expression and which
+claims the IDP returned -- names only, since the values identify the user
+and the path is reachable unauthenticated.
 
 **Which claim carries the username.** Some providers put the login-ish
 value somewhere other than `sub`.
@@ -528,6 +584,8 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_IDENTITY_MAP_TTL` | How long the account index and group answers are reused. Default `5m`. |
 | `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
+| `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
+| `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |

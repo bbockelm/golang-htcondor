@@ -81,6 +81,8 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_OAUTH2_SCOPES"},
 	{name: "HTTP_API_OAUTH2_USERNAME_CLAIM"},
 	{name: "HTTP_API_OAUTH2_GROUPS_CLAIM"},
+	{name: "HTTP_API_OAUTH2_REQUIREMENTS"},
+	{name: "HTTP_API_IDENTITY_MAP_STRIP_DOMAIN"},
 
 	// Authorization groups. Worth making dynamic later -- they are consulted
 	// per request -- but some are also folded into policy objects at

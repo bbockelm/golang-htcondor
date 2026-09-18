@@ -174,6 +174,9 @@ type Config struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+	// OAuth2Requirements is a ClassAd expression evaluated against the
+	// token's claims at login. Empty means no policy.
+	OAuth2Requirements string
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -196,6 +199,12 @@ type Config struct {
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
+
+	// IdentityMapStripDomain also tries the local part of a scoped
+	// subject -- "bockelman@wisc.edu" as "bockelman". Only sound where
+	// something else constrains which identity providers may log in,
+	// since the local part is not unique across domains.
+	IdentityMapStripDomain bool
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -338,10 +347,12 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
+		OAuth2Requirements:          cfg.OAuth2Requirements,
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
+		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,

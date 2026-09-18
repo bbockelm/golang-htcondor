@@ -18,11 +18,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/jobqueue"
+
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -182,6 +184,11 @@ type Handler struct {
 	oauth2UserInfoURL   string            // User info endpoint for SSO
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
+	// oauth2Requirements is an admin-supplied ClassAd expression
+	// evaluated against the token's claims at login. Nil means no policy,
+	// which accepts any login the IDP authenticated.
+	oauth2Requirements     *classad.Expr
+	oauth2RequirementsText string
 
 	// localIdentity maps an asserted OIDC subject to the local account
 	// that owns this user's jobs, and reads that account's groups from
@@ -481,6 +488,9 @@ type HandlerConfig struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+	// OAuth2Requirements is a ClassAd expression evaluated against the
+	// token's claims at login. Empty means no policy.
+	OAuth2Requirements string
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -503,6 +513,12 @@ type HandlerConfig struct {
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
+
+	// IdentityMapStripDomain also tries the local part of a scoped
+	// subject -- "bockelman@wisc.edu" as "bockelman". Only sound where
+	// something else constrains which identity providers may log in,
+	// since the local part is not unique across domains.
+	IdentityMapStripDomain bool
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1071,13 +1087,57 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// logged as configured, and then silently ignored -- the worst of
 	// both, because the log said the mapping was in force.
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
-		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
+		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
 		li.warmUp(context.Background())
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
 			"subject_mapped_to_account", li.mapsAccount(),
 			"strategies", cfg.IdentityMapStrategies,
-			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
+			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()],
+			"group_source", li.groupSourceName())
+
+		// Stripping the domain makes "bockelman@wisc.edu" and
+		// "bockelman@anywhere.example" resolve to the SAME account. That is
+		// fine when only one provider can issue a token at all, and a
+		// privilege hole when any can, so say so rather than leaving it to
+		// the documentation.
+		if cfg.IdentityMapStripDomain && strings.TrimSpace(cfg.OAuth2Requirements) == "" {
+			logger.Warn(logging.DestinationHTTP,
+				"Identity mapping strips the subject's domain but no login requirements are configured; "+
+					"any identity provider that can authenticate a matching local part reaches that account. "+
+					"Set HTTP_API_OAUTH2_REQUIREMENTS to constrain which providers may log in")
+		}
+	}
+
+	// Which claims carry the username and the groups.
+	//
+	// Set unconditionally. These were previously assigned inside the
+	// EnableMCP block below, but they are read on the SHARED SSO callback
+	// path (fetchUserInfo), which runs whenever the internal IDP is
+	// configured -- and Start() configures that regardless of MCP. With
+	// MCP disabled the field stayed "", so every login looked up
+	// claims[""], found nothing, and was rejected as "missing subject
+	// claim" no matter what the token actually contained. Setting the
+	// configured value was no help either, since the assignment itself
+	// never ran.
+	h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
+	if h.oauth2UsernameClaim == "" {
+		h.oauth2UsernameClaim = "sub"
+	}
+	h.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
+	if h.oauth2GroupsClaim == "" {
+		h.oauth2GroupsClaim = "groups"
+	}
+	// Parsed once, here, so a malformed policy stops the daemon at startup
+	// rather than at the first person's login.
+	if req := strings.TrimSpace(cfg.OAuth2Requirements); req != "" {
+		expr, perr := classad.ParseExpr(req)
+		if perr != nil {
+			return nil, fmt.Errorf("HTTP_API_OAUTH2_REQUIREMENTS is not a valid ClassAd expression: %w", perr)
+		}
+		h.oauth2Requirements = expr
+		h.oauth2RequirementsText = req
+		logger.Info(logging.DestinationHTTP, "OAuth2 login requirements in effect", "requirements", req)
 	}
 
 	if cfg.EnableMCP {
@@ -1131,12 +1191,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// database handle and is stopped before that handle closes.
 		h.clientUsage = newClientUsageRecorder(oauth2Provider.GetStorage().GetDB(), 0)
 
-		// Set username claim name (default: "sub")
-		h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
-		if h.oauth2UsernameClaim == "" {
-			h.oauth2UsernameClaim = "sub"
-		}
-
 		// Initialize OAuth2 state store
 		h.oauth2StateStore = NewOAuth2StateStore()
 
@@ -1166,12 +1220,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 				// Client registration code remains the same...
 				h.ensureOAuth2ClientRegistered(cfg.OAuth2ClientID, cfg.OAuth2ClientSecret, cfg.OAuth2RedirectURL, scopes)
 			}
-		}
-
-		// Set groups claim name (default: "groups")
-		h.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
-		if h.oauth2GroupsClaim == "" {
-			h.oauth2GroupsClaim = "groups"
 		}
 
 		// Set group-based access control

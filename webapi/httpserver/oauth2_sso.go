@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/ory/fosite"
 	"golang.org/x/oauth2"
+
+	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -273,9 +276,24 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the admin's login policy before anything is derived from the
+	// claims the IDP supplied.
+	if err := s.evaluateLoginRequirements(userInfo.Claims); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Login refused by OAuth2 requirements",
+			"requirements", s.oauth2RequirementsText, "claims_returned", claimNames(userInfo.Claims))
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	if userInfo.Subject == "" {
-		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim")
-		s.writeError(w, http.StatusUnauthorized, "Invalid user information")
+		// Name the claim that was looked for and what the IDP actually
+		// sent. Without this the message is the same whether the claim is
+		// misconfigured, misspelled, or genuinely absent -- and the
+		// operator cannot tell which from the log.
+		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim",
+			"claim", s.oauth2UsernameClaim, "claims_returned", claimNames(userInfo.Claims))
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf(
+			"Invalid user information: the identity provider returned no %q claim", s.oauth2UsernameClaim))
 		return
 	}
 
@@ -427,4 +445,69 @@ func (s *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.redirectToLogin(w, r)
+}
+
+// claimNames lists the claim keys an IDP returned, sorted.
+//
+// Keys only: the values carry the user's identity and affiliations, and
+// this runs on a failure path that an unauthenticated caller can reach
+// repeatedly.
+func claimNames(claims map[string]any) []string {
+	names := make([]string, 0, len(claims))
+	for k := range claims {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// claimsToClassAd renders an IDP's claims as a ClassAd.
+//
+// Values arrive as encoding/json produces them, so a string stays a
+// string, a JSON array becomes a ClassAd list, a nested object becomes a
+// nested ad addressable as "outer.inner", and null becomes UNDEFINED. A
+// claim name that is not a bare identifier -- "urn:oid:..." or one with a
+// hyphen -- is kept and can be referenced with the quoted-attribute
+// syntax, 'urn:oid:1.3.6.1'.
+func claimsToClassAd(claims map[string]any) *classad.ClassAd {
+	ad := classad.New()
+	for name, value := range claims {
+		// A claim this library cannot represent is skipped rather than
+		// aborting the login: it leaves the attribute UNDEFINED, which a
+		// requirements expression can test for, and which fails closed
+		// under any comparison.
+		_ = ad.Set(name, value)
+	}
+	return ad
+}
+
+// evaluateLoginRequirements applies the admin's login policy to a token.
+//
+// The expression is evaluated against the claims, exactly as a schedd
+// evaluates Requirements against a machine ad, so a deployment can say
+// more than a list of providers can express -- an IDP AND an affiliation
+// AND an assurance level:
+//
+//	idp == "https://login.wisc.edu/idp/shibboleth" &&
+//	  regexp("MEMBER@wisc.edu", affiliation)
+//
+// It FAILS CLOSED. Only an expression evaluating to boolean TRUE admits
+// the login; UNDEFINED, ERROR, and a non-boolean result all refuse. That
+// is the important direction: a policy naming a claim the IDP stopped
+// sending -- or misspelling one -- evaluates to UNDEFINED, and the
+// alternative would be to silently admit everybody the moment the policy
+// stopped meaning anything.
+func (s *Handler) evaluateLoginRequirements(claims map[string]any) error {
+	if s.oauth2Requirements == nil {
+		return nil
+	}
+
+	result := s.oauth2Requirements.Eval(claimsToClassAd(claims))
+	ok, err := result.BoolValue()
+	if err != nil || !ok {
+		// The expression text is the operator's own configuration, so it
+		// is safe to return; the claim VALUES are not, and are not.
+		return fmt.Errorf("this login does not satisfy the deployment's login requirements")
+	}
+	return nil
 }
