@@ -20,7 +20,37 @@ This document is the entry point; deeper detail lives in
 
 ## Install
 
-From the repo:
+### RPM (EL8/EL9)
+
+Every tagged release attaches an RPM per architecture:
+
+```bash
+sudo dnf install ./htcondor-api-<version>.x86_64.rpm
+```
+
+It installs the binary at `/usr/sbin/htcondor-api` and a config drop-in at
+`/etc/condor/config.d/50-htcondor-api.conf`. Installing does not enable the
+daemon: the `DAEMON_LIST` / `DC_DAEMON_LIST` lines ship commented out, next to
+commented examples for shared port, OAuth2, authorization and site policy. It
+is `%config(noreplace)`, so your edits survive an upgrade and the package's
+version arrives as `.rpmnew`.
+
+The drop-in configures `HTTP_API_KEK_FILE`, so the daemon will refuse to start
+until that file exists; it documents how to generate it, and the OAuth2 client
+secret. Neither is created by the package or by the daemon.
+
+To build one from the repo -- `PKG_ARCH` is a Go arch name, so an RPM for
+either architecture can be built from any host:
+
+```bash
+# nfpm's version is pinned in .github/tools, where Dependabot maintains it.
+(cd .github/tools && GOWORK=off go build -o "$HOME/go/bin/nfpm" github.com/goreleaser/nfpm/v2/cmd/nfpm)
+
+make rpm-prod                      # production binary, then package it
+make rpm PKG_ARCH=arm64            # package an already-built bin/htcondor-api
+```
+
+### From source
 
 ```bash
 make build

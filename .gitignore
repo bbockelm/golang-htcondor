@@ -90,3 +90,8 @@ examples/classadlog_reader/classadlog_reader
 # The JupyterLab tunnel helper, built here by the integration job (and
 # by hand) because that is where the test looks for it.
 /webapi/bin/
+
+# Packaging output: `make rpm` stages into dist/ (or PKG_DIR) and writes the
+# package beside it.
+/dist/
+/artifacts/

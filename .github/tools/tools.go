@@ -12,6 +12,12 @@ import (
 	// (dbmirror_integration_test.go).
 	_ "github.com/bbockelm/htcondordb/cmd/htcondordb"
 
+	// nfpm: builds the release RPM. Same reason as gotestsum -- the
+	// version is recorded in this module's go.sum, verified on download,
+	// and bumped by Dependabot, rather than resolving to whatever a
+	// workflow's `go install ...@version` happened to name.
+	_ "github.com/goreleaser/nfpm/v2/cmd/nfpm"
+
 	// gotestsum: CI's test runner, for JUnit output and coverage
 	// profiles. Pinned here rather than `go install ...@latest` in a
 	// workflow, so the version is recorded in this module's go.sum,

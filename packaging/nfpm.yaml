@@ -1,0 +1,50 @@
+# Package definition for htcondor-api, built by `make rpm`.
+name: htcondor-api
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+release: ${PKG_RELEASE}
+version_schema: none
+section: net
+priority: optional
+maintainer: ${PKG_MAINTAINER}
+description: |
+  REST and MCP API server for HTCondor.
+
+  Serves an HTTP API, a web UI and a Model Context Protocol endpoint in
+  front of an HTCondor access point. Runs as a DaemonCore daemon under
+  condor_master, so it inherits the pool's configuration and security.
+vendor: ${PKG_VENDOR}
+homepage: https://github.com/bbockelm/golang-htcondor
+license: Apache-2.0
+
+depends:
+  # The daemon is started by condor_master and reads the pool configuration;
+  # without HTCondor installed the package has nothing to attach to.
+  - condor
+
+contents:
+  # Staged here by `make rpm` rather than named through a variable: nfpm
+  # expands environment variables in its scalar fields but globs contents.src
+  # literally, so a ${...} here silently finds no files.
+  - src: dist/pkgroot/htcondor-api
+    dst: /usr/sbin/htcondor-api
+    file_info:
+      mode: 0755
+
+  - src: packaging/htcondor-api.conf
+    dst: /etc/condor/config.d/50-htcondor-api.conf
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: docs/server.md
+    dst: /usr/share/doc/htcondor-api/server.md
+    type: doc
+    file_info:
+      mode: 0644
+
+rpm:
+  group: System Environment/Daemons
+  # Compression that every EL8+ host can read.
+  compression: gzip

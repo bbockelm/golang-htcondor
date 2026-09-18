@@ -165,6 +165,32 @@ jobs:
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           ls -l artifacts
 
+      # The admins who deploy this manage software with RPMs, so a release
+      # carries one alongside the tarball. Linux only: an RPM of a Darwin
+      # binary would install and not run.
+      - name: Install nfpm (version pinned in .github/tools)
+        if: matrix.goos == 'linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/nfpm" github.com/goreleaser/nfpm/v2/cmd/nfpm)
+
+      - name: Build RPM
+        if: matrix.goos == 'linux'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          make rpm \
+            NFPM="$RUNNER_TEMP/bin/nfpm" \
+            PKG_BINARY=dist/htcondor-api \
+            PKG_ARCH="${GOARCH}" \
+            PKG_DIR=artifacts \
+            VERSION="${VERSION}"
+          (cd artifacts && for f in *.rpm; do sha256sum "$f" > "$f.sha256"; done)
+          # pkgroot is staging, not an artifact.
+          rm -rf artifacts/pkgroot
+          ls -l artifacts
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -199,4 +225,6 @@ jobs:
           files: |
             artifacts/htcondor-api-*.tar.gz
             artifacts/htcondor-api-*.tar.gz.sha256
+            artifacts/htcondor-api-*.rpm
+            artifacts/htcondor-api-*.rpm.sha256
           fail_on_unmatched_files: true
