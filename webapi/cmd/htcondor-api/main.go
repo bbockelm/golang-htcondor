@@ -139,18 +139,21 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled             bool
-	oauth2DBPath        string
-	oauth2Issuer        string
-	oauth2ClientID      string
-	oauth2ClientSecret  string
-	oauth2AuthURL       string
-	oauth2TokenURL      string
-	oauth2RedirectURL   string
-	oauth2UserInfoURL   string
-	oauth2Scopes        []string
-	oauth2UsernameClaim string
-	oauth2GroupsClaim   string
+	enabled                 bool
+	oauth2DBPath            string
+	oauth2Issuer            string
+	oauth2ClientID          string
+	oauth2ClientSecret      string
+	oauth2AuthURL           string
+	oauth2TokenURL          string
+	oauth2RedirectURL       string
+	oauth2UserInfoURL       string
+	oauth2Scopes            []string
+	oauth2UsernameClaim     string
+	oauth2IDPClaim          string
+	identityMapStripDomains []string
+	oauth2AllowedIDPs       []string
+	oauth2GroupsClaim       string
 
 	// identityMapGecos maps the OIDC subject to the local account whose
 	// GECOS equals it, and takes group membership from the system
@@ -1004,6 +1007,15 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 	if len(mcpCfg.identityMapStrategies) > 0 || mcpCfg.identityGroupsSystem {
 		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
+		if v, ok := cfg.Get("HTTP_API_IDENTITY_MAP_STRIP_DOMAIN"); ok && strings.TrimSpace(v) != "" {
+			for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+				if f = strings.TrimSpace(f); f != "" {
+					mcpCfg.identityMapStripDomains = append(mcpCfg.identityMapStripDomains, f)
+				}
+			}
+			logger.Info(logging.DestinationHTTP, "Identity mapping will try the local part of scoped subjects",
+				"domains", mcpCfg.identityMapStripDomains)
+		}
 		mcpCfg.identityMapTTL = 5 * time.Minute
 		if raw, ok := cfg.Get("HTTP_API_IDENTITY_MAP_TTL"); ok && raw != "" {
 			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
@@ -1090,6 +1102,22 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	loadIdentityMapping(cfg, &config, logger)
 
 	// Load username claim name (default: "sub")
+	// Which upstream identity providers may log in. A federation such as
+	// CILogon fronts many institutions behind one issuer, so restricting by
+	// issuer does not express "only this campus".
+	if v, ok := cfg.Get("HTTP_API_OAUTH2_ALLOWED_IDPS"); ok && strings.TrimSpace(v) != "" {
+		for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+			if f = strings.TrimSpace(f); f != "" {
+				config.oauth2AllowedIDPs = append(config.oauth2AllowedIDPs, f)
+			}
+		}
+		logger.Info(logging.DestinationHTTP, "OAuth2 identity providers restricted",
+			"allowed", config.oauth2AllowedIDPs)
+	}
+	if v, ok := cfg.Get("HTTP_API_OAUTH2_IDP_CLAIM"); ok && strings.TrimSpace(v) != "" {
+		config.oauth2IDPClaim = strings.TrimSpace(v)
+	}
+
 	if usernameClaim, ok := cfg.Get("HTTP_API_OAUTH2_USERNAME_CLAIM"); ok && usernameClaim != "" {
 		config.oauth2UsernameClaim = usernameClaim
 		logger.Info(logging.DestinationHTTP, "OAuth2 username claim", "claim", usernameClaim)
@@ -1635,11 +1663,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2UserInfoURL:          mcpCfg.oauth2UserInfoURL,
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
+		OAuth2IDPClaim:             mcpCfg.oauth2IDPClaim,
+		OAuth2AllowedIDPs:          mcpCfg.oauth2AllowedIDPs,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
 		IdentityGroupsFromSystem:   mcpCfg.identityGroupsSystem,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
+		IdentityMapStripDomains:    mcpCfg.identityMapStripDomains,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan: mcpCfg.oauth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:     mcpCfg.oauth2MaxGrantLifetime,

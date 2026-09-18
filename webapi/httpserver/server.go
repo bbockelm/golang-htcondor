@@ -174,6 +174,8 @@ type Config struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+	OAuth2IDPClaim          string   // Claim naming the upstream IDP (default: "idp")
+	OAuth2AllowedIDPs       []string // Accepted values of that claim; empty allows any
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -196,6 +198,12 @@ type Config struct {
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
+
+	// IdentityMapStripDomains lists the domains whose local part may be
+	// tried when a subject is scoped -- "bockelman@wisc.edu" as
+	// "bockelman". Listed rather than stripped blindly because the local
+	// part is not unique across domains. "*" strips any.
+	IdentityMapStripDomains []string
 	// OAuth2AccessTokenLifespan / OAuth2RefreshTokenLifespan control how long the
 	// embedded MCP issuer's tokens are valid. Zero means "use the package default"
 	// (1h access, 30d refresh). RefreshTokenLifespan must be >= AccessTokenLifespan.
@@ -338,10 +346,13 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Scopes:                cfg.OAuth2Scopes,
 		OAuth2UsernameClaim:         cfg.OAuth2UsernameClaim,
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
+		OAuth2IDPClaim:              cfg.OAuth2IDPClaim,
+		OAuth2AllowedIDPs:           cfg.OAuth2AllowedIDPs,
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
+		IdentityMapStripDomains:     cfg.IdentityMapStripDomains,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
 		OAuth2RefreshTokenLifespan:  cfg.OAuth2RefreshTokenLifespan,
 		OAuth2MaxGrantLifetime:      cfg.OAuth2MaxGrantLifetime,

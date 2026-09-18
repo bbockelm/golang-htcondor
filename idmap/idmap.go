@@ -143,6 +143,10 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 
 // Resolver maps subjects to local account names.
 type Resolver struct {
+	// stripDomains lists the domains whose local part may be tried when a
+	// subject is scoped. See WithStripDomains.
+	stripDomains []string
+
 	enum       Enumerator
 	verifier   Verifier
 	strategies []Strategy
@@ -179,6 +183,31 @@ func WithStrategies(s ...Strategy) Option {
 // WithClock replaces the clock, for tests.
 func WithClock(f func() time.Time) Option { return func(r *Resolver) { r.now = f } }
 
+// WithStripDomains makes Resolve try the local part of a scoped subject
+// -- "bockelman@wisc.edu" as "bockelman" -- for the listed domains.
+//
+// Scoped is the norm for an ePPN, while a GECOS or login name is not, so
+// without this the two can never match. The domains are listed rather
+// than stripped blindly because the local part alone is NOT unique across
+// them: "bockelman@wisc.edu" and "bockelman@example.org" both reduce to
+// "bockelman", and a deployment that accepts both would hand one person's
+// account to the other. A subject scoped to an unlisted domain is left
+// whole, so it simply fails to match instead.
+//
+// "*" strips any domain. That is only safe where something else already
+// guarantees a single namespace -- an identity-provider allow-list, say.
+func WithStripDomains(domains ...string) Option {
+	return func(r *Resolver) {
+		r.stripDomains = make([]string, 0, len(domains))
+		for _, d := range domains {
+			d = strings.TrimSpace(strings.TrimPrefix(d, "@"))
+			if d != "" {
+				r.stripDomains = append(r.stripDomains, strings.ToLower(d))
+			}
+		}
+	}
+}
+
 // New returns a Resolver over the given account source. verifier may be
 // nil, which skips the forward re-check -- acceptable only when the
 // enumerator reads the same database the rest of the system does.
@@ -211,37 +240,68 @@ func (r *Resolver) Resolve(ctx context.Context, subject string) (string, error) 
 		return "", fmt.Errorf("%w: empty subject", ErrNoMatch)
 	}
 
+	// Candidates in order: the subject exactly as asserted, then -- if it
+	// is scoped to a domain this deployment strips -- its local part. The
+	// full subject is tried FIRST so that an account whose GECOS really is
+	// the scoped form still wins, and stripping can only ever add a
+	// fallback rather than change an existing answer.
+	candidates := []string{subject}
+	if local, ok := r.localPart(subject); ok {
+		candidates = append(candidates, local)
+	}
+
 	var firstErr error
-	for _, st := range r.strategies {
-		var (
-			username string
-			err      error
-		)
-		switch st {
-		case StrategyGecos:
-			username, err = r.resolveByGecos(ctx, subject)
-		case StrategyUsername:
-			username, err = r.resolveByUsername(ctx, subject)
-		default:
-			err = fmt.Errorf("unknown strategy %q", st)
-		}
-		if err == nil {
-			return username, nil
-		}
-		// Ambiguity stops the search. A later strategy answering for a
-		// subject that two accounts already claim would resolve exactly
-		// the case that most needs refusing.
-		if errors.Is(err, ErrAmbiguous) {
-			return "", err
-		}
-		if firstErr == nil {
-			firstErr = err
+	for _, subject := range candidates {
+		for _, st := range r.strategies {
+			var (
+				username string
+				err      error
+			)
+			switch st {
+			case StrategyGecos:
+				username, err = r.resolveByGecos(ctx, subject)
+			case StrategyUsername:
+				username, err = r.resolveByUsername(ctx, subject)
+			default:
+				err = fmt.Errorf("unknown strategy %q", st)
+			}
+			if err == nil {
+				return username, nil
+			}
+			// Ambiguity stops the search. A later strategy answering for a
+			// subject that two accounts already claim would resolve exactly
+			// the case that most needs refusing.
+			if errors.Is(err, ErrAmbiguous) {
+				return "", err
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	if firstErr == nil {
 		firstErr = fmt.Errorf("%w: %q", ErrNoMatch, subject)
 	}
 	return "", firstErr
+}
+
+// localPart returns the part of a scoped subject before its "@", when the
+// domain is one this resolver was told to strip.
+func (r *Resolver) localPart(subject string) (string, bool) {
+	if len(r.stripDomains) == 0 {
+		return "", false
+	}
+	at := strings.LastIndex(subject, "@")
+	if at <= 0 || at == len(subject)-1 {
+		return "", false
+	}
+	local, domain := subject[:at], strings.ToLower(subject[at+1:])
+	for _, d := range r.stripDomains {
+		if d == "*" || d == domain {
+			return local, true
+		}
+	}
+	return "", false
 }
 
 // resolveByGecos matches the subject against the whole GECOS field,

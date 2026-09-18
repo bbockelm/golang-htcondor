@@ -182,6 +182,11 @@ type Handler struct {
 	oauth2UserInfoURL   string            // User info endpoint for SSO
 	oauth2UsernameClaim string            // Claim name for username (default: "sub")
 	oauth2GroupsClaim   string            // Claim name for group information (default: "groups")
+	// oauth2IDPClaim names the claim carrying the upstream identity
+	// provider, and oauth2AllowedIDPs is the set of values accepted from
+	// it. Empty allows any, which is the behaviour when unconfigured.
+	oauth2IDPClaim    string
+	oauth2AllowedIDPs []string
 
 	// localIdentity maps an asserted OIDC subject to the local account
 	// that owns this user's jobs, and reads that account's groups from
@@ -481,6 +486,8 @@ type HandlerConfig struct {
 	OAuth2Scopes            []string // OAuth2 scopes to request (default: ["openid", "profile", "email"])
 	OAuth2UsernameClaim     string   // Claim name for username in token (default: "sub")
 	OAuth2GroupsClaim       string   // Claim name for groups in user info (default: "groups")
+	OAuth2IDPClaim          string   // Claim naming the upstream IDP (default: "idp")
+	OAuth2AllowedIDPs       []string // Accepted values of that claim; empty allows any
 
 	// IdentityMapStrategies is the ordered list of ways to turn an OIDC
 	// subject into a local account -- "gecos", "username", or both, as in
@@ -503,6 +510,12 @@ type HandlerConfig struct {
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
+
+	// IdentityMapStripDomains lists the domains whose local part may be
+	// tried when a subject is scoped -- "bockelman@wisc.edu" as
+	// "bockelman". Listed rather than stripped blindly because the local
+	// part is not unique across domains. "*" strips any.
+	IdentityMapStripDomains []string
 	// OAuth2AccessTokenLifespan is how long an access token issued by the embedded
 	// MCP issuer is valid. Defaults to 1 hour if zero.
 	OAuth2AccessTokenLifespan time.Duration
@@ -1071,7 +1084,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// logged as configured, and then silently ignored -- the worst of
 	// both, because the log said the mapping was in force.
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
-		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, logger); li != nil {
+		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomains, logger); li != nil {
 		h.localIdentity = li
 		li.warmUp(context.Background())
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
@@ -1079,6 +1092,31 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"strategies", cfg.IdentityMapStrategies,
 			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
 	}
+
+	// Which claims carry the username and the groups.
+	//
+	// Set unconditionally. These were previously assigned inside the
+	// EnableMCP block below, but they are read on the SHARED SSO callback
+	// path (fetchUserInfo), which runs whenever the internal IDP is
+	// configured -- and Start() configures that regardless of MCP. With
+	// MCP disabled the field stayed "", so every login looked up
+	// claims[""], found nothing, and was rejected as "missing subject
+	// claim" no matter what the token actually contained. Setting the
+	// configured value was no help either, since the assignment itself
+	// never ran.
+	h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
+	if h.oauth2UsernameClaim == "" {
+		h.oauth2UsernameClaim = "sub"
+	}
+	h.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
+	if h.oauth2GroupsClaim == "" {
+		h.oauth2GroupsClaim = "groups"
+	}
+	h.oauth2IDPClaim = cfg.OAuth2IDPClaim
+	if h.oauth2IDPClaim == "" {
+		h.oauth2IDPClaim = "idp"
+	}
+	h.oauth2AllowedIDPs = cfg.OAuth2AllowedIDPs
 
 	if cfg.EnableMCP {
 		oauth2Issuer := cfg.OAuth2Issuer
@@ -1131,12 +1169,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// database handle and is stopped before that handle closes.
 		h.clientUsage = newClientUsageRecorder(oauth2Provider.GetStorage().GetDB(), 0)
 
-		// Set username claim name (default: "sub")
-		h.oauth2UsernameClaim = cfg.OAuth2UsernameClaim
-		if h.oauth2UsernameClaim == "" {
-			h.oauth2UsernameClaim = "sub"
-		}
-
 		// Initialize OAuth2 state store
 		h.oauth2StateStore = NewOAuth2StateStore()
 
@@ -1166,12 +1198,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 				// Client registration code remains the same...
 				h.ensureOAuth2ClientRegistered(cfg.OAuth2ClientID, cfg.OAuth2ClientSecret, cfg.OAuth2RedirectURL, scopes)
 			}
-		}
-
-		// Set groups claim name (default: "groups")
-		h.oauth2GroupsClaim = cfg.OAuth2GroupsClaim
-		if h.oauth2GroupsClaim == "" {
-			h.oauth2GroupsClaim = "groups"
 		}
 
 		// Set group-based access control

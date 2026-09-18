@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/ory/fosite"
@@ -273,9 +274,24 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Restrict which upstream identity provider may log people in, before
+	// anything is derived from the claims it supplied.
+	if err := s.validateIdentityProvider(userInfo.Claims); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Login refused: identity provider not allowed",
+			"error", err, "claim", s.oauth2IDPClaim)
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	if userInfo.Subject == "" {
-		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim")
-		s.writeError(w, http.StatusUnauthorized, "Invalid user information")
+		// Name the claim that was looked for and what the IDP actually
+		// sent. Without this the message is the same whether the claim is
+		// misconfigured, misspelled, or genuinely absent -- and the
+		// operator cannot tell which from the log.
+		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim",
+			"claim", s.oauth2UsernameClaim, "claims_returned", claimNames(userInfo.Claims))
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf(
+			"Invalid user information: the identity provider returned no %q claim", s.oauth2UsernameClaim))
 		return
 	}
 
@@ -427,4 +443,43 @@ func (s *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.redirectToLogin(w, r)
+}
+
+// claimNames lists the claim keys an IDP returned, sorted.
+//
+// Keys only: the values carry the user's identity and affiliations, and
+// this runs on a failure path that an unauthenticated caller can reach
+// repeatedly.
+func claimNames(claims map[string]any) []string {
+	names := make([]string, 0, len(claims))
+	for k := range claims {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validateIdentityProvider enforces the configured upstream IDP allow-list.
+//
+// Unconfigured, any provider is accepted, which is the behaviour before
+// this existed. Configured, it FAILS CLOSED: a token whose IDP claim is
+// missing or not a string is refused rather than allowed through, because
+// "cannot tell which provider this came from" is not a reason to trust it.
+// A federation like CILogon fronts many institutions behind one issuer, so
+// the issuer alone does not answer the question this asks.
+func (s *Handler) validateIdentityProvider(claims map[string]any) error {
+	if len(s.oauth2AllowedIDPs) == 0 {
+		return nil
+	}
+
+	idp, ok := claims[s.oauth2IDPClaim].(string)
+	if !ok || idp == "" {
+		return fmt.Errorf("this deployment accepts logins only from specific identity providers, and the token carries no %q claim to check", s.oauth2IDPClaim)
+	}
+	for _, allowed := range s.oauth2AllowedIDPs {
+		if idp == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("identity provider %q is not permitted to log in to this deployment", idp)
 }

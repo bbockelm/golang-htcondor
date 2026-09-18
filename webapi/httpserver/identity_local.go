@@ -78,7 +78,7 @@ func (l *localIdentity) sourcesGroups() bool { return l != nil && l.groups != ni
 // way the index can only hold accounts that something will enumerate,
 // which in practice means the ones present locally; see the comment in
 // idmap/enumerate.go for why that is not the limitation it looks like.
-func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, logger *logging.Logger) *localIdentity {
+func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, stripDomains []string, logger *logging.Logger) *localIdentity {
 	if len(strategies) == 0 && !systemGroups {
 		return nil
 	}
@@ -109,7 +109,11 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 		ver = idmap.FileGecos{Path: passwdFile}
 	}
 
-	l.resolver = idmap.New(enum, ver, idmap.WithTTL(ttl), idmap.WithStrategies(strategies...))
+	opts := []idmap.Option{idmap.WithTTL(ttl), idmap.WithStrategies(strategies...)}
+	if len(stripDomains) > 0 {
+		opts = append(opts, idmap.WithStripDomains(stripDomains...))
+	}
+	l.resolver = idmap.New(enum, ver, opts...)
 	return l
 }
 
