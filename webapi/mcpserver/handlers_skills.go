@@ -46,11 +46,6 @@ func (s *Server) hasSkills() bool {
 	return s.skillsLibrary().Len() > 0
 }
 
-// isSkillTool reports whether name is one of the skills_* tools.
-func isSkillTool(name string) bool {
-	return name == "skills_list" || name == "skills_get"
-}
-
 // skillTools is the catalogue entry for the two tools.
 //
 // Read-only and side-effect free, so they belong in the read-only scope

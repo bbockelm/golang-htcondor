@@ -23,16 +23,15 @@ import (
 )
 
 // write creates a file, making its parents.
-func write(t *testing.T, root, rel, body string) string {
+func write(t *testing.T, root, rel, body string) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return full
 }
 
 func TestLoadReadsFrontMatter(t *testing.T) {

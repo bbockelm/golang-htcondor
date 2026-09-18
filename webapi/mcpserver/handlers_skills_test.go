@@ -38,10 +38,10 @@ func skillsFixture(t *testing.T) string {
 	}
 	for rel, body := range files {
 		full := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -239,7 +239,7 @@ func TestSetSkillsDirPicksUpChanges(t *testing.T) {
 	}
 
 	if err := os.WriteFile(filepath.Join(root, "storage.md"),
-		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o644); err != nil {
+		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.SetSkillsDir(root)
