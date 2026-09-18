@@ -194,16 +194,25 @@ type Handler struct {
 	// that owns this user's jobs, and reads that account's groups from
 	// the system rather than from the token. Nil unless the deployment
 	// configures it; see identity_local.go.
-	localIdentity  *localIdentity
-	mcpAccessGroup string // Group required for any MCP access (empty = all authenticated users)
+	localIdentity *localIdentity
+	// Authorization group lists. Each accepts a comma-separated list and
+	// admits a user holding ANY of them; an empty list requires nothing.
+	// They are groupSets rather than strings because a reconfigure
+	// replaces them while requests are reading.
+	mcpAccessGroups *groupSet // Required for MCP access
+	// webuiAccessGroups gates logging in to the web interface, separately
+	// from MCP. Unset, it falls back to mcpAccessGroups so that a
+	// deployment which relied on the MCP group to gate the browser is not
+	// silently opened by this becoming its own knob.
+	webuiAccessGroups *groupSet
 	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
 	// is being extended; see mcp_deadline.go.
 	mcpMaxRequest time.Duration
 	// mcpWriteWindow overrides how far ahead each extension moves the write
 	// deadline. Zero uses mcpWriteWindow; set only by tests.
 	mcpWriteWindow time.Duration
-	mcpReadGroup   string // Group required for read access (empty = all users have read)
-	mcpWriteGroup  string // Group required for write access (empty = all users have write)
+	mcpReadGroups  *groupSet // Required for read access
+	mcpWriteGroups *groupSet // Required for write access
 
 	// superuserGroup gates superuser mode: acting on another user's jobs
 	// as that user. Deliberately NOT the same knob as webuiAdminGroup,
@@ -211,7 +220,7 @@ type Handler struct {
 	// would silently promote everyone who can look at the admin UI into
 	// someone who can act as anybody on this access point.
 	// Empty disables the feature entirely.
-	superuserGroup string
+	superuserGroups *groupSet
 	// superuserPolicy decides which identity to authenticate as when
 	// acting for someone else. Nil when superuser mode is disabled.
 	superuserPolicy *superuserPolicy
@@ -239,10 +248,10 @@ type Handler struct {
 	mcpServer *mcpserver.Server
 	// mcpActors caches the schedd-verified identity of forwarded
 	// HTCondor IDTOKENs presented to /mcp/message.
-	mcpActors       mcpActorCache
-	webuiAdminGroup string         // Group required for Web UI admin pages (empty = no admin UI)
-	metricsPublic   bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
-	htcondorConfig  *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+	mcpActors        mcpActorCache
+	webuiAdminGroups *groupSet      // Required for Web UI admin pages (empty = no admin UI)
+	metricsPublic    bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	htcondorConfig   *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
 	// dbMirror routes heavy job and history reads to a synchronized
 	// htcondordb mirror when one is current (handlers_dbroute.go). It
 	// shares its freshness policy with the MCP tools via webapi/dbmirror.
@@ -603,8 +612,13 @@ type HandlerConfig struct {
 	// users' jobs. Match is exact against the authenticated actor
 	// (typically "user@uid.domain"). Empty = no admins (default).
 	MCPAdminUsers   []string
-	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
-	EnableIDP       bool   // Enable built-in IDP (always enabled in demo mode)
+	WebUIAdminGroup string // Group(s) required for Web UI admin pages (empty disables admin UI). Comma-separated; HTTP_API_WEBUI_ADMIN_GROUP.
+
+	// WebUIAccessGroup gates logging in to the web interface, separately
+	// from MCP. Comma-separated; HTTP_API_WEBUI_ACCESS_GROUP. Empty falls
+	// back to MCPAccessGroup.
+	WebUIAccessGroup string
+	EnableIDP        bool // Enable built-in IDP (always enabled in demo mode)
 	// SpoolBufferDir is where cluster-wide uploads buffer their tar.
 	// Empty selects the system temp directory.
 	SpoolBufferDir string
@@ -807,7 +821,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
 		streamBufferSize:   streamBufferSize,
 		streamWriteTimeout: streamWriteTimeout,
-		webuiAdminGroup:    cfg.WebUIAdminGroup,
 		metricsPublic:      cfg.MetricsPublic,
 		htcondorConfig:     cfg.HTCondorConfig,
 		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
@@ -821,8 +834,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		token: cfg.Token,
 	}
 
-	if h.webuiAdminGroup != "" {
-		logger.Info(logging.DestinationHTTP, "Web UI admin group configured", "admin_group", h.webuiAdminGroup)
+	if h.webuiAdminGroups.configured() {
+		logger.Info(logging.DestinationHTTP, "Web UI admin group configured", "admin_groups", h.webuiAdminGroups.String())
 	}
 
 	// Superuser mode. Runs after the signing key and domains are set,
@@ -1128,6 +1141,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if h.oauth2GroupsClaim == "" {
 		h.oauth2GroupsClaim = "groups"
 	}
+	// Authorization groups. Set unconditionally: the login path that reads
+	// them runs whenever the internal IDP is configured, not only when MCP
+	// is enabled, and leaving them empty there would admit every
+	// authenticated user to a deployment that had asked for a group.
+	h.mcpAccessGroups = newGroupSet(cfg.MCPAccessGroup)
+	h.mcpReadGroups = newGroupSet(cfg.MCPReadGroup)
+	h.mcpWriteGroups = newGroupSet(cfg.MCPWriteGroup)
+	h.webuiAdminGroups = newGroupSet(cfg.WebUIAdminGroup)
+	h.webuiAccessGroups = newGroupSet(cfg.WebUIAccessGroup)
+
 	// Parsed once, here, so a malformed policy stops the daemon at startup
 	// rather than at the first person's login.
 	if req := strings.TrimSpace(cfg.OAuth2Requirements); req != "" {
@@ -1239,21 +1262,18 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// with token-sourced groups.
 		h.registerSystemGroupOracle(logger)
 
-		h.mcpAccessGroup = cfg.MCPAccessGroup
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
-		h.mcpReadGroup = cfg.MCPReadGroup
-		h.mcpWriteGroup = cfg.MCPWriteGroup
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpAdminUsers = cfg.MCPAdminUsers
 
-		if h.mcpAccessGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_group", h.mcpAccessGroup)
+		if h.mcpAccessGroups.configured() {
+			logger.Info(logging.DestinationHTTP, "MCP access control enabled", "access_groups", h.mcpAccessGroups.String())
 		}
-		if h.mcpReadGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP read access control enabled", "read_group", h.mcpReadGroup)
+		if h.mcpReadGroups.configured() {
+			logger.Info(logging.DestinationHTTP, "MCP read access control enabled", "read_groups", h.mcpReadGroups.String())
 		}
-		if h.mcpWriteGroup != "" {
-			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_group", h.mcpWriteGroup)
+		if h.mcpWriteGroups.configured() {
+			logger.Info(logging.DestinationHTTP, "MCP write access control enabled", "write_groups", h.mcpWriteGroups.String())
 		}
 	}
 

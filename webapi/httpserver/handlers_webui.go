@@ -63,8 +63,8 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		resp.Authenticated = true
 		resp.Username = session.Username
 		resp.Groups = session.Groups
-		if s.webuiAdminGroup != "" {
-			resp.IsAdmin = hasGroup(session.Groups, s.webuiAdminGroup)
+		if s.webuiAdminGroups.configured() {
+			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
 		if resp.SuperuserAllowed {
@@ -128,7 +128,7 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.mayUseSuperuserMode(r) {
 		s.writeError(w, http.StatusForbidden,
-			fmt.Sprintf("Superuser mode requires membership in group %q", s.superuserGroup))
+			fmt.Sprintf("Superuser mode requires membership in one of: %s", s.superuserGroups))
 		return
 	}
 	sessionID, err := getSessionCookie(r)

@@ -261,6 +261,51 @@ value somewhere other than `sub`.
 | --- | --- | --- |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | `sub` | Claim read as the asserted subject, e.g. `eppn` or `preferred_username`. This is the value identity mapping receives. |
 
+### Authorization groups
+
+Four knobs decide who may do what. Each takes a **comma-separated list**
+and admits a user holding **any** of the named groups; surrounding
+whitespace is trimmed, and an empty value means "no group required".
+Matching is case-insensitive.
+
+| Knob | Gates |
+| --- | --- |
+| `HTTP_API_WEBUI_ACCESS_GROUP` | Logging in to the web interface. Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. |
+| `HTTP_API_MCP_ACCESS_GROUP` | Driving this access point through MCP. |
+| `HTTP_API_WEBUI_ADMIN_GROUP` | The admin pages. Unset disables the admin UI. |
+| `HTTP_API_SUPERUSER_GROUP` | Superuser mode (see below). Unset disables the feature. |
+
+`HTTP_API_MCP_READ_GROUP` and `HTTP_API_MCP_WRITE_GROUP` narrow MCP
+further, and take lists on the same terms.
+
+Web interface access and MCP access are **separate**. They were one knob,
+so granting somebody the browser necessarily granted them MCP; a site can
+now let its staff open the pages without also letting them drive the AP
+through an agent:
+
+```
+HTTP_API_MCP_ACCESS_GROUP   = ap2001-login
+HTTP_API_WEBUI_ACCESS_GROUP = ap2001-login, chtc_staff
+HTTP_API_WEBUI_ADMIN_GROUP  = chtc_staff
+HTTP_API_SUPERUSER_GROUP    = chtc_admin
+```
+
+`HTTP_API_WEBUI_ACCESS_GROUP` falls back to `HTTP_API_MCP_ACCESS_GROUP`
+when unset, so a deployment that was using the MCP group to gate the
+browser keeps that behaviour rather than being silently opened.
+
+All of these are re-read on **`condor_reconfig` / SIGHUP** -- each is only
+a membership test on a request, with nothing built from it. A login
+already granted keeps its grant until it refreshes, at which point the
+policy is re-run against the new lists, so tightening a group takes effect
+on the next refresh rather than mid-request. One exception:
+`HTTP_API_SUPERUSER_GROUP` can be *changed* or *emptied* live, but cannot
+switch the feature **on**, because superuser mode builds its signing
+identity at startup; the log says so if you try.
+
+A browser refused by these gets an HTML page naming the groups to ask for,
+rather than the API's JSON error body.
+
 ### Superuser mode
 
 An administrator can act on another user's jobs *as that user*: remove,
@@ -268,7 +313,7 @@ hold, release, tail output, and ssh-to-job. Off unless configured.
 
 | Config | Default | Effect |
 | --- | --- | --- |
-| `HTTP_API_SUPERUSER_GROUP` | *(unset)* | Group whose members may use superuser mode. Unset disables the feature. |
+| `HTTP_API_SUPERUSER_GROUP` | *(unset)* | Group(s) whose members may use superuser mode. Unset disables the feature. |
 | `HTTP_API_SUPERUSER_FALLBACK_IDENTITY` | `condor@$(UID_DOMAIN)` | Identity used when the operator is not themselves a usable queue superuser. Only needs setting where the schedd does not run as `condor`. |
 
 Two things must both be true or the feature stays off, and the server logs
@@ -570,7 +615,8 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_DB_PATH` | Unified SQLite DB (sessions, OAuth2, IDP, templates, API keys). Default `$(LOCAL_DIR)/htcondor-api.db`. |
 | `HTTP_API_SIGNING_KEY` | Pool signing key for minting per-request tokens. Defaults to `SEC_TOKEN_POOL_SIGNING_KEY_FILE`. |
 | `HTTP_API_KEK_FILE` | Path to the master Key Encryption Key (32 raw bytes or 64-char hex; mode 0600/0400). Generate with `openssl rand -hex 32 > <path> && chmod 0600 <path>`. |
-| `HTTP_API_WEBUI_ADMIN_GROUP` | Group name whose members can reach the admin pages. Unset disables the admin UI. |
+| `HTTP_API_WEBUI_ACCESS_GROUP` | Comma-separated group(s) permitted to log in to the web interface. Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. Reloaded on SIGHUP. See [Authorization groups](#authorization-groups). |
+| `HTTP_API_WEBUI_ADMIN_GROUP` | Comma-separated group(s) whose members can reach the admin pages. Unset disables the admin UI. Reloaded on SIGHUP. |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
