@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/bbockelm/golang-htcondor/config"
@@ -44,6 +45,7 @@ type reconfigTarget interface {
 	SetWebUIAccessGroups(string)
 	SetWebUIAdminGroups(string)
 	SetSuperuserGroups(string)
+	SetMCPSkillsDir(string)
 }
 
 // reconfigParams is the table described above. It is deliberately a list of
@@ -82,6 +84,12 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_MCP_WRITE_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetMCPWriteGroups(v) },
+	},
+	// Reloaded unconditionally in reconfigure() as well; this entry is what
+	// handles the path being changed or cleared.
+	{
+		name:  "HTTP_API_MCP_SKILLS_DIR",
+		apply: func(s reconfigTarget, v string) { s.SetMCPSkillsDir(v) },
 	},
 	{
 		name:  "HTTP_API_WEBUI_ACCESS_GROUP",
@@ -170,6 +178,19 @@ func newReconfigWatcher(cfg *config.Config, srv reconfigTarget, logger *logging.
 // daemon's signal goroutine while requests are being served.
 func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
 	applied, needRestart := w.diff(cfg)
+
+	// The skill library is reloaded from disk on every reconfigure, not
+	// only when HTTP_API_MCP_SKILLS_DIR changes. The usual reason to
+	// reload is that the checkout the path points at was updated -- a git
+	// pull, a new deployment of the site's documentation -- which a diff
+	// of the setting itself cannot see. This is the only parameter here
+	// whose meaning lives outside the configuration file.
+	if dir := configValue(cfg, "HTTP_API_MCP_SKILLS_DIR"); dir != "" {
+		w.srv.SetMCPSkillsDir(dir)
+		if !slices.Contains(applied, "HTTP_API_MCP_SKILLS_DIR") {
+			applied = append(applied, "HTTP_API_MCP_SKILLS_DIR")
+		}
+	}
 
 	// Values can be secrets, so log which parameters changed, never what
 	// they changed to.

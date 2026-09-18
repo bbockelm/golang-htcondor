@@ -239,6 +239,7 @@ type Handler struct {
 	// open by contract; see RevocationOracle.
 	revocationOracles []RevocationOracle
 	mcpInstructions   string   // Server-level instructions provided to agents via MCP initialize
+	mcpSkillsDir      string   // Directory of site-authored Markdown skills (empty disables)
 	mcpAdminUsers     []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// mcpServer handles /mcp/message. One long-lived instance: it holds
 	// the validated-token cache and the collector-backed metrics/DB
@@ -606,6 +607,9 @@ type HandlerConfig struct {
 	MCPReadGroup    string // Group required for read operations (empty = all have read)
 	MCPWriteGroup   string // Group required for write operations (empty = all have write)
 	MCPInstructions string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPSkillsDir is a directory of site-authored Markdown skills to
+	// publish to agents. Empty disables the feature.
+	MCPSkillsDir string
 	// MCPAdminUsers lists authenticated subjects that MCP tool
 	// dispatch treats as admins — most importantly they are exempt
 	// from the owner-scope wrapper, so they can query and act on other
@@ -1264,6 +1268,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
 		h.mcpInstructions = cfg.MCPInstructions
+		h.mcpSkillsDir = cfg.MCPSkillsDir
 		h.mcpAdminUsers = cfg.MCPAdminUsers
 
 		if h.mcpAccessGroups.configured() {
@@ -1465,6 +1470,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		SkillsDir: h.mcpSkillsDir,
 		// A getter, not the handle: this server replaces its schedd when
 		// the collector reports a new address, and MCP holding the old
 		// pointer is how it kept dialling a socket that no longer existed.
