@@ -255,6 +255,11 @@ func TestCIMDLoopbackAllowanceIsNarrow(t *testing.T) {
 		"https://localhost:60253/callback",    // different scheme
 		"http://localhost:60253/callback?x=1", // extra query
 		"http://10.0.0.5:60253/callback",      // not loopback
+		// Hosts that merely LOOK loopback: net.ParseIP rejects them and
+		// they are not the literal name, so none is treated as loopback.
+		"http://127.0.0.1.evil.example:60253/callback",
+		"http://localhost.evil.example:60253/callback",
+		"http://0.0.0.0:60253/callback",
 	} {
 		ctx := WithRequestedRedirectURI(context.Background(), requested)
 		c, err := r.resolve(ctx, clientURL)
@@ -322,5 +327,39 @@ func TestCIMDNoAllowanceForNonLoopbackClients(t *testing.T) {
 	}
 	if _, err := fosite.MatchRedirectURIWithClientRedirectURIs(requested, c); err == nil {
 		t.Error("a non-loopback redirect was allowed to vary its port")
+	}
+}
+
+// The allowance is confined to loopback by construction, not by what the
+// client declared: a document naming a non-loopback http URI gets no port
+// variance either.
+func TestLoopbackPortVariantIsLoopbackOnly(t *testing.T) {
+	cases := []struct {
+		requested, declared string
+		want                bool
+	}{
+		{"http://localhost:60253/callback", "http://localhost/callback", true},
+		{"http://127.0.0.1:60253/callback", "http://127.0.0.1/callback", true},
+		{"http://[::1]:60253/callback", "http://[::1]/callback", true},
+
+		// Not loopback -- the port must match exactly for these.
+		{"http://example.org:8080/cb", "http://example.org/cb", false},
+		{"http://10.0.0.5:8080/cb", "http://10.0.0.5/cb", false},
+		{"http://127.0.0.1.evil.example:80/cb", "http://127.0.0.1.evil.example/cb", false},
+		{"http://0.0.0.0:8080/cb", "http://0.0.0.0/cb", false},
+
+		// https never gets the allowance: the rule exists for native apps
+		// on plain http loopback, and a TLS client can register its port.
+		{"https://localhost:8443/cb", "https://localhost/cb", false},
+
+		// Cross-host, even when both sides are loopback forms.
+		{"http://localhost:60253/callback", "http://127.0.0.1/callback", false},
+		{"http://127.0.0.1:60253/callback", "http://localhost/callback", false},
+	}
+	for _, tc := range cases {
+		if got := loopbackPortVariant(tc.requested, tc.declared); got != tc.want {
+			t.Errorf("loopbackPortVariant(%q, %q) = %v, want %v",
+				tc.requested, tc.declared, got, tc.want)
+		}
 	}
 }
