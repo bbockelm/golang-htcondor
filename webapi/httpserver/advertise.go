@@ -44,7 +44,7 @@ func (h *Handler) advertiseInput() apiad.Input {
 		ScheddName:       h.scheddName,
 		TrustDomain:      h.trustDomain,
 		MCPEnabled:       h.mcpServer != nil,
-		SuperuserEnabled: h.superuserGroup != "",
+		SuperuserEnabled: h.superuserGroups.configured(),
 		ActiveStreams:    h.activeStreams.Load(),
 	}
 	if sch := h.getSchedd(); sch != nil {

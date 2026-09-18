@@ -21,11 +21,11 @@ func superuserTestHandler(t *testing.T, superUsers []string) *Handler {
 		t.Fatalf("logger: %v", err)
 	}
 	h := &Handler{
-		logger:         logger,
-		uidDomain:      "example.org",
-		trustDomain:    "example.org",
-		signingKeyPath: "/nonexistent/passwords.d/POOL",
-		superuserGroup: "condor-webadmins",
+		logger:          logger,
+		uidDomain:       "example.org",
+		trustDomain:     "example.org",
+		signingKeyPath:  "/nonexistent/passwords.d/POOL",
+		superuserGroups: newGroupSet("condor-webadmins"),
 	}
 	h.superuserPolicy = newSuperuserPolicy(
 		&fakeSuperUsers{users: superUsers}, "example.org", "", time.Hour, logger)

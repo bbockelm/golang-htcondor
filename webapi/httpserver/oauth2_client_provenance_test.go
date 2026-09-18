@@ -29,7 +29,7 @@ func newProvenanceServer(t *testing.T) (*Server, func(method, target, body strin
 	if server.oauth2Provider == nil {
 		t.Fatal("expected the OAuth2 provider to be enabled")
 	}
-	server.webuiAdminGroup = "condor-admins"
+	server.webuiAdminGroups = newGroupSet("condor-admins")
 	t.Cleanup(func() { server.clientUsage.Close() })
 
 	return server, func(method, target, body string) *http.Request {

@@ -160,7 +160,7 @@ func TestResolveOwnerScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	server.webuiAdminGroup = "condor-admins"
+	server.webuiAdminGroups = newGroupSet("condor-admins")
 
 	req := func(groups ...[]string) *http.Request {
 		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
@@ -240,7 +240,7 @@ func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 	})
 
 	t.Run("admin session is not scoped", func(t *testing.T) {
-		server.webuiAdminGroup = "condor-admins"
+		server.webuiAdminGroups = newGroupSet("condor-admins")
 		r := sessionReq("root", []string{"condor-admins"})
 		if _, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "root"), r, "JobStatus == 5"); ok || err != nil {
 			t.Errorf("an admin session must not be forced into owner scope (ok=%v err=%v)", ok, err)
@@ -251,7 +251,7 @@ func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 	// the scoping they are not forced into. Without this the toggle would
 	// render but change nothing.
 	t.Run("admin session honors owned_by_me=true", func(t *testing.T) {
-		server.webuiAdminGroup = "condor-admins"
+		server.webuiAdminGroups = newGroupSet("condor-admins")
 		r := sessionReq("root", []string{"condor-admins"})
 		r.URL.RawQuery = "owned_by_me=true"
 		scoped, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain"), r, "JobStatus == 5")

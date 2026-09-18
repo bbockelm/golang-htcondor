@@ -59,28 +59,41 @@ func extractGroups(groupsClaim interface{}) []string {
 	}
 }
 
-// hasGroup checks if the user has the specified group (case-insensitive)
-func hasGroup(userGroups []string, requiredGroup string) bool {
-	if requiredGroup == "" {
-		return true // No group specified
+// validateAccess reports whether a user's groups satisfy a required set.
+func (s *Handler) validateAccess(required *groupSet, userGroups []string) error {
+	if required.allows(userGroups) {
+		return nil
 	}
-	requiredLower := strings.ToLower(requiredGroup)
-	for _, group := range userGroups {
-		if strings.ToLower(group) == requiredLower {
-			return true
-		}
-	}
-	return false
+	return fmt.Errorf("user is not in any of the required access groups: %s", required)
 }
 
-// validateGroupAccess checks if the user has access based on group membership
-// Returns error if access is denied
+// validateWebUIAccess gates logging in to the web interface.
+//
+// Separate from validateGroupAccess because the two answer different
+// questions: who may drive this AP through an agent, and who may open its
+// web interface. They were one knob, so granting somebody the browser
+// necessarily granted them MCP.
+func (s *Handler) validateWebUIAccess(userGroups []string) error {
+	return s.validateAccess(s.webUIRequiredGroups(), userGroups)
+}
+
+// webUIRequiredGroups is the set gating web interface login.
+//
+// With none of its own it falls back to the MCP groups, so a deployment
+// that was using HTTP_API_MCP_ACCESS_GROUP to gate the browser -- which
+// is what that knob did before these were separated -- is not silently
+// opened by the separation. Resolved per call rather than aliased at
+// startup so that a reconfigure of either knob takes effect immediately.
+func (s *Handler) webUIRequiredGroups() *groupSet {
+	if s.webuiAccessGroups.configured() {
+		return s.webuiAccessGroups
+	}
+	return s.mcpAccessGroups
+}
+
 func (s *Handler) validateGroupAccess(userGroups []string) error {
 	// If access group is configured, user must be in it
-	if s.mcpAccessGroup != "" && !hasGroup(userGroups, s.mcpAccessGroup) {
-		return fmt.Errorf("user not in required access group: %s", s.mcpAccessGroup)
-	}
-	return nil
+	return s.validateAccess(s.mcpAccessGroups, userGroups)
 }
 
 // getScopesForGroups determines OAuth2 scopes based on group membership.
@@ -100,14 +113,14 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			continue
 		case "mcp:read":
 			switch {
-			case s.mcpReadGroup != "":
+			case s.mcpReadGroups.configured():
 				// Specific read group configured — user must be in it
-				if hasGroup(userGroups, s.mcpReadGroup) {
+				if s.mcpReadGroups.allows(userGroups) {
 					grantedScopes = append(grantedScopes, scope)
 				}
-			case s.mcpAccessGroup != "":
+			case s.mcpAccessGroups.configured():
 				// No specific read group; fall back to access group (already validated)
-				if hasGroup(userGroups, s.mcpAccessGroup) {
+				if s.mcpAccessGroups.allows(userGroups) {
 					grantedScopes = append(grantedScopes, scope)
 				}
 			default:
@@ -116,14 +129,14 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			}
 		case "mcp:write":
 			switch {
-			case s.mcpWriteGroup != "":
+			case s.mcpWriteGroups.configured():
 				// Specific write group configured — user must be in it
-				if hasGroup(userGroups, s.mcpWriteGroup) {
+				if s.mcpWriteGroups.allows(userGroups) {
 					grantedScopes = append(grantedScopes, scope)
 				}
-			case s.mcpAccessGroup != "":
+			case s.mcpAccessGroups.configured():
 				// No specific write group; fall back to access group (already validated)
-				if hasGroup(userGroups, s.mcpAccessGroup) {
+				if s.mcpAccessGroups.allows(userGroups) {
 					grantedScopes = append(grantedScopes, scope)
 				}
 			default:
@@ -330,15 +343,30 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO",
 		"subject", subject, "groups", userGroups)
 
-	// Validate group-based access
-	if err := s.validateGroupAccess(userGroups); err != nil {
-		s.logger.Warn(logging.DestinationHTTP, "User denied access", "subject", subject, "error", err)
+	// Which gate applies depends on what is being logged in to. The web
+	// interface and MCP are separate grants: somebody may be entitled to
+	// open this AP's pages without being entitled to drive it through an
+	// agent, and the reverse.
+	accessErr := s.validateGroupAccess(userGroups)
+	required := s.mcpAccessGroups
+	if isBrowserFlow {
+		accessErr, required = s.validateWebUIAccess(userGroups), s.webUIRequiredGroups()
+	}
+	if accessErr != nil {
+		s.logger.Warn(logging.DestinationHTTP, "User denied access",
+			"subject", subject, "groups", userGroups,
+			"required_groups", required.String(),
+			"surface", map[bool]string{true: "web-ui", false: "mcp"}[isBrowserFlow],
+			"error", accessErr)
 
-		// For browser flow, show an error page instead of OAuth2 error
+		// A browser gets a page. This used to return the API's JSON error
+		// body, which is unreadable in a tab and gives somebody who has
+		// just logged in successfully nothing to act on.
 		if isBrowserFlow {
-			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Access denied: %v", err))
+			s.renderAccessDeniedPage(w, required)
 			return
 		}
+		err := accessErr
 
 		// Create RFC6749 error to redirect back to client
 		accessDeniedErr := fosite.ErrAccessDenied.WithDescription(err.Error()).WithHintf("User does not have required group membership")
@@ -510,4 +538,24 @@ func (s *Handler) evaluateLoginRequirements(claims map[string]any) error {
 		return fmt.Errorf("this login does not satisfy the deployment's login requirements")
 	}
 	return nil
+}
+
+// renderAccessDeniedPage tells a browser why its login was refused.
+//
+// The person reaching this authenticated successfully -- the identity
+// provider vouched for them -- and were then turned away by this
+// deployment's own group policy. That distinction is what the page has to
+// convey, along with the group to ask for, or they will report it as a
+// broken login.
+func (s *Handler) renderAccessDeniedPage(w http.ResponseWriter, required *groupSet) {
+	message := "You signed in successfully, but this access point's policy does not grant you access."
+	sub := ""
+	if required.configured() {
+		sub = "Access requires membership in one of: " + required.String() +
+			". Ask an administrator of this access point to add you."
+	} else {
+		sub = "Ask an administrator of this access point for access."
+	}
+	s.renderResultPage(w, http.StatusForbidden, "Access denied", "#f44336",
+		"Access denied", message, sub)
 }

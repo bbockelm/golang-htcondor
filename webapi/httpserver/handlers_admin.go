@@ -30,14 +30,14 @@ import (
 // "should this query default to all-jobs?" — for hard authorization
 // gates use requireAdmin which writes a 401/403/503 directly.
 func (s *Handler) isWebUIAdmin(r *http.Request) bool {
-	if s.webuiAdminGroup == "" {
+	if !s.webuiAdminGroups.configured() {
 		return false
 	}
 	session, ok := s.getSessionFromRequest(r)
 	if !ok {
 		return false
 	}
-	return hasGroup(session.Groups, s.webuiAdminGroup)
+	return s.webuiAdminGroups.allows(session.Groups)
 }
 
 // resolveOwnerScope settles whether a request asking for other people's
@@ -65,7 +65,7 @@ func (s *Handler) resolveOwnerScope(r *http.Request, ownedByMe bool) bool {
 
 // confusing than helpful.
 func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if s.webuiAdminGroup == "" {
+	if !s.webuiAdminGroups.configured() {
 		s.writeError(w, http.StatusServiceUnavailable,
 			"Admin UI is disabled. Set HTTP_API_WEBUI_ADMIN_GROUP to enable.")
 		return false
@@ -75,9 +75,9 @@ func (s *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return false
 	}
-	if !hasGroup(session.Groups, s.webuiAdminGroup) {
+	if !s.webuiAdminGroups.allows(session.Groups) {
 		s.writeError(w, http.StatusForbidden,
-			fmt.Sprintf("Admin access requires membership in group %q", s.webuiAdminGroup))
+			fmt.Sprintf("Admin access requires membership in one of: %s", s.webuiAdminGroups))
 		return false
 	}
 	return true

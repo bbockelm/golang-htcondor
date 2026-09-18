@@ -38,6 +38,12 @@ type reconfigParam struct {
 // through the setters in httpserver/reconfig.go.
 type reconfigTarget interface {
 	SetMCPInstructions(string)
+	SetMCPAccessGroups(string)
+	SetMCPReadGroups(string)
+	SetMCPWriteGroups(string)
+	SetWebUIAccessGroups(string)
+	SetWebUIAdminGroups(string)
+	SetSuperuserGroups(string)
 }
 
 // reconfigParams is the table described above. It is deliberately a list of
@@ -55,6 +61,41 @@ var reconfigParams = []reconfigParam{
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPInstructions(v)
 		},
+	},
+
+	// Authorization group lists. Each is only a membership test on a
+	// request -- nothing is constructed from one -- so they can be swapped
+	// under live traffic. These are also the settings most often wrong on
+	// a first deployment, where the alternative to a reconfigure is
+	// restarting the daemon to find out whether the fix was right.
+	//
+	// Sessions already granted keep their grant until they refresh, at
+	// which point the reauthorization path re-runs the policy.
+	{
+		name:  "HTTP_API_MCP_ACCESS_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetMCPAccessGroups(v) },
+	},
+	{
+		name:  "HTTP_API_MCP_READ_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetMCPReadGroups(v) },
+	},
+	{
+		name:  "HTTP_API_MCP_WRITE_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetMCPWriteGroups(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_ACCESS_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIAccessGroups(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_ADMIN_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIAdminGroups(v) },
+	},
+	// Membership only: superuser mode is built at startup, so this cannot
+	// switch it on in a running daemon. Emptying it does switch it off.
+	{
+		name:  "HTTP_API_SUPERUSER_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetSuperuserGroups(v) },
 	},
 
 	// --- Restart required (read once at startup) ---
@@ -87,9 +128,6 @@ var reconfigParams = []reconfigParam{
 	// Authorization groups. Worth making dynamic later -- they are consulted
 	// per request -- but some are also folded into policy objects at
 	// startup, so they need their setters before they can move up.
-	{name: "HTTP_API_MCP_ACCESS_GROUP"},
-	{name: "HTTP_API_WEBUI_ADMIN_GROUP"},
-	{name: "HTTP_API_SUPERUSER_GROUP"},
 	{name: "MCP_ADMIN_USERS"},
 
 	// Submit-time policy, compiled into the submit policy at startup.

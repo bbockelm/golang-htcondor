@@ -251,7 +251,7 @@ func TestRefreshNarrowsScopesWhenGroupPolicyChanges(t *testing.T) {
 	}
 
 	// alice loses write entitlement.
-	f.server.mcpWriteGroup = "condor-writers-v2"
+	f.server.mcpWriteGroups = newGroupSet("condor-writers-v2")
 
 	status, body := f.refresh(t, refreshToken)
 	if status != http.StatusOK {
@@ -288,7 +288,7 @@ func TestRefreshRevokedWhenAccessGroupLost(t *testing.T) {
 
 	_, refreshToken, _ := f.grant(t, "alice", []string{"condor-users"})
 
-	f.server.mcpAccessGroup = "condor-users-v2"
+	f.server.mcpAccessGroups = newGroupSet("condor-users-v2")
 
 	status, body := f.refresh(t, refreshToken)
 	if status == http.StatusOK {

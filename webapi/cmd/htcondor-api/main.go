@@ -1512,6 +1512,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	// Web UI admin group (empty disables admin pages — see PR (c)).
 	webuiAdminGroup, _ := cfg.Get("HTTP_API_WEBUI_ADMIN_GROUP")
+	// Who may log in to the web interface. Empty falls back to
+	// HTTP_API_MCP_ACCESS_GROUP, which is what gated the browser before
+	// these were separate knobs.
+	webuiAccessGroup, _ := cfg.Get("HTTP_API_WEBUI_ACCESS_GROUP")
 
 	// Superuser mode is gated on its own group, not on the admin-UI group:
 	// reading the admin pages and acting as any user on the access point are
@@ -1677,6 +1681,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPInstructions:            mcpCfg.instructions,
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
+		WebUIAccessGroup:           webuiAccessGroup,
 		SuperuserGroup:             strings.TrimSpace(superuserGroup),
 		SuperuserFallbackIdentity:  strings.TrimSpace(superuserFallback),
 		EnableIDP:                  enableIDP,

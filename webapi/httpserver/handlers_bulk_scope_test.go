@@ -69,7 +69,7 @@ func TestBulkOwnerScope(t *testing.T) {
 	})
 
 	t.Run("admin session bypasses scoping", func(t *testing.T) {
-		server.webuiAdminGroup = "condor-admins"
+		server.webuiAdminGroups = newGroupSet("condor-admins")
 		r := reqWithSession("root", []string{"condor-admins"})
 		got, err := server.bulkOwnerScope(ctx, r, `JobStatus == 5`)
 		if err != nil || got != `JobStatus == 5` {
@@ -139,7 +139,7 @@ func TestJobOwnerScope(t *testing.T) {
 	})
 
 	t.Run("admin session is not confined", func(t *testing.T) {
-		server.webuiAdminGroup = "condor-admins"
+		server.webuiAdminGroups = newGroupSet("condor-admins")
 		scoped, err := server.jobOwnerScope(ctx, sessionReq("root", []string{"condor-admins"}), 7, 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
