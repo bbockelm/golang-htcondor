@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
@@ -1622,6 +1623,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	pingInterval := loadPingInterval(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
+	requiredCredentials := loadRequiredCredentials(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1711,6 +1713,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PingInterval:                pingInterval,
 		MCPWatchMaxWait:             mcpWatchMaxWait,
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
+		RequiredCredentials:         requiredCredentials,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
@@ -2715,6 +2718,40 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// loadRequiredCredentials reads HTTP_API_REQUIRED_CREDENTIALS, the OAuth
+// service credentials that must be on file before a job may be submitted.
+//
+//	unset              nothing is required
+//	"scitokens"        that one service
+//	"scitokens, dropbox"  several, separated by commas or whitespace
+//
+// Some access points hold every job submitted without these, whatever the job
+// actually uses. Each submit path creates a placeholder for any that is
+// missing, so a person using the web UI does not get a held job for a reason
+// unrelated to what they asked for.
+func loadRequiredCredentials(cfg *config.Config, logger *logging.Logger) []string {
+	raw, ok := cfg.Get("HTTP_API_REQUIRED_CREDENTIALS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var services []string
+	for _, field := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	}) {
+		name := strings.TrimSpace(field)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		services = append(services, name)
+	}
+	if len(services) > 0 {
+		logger.Info(logging.DestinationHTTP, "HTTP_API_REQUIRED_CREDENTIALS configured", "services", services)
+	}
+	return services
+}
 
 // loadMCPMaxRequestDuration reads HTTP_API_MCP_MAX_REQUEST_DURATION, the hard
 // stop on an MCP request that is still making progress.

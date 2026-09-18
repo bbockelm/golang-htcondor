@@ -446,6 +446,12 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit job using SubmitRemote
+	// Some access points hold every job submitted without particular OAuth
+	// service credentials on file. Create them first, so a person using the
+	// web UI does not get a held job for a reason unrelated to what they
+	// asked for. Best effort: see ensureRequiredCredentials.
+	s.ensureRequiredCredentials(ctx)
+
 	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(req.SubmitFile))
 	if err != nil {
 		// Check if it's an authentication error
