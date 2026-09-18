@@ -355,6 +355,14 @@ docker-clean: ## Remove Docker image
 
 NFPM       ?= nfpm
 PKG_BINARY ?= bin/htcondor-api
+# Where the payload is assembled for nfpm. Deliberately NOT derived from
+# PKG_DIR and deliberately not overridable: nfpm globs contents.src literally
+# (it expands environment variables in scalar fields but not there), so this
+# path is spelled out in packaging/nfpm.yaml and the two must agree. Tying it
+# to PKG_DIR meant that overriding the output directory -- which is exactly
+# what the release workflow does -- staged the binary somewhere nfpm never
+# looked, and left the previous run's staging tree to be packaged instead.
+PKG_STAGE  := packaging/staging
 PKG_ARCH   ?= $(shell go env GOARCH)
 PKG_DIR    ?= dist
 PKG_MAINTAINER ?= Brian Bockelman <bbockelman@morgridge.org>
@@ -371,8 +379,12 @@ rpm: ## Build an RPM from a prebuilt binary (PKG_BINARY, PKG_ARCH=amd64|arm64)
 		echo "No binary at $(PKG_BINARY)."; \
 		echo "Build one first (make build-prod for a release binary), or set PKG_BINARY."; \
 		exit 1; }
-	@rm -rf $(PKG_DIR)/pkgroot && mkdir -p $(PKG_DIR)/pkgroot
-	@cp $(PKG_BINARY) $(PKG_DIR)/pkgroot/htcondor-api
+	@rm -rf $(PKG_STAGE) && mkdir -p $(PKG_STAGE)
+	@cp $(PKG_BINARY) $(PKG_STAGE)/htcondor-api
+	# nfpm writes to --target as a FILE unless the path is an existing
+	# directory, so this has to exist before it runs rather than be left to
+	# whoever ran make.
+	@mkdir -p $(PKG_DIR)
 	@set -e; \
 	set -- $$(packaging/rpm-version.sh "$(VERSION)"); \
 	PKG_VERSION=$$1; PKG_RELEASE=$$2; \
