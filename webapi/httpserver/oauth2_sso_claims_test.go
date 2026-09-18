@@ -18,8 +18,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+
+	"github.com/bbockelm/golang-htcondor/idmap"
 )
 
 const wiscIDP = "https://login.wisc.edu/idp/shibboleth"
@@ -232,5 +235,37 @@ func TestClaimNamesListsKeysNotValues(t *testing.T) {
 		if strings.Contains(n, "@") || strings.Contains(n, "cilogon.org") {
 			t.Errorf("claim VALUE leaked into the key list: %q", n)
 		}
+	}
+}
+
+// The startup log must say WHICH chain groups come from, not merely that
+// they come from the system.
+//
+// The chain is chosen per build: with cgo it is getgrouplist(3), which
+// consults every service in nsswitch.conf; without cgo -- how the release
+// binaries and container are built -- it is files plus sss, with anything
+// else marked degraded. An operator whose directory groups are missing
+// needs that distinction in the log, not just "groups_from=system".
+func TestGroupSourceIsNamedForTheOperator(t *testing.T) {
+	passwd := writePasswd(t)
+
+	li := newLocalIdentity(nil, true, passwd, time.Minute, nil, testLogger(t))
+	if li == nil {
+		t.Fatal("expected a localIdentity when groups come from the system")
+	}
+	name := li.groupSourceName()
+	if name == "" {
+		t.Fatal("group source is unnamed; the startup log would not say where membership is read from")
+	}
+	// It should name a real lookup, not a placeholder.
+	if !strings.Contains(name, "stdlib") && !strings.Contains(name, "chain") {
+		t.Errorf("group source = %q, want it to name the underlying lookup", name)
+	}
+	t.Logf("group source on this build: %s", name)
+
+	// With token-sourced groups there is nothing local to name.
+	tokenOnly := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, passwd, time.Minute, nil, testLogger(t))
+	if got := tokenOnly.groupSourceName(); got != "" {
+		t.Errorf("group source = %q, want empty when groups come from the token", got)
 	}
 }

@@ -1093,7 +1093,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
 			"subject_mapped_to_account", li.mapsAccount(),
 			"strategies", cfg.IdentityMapStrategies,
-			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()])
+			"groups_from", map[bool]string{true: "system", false: "token"}[li.sourcesGroups()],
+			"group_source", li.groupSourceName())
 	}
 
 	// Which claims carry the username and the groups.
