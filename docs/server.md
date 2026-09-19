@@ -15,8 +15,8 @@ surfaces. The HTTP API is suitable for humans (browser SPA), scripts
 LLM agents that already speak MCP (Claude Code, etc.).
 
 This document is the entry point; deeper detail lives in
-[httpserver/README.md](../httpserver/README.md) and
-[mcpserver/README.md](../mcpserver/README.md).
+[httpserver/README.md](../webapi/httpserver/README.md) and
+[mcpserver/README.md](../webapi/mcpserver/README.md).
 
 ## Install
 
@@ -572,7 +572,7 @@ given: MCP delivers those once, at initialize.
 ## API surface
 
 Endpoint groupings — full reference + request/response shapes are in
-[httpserver/README.md](../httpserver/README.md) and the OpenAPI doc
+[httpserver/README.md](../webapi/httpserver/README.md) and the OpenAPI doc
 at `/openapi.json`.
 
 **Jobs** (authenticated, owner-scoped)
@@ -623,7 +623,7 @@ at `/openapi.json`.
 **MCP** (when enabled via `HTTP_API_ENABLE_MCP=true`)
 - The full MCP surface is exposed at `/mcp/*` for cooperative
   agents. The standalone `htcondor-mcp` binary speaks the same MCP
-  protocol over stdio. See [mcpserver/README.md](../mcpserver/README.md).
+  protocol over stdio. See [mcpserver/README.md](../webapi/mcpserver/README.md).
 
 ## Example calls
 
@@ -729,11 +729,11 @@ for full semantics.
 
 ## Further reading
 
-- [httpserver/README.md](../httpserver/README.md) — full HTTP API
+- [httpserver/README.md](../webapi/httpserver/README.md) — full HTTP API
   reference, demo-mode internals, security model.
-- [mcpserver/README.md](../mcpserver/README.md) — MCP tool catalog
+- [mcpserver/README.md](../webapi/mcpserver/README.md) — MCP tool catalog
   and integration notes.
-- [SECURITY_CONFIG.md](../SECURITY_CONFIG.md) — operator-facing
+- [SECURITY_CONFIG.md](../design_notes/SECURITY_CONFIG.md) — operator-facing
   security configuration guide.
 - [docs/library.md](library.md) — embedding the underlying Go
   library in your own service.
