@@ -1633,6 +1633,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
+	creddAddress := firstConfigValue(cfg, "HTTP_API_CREDD_ADDRESS")
+	if creddAddress != "" {
+		logger.Info(logging.DestinationHTTP, "HTTP_API_CREDD_ADDRESS configured", "address", creddAddress)
+	}
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1724,6 +1728,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPWatchMaxWait:             mcpWatchMaxWait,
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
 		RequiredCredentials:         requiredCredentials,
+		CreddAddress:                creddAddress,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
