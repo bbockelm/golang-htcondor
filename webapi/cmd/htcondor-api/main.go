@@ -844,7 +844,7 @@ func loadOAuth2RedirectURL(cfg *config.Config, issuer string, logger *logging.Lo
 	}
 
 	if issuer != "" {
-		url := issuer + "/mcp/oauth2/callback"
+		url := issuer + httpserver.OAuth2CallbackPath()
 		logger.Info(logging.DestinationHTTP, "OAuth2 redirect URL derived from issuer", "url", url)
 		return url
 	}
@@ -2066,7 +2066,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		OAuth2ClientSecret: "demo-secret",
 		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
 		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:  httpBaseURL + "/mcp/oauth2/callback",
+		OAuth2RedirectURL:  httpBaseURL + httpserver.OAuth2CallbackPath(),
 		OAuth2Scopes:       []string{"openid", "profile", "email"},
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity
