@@ -115,9 +115,10 @@ func (s *Server) toolSkillsList(_ context.Context, args map[string]interface{}) 
 	}
 
 	return map[string]interface{}{
-		"skills": out,
-		"count":  len(out),
-		"hint":   "Read one in full with skills_get.",
+		"skills":            out,
+		"count":             len(out),
+		"hint":              "Read one in full with skills_get.",
+		"structuredContent": map[string]interface{}{"skills": out, "count": len(out)},
 	}, nil
 }
 
@@ -152,6 +153,11 @@ func (s *Server) toolSkillsGet(_ context.Context, args map[string]interface{}) (
 		"description": sk.Description,
 		"path":        sk.Path,
 		"content":     sk.Body,
+		"structuredContent": map[string]interface{}{
+			"name":        sk.Name,
+			"description": sk.Description,
+			"content":     sk.Body,
+		},
 	}, nil
 }
 

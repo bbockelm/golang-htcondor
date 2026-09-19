@@ -44,7 +44,7 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 	})
 	for _, t := range s.toolsFor(WithGrantedScopes(context.Background(), scopes)) {
 		srv.AddTool(
-			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Annotations: t.Annotations},
+			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Annotations: t.Annotations, OutputSchema: t.OutputSchema},
 			s.sdkToolHandler(t.Name),
 		)
 	}

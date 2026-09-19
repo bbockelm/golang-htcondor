@@ -137,6 +137,7 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 			return
 		}
 		metadata[offsetKey] = stream.Offset
+		metadata[label] = string(stream.Bytes)
 		fmt.Fprintf(&text, "%s (through byte %d):\n", label, stream.Offset)
 		if len(stream.Bytes) == 0 {
 			text.WriteString("(nothing new)\n")
@@ -154,8 +155,8 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 		appendStream("stderr", result.Stderr, "stderr_offset")
 	}
 
-	return map[string]interface{}{
+	return withStructured(map[string]interface{}{
 		"content":  []map[string]interface{}{{"type": "text", "text": text.String()}},
 		"metadata": metadata,
-	}, nil
+	}, metadata), nil
 }

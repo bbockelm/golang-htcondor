@@ -213,7 +213,12 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 			return nil, err
 		}
 		if got == nil || !got.FiredAt.IsZero() || !time.Now().Before(deadline) {
-			return textResult(renderWatchRegistration(got, w)), nil
+			return structuredTextResult(renderWatchRegistration(got, w), map[string]interface{}{
+				"watch_id":   w.ID,
+				"event":      string(w.Event),
+				"constraint": w.Constraint,
+				"fired":      got != nil && !got.FiredAt.IsZero(),
+			}), nil
 		}
 		select {
 		case <-ctx.Done():
@@ -266,7 +271,28 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 			s.logger.Warn(logging.DestinationGeneral, "recording job watch delivery failed", "error", err)
 		}
 	}
-	return textResult(renderWatchReport(news, waiting, includeDelivered)), nil
+	watchEntry := func(w *jobwatch.Watch, fired bool) map[string]interface{} {
+		return map[string]interface{}{
+			"watch_id":      w.ID,
+			"event":         string(w.Event),
+			"constraint":    w.Constraint,
+			"fired":         fired,
+			"matched_total": w.MatchedTotal,
+		}
+	}
+	entries := make([]map[string]interface{}, 0, len(news)+len(waiting))
+	for _, w := range news {
+		entries = append(entries, watchEntry(w, true))
+	}
+	for _, w := range waiting {
+		entries = append(entries, watchEntry(w, false))
+	}
+	return structuredTextResult(renderWatchReport(news, waiting, includeDelivered), map[string]interface{}{
+		"watches":       entries,
+		"count":         len(entries),
+		"new_count":     len(news),
+		"waiting_count": len(waiting),
+	}), nil
 }
 
 func (s *Server) toolCancelWatch(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -285,7 +311,8 @@ func (s *Server) toolCancelWatch(ctx context.Context, args map[string]interface{
 	if !ok {
 		return nil, fmt.Errorf("no watch %q of yours to cancel; it may have already fired and expired, or never existed", id)
 	}
-	return textResult(fmt.Sprintf("Cancelled watch %s.", id)), nil
+	return structuredTextResult(fmt.Sprintf("Cancelled watch %s.", id),
+		map[string]interface{}{"watch_id": id, "cancelled": true}), nil
 }
 
 func (s *Server) oneWatch(ctx context.Context, owner, id string) (*jobwatch.Watch, error) {

@@ -69,5 +69,7 @@ func (s *Server) toolGetVersion(_ context.Context, _ map[string]interface{}) (in
 	}
 	fmt.Fprintf(&sb, "\n%s", raw)
 
-	return textResult(sb.String()), nil
+	// structuredContent is the build struct itself, so an agent can compare
+	// fields programmatically rather than parsing the summary.
+	return structuredTextResult(sb.String(), b), nil
 }

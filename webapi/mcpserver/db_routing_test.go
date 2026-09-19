@@ -73,9 +73,15 @@ func TestJobKeyLess(t *testing.T) {
 func TestRenderJobsBase(t *testing.T) {
 	ad := classad.New()
 	ad.InsertAttr("ClusterId", 7)
-	text, meta := renderJobsBase([]*classad.ClassAd{ad}, "Owner == \"alice\"", "htcondordb", "\n[source: htcondordb mirror]")
+	text, meta, structured := renderJobsBase([]*classad.ClassAd{ad}, "Owner == \"alice\"", "htcondordb", "\n[source: htcondordb mirror]")
 	if meta["source"] != "htcondordb" || meta["count"] != 1 || meta["has_more"] != false {
 		t.Errorf("metadata wrong: %+v", meta)
+	}
+	if structured["source"] != "htcondordb" || structured["count"] != 1 {
+		t.Errorf("structuredContent wrong: %+v", structured)
+	}
+	if jobs, ok := structured["jobs"].([]*classad.ClassAd); !ok || len(jobs) != 1 {
+		t.Errorf("structuredContent.jobs should carry the ads: %+v", structured["jobs"])
 	}
 	if !strings.Contains(text, "Found 1 job(s)") || !strings.Contains(text, "JOB STATUS REFERENCE") {
 		t.Errorf("missing header or status guide: %q", text)
