@@ -116,11 +116,35 @@ func isRequestAttr(name string) bool {
 // would fully match". The latter is what NarrowingScore measures, but
 // for an actionable hint the operator wants to know "does this change
 // help at all on this predicate?".
+// failingValues accumulates the slot-side values of slots that FAILED a
+// predicate, as a frequency histogram rather than a list.
+//
+// The suggestions only ever ask two things of these values: which
+// distinct ones exist, and how many slots sit at or above each. A
+// histogram answers both in space proportional to the number of DISTINCT
+// values -- which for a resource attribute is tiny, since Cpus is 1, 2,
+// 4, 8 and Memory comes in a handful of sizes -- where a list was
+// proportional to the number of SLOTS.
+type failingValues struct {
+	counts map[float64]int
+	total  int
+}
+
+func newFailingValues() *failingValues {
+	return &failingValues{counts: map[float64]int{}}
+}
+
+func (f *failingValues) add(v float64) {
+	f.counts[v]++
+	f.total++
+}
+
+func (f *failingValues) empty() bool { return f == nil || f.total == 0 }
+
 func computeResourceSuggestion(
 	comp *resourceComparison,
 	jobAd *classad.ClassAd,
-	slots []*classad.ClassAd,
-	perSlotResults []predOutcome,
+	failing *failingValues,
 ) *ResourceSuggestion {
 	currentVal := jobAd.EvaluateAttr(comp.JobRequest)
 	if !currentVal.IsNumber() {
@@ -148,24 +172,8 @@ func computeResourceSuggestion(
 		return nil
 	}
 
-	// Collect TARGET.X numeric values from FAILING slots. These are
-	// the slots where lowering (or matching) the request might help.
-	failingValues := []float64{}
-	for i, slot := range slots {
-		if perSlotResults[i] == predTrue {
-			continue
-		}
-		v := slot.EvaluateAttr(comp.SlotAttr)
-		if !v.IsNumber() {
-			continue
-		}
-		n, err := v.NumberValue()
-		if err != nil {
-			continue
-		}
-		failingValues = append(failingValues, n)
-	}
-	if len(failingValues) == 0 {
+	// The values were accumulated during the slot pass; see Analyze.
+	if failing.empty() {
 		return nil
 	}
 
@@ -178,9 +186,9 @@ func computeResourceSuggestion(
 
 	switch comp.Op {
 	case "==":
-		suggestion.Options = suggestEqualityOptions(failingValues)
+		suggestion.Options = suggestEqualityOptions(failing)
 	default:
-		suggestion.Options = suggestRelaxationOptions(failingValues, currentNum, relaxLower)
+		suggestion.Options = suggestRelaxationOptions(failing, currentNum, relaxLower)
 	}
 	if len(suggestion.Options) == 0 {
 		return nil
@@ -205,36 +213,32 @@ func computeResourceSuggestion(
 // raise the request. We don't surface "raise" suggestions today
 // because operators rarely want to advertise needing more — kept here
 // in case a future flip wants to enable it.
-func suggestRelaxationOptions(failingValues []float64, current float64, relaxLower bool) []ResourceSuggestionOption {
-	if !relaxLower {
+func suggestRelaxationOptions(failing *failingValues, current float64, relaxLower bool) []ResourceSuggestionOption {
+	if !relaxLower || failing.empty() {
 		return nil
 	}
 	// Distinct failing values sorted descending. Each value V is a
 	// candidate "if we lower request to V, slots with X >= V (among
 	// the previously failing) would now pass."
-	distinct := distinctSorted(failingValues, false /* descending */)
+	distinct := make([]float64, 0, len(failing.counts))
+	for v := range failing.counts {
+		distinct = append(distinct, v)
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(distinct)))
 	if len(distinct) == 0 {
 		return nil
 	}
 
-	// For each distinct V, count how many failing values are >= V.
-	// Sorted descending, so the count grows monotonically as we walk.
+	// For each distinct V, how many failing slots sit at or above it.
+	// Walking the distinct values descending makes that a running sum,
+	// where counting the whole list per candidate was quadratic in the
+	// number of slots.
 	gainsAt := make(map[float64]int, len(distinct))
-	cumulative := 0
+	running := 0
 	for _, V := range distinct {
-		// Count failing values >= V. Since distinct is sorted
-		// descending and we walk top-down, "this many failing values
-		// are at the visited values so far".
-		n := 0
-		for _, v := range failingValues {
-			if v >= V {
-				n++
-			}
-		}
-		gainsAt[V] = n
-		cumulative = n
+		running += failing.counts[V]
+		gainsAt[V] = running
 	}
-	_ = cumulative // (keeps the loop above readable; cumulative isn't used)
 
 	// Pick three tiers: largest, middle, smallest.
 	tiers := pickTierIndices(len(distinct))
@@ -264,11 +268,11 @@ func suggestRelaxationOptions(failingValues []float64, current float64, relaxLow
 // "set request to the most common value among failing slots" — that
 // unlocks the largest single bucket. We surface up to three buckets
 // in descending popularity.
-func suggestEqualityOptions(failingValues []float64) []ResourceSuggestionOption {
-	counts := map[float64]int{}
-	for _, v := range failingValues {
-		counts[v]++
+func suggestEqualityOptions(failing *failingValues) []ResourceSuggestionOption {
+	if failing.empty() {
+		return nil
 	}
+	counts := failing.counts
 	type pair struct {
 		v float64
 		n int
@@ -312,28 +316,6 @@ func pickTierIndices(n int) []int {
 	}
 	// 3+: top, middle, bottom.
 	return []int{0, n / 2, n - 1}
-}
-
-// distinctSorted deduplicates a float64 slice and returns it sorted.
-// `ascending` chooses the direction.
-func distinctSorted(values []float64, ascending bool) []float64 {
-	if len(values) == 0 {
-		return nil
-	}
-	seen := map[float64]struct{}{}
-	for _, v := range values {
-		seen[v] = struct{}{}
-	}
-	out := make([]float64, 0, len(seen))
-	for v := range seen {
-		out = append(out, v)
-	}
-	if ascending {
-		sort.Float64s(out)
-	} else {
-		sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
-	}
-	return out
 }
 
 // formatNumber renders a float64 as a string suitable for display.

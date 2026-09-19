@@ -97,6 +97,20 @@ type SlotProvider interface {
 	Slots(ctx context.Context, requiredAttrs []string) ([]*classad.ClassAd, error)
 }
 
+// SlotStreamer is an optional SlotProvider capability: deliver slots one
+// at a time instead of as a slice.
+//
+// Implement it wherever the slot set is large. The analyzer retains
+// nothing per slot, so streaming turns the cost of an analysis from "the
+// whole pool, decoded, resident at once" into "one ad at a time" -- the
+// difference between ~730 MiB and nothing measurable on a 100k-slot pool.
+//
+// fn returns false to stop early. The implementation must stop calling
+// fn and return promptly, and must not retain the ad after fn returns.
+type SlotStreamer interface {
+	StreamSlots(ctx context.Context, requiredAttrs []string, fn func(*classad.ClassAd) bool) error
+}
+
 // Result is the JSON-serializable output of an Analyze call.
 type Result struct {
 	// JobReferences is the union of slot attributes referenced by the

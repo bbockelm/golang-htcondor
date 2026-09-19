@@ -58,6 +58,8 @@ type CollectorSlotProvider struct {
 
 	ttl time.Duration
 
+	stream SlotStreamFunc
+
 	mu    sync.Mutex
 	entry *slotCacheEntry
 }
@@ -80,7 +82,23 @@ type slotCacheEntry struct {
 }
 
 // CollectorSlotProviderOption configures a CollectorSlotProvider.
+// SlotStreamFunc delivers slot ads one at a time. It is supplied by the
+// caller rather than derived from SlotQuerier so this package does not
+// need to know the collector's streaming types; the adapter lives where
+// the collector is already imported.
+//
+// fn returns false to stop early; the implementation must then stop and
+// return promptly.
+type SlotStreamFunc func(ctx context.Context, adType, constraint string, projection []string, fn func(*classad.ClassAd) bool) error
+
 type CollectorSlotProviderOption func(*CollectorSlotProvider)
+
+// WithSlotStream supplies a streaming query, which is what keeps an
+// analysis from holding the whole pool in memory. Without it the provider
+// falls back to fetching and caching a slice.
+func WithSlotStream(stream SlotStreamFunc) CollectorSlotProviderOption {
+	return func(p *CollectorSlotProvider) { p.stream = stream }
+}
 
 // WithSlotConstraint scopes the slot pool query with a ClassAd constraint
 // expression (passed verbatim to the collector). Default is no constraint.
@@ -177,6 +195,41 @@ func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []strin
 	p.entry = entry
 
 	return ads, nil
+}
+
+// StreamSlots implements SlotStreamer.
+//
+// It deliberately does NOT consult or populate the cache. The cache exists
+// to avoid re-querying the collector, and it does that by holding every
+// slot ad in the pool decoded for the process lifetime -- which is the
+// allocation this streaming path exists to remove. Paying for the query
+// again is the trade: an analysis is a person asking "why will my job not
+// run", not something on a timer.
+//
+// Falls back to the slice path when no streaming query was supplied, so a
+// provider built without one still works.
+func (p *CollectorSlotProvider) StreamSlots(ctx context.Context, requiredAttrs []string, fn func(*classad.ClassAd) bool) error {
+	if p.stream == nil {
+		ads, err := p.Slots(ctx, requiredAttrs)
+		if err != nil {
+			return err
+		}
+		for _, ad := range ads {
+			if !fn(ad) {
+				return nil
+			}
+		}
+		return nil
+	}
+
+	wantAll, requested := normalizeAttrs(requiredAttrs)
+	var projection []string
+	if wantAll {
+		projection = []string{"*"}
+	} else {
+		projection = sortedKeys(requested)
+	}
+	return p.stream(ctx, p.adType, p.constraint, projection, fn)
 }
 
 // CacheStatus returns a description of the current cache entry, mostly

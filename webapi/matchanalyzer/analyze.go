@@ -99,14 +99,9 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 	}
 	projection := unionStrings(allRefs, IdentityAttrs)
 
-	slots, err := a.slots.Slots(ctx, projection)
-	if err != nil {
-		return nil, fmt.Errorf("matchanalyzer: fetch slots: %w", err)
-	}
-
 	res := &Result{
 		JobReferences:           allRefs,
-		TotalSlots:              len(slots),
+		TotalSlots:              0,
 		FullMatches:             0,
 		Predicates:              make([]PredicateResult, len(preds)),
 		NarrowingPredicateIndex: -1,
@@ -160,26 +155,50 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 		}
 	}
 
-	// perSlotPerPred[predIdx][slotIdx] = outcome. Stored in
-	// predicate-major order because computeResourceSuggestion takes a
-	// slice of outcomes for ONE predicate across all slots — the
-	// memory layout matches that access pattern. Capacity is bounded
-	// by len(slots) * len(preds), which for typical pools (<10k slots,
-	// <20 preds) fits comfortably.
-	perSlotPerPred := make([][]predOutcome, len(preds))
-	for i := range perSlotPerPred {
-		perSlotPerPred[i] = make([]predOutcome, 0, len(slots))
+	// Resource comparisons are detected BEFORE the pass, not after, so
+	// the values a suggestion needs can be accumulated while each slot
+	// is in hand. Detection is expression inspection and costs nothing
+	// per slot.
+	//
+	// Nothing here keeps the slots themselves, or anything else sized by
+	// the number of slots. That is the point: this server fetches every
+	// StartdAd in the pool, and holding them decoded is what pushed it
+	// into the OOM killer. What survives the pass is per-PREDICATE, and
+	// the failing-value histograms are per-DISTINCT-VALUE.
+	comps := make([]*resourceComparison, len(preds))
+	failing := make([]*failingValues, len(preds))
+	for i := range preds {
+		comps[i] = detectResourceComparison(boundExprs[i])
+		if comps[i] != nil {
+			failing[i] = newFailingValues()
+		}
 	}
 
-	for _, slot := range slots {
+	onSlot := func(slot *classad.ClassAd) {
 		results := evalPredicatesAgainstSlot(jobAd, slot, boundExprs)
 		if isFullMatch(results) {
 			res.FullMatches++
 		}
 		for i, r := range results {
-			perSlotPerPred[i] = append(perSlotPerPred[i], r)
+			if comps[i] == nil || r == predTrue {
+				continue
+			}
+			v := slot.EvaluateAttr(comps[i].SlotAttr)
+			if !v.IsNumber() {
+				continue
+			}
+			n, err := v.NumberValue()
+			if err != nil {
+				continue
+			}
+			failing[i].add(n)
 		}
 		a.processSlotResults(slot, results, res, matchedAllOthers, distrCollectors, resolvedSlotAttrs)
+		res.TotalSlots++
+	}
+
+	if err := a.eachSlot(ctx, projection, onSlot); err != nil {
+		return nil, err
 	}
 
 	// Pick the narrowing predicate: highest matchedAllOthers value, with
@@ -218,12 +237,11 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 		if matchedAllOthers[i] == 0 {
 			continue
 		}
-		comp := detectResourceComparison(boundExprs[i])
-		if comp == nil {
+		if comps[i] == nil {
 			continue
 		}
 		_ = p // kept for future per-predicate metadata if needed
-		res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comp, jobAd, slots, perSlotPerPred[i])
+		res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comps[i], jobAd, failing[i])
 	}
 
 	return res, nil
@@ -620,4 +638,37 @@ func valueDisplay(v classad.Value) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// eachSlot calls fn once per slot, preferring a streaming provider.
+//
+// Streaming is what keeps this bounded. A slice provider must materialize
+// every StartdAd in the pool before the first one can be looked at --
+// measured at ~7.7 KiB per decoded ad, so a 100k-slot pool is ~730 MiB
+// held at once, which is how this server met the OOM killer. A streaming
+// provider hands over one ad at a time and nothing here retains it, so
+// the pass costs what a single ad costs.
+//
+// The slice path remains for providers that cannot stream, including the
+// in-memory ones the tests use.
+func (a *Analyzer) eachSlot(ctx context.Context, projection []string, fn func(*classad.ClassAd)) error {
+	if streamer, ok := a.slots.(SlotStreamer); ok {
+		err := streamer.StreamSlots(ctx, projection, func(slot *classad.ClassAd) bool {
+			fn(slot)
+			return true
+		})
+		if err != nil {
+			return fmt.Errorf("matchanalyzer: stream slots: %w", err)
+		}
+		return nil
+	}
+
+	slots, err := a.slots.Slots(ctx, projection)
+	if err != nil {
+		return fmt.Errorf("matchanalyzer: fetch slots: %w", err)
+	}
+	for _, slot := range slots {
+		fn(slot)
+	}
+	return nil
 }

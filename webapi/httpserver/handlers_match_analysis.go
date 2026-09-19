@@ -29,11 +29,59 @@ func (s *Handler) matchAnalysisProvider() *matchanalyzer.CollectorSlotProvider {
 			s.collector,
 			// 30 seconds is the matchanalyzer default; spelled out
 			// here so the choice is reviewable in the handler context
-			// where this provider's lifetime matters.
+			// where this provider's lifetime matters. It only governs
+			// the fallback slice path -- the streaming path below does
+			// not cache, because caching here means holding every
+			// StartdAd in the pool decoded for the process lifetime.
 			matchanalyzer.WithSlotCacheTTL(30*time.Second),
+			matchanalyzer.WithSlotStream(s.streamSlotAds),
 		)
 	})
 	return s.matchAnalysisSlots
+}
+
+// streamSlotAds adapts the collector's channel-based streaming query to
+// the callback the analyzer wants.
+//
+// The adapter lives here rather than in matchanalyzer so that package does
+// not have to import the collector for its stream types.
+//
+// Draining matters: the collector's sender writes into a buffered channel
+// and gives up after a write timeout, so abandoning the range on an early
+// stop would leave it blocking. On early stop we keep receiving until the
+// channel closes and simply discard, which costs nothing per ad because
+// nothing is retained.
+func (s *Handler) streamSlotAds(
+	ctx context.Context,
+	adType, constraint string,
+	projection []string,
+	fn func(*classad.ClassAd) bool,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// limit 0 = no limit; the analyzer wants the whole pool.
+	ch, err := s.collector.QueryAdsStream(ctx, adType, constraint, projection, 0, nil)
+	if err != nil {
+		return err
+	}
+
+	stopped := false
+	for res := range ch {
+		if res.Err != nil {
+			return res.Err
+		}
+		if stopped || res.Ad == nil {
+			continue
+		}
+		if !fn(res.Ad) {
+			// Stop feeding the analyzer, but keep draining so the
+			// sender is not left blocked on a full channel.
+			stopped = true
+			cancel()
+		}
+	}
+	return nil
 }
 
 // handleJobMatchAnalysis handles GET /api/v1/jobs/{id}/match-analysis.
