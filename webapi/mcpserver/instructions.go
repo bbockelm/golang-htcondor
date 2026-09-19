@@ -202,4 +202,9 @@ func (s *Server) rebuildInstructions() {
 	}
 	built := buildInstructions(name, custom) + skillsInstructions(s.skillsLibrary())
 	s.instructions.Store(&built)
+	// The SDK transport bakes this text, and the catalogue it is built
+	// from, into servers it caches per scope set. Bumping the generation
+	// is what makes those caches notice; without it a reconfigure would
+	// change the text every other surface serves and not this one.
+	s.catalogGen.Add(1)
 }

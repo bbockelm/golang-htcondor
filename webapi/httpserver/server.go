@@ -264,6 +264,10 @@ type Config struct {
 	// MCPMaxRequestDuration is the hard stop on an MCP request that keeps
 	// making progress. See HandlerConfig.MCPMaxRequestDuration.
 	MCPMaxRequestDuration time.Duration
+
+	// MCPUseSDKTransport serves /mcp with the upstream MCP SDK's transport.
+	// See HandlerConfig.MCPUseSDKTransport.
+	MCPUseSDKTransport bool
 	// RequiredCredentials names the OAuth service credentials that must
 	// exist before a job may be submitted. See
 	// HandlerConfig.RequiredCredentials.
@@ -373,6 +377,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
+		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,
 		RequiredCredentials:         cfg.RequiredCredentials,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,

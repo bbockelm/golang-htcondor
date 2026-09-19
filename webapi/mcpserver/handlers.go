@@ -152,7 +152,20 @@ var readOnlyMCPTools = map[string]bool{
 // the caller's OAuth2 scope set if the HTTP transport provided one
 // via WithGrantedScopes. Stdio callers (no scopes on context) see
 // the full catalog.
+// handleListTools answers tools/list.
 func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interface{} {
+	return map[string]interface{}{
+		"tools": s.toolsFor(ctx),
+	}
+}
+
+// toolsFor is the catalogue this caller is allowed to see.
+//
+// Split out from handleListTools so the SDK transport registers the same
+// slice this one serves. Reading the catalogue from anywhere else -- a
+// second list, or the JSON of a tools/list response -- is a second source
+// that can disagree with this one about what exists.
+func (s *Server) toolsFor(ctx context.Context) []Tool {
 	tools := []Tool{
 		{
 			Name: "submit_job",
@@ -720,9 +733,7 @@ func (s *Server) handleListTools(ctx context.Context, _ json.RawMessage) interfa
 			filtered = append(filtered, t)
 		}
 	}
-	return map[string]interface{}{
-		"tools": filtered,
-	}
+	return filtered
 }
 
 // handleCallTool executes a tool call.

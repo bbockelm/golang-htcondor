@@ -1632,6 +1632,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	pingInterval := loadPingInterval(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
+	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -1723,6 +1724,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PingInterval:                pingInterval,
 		MCPWatchMaxWait:             mcpWatchMaxWait,
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
+		MCPUseSDKTransport:          mcpUseSDKTransport,
 		RequiredCredentials:         requiredCredentials,
 	})
 	if err != nil {
@@ -2774,6 +2776,39 @@ func loadRequiredCredentials(cfg *config.Config, logger *logging.Logger) []strin
 // bounded by this instead of by a timeout meant for ordinary replies. It is a
 // backstop against a hung tool holding a connection, not a tuning knob: the
 // cap an agent is told about is derived from it.
+// loadMCPUseSDKTransport reads HTTP_API_MCP_TRANSPORT.
+//
+//	builtin  the hand-rolled JSON-RPC handler (default)
+//	sdk      the upstream modelcontextprotocol/go-sdk transport
+//
+// The SDK transport is what the current protocol revision needs: it is
+// stateless, which SEP-2575 (2026-07-28) requires, where the built-in one
+// still answers "2024-11-05". It is not the default yet because it is
+// stricter about the request than the built-in one -- notably it requires an
+// Accept header naming both application/json and text/event-stream, which a
+// spec-compliant client sends and a hand-written curl usually does not.
+//
+// An unrecognised value refuses to start rather than silently choosing: which
+// transport is serving decides what a client must send, so guessing it would
+// be found out by a client, not by an operator.
+func loadMCPUseSDKTransport(cfg *config.Config, logger *logging.Logger) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_TRANSPORT")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "builtin":
+		return false
+	case "sdk":
+		return true
+	default:
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_MCP_TRANSPORT: refusing to start",
+			"value", raw, "expected", "builtin or sdk")
+		log.Fatalf("invalid HTTP_API_MCP_TRANSPORT=%q: expected builtin or sdk", raw)
+		return false
+	}
+}
+
 func loadMCPMaxRequestDuration(cfg *config.Config, logger *logging.Logger) time.Duration {
 	raw, ok := cfg.Get("HTTP_API_MCP_MAX_REQUEST_DURATION")
 	if !ok || strings.TrimSpace(raw) == "" {
