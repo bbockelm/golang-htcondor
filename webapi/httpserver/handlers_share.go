@@ -201,7 +201,10 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// downloader, hiding the actual data subject).
 	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
 		cluster, proc, classadStringLit(owner))
-	ads, _, qerr := s.schedd.QueryWithOptions(ctx, jobConstraint, &htcondor.QueryOptions{
+	// getSchedd, not the s.schedd snapshot: this server replaces its
+	// schedd handle when the collector reports a new address, and a
+	// captured pointer keeps dialling a socket that no longer exists.
+	ads, _, qerr := s.getSchedd().QueryWithOptions(ctx, jobConstraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Owner"},
 		Limit:      1,
 	})

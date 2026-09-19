@@ -68,7 +68,7 @@ func (s watchSource) Queue(ctx context.Context, owner string, attrs []string, li
 	// (each ad's placement is recorded by identity), so re-feeding them
 	// is harmless.
 	seen = 0
-	ads, _, err := s.h.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	ads, _, err := s.h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Limit:      limit + 1,
 		Projection: attrs,
 		FetchOpts:  htcondor.FetchNormal,
