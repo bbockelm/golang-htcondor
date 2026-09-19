@@ -323,12 +323,40 @@ func (l *localIdentity) refreshLoop(ctx context.Context) {
 // unless this deployment reads membership from the system, in which case
 // the token's claim is not consulted at all.
 func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups []string) (account string, groups []string, err error) {
+	account, groups, _, err = l.resolveWithHint(ctx, subject, tokenGroups, "")
+	return account, groups, err
+}
+
+// indexIsComplete reports whether the mapping is being made with full
+// knowledge of the account database. Only then is a mapping worth
+// remembering: a partial index cannot have ruled out a second account
+// claiming the same GECOS.
+func (l *localIdentity) indexIsComplete() bool {
+	return l.mapsAccount() && l.resolver.Degraded() == nil
+}
+
+// resolveWithHint is resolve, with an optional account to try first.
+//
+// The hint is a previously confirmed mapping (see identity_cookie.go). It
+// is CONFIRMED, never trusted: the account must currently carry the
+// asserted subject as its GECOS. What it avoids is the enumeration needed
+// to discover that account from scratch -- which a container cannot do for
+// the first minutes of its life.
+//
+// hinted reports whether the hint was used, so the caller can tell a
+// mapping made under complete knowledge from one made on a confirmation.
+func (l *localIdentity) resolveWithHint(ctx context.Context, subject string, tokenGroups []string, hint string) (account string, groups []string, hinted bool, err error) {
 	account, groups = subject, tokenGroups
 
 	if l.mapsAccount() {
-		account, err = l.resolver.Resolve(ctx, subject)
-		if err != nil {
-			return "", nil, err
+		switch {
+		case hint != "" && l.resolver.Confirm(ctx, subject, hint):
+			account, hinted = hint, true
+		default:
+			account, err = l.resolver.Resolve(ctx, subject)
+			if err != nil {
+				return "", nil, false, err
+			}
 		}
 	}
 	if l.sourcesGroups() {
@@ -359,14 +387,14 @@ func (l *localIdentity) resolve(ctx context.Context, subject string, tokenGroups
 			// empty group list, which reads downstream as a real "belongs
 			// to nothing" and is indistinguishable from a user who was
 			// legitimately removed from everything.
-			return "", nil, fmt.Errorf(
+			return "", nil, false, fmt.Errorf(
 				"group lookup for %q learned nothing: %s was unavailable: %w",
 				account, degraded.Source, degraded.Err)
 		case err != nil:
-			return "", nil, fmt.Errorf("reading groups for %q: %w", account, err)
+			return "", nil, false, fmt.Errorf("reading groups for %q: %w", account, err)
 		}
 	}
-	return account, groups, nil
+	return account, groups, hinted, nil
 }
 
 // describeFailure turns a mapping error into something an operator can

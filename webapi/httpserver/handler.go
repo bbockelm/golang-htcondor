@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/collections/crypt"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -267,6 +268,10 @@ type Handler struct {
 	webuiAdminGroups *groupSet      // Required for Web UI admin pages (empty = no admin UI)
 	metricsPublic    bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
 	htcondorConfig   *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+	// identityCookieKey signs the remembered-account hint. Derived from
+	// the application master key, which the pool signing keys wrap; empty
+	// when the deployment has no signing keys.
+	identityCookieKey []byte
 	// dbMirror routes heavy job and history reads to a synchronized
 	// htcondordb mirror when one is current (handlers_dbroute.go). It
 	// shares its freshness policy with the MCP tools via webapi/dbmirror.
@@ -1168,6 +1173,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// Lets the index survive a restart; see
 		// migrations/0008_identity_index.sql.
 		li.store = newIdentityIndexStore(h.db)
+
+		// The remembered-account hint is signed with a subkey of the
+		// application master key, which the pool signing keys wrap. No
+		// signing keys means no master, and the hint is simply
+		// unavailable -- every login then takes the index path.
+		if keks, kerr := signingKEKs(cfg.HTCondorConfig); kerr != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Could not load pool signing keys; logins will not use a remembered account", "error", kerr)
+		} else if master, merr := openOrCreateMaster(context.Background(), h.db, keks); merr != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Could not open the application master key; logins will not use a remembered account", "error", merr)
+		} else if len(master) > 0 {
+			if key, derr := crypt.Subkey(master, identityCookieInfo); derr != nil {
+				logger.Warn(logging.DestinationHTTP,
+					"Could not derive the identity cookie key", "error", derr)
+			} else {
+				h.identityCookieKey = key
+			}
+		}
 		li.warmUp(context.Background())
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
 			"subject_mapped_to_account", li.mapsAccount(),

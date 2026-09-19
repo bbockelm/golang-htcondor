@@ -312,6 +312,36 @@ func (r *Resolver) localPart(subject string) (string, bool) {
 	return subject[:at], true
 }
 
+// Confirm reports whether account currently has subject as its GECOS.
+//
+// This is the index-free half of the mapping: os/user can look an account
+// up by name even where nothing can enumerate the account database, which
+// is exactly the asymmetry that makes a cheap probe possible when a
+// caller already has a good guess at the answer.
+//
+// It is only ever a CONFIRMATION of a proposal made elsewhere. It cannot
+// see that two accounts share this GECOS, because answering that needs the
+// index -- so a caller must not use this to accept a proposal from an
+// untrusted source, only one it knows was made under complete knowledge.
+func (r *Resolver) Confirm(ctx context.Context, subject, account string) bool {
+	if subject == "" || account == "" || r.verifier == nil {
+		return false
+	}
+	gecos, err := r.verifier.GecosOf(ctx, account)
+	if err != nil {
+		return false
+	}
+	// The same candidate order Resolve uses, so a probe cannot accept
+	// something a full resolution would have refused.
+	if gecos == subject {
+		return true
+	}
+	if local, ok := r.localPart(subject); ok && gecos == local {
+		return true
+	}
+	return false
+}
+
 // resolveByGecos matches the subject against the whole GECOS field,
 // exactly. GECOS is conventionally comma-separated, and matching only a
 // component would mean an account could carry somebody else's identity
