@@ -763,6 +763,89 @@ type AdminRevokeResponse struct {
 	IDP    int64 `json:"idp"`
 }
 
+// AdminRevokeTokenRequest names one token from the admin listing.
+type AdminRevokeTokenRequest struct {
+	// Kind is "access" or "refresh" -- which table the fingerprint is in.
+	Kind string `json:"kind"`
+	// Fingerprint is the redacted signature shown in the listing. The
+	// trailing "..." may be included or not.
+	Fingerprint string `json:"fingerprint"`
+}
+
+// AdminRevokeTokenResponse reports what the revocation actually hit.
+type AdminRevokeTokenResponse struct {
+	Revoked  int64  `json:"revoked"`
+	ClientID string `json:"client_id"`
+	Subject  string `json:"subject,omitempty"`
+}
+
+// handleAdminRevokeToken handles POST /api/v1/admin/oauth2/tokens/revoke.
+//
+// Revoking ONE token from the listing revokes the whole grant it belongs
+// to -- the access token and the refresh token minted with it. Killing an
+// access token on its own would be theatre: a client holding the refresh
+// token mints a replacement within minutes, and stopping exactly that is
+// why an operator is here. It matters most for clients that registered
+// themselves dynamically, which cannot simply be disabled.
+//
+// Rows are deactivated rather than deleted, matching revoke-by-subject, so
+// the listing can still show what was revoked and by implication when.
+func (s *Handler) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusNotFound, "OAuth2 is not enabled on this server")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req AdminRevokeTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	storage := s.oauth2Provider.GetStorage()
+	grant, err := storage.FindGrantBySignaturePrefix(r.Context(), req.Kind, req.Fingerprint)
+	switch {
+	case errors.Is(err, ErrTokenNotFound):
+		// Already gone is not a failure to report as one -- a listing a
+		// few seconds stale is the normal way to arrive here.
+		s.writeError(w, http.StatusNotFound, "No token matches that fingerprint; it may already have expired")
+		return
+	case errors.Is(err, ErrTokenAmbiguous):
+		s.writeError(w, http.StatusConflict,
+			"More than one token matches that fingerprint; refusing to guess which")
+		return
+	case err != nil:
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	n, err := storage.RevokeGrant(r.Context(), grant.RequestID)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to revoke a grant",
+			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to revoke the token")
+		return
+	}
+
+	// Info, not Debug: this is an administrative action against somebody
+	// else's access, and the operator who did it should be on the record.
+	s.logger.Info(logging.DestinationHTTP, "Administrator revoked one OAuth2 grant",
+		"client_id", grant.ClientID, "subject", grant.Subject,
+		"kind", req.Kind, "fingerprint", redactSignature(grant.Signature), "revoked", n)
+
+	s.writeJSON(w, http.StatusOK, AdminRevokeTokenResponse{
+		Revoked: n, ClientID: grant.ClientID, Subject: grant.Subject,
+	})
+}
+
 // handleAdminRevokeTokens handles POST /api/v1/admin/oauth2/revoke.
 //
 // It cuts off one user immediately, across every client they have authorized.

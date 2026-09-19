@@ -1,13 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AdminToken } from "@/lib/api";
 import { ChipList } from "@/components/ChipList";
+import { ConfirmButton } from "@/components/ConfirmButton";
 
 export default function AdminTokensPage() {
   const [activeOnly, setActiveOnly] = useState(true);
   const [clientFilter, setClientFilter] = useState("");
+  const qc = useQueryClient();
+
+  const revoke = useMutation({
+    mutationFn: (t: AdminToken) =>
+      api.admin.revokeToken({ kind: t.kind, fingerprint: t.signature_prefix }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "tokens"] }),
+  });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["admin", "tokens", { activeOnly, clientFilter }],
@@ -26,7 +34,10 @@ export default function AdminTokensPage() {
         <h1 className="text-2xl font-bold text-gray-900">OAuth2 Tokens</h1>
         <p className="text-sm text-gray-500">
           Active access and refresh tokens. Signatures are redacted to a
-          fingerprint; deleting a client (in OAuth2 Clients) revokes its tokens.
+          fingerprint; deleting a client (in OAuth2 Clients) revokes its
+          tokens. Revoking one row here revokes the whole grant — the access
+          token and the refresh token issued with it — because revoking an
+          access token on its own only lasts until the client refreshes.
         </p>
       </div>
 
@@ -69,6 +80,7 @@ export default function AdminTokensPage() {
                 <th className="px-3 py-2">Scopes</th>
                 <th className="px-3 py-2">Issued</th>
                 <th className="px-3 py-2">Expires</th>
+                <th className="px-3 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -76,6 +88,8 @@ export default function AdminTokensPage() {
                 <TokenRow
                   key={`${t.kind}-${t.signature_prefix}-${i}`}
                   token={t}
+                  onRevoke={() => revoke.mutate(t)}
+                  busy={revoke.isPending}
                 />
               ))}
             </tbody>
@@ -86,7 +100,15 @@ export default function AdminTokensPage() {
   );
 }
 
-function TokenRow({ token }: { token: AdminToken }) {
+function TokenRow({
+  token,
+  onRevoke,
+  busy,
+}: {
+  token: AdminToken;
+  onRevoke: () => void;
+  busy: boolean;
+}) {
   return (
     <tr
       className={
@@ -115,6 +137,20 @@ function TokenRow({ token }: { token: AdminToken }) {
       </td>
       <td className="px-3 py-2 text-xs">
         {token.expires_at ? new Date(token.expires_at).toLocaleString() : "—"}
+      </td>
+      <td className="px-3 py-2 text-right">
+        {token.active ? (
+          <ConfirmButton
+            compact
+            label="Revoke"
+            confirmLabel="Revoke"
+            onConfirm={onRevoke}
+            pending={busy}
+            title={`Revoke this grant for ${token.subject || token.client_id} — the paired refresh token goes with it`}
+          />
+        ) : (
+          <span className="text-xs text-gray-400">revoked</span>
+        )}
       </td>
     </tr>
   );

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
@@ -899,6 +900,111 @@ func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceC
 		WHERE device_code = ?
 	`, deviceCode)
 	return err
+}
+
+// GrantRef identifies one authorization grant: the pairing of an access
+// token with the refresh token minted alongside it.
+type GrantRef struct {
+	RequestID string
+	ClientID  string
+	Subject   string
+	Signature string
+}
+
+// ErrTokenNotFound reports that no token matches a fingerprint.
+var ErrTokenNotFound = errors.New("no token matches that fingerprint")
+
+// ErrTokenAmbiguous reports that a fingerprint matches more than one
+// token. Refusing is the point: the fingerprint is a truncated signature,
+// so acting on "probably that one" would revoke somebody else's access.
+var ErrTokenAmbiguous = errors.New("more than one token matches that fingerprint")
+
+// FindGrantBySignaturePrefix resolves the fingerprint shown in the admin
+// token listing back to the grant behind it.
+//
+// kind selects the table, because the listing shows access and refresh
+// tokens together and their signatures live in different ones.
+func (s *OAuth2Storage) FindGrantBySignaturePrefix(ctx context.Context, kind, prefix string) (GrantRef, error) {
+	table, err := tokenTableFor(kind)
+	if err != nil {
+		return GrantRef{}, err
+	}
+	prefix = strings.TrimSuffix(strings.TrimSpace(prefix), "...")
+	// Short enough to be ambiguous on purpose is still ambiguous; a
+	// minimum keeps an operator from revoking a random grant with "a".
+	if len(prefix) < 6 {
+		return GrantRef{}, fmt.Errorf("fingerprint must be at least 6 characters")
+	}
+
+	// Table name comes from a fixed list, never from user input. LIKE is
+	// avoided so a fingerprint containing % or _ cannot widen the match.
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT signature, request_id, client_id, subject FROM "+table+ //nolint:gosec // G202: table is from a fixed literal list
+			" WHERE substr(signature, 1, ?) = ? LIMIT 2",
+		len(prefix), prefix)
+	if err != nil {
+		return GrantRef{}, fmt.Errorf("looking up %s token %q: %w", kind, prefix, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found []GrantRef
+	for rows.Next() {
+		var g GrantRef
+		if err := rows.Scan(&g.Signature, &g.RequestID, &g.ClientID, &g.Subject); err != nil {
+			return GrantRef{}, fmt.Errorf("reading token row: %w", err)
+		}
+		found = append(found, g)
+	}
+	if err := rows.Err(); err != nil {
+		return GrantRef{}, fmt.Errorf("looking up %s token %q: %w", kind, prefix, err)
+	}
+
+	switch len(found) {
+	case 0:
+		return GrantRef{}, ErrTokenNotFound
+	case 1:
+		return found[0], nil
+	default:
+		return GrantRef{}, ErrTokenAmbiguous
+	}
+}
+
+// RevokeGrant deactivates every token issued under one grant -- the access
+// token and the refresh token that came with it.
+//
+// Revoking only the access token would be theatre: a client holding the
+// refresh token mints a new one within minutes, which is exactly the case
+// an operator reaches for this to stop. Rows are deactivated rather than
+// deleted, matching RevokeAllForSubject, so the listing can still show
+// what was revoked.
+func (s *OAuth2Storage) RevokeGrant(ctx context.Context, requestID string) (int64, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return 0, fmt.Errorf("request id is required")
+	}
+	var total int64
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		res, err := s.db.ExecContext(ctx,
+			"UPDATE "+table+" SET active = 0 WHERE request_id = ? AND active = 1", requestID) //nolint:gosec // G202: table is from a fixed literal list
+		if err != nil {
+			return total, fmt.Errorf("revoking %s for grant %s: %w", table, requestID, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, nil
+}
+
+// tokenTableFor maps the listing's "kind" to its table.
+func tokenTableFor(kind string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "access":
+		return "oauth2_access_tokens", nil
+	case "refresh":
+		return "oauth2_refresh_tokens", nil
+	default:
+		return "", fmt.Errorf("kind must be \"access\" or \"refresh\", got %q", kind)
+	}
 }
 
 // RevokeAllForSubject deactivates every access and refresh token belonging to
