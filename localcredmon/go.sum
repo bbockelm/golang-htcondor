@@ -2,8 +2,8 @@ github.com/PelicanPlatform/classad v0.29.14 h1:8DHt6whdxGRaQqyqFubNVxgx6bmTD6h9s
 github.com/PelicanPlatform/classad v0.29.14/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
 github.com/bbockelm/cedar v0.6.19 h1:kvdL3DxV3xLuytx9+1IUxxtcdT6+/cRSMnEVLmjgXUM=
 github.com/bbockelm/cedar v0.6.19/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
-github.com/bbockelm/gosssd v0.0.2 h1:g/GTPvcmackmfOmUjMt/Efka5YJwuVTeSvblxOjUv5c=
-github.com/bbockelm/gosssd v0.0.2/go.mod h1:Hz8jIcIkQnFmA/ekP2ZWpnPqmyIxftPPFsi+Y3wqRL0=
+github.com/bbockelm/gosssd v0.0.3 h1:Rtp3c26AhmolQ+NVs8IRpIKyiPrZqnEuqrLV3yRoqLc=
+github.com/bbockelm/gosssd v0.0.3/go.mod h1:Hz8jIcIkQnFmA/ekP2ZWpnPqmyIxftPPFsi+Y3wqRL0=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=

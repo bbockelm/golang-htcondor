@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
-	github.com/bbockelm/gosssd v0.0.2 // indirect
+	github.com/bbockelm/gosssd v0.0.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
