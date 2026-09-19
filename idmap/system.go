@@ -48,12 +48,24 @@ func (s *SystemAccounts) Enumerate(ctx context.Context) ([]Account, error) {
 	// reason the rest are missing, so convert first and hand the error back
 	// alongside the result. Discarding the accounts here would leave the
 	// resolver unable to tell a partial answer from no answer.
-	found, err := droppriv.EnumerateAccounts(ctx, s.Path)
+	found, _, err := droppriv.EnumerateAccountsWithProvenance(ctx, s.Path)
 	accounts := make([]Account, 0, len(found))
 	for _, a := range found {
 		accounts = append(accounts, Account{Username: a.Username, Gecos: a.Gecos, UID: a.UID})
 	}
 	return accounts, err
+}
+
+// EnumerateWithProvenance also reports whether a directory contributed.
+// See droppriv.EnumerateAccountsWithProvenance for why that matters on a
+// restart.
+func (s *SystemAccounts) EnumerateWithProvenance(ctx context.Context) ([]Account, bool, error) {
+	found, fromDirectory, err := droppriv.EnumerateAccountsWithProvenance(ctx, s.Path)
+	accounts := make([]Account, 0, len(found))
+	for _, a := range found {
+		accounts = append(accounts, Account{Username: a.Username, Gecos: a.Gecos, UID: a.UID})
+	}
+	return accounts, fromDirectory, err
 }
 
 // SystemGecos re-checks a candidate account through droppriv.

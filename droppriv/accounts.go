@@ -127,7 +127,26 @@ func GecosInFile(ctx context.Context, path, username string) (string, error) {
 // file. That is safe rather than merely limited: every hit it produces is
 // re-checked with GecosOf, which does reach the directory, so an
 // incomplete index can fail to find somebody but cannot promote anybody.
-func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
+func EnumerateAccounts(ctx context.Context, path string) ([]Account, error) {
+	accounts, _, err := EnumerateAccountsWithProvenance(ctx, path)
+	return accounts, err
+}
+
+// EnumerateAccountsWithProvenance is EnumerateAccounts, and also reports
+// whether a DIRECTORY contributed to the result.
+//
+// The distinction matters on a restart. "The directory named no accounts"
+// and "no directory was consulted at all" produce identical account lists,
+// but only the first is knowledge. A container's SSSD socket does not
+// exist for the first seconds of the pod's life, so an index built then
+// looks complete while covering nothing but the image's own accounts --
+// and would replace a perfectly good one restored from cache.
+//
+// False here does not mean something is wrong: a host with no directory
+// reports false forever and is entirely healthy. It means only that this
+// answer cannot speak for a directory, so a caller holding one that could
+// must not throw it away.
+func EnumerateAccountsWithProvenance(_ context.Context, path string) (accounts []Account, fromDirectory bool, err error) {
 	// An explicitly configured file is the whole answer: the operator named
 	// the database, and silently adding the directory to it would make the
 	// index disagree with the verifier, which reads that same file.
@@ -137,11 +156,10 @@ func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 	}
 	f, err := os.Open(path) //nolint:gosec // the path is operator configuration
 	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
+		return nil, false, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
 
-	var accounts []Account
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -173,21 +191,22 @@ func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 		})
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	if !explicit {
 		directory, derr := directoryAccounts()
 		accounts = mergeDirectoryAccounts(accounts, directory)
+		fromDirectory = len(directory) > 0
 		if derr != nil {
 			// The file was read, so hand back what it held -- but say that
 			// the directory half is missing. "The directory has no extra
 			// accounts" and "the directory could not be reached" produce an
 			// identical index, and only one of them is somebody's fault.
-			return accounts, &DirectoryError{Source: "sssd", Err: derr}
+			return accounts, false, &DirectoryError{Source: "sssd", Err: derr}
 		}
 	}
-	return accounts, nil
+	return accounts, fromDirectory, nil
 }
 
 // ErrDirectoryEmpty reports that the directory service answered and named

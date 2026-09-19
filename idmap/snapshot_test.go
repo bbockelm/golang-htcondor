@@ -195,3 +195,129 @@ func TestARestoredEntryIsStillVerified(t *testing.T) {
 		t.Errorf("Resolve = %q; a stale cache entry was believed without checking", account)
 	}
 }
+
+// provenanceEnum reports whether a directory contributed, the way
+// SystemAccounts does.
+type provenanceEnum struct {
+	accounts      []Account
+	fromDirectory bool
+	err           error
+	calls         int
+}
+
+func (p *provenanceEnum) Name() string { return "provenance" }
+func (p *provenanceEnum) Enumerate(context.Context) ([]Account, error) {
+	p.calls++
+	return p.accounts, p.err
+}
+func (p *provenanceEnum) EnumerateWithProvenance(context.Context) ([]Account, bool, error) {
+	p.calls++
+	return p.accounts, p.fromDirectory, p.err
+}
+
+// The exact sequence observed on a restarted pod:
+//
+//	Restored the account index saved by a previous run  accounts=4267
+//	Indexed accounts by GECOS for identity mapping      accounts=18
+//
+// The restored index covered a directory; the startup rebuild ran before
+// the SSSD sidecar's socket existed, so it saw only the container's own
+// accounts and reported NO error -- "no directory here" is not a failure.
+// It therefore looked like complete knowledge and replaced 4267 accounts
+// with 18, which is precisely what persisting the index was meant to
+// prevent.
+func TestAColdStartDoesNotClobberARestoredDirectoryIndex(t *testing.T) {
+	donor := New(&provenanceEnum{
+		accounts:      []Account{{Username: "bbockelm", Gecos: "bockelman"}},
+		fromDirectory: true,
+	}, &fakeVerifier{gecos: map[string]string{"bbockelm": "bockelman"}})
+	if err := donor.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, ok := donor.Snapshot()
+	if !ok {
+		t.Fatal("no snapshot")
+	}
+	if !snap.FromDirectory {
+		t.Fatal("the snapshot does not record that it covered a directory")
+	}
+
+	// The restarted process: cache restored, then a rebuild that reaches
+	// no directory and says so by reporting no error.
+	cold := &provenanceEnum{
+		accounts:      []Account{{Username: "root", Gecos: "root"}},
+		fromDirectory: false,
+	}
+	r := New(cold, &fakeVerifier{gecos: map[string]string{"bbockelm": "bockelman", "root": "root"}})
+	r.Restore(snap)
+
+	if err := r.Refresh(context.Background()); err == nil {
+		t.Error("the cold rebuild reported success; the caller cannot tell the index was protected")
+	}
+
+	if got, _, _ := r.Stats(); got != 1 || !indexKnows(r, "bockelman") {
+		t.Errorf("index holds %d accounts and lost the directory mapping; a cold start clobbered the cache", got)
+	}
+	account, err := r.Resolve(context.Background(), "bockelman")
+	if err != nil || account != "bbockelm" {
+		t.Errorf("Resolve = %q, %v; the restored directory mapping was lost", account, err)
+	}
+}
+
+func indexKnows(r *Resolver, gecos string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.byGecos[gecos]
+	return ok
+}
+
+// A directory-backed build must still replace a directory-backed index,
+// or the first one would be permanent.
+func TestADirectoryBuildStillReplacesADirectoryIndex(t *testing.T) {
+	enum := &provenanceEnum{
+		accounts:      []Account{{Username: "bbockelm", Gecos: "bockelman"}},
+		fromDirectory: true,
+	}
+	r := New(enum, &fakeVerifier{gecos: map[string]string{
+		"bbockelm": "bockelman", "tannenba": "tatannen",
+	}})
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	enum.accounts = []Account{
+		{Username: "bbockelm", Gecos: "bockelman"},
+		{Username: "tannenba", Gecos: "tatannen"},
+	}
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got, _, _ := r.Stats(); got != 2 {
+		t.Errorf("index holds %d accounts, want 2", got)
+	}
+}
+
+// On a host that genuinely has no directory, nothing is protected and
+// ordinary rebuilds must keep working -- otherwise the first index would
+// freeze forever.
+func TestWithoutADirectoryRebuildsAreUnaffected(t *testing.T) {
+	enum := &provenanceEnum{
+		accounts:      []Account{{Username: "root", Gecos: "root"}},
+		fromDirectory: false,
+	}
+	r := New(enum, &fakeVerifier{gecos: map[string]string{"root": "root", "daemon": "daemon"}})
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	enum.accounts = []Account{
+		{Username: "root", Gecos: "root"},
+		{Username: "daemon", Gecos: "daemon"},
+	}
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got, _, _ := r.Stats(); got != 2 {
+		t.Errorf("index holds %d accounts; a no-directory host cannot rebuild", got)
+	}
+}
