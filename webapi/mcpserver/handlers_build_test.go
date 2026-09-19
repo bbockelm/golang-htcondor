@@ -44,6 +44,7 @@ func TestBuildDestination(t *testing.T) {
 		destination string
 		stagingBase string
 		image       string
+		owner       string
 		want        string
 		wantErr     bool
 	}{
@@ -80,11 +81,93 @@ func TestBuildDestination(t *testing.T) {
 			image:       "py311.sif",
 			wantErr:     true,
 		},
+		{
+			// CHTC's layout: /chtc/staging/<initial>/<netid>. A fixed
+			// prefix cannot express it, which is why the template exists.
+			name:        "per-user template",
+			stagingBase: "osdf:///chtc/staging/{initial}/{user}",
+			image:       "py311.sif",
+			owner:       "bbockelm",
+			want:        "osdf:///chtc/staging/b/bbockelm/py311.sif",
+		},
+		{
+			name:        "user placeholder alone",
+			stagingBase: "osdf:///site/builds/{user}",
+			image:       "py311.sif",
+			owner:       "alice",
+			want:        "osdf:///site/builds/alice/py311.sif",
+		},
+		{
+			name:        "initial is lowercased",
+			stagingBase: "osdf:///chtc/staging/{initial}/{user}",
+			image:       "x.sif",
+			owner:       "Bbockelm",
+			want:        "osdf:///chtc/staging/b/Bbockelm/x.sif",
+		},
+		{
+			// An explicit destination bypasses the template entirely.
+			name:        "explicit destination ignores the template",
+			destination: "osdf:///elsewhere/x.sif",
+			stagingBase: "osdf:///chtc/staging/{initial}/{user}",
+			image:       "x.sif",
+			owner:       "bbockelm",
+			want:        "osdf:///elsewhere/x.sif",
+		},
+		{
+			// Publishing to a path containing a literal "{user}" would
+			// look like it worked.
+			name:        "template with no identified caller is an error",
+			stagingBase: "osdf:///chtc/staging/{initial}/{user}",
+			image:       "x.sif",
+			wantErr:     true,
+		},
+		{
+			name:        "unknown placeholder is rejected",
+			stagingBase: "osdf:///chtc/staging/{netid}",
+			image:       "x.sif",
+			owner:       "bbockelm",
+			wantErr:     true,
+		},
+		{
+			// Distinct from the case above: this one HAS a valid
+			// placeholder, so it goes down the expansion path and is
+			// caught only by the post-expansion check. Without this
+			// case that check is dead code -- a mutation removing it
+			// left every other test green.
+			name:        "unknown placeholder alongside a valid one is rejected",
+			stagingBase: "osdf:///chtc/staging/{user}/{netid}",
+			image:       "x.sif",
+			owner:       "bbockelm",
+			wantErr:     true,
+		},
+		{
+			// The owner comes from authentication, not the request, but
+			// a separator in it would still walk out of the staging area.
+			name:        "owner with a path separator is refused",
+			stagingBase: "osdf:///chtc/staging/{user}",
+			image:       "x.sif",
+			owner:       "a/../../etc",
+			wantErr:     true,
+		},
+		{
+			name:        "owner with dot-dot is refused",
+			stagingBase: "osdf:///chtc/staging/{user}",
+			image:       "x.sif",
+			owner:       "..",
+			wantErr:     true,
+		},
+		{
+			// A fixed base must not start requiring a caller.
+			name:        "fixed base needs no caller",
+			stagingBase: "osdf:///shared/builds",
+			image:       "x.sif",
+			want:        "osdf:///shared/builds/x.sif",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildDestination(tc.destination, tc.stagingBase, tc.image)
+			got, err := buildDestination(tc.destination, tc.stagingBase, tc.image, tc.owner)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got %q", got)
