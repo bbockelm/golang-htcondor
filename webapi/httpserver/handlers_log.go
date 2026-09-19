@@ -60,7 +60,7 @@ func (s *Handler) handleJobLog(w http.ResponseWriter, r *http.Request, cluster, 
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", "UserLog", "Iwd"},
 	})
 	if err != nil {
@@ -131,7 +131,7 @@ var errSandboxFileNotFound = errors.New("sandbox file not found")
 func (s *Handler) fetchSandboxFileBytes(ctx context.Context, constraint, filename string, maxBytes int64) ([]byte, bool, error) {
 	pipeReader, pipeWriter := io.Pipe()
 
-	sandboxErrChan := s.schedd.ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	sandboxErrChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pipeWriter)
 	finalErrChan := make(chan error, 1)
 	go func() {
 		err := <-sandboxErrChan

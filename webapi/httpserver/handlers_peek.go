@@ -126,7 +126,7 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 	peekCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	result, err := s.schedd.PeekJobOutput(peekCtx, cluster, proc, htcondor.PeekRequest{
+	result, err := s.getSchedd().PeekJobOutput(peekCtx, cluster, proc, htcondor.PeekRequest{
 		Stdout:       wantStdout,
 		StdoutOffset: stdoutOffset,
 		Stderr:       wantStderr,

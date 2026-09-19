@@ -1990,7 +1990,7 @@ func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename st
 
 	// Start receiving the job sandbox in the background
 	// We need to ensure pipeWriter is closed when transfer finishes
-	sandboxErrChan := s.schedd.ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	sandboxErrChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pipeWriter)
 
 	// Channel to capture the final error from ReceiveJobSandbox
 	finalErrChan := make(chan error, 1)
@@ -3025,7 +3025,7 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	opts := &htcondor.QueryOptions{
 		Projection: projection,
 	}
-	jobAds, _, err := s.schedd.QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to query job", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to query job")
@@ -3241,7 +3241,7 @@ func (s *Handler) handleScheddPing(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	result, err := s.schedd.Ping(ctx)
+	result, err := s.getSchedd().Ping(ctx)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Ping failed: %v", err))
 		return
@@ -3294,7 +3294,7 @@ func (s *Handler) handlePing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ping schedd
-	scheddResult, err := s.schedd.Ping(ctx)
+	scheddResult, err := s.getSchedd().Ping(ctx)
 	if err != nil {
 		response["schedd"] = map[string]interface{}{
 			"status": "error",
