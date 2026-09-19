@@ -18,7 +18,10 @@ package droppriv
 
 import (
 	"fmt"
+	"os"
 	"time"
+
+	"github.com/bbockelm/gosssd"
 )
 
 // selectBestGroupLookup chooses the best available group lookup.
@@ -46,6 +49,27 @@ func selectBestGroupLookup() GroupLookup {
 
 	declared := countDeclaredMethods(nsswitchPath(), "group")
 
+	// No `group:` line at all: the file exists but says nothing about
+	// where group membership comes from, so ParseNSSwitchDB handed back
+	// its "files" default rather than an administrator's choice.
+	//
+	// This is the ordinary case in a musl container -- Alpine ships an
+	// nsswitch.conf carrying only a `hosts:` line, because musl does not
+	// implement NSS at all. Honouring the default literally would ignore
+	// an SSSD socket that somebody deliberately mounted into the
+	// container, leaving every directory user a member of nothing: not an
+	// error, just an empty group list, which reads downstream as "this
+	// user has no permissions".
+	//
+	// So a mounted socket is taken as the statement the file does not
+	// make. An administrator who DID write `group: files` is not
+	// overridden, because then declared is non-zero.
+	if declared == 0 && sssdSocketPresent() {
+		if s := sssdGroupLookup(); s != nil {
+			return &groupChain{sources: []GroupLookup{NewStdlibGroups(time.Minute), s}}
+		}
+	}
+
 	var sources []GroupLookup
 	for _, m := range methods {
 		switch m {
@@ -72,3 +96,18 @@ func selectBestGroupLookup() GroupLookup {
 	}
 	return &groupChain{sources: sources}
 }
+
+// sssdSocketPresent reports whether an SSSD client socket is reachable.
+//
+// Its presence is a deliberate act -- on a host, sssd is running; in a
+// container, somebody mounted the pipe directory in from a sidecar -- so
+// it is a usable signal about intent where nsswitch.conf makes no
+// statement.
+func sssdSocketPresent() bool {
+	_, err := os.Stat(sssdSocketPath)
+	return err == nil
+}
+
+// sssdSocketPath is the socket probed above. A variable so a test can
+// point it somewhere it is allowed to create one.
+var sssdSocketPath = gosssd.DefaultNSSSocketPath
