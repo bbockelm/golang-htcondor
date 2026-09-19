@@ -741,7 +741,12 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		_ = ad.Set("WhenToTransferOutput", "ON_EXIT")
 	}
 
-	// transfer_input_files - parse comma-separated list
+	// transfer_input_files - parse comma-separated list.
+	//
+	// Empty stays unset, unlike transfer_output_files above. That
+	// asymmetry is condor's, not ours: `transfer_input_files = ""`
+	// emits no TransferInput attribute at all, while
+	// `transfer_output_files = ""` emits TransferOutput = "".
 	if tif, ok := sf.submitCommand("transfer_input_files"); ok {
 		files := parseFileList(tif)
 		if len(files) > 0 {
@@ -750,12 +755,19 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		}
 	}
 
-	// transfer_output_files - parse comma-separated list
+	// transfer_output_files - parse comma-separated list.
+	//
+	// An explicitly empty list is set, not skipped: condor_submit emits
+	// TransferOutput = "" for `transfer_output_files = ""` and the shadow
+	// reads that as "transfer nothing". Leaving the attribute off instead
+	// means the default -- transfer every new file in the scratch
+	// directory -- which is the opposite of what the user asked for, and
+	// for a job that builds a large artifact it is the difference between
+	// transferring nothing and transferring gigabytes.
+	//
+	// transfer_input_files is deliberately not symmetric here; see below.
 	if tof, ok := sf.submitCommand("transfer_output_files"); ok {
-		files := parseFileList(tof)
-		if len(files) > 0 {
-			_ = ad.Set("TransferOutput", strings.Join(files, ","))
-		}
+		_ = ad.Set("TransferOutput", strings.Join(parseFileList(tof), ","))
 	}
 
 	// transfer_output_remaps - format: "name1=path1;name2=path2"
@@ -1223,9 +1235,17 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		_ = ad.Set("RetryUntil", retryUntil)
 	}
 
-	// success_exit_code - exit code(s) considered success
+	// success_exit_code - the exit status that counts as success.
+	//
+	// The attribute is JobSuccessExitCode; "SuccessExitCode" (what this
+	// set before) is not an attribute HTCondor reads, so the setting had
+	// no effect. It also has to be an integer, not the raw string: the
+	// shadow compares it against ExitCode, and when_to_transfer_output =
+	// ON_SUCCESS is gated on that comparison.
 	if successCode, ok := sf.submitCommand("success_exit_code"); ok {
-		_ = ad.Set("SuccessExitCode", successCode)
+		if n, err := strconv.ParseInt(strings.TrimSpace(successCode), 10, 64); err == nil {
+			_ = ad.Set("JobSuccessExitCode", n)
+		}
 	}
 
 	// leave_in_queue - keep job in queue after completion
@@ -1504,7 +1524,7 @@ func parseInt(s string) (int, error) {
 // parseFileList parses a comma-separated list of files
 // Handles whitespace and empty entries
 func parseFileList(list string) []string {
-	parts := strings.Split(list, ",")
+	parts := strings.Split(trimSubmitQuotes(list), ",")
 	var files []string
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
@@ -1513,6 +1533,27 @@ func parseFileList(list string) []string {
 		}
 	}
 	return files
+}
+
+// trimSubmitQuotes removes one matching pair of surrounding double quotes
+// from a submit command's value, the way condor_submit does:
+// `transfer_output_files = "a.txt, b.txt"` names two files, not one file
+// whose name starts with a quote.
+//
+// Without this, the quotes survive into the job ad and the failure lands
+// far from the cause -- `transfer_output_files = ""` produced a shadow
+// trying to read a file literally named `""` and held the job with a
+// transfer error naming neither the setting nor the quotes.
+//
+// One pair only, and only when both ends match. strings.Trim would strip
+// a run of quotes from either end independently, turning `""a""` into `a`
+// and quietly accepting input condor would not.
+func trimSubmitQuotes(s string) string {
+	t := strings.TrimSpace(s)
+	if len(t) >= 2 && t[0] == '"' && t[len(t)-1] == '"' {
+		return t[1 : len(t)-1]
+	}
+	return t
 }
 
 // parseRemaps parses transfer_output_remaps format: "name1=path1;name2=path2"
