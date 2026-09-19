@@ -13,6 +13,7 @@ import {
   type DisplayStatus,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
@@ -263,7 +264,60 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         }
       />
 
+      <RequirementsSection job={job} />
+
       <JobDetailsSection jobID={jobID} job={job} />
+    </div>
+  );
+}
+
+// RequirementsSection turns the job's Requirements AND-tree into a line per
+// notable clause plus a single "standard resource requirements" summary,
+// so the interesting constraint (a machine/pool pin) isn't buried in
+// boilerplate. The full expression stays available behind a disclosure.
+function RequirementsSection({ job }: { job: ClassAd }) {
+  const summary = summarizeRequirements(str(job.Requirements));
+  if (summary.empty) return null;
+  const labels = standardLabels(summary.standard);
+  const nothingNotable = summary.notable.length === 0 && !summary.hasStandard;
+  return (
+    <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+      <h2 className="text-sm font-semibold text-gray-900">Requirements</h2>
+      {nothingNotable ? (
+        <p className="text-sm text-gray-500">
+          No constraints beyond the ClassAd defaults.
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {summary.notable.map((clause, i) => (
+            <li key={i} className="flex items-start gap-2 text-sm">
+              <span className="mt-0.5 text-brand-500" aria-hidden>
+                •
+              </span>
+              <code className="break-all font-mono text-gray-900">{clause}</code>
+            </li>
+          ))}
+          {summary.hasStandard && (
+            <li className="flex items-start gap-2 text-sm text-gray-500">
+              <span className="mt-0.5" aria-hidden>
+                •
+              </span>
+              <span>
+                Standard resource requirements
+                {labels.length > 0 && <> ({labels.join(', ')})</>}
+              </span>
+            </li>
+          )}
+        </ul>
+      )}
+      <details className="text-xs">
+        <summary className="cursor-pointer text-gray-400 hover:text-gray-600">
+          Show raw expression
+        </summary>
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-sm bg-gray-50 p-2 font-mono text-gray-700">
+          {summary.raw}
+        </pre>
+      </details>
     </div>
   );
 }
