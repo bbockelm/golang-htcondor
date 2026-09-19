@@ -852,6 +852,12 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	} else if img, ok := sf.submitCommand("container_image"); ok && img != "" {
 		_ = ad.Set("ContainerImage", img)
 		_ = ad.Set("WantContainer", true)
+		// The image-kind flag is what actually turns the container
+		// runtime on in the starter (WantContainer alone does not on an
+		// Apptainer node). condor_submit sets exactly one of these from
+		// the image type; mirror that.
+		wantAttr, _ := containerImageKind(img)
+		_ = ad.Set(wantAttr, true)
 	}
 
 	// docker_network_type or container_network
@@ -923,14 +929,31 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 // HasDockerURL, a ".sif" file needs HasSIF, and anything else (a sandbox
 // directory) needs HasSandboxImage.
 func containerImageCapability(image string) string {
+	_, capability := containerImageKind(image)
+	return capability
+}
+
+// containerImageKind classifies a container_image the way HTCondor's
+// image_type_from_string does, returning both the job attribute that
+// enables the runtime for that image kind (WantDockerImage / WantSIF /
+// WantSandboxImage) and the execute-node capability the job must require
+// (HasDockerURL / HasSIF / HasSandboxImage).
+//
+// The wantAttr is load-bearing, not cosmetic: the starter's
+// Singularity::job_enabled turns the Apptainer/Singularity runtime on
+// ONLY when one of WantDockerImage/WantSIF/WantSandboxImage is set (or
+// SINGULARITY_JOB is configured). Setting ContainerImage + WantContainer
+// alone leaves an Apptainer-only execute node (the OSPool/CHTC norm)
+// running the job on bare metal.
+func containerImageKind(image string) (wantAttr, capability string) {
 	img := strings.TrimSpace(image)
 	switch {
 	case strings.HasPrefix(img, "docker:"):
-		return "TARGET.HasDockerURL =?= true"
+		return "WantDockerImage", "TARGET.HasDockerURL =?= true"
 	case strings.HasSuffix(img, ".sif"):
-		return "TARGET.HasSIF =?= true"
+		return "WantSIF", "TARGET.HasSIF =?= true"
 	default:
-		return "TARGET.HasSandboxImage =?= true"
+		return "WantSandboxImage", "TARGET.HasSandboxImage =?= true"
 	}
 }
 
