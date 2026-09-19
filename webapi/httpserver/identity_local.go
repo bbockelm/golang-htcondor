@@ -184,7 +184,26 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 			"age", time.Since(builtAt).Round(time.Second))
 	}
 
+	// The background refresh is what recovers from everything below, so
+	// it starts whatever happens -- including when the startup build
+	// fails. A daemon that cannot read the account database at t=0 must
+	// keep trying rather than give up for the rest of its life, and in a
+	// container t=0 is exactly when the directory is least likely to
+	// answer.
+	defer func() { go l.refreshLoop(context.WithoutCancel(parent)) }()
+
 	if err := l.resolver.Refresh(ctx); err != nil {
+		// Distinguish "there is no index" from "the index we already had
+		// was deliberately kept". The second is the build REFUSING to
+		// replace good knowledge with worse -- a restored index against a
+		// directory that is not up yet -- and reporting that as "every
+		// login will be refused" would be both alarming and false.
+		if held, _, _ := l.resolver.Stats(); held > 0 {
+			l.logger.Info(logging.DestinationHTTP,
+				"Kept the account index already held; this build could not improve on it",
+				"accounts", held, "reason", err)
+			return
+		}
 		l.logger.Error(logging.DestinationHTTP,
 			"Could not read the account database; every login will be refused until this works",
 			"error", err)
@@ -210,12 +229,6 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 				"a directory account will be refused until it can be. This is being retried",
 			"error", derr, "indexed", accounts)
 	}
-	// The index reflects whatever was readable at t=0, which in a container
-	// is usually before the directory is answering at all. Keep trying in
-	// the background for a few minutes so the pod is usable by the time
-	// somebody arrives, instead of serving that first snapshot until the
-	// TTL expires AND a login happens to trigger a rebuild.
-	go l.refreshLoop(context.WithoutCancel(parent))
 	// Only meaningful when the login-name strategy is also in play, and
 	// then worth saying out loud: the subject naming one of these
 	// resolves to somebody else's account.

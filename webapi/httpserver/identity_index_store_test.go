@@ -178,3 +178,51 @@ func TestASnapshotRoundTripsThroughTheStore(t *testing.T) {
 		t.Errorf("BuiltAt = %v, want %v -- a restored index must age from its real build time", got.BuiltAt, built)
 	}
 }
+
+// The freeze this nearly introduced. Protecting a restored index makes
+// the startup build report an error -- correctly, since it refused to
+// replace good knowledge with worse. If that error also skipped starting
+// the background refresh, the daemon would hold the restored index for
+// the rest of its life and never pick the directory up: a worse failure
+// than the clobber it was meant to prevent.
+func TestAProtectedStartupBuildStillStartsTheRefreshLoop(t *testing.T) {
+	dir := t.TempDir()
+	db := newTestDB(t, filepath.Join(dir, "app.db"))
+	store := newIdentityIndexStore(db)
+
+	// A previous run's index, saved.
+	full := filepath.Join(dir, "passwd")
+	body := onePasswdEntry +
+		"bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/sh\n"
+	if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := identityOverFile(t, full, time.Hour)
+	first.store = store
+	first.warmUp(context.Background())
+	if got, _, _ := first.resolver.Stats(); got != 2 {
+		t.Fatalf("precondition: first run indexed %d accounts, want 2", got)
+	}
+
+	// The restart: the account database is unreadable at t=0, so the
+	// startup build fails and the restored index is kept.
+	missing := filepath.Join(dir, "appears-later")
+	after := identityOverFile(t, missing, time.Hour)
+	after.store = store
+	after.refreshEvery = 5 * time.Millisecond
+	after.warmUp(context.Background())
+
+	if got, _, _ := after.resolver.Stats(); got != 2 {
+		t.Fatalf("the restored index was lost: %d accounts", got)
+	}
+
+	// The database becomes readable, as a directory does once its sidecar
+	// answers. Nothing calls Resolve: the daemon must notice by itself.
+	grown := body + "tannenba:x:20013:20013:tatannen:/home/tannenba:/bin/sh\n"
+	if err := os.WriteFile(missing, []byte(grown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForIndex(t, after, 3, 5*time.Second); got < 3 {
+		t.Fatalf("index still holds %d accounts; the refresh loop never started after a protected build", got)
+	}
+}
