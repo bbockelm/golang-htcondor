@@ -1054,14 +1054,15 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 
 // setResourceRequests sets resource request attributes
 func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
-	// Request CPUs (default: 1)
-	cpus := 1
+	// Request CPUs (default: 1). A count, so no units -- but it may be an
+	// expression, which condor_submit stores unevaluated.
 	if reqCpus, ok := sf.submitCommand("request_cpus"); ok {
-		if n, err := parseInt(reqCpus); err == nil {
-			cpus = n
+		if err := setCountAttr(ad, "RequestCpus", reqCpus); err != nil {
+			return err
 		}
+	} else {
+		_ = ad.Set("RequestCpus", int64(1))
 	}
-	_ = ad.Set("RequestCpus", cpus)
 
 	// Request Memory in MiB (default: 128). A bare number is already in
 	// MiB; a K/M/G/T suffix scales from bytes, so request_memory = 4GB
@@ -1087,8 +1088,8 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 
 	// Request GPUs (default: 0)
 	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
-		if n, err := parseInt(reqGpus); err == nil {
-			_ = ad.Set("RequestGpus", n)
+		if err := setCountAttr(ad, "RequestGpus", reqGpus); err != nil {
+			return err
 		}
 	}
 
@@ -1465,6 +1466,29 @@ func setSizeAttr(ad *classad.ClassAd, attr, raw string, base int64) error {
 	expr, err := classad.ParseExpr(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %q is neither a size nor a valid expression: %w", attr, raw, err)
+	}
+	_ = ad.Set(attr, expr)
+	return nil
+}
+
+// setCountAttr assigns a count-valued job attribute (request_cpus,
+// request_gpus). These take no unit suffixes, but like the size-valued
+// commands they may be expressions: condor_submit stores
+// "request_cpus = 2 * 2" verbatim rather than evaluating it to 4, and
+// keeps "request_cpus = 2.5" as a real. So anything that is not a plain
+// integer is stored as an expression instead of being dropped.
+//
+// The integer parse is deliberately strict. fmt.Sscanf("%d") -- what this
+// used to use -- accepts "2.5" as 2 and "2 * 2" as 2, silently turning
+// both into the wrong count with no error to notice.
+func setCountAttr(ad *classad.ClassAd, attr, raw string) error {
+	if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+		_ = ad.Set(attr, n)
+		return nil
+	}
+	expr, err := classad.ParseExpr(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %q is neither an integer nor a valid expression: %w", attr, raw, err)
 	}
 	_ = ad.Set(attr, expr)
 	return nil

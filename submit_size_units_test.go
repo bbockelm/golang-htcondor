@@ -210,6 +210,78 @@ request_memory = ((
 	}
 }
 
+// TestSubmitCountAttributes covers request_cpus / request_gpus. They take
+// no units, but they are expression-valued in condor, and the old
+// fmt.Sscanf("%d") parse quietly accepted a prefix of one: "2.5" became 2
+// and "2 * 2" became 2.
+//
+// Stored forms here were checked against condor_submit -dry-run, which
+// keeps "2 * 2" and "2.5" verbatim rather than folding them.
+func TestSubmitCountAttributes(t *testing.T) {
+	t.Run("plain integer", func(t *testing.T) {
+		ad := mustJobAd(t, "universe = vanilla\nexecutable = /bin/echo\nrequest_cpus = 4\n")
+		if got, ok := ad.EvaluateAttrInt("RequestCpus"); !ok || got != 4 {
+			t.Errorf("RequestCpus = %d (ok=%v), want 4", got, ok)
+		}
+	})
+
+	t.Run("default when unspecified", func(t *testing.T) {
+		ad := mustJobAd(t, "universe = vanilla\nexecutable = /bin/echo\n")
+		if got, ok := ad.EvaluateAttrInt("RequestCpus"); !ok || got != 1 {
+			t.Errorf("RequestCpus = %d (ok=%v), want 1", got, ok)
+		}
+	})
+
+	// The old parse truncated this to 2. It must not silently become a
+	// different count.
+	t.Run("real is not truncated to an int", func(t *testing.T) {
+		ad := mustJobAd(t, "universe = vanilla\nexecutable = /bin/echo\nrequest_cpus = 2.5\n")
+		if got, ok := ad.EvaluateAttrInt("RequestCpus"); ok && got == 2 {
+			t.Fatal("RequestCpus truncated to 2: the fractional part was silently dropped")
+		}
+		if got, ok := ad.EvaluateAttrReal("RequestCpus"); !ok || got != 2.5 {
+			t.Errorf("RequestCpus real = %v (ok=%v), want 2.5", got, ok)
+		}
+	})
+
+	// The old parse also truncated this to 2, losing the multiplication.
+	t.Run("arithmetic expression is preserved", func(t *testing.T) {
+		ad := mustJobAd(t, "universe = vanilla\nexecutable = /bin/echo\nrequest_cpus = 2 * 2\n")
+		got, ok := ad.EvaluateAttrInt("RequestCpus")
+		if !ok {
+			t.Fatal("RequestCpus did not evaluate to an integer")
+		}
+		if got == 2 {
+			t.Fatal("RequestCpus = 2: the expression was truncated at the first token")
+		}
+		if got != 4 {
+			t.Errorf("RequestCpus = %d, want 4", got)
+		}
+	})
+
+	t.Run("gpus take the same path", func(t *testing.T) {
+		ad := mustJobAd(t, "universe = vanilla\nexecutable = /bin/echo\nrequest_gpus = 1 + 1\n")
+		got, ok := ad.EvaluateAttrInt("RequestGpus")
+		if !ok {
+			t.Fatal("RequestGpus did not evaluate to an integer")
+		}
+		if got != 2 {
+			t.Errorf("RequestGpus = %d, want 2", got)
+		}
+	})
+
+	t.Run("unparseable is reported", func(t *testing.T) {
+		sf, err := ParseSubmitFile(strings.NewReader(
+			"universe = vanilla\nexecutable = /bin/echo\nrequest_cpus = ((\n"))
+		if err != nil {
+			t.Fatalf("ParseSubmitFile: %v", err)
+		}
+		if _, err := sf.MakeJobAd(JobID{Cluster: 1, Proc: 0}, map[string]string{}); err == nil {
+			t.Fatal("expected an error for an unparseable request_cpus, got none")
+		}
+	})
+}
+
 func mustJobAd(t *testing.T, submit string) *classad.ClassAd {
 	t.Helper()
 	sf, err := ParseSubmitFile(strings.NewReader(submit))
