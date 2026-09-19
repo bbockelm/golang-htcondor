@@ -608,6 +608,13 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// POST /api/v1/jobs/{id}/input/share — mint a short-lived signed URL
+	// for uploading this job's input without an authenticated session.
+	if len(parts) == 3 && parts[1] == "input" && parts[2] == "share" {
+		s.handleJobInputShare(w, r, jobID)
+		return
+	}
+
 	// POST /api/v1/jobs/{id}/output/share — mint a short-lived signed URL
 	// for downloading the job's sandbox without an authenticated session.
 	if len(parts) == 3 && parts[1] == "output" && parts[2] == "share" {
@@ -1282,86 +1289,34 @@ func (s *Handler) handleBulkActionResults(w http.ResponseWriter, results *htcond
 	})
 }
 
-// jobInputSpoolProjection is the projection used by the /input and
-// /input/multipart handlers when looking up the ads before streaming
-// files into the spool. It must include every attribute
-// htcondor.getInputFilesFromJobAd reads — that helper computes the
-// allow-set of filenames the schedd will accept, and any name absent
-// from the set is silently dropped on its way through
-// sendJobFilesFromTar. Notably:
-//   - TransferInput: the explicit user-listed inputs
-//   - Cmd:           the executable's path; its basename is part of
-//     the allow-set when the path is relative AND
-//     TransferExecutable is true (e.g. the SPA's
-//     inline-script flow that submits with
-//     `executable = run.sh` + transfer_executable=true)
-//   - TransferExecutable: gates the Cmd-basename inclusion above
+// The spool lookup helpers live in webapi/spool so the standalone MCP
+// server, which cannot import this package, mints upload URLs off the
+// same projection and the same notion of "awaiting input".
+var (
+	jobInputSpoolProjection = spool.InputSpoolProjection
+	jobInputShareProjection = spool.InputShareProjection
+)
+
+// awaitingInputSpool reports whether a job can still accept an input
+// upload. See spool.AwaitingInput.
+func awaitingInputSpool(ad *classad.ClassAd) bool { return spool.AwaitingInput(ad) }
+
+// fetchProcAdForSpool looks up the proc ad (and its cluster ad) that a
+// spool upload writes into. See spool.FetchProcAd for why the cluster
+// ad has to come along.
 //
-// Dropping any of these silently leaves the script out of the spool;
-// the schedd then fails the input transfer at execute time with
-// "errno 2 No such file or directory", and the job hold-loops on the
-// missing file. This list is the authoritative source for both
-// handler call sites.
-var jobInputSpoolProjection = []string{
-	"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable",
+// ownerScope wraps the id predicate with the caller's owner clause, so
+// a non-admin session cannot spool files into another user's sandbox.
+func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, ownerScope func(string) (string, error)) (*classad.ClassAd, error) {
+	return fetchProcAdForSpoolWith(ctx, schedd, cluster, proc, ownerScope, jobInputSpoolProjection)
 }
 
-// fetchProcAdForSpool returns the proc ad for (cluster, proc) with
-// cluster-ad attributes overlaid. The HTCondor schedd stores
-// attributes shared across all procs of a cluster (Cmd,
-// TransferExecutable, …) on the cluster ad rather than duplicating
-// them per-proc — a `ClusterId == X && ProcId == Y` query alone
-// returns only the proc-specific differences. Without the overlay,
-// getInputFilesFromJobAd never sees Cmd, doesn't add the executable's
-// basename to the spool allow-set, and sendJobFilesFromTar silently
-// drops the inline script on its way to the schedd.
-//
-// We pull both ads in a single query (matching ProcId == proc OR
-// ProcId == -1) with FetchIncludeClusterAd so the cluster ad arrives
-// alongside the proc ad. The resulting proc ad has cluster attrs
-// copied in only where the proc didn't already define them — proc
-// wins on conflict, matching HTCondor's normal "cluster as defaults,
-// proc as overrides" semantics.
-// fetchProcAdForSpool looks up the proc ad (and its cluster ad) that a
-// spool upload writes into. ownerScope wraps the id predicate with the
-// caller's owner clause, so a non-admin session cannot spool files into
-// another user's sandbox; it is applied around the whole predicate
-// because the cluster ad (ProcId == -1) must stay reachable.
-func fetchProcAdForSpool(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, ownerScope func(string) (string, error)) (*classad.ClassAd, error) {
-	constraint := fmt.Sprintf("ClusterId == %d && (ProcId == %d || ProcId == -1)", cluster, proc)
-	if ownerScope != nil {
-		scoped, err := ownerScope(constraint)
-		if err != nil {
-			return nil, err
-		}
-		constraint = scoped
-	}
-	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: jobInputSpoolProjection,
-		FetchOpts:  htcondor.FetchIncludeClusterAd,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var procAd, clusterAd *classad.ClassAd
-	for _, ad := range ads {
-		pid, ok := ad.EvaluateAttrInt("ProcId")
-		if !ok {
-			continue
-		}
-		switch {
-		case pid == int64(proc) && procAd == nil:
-			procAd = ad
-		case pid == -1 && clusterAd == nil:
-			clusterAd = ad
-		}
-	}
-	if procAd == nil {
-		return nil, nil
-	}
-	overlayClusterOntoProc(clusterAd, procAd)
-	return procAd, nil
+// fetchProcAdForSpoolWith is fetchProcAdForSpool over a caller-chosen
+// projection. The share-URL path needs the job's state alongside the
+// allow-set attributes, and asking for it here costs one query rather
+// than two.
+func fetchProcAdForSpoolWith(ctx context.Context, schedd *htcondor.Schedd, cluster, proc int, ownerScope func(string) (string, error), projection []string) (*classad.ClassAd, error) {
+	return spool.FetchProcAd(ctx, schedd, cluster, proc, ownerScope, projection)
 }
 
 // fetchProcAdsAwaitingInput looks up every proc of a cluster that is held
@@ -1394,73 +1349,14 @@ func fetchProcAdsAwaitingInput(
 	limit int,
 	ownerScope func(string) (string, error),
 ) ([]*classad.ClassAd, error) {
-	constraint := fmt.Sprintf(
-		"ClusterId == %d && ((JobStatus == 5 && HoldReasonCode == %d) || ProcId == -1)",
-		cluster, spool.SpoolingHoldCode)
-	if ownerScope != nil {
-		scoped, err := ownerScope(constraint)
-		if err != nil {
-			return nil, err
-		}
-		constraint = scoped
-	}
-	// Past the limit so the caller can report a remainder rather than
-	// presenting a truncated list as the whole cluster; the cluster ad is
-	// not a proc, hence the extra slot.
-	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: jobInputSpoolProjection,
-		FetchOpts:  htcondor.FetchIncludeClusterAd,
-		Limit:      limit + 2,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var clusterAd *classad.ClassAd
-	procs := make([]*classad.ClassAd, 0, len(ads))
-	for _, ad := range ads {
-		pid, ok := ad.EvaluateAttrInt("ProcId")
-		if !ok {
-			continue
-		}
-		if pid == -1 {
-			if clusterAd == nil {
-				clusterAd = ad
-			}
-			continue
-		}
-		procs = append(procs, ad)
-	}
-	for _, proc := range procs {
-		overlayClusterOntoProc(clusterAd, proc)
-	}
-	spool.SortByProc(procs)
-	return procs, nil
+	return spool.FetchProcAdsAwaitingInput(ctx, schedd, cluster, limit, ownerScope, jobInputSpoolProjection)
 }
 
-// overlayClusterOntoProc copies cluster-ad attributes onto the proc
-// ad, but only where the proc doesn't already define them — proc
-// wins on conflict, matching HTCondor's "cluster as defaults, proc
-// as overrides" semantics. Called from fetchProcAdForSpool; pulled
-// out as a pure function so the cluster/proc merge can be tested
-// without spinning up a fake schedd.
-//
-// A nil cluster ad is a valid input (small jobs may not have one
-// distinct from the proc ad).
+// overlayClusterOntoProc merges a cluster ad's attributes into a proc
+// ad. See spool.OverlayClusterOntoProc; kept here as the name the
+// package's own tests exercise the merge under.
 func overlayClusterOntoProc(cluster, proc *classad.ClassAd) {
-	if cluster == nil || proc == nil {
-		return
-	}
-	for _, attr := range cluster.GetAttributes() {
-		if _, ok := proc.Lookup(attr); ok {
-			continue // proc has its own value; don't clobber
-		}
-		expr, ok := cluster.Lookup(attr)
-		if !ok || expr == nil {
-			continue
-		}
-		_ = proc.Set(attr, expr)
-	}
+	spool.OverlayClusterOntoProc(cluster, proc)
 }
 
 // JobActionFunc is a function that performs a job action (hold, release, etc.)

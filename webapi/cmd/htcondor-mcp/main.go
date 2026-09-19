@@ -62,6 +62,11 @@ func runNormalMode() error {
 	trustDomain, _ := cfg.Get("TRUST_DOMAIN")
 	uidDomain, _ := cfg.Get("UID_DOMAIN")
 
+	// Where the REST daemon answers. This server has no listener of its
+	// own, so it is the only way create_input_upload_url can name a URL
+	// somebody could actually PUT to; the tool says so when it is unset.
+	httpBaseURL, _ := cfg.Get("HTTP_API_BASE_URL")
+
 	// Create logger from configuration
 	logger, err := logging.FromConfig(cfg)
 	if err != nil {
@@ -94,6 +99,7 @@ func runNormalMode() error {
 		SigningKeyPath: signingKeyPath,
 		TrustDomain:    trustDomain,
 		UIDDomain:      uidDomain,
+		HTTPBaseURL:    httpBaseURL,
 		Collector:      collector,
 		Credd:          credd,
 		Instructions:   mcpInstructions,

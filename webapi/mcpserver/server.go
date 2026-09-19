@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
@@ -55,8 +56,14 @@ type Server struct {
 	catalogGen atomic.Uint64
 	// skills is the site-authored skill library. Swapped atomically: a
 	// reconfigure reloads it from disk while requests are reading.
-	skills             atomic.Pointer[skills.Library]
-	signingKeyPath     string
+	skills         atomic.Pointer[skills.Library]
+	signingKeyPath string
+	// shareSigner mints the signed upload URLs create_input_upload_url
+	// hands back. Derived from the pool signing key so the URL verifies
+	// in the REST daemon that will redeem it -- which is the whole point
+	// when this server is the standalone stdio one with no listener.
+	// nil when no signing key is configured.
+	shareSigner        *shareurl.Signer
 	trustDomain        string
 	uidDomain          string
 	httpBaseURL        string // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
@@ -330,6 +337,18 @@ func NewServer(cfg Config) (*Server, error) {
 		watchMaxWait:   cfg.WatchMaxWait,
 		build:          buildSettingsFromConfig(cfg),
 	}
+	// A missing or unreadable signing key is not fatal: it disables the
+	// one tool that needs it, and that tool says so when called.
+	if key, err := shareurl.KeyFromSigningKeyFile(cfg.SigningKeyPath); err == nil {
+		if signer, serr := shareurl.NewSigner(key); serr == nil {
+			s.shareSigner = signer
+		}
+	} else if cfg.SigningKeyPath != "" {
+		logger.Warn(logging.DestinationMCP,
+			"Could not derive the share-URL key; upload URLs are unavailable",
+			"signing_key", cfg.SigningKeyPath, "error", err)
+	}
+
 	// Load before the instructions are built: the initialize text names the
 	// skills, so building it first would advertise an empty library.
 	if dir := strings.TrimSpace(cfg.SkillsDir); dir != "" {

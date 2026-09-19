@@ -38,7 +38,14 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("## Typical workflow\n\n")
 	b.WriteString("1. submit_job — submit a job with an HTCondor submit-file description.\n")
 	b.WriteString("2. upload_job_input — upload the executable and small input files (< 100 KB total recommended). " +
-		"For larger inputs, use HTTP/HTTPS URLs in transfer_input_files.\n")
+		"For larger inputs, use HTTP/HTTPS URLs in transfer_input_files, or create_input_upload_url.\n")
+	b.WriteString("   create_input_upload_url — for input too big to pass through this conversation, or " +
+		"already sitting on the machine you are running on: it returns short-lived URLs to PUT a tar " +
+		"of the files to, so the bytes go straight to the access point instead of through your context. " +
+		"Run the upload with a shell command (tar cf - ... | curl -T - '<url>'); do not read the files " +
+		"in to do it. The URLs need no credentials and can be handed to whoever holds the data. " +
+		"Input spools per proc, so a bare cluster id returns one URL per proc and each takes its " +
+		"own tar.\n")
 	b.WriteString("3. watch_jobs / check_watches — wait for the job to finish (or be held) without polling; " +
 		"a watch fires even if it already happened. Call watch_jobs once to register; call check_watches to " +
 		"see whether it has been answered. Use query_jobs for a one-off status snapshot.\n")

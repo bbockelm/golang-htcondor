@@ -130,6 +130,10 @@ func (h *Handler) setupRoutes() {
 	// Public sandbox download via short-lived signed URL. No session
 	// required — the token in ?t=... is the authorization.
 	mux.Handle("/api/v1/share/output", cors(http.HandlerFunc(h.handleSharedOutput)))
+	// Public spool upload via the same kind of URL. Registered next to
+	// its sibling and, like it, unconditionally: an MCP-only deployment
+	// (no web UI) mints these too, and the redeem has to land somewhere.
+	mux.Handle("/api/v1/share/input", cors(http.HandlerFunc(h.handleSharedInput)))
 
 	// Admin endpoints (gated on WebUIAdminGroup membership). The
 	// gating is enforced inside each handler via requireAdmin so we

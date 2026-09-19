@@ -751,6 +751,30 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	return inputFileSet
 }
 
+// SpoolInputAllowSet returns, sorted, the filenames the schedd will
+// accept into this job's input spool. Any name outside the set is
+// dropped in silence on its way through sendJobFilesFromTar, so a
+// caller who uploads by that name gets a clean success and a job that
+// runs without the file.
+//
+// Exported for the share-URL mint path: the person redeeming an upload
+// URL is often not the person who wrote the submit file, and has no
+// other way to learn which names are expected before spending an upload
+// on the wrong one.
+//
+// The ad must carry jobInputSpoolProjection's attributes with the
+// cluster ad overlaid, or the set comes back missing the executable --
+// see fetchProcAdForSpool.
+func SpoolInputAllowSet(ad *classad.ClassAd) []string {
+	set := getInputFilesFromJobAd(ad)
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // sendJobFilesFromTar processes the tar archive and sends files to schedd
 //
 //nolint:gocyclo // Complex function handling tar streaming, job switching, and file transfer protocol
