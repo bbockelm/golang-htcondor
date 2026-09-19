@@ -1102,7 +1102,15 @@ set -euo pipefail
 # the AF_UNIX 104-byte limit. mktemp -d gives us a unique mode-700
 # directory; the trap cleans it up whether we exit normally or via
 # signal, so the socket doesn't outlive the job.
-SOCK_DIR="$(mktemp -d -t htcondor-jupyter)"
+#
+# The template is spelled out rather than passed to -t: GNU mktemp
+# requires at least three trailing X's and rejects a bare prefix
+# ("too few X's in template"), while BSD mktemp accepts one. -t took
+# the BSD reading, so this worked on a developer's Mac and failed on
+# every Linux execute node. /tmp is named explicitly for the same
+# reason the directory exists at all -- $TMPDIR on an execute node is
+# the job scratch, which is the long path being avoided.
+SOCK_DIR="$(mktemp -d /tmp/htcondor-jupyter.XXXXXX)"
 trap 'rm -rf "$SOCK_DIR"' EXIT INT TERM
 SOCK="$SOCK_DIR/j.sock"
 
