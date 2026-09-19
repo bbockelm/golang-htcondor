@@ -103,19 +103,22 @@ func (s *Server) toolExecInJob(ctx context.Context, args map[string]interface{})
 		return nil, err
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"job_id":           result.JobID,
+		"stdout":           result.Stdout,
+		"stderr":           result.Stderr,
+		"exit_code":        result.ExitCode,
+		"duration_ms":      result.Duration.Milliseconds(),
+		"timed_out":        result.TimedOut,
+		"stdout_truncated": result.StdoutTruncated,
+		"stderr_truncated": result.StderrTruncated,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{"type": "text", "text": formatExecResult(result)},
 		},
-		"metadata": map[string]interface{}{
-			"job_id":           result.JobID,
-			"exit_code":        result.ExitCode,
-			"duration_ms":      result.Duration.Milliseconds(),
-			"timed_out":        result.TimedOut,
-			"stdout_truncated": result.StdoutTruncated,
-			"stderr_truncated": result.StderrTruncated,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // liveJobQuery builds the owner-confined lookup for one job.

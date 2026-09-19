@@ -183,11 +183,11 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	note += "; " + d.Note + "]"
 	note += "\n" + scope.Note()
 
-	text, metadata := renderJobsBase(jobAds, constraint, "htcondordb", note)
-	return map[string]interface{}{
+	text, metadata, structured := renderJobsBase(jobAds, constraint, "htcondordb", note)
+	return withStructured(map[string]interface{}{
 		"content":  []map[string]interface{}{{"type": "text", "text": text}},
 		"metadata": metadata,
-	}, true, d
+	}, structured), true, d
 }
 
 // decline builds a Decision for a miss that happens outside the pure

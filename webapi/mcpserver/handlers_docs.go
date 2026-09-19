@@ -170,7 +170,8 @@ func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args ma
 			"content": []map[string]interface{}{
 				{"type": "text", "text": msg},
 			},
-			"results": []interface{}{},
+			"results":           []interface{}{},
+			"structuredContent": map[string]interface{}{"query": query, "results": []interface{}{}, "count": 0},
 		}, nil
 	}
 
@@ -189,7 +190,8 @@ func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args ma
 		"content": []map[string]interface{}{
 			{"type": "text", "text": text},
 		},
-		"results": results,
+		"results":           results,
+		"structuredContent": map[string]interface{}{"query": query, "results": results, "count": len(results)},
 	}, nil
 }
 

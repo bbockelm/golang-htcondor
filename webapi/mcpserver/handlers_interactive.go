@@ -208,7 +208,8 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 					info.Name, info.JobID, info.Name, leaseDescription(info.LeaseExpires)),
 			},
 		},
-		"metadata": interactiveInfoMetadata(*info),
+		"metadata":          interactiveInfoMetadata(*info),
+		"structuredContent": interactiveInfoMetadata(*info),
 	}, nil
 }
 
@@ -239,6 +240,16 @@ func (s *Server) toolInteractiveSessionExec(ctx context.Context, args map[string
 		},
 		"metadata": map[string]interface{}{
 			"job_id":           result.JobID,
+			"exit_code":        result.ExitCode,
+			"duration_ms":      result.Duration.Milliseconds(),
+			"timed_out":        result.TimedOut,
+			"stdout_truncated": result.StdoutTruncated,
+			"stderr_truncated": result.StderrTruncated,
+		},
+		"structuredContent": map[string]interface{}{
+			"job_id":           result.JobID,
+			"stdout":           result.Stdout,
+			"stderr":           result.Stderr,
 			"exit_code":        result.ExitCode,
 			"duration_ms":      result.Duration.Milliseconds(),
 			"timed_out":        result.TimedOut,
@@ -284,8 +295,9 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 		rows = append(rows, interactiveInfoMetadata(info))
 	}
 	return map[string]interface{}{
-		"content":  []map[string]interface{}{{"type": "text", "text": sb.String()}},
-		"metadata": map[string]interface{}{"sessions": rows},
+		"content":           []map[string]interface{}{{"type": "text", "text": sb.String()}},
+		"metadata":          map[string]interface{}{"sessions": rows},
+		"structuredContent": map[string]interface{}{"sessions": rows, "count": len(rows)},
 	}, nil
 }
 
@@ -303,11 +315,14 @@ func (s *Server) toolInteractiveSessionStop(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
+	stopped := interactiveInfoMetadata(*info)
+	stopped["stopped"] = true
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
 			{"type": "text", "text": fmt.Sprintf("Stopped interactive session %q (job %s); its slot is being released.", info.Name, info.JobID)},
 		},
-		"metadata": interactiveInfoMetadata(*info),
+		"metadata":          interactiveInfoMetadata(*info),
+		"structuredContent": stopped,
 	}, nil
 }
 

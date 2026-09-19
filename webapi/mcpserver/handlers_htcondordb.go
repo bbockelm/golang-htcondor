@@ -9,6 +9,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -152,16 +153,23 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 		fmt.Fprintf(&b, " by %s", strings.Join(groupBy, ", "))
 	}
 	b.WriteString(":\n")
+	groups := make([]map[string]interface{}, 0, len(aggRows))
 	for _, r := range aggRows {
 		if len(groupBy) > 0 {
 			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(r.Group, "/"), strings.Join(r.Values, ","))
 		} else {
 			fmt.Fprintf(&b, "  count = %s\n", strings.Join(r.Values, ","))
 		}
+		groups = append(groups, map[string]interface{}{"key": r.Group, "count": strings.Join(r.Values, ",")})
 	}
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
-	return textResult(b.String()), nil
+	return structuredTextResult(b.String(), map[string]interface{}{
+		"groups":   groups,
+		"group_by": groupBy,
+		"table":    table,
+		"source":   "htcondordb",
+	}), nil
 }
 
 // --- helpers ---
@@ -216,12 +224,24 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, s
 		fmt.Fprintf(&b, " (capped at limit=%d; narrow the constraint or raise the limit for more)", limit)
 	}
 	b.WriteString(":\n\n")
+	// Parse each old-ClassAd blob into an ad for structuredContent. Best
+	// effort: a row the parser cannot read is still shown in the text, it
+	// just does not appear as a structured record.
+	records := make([]*classad.ClassAd, 0, len(rows))
 	for i, r := range rows {
 		fmt.Fprintf(&b, "--- record %d ---\n%s\n", i+1, strings.TrimSpace(r))
+		if ad, err := classad.ParseOld(r); err == nil {
+			records = append(records, ad)
+		}
 	}
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
-	return textResult(b.String())
+	return structuredTextResult(b.String(), map[string]interface{}{
+		"records":  records,
+		"count":    len(rows),
+		"source":   "htcondordb",
+		"has_more": len(rows) >= limit,
+	})
 }
 
 // freshnessNote annotates a result with the mirror's staleness and any durability gap, so an
@@ -245,14 +265,6 @@ func freshnessNote(info *dbmirror.Info) string {
 	}
 	b.WriteString("]")
 	return b.String()
-}
-
-func textResult(text string) interface{} {
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{"type": "text", "text": text},
-		},
-	}
 }
 
 // aggregateJobsFromSchedd counts live jobs with the schedd doing the
@@ -314,8 +326,19 @@ func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string,
 		}
 	}
 
-	return textResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal) +
-		"\n" + scope.Note()), nil
+	groups := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		groups = append(groups, map[string]interface{}{"key": r.Group, "count": fmt.Sprintf("%d", r.Count)})
+	}
+	structured := map[string]interface{}{
+		"groups":    groups,
+		"group_by":  groupBy,
+		"table":     "jobs",
+		"source":    "schedd",
+		"truncated": truncated,
+	}
+	return structuredTextResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal)+
+		"\n"+scope.Note(), structured), nil
 }
 
 // aggregateGroupLimit bounds how many groups an aggregate returns. It is

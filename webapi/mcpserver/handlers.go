@@ -37,6 +37,10 @@ type Tool struct {
 	// toolsFor from the central policy in annotations.go rather than on
 	// each literal, so the two transports serve the same values.
 	Annotations *mcp.ToolAnnotations `json:"annotations,omitempty"`
+	// OutputSchema is the JSON Schema for the tool's structuredContent, if
+	// it returns any. Populated by toolsFor from the central policy in
+	// structured.go, so the two transports publish the same schema.
+	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
 }
 
 // Resource represents an MCP resource
@@ -739,11 +743,13 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			filtered = append(filtered, t)
 		}
 	}
-	// Stamp the behavioural hints from the central policy. Done here, at the
-	// one chokepoint both transports read, so a tool declared anywhere gets
-	// annotated once and the JSON-RPC and SDK catalogues never disagree.
+	// Stamp the behavioural hints and output schema from the central
+	// policies. Done here, at the one chokepoint both transports read, so a
+	// tool declared anywhere is annotated and schematised once and the
+	// JSON-RPC and SDK catalogues never disagree.
 	for i := range filtered {
 		filtered[i].Annotations = annotationsFor(filtered[i].Name)
+		filtered[i].OutputSchema = outputSchemaFor(filtered[i].Name)
 	}
 	return filtered
 }
@@ -1013,15 +1019,17 @@ First job ID for status checks: %s`, jobIDs[0])
 	// the response text: the job is already submitted, so the caller
 	// has to decide whether to remove and resubmit it.
 	metadata := map[string]interface{}{
-		"cluster_id": clusterID,
-		"job_ids":    jobIDs,
+		"cluster_id":   clusterID,
+		"job_ids":      jobIDs,
+		"proc_count":   len(jobIDs),
+		"needs_upload": insp.needsSpooling,
 	}
 	if len(insp.warnings) > 0 {
 		metadata["warnings"] = insp.warnings
 	}
 	warningNote := formatSubmitWarnings(insp.warnings)
 
-	return map[string]interface{}{
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -1030,7 +1038,7 @@ First job ID for status checks: %s`, jobIDs[0])
 			},
 		},
 		"metadata": metadata,
-	}, nil
+	}, metadata), nil
 }
 
 // toolQueryJobs handles job queries
@@ -1150,7 +1158,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 		jobAds = append(jobAds, result.Ad)
 	}
 
-	resultText, metadata := renderJobsBase(jobAds, constraint, "schedd", "\n"+scope.Note())
+	resultText, metadata, structured := renderJobsBase(jobAds, constraint, "schedd", "\n"+scope.Note())
 
 	// The token comes from the walk, not from the last ad: a page may
 	// end short of the window it covered, so its last row is not always
@@ -1162,11 +1170,12 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// instead rather than leave the caller to guess.
 	if len(jobAds) >= limit {
 		metadata["has_more"] = true
+		structured["has_more"] = true
 		resultText += truncationNote(limit, limitCapped)
 	}
 	resultText += projectionNote
 
-	return map[string]interface{}{
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -1174,7 +1183,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 			},
 		},
 		"metadata": metadata,
-	}, nil
+	}, structured), nil
 }
 
 // jobStatusGuide is appended to every query_jobs result (both the schedd and the
@@ -1199,7 +1208,7 @@ TIPS:
 // path and the mirror path (tryJobsFromDB) funnel through here so their output
 // contract is identical apart from the source label and note; the schedd path
 // then layers pagination onto the returned text/metadata.
-func renderJobsBase(jobAds []*classad.ClassAd, constraint, source, trailer string) (string, map[string]interface{}) {
+func renderJobsBase(jobAds []*classad.ClassAd, constraint, source, trailer string) (string, map[string]interface{}, map[string]interface{}) {
 	jobsJSON, err := json.Marshal(jobAds)
 	if err != nil {
 		jobsJSON = []byte("[]")
@@ -1212,7 +1221,16 @@ func renderJobsBase(jobAds []*classad.ClassAd, constraint, source, trailer strin
 		"source":     source,
 		"has_more":   false,
 	}
-	return text, metadata
+	// structuredContent mirrors the metadata and carries the ads themselves
+	// (the text embeds them as a JSON blob a client would have to re-parse).
+	structured := map[string]interface{}{
+		"jobs":       jobAds,
+		"count":      len(jobAds),
+		"constraint": constraint,
+		"source":     source,
+		"has_more":   false,
+	}
+	return text, metadata, structured
 }
 
 // toolGetJob handles getting a specific job
@@ -1266,14 +1284,10 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("failed to serialize job: %w", err)
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": fmt.Sprintf("Job %s:\n%s", jobID, string(jobJSON)),
-			},
-		},
-	}, nil
+	return structuredTextResult(
+		fmt.Sprintf("Job %s:\n%s", jobID, string(jobJSON)),
+		map[string]interface{}{"job": jobAds[0], "job_id": jobID},
+	), nil
 }
 
 // matchAnalysisProvider lazily allocates the slot provider used by the
@@ -1366,23 +1380,15 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 		textBlock = fmt.Sprintf("Job %s\nRequirements: %s\n\n%s", jobID, requirementsText, textBlock)
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": textBlock,
-			},
-		},
-		// Include the structured data alongside the text. Agents that
-		// know about it can drive their own visualization; agents that
-		// don't simply ignore the extra field.
-		"data": map[string]interface{}{
-			"job_id":       jobID,
-			"requirements": requirementsText,
-			"result":       res,
-			"slot_cache":   provider.CacheStatus(),
-		},
-	}, nil
+	// Include the structured data alongside the text. Agents that know about
+	// it can drive their own visualization; agents that don't simply ignore
+	// the extra field.
+	return structuredTextResult(textBlock, map[string]interface{}{
+		"job_id":       jobID,
+		"requirements": requirementsText,
+		"result":       res,
+		"slot_cache":   provider.CacheStatus(),
+	}), nil
 }
 
 // performJobAction is a helper function for single job actions (hold/release/remove)
@@ -1416,14 +1422,10 @@ func performJobAction(ctx context.Context, args map[string]interface{}, actionFu
 		return nil, fmt.Errorf("failed to %s job %s", actionName, jobID)
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": fmt.Sprintf("Successfully %s job %s", actionName, jobID),
-			},
-		},
-	}, nil
+	return structuredTextResult(
+		fmt.Sprintf("Successfully %s job %s", actionName, jobID),
+		map[string]interface{}{"job_id": jobID, "action": actionName, "success": true},
+	), nil
 }
 
 // toolRemoveJob handles removing a specific job
@@ -1461,7 +1463,15 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"action":            "remove",
+		"constraint":        llmConstraint,
+		"total":             results.TotalJobs,
+		"success":           results.Success,
+		"permission_denied": results.PermissionDenied,
+		"not_found":         results.NotFound,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -1469,13 +1479,8 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 					results.Success, results.TotalJobs, llmConstraint),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"total":             results.TotalJobs,
-			"success":           results.Success,
-			"permission_denied": results.PermissionDenied,
-			"not_found":         results.NotFound,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // toolEditJob handles editing a job
@@ -1526,14 +1531,11 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		// hazard as the silent string it replaces, one step later.
 		text += "\n" + strings.Join(notes, "\n")
 	}
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": text,
-			},
-		},
-	}, nil
+	structured := map[string]interface{}{"job_id": jobID, "attributes": attributes}
+	if len(notes) > 0 {
+		structured["notes"] = notes
+	}
+	return structuredTextResult(text, structured), nil
 }
 
 // attrNames is the projection for the pre-edit lookup: the attributes
@@ -1848,7 +1850,15 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 			outputType, filepath.Base(outputFile), describeSandboxEntries(entries))
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"job_id":      jobID,
+		"output_type": outputType,
+		"filename":    outputFile,
+		"size":        len(outputContent),
+		"empty":       outputContent == "",
+		"content":     outputContent,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -1856,14 +1866,8 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 					describeJobOutput(outputContent, outputType)),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"job_id":      jobID,
-			"output_type": outputType,
-			"filename":    outputFile,
-			"size":        len(outputContent),
-			"empty":       outputContent == "",
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // describeJobOutput renders retrieved output, saying so when there is
@@ -1942,19 +1946,21 @@ func (s *Server) toolAdvertiseToCollector(ctx context.Context, args map[string]i
 		adType = typeStr
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"advertised": true,
+		"ad_name":    adName,
+		"ad_type":    adType,
+		"with_ack":   opts.WithAck,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
 				"text": fmt.Sprintf("Successfully advertised %s ad '%s' to collector", adType, adName),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"ad_name":  adName,
-			"ad_type":  adType,
-			"with_ack": opts.WithAck,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // toolQueryJobHistory handles job history queries
@@ -2095,7 +2101,7 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 	resultText := fmt.Sprintf("Found %d %s record(s):\n%s%s",
 		len(records), typeName, string(recordsJSON), note)
 
-	return map[string]interface{}{
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -2107,7 +2113,13 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 			"constraint":    constraint,
 			"source":        source,
 		},
-	}
+	}, map[string]interface{}{
+		"records":    records,
+		"count":      len(records),
+		"type":       typeName,
+		"constraint": constraint,
+		"source":     source,
+	})
 }
 
 // OutputFile represents a file from the job's output sandbox
@@ -2277,7 +2289,14 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("failed to spool job files: %w", err)
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"job_id":     jobID,
+		"file_count": len(uploadedFiles),
+		"files":      uploadedFiles,
+		"total_size": totalSize,
+		"released":   true,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -2289,13 +2308,8 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 					len(uploadedFiles), jobID, strings.Join(uploadedFiles, ", "), sizeWarning),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"job_id":     jobID,
-			"file_count": len(uploadedFiles),
-			"files":      uploadedFiles,
-			"total_size": totalSize,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // toolGetJobOutputFiles handles retrieving all output files from a job's sandbox
@@ -2386,18 +2400,16 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	}
 
 	if len(outputFiles) == 0 {
-		return map[string]interface{}{
+		empty := map[string]interface{}{"job_id": jobID, "file_count": 0, "files": []OutputFile{}}
+		return withStructured(map[string]interface{}{
 			"content": []map[string]interface{}{
 				{
 					"type": "text",
 					"text": fmt.Sprintf("No output files found for job %s. The job may not have produced any output yet.", jobID),
 				},
 			},
-			"metadata": map[string]interface{}{
-				"job_id":     jobID,
-				"file_count": 0,
-			},
-		}, nil
+			"metadata": empty,
+		}, empty), nil
 	}
 
 	// Build summary text
@@ -2425,19 +2437,20 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 		}
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"job_id":     jobID,
+		"file_count": len(outputFiles),
+		"files":      outputFiles,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
 				"text": summaryText,
 			},
 		},
-		"metadata": map[string]interface{}{
-			"job_id":     jobID,
-			"file_count": len(outputFiles),
-			"files":      outputFiles,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 // buildFileDownloadURL constructs the HTTP URL for downloading a specific file from a job's output
@@ -2511,18 +2524,13 @@ func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]in
 	}
 
 	if len(creds) == 0 {
-		return map[string]interface{}{
-			"content": []map[string]interface{}{
-				{
-					"type": "text",
-					"text": "No OAuth service credentials found.",
-				},
-			},
-		}, nil
+		return structuredTextResult("No OAuth service credentials found.",
+			map[string]interface{}{"credentials": []interface{}{}, "count": 0}), nil
 	}
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Found %d service credential(s):\n\n", len(creds))
+	credList := make([]map[string]interface{}, 0, len(creds))
 	for _, c := range creds {
 		status := "present"
 		if !c.Exists {
@@ -2533,20 +2541,17 @@ func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]in
 			entry += fmt.Sprintf(", Handle: %s", c.Handle)
 		}
 		entry += fmt.Sprintf(" [%s]", status)
+		item := map[string]interface{}{"service": c.Service, "handle": c.Handle, "exists": c.Exists}
 		if c.UpdatedAt != nil {
 			entry += fmt.Sprintf(" (updated: %s)", c.UpdatedAt.Format(time.RFC3339))
+			item["updated_at"] = c.UpdatedAt.Format(time.RFC3339)
 		}
+		credList = append(credList, item)
 		sb.WriteString(entry + "\n")
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": sb.String(),
-			},
-		},
-	}, nil
+	return structuredTextResult(sb.String(),
+		map[string]interface{}{"credentials": credList, "count": len(credList)}), nil
 }
 
 // toolGetCredentialStatus checks whether an OAuth credential exists for a service
@@ -2568,14 +2573,10 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 			if handle != "" {
 				label += "/" + handle
 			}
-			return map[string]interface{}{
-				"content": []map[string]interface{}{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("No credential found for service '%s'. You may need to store one using store_service_credential.", label),
-					},
-				},
-			}, nil
+			return structuredTextResult(
+				fmt.Sprintf("No credential found for service '%s'. You may need to store one using store_service_credential.", label),
+				map[string]interface{}{"service": service, "handle": handle, "exists": false},
+			), nil
 		}
 		return nil, fmt.Errorf("failed to query credential status: %w", err)
 	}
@@ -2585,18 +2586,13 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 		label += "/" + handle
 	}
 	text := fmt.Sprintf("Credential for service '%s': exists=%v", label, status.Exists)
+	structured := map[string]interface{}{"service": service, "handle": handle, "exists": status.Exists}
 	if status.UpdatedAt != nil {
 		text += fmt.Sprintf(", updated_at=%s", status.UpdatedAt.Format(time.RFC3339))
+		structured["updated_at"] = status.UpdatedAt.Format(time.RFC3339)
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": text,
-			},
-		},
-	}, nil
+	return structuredTextResult(text, structured), nil
 }
 
 // toolStoreServiceCredential stores an OAuth credential for a service
@@ -2641,14 +2637,10 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		label += "/" + handle
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": fmt.Sprintf("Successfully stored OAuth credential for service '%s'.", label),
-			},
-		},
-	}, nil
+	return structuredTextResult(
+		fmt.Sprintf("Successfully stored OAuth credential for service '%s'.", label),
+		map[string]interface{}{"service": service, "handle": handle, "stored": true},
+	), nil
 }
 
 // toolDeleteServiceCredential removes an OAuth credential for a service
@@ -2675,14 +2667,10 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 		label += "/" + handle
 	}
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": fmt.Sprintf("Successfully deleted OAuth credential for service '%s'.", label),
-			},
-		},
-	}, nil
+	return structuredTextResult(
+		fmt.Sprintf("Successfully deleted OAuth credential for service '%s'.", label),
+		map[string]interface{}{"service": service, "handle": handle, "deleted": true},
+	), nil
 }
 
 // extractSandboxFile pulls one file out of a job-sandbox tar, matching on

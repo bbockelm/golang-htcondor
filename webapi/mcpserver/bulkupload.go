@@ -73,6 +73,11 @@ func uploadNothingToDo(cluster int) map[string]interface{} {
 			"procs_spooled":   0,
 			"procs_remaining": 0,
 		},
+		"structuredContent": map[string]interface{}{
+			"cluster_id":      cluster,
+			"procs_spooled":   0,
+			"procs_remaining": 0,
+		},
 	}
 }
 
@@ -132,24 +137,25 @@ func (s *Server) uploadToCluster(
 	}
 	b.WriteString(sizeWarning)
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
+		"cluster_id":      cluster,
+		"procs_awaiting":  len(ads),
+		"procs_spooled":   len(res.Spooled),
+		"procs_failed":    len(res.Failed),
+		"procs_remaining": res.Remaining(),
+		"spooled":         res.Spooled,
+		"failed":          res.Failed,
+		"file_count":      len(uploadedFiles),
+		"files":           uploadedFiles,
+		"bytes_per_proc":  perProc,
+		"bytes_total":     perProc * int64(len(res.Spooled)),
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{"type": "text", "text": b.String()},
 		},
-		"metadata": map[string]interface{}{
-			"cluster_id":      cluster,
-			"procs_awaiting":  len(ads),
-			"procs_spooled":   len(res.Spooled),
-			"procs_failed":    len(res.Failed),
-			"procs_remaining": res.Remaining(),
-			"spooled":         res.Spooled,
-			"failed":          res.Failed,
-			"file_count":      len(uploadedFiles),
-			"files":           uploadedFiles,
-			"bytes_per_proc":  perProc,
-			"bytes_total":     perProc * int64(len(res.Spooled)),
-		},
-	}, nil
+		"metadata": structured,
+	}, structured), nil
 }
 
 func sortedKeys(m map[string]string) []string {
