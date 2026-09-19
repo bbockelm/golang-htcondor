@@ -62,6 +62,8 @@ func TestScheddIsReadThroughTheGetter(t *testing.T) {
 		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		//nolint:gosec // G304: name comes from ReadDir of this package's
+		// own directory, in a test.
 		src, rerr := os.ReadFile(name)
 		if rerr != nil {
 			t.Fatalf("read %s: %v", name, rerr)
