@@ -2075,6 +2075,7 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
             <p><strong>Client ID:</strong> %s</p>
         </div>
 
+        <form method="POST" action="%s" id="consentForm">
         <div class="permissions">
             <h2>Requested Permissions</h2>
             <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
@@ -2083,7 +2084,6 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
             %s
         </div>
 
-        <form method="POST" action="%s" id="consentForm">
 %s            <input type="hidden" name="action" value="" id="actionInput">
             <div class="actions">
                 <button type="submit" value="approve" class="approve" id="approveBtn">Authorize</button>
@@ -2116,8 +2116,10 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
 		html.EscapeString(p.Username),
 		deviceCodeSection,
 		html.EscapeString(p.ClientID),
-		scopesHTML.String(),
+		// FormAction now precedes the scope list: the permissions block
+		// moved inside the <form>, so the form tag is emitted first.
 		html.EscapeString(p.FormAction),
+		scopesHTML.String(),
 		hiddenFieldsHTML.String(),
 	)
 
