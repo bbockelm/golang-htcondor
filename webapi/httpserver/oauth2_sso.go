@@ -331,7 +331,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn(logging.DestinationHTTP,
 				"Refusing a login that maps to no single local account",
 				"oidc_subject", subject, "error", err)
-			s.writeError(w, http.StatusForbidden, describeFailure(err))
+			// A browser is on the other end of the SSO callback, so this
+			// renders like the group-policy refusal next to it rather
+			// than handing the person a JSON object to read.
+			s.renderIdentityDeniedPage(w, err)
 			return
 		}
 		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
@@ -538,6 +541,21 @@ func (s *Handler) evaluateLoginRequirements(claims map[string]any) error {
 		return fmt.Errorf("this login does not satisfy the deployment's login requirements")
 	}
 	return nil
+}
+
+// renderIdentityDeniedPage tells a browser that its login could not be
+// matched to a local account.
+//
+// Like the group-policy refusal below, the person here authenticated
+// successfully and was then turned away by this deployment. The two
+// refusals differ in what the person can do about it -- ask for a group,
+// versus report a configuration problem -- so they say different things,
+// but neither should reach a browser as JSON.
+func (s *Handler) renderIdentityDeniedPage(w http.ResponseWriter, err error) {
+	s.renderResultPage(w, http.StatusForbidden, "Access denied", "#f44336",
+		"Access denied",
+		"You signed in successfully, but this access point could not match your identity to a local account.",
+		describeFailure(err))
 }
 
 // renderAccessDeniedPage tells a browser why its login was refused.
