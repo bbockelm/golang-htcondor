@@ -34,6 +34,12 @@ type Server struct {
 	scheddProvider func() *htcondor.Schedd
 	collector      *htcondor.Collector
 	credd          htcondor.CreddClient
+	// creddProvider, when set, is consulted for every credd use instead
+	// of the snapshot above. An access point often discovers its credd
+	// after this server is built, and a snapshot taken then stays nil
+	// forever -- which withholds the credential tools entirely, since the
+	// catalogue offers them only when a credd is present. See getCredd.
+	creddProvider func() htcondor.CreddClient
 	// instructions is the built initialize-response text. It is swapped
 	// atomically because SetInstructions can run on a reconfigure while
 	// an initialize is being served.
@@ -131,7 +137,14 @@ type Config struct {
 	HTTPBaseURL    string               // Base URL for HTTP API (e.g., "http://localhost:8080") for file download links
 	Collector      *htcondor.Collector  // Collector for metrics and discovery (optional)
 	Credd          htcondor.CreddClient // Optional credd client for credential management
-	Instructions   string               // Server-level instructions provided to all agents in the MCP initialize response
+	// CreddProvider returns the credd to use for each call. Prefer it
+	// over Credd whenever the credd can appear or move after this server
+	// is built: an access point often discovers its credd after startup,
+	// and a handle captured at construction stays nil forever -- which
+	// silently withholds the credential tools, since the catalogue only
+	// offers them when a credd is present.
+	CreddProvider func() htcondor.CreddClient
+	Instructions  string // Server-level instructions provided to all agents in the MCP initialize response
 	// SkillsDir is a directory of site-authored Markdown skills to publish
 	// to agents. Empty disables the feature.
 	SkillsDir       string
@@ -298,6 +311,7 @@ func NewServer(cfg Config) (*Server, error) {
 		scheddProvider: cfg.ScheddProvider,
 		collector:      cfg.Collector,
 		credd:          cfg.Credd,
+		creddProvider:  cfg.CreddProvider,
 		trustDomain:    cfg.TrustDomain,
 		uidDomain:      cfg.UIDDomain,
 		signingKeyPath: cfg.SigningKeyPath,
@@ -611,6 +625,19 @@ func toolNameFromParams(params json.RawMessage) string {
 // changes its shared-port socket. Reading through the provider each time
 // is what keeps MCP from holding the handle that was correct at startup
 // and dialling a dead socket forever after.
+// getCredd returns the credd to use for this call: the provider's
+// answer when there is one, else the snapshot given at construction.
+// nil means this deployment has no credd, which is a normal state and
+// not an error.
+func (s *Server) getCredd() htcondor.CreddClient {
+	if s.creddProvider != nil {
+		if c := s.creddProvider(); c != nil {
+			return c
+		}
+	}
+	return s.credd
+}
+
 func (s *Server) getSchedd() *htcondor.Schedd {
 	if s.scheddProvider != nil {
 		if sc := s.scheddProvider(); sc != nil {

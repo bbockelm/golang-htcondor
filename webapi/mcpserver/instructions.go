@@ -222,3 +222,16 @@ func (s *Server) rebuildInstructions() {
 	// change the text every other surface serves and not this one.
 	s.catalogGen.Add(1)
 }
+
+// InvalidateCatalog tells the cached per-scope SDK servers that what a
+// caller would be served has changed.
+//
+// The tool catalogue is built per call but cached per scope set, keyed on
+// this generation, so a change that adds or removes tools is invisible
+// until the generation moves. Credd discovery is exactly that change:
+// the credential tools are offered only when a credd is present, so an
+// access point that finds its credd after startup would otherwise keep
+// serving the catalogue it built without one.
+func (s *Server) InvalidateCatalog() {
+	s.catalogGen.Add(1)
+}

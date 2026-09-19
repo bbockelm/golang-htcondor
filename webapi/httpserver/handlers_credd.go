@@ -66,7 +66,7 @@ func (s *Handler) handleUserCredential(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := s.credd.PutUserCred(ctx, credType, decodeCredential(req.Credential), req.User); err != nil {
+		if err := s.getCredd().PutUserCred(ctx, credType, decodeCredential(req.Credential), req.User); err != nil {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to store credential: %v", err))
 			return
 		}
@@ -80,7 +80,7 @@ func (s *Handler) handleUserCredential(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		status, err := s.credd.GetUserCredStatus(ctx, credType, user)
+		status, err := s.getCredd().GetUserCredStatus(ctx, credType, user)
 		if err != nil && !errors.Is(err, htcondor.ErrCredentialNotFound) {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to query credential: %v", err))
 			return
@@ -94,7 +94,7 @@ func (s *Handler) handleUserCredential(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := s.credd.DeleteUserCred(ctx, credType, user); err != nil {
+		if err := s.getCredd().DeleteUserCred(ctx, credType, user); err != nil {
 			if errors.Is(err, htcondor.ErrCredentialNotFound) {
 				s.writeError(w, http.StatusNotFound, "Credential not found")
 				return
@@ -132,7 +132,7 @@ func (s *Handler) handleServiceCredentialCollection(w http.ResponseWriter, r *ht
 	}
 
 	user := r.URL.Query().Get("user")
-	creds, err := s.credd.ListServiceCreds(ctx, htcondor.CredTypeOAuth, user)
+	creds, err := s.getCredd().ListServiceCreds(ctx, htcondor.CredTypeOAuth, user)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to list service credentials: %v", err))
 		return
@@ -229,7 +229,7 @@ func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Req
 				return
 			}
 		}
-		if err := s.credd.PutServiceCred(ctx, credType, credBytes, service, effectiveHandle, req.User, req.Refresh); err != nil {
+		if err := s.getCredd().PutServiceCred(ctx, credType, credBytes, service, effectiveHandle, req.User, req.Refresh); err != nil {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to store service credential: %v", err))
 			return
 		}
@@ -237,7 +237,7 @@ func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Req
 		s.writeJSON(w, http.StatusCreated, credentialStatusResponse{Exists: true, UpdatedAt: &now})
 	case http.MethodGet:
 		if credentialFetch {
-			payload, err := s.credd.GetCredential(ctx, htcondor.CredTypeOAuth, service, handle, user)
+			payload, err := s.getCredd().GetCredential(ctx, htcondor.CredTypeOAuth, service, handle, user)
 			if err != nil {
 				if errors.Is(err, htcondor.ErrCredentialNotFound) {
 					s.writeError(w, http.StatusNotFound, "Credential not found")
@@ -250,14 +250,14 @@ func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		status, err := s.credd.GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, user)
+		status, err := s.getCredd().GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, user)
 		if err != nil && !errors.Is(err, htcondor.ErrCredentialNotFound) {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to query service credential: %v", err))
 			return
 		}
 		s.writeJSON(w, http.StatusOK, credentialStatusResponse{Exists: status.Exists, UpdatedAt: status.UpdatedAt})
 	case http.MethodDelete:
-		if err := s.credd.DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, user); err != nil {
+		if err := s.getCredd().DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, user); err != nil {
 			if errors.Is(err, htcondor.ErrCredentialNotFound) {
 				s.writeError(w, http.StatusNotFound, "Credential not found")
 				return

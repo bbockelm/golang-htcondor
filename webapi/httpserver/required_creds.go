@@ -106,7 +106,11 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 	if len(s.requiredCredentials) == 0 {
 		return
 	}
-	if s.credd == nil || !s.creddAvailable.Load() {
+	// One handle for the whole call: the address updater can replace it
+	// between the nil check and the use, and a check that guarded a
+	// different value than the one used guards nothing.
+	credd := s.getCredd()
+	if credd == nil || !s.creddAvailable.Load() {
 		s.logger.Warn(logging.DestinationHTTP,
 			"cannot bootstrap the required credentials: no credd is available",
 			"services", s.requiredCredentials)
@@ -121,7 +125,7 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 
 		// The empty user means "the caller", which is how the rest of this
 		// server talks to the credd: the connection carries the identity.
-		status, err := s.credd.GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, "", "")
+		status, err := credd.GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, "", "")
 		if err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "could not check a required credential",
 				"service", service, "user", user, "error", err)
@@ -132,7 +136,7 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 			continue
 		}
 
-		if err := s.credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, placeholderCredential, service, "", "", nil); err != nil {
+		if err := credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, placeholderCredential, service, "", "", nil); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "could not bootstrap a required credential",
 				"service", service, "user", user, "error", err)
 			// Not cached: the next submit tries again.
