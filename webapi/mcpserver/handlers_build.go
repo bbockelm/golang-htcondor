@@ -81,7 +81,8 @@ func buildContainerTool() Tool {
 				"destination": map[string]interface{}{
 					"type": "string",
 					"description": "Full destination URL for the finished image, e.g. \"osdf:///chtc/staging/b/alice/py311.sif\". " +
-						"Optional when the site configures a staging base, in which case `name` is appended to it. " +
+						"Optional when the site configures a staging base, in which case `name` is appended to it " +
+						"(the base may be per-user, resolved from your authenticated identity). " +
 						"The destination directory must already exist: object stores do not create one on write, and the job fails if it is missing.",
 				},
 				"verify": map[string]interface{}{
@@ -128,9 +129,17 @@ type BuildConfig struct {
 	// Requirements (HTTP_API_BUILD_REQUIREMENTS) selects build-capable
 	// slots at a site where no transform does it.
 	Requirements string
-	// StagingBase (HTTP_API_BUILD_STAGING_BASE) is the URL prefix images
-	// are published under when the caller gives a bare name. Empty means
+	// StagingBase (HTTP_API_BUILD_STAGING_BASE) is the URL images are
+	// published under when the caller gives a bare name. Empty means
 	// every call must name its own destination.
+	//
+	// It may be a template. {user} expands to the authenticated caller
+	// and {initial} to the first letter of that name, so a site whose
+	// staging area is per user can be described:
+	//
+	//	osdf:///chtc/staging/{initial}/{user}
+	//
+	// A base with no placeholders is used verbatim.
 	StagingBase string
 
 	DefaultCpus     int
@@ -200,7 +209,17 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 
 	cfg := s.build
 
-	destination, err := buildDestination(stringArg(args, "destination"), cfg.stagingBase, name)
+	// The caller is resolved even when the staging base needs no
+	// expansion, so that a site switching to a per-user template does not
+	// discover only then that identification was failing. An
+	// unidentifiable caller is fatal for a template and harmless for a
+	// fixed base, which buildDestination decides.
+	var owner string
+	if caller, err := s.liveJobCaller(ctx); err == nil {
+		owner = caller.Owner
+	}
+
+	destination, err := buildDestination(stringArg(args, "destination"), cfg.stagingBase, name, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +314,12 @@ func validateBuildName(name string) error {
 }
 
 // buildDestination resolves where the finished image goes.
-func buildDestination(destination, stagingBase, name string) (string, error) {
+//
+// owner is the authenticated caller, used to expand a per-user staging
+// template. It is empty only when the server could not identify the
+// caller, which is an error for a template and irrelevant for a fixed
+// base.
+func buildDestination(destination, stagingBase, name, owner string) (string, error) {
 	destination = strings.TrimSpace(destination)
 	if destination != "" {
 		if !strings.Contains(destination, "://") {
@@ -307,7 +331,77 @@ func buildDestination(destination, stagingBase, name string) (string, error) {
 		return "", fmt.Errorf("no destination given and this server has no staging base configured "+
 			"(HTTP_API_BUILD_STAGING_BASE); pass destination as a full URL, e.g. osdf:///chtc/staging/b/alice/%s", name)
 	}
-	return strings.TrimSuffix(stagingBase, "/") + "/" + path.Base(name), nil
+	base, err := expandStagingBase(stagingBase, owner)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(base, "/") + "/" + path.Base(name), nil
+}
+
+// Placeholders accepted in HTTP_API_BUILD_STAGING_BASE.
+const (
+	stagingPlaceholderUser    = "{user}"
+	stagingPlaceholderInitial = "{initial}"
+)
+
+// expandStagingBase substitutes the caller into a staging template.
+//
+// A site whose staging area is per user cannot be described by a fixed
+// prefix. CHTC's is /chtc/staging/<initial>/<netid>, so the useful
+// configuration is a template:
+//
+//	osdf:///chtc/staging/{initial}/{user}
+//
+// A base with no placeholders is returned unchanged, so a site with one
+// shared area keeps working without knowing this exists.
+//
+// The owner comes from the authenticated caller, never from the request,
+// so a caller cannot aim the expansion at somebody else's directory. It
+// is still validated here: this value becomes part of a path, and a
+// username carrying a separator or a ".." would walk out of the staging
+// area. Defense in depth against an identity source that admits one.
+func expandStagingBase(base, owner string) (string, error) {
+	hasUser := strings.Contains(base, stagingPlaceholderUser)
+	hasInitial := strings.Contains(base, stagingPlaceholderInitial)
+	if !hasUser && !hasInitial {
+		// Reject a leftover brace rather than publishing to a path with
+		// a literal "{netid}" in it, which would look like it worked.
+		if i := strings.IndexByte(base, '{'); i >= 0 {
+			return "", fmt.Errorf("staging base %q contains an unknown placeholder at %q; "+
+				"only %s and %s are substituted", base, base[i:], stagingPlaceholderUser, stagingPlaceholderInitial)
+		}
+		return base, nil
+	}
+
+	if owner == "" {
+		return "", fmt.Errorf("staging base %q is per-user but the caller could not be identified; "+
+			"pass an explicit destination instead", base)
+	}
+	if err := validateStagingOwner(owner); err != nil {
+		return "", err
+	}
+
+	expanded := strings.ReplaceAll(base, stagingPlaceholderUser, owner)
+	if hasInitial {
+		expanded = strings.ReplaceAll(expanded, stagingPlaceholderInitial, strings.ToLower(owner[:1]))
+	}
+	if i := strings.IndexByte(expanded, '{'); i >= 0 {
+		return "", fmt.Errorf("staging base %q contains an unknown placeholder at %q; "+
+			"only %s and %s are substituted", base, expanded[i:], stagingPlaceholderUser, stagingPlaceholderInitial)
+	}
+	return expanded, nil
+}
+
+// validateStagingOwner rejects a username that would not be safe as a
+// path component.
+func validateStagingOwner(owner string) error {
+	if strings.ContainsAny(owner, "/\\") {
+		return fmt.Errorf("cannot build a per-user staging path: the caller name %q contains a path separator", owner)
+	}
+	if owner == "." || owner == ".." || strings.Contains(owner, "..") {
+		return fmt.Errorf("cannot build a per-user staging path: the caller name %q is not a usable path component", owner)
+	}
+	return nil
 }
 
 // buildSubmitFile renders the submit file for a build job.
