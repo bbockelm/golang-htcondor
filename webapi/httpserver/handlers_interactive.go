@@ -85,6 +85,14 @@ type InteractiveCreateTerminalRequest struct {
 	GpusMinimumRuntime    string `json:"gpus_minimum_runtime,omitempty"`
 	CudaVersion           string `json:"cuda_version,omitempty"`
 	RequireGpus           string `json:"require_gpus,omitempty"`
+
+	// SubmitLines are extra submit commands the user typed in the launch
+	// form (e.g. "+ProjectName = ...", "environment = ..."). Untrusted:
+	// validated with interactive.ValidateCallerSubmitLines, which rejects
+	// anything that would redefine the session (executable, universe,
+	// queue, ...). Merged before the operator's block so operator policy
+	// still wins.
+	SubmitLines string `json:"submit_lines,omitempty"`
 }
 
 func (req *InteractiveCreateTerminalRequest) applyDefaults() {
@@ -121,6 +129,9 @@ func (req *InteractiveCreateTerminalRequest) validate() error {
 	// that the SPA never produces.
 	if err := validateGPUSubmitFields(req.GpusMinimumCapability, req.GpusMinimumRuntime, req.CudaVersion, req.RequireGpus); err != nil {
 		return err
+	}
+	if err := interactive.ValidateCallerSubmitLines(req.SubmitLines); err != nil {
+		return fmt.Errorf("submit_lines: %w", err)
 	}
 	return nil
 }
@@ -229,6 +240,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
 		Requirements:          s.interactiveRequirements,
+		CallerSubmitLines:     req.SubmitLines,
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
