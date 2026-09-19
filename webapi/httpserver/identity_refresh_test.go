@@ -47,7 +47,7 @@ func identityOverFile(t *testing.T, path string, every time.Duration) *localIden
 	return li
 }
 
-const onePasswdEntry = "root:x:0:0:root:/root:/bin/sh\n"
+const onePasswdEntry = "root:x:0:0:root:/root:/bin/sh\n" //nolint:gosec // a passwd(5) fixture line; the "x" means the hash lives in shadow(5)
 
 // The index must come back on its own, not because somebody happened to
 // log in after the TTL. In a container the first index is built before the

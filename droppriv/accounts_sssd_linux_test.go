@@ -17,6 +17,7 @@
 package droppriv
 
 import (
+	"context"
 	"net"
 	"path/filepath"
 	"sync"
@@ -39,7 +40,8 @@ func newDeadSSSD(t *testing.T) *deadSSSD {
 	// The socket lives in a temp dir; the path length matters on some
 	// systems, and t.TempDir() is short enough.
 	path := filepath.Join(t.TempDir(), "nss")
-	ln, err := net.Listen("unix", path)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "unix", path)
 	if err != nil {
 		t.Fatalf("listening on %s: %v", path, err)
 	}
