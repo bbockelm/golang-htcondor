@@ -105,6 +105,9 @@ type Handler struct {
 	// those jobs off machines where attaching to them cannot work.
 	// See HandlerConfig.InteractiveRequirements.
 	interactiveRequirements string
+	// build is the site's container-build configuration; see
+	// HandlerConfig.Build.
+	build mcpserver.BuildConfig
 	// submitPolicy is the operator's site-wide submit-file defaults and
 	// overrides, applied to EVERY job this API submits regardless of the
 	// surface it arrived on. Zero value applies nothing.
@@ -394,6 +397,10 @@ type HandlerConfig struct {
 	// expression, and a submitter who could set it could widen their own
 	// match rather than narrow it.
 	InteractiveRequirements string
+
+	// Build is the site's container-build configuration, handed to the
+	// MCP server's build_container tool. See mcpserver.BuildConfig.
+	Build mcpserver.BuildConfig
 	// SubmitFileDefaults are submit-file lines applied to every
 	// submission ONLY where the submit file is silent, so a user who
 	// sets the same command keeps their own value. Configure via
@@ -901,6 +908,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
 			"defaults_bytes", len(cfg.SubmitFileDefaults),
 			"overrides_bytes", len(cfg.SubmitFileOverrides))
+	}
+
+	h.build = cfg.Build
+	if strings.TrimSpace(h.build.ExtraSubmit) != "" {
+		logger.Info(logging.DestinationHTTP,
+			"Container build jobs carry extra submit directives",
+			"lines", strings.Count(strings.TrimSpace(h.build.ExtraSubmit), "\n")+1)
 	}
 
 	// Independent of the extras block: an operator may constrain where
@@ -1579,6 +1593,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// starter needs just as much as a session's shell does.
 		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
 		InteractiveRequirements: h.interactiveRequirements,
+		Build:                   h.build,
 		CCBStreaming:            h.ccbStreaming,
 		SigningKeyPath:          h.signingKeyPath,
 		TrustDomain:             h.trustDomain,

@@ -738,6 +738,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// handlers_interactive.go) so the exec surface reads as one piece.
 	tools = append(tools, interactiveTools()...)
 
+	// Container builds. Offered wherever jobs can be submitted: the
+	// site-specific part (which slots build, where images go) is
+	// configuration, and a site that sets none still gets a working
+	// tool as long as the caller names a destination.
+	tools = append(tools, buildContainerTool())
+
 	// The two tools that reach into a live job.
 	tools = append(tools, tailTool(), execInJobTool())
 
@@ -861,6 +867,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolTailJobOutput(ctx, request.Arguments)
 	case "exec_in_job":
 		result, err = s.toolExecInJob(ctx, request.Arguments)
+	case "build_container":
+		result, err = s.toolBuildContainer(ctx, request.Arguments)
 	case "interactive_session_start":
 		result, err = s.toolInteractiveSessionStart(ctx, request.Arguments)
 	case "interactive_session_exec":

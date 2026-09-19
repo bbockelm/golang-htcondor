@@ -22,6 +22,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 )
 
@@ -135,6 +136,10 @@ type Config struct {
 	// the interactive terminal job's Requirements. See
 	// HandlerConfig.InteractiveRequirements.
 	InteractiveRequirements string
+
+	// Build is the site's container-build configuration; see
+	// mcpserver.BuildConfig and HandlerConfig.Build.
+	Build mcpserver.BuildConfig
 	// SubmitFileDefaults and SubmitFileOverrides are the site-wide
 	// submit-file policy applied to EVERY submission -- REST, templates,
 	// interactive, Jupyter and MCP alike. Defaults apply only where the
@@ -353,6 +358,7 @@ func NewServer(cfg Config) (*Server, error) {
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
 		InteractiveRequirements:     cfg.InteractiveRequirements,
+		Build:                       cfg.Build,
 		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,
 		SubmitFileDefaults:          cfg.SubmitFileDefaults,
 		SubmitFileOverrides:         cfg.SubmitFileOverrides,

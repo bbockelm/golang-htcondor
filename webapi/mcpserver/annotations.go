@@ -101,12 +101,17 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;
 	// each call makes a new job, so it is not idempotent.
-	"submit_job":  writeAnn(true, false),
-	"hold_job":    writeAnn(true, true),
-	"release_job": writeAnn(true, true),
-	"remove_job":  writeAnn(true, true),
-	"remove_jobs": writeAnn(true, true),
-	"edit_job":    writeAnn(true, true),
+	"submit_job": writeAnn(true, false),
+	// build_container submits a job like submit_job does. Not
+	// idempotent: calling it again runs another build and overwrites
+	// whatever is at the destination. Open-world because the image
+	// lands in object storage outside the pool.
+	"build_container": writeAnn(true, false),
+	"hold_job":        writeAnn(true, true),
+	"release_job":     writeAnn(true, true),
+	"remove_job":      writeAnn(true, true),
+	"remove_jobs":     writeAnn(true, true),
+	"edit_job":        writeAnn(true, true),
 	// advertise_to_collector re-publishes an ad; sending the same ad again
 	// refreshes it to the same state, so it is idempotent.
 	"advertise_to_collector": writeAnn(true, true),

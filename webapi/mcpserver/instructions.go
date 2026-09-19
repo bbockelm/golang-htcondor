@@ -66,6 +66,18 @@ func defaultInstructions(scheddName string) string {
 		"and disconnects, which makes it the tool for inspecting a running job (ls the sandbox, " +
 		"check a process, read a file mid-run) without starting a session or disturbing the job. " +
 		"Use a session instead when several commands need the same shell.\n\n")
+	b.WriteString("## Building container images\n\n")
+	b.WriteString("build_container builds an Apptainer image from a definition file as a job on the " +
+		"pool's build machines and publishes the .sif to object storage. Pass the definition text " +
+		"verbatim; the tool supplies the submit attributes that reach a build-capable slot, the " +
+		"resource requests, the image-cache handling, and the transfer.\n")
+	b.WriteString("It returns as soon as the job is submitted, because a real image takes minutes. " +
+		"Wait with watch_jobs (event=\"done\"), then read get_job_stdout for the build log.\n")
+	b.WriteString("Pass a verify command whenever you can. It runs inside the freshly built image, " +
+		"and if it fails the image is NOT published — which matters because the destination is a " +
+		"shared path other people read from. A failed build publishes nothing but still returns " +
+		"its logs, so it stays diagnosable.\n\n")
+
 	b.WriteString("Three things to know:\n")
 	b.WriteString("  - The session name is the only handle. Pass it on every call; " +
 		"interactive_session_list finds sessions from earlier conversations.\n")
