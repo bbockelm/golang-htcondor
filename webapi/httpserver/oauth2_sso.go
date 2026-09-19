@@ -324,7 +324,13 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// store, the consent and device-approval flows.
 	subject := userInfo.Subject
 	if s.localIdentity != nil {
-		account, groups, err := s.localIdentity.resolve(ctx, subject, userGroups)
+		// A previously confirmed mapping, if this browser has one. It is
+		// re-confirmed against the live account database below, never
+		// trusted; what it avoids is the enumeration needed to discover
+		// the account from scratch, which a just-restarted daemon cannot
+		// do until its directory is answering.
+		hint := s.readIdentityCookie(r, subject)
+		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, subject, userGroups, hint)
 		if err != nil {
 			// Refused, not degraded. See localIdentity's comment on why
 			// there is no fallback to the token's own claims.
@@ -338,8 +344,17 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
-			"oidc_subject", subject, "account", account,
+			"oidc_subject", subject, "account", account, "from_hint", hinted,
 			"groups", groups, "groups_from_system", s.localIdentity.sourcesGroups())
+
+		// Remember the mapping only when it was made with full knowledge
+		// of the account database. A hinted mapping is not re-issued: it
+		// was confirmed by name, which cannot rule out a second account
+		// claiming the same GECOS, so extending its life would launder a
+		// weaker check into a longer-lived claim.
+		if !hinted && s.localIdentity.indexIsComplete() {
+			s.setIdentityCookie(w, subject, account)
+		}
 		subject, userGroups = account, groups
 	}
 

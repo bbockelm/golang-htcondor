@@ -119,3 +119,47 @@ func TestAFailedRefreshKeepsThePreviousIndex(t *testing.T) {
 	// is the intended trade and not a consequence of the refresh failing.
 	// What this test pins is that the refresh did not blank the index.
 }
+
+// A hint is confirmed, never trusted. One that does not check out must
+// fall through to the ordinary resolution rather than being taken at its
+// word -- this is the wiring that makes a forged cookie inert.
+func TestAnUnconfirmableHintFallsBackToTheIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	body := onePasswdEntry + "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/sh\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	li := identityOverFile(t, path, time.Hour)
+	li.warmUp(context.Background())
+
+	// "root" exists, but its GECOS is not this subject.
+	account, _, hinted, err := li.resolveWithHint(context.Background(), "bockelman", nil, "root")
+	if err != nil {
+		t.Fatalf("resolveWithHint: %v", err)
+	}
+	if hinted {
+		t.Error("an unconfirmable hint was reported as used")
+	}
+	if account != "bbockelm" {
+		t.Errorf("account = %q, want bbockelm from the index", account)
+	}
+}
+
+// And a hint that does check out is used, or the mechanism buys nothing.
+func TestAConfirmedHintIsUsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	body := onePasswdEntry + "bbockelm:x:20014:20014:bockelman:/home/bbockelm:/bin/sh\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	li := identityOverFile(t, path, time.Hour)
+	li.warmUp(context.Background())
+
+	account, _, hinted, err := li.resolveWithHint(context.Background(), "bockelman", nil, "bbockelm")
+	if err != nil {
+		t.Fatalf("resolveWithHint: %v", err)
+	}
+	if !hinted || account != "bbockelm" {
+		t.Errorf("account = %q, hinted = %v; want the hint to have been used", account, hinted)
+	}
+}
