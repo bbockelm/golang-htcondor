@@ -57,5 +57,28 @@ set -euo pipefail
 # gotestsum comes from the image; GOCACHE/GOMODCACHE are the restored
 # caches under the bind-mounted workspace.
 cd webapi
-GOWORK=off gotestsum -- -tags=integration -timeout=20m \
-  ./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/
+
+PACKAGES=(./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/ ./interactive/)
+
+# The list above is hand-maintained, so check it against the tree rather
+# than trusting it. A package whose tests are all behind the integration
+# tag contributes nothing to any other job, so leaving it out is invisible:
+# ./interactive/ was missing and its session test -- the one covering
+# condor_ssh_to_job -- ran nowhere at all.
+missing=()
+while read -r dir; do
+  found=no
+  for pkg in "${PACKAGES[@]}"; do
+    [ "${pkg%/}" = "./${dir#./}" ] && found=yes && break
+  done
+  [ "$found" = no ] && missing+=("$dir")
+done < <(grep -rl '^//go:build integration' --include='*_test.go' . | xargs -n1 dirname | sort -u)
+
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "These webapi packages have integration-tagged tests but are not in PACKAGES:" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  echo "Add them above, or they run in no job at all." >&2
+  exit 1
+fi
+
+GOWORK=off gotestsum -- -tags=integration -timeout=25m "${PACKAGES[@]}"
