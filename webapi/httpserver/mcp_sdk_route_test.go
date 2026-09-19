@@ -46,7 +46,9 @@ func newMCPTransportServer(t *testing.T, useSDK bool) *Server {
 	return s
 }
 
-func postMCP(t *testing.T, s *Server, path, accept string) *http.Response {
+// postMCP returns the status and content type rather than the response, so
+// the body is closed here instead of at four call sites.
+func postMCP(t *testing.T, s *Server, path, accept string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path,
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
@@ -56,7 +58,9 @@ func postMCP(t *testing.T, s *Server, path, accept string) *http.Response {
 	}
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
-	return w.Result()
+	resp := w.Result()
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode, resp.Header.Get("Content-Type")
 }
 
 // Both transports serve both paths, and neither falls through to the SPA.
@@ -70,11 +74,11 @@ func TestMCPRoutedOnEitherTransport(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newMCPTransportServer(t, useSDK)
 			for _, path := range []string{"/mcp", "/mcp/message"} {
-				resp := postMCP(t, s, path, "application/json, text/event-stream")
-				if resp.StatusCode == http.StatusNotFound {
+				code, contentType := postMCP(t, s, path, "application/json, text/event-stream")
+				if code == http.StatusNotFound {
 					t.Errorf("%s is not routed on the %s transport", path, name)
 				}
-				if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+				if strings.HasPrefix(contentType, "text/html") {
 					t.Errorf("%s fell through to the SPA on the %s transport", path, name)
 				}
 			}
@@ -94,10 +98,9 @@ func TestMCPUnauthenticatedRefusedOnEitherTransport(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s := newMCPTransportServer(t, useSDK)
-			resp := postMCP(t, s, "/mcp", "application/json, text/event-stream")
-			if resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("an unauthenticated caller got %d on the %s transport, want 401",
-					resp.StatusCode, name)
+			code, _ := postMCP(t, s, "/mcp", "application/json, text/event-stream")
+			if code != http.StatusUnauthorized {
+				t.Errorf("an unauthenticated caller got %d on the %s transport, want 401", code, name)
 			}
 		})
 	}
@@ -116,12 +119,11 @@ func TestSDKTransportRequiresTheSpecAcceptHeader(t *testing.T) {
 
 	// Authentication comes first on both, so use a header that gets past
 	// neither -- what differs is WHICH refusal arrives.
-	if got := postMCP(t, builtin, "/mcp", "application/json").StatusCode; got == http.StatusBadRequest {
-		t.Errorf("the built-in transport rejected a plain Accept with 400; it should not care")
+	if got, _ := postMCP(t, builtin, "/mcp", "application/json"); got == http.StatusBadRequest {
+		t.Error("the built-in transport rejected a plain Accept with 400; it should not care")
 	}
-	resp := postMCP(t, sdk, "/mcp", "application/json")
-	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("SDK transport answered %d for a plain Accept; expected a refusal", resp.StatusCode)
+	if got, _ := postMCP(t, sdk, "/mcp", "application/json"); got != http.StatusUnauthorized && got != http.StatusBadRequest {
+		t.Errorf("SDK transport answered %d for a plain Accept; expected a refusal", got)
 	}
 }
 

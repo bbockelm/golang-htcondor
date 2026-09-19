@@ -27,18 +27,18 @@ func sdkTestServer(t *testing.T) *Server {
 
 // verifierFor makes every request present the given scopes.
 func verifierFor(scopes []string) auth.TokenVerifier {
-	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+	return func(_ context.Context, _ string, _ *http.Request) (*auth.TokenInfo, error) {
 		return &auth.TokenInfo{Scopes: scopes, Expiration: time.Now().Add(time.Hour)}, nil
 	}
 }
 
-func sdkPost(t *testing.T, ts *httptest.Server, payload map[string]interface{}) (int, string) {
+func sdkPost(t *testing.T, ts *httptest.Server, payload map[string]interface{}) string {
 	t.Helper()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequest("POST", ts.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", ts.URL, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func sdkPost(t *testing.T, ts *httptest.Server, payload map[string]interface{}) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return resp.StatusCode, string(raw)
+	return string(raw)
 }
 
 // TestSDKCatalogueIsTheCallGate: the catalogue a caller sees and the calls it
@@ -76,7 +76,7 @@ func TestSDKCatalogueIsTheCallGate(t *testing.T) {
 			ts := httptest.NewServer(s.SDKHTTPHandler(verifierFor(tc.scopes)))
 			defer ts.Close()
 
-			_, listed := sdkPost(t, ts, map[string]interface{}{
+			listed := sdkPost(t, ts, map[string]interface{}{
 				"jsonrpc": "2.0", "id": 1, "method": "tools/list",
 			})
 			if strings.Contains(listed, `"submit_job"`) != tc.wantWrite {
@@ -87,7 +87,7 @@ func TestSDKCatalogueIsTheCallGate(t *testing.T) {
 			}
 
 			// The call gate must agree with the catalogue.
-			_, called := sdkPost(t, ts, map[string]interface{}{
+			called := sdkPost(t, ts, map[string]interface{}{
 				"jsonrpc": "2.0", "id": 2, "method": "tools/call",
 				"params": map[string]interface{}{
 					"name":      "submit_job",
@@ -114,7 +114,7 @@ func TestSDKToolFailureIsAResultNotAProtocolError(t *testing.T) {
 	defer ts.Close()
 
 	// A real tool, reaching a schedd that is not there.
-	_, body := sdkPost(t, ts, map[string]interface{}{
+	body := sdkPost(t, ts, map[string]interface{}{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]interface{}{"name": "query_jobs", "arguments": map[string]interface{}{}},
 	})
@@ -189,7 +189,9 @@ func TestSDKCancelsWhenTheClientGoesAway(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	_, _ = http.DefaultClient.Do(req)
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
 
 	select {
 	case took := <-ran:
@@ -237,12 +239,12 @@ func TestSDKServesCurrentInstructions(t *testing.T) {
 			"clientInfo":      map[string]interface{}{"name": "t", "version": "0"},
 		},
 	}
-	if _, body := sdkPost(t, ts, initialize); !strings.Contains(body, "MARKER-ONE") {
+	if body := sdkPost(t, ts, initialize); !strings.Contains(body, "MARKER-ONE") {
 		t.Fatalf("initialize did not carry the operator's instructions:\n%s", body)
 	}
 
 	s.SetInstructions("MARKER-TWO")
-	_, body := sdkPost(t, ts, initialize)
+	body := sdkPost(t, ts, initialize)
 	if strings.Contains(body, "MARKER-ONE") || !strings.Contains(body, "MARKER-TWO") {
 		t.Errorf("initialize served stale instructions after a reconfigure:\n%s", body)
 	}
