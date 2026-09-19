@@ -2905,7 +2905,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 	// This allows the server to use its own IDP for authentication (SSO)
 	clientID := "internal-client"
 	clientSecret := "internal-secret"
-	ssoRedirectURI := issuer + "/mcp/oauth2/callback"
+	ssoRedirectURI := issuer + OAuth2CallbackPath()
 
 	// Check if client exists
 	_, err := h.idpProvider.storage.GetClient(ctx, clientID)

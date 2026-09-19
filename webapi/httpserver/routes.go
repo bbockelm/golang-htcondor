@@ -221,8 +221,12 @@ func (h *Handler) setupRoutes() {
 
 		// OAuth2 endpoints
 		mux.HandleFunc("/mcp/oauth2/authorize", h.handleOAuth2Authorize)
-		mux.HandleFunc("/mcp/oauth2/consent", h.handleOAuth2Consent)   // Consent page
-		mux.HandleFunc("/mcp/oauth2/callback", h.handleOAuth2Callback) // SSO callback
+		mux.HandleFunc("/mcp/oauth2/consent", h.handleOAuth2Consent) // Consent page
+		// The SSO callback is served at both paths whatever the server
+		// advertises (OAuth2CallbackPath): an authorization started before
+		// an upgrade comes back to the path it began with.
+		mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
+		mux.HandleFunc(webUICallbackPath, h.handleOAuth2Callback)
 		mux.HandleFunc("/mcp/oauth2/token", h.handleOAuth2Token)
 		mux.HandleFunc("/mcp/oauth2/introspect", h.handleOAuth2Introspect)
 		mux.HandleFunc("/mcp/oauth2/revoke", h.handleOAuth2Revoke)
