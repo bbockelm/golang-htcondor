@@ -78,6 +78,10 @@ type localIdentity struct {
 	// refreshEvery is the index TTL, and the cadence of the background
 	// rebuild. A field so a test need not wait out the real one.
 	refreshEvery time.Duration
+
+	// store persists the index across restarts. Nil disables that, which
+	// is the case for a deployment with no application database.
+	store *identityIndexStore
 }
 
 // mapsAccount reports whether the asserted subject is translated.
@@ -167,6 +171,22 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		// Only groups are being sourced locally; there is no index.
 		return
 	}
+
+	// Start from what the last run knew. The rebuild below usually cannot
+	// read the directory yet -- that is the whole problem this addresses
+	// -- and a degraded build will not be allowed to replace this.
+	if snap, ok, err := l.store.Load(ctx); err != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"Could not read the saved account index; starting without one", "error", err)
+	} else if ok {
+		l.resolver.Restore(snap)
+		accounts, _, builtAt := l.resolver.Stats()
+		l.logger.Info(logging.DestinationHTTP,
+			"Restored the account index saved by a previous run",
+			"accounts", accounts, "built_at", builtAt,
+			"age", time.Since(builtAt).Round(time.Second))
+	}
+
 	if err := l.resolver.Refresh(ctx); err != nil {
 		l.logger.Error(logging.DestinationHTTP,
 			"Could not read the account database; every login will be refused until this works",
@@ -176,6 +196,7 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	accounts, ambiguous, _ := l.resolver.Stats()
 	l.logger.Info(logging.DestinationHTTP, "Indexed accounts by GECOS for identity mapping",
 		"accounts", accounts, "ambiguous", ambiguous)
+	l.saveIndex(ctx)
 	if accounts == 0 {
 		l.logger.Warn(logging.DestinationHTTP,
 			"The account database enumerated to nothing, so no login can be mapped. "+
@@ -212,6 +233,23 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		l.logger.Warn(logging.DestinationHTTP,
 			"Several accounts share a GECOS; nobody presenting one of these can log in",
 			"gecos", l.resolver.AmbiguousGecos())
+	}
+}
+
+// saveIndex persists the index if it is complete enough to be worth
+// restoring. A failure here costs a slower start next time and nothing
+// else, so it is logged rather than propagated.
+func (l *localIdentity) saveIndex(ctx context.Context) {
+	if l.store == nil {
+		return
+	}
+	snap, ok := l.resolver.Snapshot()
+	if !ok {
+		return
+	}
+	if err := l.store.Save(ctx, snap); err != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"Could not save the account index for the next run", "error", err)
 	}
 }
 
@@ -253,6 +291,8 @@ func (l *localIdentity) refreshLoop(ctx context.Context) {
 			}
 			continue
 		}
+
+		l.saveIndex(ctx)
 
 		accounts, ambiguous, _ := l.resolver.Stats()
 		degraded := l.resolver.Degraded() != nil
