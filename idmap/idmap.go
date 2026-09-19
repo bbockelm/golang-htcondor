@@ -147,6 +147,17 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 	return out, nil
 }
 
+// Snapshot is a saved index, suitable for writing somewhere durable and
+// restoring into a later process. It carries its own build time so a
+// restored index ages normally rather than appearing freshly built.
+type Snapshot struct {
+	ByGecos map[string]string `json:"by_gecos"`
+	Counts  map[string]int    `json:"counts"`
+	Users   []string          `json:"users"`
+	BuiltAt time.Time         `json:"built_at"`
+	Count   int               `json:"count"`
+}
+
 // Resolver maps subjects to local account names.
 type Resolver struct {
 	// degraded records that the last build could not read part of the
@@ -519,6 +530,15 @@ func (r *Resolver) build(ctx context.Context) error {
 	}
 
 	r.mu.Lock()
+	// A degraded build must not replace knowledge we already have. On a
+	// container start the directory is typically unreadable for the first
+	// minutes, and installing that partial view would throw away a
+	// complete index -- one restored from cache, or built before the
+	// directory went away -- and refuse logins that were working.
+	if degraded != nil && r.degraded == nil && r.count > 0 {
+		r.mu.Unlock()
+		return fmt.Errorf("keeping the existing complete index: %w", err)
+	}
 	r.byGecos = byGecos
 	r.ambiguous = counts
 	r.knownUsers = known
@@ -533,6 +553,77 @@ func (r *Resolver) build(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 	return nil
+}
+
+// Snapshot returns the current index for persisting, and reports whether
+// it is worth persisting at all.
+//
+// Only a COMPLETE index qualifies. A degraded one is missing accounts by
+// definition, and its ambiguity counts are therefore unreliable -- saving
+// it would turn a transient outage into a cache that outlives it.
+func (r *Resolver) Snapshot() (Snapshot, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.degraded != nil || r.count == 0 {
+		return Snapshot{}, false
+	}
+
+	snap := Snapshot{
+		ByGecos: make(map[string]string, len(r.byGecos)),
+		Counts:  make(map[string]int, len(r.ambiguous)),
+		Users:   make([]string, 0, len(r.knownUsers)),
+		BuiltAt: r.builtAt,
+		Count:   r.count,
+	}
+	for k, v := range r.byGecos {
+		snap.ByGecos[k] = v
+	}
+	for k, v := range r.ambiguous {
+		snap.Counts[k] = v
+	}
+	for u := range r.knownUsers {
+		snap.Users = append(snap.Users, u)
+	}
+	sort.Strings(snap.Users)
+	return snap, true
+}
+
+// Restore installs a previously saved index.
+//
+// The restored index is a set of CANDIDATES, exactly like a freshly built
+// one: every hit it produces is still forward-verified by name against the
+// live account database before it is believed, so an entry that has since
+// changed or disappeared cannot let anybody in. What it buys is that a
+// process which has just restarted can answer at all, instead of refusing
+// every login until the directory becomes readable.
+//
+// BuiltAt is preserved rather than reset, so the index is exactly as
+// stale as it really is and the ordinary TTL rebuild applies to it.
+func (r *Resolver) Restore(snap Snapshot) {
+	if len(snap.ByGecos) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.byGecos = make(map[string]string, len(snap.ByGecos))
+	for k, v := range snap.ByGecos {
+		r.byGecos[k] = v
+	}
+	r.ambiguous = make(map[string]int, len(snap.Counts))
+	for k, v := range snap.Counts {
+		r.ambiguous[k] = v
+	}
+	r.knownUsers = make(map[string]bool, len(snap.Users))
+	for _, u := range snap.Users {
+		r.knownUsers[u] = true
+	}
+	r.builtAt = snap.BuiltAt
+	r.count = snap.Count
+	if r.count == 0 {
+		r.count = len(snap.ByGecos)
+	}
+	r.degraded = nil
 }
 
 // Degraded reports why the current index is incomplete, or nil if it is

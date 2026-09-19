@@ -190,6 +190,15 @@ func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 	return accounts, nil
 }
 
+// ErrDirectoryEmpty reports that the directory service answered and named
+// no accounts at all.
+//
+// Distinct from a directory that could not be reached, and from one that
+// is simply absent: SSSD is running and said "nobody". The index that
+// results covers only local accounts, so it cannot map a directory
+// identity, and callers must not mistake it for complete knowledge.
+var ErrDirectoryEmpty = errors.New("the directory service enumerated no accounts")
+
 // DirectoryError reports that the passwd file was read but the directory
 // half of an enumeration was not.
 //

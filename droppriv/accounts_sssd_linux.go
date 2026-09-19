@@ -138,6 +138,13 @@ func enumerateSSSDAccounts() ([]Account, error) {
 		return nil, fmt.Errorf("enumerating accounts from SSSD at %s: %w", sssdAccountsPath, err)
 	}
 
+	return accountsFromSSSDUsers(users)
+}
+
+// accountsFromSSSDUsers converts an enumeration result, and decides what
+// an empty one means. Split out so the decision can be tested without
+// standing up a directory that answers but has nothing in it.
+func accountsFromSSSDUsers(users []*gosssd.User) ([]Account, error) {
 	accounts := make([]Account, 0, len(users))
 	for _, u := range users {
 		if u == nil || u.Name == "" {
@@ -150,6 +157,18 @@ func enumerateSSSDAccounts() ([]Account, error) {
 			GID:      u.GID,
 			Gecos:    gecos,
 		})
+	}
+	if len(accounts) == 0 {
+		// SSSD is here and told us about nobody. That is a fact, not a
+		// guess, and it has exactly two causes: the domain does not set
+		// "enumerate = true", or SSSD has not finished its first pass over
+		// the directory -- which on a real directory takes minutes, and in
+		// a container overlaps every start.
+		//
+		// Either way this process does not know the directory's accounts,
+		// so the resulting index must not be treated as authoritative:
+		// not persisted, and not allowed to replace one that is.
+		return nil, ErrDirectoryEmpty
 	}
 	return accounts, nil
 }
