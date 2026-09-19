@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -567,6 +568,48 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
+			Name: "create_input_upload_url",
+			Description: "Create a short-lived URL for uploading one job's input files, so the " +
+				"bytes never pass through this conversation. Use it INSTEAD OF upload_job_input " +
+				"whenever the files are large, are already on the machine you are running on, or " +
+				"belong to somebody else who will do the upload.\n\n" +
+				"The URL accepts a PUT of a tar archive and needs no credentials of its own -- " +
+				"possession of it is the authorization, and it acts as the job's owner. Run the " +
+				"upload with an ordinary shell command, e.g.\n" +
+				"  tar cf - input.dat | curl -T - '<url>'\n" +
+				"Do NOT read the files into your context to do this; that is what upload_job_input " +
+				"is for and it is the thing this tool exists to avoid.\n\n" +
+				"HTCondor spools input PER PROC. Pass a bare cluster id (job_id=\"123\") to get " +
+				"one URL for every proc of that cluster still awaiting input; pass \"cluster.proc\" " +
+				"for exactly one. Each URL takes its own tar -- one upload does not cover the " +
+				"cluster.\n\n" +
+				"Only a job still held for input spooling can be uploaded to, and a URL goes " +
+				"inert once its upload completes. Every entry lists expected_files: the schedd " +
+				"accepts ONLY those names and silently drops anything else, so the tar's entry " +
+				"names have to match them exactly, per proc.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type": "string",
+						"description": "Either one job as 'cluster.proc' (e.g. '123.0'), or a bare " +
+							"cluster id (e.g. '123') to mint a URL for every proc of that cluster " +
+							"still held for input spooling.",
+					},
+					"ttl_seconds": map[string]interface{}{
+						"type": "integer",
+						// Built from the constants rather than restated, so the
+						// documented numbers cannot drift from the enforced ones.
+						"description": fmt.Sprintf("How long the URL stays valid, in seconds. "+
+							"Default %d, maximum %d. The job's state is the real limit: the URL "+
+							"stops working when the job is no longer awaiting input.",
+							int(shareurl.DefaultInputTTL.Seconds()), int(shareurl.MaxInputTTL.Seconds())),
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
+		{
 			Name:        "get_job_output",
 			Description: "Get all output files from a job's sandbox as structured data. Files are returned with their content (text or base64-encoded for binary), truncated if larger than 100KB per file.",
 			InputSchema: map[string]interface{}{
@@ -839,6 +882,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolUploadJobInput(ctx, request.Arguments)
 	case "get_job_output":
 		result, err = s.toolGetJobOutputFiles(ctx, request.Arguments)
+	case "create_input_upload_url":
+		result, err = s.toolCreateInputUploadURL(ctx, request.Arguments)
 	case "list_service_credentials":
 		result, err = s.toolListServiceCredentials(ctx, request.Arguments)
 	case "get_credential_status":

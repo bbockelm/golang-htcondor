@@ -120,6 +120,11 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// upload_job_input only adds files to a job's spool (additive); the same
 	// upload lands the spool in the same state.
 	"upload_job_input": writeAnn(false, true),
+	// create_input_upload_url does not touch the job -- it hands back a
+	// capability. Minting a second URL for the same job neither replaces
+	// the first nor changes anything, so: additive, and idempotent in the
+	// only sense that matters (calling twice leaves the same state).
+	"create_input_upload_url": writeAnn(false, true),
 	// storing a credential overwrites any prior one for the service/handle;
 	// deleting one removes it. Both are idempotent on a repeat.
 	"store_service_credential":  writeAnn(true, true),

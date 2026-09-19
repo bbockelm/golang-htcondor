@@ -36,6 +36,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
 	"github.com/ory/fosite"
@@ -294,7 +295,7 @@ type Handler struct {
 	// temp directory. Configurable because spilling a gigabyte into a
 	// small /tmp is a way to take the server down with it.
 	spoolBufferDir     string
-	shareSecret        []byte            // Random 32-byte HMAC key for short-lived signed URLs
+	shareSigner        *shareurl.Signer  // HMAC signer for short-lived signed URLs
 	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider        *IDPProvider      // Built-in IDP provider
 	idpLoginLimiter    *LoginRateLimiter // Rate limiter for IDP login attempts
@@ -1002,12 +1003,33 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 	}
 
-	// Random per-process HMAC key for short-lived shared download URLs.
-	// We generate fresh on each start: signed URLs are intentionally
-	// short-lived and don't need to survive a restart.
-	h.shareSecret = make([]byte, 32)
-	if _, err := rand.Read(h.shareSecret); err != nil {
-		return nil, fmt.Errorf("failed to generate share secret: %w", err)
+	// HMAC key for short-lived signed URLs. Derived from the pool
+	// signing key when there is one, so that every process able to mint
+	// these agrees on the key: a standalone MCP server has no HTTP
+	// listener of its own and hands out URLs this daemon has to honor,
+	// and a restart here does not strand URLs already sent to someone.
+	// Redeeming needs the signing key anyway (it mints the owner's JWT),
+	// so this costs nothing that was working before.
+	//
+	// Without a signing key, fall back to a random per-process key. Share
+	// URLs are unusable in that configuration either way -- the redeem
+	// path refuses -- and a signer that exists keeps the failure on the
+	// one code path that explains it.
+	shareKey, err := shareurl.KeyFromSigningKeyFile(h.signingKeyPath)
+	if err != nil {
+		if h.signingKeyPath != "" {
+			h.logger.Warn(logging.DestinationHTTP,
+				"Could not derive share-URL key from the signing key; falling back to a per-process key",
+				"signing_key", h.signingKeyPath, "error", err)
+		}
+		shareKey = make([]byte, 32)
+		if _, err := rand.Read(shareKey); err != nil {
+			return nil, fmt.Errorf("failed to generate share secret: %w", err)
+		}
+	}
+	h.shareSigner, err = shareurl.NewSigner(shareKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize share URL signer: %w", err)
 	}
 
 	// In-memory log buffer for the admin UI's "recent logs" panel.

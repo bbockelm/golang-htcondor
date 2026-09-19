@@ -189,6 +189,23 @@ var outputSchemas = map[string]map[string]interface{}{
 		"procs_failed":    intSchema,
 	}),
 
+	"create_input_upload_url": obj(map[string]interface{}{
+		"cluster_id":  intSchema,
+		"owner":       strSchema,
+		"expires_at":  strSchema,
+		"ttl_seconds": intSchema,
+		"count":       intSchema,
+		// One entry per proc: HTCondor spools per proc, and the allow-set
+		// is per proc too.
+		"uploads": arr(obj(map[string]interface{}{
+			"job_id":         strSchema,
+			"url":            strSchema,
+			"expected_files": arr(strSchema),
+		})),
+		"procs_remaining": intSchema,
+		"note":            strSchema,
+	}, "cluster_id", "count", "uploads"),
+
 	// --- credentials --------------------------------------------------
 	"list_service_credentials": obj(map[string]interface{}{
 		"credentials": arr(obj(map[string]interface{}{
