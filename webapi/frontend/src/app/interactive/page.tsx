@@ -40,6 +40,7 @@ import {
   DEFAULT_RESOURCE_REQUEST,
   type ResourceRequest,
 } from '@/components/ResourceRequest';
+import { SubmitLinesField } from '@/components/SubmitLinesField';
 import { ConfirmButton } from '@/components/ConfirmButton';
 
 const DEFAULT_JUPYTER_IMAGE = 'quay.io/jupyter/scipy-notebook:latest';
@@ -85,6 +86,7 @@ function JupyterSection() {
     memoryMB: 4096,
     diskMB: 4096,
   });
+  const [submitLines, setSubmitLines] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const submit = useMutation({
@@ -92,6 +94,7 @@ function JupyterSection() {
       api.jupyter.create({
         image,
         ...resourceRequestToApi(resources),
+        submit_lines: submitLines.trim() || undefined,
       }),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
@@ -140,6 +143,7 @@ function JupyterSection() {
           </p>
         </Field>
         <ResourceRequestPanel value={resources} onChange={setResources} />
+        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -265,11 +269,15 @@ function TerminalSection() {
   });
 
   const [resources, setResources] = useState<ResourceRequest>(DEFAULT_RESOURCE_REQUEST);
+  const [submitLines, setSubmitLines] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const submit = useMutation({
     mutationFn: () =>
-      api.interactive.createTerminal(resourceRequestToApi(resources)),
+      api.interactive.createTerminal({
+        ...resourceRequestToApi(resources),
+        submit_lines: submitLines.trim() || undefined,
+      }),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
       invalidateInteractiveLists(queryClient);
@@ -310,6 +318,7 @@ function TerminalSection() {
       <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
         <div className="text-sm font-medium text-gray-700">Launch new</div>
         <ResourceRequestPanel value={resources} onChange={setResources} />
+        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}

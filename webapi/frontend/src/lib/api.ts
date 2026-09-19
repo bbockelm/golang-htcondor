@@ -504,6 +504,9 @@ export interface JupyterCreateRequest {
   gpus_minimum_runtime?: string;
   cuda_version?: string;
   require_gpus?: string;
+  // Extra submit commands the user typed (validated server-side;
+  // session-defining commands like executable/universe/queue are rejected).
+  submit_lines?: string;
 }
 
 export interface JupyterCreateResponse {
@@ -548,6 +551,8 @@ export interface InteractiveTerminalCreateRequest {
   gpus_minimum_runtime?: string;
   cuda_version?: string;
   require_gpus?: string;
+  // See JupyterCreateRequest.submit_lines.
+  submit_lines?: string;
 }
 
 export interface InteractiveTerminalCreateResponse {

@@ -70,3 +70,38 @@ func TestInteractiveTerminalSubmitFileSetsJobBatchName(t *testing.T) {
 		t.Errorf("JobBatchName %q does not start with prefix %q", got, interactiveTerminalBatchPrefix)
 	}
 }
+
+// TestInteractiveTerminalRequestValidatesSubmitLines: user submit_lines
+// are validated the same way as the MCP session path -- session-defining
+// commands rejected, benign additions accepted.
+func TestInteractiveTerminalRequestValidatesSubmitLines(t *testing.T) {
+	base := func(lines string) *InteractiveCreateTerminalRequest {
+		r := &InteractiveCreateTerminalRequest{Cpus: 1, MemoryMB: 1024, DiskMB: 1024, SubmitLines: lines}
+		return r
+	}
+	if err := base("executable = /bin/sh").validate(); err == nil {
+		t.Error("expected submit_lines to reject an executable override")
+	}
+	if err := base("queue 5").validate(); err == nil {
+		t.Error("expected submit_lines to reject a queue statement")
+	}
+	if err := base("+ProjectName = \"P\"").validate(); err != nil {
+		t.Errorf("benign submit_lines rejected: %v", err)
+	}
+}
+
+// TestInteractiveTerminalSubmitFileIncludesCallerLines: a validated caller
+// line reaches the generated submit file.
+func TestInteractiveTerminalSubmitFileIncludesCallerLines(t *testing.T) {
+	src := buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
+		InstanceID:        "deadbeefdeadbeef",
+		BatchName:         interactiveTerminalBatchPrefix + "deadbeefdeadbeef",
+		Cpus:              1,
+		MemoryMB:          1024,
+		DiskMB:            1024,
+		CallerSubmitLines: "+ProjectName = \"MyProj\"",
+	})
+	if !strings.Contains(src, `+ProjectName = "MyProj"`) {
+		t.Errorf("caller submit line missing from submit file:\n%s", src)
+	}
+}

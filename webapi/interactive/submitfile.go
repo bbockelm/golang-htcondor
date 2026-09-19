@@ -198,6 +198,25 @@ type SubmitArgs struct {
 	CallerSubmitLines string
 }
 
+// AppendCallerSubmitLines writes the session caller's own submit
+// commands to sb, wrapped in a banner so the schedd spool shows their
+// provenance. No-op when empty/whitespace. Callers MUST have run the
+// text through ValidateCallerSubmitLines first: unlike the operator
+// extras this is untrusted user input, and the validator is what keeps
+// it from redefining the session (executable/universe/queue/...).
+func AppendCallerSubmitLines(sb *strings.Builder, lines string) {
+	lines = strings.TrimSpace(lines)
+	if lines == "" {
+		return
+	}
+	sb.WriteString("\n# --- Caller-supplied submit commands ---\n")
+	sb.WriteString(lines)
+	if !strings.HasSuffix(lines, "\n") {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("# --- End caller-supplied commands ---\n")
+}
+
 // AppendExtraSubmitLines writes operator-supplied extra submit-file
 // directives to sb, surrounded by a marker comment so the resulting
 // submit file makes the source obvious. No-op when extras is empty
@@ -325,14 +344,7 @@ func BuildSubmitFile(a SubmitArgs) string {
 	// The caller's own submit commands come before the operator's block,
 	// so an operator override still wins -- same precedence the rest of
 	// this file follows, and the reason the operator block is last.
-	if lines := strings.TrimSpace(a.CallerSubmitLines); lines != "" {
-		sb.WriteString("\n# --- Caller-supplied submit commands ---\n")
-		sb.WriteString(lines)
-		if !strings.HasSuffix(lines, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("# --- End caller-supplied commands ---\n")
-	}
+	AppendCallerSubmitLines(&sb, a.CallerSubmitLines)
 
 	// Operator-supplied extras get spliced in just before `queue`
 	// so they can override anything the builder emitted above. The

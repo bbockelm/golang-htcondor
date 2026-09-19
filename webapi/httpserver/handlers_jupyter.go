@@ -32,6 +32,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/gorilla/websocket"
 
@@ -513,6 +514,13 @@ type JupyterCreateRequest struct {
 	GpusMinimumRuntime    string `json:"gpus_minimum_runtime,omitempty"`
 	CudaVersion           string `json:"cuda_version,omitempty"`
 	RequireGpus           string `json:"require_gpus,omitempty"`
+
+	// SubmitLines are extra submit commands the user typed in the launch
+	// form. Untrusted: validated with interactive.ValidateCallerSubmitLines,
+	// which rejects anything that would redefine the job (executable,
+	// universe, container_image, queue, ...). Merged before the operator's
+	// extras so operator policy still wins.
+	SubmitLines string `json:"submit_lines,omitempty"`
 }
 
 // JupyterCreateResponse is the JSON returned by POST /jupyter/instances.
@@ -676,6 +684,8 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		GpusMinimumRuntime:    req.GpusMinimumRuntime,
 		CudaVersion:           req.CudaVersion,
 		RequireGpus:           req.RequireGpus,
+		CallerSubmitLines:     req.SubmitLines,
+		ExtraRequirements:     s.interactiveRequirements,
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
@@ -788,6 +798,9 @@ func (req *JupyterCreateRequest) validate() error {
 	if err := validateGPUSubmitFields(req.GpusMinimumCapability, req.GpusMinimumRuntime, req.CudaVersion, req.RequireGpus); err != nil {
 		return err
 	}
+	if err := interactive.ValidateCallerSubmitLines(req.SubmitLines); err != nil {
+		return fmt.Errorf("submit_lines: %w", err)
+	}
 	return nil
 }
 
@@ -857,6 +870,17 @@ type jupyterSubmitArgs struct {
 	CudaVersion           string
 	RequireGpus           string
 
+	// CallerSubmitLines are the user's own submit commands from the
+	// launch form, merged in before the operator's block (so operator
+	// policy still wins). Validated with ValidateCallerSubmitLines.
+	CallerSubmitLines string
+
+	// ExtraRequirements is an operator ClassAd expression ANDed into the
+	// job's requirements (Handler.interactiveRequirements /
+	// HTTP_API_INTERACTIVE_REQUIREMENTS), matching the interactive
+	// terminal path. Empty adds nothing.
+	ExtraRequirements string
+
 	// ExtraSubmitLines is operator-supplied submit-file content
 	// merged in just before the `queue` directive. Same source as
 	// the interactive-terminal builder: Handler.interactiveExtraSubmit.
@@ -922,14 +946,22 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 		a.GpusMinimumRuntime, a.CudaVersion, a.RequireGpus,
 	))
 
-	fmt.Fprintf(&sb, "requirements = %s\n\n", jupyterRequirementsExpr(a.HelperGOOS, a.HelperGOARCH))
+	req := jupyterRequirementsExpr(a.HelperGOOS, a.HelperGOARCH)
+	if extra := strings.TrimSpace(a.ExtraRequirements); extra != "" {
+		// AND the operator's interactive-requirements expression, matching
+		// the SSH-terminal path (HTTP_API_INTERACTIVE_REQUIREMENTS).
+		req = fmt.Sprintf("(%s) && (%s)", req, extra)
+	}
+	fmt.Fprintf(&sb, "requirements = %s\n\n", req)
 
 	fmt.Fprintf(&sb, "log    = jupyter.log\n")
 	fmt.Fprintf(&sb, "output = jupyter.out\n")
 	fmt.Fprintf(&sb, "error  = jupyter.err\n")
 
-	// Operator-supplied extras splice in just before `queue`. See
-	// appendExtraSubmitLines + Handler.interactiveExtraSubmit.
+	// The user's own submit commands, then the operator's extras last so
+	// operator policy overrides both the builder and the user. Same
+	// precedence and validation as the interactive-terminal builder.
+	interactive.AppendCallerSubmitLines(&sb, a.CallerSubmitLines)
 	appendExtraSubmitLines(&sb, a.ExtraSubmitLines)
 
 	fmt.Fprintf(&sb, "queue\n")

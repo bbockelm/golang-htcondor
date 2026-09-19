@@ -340,3 +340,43 @@ func TestJupyterLaunchScriptMktempIsPortable(t *testing.T) {
 		t.Errorf("template %q is not under /tmp; the whole point is avoiding the long scratch path", template)
 	}
 }
+
+// TestBuildJupyterSubmitFile_CallerLinesAndExtraRequirements checks that
+// user submit lines land in the file (with their banner) and that an
+// operator interactive-requirements expression is ANDed into the
+// requirements line (parity with the SSH-terminal path).
+func TestBuildJupyterSubmitFile_CallerLinesAndExtraRequirements(t *testing.T) {
+	got := buildJupyterSubmitFile(jupyterSubmitArgs{
+		InstanceID:        "x",
+		Image:             "quay.io/jupyter/scipy-notebook:latest",
+		Cpus:              1,
+		MemoryMB:          256,
+		DiskMB:            256,
+		Universe:          "container",
+		HelperGOOS:        "linux",
+		HelperGOARCH:      "amd64",
+		CallerSubmitLines: "+ProjectName = \"MyProj\"\nconcurrency_limits = foo:1",
+		ExtraRequirements: "TARGET.HasCVMFS =?= true",
+	})
+	mustContain(t, got, "Caller-supplied submit commands")
+	mustContain(t, got, `+ProjectName = "MyProj"`)
+	mustContain(t, got, "concurrency_limits = foo:1")
+	mustContain(t, got, "&& (TARGET.HasCVMFS =?= true)")
+}
+
+// TestJupyterCreateRequestValidateSubmitLines: session-defining lines are
+// rejected; benign additions pass.
+func TestJupyterCreateRequestValidateSubmitLines(t *testing.T) {
+	base := func(lines string) *JupyterCreateRequest {
+		return &JupyterCreateRequest{Cpus: 1, MemoryMB: 256, DiskMB: 256, SubmitLines: lines}
+	}
+	if err := base("universe = standard").validate(); err == nil {
+		t.Error("expected submit_lines to reject a universe override")
+	}
+	if err := base("executable = /bin/sh").validate(); err == nil {
+		t.Error("expected submit_lines to reject an executable override")
+	}
+	if err := base("+ProjectName = \"P\"\nenvironment = \"A=b\"").validate(); err != nil {
+		t.Errorf("benign submit_lines rejected: %v", err)
+	}
+}
