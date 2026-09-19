@@ -1165,6 +1165,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
+		// Lets the index survive a restart; see
+		// migrations/0008_identity_index.sql.
+		li.store = newIdentityIndexStore(h.db)
 		li.warmUp(context.Background())
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
 			"subject_mapped_to_account", li.mapsAccount(),

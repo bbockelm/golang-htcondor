@@ -53,6 +53,18 @@ import (
 // warmUpTimeout bounds the startup index build.
 const warmUpTimeout = 30 * time.Second
 
+// The index is rebuilt on this cadence whether or not anybody logs in.
+//
+// Rebuilding only on demand meant the first snapshot could be served for a
+// whole TTL after the account database became readable -- and in a
+// container that first snapshot is taken before the SSSD sidecar answers,
+// so it is usually the wrong one. Refreshing on the TTL is what the TTL
+// already promises; doing it proactively just stops the promise from
+// depending on somebody arriving to trigger it.
+//
+// A refresh that fails changes nothing: the previous index stays in place
+// until one succeeds.
+
 type localIdentity struct {
 	// resolver maps the asserted subject to a local account. Nil leaves
 	// the subject alone, which is right when it is already a login name.
@@ -62,6 +74,14 @@ type localIdentity struct {
 	// where there is no account database to read.
 	groups droppriv.GroupLookup
 	logger *logging.Logger
+
+	// refreshEvery is the index TTL, and the cadence of the background
+	// rebuild. A field so a test need not wait out the real one.
+	refreshEvery time.Duration
+
+	// store persists the index across restarts. Nil disables that, which
+	// is the case for a deployment with no application database.
+	store *identityIndexStore
 }
 
 // mapsAccount reports whether the asserted subject is translated.
@@ -101,7 +121,7 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	l := &localIdentity{logger: logger}
+	l := &localIdentity{logger: logger, refreshEvery: ttl}
 	if systemGroups {
 		// Order from nsswitch.conf, so this agrees with the rest of the
 		// machine rather than preferring a source of its own.
@@ -143,6 +163,7 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	// startup with no port, no /readyz and no log line. Failing here is
 	// survivable -- the index is rebuilt on first use -- whereas never
 	// returning is not.
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, warmUpTimeout)
 	defer cancel()
 
@@ -150,6 +171,22 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		// Only groups are being sourced locally; there is no index.
 		return
 	}
+
+	// Start from what the last run knew. The rebuild below usually cannot
+	// read the directory yet -- that is the whole problem this addresses
+	// -- and a degraded build will not be allowed to replace this.
+	if snap, ok, err := l.store.Load(ctx); err != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"Could not read the saved account index; starting without one", "error", err)
+	} else if ok {
+		l.resolver.Restore(snap)
+		accounts, _, builtAt := l.resolver.Stats()
+		l.logger.Info(logging.DestinationHTTP,
+			"Restored the account index saved by a previous run",
+			"accounts", accounts, "built_at", builtAt,
+			"age", time.Since(builtAt).Round(time.Second))
+	}
+
 	if err := l.resolver.Refresh(ctx); err != nil {
 		l.logger.Error(logging.DestinationHTTP,
 			"Could not read the account database; every login will be refused until this works",
@@ -159,11 +196,29 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	accounts, ambiguous, _ := l.resolver.Stats()
 	l.logger.Info(logging.DestinationHTTP, "Indexed accounts by GECOS for identity mapping",
 		"accounts", accounts, "ambiguous", ambiguous)
+	l.saveIndex(ctx)
 	if accounts == 0 {
 		l.logger.Warn(logging.DestinationHTTP,
 			"The account database enumerated to nothing, so no login can be mapped. "+
 				"If accounts live in a directory, SSSD lists them only with `enumerate = true`")
 	}
+	// Distinct from an empty index, and far more confusing without a line
+	// of its own: the index was built, it just does not cover the
+	// directory. In a container this is usually a startup ordering
+	// problem -- the daemon indexes before the SSSD sidecar is answering
+	// -- and it clears itself on the first rebuild after the TTL.
+	if derr := l.resolver.Degraded(); derr != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"The account index is incomplete: a directory could not be read, so logins that map to "+
+				"a directory account will be refused until it can be. This is being retried",
+			"error", derr, "indexed", accounts)
+	}
+	// The index reflects whatever was readable at t=0, which in a container
+	// is usually before the directory is answering at all. Keep trying in
+	// the background for a few minutes so the pod is usable by the time
+	// somebody arrives, instead of serving that first snapshot until the
+	// TTL expires AND a login happens to trigger a rebuild.
+	go l.refreshLoop(context.WithoutCancel(parent))
 	// Only meaningful when the login-name strategy is also in play, and
 	// then worth saying out loud: the subject naming one of these
 	// resolves to somebody else's account.
@@ -178,6 +233,87 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		l.logger.Warn(logging.DestinationHTTP,
 			"Several accounts share a GECOS; nobody presenting one of these can log in",
 			"gecos", l.resolver.AmbiguousGecos())
+	}
+}
+
+// saveIndex persists the index if it is complete enough to be worth
+// restoring. A failure here costs a slower start next time and nothing
+// else, so it is logged rather than propagated.
+func (l *localIdentity) saveIndex(ctx context.Context) {
+	if l.store == nil {
+		return
+	}
+	snap, ok := l.resolver.Snapshot()
+	if !ok {
+		return
+	}
+	if err := l.store.Save(ctx, snap); err != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"Could not save the account index for the next run", "error", err)
+	}
+}
+
+// refreshLoop rebuilds the index on its TTL, without waiting for a login.
+//
+// There is no cleverness here on purpose. An earlier version watched for
+// the account count to grow and stopped when it did, which was a guess
+// standing in for a signal: it could not tell a directory that contributed
+// nothing from one that could not be read, and an unrelated edit to the
+// local passwd file looked the same as success.
+func (l *localIdentity) refreshLoop(ctx context.Context) {
+	if l.refreshEvery <= 0 {
+		return
+	}
+	ticker := time.NewTicker(l.refreshEvery)
+	defer ticker.Stop()
+
+	wasDegraded := l.resolver.Degraded() != nil
+	lastCount, _, _ := l.resolver.Stats()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		refreshCtx, cancel := context.WithTimeout(ctx, warmUpTimeout)
+		err := l.resolver.Refresh(refreshCtx)
+		cancel()
+		if err != nil {
+			// The previous index is still in place; say so once rather
+			// than on every tick.
+			if !wasDegraded {
+				wasDegraded = true
+				l.logger.Warn(logging.DestinationHTTP,
+					"Could not rebuild the account index; continuing with the previous one",
+					"error", err)
+			}
+			continue
+		}
+
+		l.saveIndex(ctx)
+
+		accounts, ambiguous, _ := l.resolver.Stats()
+		degraded := l.resolver.Degraded() != nil
+
+		// Report only transitions. A steady state is not news, and this
+		// runs for the life of the process.
+		switch {
+		case wasDegraded && !degraded:
+			l.logger.Info(logging.DestinationHTTP,
+				"The account index is complete again",
+				"accounts", accounts, "ambiguous", ambiguous)
+		case !wasDegraded && degraded:
+			l.logger.Warn(logging.DestinationHTTP,
+				"The account index has become incomplete: a directory could not be read",
+				"error", l.resolver.Degraded(), "accounts", accounts)
+		case accounts != lastCount:
+			l.logger.Info(logging.DestinationHTTP,
+				"The account index changed size",
+				"accounts", accounts, "was", lastCount, "ambiguous", ambiguous)
+		}
+		wasDegraded, lastCount = degraded, accounts
 	}
 }
 
