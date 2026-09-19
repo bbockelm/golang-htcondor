@@ -187,12 +187,15 @@ type Config struct {
 	// membership comes from the system rather than the token, and a
 	// caller that maps to no single account is refused a session.
 	IdentityMapStrategies []idmap.Strategy
-	// IdentityGroupsFromSystem takes group membership from the account
-	// database instead of the token's groups claim. Independent of
+	// IdentityGroupSources lists where group membership comes from, as
+	// parsed specs: "system" and/or "file:<path>". Empty keeps the
+	// token's groups claim, which is what a container wants because it
+	// holds no account database to read. Independent of
 	// IdentityMapStrategies: a deployment may want either, both, or
-	// neither. The default -- neither -- is what a container wants,
-	// because it holds no account database to read.
-	IdentityGroupsFromSystem bool
+	// neither. Several sources are unioned, the way glibc merges NSS
+	// services, so a site can carry directory groups and hand-maintained
+	// ones at once.
+	IdentityGroupSources []string
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// /etc/passwd. Empty means /etc/passwd, which is the only account
 	// source that enumerates: the GECOS index cannot list accounts that
@@ -369,7 +372,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2GroupsClaim:           cfg.OAuth2GroupsClaim,
 		OAuth2Requirements:          cfg.OAuth2Requirements,
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
-		IdentityGroupsFromSystem:    cfg.IdentityGroupsFromSystem,
+		IdentityGroupSources:        cfg.IdentityGroupSources,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,

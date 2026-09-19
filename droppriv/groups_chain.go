@@ -190,6 +190,34 @@ func resetDefaultGroupLookup() {
 	defaultGroupLookup = nil
 }
 
+// NewGroupChain merges several group sources the way glibc merges NSS
+// services: the answer is the UNION, not the first match.
+//
+// That is the whole point of allowing more than one. An account can hold
+// directory groups and hand-maintained ones at the same time, and stopping
+// at the first source that answers would drop half of somebody's
+// membership. A source that is unavailable marks the read degraded rather
+// than truncating it silently; see DegradedError.
+//
+// A single source is returned as-is rather than wrapped, so logs say
+// "sssd" instead of "chain(sssd)" where there is nothing to merge.
+func NewGroupChain(sources ...GroupLookup) GroupLookup {
+	kept := make([]GroupLookup, 0, len(sources))
+	for _, s := range sources {
+		if s != nil {
+			kept = append(kept, s)
+		}
+	}
+	switch len(kept) {
+	case 0:
+		return nil
+	case 1:
+		return kept[0]
+	default:
+		return &groupChain{sources: kept}
+	}
+}
+
 // NewSystemGroupLookup returns the best group lookup for this system,
 // caching answers for ttl.
 //

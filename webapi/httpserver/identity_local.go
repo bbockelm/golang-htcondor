@@ -114,19 +114,16 @@ func (l *localIdentity) groupSourceName() string {
 // way the index can only hold accounts that something will enumerate,
 // which in practice means the ones present locally; see the comment in
 // idmap/enumerate.go for why that is not the limitation it looks like.
-func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile string, ttl time.Duration, stripDomain bool, logger *logging.Logger) *localIdentity {
-	if len(strategies) == 0 && !systemGroups {
+func newLocalIdentity(strategies []idmap.Strategy, groupSources []string, passwdFile string, ttl time.Duration, stripDomain bool, logger *logging.Logger) *localIdentity {
+	if len(strategies) == 0 && len(groupSources) == 0 {
 		return nil
 	}
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
 	l := &localIdentity{logger: logger, refreshEvery: ttl}
-	if systemGroups {
-		// Order from nsswitch.conf, so this agrees with the rest of the
-		// machine rather than preferring a source of its own.
-		l.groups = droppriv.NewSystemGroupLookup(ttl)
-	}
+	// Several sources are unioned; see buildGroupSources.
+	l.groups = buildGroupSources(groupSources, ttl)
 	if len(strategies) == 0 {
 		return l
 	}
