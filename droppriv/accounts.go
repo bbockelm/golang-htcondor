@@ -90,13 +90,21 @@ func GecosInFile(ctx context.Context, path, username string) (string, error) {
 
 // EnumerateAccounts lists accounts from a passwd file.
 //
-// This is the one operation with no stdlib equivalent -- os/user can look
-// an account up but cannot list them -- and no NSS equivalent either: the
-// SSSD client protocol has no enumeration call, and SSSD answers an
-// enumeration only under "enumerate = true", which is off by default. So a
-// reverse index over GECOS can only cover accounts present in this file.
-// Every hit it produces is re-checked with GecosOf, which does reach the
-// directory, so an incomplete index cannot promote anybody.
+// os/user has no equivalent: it can look an account up but not list them.
+//
+// Nor does anything else here, today. The SSSD protocol DOES define
+// enumeration -- SSS_NSS_SETPWENT/GETPWENT/ENDPWENT, what getpwent(3)
+// drives through the NSS module -- but the client library this package
+// uses does not implement it yet, so a passwd file is currently the only
+// thing that can be listed. When it does, a directory-backed deployment
+// can build the index without materialising accounts locally, and SSSD
+// will still only answer under "enumerate = true", which is off by
+// default and discouraged for large directories.
+//
+// Until then a reverse index over GECOS covers only the accounts in this
+// file. That is safe rather than merely limited: every hit it produces is
+// re-checked with GecosOf, which does reach the directory, so an
+// incomplete index can fail to find somebody but cannot promote anybody.
 func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 	if path == "" {
 		path = DefaultPasswdFile

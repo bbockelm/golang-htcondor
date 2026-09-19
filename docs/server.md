@@ -182,12 +182,17 @@ account. Which providers may issue such a token is decided by
 enable this only alongside one. The server logs a warning at startup if
 stripping is on with no requirements expression configured.
 
-The index can only contain accounts something will enumerate, which in
-practice means those present in the passwd file: no NSS enumeration call
-exists, and SSSD answers one only under `enumerate = true`, which is off
-by default. Every candidate it produces is re-checked by name against the
-live database before it is believed, and that lookup *does* reach a
-directory, so an incomplete index cannot promote anybody.
+The index can only contain accounts something will enumerate, which today
+means those present in the passwd file. SSSD *can* enumerate -- and will,
+under `enumerate = true`, which is off by default and discouraged for
+large directories -- but the client library this server uses does not
+implement that call yet, so a directory-backed deployment has to
+materialise its accounts in a file this server can read.
+
+Every candidate the index produces is re-checked by name against the live
+database before it is believed, and that lookup *does* reach a directory.
+So an incomplete index can fail to find somebody, but cannot promote
+anybody.
 
 **Group membership.** `HTTP_API_GROUP_SOURCE` decides where groups come
 from, independently of the mapping above.
