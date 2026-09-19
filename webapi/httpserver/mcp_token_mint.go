@@ -9,13 +9,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"golang.org/x/crypto/hkdf"
 )
+
+// readSigningKeyAsRoot reads a pool signing key through droppriv, so a
+// root-owned mode-0600 key is readable even after this server has
+// dropped privileges. droppriv.OpenAsRoot degrades to an ordinary read
+// on an unprivileged platform.
+func readSigningKeyAsRoot(path string) ([]byte, error) {
+	f, err := droppriv.OpenAsRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
 
 // nbfClockSkewLeeway backdates the `nbf` (not-before) claim on minted
 // IDTOKENs. The schedd rejects a token whose nbf is in its future, and
@@ -50,9 +63,14 @@ func generateMCPAccessJWT(
 	authzLimits []string,
 ) (string, error) {
 	// Read and unscramble the signing key — same on-disk format as
-	// HTCondor's passwords.d/ entries.
+	// HTCondor's passwords.d/ entries. The pool signing keys are
+	// root-owned mode 0600, and this server runs with privileges
+	// dropped (under condor_master), so read the key through
+	// droppriv.OpenAsRoot -- the rule is that credentials are read as
+	// root. On an unprivileged platform OpenAsRoot degrades to a normal
+	// read, so this stays correct off the execute node too.
 	keyPath := filepath.Join(keyDir, keyID)
-	scrambled, err := os.ReadFile(keyPath) //nolint:gosec // operator-controlled path
+	scrambled, err := readSigningKeyAsRoot(keyPath)
 	if err != nil {
 		return "", fmt.Errorf("read signing key %s: %w", keyPath, err)
 	}
