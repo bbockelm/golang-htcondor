@@ -147,6 +147,16 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 	return out, nil
 }
 
+// ProvenanceEnumerator is an Enumerator that also reports whether a
+// directory contributed to its answer.
+//
+// Optional: an enumerator that does not implement it is simply assumed to
+// speak for whatever it covers.
+type ProvenanceEnumerator interface {
+	Enumerator
+	EnumerateWithProvenance(ctx context.Context) ([]Account, bool, error)
+}
+
 // Snapshot is a saved index, suitable for writing somewhere durable and
 // restoring into a later process. It carries its own build time so a
 // restored index ages normally rather than appearing freshly built.
@@ -156,6 +166,10 @@ type Snapshot struct {
 	Users   []string          `json:"users"`
 	BuiltAt time.Time         `json:"built_at"`
 	Count   int               `json:"count"`
+	// FromDirectory records that a directory contributed to this index.
+	// Restoring it means the next run KNOWS a directory exists here, and
+	// so must not let an index built without one replace it.
+	FromDirectory bool `json:"from_directory"`
 }
 
 // Resolver maps subjects to local account names.
@@ -163,6 +177,10 @@ type Resolver struct {
 	// degraded records that the last build could not read part of the
 	// account database. Guarded by mu with the index it describes.
 	degraded *droppriv.DirectoryError
+
+	// fromDirectory records that the current index covers a directory,
+	// not just this machine's own accounts.
+	fromDirectory bool
 
 	// stripDomain enables trying the local part of a scoped subject. See
 	// WithStripDomain.
@@ -523,7 +541,19 @@ func (r *Resolver) build(ctx context.Context) error {
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildTimeout)
 	defer cancel()
 
-	accounts, err := r.enum.Enumerate(buildCtx)
+	var (
+		accounts      []Account
+		fromDirectory bool
+		err           error
+	)
+	if pe, ok := r.enum.(ProvenanceEnumerator); ok {
+		accounts, fromDirectory, err = pe.EnumerateWithProvenance(buildCtx)
+	} else {
+		accounts, err = r.enum.Enumerate(buildCtx)
+		// No opinion: an enumerator that does not report provenance is
+		// taken to speak for whatever it covers.
+		fromDirectory = true
+	}
 	// A degraded enumeration still carries the accounts it COULD list.
 	// Indexing those beats refusing every login for as long as a directory
 	// is unreachable -- but the reason is kept so that somebody is told the
@@ -569,11 +599,22 @@ func (r *Resolver) build(ctx context.Context) error {
 		r.mu.Unlock()
 		return fmt.Errorf("keeping the existing complete index: %w", err)
 	}
+	// The same protection for a build that consulted no directory at all.
+	// "The directory named nobody" and "no directory was reachable yet"
+	// produce identical account lists, and in a container the second is
+	// what the first seconds look like -- so without this, a cold start
+	// replaces an index restored from cache with the image's own handful
+	// of accounts.
+	if !fromDirectory && r.fromDirectory && r.count > 0 {
+		r.mu.Unlock()
+		return fmt.Errorf("keeping the existing index, which covers a directory this build could not reach")
+	}
 	r.byGecos = byGecos
 	r.ambiguous = counts
 	r.knownUsers = known
 	r.builtAt = r.now()
 	r.count = len(accounts)
+	r.fromDirectory = fromDirectory
 	// Cleared on a clean build: a directory that has come back must stop
 	// being reported as down.
 	if degraded != nil {
@@ -599,11 +640,12 @@ func (r *Resolver) Snapshot() (Snapshot, bool) {
 	}
 
 	snap := Snapshot{
-		ByGecos: make(map[string]string, len(r.byGecos)),
-		Counts:  make(map[string]int, len(r.ambiguous)),
-		Users:   make([]string, 0, len(r.knownUsers)),
-		BuiltAt: r.builtAt,
-		Count:   r.count,
+		ByGecos:       make(map[string]string, len(r.byGecos)),
+		Counts:        make(map[string]int, len(r.ambiguous)),
+		Users:         make([]string, 0, len(r.knownUsers)),
+		BuiltAt:       r.builtAt,
+		Count:         r.count,
+		FromDirectory: r.fromDirectory,
 	}
 	for k, v := range r.byGecos {
 		snap.ByGecos[k] = v
@@ -650,6 +692,7 @@ func (r *Resolver) Restore(snap Snapshot) {
 	}
 	r.builtAt = snap.BuiltAt
 	r.count = snap.Count
+	r.fromDirectory = snap.FromDirectory
 	if r.count == 0 {
 		r.count = len(snap.ByGecos)
 	}
