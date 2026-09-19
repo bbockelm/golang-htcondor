@@ -604,7 +604,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	}
 
 	// Add credential management tools if credd is available
-	if s.credd != nil {
+	if s.getCredd() != nil {
 		tools = append(tools,
 			Tool{
 				Name:        "list_service_credentials",
@@ -2534,7 +2534,7 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 		return ""
 	}
 
-	hasCredd := s.credd != nil
+	hasCredd := s.getCredd() != nil
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "\n\nOAUTH CREDENTIALS REQUIRED:\nThe job requires OAuth credentials for: %s\n", services)
 	if hasCredd {
@@ -2553,11 +2553,11 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 
 // toolListServiceCredentials lists all OAuth service credentials
 func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	if s.credd == nil {
+	if s.getCredd() == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
-	creds, err := s.credd.ListServiceCreds(ctx, htcondor.CredTypeOAuth, "")
+	creds, err := s.getCredd().ListServiceCreds(ctx, htcondor.CredTypeOAuth, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list service credentials: %w", err)
 	}
@@ -2595,7 +2595,7 @@ func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]in
 
 // toolGetCredentialStatus checks whether an OAuth credential exists for a service
 func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.credd == nil {
+	if s.getCredd() == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -2605,7 +2605,7 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 	}
 	handle, _ := args["handle"].(string)
 
-	status, err := s.credd.GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, "")
+	status, err := s.getCredd().GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, "")
 	if err != nil {
 		if errors.Is(err, htcondor.ErrCredentialNotFound) {
 			label := service
@@ -2636,7 +2636,7 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 
 // toolStoreServiceCredential stores an OAuth credential for a service
 func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.credd == nil {
+	if s.getCredd() == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -2667,7 +2667,7 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		return nil, err
 	}
 
-	if err := s.credd.PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
+	if err := s.getCredd().PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
 		return nil, fmt.Errorf("failed to store credential: %w", err)
 	}
 
@@ -2684,7 +2684,7 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 
 // toolDeleteServiceCredential removes an OAuth credential for a service
 func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.credd == nil {
+	if s.getCredd() == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -2694,7 +2694,7 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 	}
 	handle, _ := args["handle"].(string)
 
-	if err := s.credd.DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, ""); err != nil {
+	if err := s.getCredd().DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, ""); err != nil {
 		if errors.Is(err, htcondor.ErrCredentialNotFound) {
 			return nil, fmt.Errorf("credential not found for service '%s'", service)
 		}

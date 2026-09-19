@@ -70,9 +70,16 @@ type Handler struct {
 	scheddAddrLastConfirmedAt time.Time
 	collector                 *htcondor.Collector
 	jobMirror                 *jobqueue.Mirror // nil unless a job_queue.log is configured
-	credd                     htcondor.CreddClient
-	creddAvailable            atomic.Bool // Whether credd is available (nil credd = not available)
-	creddDiscovered           bool        // Whether credd address was discovered (and needs periodic updates)
+	// creddMu protects credd. The address updater replaces the handle
+	// when a credd appears or moves, so every read goes through
+	// getCredd(); creddAvailable being atomic covered the flag but never
+	// the handle beside it, and an interface value is two words -- a
+	// reader racing the write can see a type and data that never went
+	// together.
+	creddMu         sync.RWMutex
+	credd           htcondor.CreddClient
+	creddAvailable  atomic.Bool // Whether credd is available (nil credd = not available)
+	creddDiscovered bool        // Whether credd address was discovered (and needs periodic updates)
 	// dbMirrorTokenSubject overrides the identity the htcondordb token
 	// asserts. Empty means "condor@<trust domain>". Configurable because
 	// the mirror's ALLOW_READ is the operator's, not ours.
@@ -1043,7 +1050,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"services", h.requiredCredentials)
 	}
 
-	if h.credd == nil {
+	if h.getCredd() == nil {
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
 		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(scheddAddr), logger)
 		if err != nil {
@@ -1052,7 +1059,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			h.creddDiscovered = true // Mark for periodic discovery attempts
 		} else {
 			logger.Info(logging.DestinationHTTP, "Discovered credd", "address", creddAddr)
-			h.credd = htcondor.NewCedarCredd(creddAddr)
+			h.setCredd(htcondor.NewCedarCredd(creddAddr))
 			h.creddAvailable.Store(true)
 			h.creddDiscovered = true // Mark for periodic updates
 		}
@@ -1579,7 +1586,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// the collector reports a new address, and MCP holding the old
 		// pointer is how it kept dialling a socket that no longer existed.
 		ScheddProvider: h.getSchedd,
-		Credd:          h.credd,
+		// A getter, not the handle, for the same reason as the schedd
+		// above: this access point discovers its credd after startup, and
+		// a snapshot taken here stays nil for the life of the process --
+		// which withholds every credential tool, because the catalogue
+		// only offers them when a credd is present.
+		CreddProvider:  h.getCredd,
 		Collector:      h.collector,
 		HTCondorConfig: h.htcondorConfig,
 		AdminUsers:     h.mcpAdminUsers,
@@ -2426,6 +2438,22 @@ func (h *Handler) GetSchedd() *htcondor.Schedd {
 	return h.schedd
 }
 
+// getCredd returns the current credd client, or nil when none has been
+// discovered. Thread-safe: the address updater replaces it in the
+// background.
+func (h *Handler) getCredd() htcondor.CreddClient {
+	h.creddMu.RLock()
+	defer h.creddMu.RUnlock()
+	return h.credd
+}
+
+// setCredd replaces the credd client.
+func (h *Handler) setCredd(c htcondor.CreddClient) {
+	h.creddMu.Lock()
+	defer h.creddMu.Unlock()
+	h.credd = c
+}
+
 // getCollector returns the collector instance, or nil when no
 // collector was configured. Used by chat tools that surface
 // pool-wide read-only data (slot status, GPU types, etc.); those
@@ -2640,8 +2668,16 @@ func (h *Handler) startCreddAddressUpdater(ctx context.Context) {
 				// Update credd if it became available
 				if !h.creddAvailable.Load() {
 					h.logger.Info(logging.DestinationHTTP, "Credd became available", "address", creddAddr)
-					h.credd = htcondor.NewCedarCredd(creddAddr)
+					h.setCredd(htcondor.NewCedarCredd(creddAddr))
 					h.creddAvailable.Store(true)
+					// The MCP tool catalogue offers the credential tools
+					// only when a credd is present, and it is cached per
+					// scope set. Without this the tools stay hidden for
+					// the life of the process even though the credd is
+					// now there.
+					if h.mcpServer != nil {
+						h.mcpServer.InvalidateCatalog()
+					}
 				}
 
 			case <-ctx.Done():
