@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -310,9 +312,25 @@ func testPollBeforeAuthorization(t *testing.T, httpClient *http.Client, baseURL,
 	t.Logf("Got expected authorization_pending error")
 }
 
-// approveDevice approves the device using the user code
-func approveDevice(t *testing.T, httpClient *http.Client, verificationURI, userCode, username string) {
-	data := fmt.Sprintf("user_code=%s&action=approve&username=%s", userCode, username)
+// approveDevice approves the device using the user code.
+//
+// It posts what the rendered consent page posts: consent_form_version, which
+// the page always emits, plus a scope field per ticked checkbox. Omitting them
+// took a legacy branch no browser reaches, which is how a bug that stripped
+// every scope but "openid" from real device logins passed this test.
+func approveDevice(t *testing.T, httpClient *http.Client, verificationURI, userCode, username string, scopes ...string) {
+	if len(scopes) == 0 {
+		scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+	form := url.Values{}
+	form.Set("user_code", userCode)
+	form.Set("action", "approve")
+	form.Set("username", username)
+	form.Set("consent_form_version", "1")
+	for _, s := range scopes {
+		form.Add("scope", s)
+	}
+	data := form.Encode()
 	req, err := http.NewRequest("POST", verificationURI, strings.NewReader(data))
 	if err != nil {
 		t.Fatalf("Failed to create approval request: %v", err)
@@ -375,6 +393,16 @@ func pollForToken(t *testing.T, httpClient *http.Client, baseURL, clientID, devi
 
 			if tokenResp.AccessToken == "" {
 				t.Fatal("Empty access token received")
+			}
+
+			// The scope was decoded and never checked, so a token that
+			// carried nothing but "openid" -- which refuses every MCP
+			// method -- looked like a successful login.
+			granted := strings.Fields(tokenResp.Scope)
+			for _, want := range []string{"mcp:read", "mcp:write"} {
+				if !slices.Contains(granted, want) {
+					t.Errorf("token is missing %q; granted scopes: %v", want, granted)
+				}
 			}
 
 			return tokenResp.AccessToken
