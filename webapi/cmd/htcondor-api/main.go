@@ -37,6 +37,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 var (
@@ -597,6 +598,49 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 		return v
 	}
 	return ""
+}
+
+// loadBuildConfig reads the operator's container-build settings. A site
+// selects its build machines by its own convention -- an attribute a
+// schedd transform recognises, or an explicit Requirements expression --
+// and build_container cannot guess it, so an unconfigured server simply
+// submits an ordinary job and relies on the caller naming a destination.
+//
+// Sizes are MiB, matching what an operator would write and what the tool
+// argument takes. Read once at startup; restart to pick up changes.
+func loadBuildConfig(cfg *config.Config, logger *logging.Logger) mcpserver.BuildConfig {
+	get := func(key string) string {
+		v, _ := cfg.Get(key)
+		return v
+	}
+	// A malformed number is logged and ignored rather than failing
+	// startup: the rest of the server is unrelated to container builds,
+	// and a typo in a cap should not take the API down.
+	num := func(key string) int {
+		raw := strings.TrimSpace(get(key))
+		if raw == "" {
+			return 0
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			logger.Warn(logging.DestinationGeneral,
+				"Ignoring a container-build setting that is not a non-negative integer",
+				"setting", key, "value", raw)
+			return 0
+		}
+		return n
+	}
+	return mcpserver.BuildConfig{
+		ExtraSubmit:     get("HTTP_API_BUILD_EXTRA_SUBMIT"),
+		Requirements:    strings.TrimSpace(get("HTTP_API_BUILD_REQUIREMENTS")),
+		StagingBase:     strings.TrimSpace(get("HTTP_API_BUILD_STAGING_BASE")),
+		DefaultCpus:     num("HTTP_API_BUILD_DEFAULT_CPUS"),
+		DefaultMemoryMB: num("HTTP_API_BUILD_DEFAULT_MEMORY_MB"),
+		DefaultDiskMB:   num("HTTP_API_BUILD_DEFAULT_DISK_MB"),
+		MaxCpus:         num("HTTP_API_BUILD_MAX_CPUS"),
+		MaxMemoryMB:     num("HTTP_API_BUILD_MAX_MEMORY_MB"),
+		MaxDiskMB:       num("HTTP_API_BUILD_MAX_DISK_MB"),
+	}
 }
 
 // loadInteractiveRequirements returns the ClassAd expression to AND into
@@ -1706,6 +1750,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
 		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
+		Build:                      loadBuildConfig(cfg, logger),
 		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
 		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
 		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),

@@ -123,6 +123,19 @@ var outputSchemas = map[string]map[string]interface{}{
 		"needs_upload": boolSchema,
 		"warnings":     arr(strSchema),
 	}, "cluster_id"),
+	// build_container returns the submitted job plus the resolved
+	// destination and resources, so a caller can see what the site
+	// defaults and caps turned its request into.
+	"build_container": obj(map[string]interface{}{
+		"cluster_id":  intSchema,
+		"job_id":      strSchema,
+		"name":        strSchema,
+		"destination": strSchema,
+		"verify":      strSchema,
+		"cpus":        intSchema,
+		"memory_mb":   intSchema,
+		"disk_mb":     intSchema,
+	}, "cluster_id", "job_id", "destination"),
 	"remove_job":  jobActionSchema(),
 	"hold_job":    jobActionSchema(),
 	"release_job": jobActionSchema(),

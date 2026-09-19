@@ -143,6 +143,15 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_SUBMIT_FILE_OVERRIDES"},
 	{name: "HTTP_API_INTERACTIVE_REQUIREMENTS"},
 	{name: "HTTP_API_INTERACTIVE_EXTRA_SUBMIT"},
+	{name: "HTTP_API_BUILD_EXTRA_SUBMIT"},
+	{name: "HTTP_API_BUILD_REQUIREMENTS"},
+	{name: "HTTP_API_BUILD_STAGING_BASE"},
+	{name: "HTTP_API_BUILD_DEFAULT_CPUS"},
+	{name: "HTTP_API_BUILD_DEFAULT_MEMORY_MB"},
+	{name: "HTTP_API_BUILD_DEFAULT_DISK_MB"},
+	{name: "HTTP_API_BUILD_MAX_CPUS"},
+	{name: "HTTP_API_BUILD_MAX_MEMORY_MB"},
+	{name: "HTTP_API_BUILD_MAX_DISK_MB"},
 
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},

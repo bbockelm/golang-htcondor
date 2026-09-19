@@ -95,6 +95,11 @@ type Server struct {
 	jobWatchEval *jobwatch.Evaluator
 	watchMaxWait time.Duration
 
+	// build carries the site's container-build configuration, resolved
+	// from Config at construction so the tool does not reach back into
+	// a Config the server does not keep.
+	build buildSettings
+
 	// interactive owns the caller's named interactive sessions: the
 	// jobs behind them, their leases, and the SSH connections commands
 	// run over. One per server, because a session outlives the call
@@ -212,6 +217,13 @@ type Config struct {
 	// terminal already honours it; an agent's session is the same kind
 	// of job on the same pool and gets the same treatment.
 	InteractiveExtraSubmit string
+
+	// Build carries the site's container-build configuration for the
+	// build_container tool. A pool's build machines are selected by site
+	// convention -- CHTC uses +IsBuildJob = True, which a schedd
+	// transform then turns into the real slot requirements -- and no
+	// agent can be expected to know that convention.
+	Build BuildConfig
 }
 
 // NewServer creates a new MCP server
@@ -302,6 +314,7 @@ func NewServer(cfg Config) (*Server, error) {
 		jobWatch:       cfg.JobWatch,
 		jobWatchEval:   cfg.JobWatchEval,
 		watchMaxWait:   cfg.WatchMaxWait,
+		build:          buildSettingsFromConfig(cfg),
 	}
 	// Load before the instructions are built: the initialize text names the
 	// skills, so building it first would advertise an empty library.
