@@ -119,20 +119,44 @@ func clientIP(r *http.Request, trusted []*net.IPNet) string {
 
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
+		var (
+			leftmost string
+			complete = true
+		)
 		for i := len(parts) - 1; i >= 0; i-- {
 			candidate := hostOnly(parts[i])
 			ip := net.ParseIP(candidate)
 			if ip == nil {
 				// Unparseable entry: the chain is not trustworthy past this
 				// point, so stop rather than skipping over it.
+				complete = false
 				break
 			}
+			leftmost = candidate
 			if !ipInAny(ip, trusted) {
 				return candidate
 			}
 		}
-		// Every hop was a trusted proxy and none named a client. Fall
-		// through: the peer is the most specific thing actually known.
+		if !complete {
+			// The walk gave up part way, so the entries it did read are all
+			// proxy hops with a client that was never reached. Naming one of
+			// those as the client would be worse than admitting ignorance.
+			leftmost = ""
+		}
+		// Every hop was itself trusted. The leftmost entry is then the
+		// closest thing to a client this server can name, so use it rather
+		// than the peer.
+		//
+		// This is also what makes a deployment that cannot enumerate its
+		// proxies work. Where the ingress gets a fresh pod address on every
+		// restart, the only workable setting is to trust everything
+		// (0.0.0.0/0, ::/0) -- and under that setting EVERY hop matches, so
+		// walking to "the first untrusted address" would find none and fall
+		// back to the peer, which is the ingress. That configuration is
+		// explicitly choosing to believe the header, spoofable and all.
+		if leftmost != "" {
+			return leftmost
+		}
 	}
 
 	if xrip := hostOnly(r.Header.Get("X-Real-IP")); xrip != "" {

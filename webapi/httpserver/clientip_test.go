@@ -30,8 +30,9 @@ func mustCIDRs(t *testing.T, entries ...string) []*net.IPNet {
 	return n
 }
 
-func request(remote string, headers map[string]string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+func request(t *testing.T, remote string, headers map[string]string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	r.RemoteAddr = remote
 	for k, v := range headers {
 		r.Header.Set(k, v)
@@ -44,7 +45,7 @@ func request(remote string, headers map[string]string) *http.Request {
 func TestForwardedHeadersAreIgnoredFromAnUnknownPeer(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8")
 
-	got := clientIP(request("203.0.113.9:5555", map[string]string{
+	got := clientIP(request(t, "203.0.113.9:5555", map[string]string{
 		"X-Forwarded-For": "1.2.3.4",
 		"X-Real-IP":       "5.6.7.8",
 	}), trusted)
@@ -56,7 +57,7 @@ func TestForwardedHeadersAreIgnoredFromAnUnknownPeer(t *testing.T) {
 
 // With nothing configured, nothing is believed.
 func TestNoTrustedProxiesMeansNoHeaders(t *testing.T) {
-	got := clientIP(request("203.0.113.9:5555", map[string]string{
+	got := clientIP(request(t, "203.0.113.9:5555", map[string]string{
 		"X-Forwarded-For": "1.2.3.4",
 	}), nil)
 	if got != "203.0.113.9" {
@@ -67,7 +68,7 @@ func TestNoTrustedProxiesMeansNoHeaders(t *testing.T) {
 // The ordinary case: one ingress, which observed the real client.
 func TestTrustedProxyForwardsTheClient(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8")
-	got := clientIP(request("10.1.2.3:44444", map[string]string{
+	got := clientIP(request(t, "10.1.2.3:44444", map[string]string{
 		"X-Forwarded-For": "198.51.100.7",
 	}), trusted)
 	if got != "198.51.100.7" {
@@ -82,7 +83,7 @@ func TestTrustedProxyForwardsTheClient(t *testing.T) {
 func TestASpoofedPrefixDoesNotWin(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8")
 
-	got := clientIP(request("10.1.2.3:44444", map[string]string{
+	got := clientIP(request(t, "10.1.2.3:44444", map[string]string{
 		// "1.2.3.4" is what the caller injected; "198.51.100.7" is what the
 		// ingress actually observed and appended.
 		"X-Forwarded-For": "1.2.3.4, 198.51.100.7",
@@ -100,7 +101,7 @@ func TestASpoofedPrefixDoesNotWin(t *testing.T) {
 // not one of ours.
 func TestChainOfTrustedProxies(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8", "192.168.0.0/16")
-	got := clientIP(request("10.1.2.3:44444", map[string]string{
+	got := clientIP(request(t, "10.1.2.3:44444", map[string]string{
 		"X-Forwarded-For": "198.51.100.7, 192.168.5.5, 10.9.9.9",
 	}), trusted)
 	if got != "198.51.100.7" {
@@ -113,10 +114,10 @@ func TestChainOfTrustedProxies(t *testing.T) {
 func TestXRealIPOnlyFromATrustedPeer(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8")
 
-	if got := clientIP(request("10.1.2.3:4", map[string]string{"X-Real-IP": "198.51.100.7"}), trusted); got != "198.51.100.7" {
+	if got := clientIP(request(t, "10.1.2.3:4", map[string]string{"X-Real-IP": "198.51.100.7"}), trusted); got != "198.51.100.7" {
 		t.Errorf("trusted X-Real-IP = %q", got)
 	}
-	if got := clientIP(request("203.0.113.9:4", map[string]string{"X-Real-IP": "198.51.100.7"}), trusted); got != "203.0.113.9" {
+	if got := clientIP(request(t, "203.0.113.9:4", map[string]string{"X-Real-IP": "198.51.100.7"}), trusted); got != "203.0.113.9" {
 		t.Errorf("untrusted X-Real-IP was believed: %q", got)
 	}
 }
@@ -125,7 +126,7 @@ func TestXRealIPOnlyFromATrustedPeer(t *testing.T) {
 // an entry that cannot be parsed, the rest is not trustworthy.
 func TestUnparseableChainEntryStopsTheWalk(t *testing.T) {
 	trusted := mustCIDRs(t, "10.0.0.0/8")
-	got := clientIP(request("10.1.2.3:4", map[string]string{
+	got := clientIP(request(t, "10.1.2.3:4", map[string]string{
 		"X-Forwarded-For": "198.51.100.7, not-an-ip, 10.9.9.9",
 	}), trusted)
 	if got == "198.51.100.7" {
@@ -153,7 +154,7 @@ func TestIPv6AddressesSurviveIntact(t *testing.T) {
 	// to treat it as another proxy hop: 2001:db8:beef::9 is inside
 	// 2001:db8::/32.
 	trusted := mustCIDRs(t, "2001:db8::/32")
-	got := clientIP(request("[2001:db8::5]:44", map[string]string{
+	got := clientIP(request(t, "[2001:db8::5]:44", map[string]string{
 		"X-Forwarded-For": "2001:db9:beef::9",
 	}), trusted)
 	if got != "2001:db9:beef::9" {
@@ -179,5 +180,36 @@ func TestParseCIDRsAcceptsBareAddresses(t *testing.T) {
 	}
 	if _, err := parseCIDRs([]string{"not-an-address"}); err == nil {
 		t.Error("garbage was accepted")
+	}
+}
+
+// A deployment whose ingress gets a fresh pod address on every restart
+// cannot enumerate its proxies, so the only workable setting is to trust
+// everything. Under it every hop matches the trusted set, so a strict
+// "first untrusted address" walk would find none and fall back to the
+// peer -- the ingress -- which is exactly the value the operator was
+// trying to see past.
+func TestTrustingEverythingBelievesTheHeader(t *testing.T) {
+	all := mustCIDRs(t, "0.0.0.0/0", "::/0")
+
+	got := clientIP(request(t, "10.244.7.31:55555", map[string]string{
+		"X-Forwarded-For": "198.51.100.7",
+	}), all)
+	if got != "198.51.100.7" {
+		t.Errorf("clientIP = %q, want the forwarded client", got)
+	}
+
+	// Multiple hops, all trusted: the leftmost is the closest thing to a
+	// client that can be named.
+	got = clientIP(request(t, "10.244.7.31:55555", map[string]string{
+		"X-Forwarded-For": "198.51.100.7, 10.244.1.1",
+	}), all)
+	if got != "198.51.100.7" {
+		t.Errorf("clientIP = %q, want the leftmost entry", got)
+	}
+
+	// And with no header there is still nothing to believe.
+	if got := clientIP(request(t, "10.244.7.31:55555", nil), all); got != "10.244.7.31" {
+		t.Errorf("clientIP = %q, want the peer when no header was sent", got)
 	}
 }
