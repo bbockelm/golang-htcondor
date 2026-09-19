@@ -176,13 +176,13 @@ func buildSettingsFromConfig(cfg Config) buildSettings {
 // request above the cap is lowered rather than refused: the build still
 // runs, and refusing would make an agent guess at a number the operator
 // never told it.
-func clampBuildResource(requested, def, max int) int {
+func clampBuildResource(requested, fallback, limit int) int {
 	v := requested
 	if v <= 0 {
-		v = def
+		v = fallback
 	}
-	if max > 0 && v > max {
-		v = max
+	if limit > 0 && v > limit {
+		v = limit
 	}
 	return v
 }
