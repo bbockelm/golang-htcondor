@@ -182,12 +182,18 @@ account. Which providers may issue such a token is decided by
 enable this only alongside one. The server logs a warning at startup if
 stripping is on with no requirements expression configured.
 
-The index can only contain accounts something will enumerate, which today
-means those present in the passwd file. SSSD *can* enumerate -- and will,
-under `enumerate = true`, which is off by default and discouraged for
-large directories -- but the client library this server uses does not
-implement that call yet, so a directory-backed deployment has to
-materialise its accounts in a file this server can read.
+The index is built from the passwd file **and** from SSSD, when an SSSD
+socket is reachable. A directory-backed deployment therefore needs no
+local copy of its accounts -- a container with only its own `/etc/passwd`
+still indexes the whole directory, provided the SSSD domain sets
+`enumerate = true` (off by default, and discouraged for very large
+directories). A local entry wins a name collision, since that is the one
+`os/user` resolves.
+
+Naming a file with `HTTP_API_IDENTITY_MAP_PASSWD_FILE` turns the merge
+off: the file becomes the whole account database. That keeps the index and
+the re-check reading the same source, which is what makes an
+operator-supplied file self-consistent.
 
 Every candidate the index produces is re-checked by name against the live
 database before it is believed, and that lookup *does* reach a directory.
