@@ -243,6 +243,13 @@ var outputSchemas = map[string]map[string]interface{}{
 		"event":      strSchema,
 		"constraint": strSchema,
 		"fired":      boolSchema,
+		// How long this call blocked, and how long the watch has existed
+		// (they differ once a watch outlives the call that made it).
+		"waited_seconds":    intSchema,
+		"watch_age_seconds": intSchema,
+		// Fired because the state can no longer occur rather than
+		// because it happened -- "it never ran", not "it ran".
+		"unsatisfiable": boolSchema,
 	}, "watch_id"),
 	"check_watches": obj(map[string]interface{}{
 		"watches":       arr(adSchema),

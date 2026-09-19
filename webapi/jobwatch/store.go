@@ -146,7 +146,7 @@ func (s *Store) ForOwner(ctx context.Context, owner string, fired *bool) ([]*Wat
 		return nil, ErrNoOwner
 	}
 	q := `SELECT id, owner, label, constraint_expr, event, condition_expr, mode, created_at, tracked_json,
-	             fired_at, matched_json, matched_total, delivered_at, undetermined, incomplete
+	             fired_at, matched_json, matched_total, delivered_at, undetermined, unsatisfiable, incomplete
 	        FROM job_watches WHERE owner = ? AND expires_at > ?`
 	args := []any{owner, s.now().UTC()}
 	if fired != nil {
@@ -214,9 +214,10 @@ func (s *Store) Fire(ctx context.Context, id string, out Outcome, at time.Time) 
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE job_watches
-		   SET fired_at = ?, matched_json = ?, matched_total = ?, tracked_json = ?, undetermined = ?
+		   SET fired_at = ?, matched_json = ?, matched_total = ?, tracked_json = ?, undetermined = ?,
+		       unsatisfiable = ?
 		 WHERE id = ? AND fired_at IS NULL`,
-		at.UTC(), string(matched), out.Satisfied, tracked, out.Undetermined, id)
+		at.UTC(), string(matched), out.Satisfied, tracked, out.Undetermined, out.Unsatisfiable, id)
 	return err
 }
 
@@ -300,7 +301,7 @@ func scanFullWatches(rows *sql.Rows) ([]*Watch, error) {
 		var firedAt, deliveredAt sql.NullTime
 		if err := rows.Scan(&w.ID, &w.Owner, &w.Label, &w.Constraint, &event, &w.Condition, &mode,
 			&w.CreatedAt, &tracked, &firedAt, &matched, &w.MatchedTotal, &deliveredAt,
-			&w.Undetermined, &w.Incomplete); err != nil {
+			&w.Undetermined, &w.Unsatisfiable, &w.Incomplete); err != nil {
 			return nil, err
 		}
 		if err := finish(w, event, mode, tracked); err != nil {

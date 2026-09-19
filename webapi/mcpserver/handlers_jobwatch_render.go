@@ -13,7 +13,12 @@ import (
 // learn whether its jobs finished will sometimes get it wrong; one that
 // reads "FIRED: all 200 jobs are done" will not.
 
-func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) string {
+// waited is how long this call blocked before returning, which the text
+// states outright. An agent has no clock of its own across a tool call:
+// without it, a watch that fired immediately and one that came back after
+// a ten-minute wait read identically, and the elapsed time is most of
+// what says whether the pool is moving.
+func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch, waited time.Duration) string {
 	w := got
 	if w == nil {
 		w = registered
@@ -25,7 +30,7 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 	}
 	var b strings.Builder
 	if !w.FiredAt.IsZero() {
-		fmt.Fprintf(&b, "FIRED already — %s\n\n", describeFired(w))
+		fmt.Fprintf(&b, "FIRED after %s — %s\n\n", shortDuration(waited), describeFired(w))
 		fmt.Fprintf(&b, "Watch %s (%s) has already been answered; you do not need to check it again.\n", w.ID, describeQuestion(w))
 		b.WriteString(renderMatched(w))
 		return b.String()
@@ -36,7 +41,8 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 	// now" otherwise calls it again every turn, waiting each time on a
 	// question it has already arranged to have answered.
 	if w.Coalesced {
-		fmt.Fprintf(&b, "ALREADY WATCHING — %s, registered %s ago: %s\n\n",
+		fmt.Fprintf(&b, "ALREADY WATCHING (waited %s in this call) — %s, registered %s ago: %s\n\n",
+			shortDuration(waited),
 			w.ID, shortDuration(time.Since(w.CreatedAt)), describeQuestion(w))
 		b.WriteString(renderWatchProgress(w))
 		fmt.Fprintf(&b, "\nTo check it, call check_watches with {\"watch_id\": %q}. Calling watch_jobs "+
@@ -44,7 +50,7 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch) st
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "WAITING — watch %s registered: %s\n\n", w.ID, describeQuestion(w))
+	fmt.Fprintf(&b, "WAITING after %s — watch %s registered: %s\n\n", shortDuration(waited), w.ID, describeQuestion(w))
 	if w.Incomplete {
 		b.WriteString("WARNING: this watch selects more jobs than one read of the queue covers, so it is " +
 			"looking at a sample rather than the whole set. An \"all\" watch will never fire in this state, " +
@@ -91,7 +97,11 @@ func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool) s
 
 	for _, w := range news {
 		fmt.Fprintf(&b, "--- %s (%s) ---\n", w.ID, describeQuestion(w))
-		fmt.Fprintf(&b, "fired %s (%s ago)\n", w.FiredAt.UTC().Format(time.RFC3339), shortDuration(time.Since(w.FiredAt)))
+		// Both halves of the clock: how long the question took to answer,
+		// and how stale the answer is by the time it is being read.
+		fmt.Fprintf(&b, "fired %s (%s ago), after waiting %s\n",
+			w.FiredAt.UTC().Format(time.RFC3339), shortDuration(time.Since(w.FiredAt)),
+			shortDuration(w.FiredAt.Sub(w.CreatedAt)))
 		b.WriteString(renderMatched(w))
 		b.WriteString("\n")
 	}
@@ -138,6 +148,13 @@ func describeFired(w *jobwatch.Watch) string {
 	if w.MatchedTotal != 1 {
 		noun = "jobs"
 	}
+	if w.Unsatisfiable {
+		// Fired because the answer is settled, not because the event
+		// happened. Phrasing this as the event ("0 jobs started running")
+		// invites the agent to wait again for a state that has already
+		// been ruled out, so say what is actually true.
+		return fmt.Sprintf("%s never happened: the job(s) left the queue without it", describeEventState(w.Event))
+	}
 	if w.Undetermined {
 		// Deliberately not phrased as the event: nothing established
 		// that these succeeded or failed, and saying so would be a
@@ -157,6 +174,19 @@ func describeFired(w *jobwatch.Watch) string {
 		return fmt.Sprintf("%d %s started running", w.MatchedTotal, noun)
 	default:
 		return fmt.Sprintf("%d %s matched", w.MatchedTotal, noun)
+	}
+}
+
+// describeEventState names the state a live-state watch was waiting for,
+// for the case where it never occurred.
+func describeEventState(e jobwatch.Event) string {
+	switch e {
+	case jobwatch.EventRunning:
+		return "starting to run"
+	case jobwatch.EventHeld:
+		return "going on hold"
+	default:
+		return "the condition you asked about"
 	}
 }
 

@@ -88,6 +88,9 @@ type Watch struct {
 	// Undetermined is set on a watch that fired without establishing the
 	// outcome; see giveUpWaiting.
 	Undetermined bool
+	// Unsatisfiable is set on a watch that fired because the state it was
+	// waiting for can no longer occur; see resolveUnsatisfiable.
+	Unsatisfiable bool
 
 	// Incomplete is set while the watch selects more jobs than one read
 	// covers. Persisted, because check_watches re-reads the watch from
@@ -265,6 +268,12 @@ type Outcome struct {
 	// "these finished and I cannot tell you how", which an agent can act
 	// on. Silence is the one answer it cannot.
 	Undetermined bool
+	// Unsatisfiable marks a firing where the state the watch was waiting
+	// for can no longer occur: every job it selects has left the queue
+	// without ever being seen in that state. Satisfied is not inflated to
+	// match -- the watch fires to release the caller and reports that the
+	// thing did not happen, which is a different answer from "it did".
+	Unsatisfiable bool
 	// AllEndedAt is the updated grace-period stamp, for the caller to
 	// persist. Zero clears it.
 	AllEndedAt time.Time
@@ -336,6 +345,11 @@ type Fold struct {
 type placement struct {
 	inQueue   bool
 	inHistory bool
+	// ended marks a job observed in a terminal state this pass. A live-state
+	// event (running, held, custom) that has not hit by the time such a job
+	// ends can never hit for it, which is what Done turns into a verdict
+	// instead of another round of waiting.
+	ended bool
 	// hitDone guards against counting one job's satisfaction twice -- e.g. a
 	// terminal job observed both as a terminal ad still in the queue and as a
 	// history row in the same pass.
@@ -377,6 +391,7 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 	// accounted-for (not inQueue) so Done() does not count it as still running.
 	if isTerminalStatus(statusOf(ad)) {
 		p.inHistory = true
+		p.ended = true
 		f.seen[id] = p
 		f.resolveTerminal(id, ad)
 		return
@@ -411,6 +426,7 @@ func (f *Fold) Finished(ad *classad.ClassAd) {
 	id := jobIDOf(ad)
 	p := f.seen[id]
 	p.inHistory = true
+	p.ended = true
 	f.seen[id] = p
 	f.resolveTerminal(id, ad)
 }
@@ -426,7 +442,52 @@ func (f *Fold) resolveTerminal(id JobID, ad *classad.ClassAd) {
 		if succeeded(ad) == (f.w.Event == EventSucceeded) {
 			f.hit(id, ad)
 		}
+	case EventRunning:
+		// "Running" is a state, and a state is only observable while it
+		// lasts. The evaluator samples the queue every few seconds, so a
+		// job that starts and finishes between two passes was never seen
+		// running -- and a watch that decided this on the live sample
+		// alone would wait out its whole timeout for a job that ran to
+		// completion minutes ago. That is not a rare shape: it is what a
+		// short job on an idle pool does every time.
+		//
+		// The terminal ad still carries the evidence, so ask it whether
+		// the job ever started rather than whether it is running now.
+		if everRan(ad) {
+			f.hit(id, ad)
+		}
 	}
+}
+
+// everRan reports whether a job that has left the queue executed at some
+// point, from attributes that outlive the run itself.
+//
+// JobStartDate is the load-bearing one: the schedd writes it, along with
+// JobCurrentStartDate, straight into the job queue from
+// add_shadow_birthdate() when it spawns the shadow, so it is durable and
+// lands in history. NumJobStarts is deliberately NOT trusted alone --
+// the shadow updates it lazily by default (SHADOW_LAZY_QUEUE_UPDATE), so
+// it can be stale or, if the shadow dies first, never written at all.
+//
+// Each signal only ever proves a run happened, never that one did not,
+// so taking any of them keeps the union safe: the cost of a missing
+// attribute is the old behaviour for that job, not a wrong answer.
+// Completion is itself the strongest signal -- a job cannot complete
+// without having run -- and covers the universes that never spawn a
+// shadow.
+func everRan(ad *classad.ClassAd) bool {
+	if ad == nil {
+		return false
+	}
+	if statusOf(ad) == statusCompleted {
+		return true
+	}
+	for _, attr := range []string{"JobStartDate", "JobCurrentStartDate", "NumJobStarts"} {
+		if v, ok := ad.EvaluateAttrInt(attr); ok && v > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *Fold) hit(id JobID, ad *classad.ClassAd) {
@@ -453,8 +514,14 @@ func (f *Fold) Done() Outcome {
 	out := Outcome{Tracked: make([]JobID, 0, len(f.seen)), Satisfied: f.satisfied, Matched: f.matched}
 	var unresolved []JobID
 	var stillHere int
+	var lost int
 	for id, p := range f.seen {
 		out.Tracked = append(out.Tracked, id)
+		if p.ended && !p.hitDone {
+			// Ended without satisfying this watch. For a live-state event
+			// that is final: the job is gone and cannot enter the state now.
+			lost++
+		}
 		switch {
 		case p.inQueue:
 			stillHere++
@@ -507,7 +574,56 @@ func (f *Fold) Done() Outcome {
 	if out.Fires {
 		return out
 	}
+	if resolved, ok := f.w.resolveUnsatisfiable(out, lost, stillHere, f.truncated); ok {
+		return resolved
+	}
 	return f.w.giveUpWaiting(out, unresolved, stillHere, f.now)
+}
+
+// resolveUnsatisfiable decides whether a live-state watch has become
+// impossible rather than merely unfulfilled, and if so fires it saying so.
+//
+// A watch for "running", "held" or a custom in-queue condition can only
+// hit while the job is in the queue. Once every job it selects has left,
+// there is nothing further to observe: the watch is not early, it is
+// over. Left alone it would block until its timeout and then report
+// nothing, which reads to an agent exactly like a job that is still
+// pending -- so the agent waits again, on a question that already has
+// its final answer.
+//
+// This fires, because a caller blocked on this watch needs releasing
+// either way. It does not claim satisfaction: Satisfied stays at
+// whatever was actually observed and Unsatisfiable says the state never
+// happened. "Your job never ran" and "your job ran" are both answers;
+// only silence is not.
+//
+// It stays off the terminal events on purpose -- done, succeeded and
+// failed are answered by the job ending, so ending is not a failure mode
+// for them -- and off truncated reads, where absence is not evidence.
+func (w *Watch) resolveUnsatisfiable(out Outcome, lost, stillHere int, truncated bool) (Outcome, bool) {
+	switch w.Event {
+	case EventRunning, EventHeld, EventCustom:
+	default:
+		return out, false
+	}
+	if truncated || out.Selected == 0 || lost == 0 {
+		return out, false
+	}
+	switch w.Mode {
+	case ModeAll:
+		// One job that ended without ever being seen in the state is
+		// enough: "all of them" can no longer become true, however the
+		// rest of the set turns out.
+	default:
+		// "Any of them" stays open while any job could still enter the
+		// state, so this needs the whole set to be gone.
+		if stillHere > 0 || lost != out.Selected {
+			return out, false
+		}
+	}
+	out.Fires = true
+	out.Unsatisfiable = true
+	return out, true
 }
 
 // BaseAttrs are the attributes every evaluation needs regardless of what
@@ -520,7 +636,14 @@ func (f *Fold) Done() Outcome {
 // and the watch would quietly never fire. So the list is deliberately
 // generous: one extra attribute costs bytes, a missing one costs a watch
 // that waits forever.
-var BaseAttrs = append([]string{"ClusterId", "ProcId", "Owner", "JobStatus"}, CarryAttrs...)
+var BaseAttrs = append([]string{
+	"ClusterId", "ProcId", "Owner", "JobStatus",
+	// Evidence that a job ran, read off the terminal ad by everRan. Without
+	// these in the projection a "running" watch over a job that has already
+	// finished cannot tell "it ran and I missed it" from "it never started",
+	// which is the difference between firing and waiting out the timeout.
+	"JobStartDate", "JobCurrentStartDate", "NumJobStarts",
+}, CarryAttrs...)
 
 // ReadAttrs is every attribute this watch's expressions touch, so a
 // caller can fetch a projected ad instead of a whole one.
