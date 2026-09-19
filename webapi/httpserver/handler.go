@@ -205,6 +205,9 @@ type Handler struct {
 	// deployment which relied on the MCP group to gate the browser is not
 	// silently opened by this becoming its own knob.
 	webuiAccessGroups *groupSet
+	// creddAddress is HTTP_API_CREDD_ADDRESS: an operator's statement of
+	// which credd this schedd uses, which wins over discovery.
+	creddAddress string
 	// requiredCredentials names the OAuth services this access point wants
 	// on file before a job is submitted; see required_creds.go.
 	requiredCredentials []string
@@ -666,6 +669,10 @@ type HandlerConfig struct {
 	// that outlives it loses the response carrying the watch id. Zero
 	// uses the mcpserver default.
 	MCPWatchMaxWait time.Duration
+	// CreddAddress pins the credd to talk to (HTTP_API_CREDD_ADDRESS),
+	// overriding discovery. Needed where a schedd does not advertise its
+	// credd; otherwise the credd is read from the schedd itself.
+	CreddAddress string
 	// RequiredCredentials names the OAuth service credentials that must
 	// exist before a job may be submitted (HTTP_API_REQUIRED_CREDENTIALS).
 	// Some access points hold every job submitted without them. Each submit
@@ -975,6 +982,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Services this access point wants on file before a job is submitted.
 	// Initialised unconditionally so the submit paths never reach a nil
 	// cache; with no services configured the check is a length test.
+	h.creddAddress = cfg.CreddAddress
 	h.requiredCredentials = cfg.RequiredCredentials
 	h.requiredCredCache = newRequiredCredCache(requiredCredentialTTL)
 	if len(h.requiredCredentials) > 0 {
@@ -984,7 +992,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	if h.credd == nil {
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
-		creddAddr, err := discoverCredd(cfg.ScheddName, scheddAddr, cfg.Collector, logger)
+		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(scheddAddr), logger)
 		if err != nil {
 			logger.Warn(logging.DestinationHTTP, "Failed to discover credd, credential endpoints will be disabled", "error", err)
 			h.creddAvailable.Store(false)
@@ -2542,7 +2550,7 @@ func (h *Handler) startCreddAddressUpdater(ctx context.Context) {
 				scheddAddr := schedd.Address()
 
 				// Attempt to discover credd
-				creddAddr, err := discoverCredd(h.scheddName, scheddAddr, h.collector, h.logger)
+				creddAddr, err := discoverCredd(ctx, h.creddLookupFor(scheddAddr), h.logger)
 				if err != nil {
 					// Only log if credd is already available to avoid spam
 					if h.creddAvailable.Load() {

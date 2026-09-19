@@ -268,10 +268,12 @@ type Config struct {
 	// exist before a job may be submitted. See
 	// HandlerConfig.RequiredCredentials.
 	RequiredCredentials []string
-	StreamBufferSize    int                  // Buffer size for streaming queries (default: 100)
-	StreamWriteTimeout  time.Duration        // Write timeout for streaming queries (default: 5s)
-	Token               string               // Token for daemon authentication (optional)
-	Credd               htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
+	// CreddAddress pins the credd to talk to. See HandlerConfig.CreddAddress.
+	CreddAddress       string
+	StreamBufferSize   int                  // Buffer size for streaming queries (default: 100)
+	StreamWriteTimeout time.Duration        // Write timeout for streaming queries (default: 5s)
+	Token              string               // Token for daemon authentication (optional)
+	Credd              htcondor.CreddClient // Optional credd client; defaults to in-memory implementation
 	// Placementd is an optional condor_placementd client; nil means
 	// "discover one". See HandlerConfig.
 	Placementd htcondor.PlacementdClient
@@ -374,6 +376,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		RequiredCredentials:         cfg.RequiredCredentials,
+		CreddAddress:                cfg.CreddAddress,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		WebUIAccessGroup:            cfg.WebUIAccessGroup,
@@ -1374,70 +1377,6 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
 }
 
-// discoverCredd discovers the credd address by:
-// 1. Checking for a local .credd_address file if schedd was found via address file
-// 2. Querying the collector for a CreddAd with the same Name as the schedd
-// Returns the credd address or error if not found
-func discoverCredd(scheddName string, scheddAddr string, collector *htcondor.Collector, logger *logging.Logger) (string, error) {
-	// First, try to find credd via local address file if schedd address looks local
-	if strings.Contains(scheddAddr, "127.0.0.1") || strings.Contains(scheddAddr, "localhost") {
-		logger.Info(logging.DestinationHTTP, "Schedd appears local, checking for .credd_address file")
-
-		// Try to find credd address file in common HTCondor locations
-		creddAddressFile := findCreddAddressFile(logger)
-		if creddAddressFile != "" {
-			data, err := os.ReadFile(creddAddressFile) //nolint:gosec // creddAddressFile comes from HTCondor config or known paths
-			if err == nil {
-				// Only take the first line (address), ignore version info
-				lines := strings.Split(string(data), "\n")
-				address := strings.TrimSpace(lines[0])
-				if address != "" && !strings.Contains(address, "(null)") {
-					logger.Info(logging.DestinationHTTP, "Found local credd via address file", "address", address)
-					return address, nil
-				}
-			}
-		}
-	}
-
-	// If no local credd found, query collector
-	if collector != nil {
-		logger.Info(logging.DestinationHTTP, "Querying collector for credd", "scheddName", scheddName)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// Query for CreddAd with same Name as schedd
-		constraint := ""
-		if scheddName != "" {
-			constraint = fmt.Sprintf(`Name == "%s"`, scheddName)
-		}
-
-		ads, _, err := collector.QueryAdsWithOptions(ctx, "CredD", constraint, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to query collector for credd: %w", err)
-		}
-
-		if len(ads) == 0 {
-			return "", fmt.Errorf("no credd ads found in collector")
-		}
-
-		// Use the first credd ad
-		myAddressExpr, ok := ads[0].Lookup("MyAddress")
-		if !ok {
-			return "", fmt.Errorf("credd ad missing MyAddress attribute")
-		}
-
-		myAddress := myAddressExpr.String()
-		myAddress = strings.Trim(myAddress, `"`)
-
-		if myAddress != "" {
-			return myAddress, nil
-		}
-	}
-
-	return "", fmt.Errorf("no credd found via local file or collector")
-}
-
-// findCreddAddressFile searches for .credd_address file in common HTCondor locations
 func findCreddAddressFile(logger *logging.Logger) string {
 	// First, try to get the configured path from HTCondor config
 	if htcConfig, err := config.New(); err == nil {
