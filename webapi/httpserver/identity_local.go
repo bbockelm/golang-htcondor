@@ -53,19 +53,17 @@ import (
 // warmUpTimeout bounds the startup index build.
 const warmUpTimeout = 30 * time.Second
 
-// How hard to keep trying after a startup that found no directory.
+// The index is rebuilt on this cadence whether or not anybody logs in.
 //
-// A container starts this daemon and its SSSD sidecar at the same instant,
-// so the first index is built against a directory that is not answering
-// yet -- and SSSD does not serve an enumeration until its own first pass
-// over the directory completes, which on a real one takes minutes. These
-// bound a quiet retry over that window: often enough to be ready before
-// the first person logs in, few enough that a host with no directory at
-// all pays for a handful of extra passwd reads and then stops.
-const (
-	startupRetryInterval = 20 * time.Second
-	startupRetryWindow   = 5 * time.Minute
-)
+// Rebuilding only on demand meant the first snapshot could be served for a
+// whole TTL after the account database became readable -- and in a
+// container that first snapshot is taken before the SSSD sidecar answers,
+// so it is usually the wrong one. Refreshing on the TTL is what the TTL
+// already promises; doing it proactively just stops the promise from
+// depending on somebody arriving to trigger it.
+//
+// A refresh that fails changes nothing: the previous index stays in place
+// until one succeeds.
 
 type localIdentity struct {
 	// resolver maps the asserted subject to a local account. Nil leaves
@@ -77,10 +75,9 @@ type localIdentity struct {
 	groups droppriv.GroupLookup
 	logger *logging.Logger
 
-	// Retry pacing for the startup re-index, as fields so a test does not
-	// have to wait out the real window.
-	retryInterval time.Duration
-	retryWindow   time.Duration
+	// refreshEvery is the index TTL, and the cadence of the background
+	// rebuild. A field so a test need not wait out the real one.
+	refreshEvery time.Duration
 }
 
 // mapsAccount reports whether the asserted subject is translated.
@@ -120,11 +117,7 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	l := &localIdentity{
-		logger:        logger,
-		retryInterval: startupRetryInterval,
-		retryWindow:   startupRetryWindow,
-	}
+	l := &localIdentity{logger: logger, refreshEvery: ttl}
 	if systemGroups {
 		// Order from nsswitch.conf, so this agrees with the rest of the
 		// machine rather than preferring a source of its own.
@@ -204,7 +197,7 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	// the background for a few minutes so the pod is usable by the time
 	// somebody arrives, instead of serving that first snapshot until the
 	// TTL expires AND a login happens to trigger a rebuild.
-	go l.retryStartupIndex(context.WithoutCancel(parent), accounts)
+	go l.refreshLoop(context.WithoutCancel(parent))
 	// Only meaningful when the login-name strategy is also in play, and
 	// then worth saying out loud: the subject naming one of these
 	// resolves to somebody else's account.
@@ -222,32 +215,26 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	}
 }
 
-// retryStartupIndex re-indexes every retryInterval until the directory
-// shows up or retryWindow expires.
+// refreshLoop rebuilds the index on its TTL, without waiting for a login.
 //
-// The stopping rule is that the account count GREW. That is the only
-// observable which separates the two cases that look identical at
-// startup: a directory that was not answering yet, and a host that simply
-// has no directory. The first one resolves itself and we stop; the second
-// costs a handful of passwd reads across the window and then stops too.
-//
-// Deliberately not a permanent background refresher: once the window
-// closes the ordinary TTL takes over, so a long-lived process is not
-// enumerating a large directory on a timer forever.
-func (l *localIdentity) retryStartupIndex(ctx context.Context, startingCount int) {
-	if l.retryInterval <= 0 || l.retryWindow <= 0 {
+// There is no cleverness here on purpose. An earlier version watched for
+// the account count to grow and stopped when it did, which was a guess
+// standing in for a signal: it could not tell a directory that contributed
+// nothing from one that could not be read, and an unrelated edit to the
+// local passwd file looked the same as success.
+func (l *localIdentity) refreshLoop(ctx context.Context) {
+	if l.refreshEvery <= 0 {
 		return
 	}
-	ticker := time.NewTicker(l.retryInterval)
+	ticker := time.NewTicker(l.refreshEvery)
 	defer ticker.Stop()
-	deadline := time.NewTimer(l.retryWindow)
-	defer deadline.Stop()
+
+	wasDegraded := l.resolver.Degraded() != nil
+	lastCount, _, _ := l.resolver.Stats()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-deadline.C:
 			return
 		case <-ticker.C:
 		}
@@ -256,20 +243,37 @@ func (l *localIdentity) retryStartupIndex(ctx context.Context, startingCount int
 		err := l.resolver.Refresh(refreshCtx)
 		cancel()
 		if err != nil {
-			// Expected while the directory is still coming up; the startup
-			// log already said the index is incomplete, and repeating that
-			// every interval would bury it.
+			// The previous index is still in place; say so once rather
+			// than on every tick.
+			if !wasDegraded {
+				wasDegraded = true
+				l.logger.Warn(logging.DestinationHTTP,
+					"Could not rebuild the account index; continuing with the previous one",
+					"error", err)
+			}
 			continue
 		}
 
 		accounts, ambiguous, _ := l.resolver.Stats()
-		if accounts <= startingCount {
-			continue
+		degraded := l.resolver.Degraded() != nil
+
+		// Report only transitions. A steady state is not news, and this
+		// runs for the life of the process.
+		switch {
+		case wasDegraded && !degraded:
+			l.logger.Info(logging.DestinationHTTP,
+				"The account index is complete again",
+				"accounts", accounts, "ambiguous", ambiguous)
+		case !wasDegraded && degraded:
+			l.logger.Warn(logging.DestinationHTTP,
+				"The account index has become incomplete: a directory could not be read",
+				"error", l.resolver.Degraded(), "accounts", accounts)
+		case accounts != lastCount:
+			l.logger.Info(logging.DestinationHTTP,
+				"The account index changed size",
+				"accounts", accounts, "was", lastCount, "ambiguous", ambiguous)
 		}
-		l.logger.Info(logging.DestinationHTTP,
-			"The account index picked up the directory after start; logins can now map to directory accounts",
-			"accounts", accounts, "ambiguous", ambiguous, "was", startingCount)
-		return
+		wasDegraded, lastCount = degraded, accounts
 	}
 }
 
