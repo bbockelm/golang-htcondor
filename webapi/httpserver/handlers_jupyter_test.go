@@ -210,10 +210,18 @@ func TestBuildJupyterLaunchScript_Docker(t *testing.T) {
 	mustContain(t, got, `--ServerApp.sock="$SOCK"`)
 	mustContain(t, got, `trap 'rm -rf "$SOCK_DIR"' EXIT`)
 	mustContain(t, got, "--daemonize")
-	mustContain(t, got, "exec jupyter lab")
+	// Jupyter is resolved rather than assumed on PATH: the happy path is
+	// still "jupyter lab", but the script adds common conda locations and
+	// falls back to "python -m jupyterlab" so an Apptainer container whose
+	// image env wasn't activated still launches.
+	mustContain(t, got, "set -- jupyter lab")
+	mustContain(t, got, `exec "$@"`)
+	mustContain(t, got, "/opt/conda/bin")
+	mustContain(t, got, "python3 -m jupyterlab")
 	mustContain(t, got, `--ServerApp.base_url="/api/v1/jupyter/instances/x/proxy/"`)
 	mustContain(t, got, `--ServerApp.allow_origin="http://api.example.com"`)
-	// Docker case: no conda dance.
+	// Docker case: no conda *provisioning* dance (that is the vanilla
+	// path); resolving an existing jupyter is fine.
 	if strings.Contains(got, "conda create") {
 		t.Errorf("docker launch script should not contain conda fallback; got:\n%s", got)
 	}
@@ -237,7 +245,9 @@ func TestBuildJupyterLaunchScript_Vanilla(t *testing.T) {
 	mustContain(t, got, "pip install --quiet --disable-pip-version-check")
 	mustContain(t, got, "jupyterlab")
 	mustContain(t, got, "'python-lsp-server[all]'")
-	mustContain(t, got, "exec jupyter lab")
+	// The activated env puts jupyter on PATH, so resolution picks it.
+	mustContain(t, got, "set -- jupyter lab")
+	mustContain(t, got, `exec "$@"`)
 }
 
 // TestBuildJupyterTunnelURL covers the scheme + host derivation.
