@@ -200,9 +200,10 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 	// an agent does when it reads watch_jobs as "get me the state now".
 	// Answer from what is already known and name the tool that does
 	// this properly.
-	deadline := time.Now().Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
+	callStart := time.Now()
+	deadline := callStart.Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
 	if w.Coalesced && !blockingIsPrimary(s.maxWaitSeconds()) {
-		deadline = time.Now()
+		deadline = callStart
 	}
 	for {
 		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
@@ -213,12 +214,23 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 			return nil, err
 		}
 		if got == nil || !got.FiredAt.IsZero() || !time.Now().Before(deadline) {
-			return structuredTextResult(renderWatchRegistration(got, w), map[string]interface{}{
-				"watch_id":   w.ID,
-				"event":      string(w.Event),
-				"constraint": w.Constraint,
-				"fired":      got != nil && !got.FiredAt.IsZero(),
-			}), nil
+			// How long this call blocked. An agent that cannot see the
+			// clock has no other way to tell a watch that fired at once
+			// from one that came back after ten minutes of waiting, and
+			// the two mean very different things about the pool.
+			waited := time.Since(callStart)
+			out := map[string]interface{}{
+				"watch_id":       w.ID,
+				"event":          string(w.Event),
+				"constraint":     w.Constraint,
+				"fired":          got != nil && !got.FiredAt.IsZero(),
+				"waited_seconds": int(waited.Round(time.Second).Seconds()),
+			}
+			if got != nil {
+				out["watch_age_seconds"] = int(time.Since(got.CreatedAt).Round(time.Second).Seconds())
+				out["unsatisfiable"] = got.Unsatisfiable
+			}
+			return structuredTextResult(renderWatchRegistration(got, w, waited), out), nil
 		}
 		select {
 		case <-ctx.Done():
@@ -272,13 +284,24 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 		}
 	}
 	watchEntry := func(w *jobwatch.Watch, fired bool) map[string]interface{} {
-		return map[string]interface{}{
+		e := map[string]interface{}{
 			"watch_id":      w.ID,
 			"event":         string(w.Event),
 			"constraint":    w.Constraint,
 			"fired":         fired,
 			"matched_total": w.MatchedTotal,
 		}
+		// Age for a watch still waiting, time-to-answer for one that
+		// fired: in both cases how long this question has been open,
+		// which is what an agent needs to judge whether to keep waiting
+		// or go and look at the pool itself.
+		if fired {
+			e["waited_seconds"] = int(w.FiredAt.Sub(w.CreatedAt).Round(time.Second).Seconds())
+			e["unsatisfiable"] = w.Unsatisfiable
+		} else {
+			e["waited_seconds"] = int(time.Since(w.CreatedAt).Round(time.Second).Seconds())
+		}
+		return e
 	}
 	entries := make([]map[string]interface{}, 0, len(news)+len(waiting))
 	for _, w := range news {
