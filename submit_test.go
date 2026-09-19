@@ -318,6 +318,18 @@ container_image = docker://quay.io/jupyter/scipy-notebook:latest
 	if _, ok := ad.Lookup("WantDocker"); ok {
 		t.Error("a container_image job set WantDocker")
 	}
+	// The image-kind flag is what turns the container runtime on in the
+	// starter (Singularity::job_enabled). A docker:// image is WantDockerImage;
+	// WantSIF/WantSandboxImage must NOT be set. Missing this flag is why an
+	// Apptainer node ran the job on bare metal.
+	if got := lookupStr(t, ad, "WantDockerImage"); got != "true" {
+		t.Errorf("WantDockerImage = %q, want true (starter keys on it to enable the runtime)", got)
+	}
+	for _, notWant := range []string{"WantSIF", "WantSandboxImage"} {
+		if _, ok := ad.Lookup(notWant); ok {
+			t.Errorf("a docker:// image should not set %s", notWant)
+		}
+	}
 	// HTCondor's container-universe requirement: the node must support
 	// the container universe (HasContainer) and be able to pull the image
 	// kind. A docker:// repo needs HasDockerURL, which is runtime-agnostic
@@ -338,17 +350,42 @@ container_image = docker://quay.io/jupyter/scipy-notebook:latest
 
 // TestContainerImageCapability pins the image-kind -> node-capability
 // mapping, matching HTCondor's image_type_from_string.
-func TestContainerImageCapability(t *testing.T) {
-	cases := map[string]string{
-		"docker://quay.io/x:latest": "HasDockerURL",
-		"docker:x":                  "HasDockerURL",
-		"/pool/images/foo.sif":      "HasSIF",
-		"/pool/images/sandbox/":     "HasSandboxImage",
-		"just-a-name":               "HasSandboxImage",
+func TestContainerImageKind(t *testing.T) {
+	cases := []struct {
+		image, wantAttr, capability string
+	}{
+		{"docker://quay.io/x:latest", "WantDockerImage", "HasDockerURL"},
+		{"docker:x", "WantDockerImage", "HasDockerURL"},
+		{"/pool/images/foo.sif", "WantSIF", "HasSIF"},
+		{"/pool/images/sandbox/", "WantSandboxImage", "HasSandboxImage"},
+		{"just-a-name", "WantSandboxImage", "HasSandboxImage"},
 	}
-	for img, want := range cases {
-		if got := containerImageCapability(img); !strings.Contains(got, want) {
-			t.Errorf("containerImageCapability(%q) = %q, want it to name %s", img, got, want)
+	for _, c := range cases {
+		wantAttr, capability := containerImageKind(c.image)
+		if wantAttr != c.wantAttr {
+			t.Errorf("containerImageKind(%q) wantAttr = %q, want %q", c.image, wantAttr, c.wantAttr)
+		}
+		if !strings.Contains(capability, c.capability) {
+			t.Errorf("containerImageKind(%q) capability = %q, want it to name %s", c.image, capability, c.capability)
+		}
+	}
+}
+
+// TestContainerImageKindFlagInAd checks that a .sif container_image sets
+// WantSIF on the job ad (and not the docker/sandbox flags) -- the same
+// starter-visible mechanism as the docker:// case in TestContainerUniverse.
+func TestContainerImageKindFlagInAd(t *testing.T) {
+	ad := adFromSubmit(t, `
+universe = container
+executable = /bin/echo
+container_image = /cvmfs/x/images/foo.sif
+`)
+	if got := lookupStr(t, ad, "WantSIF"); got != "true" {
+		t.Errorf("WantSIF = %q, want true", got)
+	}
+	for _, notWant := range []string{"WantDockerImage", "WantSandboxImage"} {
+		if _, ok := ad.Lookup(notWant); ok {
+			t.Errorf("a .sif image should not set %s", notWant)
 		}
 	}
 }
