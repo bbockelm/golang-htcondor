@@ -1706,8 +1706,26 @@ func (s *Server) resourceScheddStatus(ctx context.Context) (interface{}, error) 
 		}, nil
 	}
 
-	// Try to get schedd ad from collector using QueryAds
-	constraint := "true" // Get all schedds or filter later
+	// Ask about THIS server's schedd, not the pool's.
+	//
+	// The constraint was "true" with a note to filter later, and the filter
+	// was ads[0] -- so on a pool with more than one access point the status
+	// came from whichever schedd the collector happened to list first. On a
+	// multi-AP pool that is somebody else's machine, reported as though it
+	// were the one this server submits to.
+	constraint, err := scheddAdConstraint(s.getSchedd())
+	if err != nil {
+		return map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{
+					"uri":      "condor://schedd/status",
+					"mimeType": "text/plain",
+					"text":     "Schedd status unavailable: " + err.Error(),
+				},
+			},
+		}, nil
+	}
+
 	ads, _, err := s.collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query collector: %w", err)
@@ -1725,7 +1743,13 @@ func (s *Server) resourceScheddStatus(ctx context.Context) (interface{}, error) 
 		}, nil
 	}
 
-	// Serialize the schedd ad (use first one)
+	// One ad, because the constraint names a single schedd. More than one
+	// would mean the name is ambiguous, and picking from them is exactly
+	// how this resource came to report a stranger.
+	if len(ads) > 1 {
+		return nil, fmt.Errorf("%d schedd ads matched %s; refusing to guess which is this server's", len(ads), constraint)
+	}
+
 	adJSON, err := json.MarshalIndent(ads[0], "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize schedd ad: %w", err)
@@ -2731,4 +2755,29 @@ func describeSandboxEntries(entries []string) string {
 			fmt.Sprintf(", and %d more", len(entries)-maxListed)
 	}
 	return strings.Join(entries, ", ")
+}
+
+// scheddAdConstraint builds a collector constraint selecting the schedd this
+// server submits to, by name when it has one and otherwise by the address it
+// is actually dialling.
+//
+// It returns an error rather than a match-everything constraint when neither
+// is known: a resource that describes an unidentified schedd is worse than one
+// that says it cannot tell, because the caller cannot see which it got.
+func scheddAdConstraint(schedd *htcondor.Schedd) (string, error) {
+	if schedd == nil {
+		return "", fmt.Errorf("no schedd is configured")
+	}
+	if name := strings.TrimSpace(schedd.Name()); name != "" {
+		return fmt.Sprintf("Name == %s", quoteClassAdString(name)), nil
+	}
+	if addr := strings.TrimSpace(schedd.Address()); addr != "" {
+		return fmt.Sprintf("MyAddress == %s", quoteClassAdString(addr)), nil
+	}
+	return "", fmt.Errorf("the schedd has neither a name nor an address, so it cannot be identified in the collector")
+}
+
+// quoteClassAdString renders a Go string as a ClassAd string literal.
+func quoteClassAdString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
