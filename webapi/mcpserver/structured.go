@@ -286,6 +286,15 @@ var outputSchemas = map[string]map[string]interface{}{
 		"Revision": strSchema,
 		"Dirty":    boolSchema,
 	}),
+
+	"whoami": obj(map[string]interface{}{
+		"authenticated_user": strSchema,
+		"admin":              boolSchema,
+		"job_visibility":     strSchema,
+		"confined_to_owner":  strSchema,
+		"access_point":       strSchema,
+		"oauth_scopes":       obj(map[string]interface{}{}),
+	}),
 }
 
 // jobActionSchema is the result shape for the single-job control tools

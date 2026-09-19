@@ -94,6 +94,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"skills_list":                   readOnlyAnn(false),
 	"skills_get":                    readOnlyAnn(false),
 	"get_version":                   readOnlyAnn(false),
+	"whoami":                        readOnlyAnn(false),
 	"check_watches":                 readOnlyAnn(false),
 	"cancel_watch":                  readOnlyAnn(false),
 

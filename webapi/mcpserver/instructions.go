@@ -157,6 +157,8 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("  exec_in_job — run one command inside a job that is already running\n")
 	b.WriteString("  get_version — report this server's build (version, git commit, linked library versions); " +
 		"use it to confirm which code is deployed\n")
+	b.WriteString("  whoami — who this server authenticated you as, whether you are an administrator, and whether " +
+		"the other tools are confined to your own jobs; ask it when a query returns less than you expect.\n")
 
 	return b.String()
 }
