@@ -2788,7 +2788,9 @@ func loadRequiredCredentials(cfg *config.Config, logger *logging.Logger) []strin
 //
 // The SDK transport is what the current protocol revision needs: it is
 // stateless, which SEP-2575 (2026-07-28) requires, where the built-in one
-// still answers "2024-11-05". It is not the default yet because it is
+// still answers "2024-11-05". A 2026-07-28 client reaches the built-in
+// transport by downgrading rather than failing, so this decides which
+// protocol is available, not whether modern clients work at all. It is not the default yet because it is
 // stricter about the request than the built-in one -- notably it requires an
 // Accept header naming both application/json and text/event-stream, which a
 // spec-compliant client sends and a hand-written curl usually does not.

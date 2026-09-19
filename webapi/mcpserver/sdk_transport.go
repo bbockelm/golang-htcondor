@@ -38,7 +38,10 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 	if v := s.instructions.Load(); v != nil {
 		instructions = *v
 	}
-	srv := mcp.NewServer(sdkImplementation, &mcp.ServerOptions{Instructions: instructions})
+	srv := mcp.NewServer(sdkImplementation, &mcp.ServerOptions{
+		Instructions: instructions,
+		SetCacheable: privateToTheCaller,
+	})
 	for _, t := range s.toolsFor(WithGrantedScopes(context.Background(), scopes)) {
 		srv.AddTool(
 			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema},
@@ -46,6 +49,34 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 		)
 	}
 	return srv
+}
+
+// privateToTheCaller marks every cacheable result as private.
+//
+// The 2026-07-28 protocol attaches cache-control to the results a stateless
+// client re-fetches most -- server/discover and the list methods -- and the
+// SDK's default scope is "public", which tells any intermediary it may cache
+// one response and serve it to somebody else.
+//
+// That is the wrong statement about this server. Its catalogue is built from
+// the caller's granted scopes, so two callers asking the same question get
+// different answers, and the answer a read-write token gets is the full write
+// surface. A gateway in front of this daemon -- which is how it is deployed --
+// taking "public" at its word could hand that to a read-only caller. The
+// existing scope filter exists precisely to stop a client learning what it
+// may not call.
+//
+// The exposure is currently bounded by the SDK's other default, ttlMs 0,
+// which tells a conforming cache the result is already stale. That is a
+// second thing being right rather than this being right, and it is not left
+// resting on it: a TTL is a tuning knob somebody will reasonably raise.
+//
+// TTL is deliberately not set here. Letting a caller's own client cache its
+// own catalogue is safe and is the point of the feature, but choosing how
+// long a client may be wrong about the tool list after a reconfigure is a
+// decision to make deliberately, not a side effect of fixing the scope.
+func privateToTheCaller(_ context.Context, _ mcp.Request, c *mcp.Cacheable) {
+	c.CacheScope = "private"
 }
 
 // sdkToolHandler adapts one tool to the SDK's raw handler signature.
