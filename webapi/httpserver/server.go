@@ -74,6 +74,9 @@ type Config struct {
 	// full docs and the security rationale. Configurable via
 	// HTTP_API_USER_HEADER_TRUSTED_PROXIES.
 	UserHeaderTrustedProxies []string
+	// TrustedProxies lists CIDRs whose forwarded headers are honored for
+	// access logging. Empty means none are. HTTP_API_TRUSTED_PROXIES.
+	TrustedProxies []string
 	// UserHeaderTrustAnyUnsafe disables the trusted-proxy gate and
 	// honors UserHeader from any source. Demo / test only — see
 	// HandlerConfig.UserHeaderTrustAnyUnsafe. Configurable via
@@ -322,6 +325,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ScheddAddrDiscovered:        cfg.ScheddAddrDiscovered,
 		UserHeader:                  cfg.UserHeader,
 		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
+		TrustedProxies:              cfg.TrustedProxies,
 		UserHeaderTrustAnyUnsafe:    cfg.UserHeaderTrustAnyUnsafe,
 		SigningKeyPath:              cfg.SigningKeyPath,
 		TrustDomain:                 cfg.TrustDomain,
@@ -914,17 +918,11 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			bytesWritten:   0,
 		}
 
-		// Get client IP (handle X-Forwarded-For and X-Real-IP)
-		clientIP := r.RemoteAddr
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			clientIP = strings.Split(xff, ",")[0]
-		} else if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-			clientIP = xrip
-		}
-		// Strip port from RemoteAddr if present
-		if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
-			clientIP = clientIP[:idx]
-		}
+		// Forwarded headers are read only from a configured proxy; see
+		// clientIP. Unconfigured this is the peer address, which behind an
+		// ingress is the ingress -- honest, rather than a value the caller
+		// chose.
+		clientIP := clientIP(r, s.trustedProxies)
 
 		// Extract identity from context (will be set by auth middleware if present)
 		identity := "-"

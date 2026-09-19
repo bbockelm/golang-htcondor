@@ -1650,6 +1650,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,
 		UserHeaderTrustedProxies: loadUserHeaderTrustedProxies(cfg),
+		TrustedProxies:           config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_TRUSTED_PROXIES")),
 		UserHeaderTrustAnyUnsafe: loadUserHeaderTrustAnyUnsafe(cfg),
 		SigningKeyPath:           signingKeyPath,
 		HTTPBaseURL:              publicBaseURL(cfg),

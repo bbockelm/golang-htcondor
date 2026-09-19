@@ -115,6 +115,11 @@ type Handler struct {
 	// means the header is rejected from every source unless the
 	// "unsafe" demo flag below is true.
 	userHeaderTrustedProxies []*net.IPNet
+	// trustedProxies is the set of peers whose forwarded headers are
+	// believed when recording a client address. Separate from the list
+	// above: that one decides who may assert an IDENTITY, which is a much
+	// larger grant than being believed about an address.
+	trustedProxies []*net.IPNet
 	// userHeaderUnsafeAllowAll, when true, bypasses the trusted-proxy
 	// CIDR check and accepts the user header from any source. This is
 	// the legacy behavior; it is dangerous in production (any client
@@ -412,6 +417,12 @@ type HandlerConfig struct {
 	// (comma-separated CIDRs, e.g. "127.0.0.1/32,::1/128,10.0.0.0/8")
 	// or programmatically.
 	UserHeaderTrustedProxies []string
+
+	// TrustedProxies lists CIDRs (or bare addresses) whose X-Forwarded-For
+	// and X-Real-IP headers are honoured for access logging. Empty means
+	// no forwarded header is believed and the peer address is logged.
+	// Configure via HTTP_API_TRUSTED_PROXIES.
+	TrustedProxies []string
 	// UserHeaderTrustAnyUnsafe disables the trusted-proxy check and
 	// accepts UserHeader from any source. This is the demo / test
 	// mode only — it is unsafe in any production deployment because
@@ -916,6 +927,20 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	//     is honored only from those CIDRs. This is the production
 	//     mode (reverse proxy on a known network).
 	// If UserHeader is set but neither (2) nor (3) applies, the
+	// Proxies whose forwarded headers are believed when recording a client
+	// address. A malformed entry stops the daemon rather than being
+	// dropped: the failure it would otherwise cause is a log full of
+	// addresses the caller chose, which nobody notices until the log is
+	// being relied on.
+	if proxies, perr := parseCIDRs(cfg.TrustedProxies); perr != nil {
+		return nil, fmt.Errorf("HTTP_API_TRUSTED_PROXIES: %w", perr)
+	} else if len(proxies) > 0 {
+		h.trustedProxies = proxies
+		logger.Info(logging.DestinationHTTP,
+			"Forwarded client-address headers will be honored from these proxies",
+			"proxies", cfg.TrustedProxies)
+	}
+
 	// header is silently ignored (effectively disabled). We refuse to
 	// boot in that case so the operator notices the misconfiguration
 	// rather than silently dropping authentication.
