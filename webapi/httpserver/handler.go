@@ -533,12 +533,15 @@ type HandlerConfig struct {
 	// membership comes from the system rather than the token, and a
 	// caller that maps to no single account is refused a session.
 	IdentityMapStrategies []idmap.Strategy
-	// IdentityGroupsFromSystem takes group membership from the account
-	// database instead of the token's groups claim. Independent of
+	// IdentityGroupSources lists where group membership comes from, as
+	// parsed specs: "system" and/or "file:<path>". Empty keeps the
+	// token's groups claim, which is what a container wants because it
+	// holds no account database to read. Independent of
 	// IdentityMapStrategies: a deployment may want either, both, or
-	// neither. The default -- neither -- is what a container wants,
-	// because it holds no account database to read.
-	IdentityGroupsFromSystem bool
+	// neither. Several sources are unioned, the way glibc merges NSS
+	// services, so a site can carry directory groups and hand-maintained
+	// ones at once.
+	IdentityGroupSources []string
 	// IdentityMapPasswdFile reads accounts from this file instead of
 	// /etc/passwd. Empty means /etc/passwd, which is the only account
 	// source that enumerates: the GECOS index cannot list accounts that
@@ -1167,7 +1170,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// so a deployment with MCP off had HTTP_API_IDENTITY_MAP parsed,
 	// logged as configured, and then silently ignored -- the worst of
 	// both, because the log said the mapping was in force.
-	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupsFromSystem,
+	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupSources,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
 		// Lets the index survive a restart; see

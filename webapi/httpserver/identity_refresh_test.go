@@ -39,7 +39,7 @@ func waitForIndex(t *testing.T, li *localIdentity, n int, within time.Duration) 
 
 func identityOverFile(t *testing.T, path string, every time.Duration) *localIdentity {
 	t.Helper()
-	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, path, time.Minute, false, testLogger(t))
+	li := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, nil, path, time.Minute, false, testLogger(t))
 	if li == nil {
 		t.Fatal("no local identity was configured")
 	}

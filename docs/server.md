@@ -201,11 +201,49 @@ So an incomplete index can fail to find somebody, but cannot promote
 anybody.
 
 **Group membership.** `HTTP_API_GROUP_SOURCE` decides where groups come
-from, independently of the mapping above.
+from, independently of the mapping above. It takes a comma-separated list;
+whitespace around each entry is ignored.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `HTTP_API_GROUP_SOURCE` | `token` | `token` uses the token's groups claim -- correct for a container. `system` (or `unix`) reads Unix groups for the mapped account. |
+| `HTTP_API_GROUP_SOURCE` | `token` | Comma-separated list of `token`, `system` (or `unix`), and `file:<path>`. |
+
+| Source | Reads |
+| --- | --- |
+| `token` | The token's groups claim. Correct for a container, which holds no account database. |
+| `system` | Unix groups for the mapped account, following this host's `nsswitch.conf`. |
+| `file:<path>` | An `/etc/group`-format file. |
+
+Several **local** sources are a union, the way glibc merges NSS services --
+an account can hold directory groups and hand-maintained ones at once, and
+stopping at the first source that answers would drop half of somebody's
+membership:
+
+```
+HTTP_API_GROUP_SOURCE = system, file:/etc/htcondor-api/groups
+```
+
+`token` cannot be combined with a local source; the server refuses to start
+if it is. They are different trust bases -- one is what the identity
+provider asserted, the other is what this machine's account database says
+-- and unioning them would let a provider add a caller to any group the
+local policy checks.
+
+**`file:<path>`** exists for memberships the directory does not carry, such
+as a staff or admin group that is not in LDAP. The format is `group(5)`,
+deliberately, so `getent group <name>` output can be pasted in unchanged:
+
+```
+chtc_staff:*:40388:ckoch5,aowen4,bbockelm
+ap2001-login:*:40428:bbockelm,qwang377
+```
+
+Only the group name and the member list are used; the password and gid
+fields are ignored. Like `/etc/group` itself it lists supplementary members
+only. The file is re-read when it changes, so an edit takes effect without
+restarting the daemon. A file that cannot be read marks the answer
+*possibly incomplete* rather than reporting that nobody is in any group --
+the difference matters, because the latter is an authorization decision.
 
 With `system`, membership is re-read on every refresh, so a user removed
 from a group upstream stops passing without waiting for their refresh
@@ -733,7 +771,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |
 | `HTTP_API_IDENTITY_MAP_TTL` | How long the account index and group answers are reused. Default `5m`. |
-| `HTTP_API_GROUP_SOURCE` | `token` (default) or `system` — whether group membership comes from the token claim or from Unix groups. |
+| `HTTP_API_GROUP_SOURCE` | Comma-separated: `token` (default), `system`, and/or `file:<path>`. Local sources are unioned; `token` may not be mixed with them. See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_OAUTH2_USERNAME_CLAIM` | Claim carrying the username, e.g. `eppn`. Default `sub`. |
 | `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |

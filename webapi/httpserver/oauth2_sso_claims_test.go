@@ -249,7 +249,7 @@ func TestClaimNamesListsKeysNotValues(t *testing.T) {
 func TestGroupSourceIsNamedForTheOperator(t *testing.T) {
 	passwd := writePasswd(t)
 
-	li := newLocalIdentity(nil, true, passwd, time.Minute, false, testLogger(t))
+	li := newLocalIdentity(nil, []string{"system"}, passwd, time.Minute, false, testLogger(t))
 	if li == nil {
 		t.Fatal("expected a localIdentity when groups come from the system")
 	}
@@ -264,7 +264,7 @@ func TestGroupSourceIsNamedForTheOperator(t *testing.T) {
 	t.Logf("group source on this build: %s", name)
 
 	// With token-sourced groups there is nothing local to name.
-	tokenOnly := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, false, passwd, time.Minute, false, testLogger(t))
+	tokenOnly := newLocalIdentity([]idmap.Strategy{idmap.StrategyGecos}, nil, passwd, time.Minute, false, testLogger(t))
 	if got := tokenOnly.groupSourceName(); got != "" {
 		t.Errorf("group source = %q, want empty when groups come from the token", got)
 	}

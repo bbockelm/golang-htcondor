@@ -200,13 +200,13 @@ func TestSystemGroupOracleIsWiredExactlyWhenGroupsAreLocal(t *testing.T) {
 	cases := []struct {
 		name         string
 		strategies   []idmap.Strategy
-		systemGroups bool
+		systemGroups []string
 		wantOracle   bool
 	}{
-		{"groups from the system", []idmap.Strategy{idmap.StrategyGecos}, true, true},
-		{"groups from the system, no subject mapping", nil, true, true},
-		{"subject mapped, groups from the token", []idmap.Strategy{idmap.StrategyGecos}, false, false},
-		{"neither (the default, and what a container runs)", nil, false, false},
+		{"groups from the system", []idmap.Strategy{idmap.StrategyGecos}, []string{"system"}, true},
+		{"groups from the system, no subject mapping", nil, []string{"system"}, true},
+		{"subject mapped, groups from the token", []idmap.Strategy{idmap.StrategyGecos}, nil, false},
+		{"neither (the default, and what a container runs)", nil, nil, false},
 	}
 
 	for _, tc := range cases {

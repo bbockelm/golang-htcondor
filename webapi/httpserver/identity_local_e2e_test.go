@@ -230,10 +230,10 @@ func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup
 		MCPAccessGroup:      accessGroup,
 
 		// The thing under test.
-		IdentityMapStrategies:    []idmap.Strategy{idmap.StrategyGecos},
-		IdentityGroupsFromSystem: true,
-		IdentityMapPasswdFile:    passwdPath,
-		IdentityMapTTL:           time.Minute,
+		IdentityMapStrategies: []idmap.Strategy{idmap.StrategyGecos},
+		IdentityGroupSources:  []string{"system"},
+		IdentityMapPasswdFile: passwdPath,
+		IdentityMapTTL:        time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

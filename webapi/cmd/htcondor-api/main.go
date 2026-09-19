@@ -160,7 +160,7 @@ type mcpConfig struct {
 	// GECOS equals it, and takes group membership from the system
 	// instead of the token. See webapi/httpserver/identity_local.go.
 	identityMapStrategies []idmap.Strategy
-	identityGroupsSystem  bool
+	identityGroupSources  []string
 	identityMapPasswdFile string
 	identityMapTTL        time.Duration
 	mcpAccessGroup        string
@@ -993,20 +993,17 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 	// mapping above: a container has no account database to read and
 	// must keep the token's claim, which is why "token" is the default.
 	if v, ok := cfg.Get("HTTP_API_GROUP_SOURCE"); ok && strings.TrimSpace(v) != "" {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "system", "unix":
-			mcpCfg.identityGroupsSystem = true
-		case "token", "oidc":
-			mcpCfg.identityGroupsSystem = false
-		default:
+		specs, err := httpserver.ParseGroupSources(v)
+		if err != nil {
 			logger.Error(logging.DestinationHTTP,
-				"HTTP_API_GROUP_SOURCE must be \"token\" or \"system\"; refusing to start",
-				"value", v)
+				"HTTP_API_GROUP_SOURCE is not usable; refusing to start",
+				"value", v, "error", err)
 			os.Exit(1)
 		}
+		mcpCfg.identityGroupSources = specs
 	}
 
-	if len(mcpCfg.identityMapStrategies) > 0 || mcpCfg.identityGroupsSystem {
+	if len(mcpCfg.identityMapStrategies) > 0 || len(mcpCfg.identityGroupSources) > 0 {
 		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
 		// Whether a scoped subject may also be matched by its local part.
 		// A boolean, because the domain it strips is whichever the token
@@ -1033,8 +1030,8 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 			}
 		}
 		groupsFrom := "token"
-		if mcpCfg.identityGroupsSystem {
-			groupsFrom = "system"
+		if len(mcpCfg.identityGroupSources) > 0 {
+			groupsFrom = strings.Join(mcpCfg.identityGroupSources, ",")
 		}
 		logger.Info(logging.DestinationHTTP, "Local identity configured",
 			"strategies", mcpCfg.identityMapStrategies, "groups_from", groupsFrom,
@@ -1684,7 +1681,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
-		IdentityGroupsFromSystem:   mcpCfg.identityGroupsSystem,
+		IdentityGroupSources:       mcpCfg.identityGroupSources,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		IdentityMapStripDomain:     mcpCfg.identityMapStripDomain,
