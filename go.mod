@@ -6,7 +6,7 @@ require (
 	github.com/PelicanPlatform/classad v0.29.14
 	github.com/PelicanPlatform/classad/collections v0.29.6
 	github.com/bbockelm/cedar v0.6.19
-	github.com/bbockelm/gosssd v0.0.3
+	github.com/bbockelm/gosssd v0.0.4
 	github.com/glebarez/go-sqlite v1.23.0
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/stretchr/testify v1.12.1

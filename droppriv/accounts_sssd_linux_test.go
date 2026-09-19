@@ -82,25 +82,30 @@ func newDeadSSSD(t *testing.T) *deadSSSD {
 	return d
 }
 
-// gosssd caches one connection for the life of the process and does not
-// reconnect on its own: once the daemon restarts, every later request
-// fails with "not connected" and keeps failing. Without the retry this
-// asserts, a single SSSD restart silently disables directory lookups
-// until the daemon using this package is itself restarted.
-func TestSSSDCallRedialsAfterTheConnectionDies(t *testing.T) {
+// A connection that dies must be retried rather than poisoning every
+// later lookup: a restarted SSSD used to disable directory lookups for
+// the life of this process.
+//
+// gosssd owns that retry as of v0.0.4, so what is asserted here is that
+// the behaviour still reaches through this call path -- not how many
+// attempts gosssd chooses to make, which is its business and would make
+// this test a tripwire on its defaults.
+func TestSSSDLookupsRetryWhenTheConnectionDies(t *testing.T) {
 	d := newDeadSSSD(t)
 
 	_, err := enumerateSSSDAccounts()
 	if err == nil {
 		t.Fatal("a socket that hangs up produced no error")
 	}
-	if got := d.accepts.Load(); got != 2 {
-		t.Errorf("accepted %d connections, want 2: the failed one and the re-dial", got)
+	if got := d.accepts.Load(); got < 2 {
+		t.Errorf("accepted %d connections; a dead connection was not retried", got)
 	}
 }
 
-// The failed connection must not stay cached, or the retry merely moves
-// the permanent failure one call later.
+// A failed call must not leave the shared client permanently broken: the
+// next lookup has to dial again. This is the property that actually
+// failed in production -- a restarted SSSD disabled directory lookups for
+// the life of the process.
 func TestAFailedSSSDConnectionIsNotLeftCached(t *testing.T) {
 	d := newDeadSSSD(t)
 
@@ -114,33 +119,5 @@ func TestAFailedSSSDConnectionIsNotLeftCached(t *testing.T) {
 	}
 	if got := d.accepts.Load(); got <= first {
 		t.Errorf("accepts stayed at %d; the second call reused a connection known to be dead", got)
-	}
-}
-
-// Dropping a client that is no longer the shared one must not close a
-// healthy replacement another goroutine has since installed.
-func TestDropSSSDClientLeavesAReplacementAlone(t *testing.T) {
-	newDeadSSSD(t)
-
-	stale, err := sssdAccountClient()
-	if err != nil {
-		t.Fatalf("dialling the fake: %v", err)
-	}
-	// Simulate another goroutine having already replaced it.
-	sssdAccountsMu.Lock()
-	sssdAccountsClient = nil
-	sssdAccountsMu.Unlock()
-	replacement, err := sssdAccountClient()
-	if err != nil {
-		t.Fatalf("dialling again: %v", err)
-	}
-
-	dropSSSDClient(stale)
-
-	sssdAccountsMu.Lock()
-	current := sssdAccountsClient
-	sssdAccountsMu.Unlock()
-	if current != replacement {
-		t.Error("dropping a stale client discarded the replacement connection")
 	}
 }

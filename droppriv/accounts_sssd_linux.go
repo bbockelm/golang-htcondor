@@ -17,7 +17,6 @@
 package droppriv
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -27,9 +26,12 @@ import (
 )
 
 // This file speaks the SSSD client socket directly rather than going
-// through libc, which means it also owns the housekeeping an NSS module
-// would otherwise do for it -- in particular noticing that the daemon on
-// the other end of a cached connection has gone away.
+// through libc.
+//
+// Reconnecting is gosssd's job as of v0.0.4: it dials on demand and
+// retries a request whose connection has died, so a restarted SSSD or a
+// socket that appears late no longer disables lookups for the life of the
+// process. This package used to carry that retry itself.
 
 var sssdAccountsPath = gosssd.DefaultNSSSocketPath
 
@@ -60,63 +62,12 @@ func sssdAccountClient() (*gosssd.Client, error) {
 	if sssdAccountsPath != gosssd.DefaultNSSSocketPath {
 		opts = append(opts, gosssd.WithSocketPath(sssdAccountsPath))
 	}
+	// No eager Connect: gosssd dials on demand, so a client built before
+	// SSSD is listening is not stillborn, and it redials a connection the
+	// daemon has since dropped. Both used to be this package's problem.
 	client := gosssd.NewClient(opts...)
-	if err := client.Connect(); err != nil {
-		return nil, fmt.Errorf("SSSD not available: %w", err)
-	}
 	sssdAccountsClient = client
 	return client, nil
-}
-
-// dropSSSDClient discards a connection that has stopped working so the
-// next call dials a fresh one.
-//
-// It drops the shared client only if it is still the one that failed:
-// a concurrent caller may already have replaced it, and closing that
-// replacement would turn one dead connection into a stream of them.
-func dropSSSDClient(stale *gosssd.Client) {
-	sssdAccountsMu.Lock()
-	defer sssdAccountsMu.Unlock()
-	if sssdAccountsClient != stale {
-		return
-	}
-	sssdAccountsClient = nil
-	_ = stale.Close()
-}
-
-// onSSSD runs fn against the shared connection and, if it fails, re-dials
-// and runs it once more.
-//
-// The connection is cached for the life of the process; SSSD is not. A
-// config reload, a crash or a supervisor restart leaves the cached socket
-// dead, and gosssd does not reconnect on its own -- sendRequest fails with
-// "not connected" and keeps doing so. Without this retry a single SSSD
-// restart disables every directory lookup until the daemon using this
-// package is itself restarted.
-//
-// Retrying on ANY error, rather than trying to recognise a connection
-// error, is deliberate: these operations are idempotent reads, so the
-// cost of a needless second attempt is one round trip, whereas the cost
-// of failing to recognise a dead socket is a silently degraded process.
-func onSSSD[T any](fn func(*gosssd.Client) (T, error)) (T, error) {
-	var zero T
-	client, err := sssdAccountClient()
-	if err != nil {
-		return zero, err
-	}
-	result, err := fn(client)
-	if err == nil {
-		return result, nil
-	}
-
-	dropSSSDClient(client)
-	fresh, dialErr := sssdAccountClient()
-	if dialErr != nil {
-		// Report both: the first error says what broke, the second says
-		// that reconnecting did not help either.
-		return zero, errors.Join(err, dialErr)
-	}
-	return fn(fresh)
 }
 
 // enumerateSSSDAccounts lists the accounts SSSD knows about.
@@ -131,9 +82,11 @@ func enumerateSSSDAccounts() ([]Account, error) {
 	if !sssdAvailable() {
 		return nil, nil
 	}
-	users, err := onSSSD(func(c *gosssd.Client) ([]*gosssd.User, error) {
-		return c.EnumerateUsers()
-	})
+	client, err := sssdAccountClient()
+	if err != nil {
+		return nil, err
+	}
+	users, err := client.EnumerateUsers()
 	if err != nil {
 		return nil, fmt.Errorf("enumerating accounts from SSSD at %s: %w", sssdAccountsPath, err)
 	}
@@ -177,9 +130,11 @@ func gecosFromSSSD(username string) (string, bool) {
 	if username == "" || !sssdAvailable() {
 		return "", false
 	}
-	u, err := onSSSD(func(c *gosssd.Client) (*gosssd.User, error) {
-		return c.GetUserByName(username)
-	})
+	client, err := sssdAccountClient()
+	if err != nil {
+		return "", false
+	}
+	u, err := client.GetUserByName(username)
 	if err != nil || u == nil || u.Name != username {
 		return "", false
 	}
