@@ -701,6 +701,9 @@ func sendWorkflowMCPRequest(t *testing.T, client *http.Client, baseURL, accessTo
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	// The SDK transport answers 400 without this; the built-in one
+	// ignores it. See mcpserver.AcceptHeader.
+	req.Header.Set("Accept", mcpserver.AcceptHeader)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := client.Do(req)

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -425,6 +426,9 @@ func testMCPWithDeviceToken(t *testing.T, httpClient *http.Client, baseURL, acce
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	// The SDK transport answers 400 without this; the built-in one
+	// ignores it. See mcpserver.AcceptHeader.
+	req.Header.Set("Accept", mcpserver.AcceptHeader)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := httpClient.Do(req)

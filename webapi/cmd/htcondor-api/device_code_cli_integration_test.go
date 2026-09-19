@@ -47,6 +47,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // TestDeviceCodeCLIFlow tests the end-to-end device code flow with the CLI
@@ -670,6 +672,9 @@ func testMCPAPIWithToken(serverURL, token, caPath string) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	// The SDK transport answers 400 without this; the built-in one
+	// ignores it. See mcpserver.AcceptHeader.
+	req.Header.Set("Accept", mcpserver.AcceptHeader)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := client.Do(req)

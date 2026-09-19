@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // newAuthTestHandler builds a Handler with a real fosite OAuth2 provider
@@ -66,6 +67,9 @@ func TestMCPMessageRejectsBadTokenWith401(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/message",
 				bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+			// The SDK transport answers 400 without this; the built-in
+			// one ignores it. See mcpserver.AcceptHeader.
+			req.Header.Set("Accept", mcpserver.AcceptHeader)
 			if tc.bearer != "" {
 				req.Header.Set("Authorization", "Bearer "+tc.bearer)
 			}

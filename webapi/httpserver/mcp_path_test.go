@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // newMCPPathServer builds a server with MCP enabled and its routes
@@ -40,6 +42,9 @@ func TestMCPProtocolEndpointAnswersOnBothPaths(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(),
 				http.MethodPost, path, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
 			req.Header.Set("Content-Type", "application/json")
+			// The SDK transport answers 400 without this; the built-in
+			// one ignores it. See mcpserver.AcceptHeader.
+			req.Header.Set("Accept", mcpserver.AcceptHeader)
 			w := httptest.NewRecorder()
 			s.ServeHTTP(w, req)
 
