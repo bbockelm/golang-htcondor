@@ -156,6 +156,7 @@ var readOnlyMCPTools = map[string]bool{
 	"cancel_watch":             true,
 	// get_version reports only this binary's build identity.
 	"get_version": true,
+	"whoami":      true,
 }
 
 // handleListTools returns the list of available tools, filtered by
@@ -585,6 +586,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// build — so it is always offered.
 	tools = append(tools, versionTool())
 
+	// Who the caller is and what it gets them; no backend needed, so it is
+	// always offered.
+	tools = append(tools, whoamiTool())
+
 	// Add HTCondor documentation tools if the docs are embedded.
 	// These are read-only, side-effect-free reference lookups; we
 	// register them under the read-only OAuth2 allowlist.
@@ -850,6 +855,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
+	case "whoami":
+		result, err = s.toolWhoami(ctx, request.Arguments)
 	case "tail_job_output":
 		result, err = s.toolTailJobOutput(ctx, request.Arguments)
 	case "exec_in_job":
