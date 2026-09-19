@@ -1054,44 +1054,49 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 
 // setResourceRequests sets resource request attributes
 func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
-	// Request CPUs (default: 1)
-	cpus := 1
+	// Request CPUs (default: 1). A count, so no units -- but it may be an
+	// expression, which condor_submit stores unevaluated.
 	if reqCpus, ok := sf.submitCommand("request_cpus"); ok {
-		if n, err := parseInt(reqCpus); err == nil {
-			cpus = n
+		if err := setCountAttr(ad, "RequestCpus", reqCpus); err != nil {
+			return err
 		}
+	} else {
+		_ = ad.Set("RequestCpus", int64(1))
 	}
-	_ = ad.Set("RequestCpus", cpus)
 
-	// Request Memory in MB (default: 128)
-	memory := 128
+	// Request Memory in MiB (default: 128). A bare number is already in
+	// MiB; a K/M/G/T suffix scales from bytes, so request_memory = 4GB
+	// is RequestMemory = 4096. Dropping the suffix here would silently
+	// ask for 4 MiB.
 	if reqMem, ok := sf.submitCommand("request_memory"); ok {
-		if n, err := parseInt(reqMem); err == nil {
-			memory = n
+		if err := setSizeAttr(ad, "RequestMemory", reqMem, unitMiB); err != nil {
+			return err
 		}
+	} else {
+		_ = ad.Set("RequestMemory", int64(128))
 	}
-	_ = ad.Set("RequestMemory", memory)
 
-	// Request Disk in KB (default: 1024)
-	disk := 1024
+	// Request Disk in KiB (default: 1024). Same rule with a KiB base:
+	// request_disk = 10GB is RequestDisk = 10485760.
 	if reqDisk, ok := sf.submitCommand("request_disk"); ok {
-		if n, err := parseInt(reqDisk); err == nil {
-			disk = n
+		if err := setSizeAttr(ad, "RequestDisk", reqDisk, unitKiB); err != nil {
+			return err
 		}
+	} else {
+		_ = ad.Set("RequestDisk", int64(1024))
 	}
-	_ = ad.Set("RequestDisk", disk)
 
 	// Request GPUs (default: 0)
 	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
-		if n, err := parseInt(reqGpus); err == nil {
-			_ = ad.Set("RequestGpus", n)
+		if err := setCountAttr(ad, "RequestGpus", reqGpus); err != nil {
+			return err
 		}
 	}
 
-	// GPU memory per device (MB)
+	// GPU memory per device (MiB)
 	if gpuMem, ok := sf.submitCommand("request_gpu_memory"); ok {
-		if n, err := parseInt(gpuMem); err == nil {
-			_ = ad.Set("RequestGpuMemory", n)
+		if err := setSizeAttr(ad, "RequestGpuMemory", gpuMem, unitMiB); err != nil {
+			return err
 		}
 	}
 
@@ -1346,6 +1351,149 @@ func parseBool(s string, def bool) bool {
 	}
 }
 
+// Base units, in bytes, for the size-valued submit commands. HTCondor
+// states each of these attributes in its own unit -- RequestMemory is
+// MiB, RequestDisk is KiB -- so the base is a property of the command,
+// not of the value.
+const (
+	unitKiB = int64(1024)
+	unitMiB = int64(1024) * 1024
+)
+
+// parseSizeWithUnits parses a size-valued submit command (request_memory,
+// request_disk, image_size, ...) into the attribute's own base unit,
+// mirroring HTCondor's parse_int64_bytes() (condor_utils/metric_units.cpp).
+//
+// The rules, which are the ones condor_submit implements:
+//   - an optional fractional part is allowed ("2.5G")
+//   - a K/M/G/T suffix (case-insensitive, optional trailing "b"/"B")
+//     scales the number to bytes
+//   - NO suffix means the number is already in the attribute's base unit,
+//     so request_memory = 4096 stays 4096 MiB
+//   - the result is the number of base units, rounded UP
+//   - anything else (an expression, a bare "B", trailing junk) is not a
+//     size; the caller decides what to do with it
+//
+// Using strconv/fmt.Sscanf here instead is the bug this replaces: "%d"
+// stops at the first non-digit and reports no error, so "4GB" parsed as
+// a silent 4.
+func parseSizeWithUnits(s string, base int64) (int64, bool) {
+	p := strings.TrimLeft(s, " \t")
+
+	// Integer part.
+	i := 0
+	if i < len(p) && (p[i] == '+' || p[i] == '-') {
+		i++
+	}
+	digits := i
+	for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+		i++
+	}
+	if i == digits {
+		return 0, false
+	}
+	val, err := strconv.ParseInt(p[:i], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	// Optional fractional part; HTCondor keeps three digits and ignores
+	// the rest, since the result is rounded up to the base anyway.
+	frac := 0.0
+	if i < len(p) && p[i] == '.' {
+		i++
+		for scale := 10.0; i < len(p) && p[i] >= '0' && p[i] <= '9'; i++ {
+			if scale <= 1000.0 {
+				frac += float64(p[i]-'0') / scale
+				scale *= 10
+			}
+		}
+	}
+
+	for i < len(p) && (p[i] == ' ' || p[i] == '\t') {
+		i++
+	}
+
+	// Multiplier suffix. No suffix means the value is already in base units.
+	mult := base
+	if i < len(p) {
+		switch p[i] {
+		case 'k', 'K':
+			mult = unitKiB
+		case 'm', 'M':
+			mult = unitMiB
+		case 'g', 'G':
+			mult = unitMiB * 1024
+		case 't', 'T':
+			mult = unitMiB * 1024 * 1024
+		default:
+			return 0, false
+		}
+		i++
+		// Tolerate the "b" in "KB".
+		if i < len(p) && (p[i] == 'b' || p[i] == 'B') {
+			i++
+		}
+	}
+
+	for i < len(p) && (p[i] == ' ' || p[i] == '\t') {
+		i++
+	}
+	if i != len(p) {
+		return 0, false
+	}
+
+	// Round up to whole base units, as condor_submit does.
+	bytes := int64((float64(val) + frac) * float64(mult))
+	return (bytes + base - 1) / base, true
+}
+
+// setSizeAttr assigns a size-valued job attribute. A parseable size becomes
+// the integer count of base units; anything else is stored as a ClassAd
+// expression, which is what condor_submit does (AssignJobExpr) for values
+// like "request_memory = ifThenElse(...)" or "MY.VM_Memory".
+//
+// The case that matters is the third one. Dropping an unparseable value --
+// what the old code did, by guarding on "err == nil" and falling through --
+// left the attribute at its hardcoded default with nothing to say the
+// request had been ignored. A job that asked for an expression silently
+// became a 128 MiB job.
+func setSizeAttr(ad *classad.ClassAd, attr, raw string, base int64) error {
+	if n, ok := parseSizeWithUnits(raw, base); ok {
+		_ = ad.Set(attr, n)
+		return nil
+	}
+	expr, err := classad.ParseExpr(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %q is neither a size nor a valid expression: %w", attr, raw, err)
+	}
+	_ = ad.Set(attr, expr)
+	return nil
+}
+
+// setCountAttr assigns a count-valued job attribute (request_cpus,
+// request_gpus). These take no unit suffixes, but like the size-valued
+// commands they may be expressions: condor_submit stores
+// "request_cpus = 2 * 2" verbatim rather than evaluating it to 4, and
+// keeps "request_cpus = 2.5" as a real. So anything that is not a plain
+// integer is stored as an expression instead of being dropped.
+//
+// The integer parse is deliberately strict. fmt.Sscanf("%d") -- what this
+// used to use -- accepts "2.5" as 2 and "2 * 2" as 2, silently turning
+// both into the wrong count with no error to notice.
+func setCountAttr(ad *classad.ClassAd, attr, raw string) error {
+	if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+		_ = ad.Set(attr, n)
+		return nil
+	}
+	expr, err := classad.ParseExpr(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %q is neither an integer nor a valid expression: %w", attr, raw, err)
+	}
+	_ = ad.Set(attr, expr)
+	return nil
+}
+
 func parseInt(s string) (int, error) {
 	s = strings.TrimSpace(s)
 	var n int
@@ -1516,10 +1664,10 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 		_ = ad.Set("VM_Type", vmType)
 	}
 
-	// vm_memory - Memory for the VM in MB
+	// vm_memory - Memory for the VM in MiB
 	if vmMemory, ok := sf.submitCommand("vm_memory"); ok {
-		if intMem, err := parseInt(vmMemory); err == nil {
-			_ = ad.Set("VM_Memory", intMem)
+		if err := setSizeAttr(ad, "VM_Memory", vmMemory, unitMiB); err != nil {
+			return err
 		}
 	}
 
@@ -1985,24 +2133,24 @@ func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
 // setSimpleJobExprs sets simple job expression attributes
 // These are standard HTCondor job attributes that are commonly used
 func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
-	// image_size - disk image size (often auto-calculated)
+	// image_size - disk image size in KiB (often auto-calculated)
 	if imageSize, ok := sf.submitCommand("image_size"); ok {
-		if intSize, err := parseInt(imageSize); err == nil {
-			_ = ad.Set("ImageSize", intSize)
+		if err := setSizeAttr(ad, "ImageSize", imageSize, unitKiB); err != nil {
+			return err
 		}
 	}
 
-	// executable_size - size of executable
+	// executable_size - size of executable in KiB
 	if execSize, ok := sf.submitCommand("executable_size"); ok {
-		if intSize, err := parseInt(execSize); err == nil {
-			_ = ad.Set("ExecutableSize", intSize)
+		if err := setSizeAttr(ad, "ExecutableSize", execSize, unitKiB); err != nil {
+			return err
 		}
 	}
 
-	// disk_usage - disk usage
+	// disk_usage - disk usage in KiB
 	if diskUsage, ok := sf.submitCommand("disk_usage"); ok {
-		if intUsage, err := parseInt(diskUsage); err == nil {
-			_ = ad.Set("DiskUsage", intUsage)
+		if err := setSizeAttr(ad, "DiskUsage", diskUsage, unitKiB); err != nil {
+			return err
 		}
 	}
 
