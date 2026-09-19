@@ -183,7 +183,11 @@ func TestDeviceCodeWithRefreshFlow(t *testing.T) {
 
 	// Step 3: User approves the device
 	t.Log("Step 3: User approving device...")
-	approveDevice(t, client, verificationURI, userCode, testUser)
+	// Tick every scope the device-authorize step asked for, including
+	// offline_access -- without it the grant carries no refresh token,
+	// which is what this test is about.
+	approveDevice(t, client, verificationURI, userCode, testUser,
+		"openid", "mcp:read", "mcp:write", "offline_access")
 
 	// Step 4: Poll for token (should succeed and get refresh token)
 	t.Log("Step 4: Polling for token after authorization...")

@@ -1764,7 +1764,15 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// the group list is persisted with the grant.
 			session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
 
-			acceptedScopes := narrowDeviceApprovalScopes(r.Form, request)
+			// The same two steps the authorization-code consent handler
+			// performs: narrow what was requested to what the user ticked,
+			// then intersect that with what their groups allow. The device
+			// flow previously narrowed against the session's GRANTED scopes
+			// instead -- a set nothing in this flow ever populates, so the
+			// intersection was always empty and every device login came back
+			// with "openid" alone.
+			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form, "consent_form_version")
+			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
 
 			// Approve the device code with the user-narrowed scope set.
 			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
@@ -2317,46 +2325,6 @@ func narrowConsentScopes(requestedScopes []string, form url.Values, markerField 
 	return out
 }
 
-// narrowDeviceApprovalScopes computes the intersection of three sets:
-//   - the scopes the user checked on the consent form (form["scope"]),
-//   - the scopes the device originally requested,
-//   - the scopes group policy granted at device-authorize time
-//     (request.GetGrantedScopes()).
-//
-// As with narrowConsentScopes, the form's `consent_form_version`
-// marker selects between v1 (per-scope) and legacy (approve all
-// originally-granted) behavior. `openid` is always included
-// because OIDC requires it.
-func narrowDeviceApprovalScopes(form url.Values, request fosite.Requester) []string {
-	if !form.Has("consent_form_version") {
-		// Legacy: approve everything the device-authorize step
-		// already granted via group policy.
-		out := make([]string, 0, len(request.GetGrantedScopes()))
-		out = append(out, request.GetGrantedScopes()...)
-		return out
-	}
-	requestedSet := make(map[string]bool)
-	for _, s := range request.GetRequestedScopes() {
-		requestedSet[s] = true
-	}
-	grantedFromPolicy := make(map[string]bool)
-	for _, s := range request.GetGrantedScopes() {
-		grantedFromPolicy[s] = true
-	}
-	acceptedSet := map[string]bool{"openid": true}
-	for _, s := range form["scope"] {
-		if requestedSet[s] && grantedFromPolicy[s] {
-			acceptedSet[s] = true
-		}
-	}
-	out := make([]string, 0, len(acceptedSet))
-	for s := range acceptedSet {
-		out = append(out, s)
-	}
-	return out
-}
-
-// hasCondorScopes checks if any condor:/* scopes are present in the list
 func hasCondorScopes(scopes []string) bool {
 	for _, scope := range scopes {
 		if strings.HasPrefix(scope, "condor:/") {
