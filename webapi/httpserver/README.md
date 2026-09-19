@@ -861,6 +861,7 @@ curl -X POST https://htcondor.example.com/oauth2/token \
 curl -X POST https://htcondor.example.com/mcp \
   -H "Authorization: Bearer eyJhbGc..." \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{
     "jsonrpc": "2.0",
     "method": "job.submit",

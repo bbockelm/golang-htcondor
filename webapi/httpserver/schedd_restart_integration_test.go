@@ -20,6 +20,7 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // A schedd restart changes its shared-port socket id. Everything the API
@@ -239,6 +240,9 @@ func mcpQueryWorks(client *http.Client, baseURL, token string) error {
 	})
 	req, _ := http.NewRequest("POST", baseURL+"/mcp/message", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
+	// The SDK transport answers 400 without this; the built-in one
+	// ignores it. See mcpserver.AcceptHeader.
+	req.Header.Set("Accept", mcpserver.AcceptHeader)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {

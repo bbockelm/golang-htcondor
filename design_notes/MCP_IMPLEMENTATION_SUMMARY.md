@@ -179,6 +179,7 @@ curl -X POST http://localhost:8080/mcp/oauth2/token \
 curl -X POST http://localhost:8080/mcp/message \
   -H "Authorization: Bearer ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
