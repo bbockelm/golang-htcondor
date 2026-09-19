@@ -81,7 +81,6 @@ type slotCacheEntry struct {
 	ads []*classad.ClassAd
 }
 
-// CollectorSlotProviderOption configures a CollectorSlotProvider.
 // SlotStreamFunc delivers slot ads one at a time. It is supplied by the
 // caller rather than derived from SlotQuerier so this package does not
 // need to know the collector's streaming types; the adapter lives where
@@ -91,6 +90,7 @@ type slotCacheEntry struct {
 // return promptly.
 type SlotStreamFunc func(ctx context.Context, adType, constraint string, projection []string, fn func(*classad.ClassAd) bool) error
 
+// CollectorSlotProviderOption configures a CollectorSlotProvider.
 type CollectorSlotProviderOption func(*CollectorSlotProvider)
 
 // WithSlotStream supplies a streaming query, which is what keeps an
