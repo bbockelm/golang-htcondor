@@ -1135,7 +1135,7 @@ chmod +x ./htcondor-jupyter-helper
 # fall back to "python -m jupyterlab", before giving a clear error rather
 # than the cryptic "exec: jupyter: not found".
 if ! command -v jupyter >/dev/null 2>&1; then
-    for d in /opt/conda/bin /opt/conda/condabin /srv/conda/bin /usr/local/bin; do
+    for d in /opt/conda/bin /opt/conda/condabin /srv/conda/bin /usr/local/bin /opt/conda/envs/*/bin; do
         if [ -x "$d/jupyter" ]; then PATH="$d:$PATH"; export PATH; break; fi
     done
 fi
@@ -1146,7 +1146,23 @@ elif command -v python3 >/dev/null 2>&1 && python3 -c 'import jupyterlab' >/dev/
 elif command -v python >/dev/null 2>&1 && python -c 'import jupyterlab' >/dev/null 2>&1; then
     set -- python -m jupyterlab
 else
-    echo "[jupyter-launch] JupyterLab not found in this environment. The container image must provide 'jupyter' on PATH (e.g. under /opt/conda/bin) or an importable 'jupyterlab' module." >&2
+    # Not found. Dump what we can see so the failure is diagnosable: most
+    # importantly whether we are actually inside the container image at
+    # all (a bare-node run has no /opt/conda and no *_CONTAINER var) or in
+    # a container whose jupyter lives somewhere unexpected. errexit is off
+    # here since we exit 127 regardless.
+    set +e
+    {
+        echo "[jupyter-launch] JupyterLab not found in this environment."
+        echo "[jupyter-launch] The image must provide 'jupyter' on PATH (e.g. /opt/conda/bin) or an importable 'jupyterlab' module."
+        echo "[jupyter-launch] --- diagnostics ---"
+        echo "[jupyter-launch] user=$(id -un 2>/dev/null || echo '?') cwd=$(pwd)"
+        echo "[jupyter-launch] container=${APPTAINER_CONTAINER:-${SINGULARITY_CONTAINER:-none}}"
+        echo "[jupyter-launch] os=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}") uname=$(uname -sm 2>/dev/null)"
+        echo "[jupyter-launch] PATH=$PATH"
+        echo "[jupyter-launch] python3=$(command -v python3 2>/dev/null || echo none) python=$(command -v python 2>/dev/null || echo none)"
+        echo "[jupyter-launch] /opt/conda/bin: $(ls -1 /opt/conda/bin 2>&1 | head -n 8 | tr '\n' ' ')"
+    } >&2
     exit 127
 fi
 
