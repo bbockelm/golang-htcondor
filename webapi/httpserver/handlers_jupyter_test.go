@@ -205,7 +205,7 @@ func TestBuildJupyterLaunchScript_Docker(t *testing.T) {
 	// Socket lives under /tmp via mktemp so we stay under the macOS
 	// AF_UNIX 104-byte limit; the script binds the same path on both
 	// the helper (--socket) and jupyter-lab (--ServerApp.sock).
-	mustContain(t, got, `mktemp -d -t htcondor-jupyter`)
+	mustContain(t, got, `mktemp -d /tmp/htcondor-jupyter.XXXXXX`)
 	mustContain(t, got, `--socket "$SOCK"`)
 	mustContain(t, got, `--ServerApp.sock="$SOCK"`)
 	mustContain(t, got, `trap 'rm -rf "$SOCK_DIR"' EXIT`)
@@ -274,5 +274,54 @@ func mustContain(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
 		t.Errorf("submit file missing %q\n--- full ---\n%s\n--- end ---", needle, haystack)
+	}
+}
+
+// The launch script runs on a Linux execute node, so its mktemp call has
+// to satisfy GNU mktemp, which requires at least three trailing X's and
+// rejects a bare prefix with "too few X's in template". BSD mktemp accepts
+// the bare prefix, so the original `-t htcondor-jupyter` worked on a
+// developer's Mac and failed on every worker.
+//
+// Asserting the PROPERTY rather than the literal string: a future edit
+// that reintroduces a bare prefix -- or drops the X's while keeping the
+// path -- fails here rather than only on a worker.
+func TestJupyterLaunchScriptMktempIsPortable(t *testing.T) {
+	got := buildJupyterLaunchScript(jupyterLaunchScriptArgs{
+		Universe:    "docker",
+		UpstreamURL: "ws://api.example.com/api/v1/jupyter/instances/x/tunnel",
+		BaseURL:     "/api/v1/jupyter/instances/x/proxy/",
+		AllowOrigin: "http://api.example.com",
+	})
+
+	var line string
+	for _, l := range strings.Split(got, "\n") {
+		t := strings.TrimSpace(l)
+		// The surrounding comment mentions mktemp too; we want the command.
+		if strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.Contains(t, "mktemp") {
+			line = t
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("no mktemp line in the generated script")
+	}
+
+	// Pull out the template: the last whitespace-separated word, minus
+	// the shell quoting the script wraps it in.
+	fields := strings.Fields(line)
+	template := strings.Trim(fields[len(fields)-1], `"')`)
+
+	if strings.Contains(line, " -t ") {
+		t.Errorf("mktemp -t is not portable for this purpose: %s", line)
+	}
+	if !strings.HasSuffix(template, "XXXXXX") {
+		t.Errorf("template %q does not end in X's; GNU mktemp rejects it as \"too few X's in template\"", template)
+	}
+	if !strings.HasPrefix(template, "/tmp/") {
+		t.Errorf("template %q is not under /tmp; the whole point is avoiding the long scratch path", template)
 	}
 }

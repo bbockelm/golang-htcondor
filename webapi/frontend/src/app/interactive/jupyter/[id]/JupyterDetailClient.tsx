@@ -428,8 +428,19 @@ function Header({
       {instance.cluster_id && (
         // Jupyter clusters always have a single proc (proc 0); show the
         // canonical "<cluster>.0" form rather than just the cluster.
+        //
+        // Linked, as the terminal page links its own: this is the one
+        // place a session names the job behind it, and from here the
+        // job page is where its resources, machine and logs are.
         <span className="text-gray-700">
-          job <span className="font-mono">{instance.cluster_id}.0</span>
+          job{' '}
+          <Link
+            href={`/jobs/${encodeURIComponent(`${instance.cluster_id}.0`)}`}
+            className="font-mono underline hover:text-gray-900"
+            title="Job details"
+          >
+            {instance.cluster_id}.0
+          </Link>
         </span>
       )}
       {instance.image && (
