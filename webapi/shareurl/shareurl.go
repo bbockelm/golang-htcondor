@@ -58,7 +58,7 @@ const (
 )
 
 // Defaults returns the default and maximum lifetime for a kind.
-func Defaults(k Kind) (def, max time.Duration) {
+func Defaults(k Kind) (defaultTTL, maxTTL time.Duration) {
 	if k == KindInput {
 		return DefaultInputTTL, MaxInputTTL
 	}
@@ -68,12 +68,12 @@ func Defaults(k Kind) (def, max time.Duration) {
 // ClampTTL applies the kind's policy to a requested lifetime. A
 // non-positive request means "use the default".
 func ClampTTL(k Kind, requested time.Duration) time.Duration {
-	def, max := Defaults(k)
+	defaultTTL, maxTTL := Defaults(k)
 	if requested <= 0 {
-		return def
+		return defaultTTL
 	}
-	if requested > max {
-		return max
+	if requested > maxTTL {
+		return maxTTL
 	}
 	return requested
 }

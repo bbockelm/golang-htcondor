@@ -29,6 +29,13 @@ type tarNameRecorder struct {
 
 const tarBlockSize = 512
 
+// tarTypeRegOld is the pre-POSIX spelling of a regular file: old tars
+// write a NUL type byte where ustar writes '0'. archive/tar named this
+// TypeRegA and then deprecated it, but a recorder reading raw header
+// bytes still meets it on the wire, and treating it as anything other
+// than a regular file would lose the entry's name.
+const tarTypeRegOld = 0x00
+
 func newTarNameRecorder() *tarNameRecorder { return &tarNameRecorder{} }
 
 // Write consumes a copy of the tar stream. It never returns an error:
@@ -93,7 +100,7 @@ func (t *tarNameRecorder) consumeHeader(block []byte) {
 		t.unreliable = true
 		return
 	}
-	if typeflag == tar.TypeReg || typeflag == tar.TypeRegA {
+	if typeflag == tar.TypeReg || typeflag == tarTypeRegOld {
 		name := cString(block[0:100])
 		if prefix := cString(block[345:500]); prefix != "" {
 			name = prefix + "/" + name

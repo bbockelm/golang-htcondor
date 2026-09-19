@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -58,7 +59,7 @@ func TestSharedInputRejectsAnOutputToken(t *testing.T) {
 	tok := mintToken(t, h, shareurl.KindOutput, time.Now().Add(time.Hour))
 
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("an output token was accepted for upload: status %d, body %s", w.Code, w.Body.String())
@@ -75,7 +76,7 @@ func TestSharedInputRejectsAnExpiredToken(t *testing.T) {
 	tok := mintToken(t, h, shareurl.KindInput, time.Now().Add(-time.Minute))
 
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("an expired token was accepted: status %d", w.Code)
@@ -88,7 +89,7 @@ func TestSharedInputRejectsATamperedToken(t *testing.T) {
 	tok[0] ^= 0x01
 
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodPut, "/api/v1/share/input?t="+string(tok), strings.NewReader("x")))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/v1/share/input?t="+string(tok), strings.NewReader("x")))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("a tampered token was accepted: status %d", w.Code)
@@ -98,7 +99,7 @@ func TestSharedInputRejectsATamperedToken(t *testing.T) {
 func TestSharedInputRequiresAToken(t *testing.T) {
 	h := shareTestHandler(t)
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodPut, "/api/v1/share/input", strings.NewReader("x")))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/v1/share/input", strings.NewReader("x")))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a tokenless upload got status %d, want 400", w.Code)
 	}
@@ -108,7 +109,7 @@ func TestSharedInputRejectsAGet(t *testing.T) {
 	h := shareTestHandler(t)
 	tok := mintToken(t, h, shareurl.KindInput, time.Now().Add(time.Hour))
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodGet, "/api/v1/share/input?t="+tok, nil))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/share/input?t="+tok, nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET on the upload endpoint got status %d, want 405", w.Code)
 	}
@@ -122,13 +123,13 @@ func TestShareEndpointsRefuseWithoutASigningKey(t *testing.T) {
 	h.signingKeyPath = ""
 
 	w := httptest.NewRecorder()
-	h.handleSharedInput(w, httptest.NewRequest(http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
+	h.handleSharedInput(w, httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/v1/share/input?t="+tok, strings.NewReader("x")))
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("redeem without a signing key got status %d, want 501", w.Code)
 	}
 
 	w = httptest.NewRecorder()
-	h.handleJobInputShare(w, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/42.0/input/share", nil), "42.0")
+	h.handleJobInputShare(w, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/42.0/input/share", nil), "42.0")
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("mint without a signing key got status %d, want 501", w.Code)
 	}
@@ -137,7 +138,7 @@ func TestShareEndpointsRefuseWithoutASigningKey(t *testing.T) {
 func TestJobInputShareRejectsAGet(t *testing.T) {
 	h := shareTestHandler(t)
 	w := httptest.NewRecorder()
-	h.handleJobInputShare(w, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/42.0/input/share", nil), "42.0")
+	h.handleJobInputShare(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/42.0/input/share", nil), "42.0")
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET on the mint endpoint got status %d, want 405", w.Code)
 	}
@@ -147,20 +148,20 @@ func TestJobInputShareRejectsAGet(t *testing.T) {
 // than the download one; an over-long request is clamped, not refused.
 func TestRequestedTTLIsOptionalAndClamped(t *testing.T) {
 	body := strings.NewReader(`{"ttl_seconds": 999999}`)
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/42.0/input/share", body)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/42.0/input/share", body)
 	if got := shareurl.ClampTTL(shareurl.KindInput, requestedTTL(r)); got != shareurl.MaxInputTTL {
 		t.Fatalf("clamped TTL = %v, want %v", got, shareurl.MaxInputTTL)
 	}
 
 	// No body at all is the common case and must not be an error.
-	r = httptest.NewRequest(http.MethodPost, "/api/v1/jobs/42.0/input/share", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/42.0/input/share", nil)
 	if got := shareurl.ClampTTL(shareurl.KindInput, requestedTTL(r)); got != shareurl.DefaultInputTTL {
 		t.Fatalf("default TTL = %v, want %v", got, shareurl.DefaultInputTTL)
 	}
 
 	// Garbage in the optional knob falls back to the default rather than
 	// failing a request that is otherwise fine.
-	r = httptest.NewRequest(http.MethodPost, "/api/v1/jobs/42.0/input/share", strings.NewReader("{not json"))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/42.0/input/share", strings.NewReader("{not json"))
 	if got := shareurl.ClampTTL(shareurl.KindInput, requestedTTL(r)); got != shareurl.DefaultInputTTL {
 		t.Fatalf("TTL from a malformed body = %v, want the default %v", got, shareurl.DefaultInputTTL)
 	}
