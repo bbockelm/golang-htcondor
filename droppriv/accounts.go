@@ -25,8 +25,20 @@ import (
 	"strings"
 )
 
+// The directory seam. These are the SSSD-backed implementations, held in
+// variables so a test can exercise the merge and the verification fallback
+// without standing up an SSSD.
+var (
+	directoryAccounts = enumerateSSSDAccounts
+	directoryGecos    = gecosFromSSSD
+)
+
 // DefaultPasswdFile is the account file read when none is configured.
 const DefaultPasswdFile = "/etc/passwd"
+
+// defaultPasswdFileForTest is the path actually read for the default. A
+// variable so a test can supply a fixture in place of the real one.
+var defaultPasswdFileForTest = DefaultPasswdFile
 
 // Account is one entry from the account database.
 type Account struct {
@@ -56,14 +68,24 @@ func GecosOf(_ context.Context, username string) (string, error) {
 		return "", fmt.Errorf("no username to look up")
 	}
 	u, err := user.Lookup(username)
-	if err != nil {
-		var unknown user.UnknownUserError
-		if errors.As(err, &unknown) {
-			return "", fmt.Errorf("%w: %q", ErrUnknownUser, username)
-		}
+	if err == nil {
+		return u.Name, nil
+	}
+
+	var unknown user.UnknownUserError
+	if !errors.As(err, &unknown) {
 		return "", fmt.Errorf("looking up %q: %w", username, err)
 	}
-	return u.Name, nil
+
+	// Not in the local database. Ask the directory before concluding the
+	// account does not exist: os/user reads /etc/passwd alone without cgo,
+	// and under musl there is no NSS for it to consult at all, so a
+	// directory account is invisible to it. Without this, an index built by
+	// enumerating the directory would verify none of its own entries.
+	if gecos, ok := directoryGecos(username); ok {
+		return gecos, nil
+	}
+	return "", fmt.Errorf("%w: %q", ErrUnknownUser, username)
 }
 
 // GecosInFile returns an account's GECOS name from a specific passwd file.
@@ -106,8 +128,12 @@ func GecosInFile(ctx context.Context, path, username string) (string, error) {
 // re-checked with GecosOf, which does reach the directory, so an
 // incomplete index can fail to find somebody but cannot promote anybody.
 func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
-	if path == "" {
-		path = DefaultPasswdFile
+	// An explicitly configured file is the whole answer: the operator named
+	// the database, and silently adding the directory to it would make the
+	// index disagree with the verifier, which reads that same file.
+	explicit := strings.TrimSpace(path) != ""
+	if !explicit {
+		path = defaultPasswdFileForTest
 	}
 	f, err := os.Open(path) //nolint:gosec // the path is operator configuration
 	if err != nil {
@@ -149,5 +175,33 @@ func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
+
+	if !explicit {
+		accounts = mergeDirectoryAccounts(accounts, directoryAccounts())
+	}
 	return accounts, nil
+}
+
+// mergeDirectoryAccounts appends directory accounts the file did not name.
+//
+// The file wins a collision. A local entry is the one an administrator put
+// on this machine deliberately, and it is what os/user resolves, so letting
+// the directory shadow it would index a GECOS that the verifier -- which
+// asks os/user first -- would then contradict.
+func mergeDirectoryAccounts(fromFile, fromDirectory []Account) []Account {
+	if len(fromDirectory) == 0 {
+		return fromFile
+	}
+	seen := make(map[string]struct{}, len(fromFile))
+	for _, a := range fromFile {
+		seen[a.Username] = struct{}{}
+	}
+	for _, a := range fromDirectory {
+		if _, dup := seen[a.Username]; dup {
+			continue
+		}
+		seen[a.Username] = struct{}{}
+		fromFile = append(fromFile, a)
+	}
+	return fromFile
 }
