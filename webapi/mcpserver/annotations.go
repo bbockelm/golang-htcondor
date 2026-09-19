@@ -40,12 +40,16 @@ func readOnlyAnn(openWorld bool) *mcp.ToolAnnotations {
 // overwrite or tear down existing state rather than only add to it;
 // idempotent means repeating the call with the same arguments lands the
 // environment in the same place (so a client may safely retry it).
-func writeAnn(destructive, idempotent, openWorld bool) *mcp.ToolAnnotations {
+//
+// Every state-changing tool this server exposes acts on the pool/schedd/
+// collector/credd, so openWorldHint is always true for a write and is not a
+// parameter here.
+func writeAnn(destructive, idempotent bool) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{
 		ReadOnlyHint:    false,
 		DestructiveHint: boolPtr(destructive),
 		IdempotentHint:  idempotent,
-		OpenWorldHint:   boolPtr(openWorld),
+		OpenWorldHint:   boolPtr(true),
 	}
 }
 
@@ -96,32 +100,32 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;
 	// each call makes a new job, so it is not idempotent.
-	"submit_job":  writeAnn(true, false, true),
-	"hold_job":    writeAnn(true, true, true),
-	"release_job": writeAnn(true, true, true),
-	"remove_job":  writeAnn(true, true, true),
-	"remove_jobs": writeAnn(true, true, true),
-	"edit_job":    writeAnn(true, true, true),
+	"submit_job":  writeAnn(true, false),
+	"hold_job":    writeAnn(true, true),
+	"release_job": writeAnn(true, true),
+	"remove_job":  writeAnn(true, true),
+	"remove_jobs": writeAnn(true, true),
+	"edit_job":    writeAnn(true, true),
 	// advertise_to_collector re-publishes an ad; sending the same ad again
 	// refreshes it to the same state, so it is idempotent.
-	"advertise_to_collector": writeAnn(true, true, true),
+	"advertise_to_collector": writeAnn(true, true),
 
 	// --- other state-changing tools ---
 	// upload_job_input only adds files to a job's spool (additive); the same
 	// upload lands the spool in the same state.
-	"upload_job_input": writeAnn(false, true, true),
+	"upload_job_input": writeAnn(false, true),
 	// storing a credential overwrites any prior one for the service/handle;
 	// deleting one removes it. Both are idempotent on a repeat.
-	"store_service_credential":  writeAnn(true, true, true),
-	"delete_service_credential": writeAnn(true, true, true),
+	"store_service_credential":  writeAnn(true, true),
+	"delete_service_credential": writeAnn(true, true),
 	// interactive sessions: starting makes a new session (additive, not
 	// idempotent); exec runs an arbitrary command in one (may destroy, not
 	// idempotent); stopping tears one down (destructive, idempotent).
-	"interactive_session_start": writeAnn(false, false, true),
-	"interactive_session_exec":  writeAnn(true, false, true),
-	"interactive_session_stop":  writeAnn(true, true, true),
+	"interactive_session_start": writeAnn(false, false),
+	"interactive_session_exec":  writeAnn(true, false),
+	"interactive_session_stop":  writeAnn(true, true),
 	// exec_in_job runs an arbitrary command inside a live job.
-	"exec_in_job": writeAnn(true, false, true),
+	"exec_in_job": writeAnn(true, false),
 }
 
 // annotationsFor returns the behavioural hints for a tool, or nil if the
