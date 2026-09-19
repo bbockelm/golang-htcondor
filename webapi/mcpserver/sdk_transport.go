@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -42,6 +45,7 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 		Instructions: instructions,
 		SetCacheable: privateToTheCaller,
 	})
+	srv.AddReceivingMiddleware(s.logMCPRequest)
 	for _, t := range s.toolsFor(WithGrantedScopes(context.Background(), scopes)) {
 		srv.AddTool(
 			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Annotations: t.Annotations, OutputSchema: t.OutputSchema},
@@ -49,6 +53,49 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 		)
 	}
 	return srv
+}
+
+// logMCPRequest logs one line per RPC: what was asked, by whom, and how it
+// ended.
+//
+// The built-in transport logged this before dispatch, deliberately -- so a
+// call that killed the process still left evidence that it arrived -- and
+// that line lives in the HTTP handler the SDK transport does not call. Left
+// out, an operator sees "POST /mcp status=200" and cannot tell tools/list
+// from tools/call, nor which tool ran, nor attribute a slow request to
+// anything. The gap was found by needing it: a 34-second call on a live
+// deployment could not be identified from its logs.
+//
+// A receiving middleware rather than a line in the tool adapter, because it
+// covers every method -- initialize, server/discover, the list methods, tools
+// /call -- where the original covered only what reached one HTTP handler.
+//
+// handleCallTool still logs the tool name, its arguments and its outcome, so
+// this deliberately does not repeat them: this answers "did a request arrive,
+// and what happened to it", which is the question the HTTP line alone cannot.
+func (s *Server) logMCPRequest(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		started := time.Now()
+		result, err := next(ctx, method, req)
+
+		// A failing TOOL is not an error here: it comes back as a result
+		// carrying isError, and handleCallTool has already logged it. An
+		// error at this level is the protocol failing -- a malformed
+		// request, an unknown method, a tool that was never registered for
+		// this caller's scopes.
+		fields := []any{
+			"method", method,
+			"outcome", "ok",
+			"duration_ms", time.Since(started).Milliseconds(),
+			"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
+		}
+		if err != nil {
+			fields[3] = "error"
+			fields = append(fields, "error", err.Error())
+		}
+		s.logger.Info(logging.DestinationMCP, "MCP request", fields...)
+		return result, err
+	}
 }
 
 // privateToTheCaller marks every cacheable result as private.
