@@ -381,6 +381,16 @@ export interface PlacementAuthorization {
 // We model them loosely and pull common fields out at the call site.
 export type ClassAd = Record<string, unknown>;
 
+// CollectorAdsResponse is the envelope returned by
+// GET /api/v1/collector/ads/{adType}. The collector has no pagination
+// yet, so has_more is always false.
+export interface CollectorAdsResponse {
+  ads: ClassAd[];
+  total_returned?: number;
+  has_more?: boolean;
+  next_page_token?: string;
+}
+
 // JobListResponse is what /api/v1/jobs returns. The trailing metadata
 // is NOT optional decoration: `has_more` is the only signal that the
 // answer was cut short, and a UI that ignores it silently shows a
@@ -1292,6 +1302,36 @@ export const api = {
     // repeatedly while chasing a misconfiguration.
     test: (): Promise<DBMirrorTest> =>
       fetchJSON(`${BASE}/dbmirror/test`, { method: 'POST' }),
+  },
+
+  collector: {
+    // list queries the pool collector for ads of a type (default the
+    // execute-node slot ads, "startd"). constraint is a raw ClassAd
+    // expression; projection is a CSV of attributes; limit accepts a
+    // number or '*' (unlimited). Returns 501 (ApiError) when the server
+    // has no collector configured.
+    list: (params?: {
+      adType?: string;
+      constraint?: string;
+      projection?: string;
+      limit?: number | '*';
+    }): Promise<CollectorAdsResponse> => {
+      const adType = params?.adType || 'startd';
+      const qs = new URLSearchParams();
+      if (params?.constraint) qs.set('constraint', params.constraint);
+      if (params?.projection) qs.set('projection', params.projection);
+      if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+      const q = qs.toString();
+      return fetchJSON(
+        `${BASE}/collector/ads/${encodeURIComponent(adType)}${q ? '?' + q : ''}`,
+      );
+    },
+    // get returns a single ad by its Name attribute (e.g. a slot
+    // "slot1_2@host"). The name may contain @ and .; it is encoded.
+    get: (adType: string, name: string): Promise<ClassAd> =>
+      fetchJSON(
+        `${BASE}/collector/ads/${encodeURIComponent(adType)}/${encodeURIComponent(name)}`,
+      ),
   },
 
   placement: {

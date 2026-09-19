@@ -22,6 +22,7 @@ interface SidebarProps {
 const NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/jobs', label: 'Jobs' },
+  { href: '/pool', label: 'Pool' },
   { href: '/archive', label: 'Archive' },
   { href: '/submit', label: 'Submit' },
   { href: '/interactive', label: 'Interactive' },
