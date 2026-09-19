@@ -2080,6 +2080,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	h.startJobWatchEvaluator(ctx)
 	h.startJobWatchFeed(ctx)
+	h.startJobWatchNudge(ctx)
 
 	return nil
 }
@@ -2102,6 +2103,31 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 		defer h.wg.Done()
 		h.logger.Info(logging.DestinationHTTP, "Following the htcondordb jobs table for job watches")
 		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
+	}()
+}
+
+// startJobWatchNudge re-evaluates an owner's watches as soon as the
+// change stream says something happened to their jobs, rather than at
+// the next 30-second sweep.
+//
+// The feed already recognises the transitions -- it has been publishing
+// them to the dashboard ticker all along -- so this only subscribes the
+// evaluator to a signal that was already there. It rides the feed's
+// lifetime because it has no purpose without it, and it is strictly an
+// accelerator: everything still resolves on the periodic sweep if the
+// stream is absent, behind, or dropping events.
+func (h *Handler) startJobWatchNudge(ctx context.Context) {
+	if h.jobWatchFeed == nil || h.jobWatchEval == nil || !h.dbMirror.Enabled() {
+		return
+	}
+	nudger := jobwatch.NewNudger(h.jobWatchFeed, h.jobWatchEval.CheckOwner,
+		func(format string, args ...any) {
+			h.logger.Debug(logging.DestinationHTTP, fmt.Sprintf(format, args...))
+		})
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		nudger.Run(ctx)
 	}()
 }
 
