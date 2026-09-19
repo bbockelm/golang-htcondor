@@ -1126,12 +1126,36 @@ chmod +x ./htcondor-jupyter-helper
     --socket "$SOCK" \
     --daemonize%s%s
 
+# Resolve how to launch JupyterLab. In the vanilla path the setup above
+# activated an env that puts jupyter on PATH. In a container the image
+# provides it -- but under Apptainer the image ENTRYPOINT that would
+# activate the image's environment (conda, on the jupyter/docker-stacks
+# images) is not run, and /opt/conda/bin is not on the default PATH, so a
+# bare "jupyter" is not found. Add the common conda/venv locations, then
+# fall back to "python -m jupyterlab", before giving a clear error rather
+# than the cryptic "exec: jupyter: not found".
+if ! command -v jupyter >/dev/null 2>&1; then
+    for d in /opt/conda/bin /opt/conda/condabin /srv/conda/bin /usr/local/bin; do
+        if [ -x "$d/jupyter" ]; then PATH="$d:$PATH"; export PATH; break; fi
+    done
+fi
+if command -v jupyter >/dev/null 2>&1; then
+    set -- jupyter lab
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import jupyterlab' >/dev/null 2>&1; then
+    set -- python3 -m jupyterlab
+elif command -v python >/dev/null 2>&1 && python -c 'import jupyterlab' >/dev/null 2>&1; then
+    set -- python -m jupyterlab
+else
+    echo "[jupyter-launch] JupyterLab not found in this environment. The container image must provide 'jupyter' on PATH (e.g. under /opt/conda/bin) or an importable 'jupyterlab' module." >&2
+    exit 127
+fi
+
 # Run jupyter-lab against the same UDS. Jupyter creates the UDS at
 # startup; the helper dials it on demand for each yamux stream the
 # API server opens. Auth is disabled here because the websocket
 # tunnel already enforced it; the UDS keeps any other user on this
 # execute node off our notebooks.
-exec jupyter lab \
+exec "$@" \
     --ServerApp.sock="$SOCK" \
     --ServerApp.token='' \
     --ServerApp.password='' \
