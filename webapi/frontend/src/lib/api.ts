@@ -1237,6 +1237,19 @@ export const api = {
       const q = qs.toString();
       return fetchJSON(`${BASE}/admin/oauth2/tokens${q ? '?' + q : ''}`);
     },
+    // Revoking one token from the listing revokes the whole grant it
+    // belongs to -- the access token AND the refresh token minted with it.
+    // Killing the access token alone would be cosmetic: a client holding
+    // the refresh token mints a replacement within minutes.
+    revokeToken: (body: {
+      kind: string;
+      fingerprint: string;
+    }): Promise<{ revoked: number; client_id: string; subject?: string }> =>
+      fetchJSON(`${BASE}/admin/oauth2/tokens/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ''}`),
     // Read the running HTCondor config (admin only). The backend
