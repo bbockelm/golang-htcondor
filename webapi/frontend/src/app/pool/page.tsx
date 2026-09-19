@@ -38,14 +38,25 @@ export default function PoolPage() {
 
   const constraint = mode === 'expr' ? appliedExpr : '';
 
+  // Always exclude per-job (dynamic) slots from the query. On a busy pool
+  // they outnumber the machines by orders of magnitude, and fetching them
+  // all made the streamed response so large it was truncated mid-array
+  // ("Expected ',' or ']'"). Usage is derived from each machine's free
+  // capacity instead (see usageFor), so the totals stay correct without
+  // them. A user expression is ANDed on top.
+  const excludeDynamic = 'SlotType =!= "Dynamic"';
+  const effectiveConstraint = constraint
+    ? `(${excludeDynamic}) && (${constraint})`
+    : excludeDynamic;
+
   const { data, isLoading, error, isFetching, refetch } = useQuery({
-    queryKey: ['pool-slots', constraint],
+    queryKey: ['pool-slots', effectiveConstraint],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
         projection: SLOT_PROJECTION,
         limit: '*',
-        constraint: constraint || undefined,
+        constraint: effectiveConstraint,
       }),
     refetchInterval: 30_000,
     retry: false,
@@ -113,6 +124,17 @@ export default function PoolPage() {
           {exprError && (
             <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               {exprError}
+            </p>
+          )}
+
+          <p className="text-xs text-gray-400">
+            Per-job (dynamic) slots are excluded; usage reflects each
+            machine&apos;s allocated capacity.
+          </p>
+
+          {data?.error && (
+            <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              The collector query returned only partial results: {data.error}
             </p>
           )}
 

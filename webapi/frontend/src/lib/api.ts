@@ -389,6 +389,9 @@ export interface CollectorAdsResponse {
   total_returned?: number;
   has_more?: boolean;
   next_page_token?: string;
+  // Set when the collector stream ended early with an error; the ads
+  // present are a partial result.
+  error?: string;
 }
 
 // JobListResponse is what /api/v1/jobs returns. The trailing metadata

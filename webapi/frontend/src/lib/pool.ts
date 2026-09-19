@@ -114,11 +114,17 @@ export interface ResourceUsage {
   totalGpus: number;
 }
 
-// usageFor computes used-vs-total over a set of slots, matching how
-// condor_status accounts a partitionable pool: total is the machine
-// capacity (TotalCpus, counted once per machine), used is the resources
-// held by claimed non-partitionable slots (dynamic carve-outs + claimed
-// static slots).
+// usageFor computes used-vs-total over a set of slots. Total is the
+// machine capacity (TotalCpus, counted once per machine). Used is derived
+// so it is correct WITHOUT fetching the per-job dynamic slots (the /pool
+// query excludes them, since on a busy pool they dominate the payload):
+//
+//   - a partitionable slot reports the machine's UNALLOCATED leftover, so
+//     its claimed portion is capacity - leftover;
+//   - a claimed static slot contributes its own size;
+//   - a dynamic slot, if one is present at all, contributes nothing here
+//     because its resources are already counted in the partitionable
+//     leftover above -- this keeps the total honest either way.
 export function usageFor(slots: Slot[]): ResourceUsage {
   const u: ResourceUsage = {
     usedCpus: 0,
@@ -136,7 +142,11 @@ export function usageFor(slots: Slot[]): ResourceUsage {
       u.totalMemoryMB += s.totalMemoryMB ?? 0;
       u.totalGpus += s.totalGpus ?? 0;
     }
-    if (slotInUse(s)) {
+    if (s.partitionable) {
+      u.usedCpus += Math.max(0, (s.totalCpus ?? 0) - (s.cpus ?? 0));
+      u.usedMemoryMB += Math.max(0, (s.totalMemoryMB ?? 0) - (s.memoryMB ?? 0));
+      u.usedGpus += Math.max(0, (s.totalGpus ?? 0) - (s.gpus ?? 0));
+    } else if (!s.dynamic && s.state === 'Claimed') {
       u.usedCpus += s.cpus ?? 0;
       u.usedMemoryMB += s.memoryMB ?? 0;
       u.usedGpus += s.gpus ?? 0;

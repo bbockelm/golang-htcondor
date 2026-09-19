@@ -65,13 +65,23 @@ const staticMachine: ClassAd[] = [
 ];
 
 describe('usageFor', () => {
-  it('counts the dynamic carve-out as used and the partitionable leftover as free', () => {
+  it('derives used from the partitionable leftover (capacity - free)', () => {
     const u = usageFor(partitionableMachine.map(parseSlot));
     expect(u.totalCpus).toBe(8); // machine capacity, counted once
-    expect(u.usedCpus).toBe(6); // the claimed dynamic slot
+    expect(u.usedCpus).toBe(6); // 8 total - 2 free on the partitionable slot
     expect(u.usedMemoryMB).toBe(12288);
-    // The partitionable slot itself is never counted as used even though
-    // it is a slot with Cpus.
+  });
+
+  it('gives the same usage when dynamic slots are absent (the /pool query excludes them)', () => {
+    // Only the partitionable slot (its Cpus is the free leftover). The
+    // used total must match the with-dynamic case above.
+    const partitionableOnly = partitionableMachine
+      .filter((ad) => ad.SlotType !== 'Dynamic')
+      .map(parseSlot);
+    const u = usageFor(partitionableOnly);
+    expect(u.totalCpus).toBe(8);
+    expect(u.usedCpus).toBe(6);
+    expect(u.usedMemoryMB).toBe(12288);
   });
 
   it('counts a claimed static slot as used and an idle one as free', () => {
