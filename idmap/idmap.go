@@ -27,11 +27,15 @@
 // # Why this is an index and not a lookup
 //
 // Every user database indexes accounts by name and by uid. None indexes
-// them by GECOS, and the SSSD client this repo already uses
-// (droppriv's lookup strategies) exposes no enumeration at all. So the
-// useful direction -- subject to account -- is the one the system cannot
-// answer directly, and has to be inverted here by reading the whole
-// account list once and keeping the result.
+// them by GECOS. So the useful direction -- subject to account -- is the
+// one the system cannot answer directly, and has to be inverted here by
+// reading the whole account list once and keeping the result.
+//
+// Enumeration itself is available: droppriv reads the passwd file and
+// asks SSSD, which lists directory accounts when the domain is configured
+// with "enumerate = true". Where it is not, the index covers only local
+// accounts -- which is why every hit is re-verified by name against the
+// live database before it is believed.
 //
 // # Trust
 //
@@ -56,6 +60,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
 // buildTimeout bounds one enumeration of the account database. A
@@ -143,6 +149,10 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 
 // Resolver maps subjects to local account names.
 type Resolver struct {
+	// degraded records that the last build could not read part of the
+	// account database. Guarded by mu with the index it describes.
+	degraded *droppriv.DirectoryError
+
 	// stripDomain enables trying the local part of a scoped subject. See
 	// WithStripDomain.
 	stripDomain bool
@@ -473,7 +483,16 @@ func (r *Resolver) build(ctx context.Context) error {
 	defer cancel()
 
 	accounts, err := r.enum.Enumerate(buildCtx)
-	if err != nil {
+	// A degraded enumeration still carries the accounts it COULD list.
+	// Indexing those beats refusing every login for as long as a directory
+	// is unreachable -- but the reason is kept so that somebody is told the
+	// index is incomplete, rather than discovering it one 403 at a time.
+	var degraded *droppriv.DirectoryError
+	switch {
+	case err == nil:
+	case errors.As(err, &degraded) && len(accounts) > 0:
+		// Keep going with the partial list; `degraded` is recorded below.
+	default:
 		return fmt.Errorf("enumerating accounts via %s: %w", r.enum.Name(), err)
 	}
 
@@ -505,8 +524,27 @@ func (r *Resolver) build(ctx context.Context) error {
 	r.knownUsers = known
 	r.builtAt = r.now()
 	r.count = len(accounts)
+	// Cleared on a clean build: a directory that has come back must stop
+	// being reported as down.
+	if degraded != nil {
+		r.degraded = degraded
+	} else {
+		r.degraded = nil
+	}
 	r.mu.Unlock()
 	return nil
+}
+
+// Degraded reports why the current index is incomplete, or nil if it is
+// whole. It is the difference between "nobody here matches" and "half the
+// account database was unreadable when this was built".
+func (r *Resolver) Degraded() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.degraded == nil {
+		return nil
+	}
+	return r.degraded
 }
 
 // ShadowedUsernames lists accounts whose login name is ALSO some other

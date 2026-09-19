@@ -18,6 +18,9 @@ package droppriv
 
 // SSSD is Linux-only; these are the no-op counterparts.
 
-func enumerateSSSDAccounts() []Account { return nil }
+// enumerateSSSDAccounts has nothing to add off Linux. The nil error is
+// the point: there is no directory here to be unreachable, so the
+// passwd file is the whole answer rather than a degraded one.
+func enumerateSSSDAccounts() ([]Account, error) { return nil, nil }
 
 func gecosFromSSSD(string) (string, bool) { return "", false }

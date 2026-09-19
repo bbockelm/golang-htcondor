@@ -44,15 +44,16 @@ func (s *SystemAccounts) Name() string {
 
 // Enumerate lists the accounts available to build an index from.
 func (s *SystemAccounts) Enumerate(ctx context.Context) ([]Account, error) {
+	// A degraded read returns BOTH the accounts it managed to list and the
+	// reason the rest are missing, so convert first and hand the error back
+	// alongside the result. Discarding the accounts here would leave the
+	// resolver unable to tell a partial answer from no answer.
 	found, err := droppriv.EnumerateAccounts(ctx, s.Path)
-	if err != nil {
-		return nil, err
-	}
 	accounts := make([]Account, 0, len(found))
 	for _, a := range found {
 		accounts = append(accounts, Account{Username: a.Username, Gecos: a.Gecos, UID: a.UID})
 	}
-	return accounts, nil
+	return accounts, err
 }
 
 // SystemGecos re-checks a candidate account through droppriv.

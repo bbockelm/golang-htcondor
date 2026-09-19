@@ -26,10 +26,16 @@ import (
 // withDirectory stubs the SSSD-backed seam.
 func withDirectory(t *testing.T, accounts []Account, gecos map[string]string) {
 	t.Helper()
+	withDirectoryErr(t, accounts, gecos, nil)
+}
+
+// withDirectoryErr stubs the seam with a directory that fails.
+func withDirectoryErr(t *testing.T, accounts []Account, gecos map[string]string, err error) {
+	t.Helper()
 	oldA, oldG := directoryAccounts, directoryGecos
 	t.Cleanup(func() { directoryAccounts, directoryGecos = oldA, oldG })
 
-	directoryAccounts = func() []Account { return accounts }
+	directoryAccounts = func() ([]Account, error) { return accounts, err }
 	directoryGecos = func(name string) (string, bool) {
 		g, ok := gecos[name]
 		return g, ok

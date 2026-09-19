@@ -17,6 +17,7 @@
 package droppriv
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -25,21 +26,11 @@ import (
 	"github.com/bbockelm/gosssd"
 )
 
-// Account enumeration and GECOS lookup through SSSD.
-//
-// Deliberately NOT gated on cgo, unlike the group lookup beside it. That
-// one is !cgo-only because getgrouplist(3) already walks every NSS service
-// when cgo is available, so asking SSSD as well would duplicate it. There
-// is no equivalent here: os/user has no enumeration call in EITHER build
-// mode -- it can look an account up and cannot list them -- so a
-// directory-backed deployment needs this however the binary was built.
-//
-// SSSD answers enumeration only when the domain sets "enumerate = true".
-// That is off by default and discouraged for large directories, so an
-// empty result is the normal case, not a failure, and is reported as such.
+// This file speaks the SSSD client socket directly rather than going
+// through libc, which means it also owns the housekeeping an NSS module
+// would otherwise do for it -- in particular noticing that the daemon on
+// the other end of a cached connection has gone away.
 
-// sssdAccountsPath is the socket probed before dialling. A variable so a
-// test can point it at one it is allowed to create.
 var sssdAccountsPath = gosssd.DefaultNSSSocketPath
 
 var (
@@ -47,17 +38,17 @@ var (
 	sssdAccountsClient *gosssd.Client
 )
 
-// sssdAvailable reports whether an SSSD client socket is present.
+// sssdAvailable reports whether an SSSD socket exists at all.
 //
-// Its presence is a deliberate act -- sssd is running, or somebody mounted
-// the pipe directory into a container -- and dialling a socket that is not
-// there costs a connection attempt on every index rebuild.
+// A host with no SSSD is the ordinary case, not a fault: the directory
+// half of the enumeration is simply empty and the caller proceeds with
+// the passwd file. It is checked per call rather than once, because in a
+// container the socket routinely appears AFTER this process starts.
 func sssdAvailable() bool {
 	_, err := os.Stat(sssdAccountsPath)
 	return err == nil
 }
 
-// sssdAccountClient returns a connected client, dialling on first use.
 func sssdAccountClient() (*gosssd.Client, error) {
 	sssdAccountsMu.Lock()
 	defer sssdAccountsMu.Unlock()
@@ -77,23 +68,74 @@ func sssdAccountClient() (*gosssd.Client, error) {
 	return client, nil
 }
 
-// enumerateSSSDAccounts lists the accounts SSSD is willing to enumerate.
+// dropSSSDClient discards a connection that has stopped working so the
+// next call dials a fresh one.
 //
-// Returns nothing, without error, when SSSD is not reachable or the domain
-// does not enumerate: a caller merging this with a passwd file wants the
-// file's accounts either way, and neither case means the directory is
-// broken.
-func enumerateSSSDAccounts() []Account {
-	if !sssdAvailable() {
-		return nil
+// It drops the shared client only if it is still the one that failed:
+// a concurrent caller may already have replaced it, and closing that
+// replacement would turn one dead connection into a stream of them.
+func dropSSSDClient(stale *gosssd.Client) {
+	sssdAccountsMu.Lock()
+	defer sssdAccountsMu.Unlock()
+	if sssdAccountsClient != stale {
+		return
 	}
+	sssdAccountsClient = nil
+	_ = stale.Close()
+}
+
+// onSSSD runs fn against the shared connection and, if it fails, re-dials
+// and runs it once more.
+//
+// The connection is cached for the life of the process; SSSD is not. A
+// config reload, a crash or a supervisor restart leaves the cached socket
+// dead, and gosssd does not reconnect on its own -- sendRequest fails with
+// "not connected" and keeps doing so. Without this retry a single SSSD
+// restart disables every directory lookup until the daemon using this
+// package is itself restarted.
+//
+// Retrying on ANY error, rather than trying to recognise a connection
+// error, is deliberate: these operations are idempotent reads, so the
+// cost of a needless second attempt is one round trip, whereas the cost
+// of failing to recognise a dead socket is a silently degraded process.
+func onSSSD[T any](fn func(*gosssd.Client) (T, error)) (T, error) {
+	var zero T
 	client, err := sssdAccountClient()
 	if err != nil {
-		return nil
+		return zero, err
 	}
-	users, err := client.EnumerateUsers()
+	result, err := fn(client)
+	if err == nil {
+		return result, nil
+	}
+
+	dropSSSDClient(client)
+	fresh, dialErr := sssdAccountClient()
+	if dialErr != nil {
+		// Report both: the first error says what broke, the second says
+		// that reconnecting did not help either.
+		return zero, errors.Join(err, dialErr)
+	}
+	return fn(fresh)
+}
+
+// enumerateSSSDAccounts lists the accounts SSSD knows about.
+//
+// A nil error with no accounts means SSSD has nothing to add -- either it
+// is not running here, or the domain is not configured with
+// "enumerate = true". A non-nil error means the directory could not be
+// read, which is a different situation entirely and must not be reported
+// as an empty directory: an index silently missing every directory
+// account refuses logins that ought to work.
+func enumerateSSSDAccounts() ([]Account, error) {
+	if !sssdAvailable() {
+		return nil, nil
+	}
+	users, err := onSSSD(func(c *gosssd.Client) ([]*gosssd.User, error) {
+		return c.EnumerateUsers()
+	})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("enumerating accounts from SSSD at %s: %w", sssdAccountsPath, err)
 	}
 
 	accounts := make([]Account, 0, len(users))
@@ -109,23 +151,16 @@ func enumerateSSSDAccounts() []Account {
 			Gecos:    gecos,
 		})
 	}
-	return accounts
+	return accounts, nil
 }
 
-// gecosFromSSSD returns an account's GECOS name from the directory.
-//
-// The counterpart to enumeration: an index entry that cannot be verified is
-// refused, so enumerating the directory without being able to look one of
-// its accounts up again would map nobody.
 func gecosFromSSSD(username string) (string, bool) {
 	if username == "" || !sssdAvailable() {
 		return "", false
 	}
-	client, err := sssdAccountClient()
-	if err != nil {
-		return "", false
-	}
-	u, err := client.GetUserByName(username)
+	u, err := onSSSD(func(c *gosssd.Client) (*gosssd.User, error) {
+		return c.GetUserByName(username)
+	})
 	if err != nil || u == nil || u.Name != username {
 		return "", false
 	}

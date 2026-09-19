@@ -177,10 +177,37 @@ func EnumerateAccounts(_ context.Context, path string) ([]Account, error) {
 	}
 
 	if !explicit {
-		accounts = mergeDirectoryAccounts(accounts, directoryAccounts())
+		directory, derr := directoryAccounts()
+		accounts = mergeDirectoryAccounts(accounts, directory)
+		if derr != nil {
+			// The file was read, so hand back what it held -- but say that
+			// the directory half is missing. "The directory has no extra
+			// accounts" and "the directory could not be reached" produce an
+			// identical index, and only one of them is somebody's fault.
+			return accounts, &DirectoryError{Source: "sssd", Err: derr}
+		}
 	}
 	return accounts, nil
 }
+
+// DirectoryError reports that the passwd file was read but the directory
+// half of an enumeration was not.
+//
+// It is returned ALONGSIDE the accounts that were readable, so a caller
+// may choose to index those and carry on. That choice belongs to the
+// caller: refusing every login because a directory is briefly unreachable
+// is usually worse than serving a smaller index, but doing so silently is
+// worse than either.
+type DirectoryError struct {
+	Source string
+	Err    error
+}
+
+func (e *DirectoryError) Error() string {
+	return fmt.Sprintf("account enumeration degraded: %s unavailable: %v", e.Source, e.Err)
+}
+
+func (e *DirectoryError) Unwrap() error { return e.Err }
 
 // mergeDirectoryAccounts appends directory accounts the file did not name.
 //

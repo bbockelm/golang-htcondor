@@ -53,6 +53,20 @@ import (
 // warmUpTimeout bounds the startup index build.
 const warmUpTimeout = 30 * time.Second
 
+// How hard to keep trying after a startup that found no directory.
+//
+// A container starts this daemon and its SSSD sidecar at the same instant,
+// so the first index is built against a directory that is not answering
+// yet -- and SSSD does not serve an enumeration until its own first pass
+// over the directory completes, which on a real one takes minutes. These
+// bound a quiet retry over that window: often enough to be ready before
+// the first person logs in, few enough that a host with no directory at
+// all pays for a handful of extra passwd reads and then stops.
+const (
+	startupRetryInterval = 20 * time.Second
+	startupRetryWindow   = 5 * time.Minute
+)
+
 type localIdentity struct {
 	// resolver maps the asserted subject to a local account. Nil leaves
 	// the subject alone, which is right when it is already a login name.
@@ -62,6 +76,11 @@ type localIdentity struct {
 	// where there is no account database to read.
 	groups droppriv.GroupLookup
 	logger *logging.Logger
+
+	// Retry pacing for the startup re-index, as fields so a test does not
+	// have to wait out the real window.
+	retryInterval time.Duration
+	retryWindow   time.Duration
 }
 
 // mapsAccount reports whether the asserted subject is translated.
@@ -101,7 +120,11 @@ func newLocalIdentity(strategies []idmap.Strategy, systemGroups bool, passwdFile
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	l := &localIdentity{logger: logger}
+	l := &localIdentity{
+		logger:        logger,
+		retryInterval: startupRetryInterval,
+		retryWindow:   startupRetryWindow,
+	}
 	if systemGroups {
 		// Order from nsswitch.conf, so this agrees with the rest of the
 		// machine rather than preferring a source of its own.
@@ -143,6 +166,7 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	// startup with no port, no /readyz and no log line. Failing here is
 	// survivable -- the index is rebuilt on first use -- whereas never
 	// returning is not.
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, warmUpTimeout)
 	defer cancel()
 
@@ -164,6 +188,23 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 			"The account database enumerated to nothing, so no login can be mapped. "+
 				"If accounts live in a directory, SSSD lists them only with `enumerate = true`")
 	}
+	// Distinct from an empty index, and far more confusing without a line
+	// of its own: the index was built, it just does not cover the
+	// directory. In a container this is usually a startup ordering
+	// problem -- the daemon indexes before the SSSD sidecar is answering
+	// -- and it clears itself on the first rebuild after the TTL.
+	if derr := l.resolver.Degraded(); derr != nil {
+		l.logger.Warn(logging.DestinationHTTP,
+			"The account index is incomplete: a directory could not be read, so logins that map to "+
+				"a directory account will be refused until it can be. This is being retried",
+			"error", derr, "indexed", accounts)
+	}
+	// The index reflects whatever was readable at t=0, which in a container
+	// is usually before the directory is answering at all. Keep trying in
+	// the background for a few minutes so the pod is usable by the time
+	// somebody arrives, instead of serving that first snapshot until the
+	// TTL expires AND a login happens to trigger a rebuild.
+	go l.retryStartupIndex(context.WithoutCancel(parent), accounts)
 	// Only meaningful when the login-name strategy is also in play, and
 	// then worth saying out loud: the subject naming one of these
 	// resolves to somebody else's account.
@@ -178,6 +219,57 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		l.logger.Warn(logging.DestinationHTTP,
 			"Several accounts share a GECOS; nobody presenting one of these can log in",
 			"gecos", l.resolver.AmbiguousGecos())
+	}
+}
+
+// retryStartupIndex re-indexes every retryInterval until the directory
+// shows up or retryWindow expires.
+//
+// The stopping rule is that the account count GREW. That is the only
+// observable which separates the two cases that look identical at
+// startup: a directory that was not answering yet, and a host that simply
+// has no directory. The first one resolves itself and we stop; the second
+// costs a handful of passwd reads across the window and then stops too.
+//
+// Deliberately not a permanent background refresher: once the window
+// closes the ordinary TTL takes over, so a long-lived process is not
+// enumerating a large directory on a timer forever.
+func (l *localIdentity) retryStartupIndex(ctx context.Context, startingCount int) {
+	if l.retryInterval <= 0 || l.retryWindow <= 0 {
+		return
+	}
+	ticker := time.NewTicker(l.retryInterval)
+	defer ticker.Stop()
+	deadline := time.NewTimer(l.retryWindow)
+	defer deadline.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+
+		refreshCtx, cancel := context.WithTimeout(ctx, warmUpTimeout)
+		err := l.resolver.Refresh(refreshCtx)
+		cancel()
+		if err != nil {
+			// Expected while the directory is still coming up; the startup
+			// log already said the index is incomplete, and repeating that
+			// every interval would bury it.
+			continue
+		}
+
+		accounts, ambiguous, _ := l.resolver.Stats()
+		if accounts <= startingCount {
+			continue
+		}
+		l.logger.Info(logging.DestinationHTTP,
+			"The account index picked up the directory after start; logins can now map to directory accounts",
+			"accounts", accounts, "ambiguous", ambiguous, "was", startingCount)
+		return
 	}
 }
 
