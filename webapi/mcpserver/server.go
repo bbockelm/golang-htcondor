@@ -42,6 +42,11 @@ type Server struct {
 	// the initialize text can be rebuilt when the skills library changes
 	// without the operator having to set it again.
 	customInstructions atomic.Pointer[string]
+	// catalogGen counts changes to what a caller would be served -- the
+	// instructions and the tool catalogue built beside them. The SDK
+	// transport caches a server per scope set, and this is how those
+	// caches learn they are stale.
+	catalogGen atomic.Uint64
 	// skills is the site-authored skill library. Swapped atomically: a
 	// reconfigure reloads it from disk while requests are reading.
 	skills             atomic.Pointer[skills.Library]

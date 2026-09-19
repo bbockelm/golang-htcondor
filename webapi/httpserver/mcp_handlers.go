@@ -1,7 +1,6 @@
 package httpserver
 
 import (
-	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
@@ -83,152 +82,123 @@ func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string 
 // included.
 const maxMCPBody = 16 << 20 // 16 MB
 
+// mcpAuthContext authenticates an MCP request and builds the context its
+// tools run in: the HTCondor security config, the caller's granted scopes,
+// and the identity the schedd attributes the connection to.
+//
+// Extracted so both transports enrich identically. They cannot share the
+// gating that follows -- the built-in one reads the method off the parsed
+// message, while the SDK transport registers only the tools a caller may see,
+// so its catalogue IS its gate -- but everything about WHO the caller is has
+// exactly one implementation. Two would be two chances to scope a query by a
+// name the schedd never uses.
+//
+// The returned token is the fosite one, nil for a forwarded HTCondor token.
+// On failure the response has been written and ok is false.
+func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (context.Context, fosite.AccessRequester, bool) {
+	token, err := h.validateOAuth2Token(r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
+		return nil, nil, false
+	}
+
+	ctx := r.Context()
+
+	if token == nil {
+		// A forwarded HTCondor token: HTCondor validates it, not us.
+		authHeader := r.Header.Get("Authorization")
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 {
+			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
+			return nil, nil, false
+		}
+		htcToken := parts[1]
+
+		h.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
+
+		// Build a SecurityConfig from the configured CLIENT methods (so SSL
+		// is offered alongside TOKEN when the pool's auth methods include
+		// it). HTCondor still validates the token itself; we just don't lock
+		// the wire to TOKEN-only.
+		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+			return nil, nil, false
+		}
+		// Key this caller's CEDAR sessions to this caller's credential.
+		// cedar's client session cache is keyed {SecurityTag, address,
+		// command} -- and with an empty tag, {address, command} alone. Every
+		// forwarded-token caller talks to the same schedd address with the
+		// same commands, so without a tag one user's request resumes a
+		// session another user authenticated, and runs as them. The tag is a
+		// digest of the bearer rather than a claim out of it: a claim is
+		// attacker-chosen, so a forged `sub` would let an attacker land on a
+		// victim's session, which is the very thing being prevented.
+		secConfig.SecurityTag = mcpActorKey(htcToken)
+		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+		// Owner-scoped tools need to know who the caller is. Ask the schedd
+		// rather than the token: this branch forwards the token precisely
+		// because the schedd is what verifies it, so the identity it maps the
+		// caller to is the only trustworthy answer available here.
+		if actor := h.actorForSession(ctx, htcToken); actor != "" {
+			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		}
+		return ctx, nil, true
+	}
+
+	username := h.extractUsernameFromToken(token)
+	if username == "" {
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
+		return nil, nil, false
+	}
+	h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
+
+	if h.signingKeyPath != "" && h.trustDomain != "" {
+		htcToken, err := h.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
+			h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+			return nil, nil, false
+		}
+		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
+			return nil, nil, false
+		}
+		secConfig.SecurityTag = username
+		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	}
+
+	// The caller's granted scopes, so the catalogue can be filtered and every
+	// other tool can consult them.
+	ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
+
+	// Owner-scoping needs the identity the SCHEDD attributes this connection
+	// to, which is not always the username claim we authenticated: a pool that
+	// prefers FS over TOKEN attributes it to the process user. Ask the schedd,
+	// keyed by this bearer. Falling back to the claim would scope queries by a
+	// name the schedd never uses, hiding the caller's own jobs.
+	if actor := h.actorForSession(ctx, bearerFromRequest(r)); actor != "" {
+		ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+	} else {
+		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)
+	}
+	return ctx, token, true
+}
+
 func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Before anything reads it. The body is consumed whole below, and on
 	// the OAuth path it is read, buffered and re-read, so the limit has
 	// to be in place ahead of the first read rather than at each.
 	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBody)
 
-	// Validate OAuth2 token or detect HTCondor token
-	token, err := h.validateOAuth2Token(r)
-	if err != nil {
-		h.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
-		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
+	ctx, token, ok := h.mcpAuthContext(w, r)
+	if !ok {
 		return
-	}
-
-	// Create context with security config for HTCondor operations
-	ctx := r.Context()
-
-	// Check if this is an HTCondor token (token == nil && err == nil)
-	if token == nil {
-		// This is an HTCondor token - extract it and pass to HTCondor for validation
-		auth := r.Header.Get("Authorization")
-		parts := strings.SplitN(auth, " ", 2)
-		if len(parts) != 2 {
-			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid Authorization header")
-			return
-		}
-		htcToken := parts[1]
-
-		h.logger.Info(logging.DestinationHTTP, "Using HTCondor token for authentication")
-
-		// Build a SecurityConfig from the configured CLIENT methods
-		// (so SSL is offered alongside TOKEN when the pool's auth
-		// methods include it). HTCondor still validates the token
-		// itself; we just don't lock the wire to TOKEN-only.
-		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
-			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
-			return
-		}
-		// Key this caller's CEDAR sessions to this caller's credential.
-		// cedar's client session cache is keyed {SecurityTag, address,
-		// command} — and with an empty tag, {address, command} alone.
-		// Every forwarded-token caller talks to the same schedd address
-		// with the same commands, so without a tag one user's request
-		// resumes a session another user authenticated, and runs as
-		// them. The tag is a digest of the bearer rather than a claim
-		// out of it: a claim is attacker-chosen, so a forged `sub`
-		// would let an attacker land on a victim's session, which is
-		// the very thing being prevented.
-		secConfig.SecurityTag = mcpActorKey(htcToken)
-		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
-
-		// Owner-scoped tools need to know who the caller is. Ask the
-		// schedd rather than the token: this branch forwards the token
-		// precisely because the schedd is what verifies it, so the
-		// identity it maps the caller to is the only trustworthy answer
-		// available here.
-		if actor := h.actorForSession(ctx, htcToken); actor != "" {
-			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
-		}
-
-		// For HTCondor tokens, we don't validate scopes here - HTCondor does that
-		// Just process the MCP message
-	} else {
-		// This is an OAuth2 token - validate scopes and generate HTCondor token
-
-		// Extract username from token using configured claim
-		username := h.extractUsernameFromToken(token)
-		if username == "" {
-			h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Token missing username claim")
-			return
-		}
-
-		h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
-
-		// Read MCP message from request body to check scopes
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to read request body", "error", err)
-			h.writeError(w, http.StatusBadRequest, "Failed to read request body")
-			return
-		}
-
-		// Parse MCP message
-		var mcpRequest mcpserver.MCPMessage
-		if err := json.Unmarshal(body, &mcpRequest); err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
-			h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
-			return
-		}
-
-		// Check if the requested MCP method is allowed based on OAuth2 scopes
-		if !h.isMethodAllowedByScopes(token, &mcpRequest) {
-			h.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes", "method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
-			h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
-			return
-		}
-
-		h.logger.Info(logging.DestinationHTTP, "Signing key path", "path", h.signingKeyPath, "trust_domain", h.trustDomain)
-
-		// Generate HTCondor token with appropriate permissions based on OAuth2 scopes
-		// If we have a signing key, generate an HTCondor token for this user
-		if h.signingKeyPath != "" && h.trustDomain != "" {
-			htcToken, err := h.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
-				h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
-				return
-			}
-
-			// Build a SecurityConfig from the configured CLIENT
-			// methods, then overlay the generated token and the
-			// per-user SecurityTag (so cedar's session cache keys
-			// the resumed session by user, not just by peer addr).
-			secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
-				h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
-				return
-			}
-			secConfig.SecurityTag = username
-			ctx = htcondor.WithSecurityConfig(ctx, secConfig)
-		}
-
-		// Pass the caller's OAuth2-granted scopes into the MCP
-		// dispatch so handleListTools can filter the catalog and
-		// every other tool can consult them. Without this, the MCP
-		// layer has no idea which scopes the request was authorized
-		// with.
-		ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
-
-		// Owner-scoping needs the identity the SCHEDD attributes this
-		// connection to, which is not always the username claim we
-		// authenticated: a pool that prefers FS over TOKEN attributes
-		// it to the process user. Ask the schedd, keyed by this bearer.
-		// Falling back to the claim would scope queries by a name the
-		// schedd never uses, hiding the caller's own jobs.
-		if actor := h.actorForSession(ctx, bearerFromRequest(r)); actor != "" {
-			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
-		} else {
-			h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)
-		}
-
-		// Restore the body for later reading
-		r.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
 	// Read MCP message from request body
@@ -244,6 +214,17 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &mcpRequest); err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to parse MCP message", "error", err)
 		h.writeError(w, http.StatusBadRequest, "Invalid MCP message format")
+		return
+	}
+
+	// Gate the method on the caller's scopes. Only this transport needs
+	// it: it dispatches one server for everyone, so the scopes have to be
+	// checked against the method here. A forwarded HTCondor token (token
+	// nil) is gated by HTCondor instead.
+	if token != nil && !h.isMethodAllowedByScopes(token, &mcpRequest) {
+		h.logger.Warn(logging.DestinationHTTP, "MCP method not allowed by scopes",
+			"method", mcpRequest.Method, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Insufficient permissions for requested operation")
 		return
 	}
 

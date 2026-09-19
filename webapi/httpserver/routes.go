@@ -235,10 +235,17 @@ func (h *Handler) setupRoutes() {
 		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
 		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays
 		// registered for clients configured before it moved.
-		mux.HandleFunc(mcpPath, h.handleMCPMessage)
-		mux.HandleFunc(mcpMessagePath, h.handleMCPMessage)
+		transport := "builtin"
+		mcpHandler := http.HandlerFunc(h.handleMCPMessage)
+		if h.mcpUseSDK && h.mcpServer != nil {
+			transport = "sdk"
+			sdk := h.mcpSDKHandler()
+			mcpHandler = func(w http.ResponseWriter, r *http.Request) { sdk.ServeHTTP(w, r) }
+		}
+		mux.HandleFunc(mcpPath, mcpHandler)
+		mux.HandleFunc(mcpMessagePath, mcpHandler)
 
-		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp")
+		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp", "transport", transport)
 	}
 
 	// IDP endpoints (if enabled)

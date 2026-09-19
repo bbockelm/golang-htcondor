@@ -215,6 +215,8 @@ type Handler struct {
 	// mcpMaxRequest is the hard stop on an MCP request whose write deadline
 	// is being extended; see mcp_deadline.go.
 	mcpMaxRequest time.Duration
+	// mcpUseSDK serves /mcp over the upstream SDK's transport.
+	mcpUseSDK bool
 	// mcpWriteWindow overrides how far ahead each extension moves the write
 	// deadline. Zero uses mcpWriteWindow; set only by tests.
 	mcpWriteWindow time.Duration
@@ -679,6 +681,10 @@ type HandlerConfig struct {
 	// path creates a placeholder for any that is missing; see
 	// required_creds.go.
 	RequiredCredentials []string
+	// MCPUseSDKTransport serves /mcp with the upstream MCP SDK's transport
+	// instead of the hand-rolled JSON-RPC handler. HTTP_API_MCP_TRANSPORT.
+	MCPUseSDKTransport bool
+
 	// MCPMaxRequestDuration is the hard stop on an MCP request that is
 	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
 	// request runs, its write deadline is moved forward rather than being
@@ -1295,6 +1301,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.registerSystemGroupOracle(logger)
 
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
+		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpSkillsDir = cfg.MCPSkillsDir
 		h.mcpAdminUsers = cfg.MCPAdminUsers
