@@ -24,6 +24,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Tool represents an MCP tool definition
@@ -31,6 +32,11 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
+	// Annotations carries the MCP behavioural hints (readOnlyHint,
+	// destructiveHint, idempotentHint, openWorldHint). It is populated by
+	// toolsFor from the central policy in annotations.go rather than on
+	// each literal, so the two transports serve the same values.
+	Annotations *mcp.ToolAnnotations `json:"annotations,omitempty"`
 }
 
 // Resource represents an MCP resource
@@ -732,6 +738,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		if scopesAllowTool(scopes, t.Name) {
 			filtered = append(filtered, t)
 		}
+	}
+	// Stamp the behavioural hints from the central policy. Done here, at the
+	// one chokepoint both transports read, so a tool declared anywhere gets
+	// annotated once and the JSON-RPC and SDK catalogues never disagree.
+	for i := range filtered {
+		filtered[i].Annotations = annotationsFor(filtered[i].Name)
 	}
 	return filtered
 }
