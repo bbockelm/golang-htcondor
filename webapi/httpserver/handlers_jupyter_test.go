@@ -217,7 +217,12 @@ func TestBuildJupyterLaunchScript_Docker(t *testing.T) {
 	mustContain(t, got, "set -- jupyter lab")
 	mustContain(t, got, `exec "$@"`)
 	mustContain(t, got, "/opt/conda/bin")
+	mustContain(t, got, "/opt/conda/envs/*/bin")
 	mustContain(t, got, "python3 -m jupyterlab")
+	// On failure the launcher dumps a diagnostic block so we can tell a
+	// bare-node run from a container whose jupyter is elsewhere.
+	mustContain(t, got, "--- diagnostics ---")
+	mustContain(t, got, "container=")
 	mustContain(t, got, `--ServerApp.base_url="/api/v1/jupyter/instances/x/proxy/"`)
 	mustContain(t, got, `--ServerApp.allow_origin="http://api.example.com"`)
 	// Docker case: no conda *provisioning* dance (that is the vanilla
