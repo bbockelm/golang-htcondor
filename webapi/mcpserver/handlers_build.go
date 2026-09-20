@@ -52,6 +52,10 @@ const buildImageName = "image.sif"
 // buildDefName is the definition file as spooled into the job.
 const buildDefName = "image.def"
 
+// buildVerifyName holds the caller's verify command, spooled as a file
+// rather than interpolated into the build script. See buildScript.
+const buildVerifyName = "verify.cmd"
+
 func buildContainerTool() Tool {
 	return Tool{
 		Name: "build_container",
@@ -230,7 +234,7 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	memoryMB := clampBuildResource(intArg(args, "memory_mb", 0), cfg.defMemoryMB, cfg.maxMemoryMB)
 	diskMB := clampBuildResource(intArg(args, "disk_mb", 0), cfg.defDiskMB, cfg.maxDiskMB)
 
-	submitFile := buildSubmitFile(cfg, destination, cpus, memoryMB, diskMB)
+	submitFile := buildSubmitFile(cfg, destination, cpus, memoryMB, diskMB, verify != "")
 
 	schedd := s.getSchedd()
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
@@ -243,8 +247,11 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	// as the submitting user, and a file on disk would need cleaning up
 	// on every failure path.
 	stage := fstest.MapFS{
-		"build.sh":   &fstest.MapFile{Data: []byte(buildScript(verify)), Mode: 0o755},
+		"build.sh":   &fstest.MapFile{Data: []byte(buildScript(verify != "")), Mode: 0o755},
 		buildDefName: &fstest.MapFile{Data: []byte(definition), Mode: 0o644},
+	}
+	if verify != "" {
+		stage[buildVerifyName] = &fstest.MapFile{Data: []byte(verify), Mode: 0o644}
 	}
 	if err := schedd.SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		s.removeBuildJob(ctx, clusterID, "spooling the build inputs failed")
@@ -409,13 +416,20 @@ func validateStagingOwner(owner string) error {
 // Resource values are emitted as bare numbers in the attributes' own
 // units, never with a "GB" suffix, so the result does not depend on how
 // the submit parser handles suffixes.
-func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, diskMB int) string {
+func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, diskMB int, hasVerify bool) string {
 	var sb strings.Builder
 
 	sb.WriteString("universe                = vanilla\n")
 	sb.WriteString("executable              = build.sh\n")
 	sb.WriteString("transfer_executable     = true\n")
-	fmt.Fprintf(&sb, "transfer_input_files    = %s\n", buildDefName)
+	// The verify command travels as a file so it is never script text;
+	// it has to be listed here or it would be spooled and then not
+	// transferred, and the build would fail reading it.
+	inputs := buildDefName
+	if hasVerify {
+		inputs += ", " + buildVerifyName
+	}
+	fmt.Fprintf(&sb, "transfer_input_files    = %s\n", inputs)
 
 	fmt.Fprintf(&sb, "request_cpus            = %d\n", cpus)
 	fmt.Fprintf(&sb, "request_memory          = %d\n", memoryMB)
@@ -460,7 +474,7 @@ func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, disk
 // first failure, because the alternative -- letting a failed build fall
 // through to a verification step that then fails for a different reason
 // -- produces a log that describes the wrong problem.
-func buildScript(verify string) string {
+func buildScript(hasVerify bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(`#!/bin/bash
@@ -515,12 +529,19 @@ echo "=== image ==="
 	fmt.Fprintf(&sb, "ls -lh %s\n", buildImageName)
 	fmt.Fprintf(&sb, "apptainer inspect %s\n", buildImageName)
 
-	if verify != "" {
+	if hasVerify {
 		sb.WriteString(`
 echo
 echo "=== verify ==="
 `)
-		fmt.Fprintf(&sb, "apptainer exec %s %s\n", buildImageName, verify)
+		// The command is read from a spooled file and handed to sh as a
+		// single argument, never pasted into this script. Interpolating
+		// it made a newline in the caller's string inject script lines
+		// AFTER the check that reads its exit status -- so a verify of
+		// "true\nexit 0" published an image that was never verified,
+		// defeating the one guarantee this feature offers.
+		fmt.Fprintf(&sb, "apptainer exec %s /bin/sh -c \"$(cat %s)\"\n",
+			buildImageName, buildVerifyName)
 		sb.WriteString(`rc=$?
 echo "verify_exit=$rc"
 if [ "$rc" -ne 0 ]; then
@@ -530,6 +551,19 @@ if [ "$rc" -ne 0 ]; then
 fi
 `)
 	}
+
+	// Exiting 0 without the image is the one way this script can produce
+	// the confusing failure it is meant to avoid: ON_SUCCESS would then
+	// transfer a file that is not there, and HTCondor reports that as a
+	// transfer error naming the remap -- pointing at the destination
+	// rather than at the build.
+	fmt.Fprintf(&sb, `
+if [ ! -s %s ]; then
+    echo "apptainer exited 0 but produced no %s; refusing to report success" 1>&2
+    cleanup
+    exit 1
+fi
+`, buildImageName, buildImageName)
 
 	sb.WriteString(`
 cleanup

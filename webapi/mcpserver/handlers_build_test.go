@@ -207,7 +207,7 @@ func TestBuildSubmitFile(t *testing.T) {
 		defMemoryMB:  16384,
 		defDiskMB:    30720,
 	}
-	got := buildSubmitFile(cfg, "osdf:///chtc/staging/b/alice/py311.sif", 8, 16384, 30720)
+	got := buildSubmitFile(cfg, "osdf:///chtc/staging/b/alice/py311.sif", 8, 16384, 30720, false)
 
 	mustContain := []string{
 		"executable              = build.sh",
@@ -246,7 +246,7 @@ func TestBuildSubmitFile(t *testing.T) {
 
 func TestBuildSubmitFileOmitsUnsetSiteConfig(t *testing.T) {
 	got := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
-		"osdf:///x/y.sif", 1, 1, 1)
+		"osdf:///x/y.sif", 1, 1, 1, false)
 	if strings.Contains(got, "requirements") {
 		t.Errorf("an unset requirements must not emit an empty expression:\n%s", got)
 	}
@@ -256,7 +256,7 @@ func TestBuildSubmitFileOmitsUnsetSiteConfig(t *testing.T) {
 }
 
 func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
-	withVerify := buildScript("python3 -c 'import numpy'")
+	withVerify := buildScript(true)
 
 	for _, want := range []string{
 		"apptainer build image.sif image.def",
@@ -264,7 +264,8 @@ func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
 		// The build's own failure must stop the script before the
 		// verify step, or the log describes the wrong problem.
 		`if [ "$rc" -ne 0 ]; then`,
-		"apptainer exec image.sif python3 -c 'import numpy'",
+		// The command is read from the spooled file, not pasted in.
+		"apptainer exec image.sif /bin/sh -c \"$(cat verify.cmd)\"",
 		"verify_exit=$rc",
 		"will NOT be published",
 		// The cache is the largest thing in the sandbox and must not
@@ -281,7 +282,7 @@ func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
 	// Without a verify command there must be no verify block at all,
 	// rather than an empty `apptainer exec image.sif` that would fail
 	// and suppress a perfectly good image.
-	noVerify := buildScript("")
+	noVerify := buildScript(false)
 	if strings.Contains(noVerify, "=== verify ===") {
 		t.Errorf("a build with no verify command must not emit a verify block:\n%s", noVerify)
 	}
@@ -312,5 +313,58 @@ func TestBuildContainerToolDeclared(t *testing.T) {
 	req, ok := tool.InputSchema["required"].([]string)
 	if !ok || len(req) != 2 {
 		t.Fatalf("required = %v, want definition and name", tool.InputSchema["required"])
+	}
+}
+
+// A verify command must never become script text. Pasting it in meant a
+// newline injected lines AFTER the check that reads its exit status, so
+// "true\nexit 0" published an image that was never verified -- the one
+// thing this feature exists to prevent.
+func TestVerifyCommandIsNotScriptText(t *testing.T) {
+	script := buildScript(true)
+
+	// Whatever the caller wrote, none of it is in the script.
+	// Distinctive strings only: "\nexit 0" would also match the script's
+	// own legitimate final exit, and a needle that cannot tell injected
+	// text from the real thing is not a test.
+	for _, injected := range []string{"exit 0   # injected", "rm -rf /"} {
+		if strings.Contains(script, injected) {
+			t.Errorf("the build script contains caller-supplied text %q:\n%s", injected, script)
+		}
+	}
+	// It is read from the spooled file and passed as ONE argument to sh.
+	if !strings.Contains(script, `/bin/sh -c "$(cat verify.cmd)"`) {
+		t.Errorf("verify must be read from %s and passed as a single argument:\n%s", buildVerifyName, script)
+	}
+	// And the exit status is still what gates publication.
+	if !strings.Contains(script, "verify_exit=$rc") || !strings.Contains(script, "will NOT be published") {
+		t.Errorf("verify must still gate publication:\n%s", script)
+	}
+}
+
+// The verify file has to be spooled AND listed as an input, or the build
+// fails reading a file that was never transferred.
+func TestVerifyFileIsTransferred(t *testing.T) {
+	with := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
+		"osdf:///x/y.sif", 1, 1, 1, true)
+	if !strings.Contains(with, "transfer_input_files    = image.def, verify.cmd") {
+		t.Errorf("verify.cmd must be transferred when a verify command is given:\n%s", with)
+	}
+
+	without := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
+		"osdf:///x/y.sif", 1, 1, 1, false)
+	if strings.Contains(without, "verify.cmd") {
+		t.Errorf("verify.cmd must not be requested when there is no verify command:\n%s", without)
+	}
+}
+
+// Exiting 0 without the image would make HTCondor report a transfer
+// failure naming the remap -- blaming the destination for a build that
+// silently produced nothing.
+func TestScriptRefusesSuccessWithoutAnImage(t *testing.T) {
+	for _, script := range []string{buildScript(true), buildScript(false)} {
+		if !strings.Contains(script, "if [ ! -s image.sif ]; then") {
+			t.Errorf("the script must not report success without the image:\n%s", script)
+		}
 	}
 }
