@@ -206,15 +206,6 @@ var attributesToIgnore = map[string]bool{
 	"JobLeaseDuration": true, // 2400
 	"LeaveJobInQueue":  true, // false
 
-	// MASKS a live bug, not a difference: the Go library writes the
-	// streaming choice as StreamOutput/StreamError, but HTCondor reads
-	// StreamOut/StreamErr (ATTR_STREAM_OUTPUT / ATTR_STREAM_ERROR in
-	// condor_attributes.h). condor_submit writes StreamOut/StreamErr =
-	// false whenever the corresponding file is transferred, so these two
-	// entries hide both the misnaming and the missing default.
-	"StreamErr": true,
-	"StreamOut": true,
-
 	// Docker/container mapping.
 	"WantDocker":  true,
 	"JobUniverse": true, // Docker may map to different universe numbers
@@ -753,4 +744,67 @@ queue
 	}
 
 	compareClassAds(t, goAd, condorAd, "NoStdioFiles")
+}
+
+// TestIntegrationStreamedStdio asks condor_submit what stream_input,
+// stream_output and stream_error mean. No other test in this file sets
+// them, and StreamOut/StreamErr used to be ignored outright, so the
+// misnamed StreamOutput/StreamError attributes were invisible here.
+func TestIntegrationStreamedStdio(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	submitContent := `
+universe = vanilla
+executable = /usr/bin/true
+input = stream.in
+output = stream.out
+error = stream.err
+log = stream.log
+stream_input = true
+stream_output = true
+stream_error = true
+queue
+`
+
+	condorAd, err := runCondorSubmit(submitContent)
+	if err != nil {
+		t.Fatalf("Failed to run condor_submit: %v", err)
+	}
+
+	sf, err := ParseSubmitFile(strings.NewReader(submitContent))
+	if err != nil {
+		t.Fatalf("Failed to parse submit file: %v", err)
+	}
+
+	result, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if len(result.ProcAds) == 0 {
+		t.Fatal("No proc ads generated")
+	}
+	goAd := result.ProcAds[0]
+
+	// Check the names explicitly as well as through compareClassAds:
+	// StreamIn is not in either ad for a job with no input file, and
+	// "absent from both" is exactly the failure this guards against.
+	for _, attr := range []string{"StreamIn", "StreamOut", "StreamErr"} {
+		condorExpr, condorHas := condorAd.Lookup(attr)
+		if !condorHas {
+			t.Errorf("condor_submit did not set %s; the expectation in this test is wrong, not the library", attr)
+			continue
+		}
+		goExpr, goHas := goAd.Lookup(attr)
+		if !goHas {
+			t.Errorf("Go ad is missing %s (condor_submit has %s)", attr, condorExpr.String())
+			continue
+		}
+		if goExpr.String() != condorExpr.String() {
+			t.Errorf("%s: Go has %s, condor_submit has %s", attr, goExpr.String(), condorExpr.String())
+		}
+	}
+
+	compareClassAds(t, goAd, condorAd, "StreamedStdio")
 }

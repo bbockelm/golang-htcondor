@@ -605,3 +605,80 @@ func TestSubmittedAdsCarryStdioFiles(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamAttributeNames pins the attribute names HTCondor actually
+// reads. stream_output was written as StreamOutput and stream_error as
+// StreamError, neither of which anything looks up, so asking to stream
+// was silently a no-op.
+func TestStreamAttributeNames(t *testing.T) {
+	ad := adFromSubmit(t, `
+universe = vanilla
+executable = /bin/true
+input = a.in
+output = a.out
+error = a.err
+stream_input = true
+stream_output = true
+stream_error = true
+`)
+
+	for _, attr := range []string{"StreamIn", "StreamOut", "StreamErr"} {
+		got, ok := classad.GetAs[bool](ad, attr)
+		if !ok {
+			t.Errorf("%s is not set; that is the name the starter and shadow look up", attr)
+			continue
+		}
+		if !got {
+			t.Errorf("%s = false, want true", attr)
+		}
+	}
+
+	// The old names must be gone, not merely duplicated: a job ad
+	// carrying both would keep passing a name check while still
+	// shipping the attribute nothing reads.
+	for _, attr := range []string{"StreamInput", "StreamOutput", "StreamError"} {
+		if _, ok := ad.Lookup(attr); ok {
+			t.Errorf("%s is set; HTCondor has no such attribute", attr)
+		}
+	}
+}
+
+// TestStreamAttributeDefaults follows condor_submit: the attribute is
+// written for every transferred stream, defaulting to false, and omitted
+// for a stream that is not transferred at all.
+func TestStreamAttributeDefaults(t *testing.T) {
+	t.Run("named files default to not streaming", func(t *testing.T) {
+		ad := adFromSubmit(t, "universe = vanilla\nexecutable = /bin/true\noutput = a.out\nerror = a.err\n")
+		for _, attr := range []string{"StreamOut", "StreamErr"} {
+			got, ok := classad.GetAs[bool](ad, attr)
+			if !ok {
+				t.Errorf("%s is not set; condor_submit writes it for every transferred stream", attr)
+				continue
+			}
+			if got {
+				t.Errorf("%s = true, want false", attr)
+			}
+		}
+		if _, ok := ad.Lookup("StreamIn"); ok {
+			t.Error("StreamIn is set, but this job has no input file to stream")
+		}
+	})
+
+	t.Run("streaming a file that is not transferred is dropped", func(t *testing.T) {
+		// condor_submit's CheckStdFile forces stream_it false when the
+		// file is /dev/null or unnamed, and then SetStdout/SetStderr
+		// skip the assignment entirely.
+		ad := adFromSubmit(t, `
+universe = vanilla
+executable = /bin/true
+output = /dev/null
+stream_output = true
+stream_error = true
+`)
+		for _, attr := range []string{"StreamOut", "StreamErr"} {
+			if _, ok := ad.Lookup(attr); ok {
+				t.Errorf("%s is set, but its file is the null file", attr)
+			}
+		}
+	})
+}

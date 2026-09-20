@@ -2272,19 +2272,37 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		_ = ad.Set("WantRemoteSyscalls", parseBool(wantSyscalls, false))
 	}
 
-	// StreamInput - stream stdin
-	if streamIn, ok := sf.submitCommand("stream_input"); ok {
-		_ = ad.Set("StreamInput", parseBool(streamIn, false))
-	}
-
-	// StreamOutput - stream stdout
-	if streamOut, ok := sf.submitCommand("stream_output"); ok {
-		_ = ad.Set("StreamOutput", parseBool(streamOut, false))
-	}
-
-	// StreamError - stream stderr
-	if streamErr, ok := sf.submitCommand("stream_error"); ok {
-		_ = ad.Set("StreamError", parseBool(streamErr, false))
+	// StreamIn / StreamOut / StreamErr - stream stdin/stdout/stderr live
+	// to the submit machine instead of transferring the file at the end.
+	//
+	// The attribute names are HTCondor's, not the submit commands'.
+	// ATTR_STREAM_INPUT, ATTR_STREAM_OUTPUT and ATTR_STREAM_ERROR in
+	// src/condor_includes/condor_attributes.h are StreamIn, StreamOut and
+	// StreamErr; the starter and the shadow look those up (jic_shadow.cpp,
+	// remoteresource.cpp). Nothing reads StreamInput/StreamOutput/StreamError.
+	//
+	// Presence matters as much as the value. The starter's decision to
+	// write the job's stdout to _condor_stdout and let the shadow rename
+	// it back is guarded by LookupBool(ATTR_STREAM_OUTPUT, stream) &&
+	// !stream, and LookupBool is false for an absent attribute -- so
+	// omitting StreamOut is not the same as setting it false.
+	//
+	// SetStdin/SetStdout/SetStderr in submit_utils.cpp assign the
+	// attribute whenever the stream is transferred, defaulting to false
+	// when the submit file says nothing, and omit it entirely when it is
+	// not: CheckStdFile forces streaming off for /dev/null, and the
+	// assignment sits behind "if (transfer_it)".
+	for _, std := range []struct{ fileCmd, streamCmd, attr string }{
+		{"input", "stream_input", "StreamIn"},
+		{"output", "stream_output", "StreamOut"},
+		{"error", "stream_error", "StreamErr"},
+	} {
+		fileValue, _ := sf.submitCommand(std.fileCmd)
+		if _, transferIt := checkStdFile(fileValue); !transferIt {
+			continue
+		}
+		stream, _ := sf.submitCommand(std.streamCmd)
+		_ = ad.Set(std.attr, parseBool(stream, false))
 	}
 
 	// JobDescription - human-readable description of job
