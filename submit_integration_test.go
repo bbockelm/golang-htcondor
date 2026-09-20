@@ -114,15 +114,25 @@ func runCondorSubmit(submitContent string) (*classad.ClassAd, error) {
 	return ad, nil
 }
 
-// attributesToIgnore are attributes that differ between implementations or are time/version dependent
+// attributesToIgnore are attributes compareClassAds does not hold the two
+// implementations to.
+//
+// Every entry states why. An entry with no stated reason is a hole: it
+// hides a real divergence from the only test in this repo that asks
+// condor_submit what a submit file means, and the Out/Err canonicalization
+// bug is the kind of thing that ships through one. Each entry below was
+// checked by deleting it and re-running TestIntegration*; the note says
+// what the failure was, or that the entry is intentional.
+//
+// Note also that compareClassAds is asymmetric: an attribute only
+// condor_submit sets is an error, but an attribute only the Go library
+// sets is a t.Logf. Entries tagged "Go-only" therefore suppress just the
+// value comparison.
 var attributesToIgnore = map[string]bool{
-	// Time-dependent attributes
-	"QDate":                true,
-	"EnteredCurrentStatus": true,
-	"CompletionDate":       true,
-	"JobCurrentStartDate":  true,
-	"JobStartDate":         true,
-	"LastSuspensionTime":   true,
+	// Differ every run by construction.
+	"QDate":                true, // submit timestamp
+	"EnteredCurrentStatus": true, // submit timestamp
+	"LastSuspensionTime":   true, // condor_submit stamps 0; the Go library omits it
 
 	// Version-dependent attributes. condor_submit stamps
 	// SubmitVersion onto every job (and the schedd stamps
@@ -137,23 +147,25 @@ var attributesToIgnore = map[string]bool{
 	// intentional difference.
 	"CondorVersion":  true,
 	"CondorPlatform": true,
-	"SubmitVersion":  true,
+	"SubmitVersion":  true, // Go-only here; condor_submit -dry-run omits it
 
-	// Auto-generated attributes that may differ
-	"ClusterId":     true,
+	// Identity of the submission, not of the job description.
+	"ClusterId":     true, // dry-run always says 1/0; the Go library uses the id it was handed
 	"ProcId":        true,
-	"JobSubmitFile": true,
-	"Iwd":           true, // Current working directory
-	"UserLog":       true, // Full path varies
+	"JobSubmitFile": true, // condor_submit names the file on disk; the Go library parses a reader
+	"Iwd":           true, // both use the process cwd today, but only because no test sets initialdir
+	"UserLog":       true, // MASKS: condor_submit absolutizes the log path against Iwd, the Go library stores it as written
 
-	// Attributes that may vary by environment
-	"FileSystemDomain": true,
-	"Owner":            true,
+	// Properties of the submitting host/account that condor_submit reads
+	// from the local config and the Go library does not stamp at all.
+	"FileSystemDomain": true, // MASKS: condor_submit sets it, and its own Requirements reference MY.FileSystemDomain
+	"Owner":            true, // dry-run leaves it undefined; the real value comes from the schedd
+	"JobSubmitMethod":  true, // MASKS: condor_submit stamps 0; this library is not condor_submit
 
-	// Implementation-specific attributes
-	"JobSubmitMethod": true,
-
-	// Runtime attributes that are zero at submission
+	// Runtime counters. condor_submit stamps the zero value for each and
+	// the Go library omits them; the schedd/shadow initialize them either
+	// way, so the ads are equivalent to a running job but not textually.
+	// MASKS: every one of these is "in condor_submit, missing in Go".
 	"ImageSize":                true,
 	"ExecutableSize":           true,
 	"DiskUsage":                true,
@@ -170,51 +182,63 @@ var attributesToIgnore = map[string]bool{
 	"CommittedSuspensionTime":  true,
 	"NumJobCompletions":        true,
 	"CurrentHosts":             true,
-	"TransferInputSizeMB":      true,
 	"NumCkpts":                 true,
+	"ExitStatus":               true,
+	"ExitBySignal":             true,
+	// TransferInputSizeMB is the same kind of stamp, but it is not inert:
+	// condor_submit's default RequestDisk expression reads it, which is
+	// part of why RequestDisk is ignored below.
+	"TransferInputSizeMB": true,
 
-	// Status attributes
-	"ExitStatus":   true,
-	"ExitBySignal": true,
+	// Ad typing. condor_submit writes MyType/TargetType as ordinary
+	// attributes; a classad-native ad carries them out of band.
+	"MyType":     true,
+	"TargetType": true,
 
-	// HTCondor internals
-	"MyType":           true,
-	"TargetType":       true,
-	"JobStatus":        true,
-	"JobPrio":          true,
-	"NumJobStarts":     true,
-	"NumRestarts":      true,
-	"NumSystemHolds":   true,
-	"TransferIn":       true,
-	"In":               true, // stdin
-	"StreamErr":        true,
-	"StreamOut":        true,
-	"LeaveJobInQueue":  true,
-	"JobLeaseDuration": true,
-	"JobNotification":  true,
-	"JobRunCount":      true,
-	"MinHosts":         true,
-	"MaxHosts":         true,
-	"Rank":             true,
+	// Submit-time defaults condor_submit writes and the Go library does
+	// not. Each is a real divergence, left ignored rather than fixed
+	// because fixing them is a change to what this library submits, not
+	// a test change. MASKS, with the value condor_submit writes:
+	"JobPrio":          true, // 0
+	"MinHosts":         true, // 1
+	"MaxHosts":         true, // 1
+	"JobNotification":  true, // 0 (NEVER), unless the submit file says otherwise
+	"JobLeaseDuration": true, // 2400
+	"LeaveJobInQueue":  true, // false
 
-	// Docker-specific
+	// MASKS a live bug, not a difference: the Go library writes the
+	// streaming choice as StreamOutput/StreamError, but HTCondor reads
+	// StreamOut/StreamErr (ATTR_STREAM_OUTPUT / ATTR_STREAM_ERROR in
+	// condor_attributes.h). condor_submit writes StreamOut/StreamErr =
+	// false whenever the corresponding file is transferred, so these two
+	// entries hide both the misnaming and the missing default.
+	"StreamErr": true,
+	"StreamOut": true,
+
+	// Docker/container mapping.
 	"WantDocker":  true,
 	"JobUniverse": true, // Docker may map to different universe numbers
 
-	// Go library may set these, but condor_submit may not
+	// Go-only attributes: set by this library, absent from condor_submit's
+	// ad, so only their value comparison is suppressed.
 	"TransferExecutable": true,
 	"EmailAttributes":    true,
 	"TransferInput":      true,
 	"ContainerImage":     true, // Docker universe
-	"Args":               true, // May use Arguments instead
+	"JobRunCount":        true,
 	"CopyToSpool":        true, // Handled via ::send_SpoolFile commands, not in ClassAd
 
-	// HTCondor may use different naming/representation
-	"Environment":         true, // May be formatted differently
-	"Arguments":           true, // May use Args instead
-	"ShouldTransferFiles": true, // Default may differ
-	"RequestDisk":         true, // May be expression vs value
-	"Requirements":        true, // Complex expressions may not match
+	// Arguments representation. MASKS: condor_submit emits Arguments (the
+	// V2 form) and the Go library emits Args (V1) for the same submit
+	// file, so neither name lines up.
+	"Args":      true,
+	"Arguments": true,
+
+	// Values that genuinely differ and are known to.
+	"Environment":         true, // MASKS: condor_submit always emits Environment (""), and the V1/V2 forms differ
+	"ShouldTransferFiles": true, // MASKS: condor_submit defaults to IF_NEEDED, this library to YES
+	"RequestDisk":         true, // condor_submit emits the MAX(...) expression, this library a number
+	"Requirements":        true, // complex expressions do not render identically
 }
 
 // compareClassAds compares two ClassAds and reports differences, ignoring certain attributes
@@ -666,4 +690,67 @@ queue
 	goAd := result.ProcAds[0]
 
 	compareClassAds(t, goAd, condorAd, "DockerUniverse")
+}
+
+// TestIntegrationNoStdioFiles is the case every other test in this file
+// misses: a submit file that names no output, error or input. All the
+// others set output and error, so the comparison never saw what the two
+// implementations do when the submit file is silent — which is where
+// condor_submit canonicalizes to /dev/null and this library used to emit
+// nothing at all.
+func TestIntegrationNoStdioFiles(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	submitContent := `
+universe = vanilla
+executable = /usr/bin/true
+log = test.log
+queue
+`
+
+	condorAd, err := runCondorSubmit(submitContent)
+	if err != nil {
+		t.Fatalf("Failed to run condor_submit: %v", err)
+	}
+
+	sf, err := ParseSubmitFile(strings.NewReader(submitContent))
+	if err != nil {
+		t.Fatalf("Failed to parse submit file: %v", err)
+	}
+
+	result, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if len(result.ProcAds) == 0 {
+		t.Fatal("No proc ads generated")
+	}
+	goAd := result.ProcAds[0]
+
+	// Assert the canonicalization directly as well as through
+	// compareClassAds: this is the attribute set the shadow reads to
+	// decide there is no stdout/stderr to bring back, so "both sides
+	// omit it" must not be able to pass here.
+	for _, attr := range []string{"In", "Out", "Err"} {
+		condorExpr, condorHas := condorAd.Lookup(attr)
+		if !condorHas {
+			t.Errorf("condor_submit did not set %s; the expectation in this test is wrong, not the library", attr)
+			continue
+		}
+		if got := condorExpr.String(); got != `"/dev/null"` {
+			t.Errorf("condor_submit set %s = %s, expected the null file", attr, got)
+		}
+		goExpr, goHas := goAd.Lookup(attr)
+		if !goHas {
+			t.Errorf("Go ad is missing %s (condor_submit has %s)", attr, condorExpr.String())
+			continue
+		}
+		if goExpr.String() != condorExpr.String() {
+			t.Errorf("%s: Go has %s, condor_submit has %s", attr, goExpr.String(), condorExpr.String())
+		}
+	}
+
+	compareClassAds(t, goAd, condorAd, "NoStdioFiles")
 }

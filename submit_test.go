@@ -481,3 +481,127 @@ func TestWireVersionStringMatchesSubmit(t *testing.T) {
 		t.Errorf("wireVersionString() = %q, submitVersionString = %q; these must agree", got, want)
 	}
 }
+
+// TestStdioFilesCanonicalizeToNullFile pins the canonicalization
+// condor_submit performs in CheckStdFile: a submit file that names no
+// input/output/error still gets In/Out/Err = "/dev/null", plus
+// TransferIn/TransferOut/TransferErr = false.
+//
+// Omitting the attribute is not equivalent. The shadow decides "nothing
+// to send back" by string-matching /dev/null (nullfile.cpp); with Out
+// unset it instead seeds the failure-file list with the empty name and
+// uploads the job's whole sandbox into the AP's spool.
+func TestStdioFilesCanonicalizeToNullFile(t *testing.T) {
+	tests := []struct {
+		name         string
+		submit       string
+		wantIn       string
+		wantOut      string
+		wantErr      string
+		wantTransfer map[string]bool // attribute -> expected value; absent means must not be set
+	}{
+		{
+			name:    "no stdio commands at all",
+			submit:  "universe = vanilla\nexecutable = /bin/true\n",
+			wantIn:  "/dev/null",
+			wantOut: "/dev/null",
+			wantErr: "/dev/null",
+			wantTransfer: map[string]bool{
+				"TransferIn":  false,
+				"TransferOut": false,
+				"TransferErr": false,
+			},
+		},
+		{
+			name:         "all three named",
+			submit:       "universe = vanilla\nexecutable = /bin/true\ninput = a.in\noutput = a.out\nerror = a.err\n",
+			wantIn:       "a.in",
+			wantOut:      "a.out",
+			wantErr:      "a.err",
+			wantTransfer: map[string]bool{},
+		},
+		{
+			name:    "empty values",
+			submit:  "universe = vanilla\nexecutable = /bin/true\ninput =\noutput =\nerror =\n",
+			wantIn:  "/dev/null",
+			wantOut: "/dev/null",
+			wantErr: "/dev/null",
+			wantTransfer: map[string]bool{
+				"TransferIn":  false,
+				"TransferOut": false,
+				"TransferErr": false,
+			},
+		},
+		{
+			name:    "explicit /dev/null turns transfer off too",
+			submit:  "universe = vanilla\nexecutable = /bin/true\noutput = /dev/null\nerror = a.err\n",
+			wantIn:  "/dev/null",
+			wantOut: "/dev/null",
+			wantErr: "a.err",
+			wantTransfer: map[string]bool{
+				"TransferIn":  false,
+				"TransferOut": false,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ad := adFromSubmit(t, tc.submit)
+
+			for attr, want := range map[string]string{"In": tc.wantIn, "Out": tc.wantOut, "Err": tc.wantErr} {
+				got, ok := classad.GetAs[string](ad, attr)
+				if !ok {
+					t.Errorf("%s is not set; condor_submit always sets it", attr)
+					continue
+				}
+				if got != want {
+					t.Errorf("%s = %q, want %q", attr, got, want)
+				}
+			}
+
+			for _, attr := range []string{"TransferIn", "TransferOut", "TransferErr"} {
+				got, ok := classad.GetAs[bool](ad, attr)
+				want, wantSet := tc.wantTransfer[attr]
+				switch {
+				case wantSet && !ok:
+					t.Errorf("%s is not set, want %v", attr, want)
+				case !wantSet && ok:
+					t.Errorf("%s = %v, want unset (condor_submit only writes it when transfer is off)", attr, got)
+				case wantSet && got != want:
+					t.Errorf("%s = %v, want %v", attr, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSubmittedAdsCarryStdioFiles is the consequence check: every proc ad
+// Submit() hands to the schedd must carry Out and Err, because that is
+// what the shadow reads when it decides whether there is stdout/stderr
+// to bring home.
+func TestSubmittedAdsCarryStdioFiles(t *testing.T) {
+	sf, err := ParseSubmitFile(strings.NewReader("universe = vanilla\nexecutable = /bin/true\nqueue 3\n"))
+	if err != nil {
+		t.Fatalf("parse submit: %v", err)
+	}
+	result, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(result.ProcAds) != 3 {
+		t.Fatalf("got %d proc ads, want 3", len(result.ProcAds))
+	}
+	for i, ad := range result.ProcAds {
+		for _, attr := range []string{"In", "Out", "Err"} {
+			got, ok := classad.GetAs[string](ad, attr)
+			if !ok {
+				t.Errorf("proc %d: %s missing from the submitted ad", i, attr)
+				continue
+			}
+			if got != "/dev/null" {
+				t.Errorf("proc %d: %s = %q, want %q", i, attr, got, "/dev/null")
+			}
+		}
+	}
+}
