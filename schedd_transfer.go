@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
 	"github.com/bbockelm/golang-htcondor/filetransfer"
+	"github.com/bbockelm/golang-htcondor/internal/nullfile"
 	"github.com/bbockelm/golang-htcondor/version"
 )
 
@@ -215,22 +216,22 @@ func (s *Schedd) processJobSandbox(ctx context.Context, cedarStream *stream.Stre
 		}
 	}
 
-	// Also add Stdout and Stderr files if they exist and we are filtering
+	// Also add Stdout and Stderr files if they exist and we are
+	// filtering. A stream named by the null file has no file to
+	// retrieve; the empty name is a separate case -- it means the ad
+	// said nothing, not that it said discard -- and is excluded on its
+	// own.
 	if transferOutputFiles != nil {
-		// Add standard output file
-		if outExpr, ok := jobAd.Lookup("Out"); ok {
-			val := outExpr.Eval(nil)
-			if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
-				transferOutputFiles[str] = true
+		for _, attr := range []string{"Out", "Err"} {
+			expr, ok := jobAd.Lookup(attr)
+			if !ok {
+				continue
 			}
-		}
-
-		// Add standard error file
-		if errExpr, ok := jobAd.Lookup("Err"); ok {
-			val := errExpr.Eval(nil)
-			if str, err := val.StringValue(); err == nil && str != "" && str != "/dev/null" {
-				transferOutputFiles[str] = true
+			str, err := expr.Eval(nil).StringValue()
+			if err != nil || str == "" || nullfile.Is(str) {
+				continue
 			}
+			transferOutputFiles[str] = true
 		}
 	}
 

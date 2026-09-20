@@ -21,6 +21,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/bbockelm/golang-htcondor/internal/nullfile"
 )
 
 // remap represents a path remapping from Source to Dest.
@@ -39,7 +40,7 @@ type remap struct {
 //   - Iwd: Initial working directory (base path for relative files)
 //   - Cmd: Executable path (included if TransferExecutable is true)
 //   - TransferExecutable: Whether to include the executable
-//   - In: Standard input file (included if set)
+//   - In: Standard input file (included unless unset or the null file)
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -86,9 +87,16 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 		}
 	}
 
-	// Add stdin file if specified
+	// Add stdin file if specified.
+	//
+	// The null file is not a file to send. condor_submit writes
+	// In = "/dev/null" for every job that names no stdin, which is most
+	// of them, so this is the common case and not an exotic one: opened
+	// and tarred up it becomes a character-device entry named "null" in
+	// the job's input sandbox, shipped to the execute node for every
+	// such job.
 	stdinPath, hasStdin := classad.GetAs[string](jobAd, "In")
-	if hasStdin && stdinPath != "" {
+	if hasStdin && stdinPath != "" && !nullfile.Is(stdinPath) {
 		// Skip URLs for stdin
 		if !isURL(stdinPath) {
 			if err := addFileToTar(tw, stdinPath, iwd, userName, mgr); err != nil {
@@ -201,8 +209,8 @@ func addFileToTar(tw *tar.Writer, filePath string, baseDir string, userName stri
 //   - Iwd: Initial working directory (default location for files)
 //   - TransferOutput: Comma-separated list of files to extract (empty = extract all)
 //   - TransferOutputRemaps: Semicolon-separated "src=dest" remappings
-//   - Out: Standard output file path
-//   - Err: Standard error file path
+//   - Out: Standard output file path (the null file means discard)
+//   - Err: Standard error file path (the null file means discard)
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -313,24 +321,16 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 		var destPath string
 		switch header.Name {
 		case "_condor_stdout":
-			// Map to Out attribute, skip if not set
-			if !hasStdout {
+			var ok bool
+			destPath, ok = stdioDestination(stdoutPath, hasStdout, iwd)
+			if !ok {
 				continue
-			}
-			if filepath.IsAbs(stdoutPath) {
-				destPath = stdoutPath
-			} else {
-				destPath = filepath.Join(iwd, stdoutPath)
 			}
 		case "_condor_stderr":
-			// Map to Err attribute, skip if not set
-			if !hasStderr {
+			var ok bool
+			destPath, ok = stdioDestination(stderrPath, hasStderr, iwd)
+			if !ok {
 				continue
-			}
-			if filepath.IsAbs(stderrPath) {
-				destPath = stderrPath
-			} else {
-				destPath = filepath.Join(iwd, stderrPath)
 			}
 		default:
 			var ok bool
@@ -395,6 +395,30 @@ func outputDestination(
 		return filepath.Join(iwd, filepath.Clean(name)), true //nolint:gosec // guarded by escapesIwd above
 	}
 	return getDestinationPath(name, iwd, remaps), true
+}
+
+// stdioDestination decides where the _condor_stdout or _condor_stderr
+// tar entry goes, given the job ad's Out or Err, or that it is not to be
+// written at all (ok == false).
+//
+// A stream whose name is the null file has nowhere to go. That is not a
+// defensive nicety: condor_submit never leaves Out or Err unset, it
+// writes "/dev/null" for a stream the submit file did not name
+// (CheckStdFile in src/condor_utils/submit_utils.cpp), so the "attribute
+// missing" arm covers ads this library built and the null-file arm
+// covers the ones real submissions carry. Without it the entry is
+// written to /dev/null as though that were an output location: harmless
+// on a machine that has one, and on a machine that does not -- a
+// stripped container, a read-only /dev -- an error out of extractFile
+// that abandons every remaining file in the tarball.
+func stdioDestination(path string, has bool, iwd string) (string, bool) {
+	if !has || nullfile.Is(path) {
+		return "", false
+	}
+	if filepath.IsAbs(path) {
+		return path, true
+	}
+	return filepath.Join(iwd, path), true
 }
 
 // escapesIwd reports whether a relative tar entry name would resolve

@@ -1261,3 +1261,133 @@ func TestExtractOutputSandboxRefusesPathTraversal(t *testing.T) {
 		t.Errorf("a traversing tar entry was written to %s", target)
 	}
 }
+
+// TestCreateInputSandboxTar_NullStdin covers the job ad shape real
+// submissions have: condor_submit canonicalizes an unnamed stdin to
+// "/dev/null" rather than leaving In unset, so "In is missing" is the
+// rare case and "In is the null file" is the common one.
+//
+// Treated as a filename, /dev/null is opened, stat'd and tarred up, and
+// because it is outside Iwd the archive path collapses to its basename:
+// every such job's input sandbox gained a character-device entry named
+// "null".
+func TestCreateInputSandboxTar_NullStdin(t *testing.T) {
+	inputDir := t.TempDir()
+	createTestFile(t, filepath.Join(inputDir, "data.txt"), "input data", 0o600)
+
+	for _, in := range []string{"/dev/null", ""} {
+		t.Run("In="+in, func(t *testing.T) {
+			jobAd := classad.New()
+			_ = jobAd.Set("Iwd", inputDir)
+			_ = jobAd.Set("Owner", getTestUsername())
+			_ = jobAd.Set("In", in)
+			_ = jobAd.Set("TransferInput", "data.txt")
+
+			var buf bytes.Buffer
+			if err := CreateInputSandboxTar(context.Background(), jobAd, &buf); err != nil {
+				t.Fatalf("CreateInputSandboxTar failed: %v", err)
+			}
+
+			names := tarEntryNames(t, &buf)
+			if len(names) != 1 || names[0] != "data.txt" {
+				t.Errorf("tar contains %v, want only [data.txt]", names)
+			}
+		})
+	}
+}
+
+// TestExtractOutputSandbox_NullOutErr is the output-side counterpart:
+// with Out and Err naming the null file there is nowhere for
+// _condor_stdout and _condor_stderr to go, and the rest of the tarball
+// must still be extracted.
+//
+// It does not detect the guard being removed, and cannot: without it
+// the two entries are written to /dev/null, which leaves nothing on
+// disk to distinguish from having skipped them. TestStdioDestination is
+// where that decision is actually asserted; this one covers the
+// end-to-end path around it.
+func TestExtractOutputSandbox_NullOutErr(t *testing.T) {
+	outputDir := t.TempDir()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, "_condor_stdout", "stdout content")
+	addTarFile(t, tw, "_condor_stderr", "stderr content")
+	addTarFile(t, tw, "output.txt", "regular output")
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Failed to close tar writer: %v", err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", outputDir)
+	_ = jobAd.Set("Owner", getTestUsername())
+	_ = jobAd.Set("Out", "/dev/null")
+	_ = jobAd.Set("Err", "/dev/null")
+	_ = jobAd.Set("TransferOutput", "")
+
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+
+	verifyFileContent(t, filepath.Join(outputDir, "output.txt"), "regular output")
+	for _, name := range []string{"_condor_stdout", "_condor_stderr", "null"} {
+		if _, err := os.Stat(filepath.Join(outputDir, name)); err == nil {
+			t.Errorf("%s should not have been written", name)
+		}
+	}
+}
+
+// TestStdioDestination pins the decision the _condor_stdout and
+// _condor_stderr tar entries go through. The null-file arm is not
+// observable from the filesystem -- writing to /dev/null leaves nothing
+// behind to look at -- so it is asserted here.
+func TestStdioDestination(t *testing.T) {
+	const iwd = "/var/lib/condor/execute/dir_1"
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		has      bool
+		wantDest string
+		wantOK   bool
+	}{
+		{name: "relative", path: "job.out", has: true, wantDest: iwd + "/job.out", wantOK: true},
+		{name: "absolute", path: "/elsewhere/job.out", has: true, wantDest: "/elsewhere/job.out", wantOK: true},
+		{name: "attribute absent", path: "", has: false},
+		// The null file, which is what condor_submit writes for an
+		// unnamed stream, is not a destination.
+		{name: "null file", path: "/dev/null", has: true},
+		// An empty name is not the null file, and this is not the place
+		// that decides what to do about it: it stays a relative path
+		// under Iwd, exactly as before.
+		{name: "empty name", path: "", has: true, wantDest: iwd, wantOK: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest, ok := stdioDestination(tc.path, tc.has, iwd)
+			if ok != tc.wantOK {
+				t.Fatalf("stdioDestination(%q, %v, iwd) ok = %v, want %v", tc.path, tc.has, ok, tc.wantOK)
+			}
+			if ok && dest != tc.wantDest {
+				t.Errorf("stdioDestination(%q, %v, iwd) = %q, want %q", tc.path, tc.has, dest, tc.wantDest)
+			}
+		})
+	}
+}
+
+// tarEntryNames reads a tar archive and returns the name of every entry.
+func tarEntryNames(t *testing.T, r io.Reader) []string {
+	t.Helper()
+	var names []string
+	tr := tar.NewReader(r)
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Failed to read tar: %v", err)
+		}
+		names = append(names, header.Name)
+	}
+	return names
+}
