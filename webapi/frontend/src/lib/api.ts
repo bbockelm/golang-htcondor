@@ -389,6 +389,9 @@ export interface CollectorAdsResponse {
   total_returned?: number;
   has_more?: boolean;
   next_page_token?: string;
+  // Set when the collector stream ended early with an error; the ads
+  // present are a partial result.
+  error?: string;
 }
 
 // JobListResponse is what /api/v1/jobs returns. The trailing metadata
@@ -1328,10 +1331,21 @@ export const api = {
     },
     // get returns a single ad by its Name attribute (e.g. a slot
     // "slot1_2@host"). The name may contain @ and .; it is encoded.
-    get: (adType: string, name: string): Promise<ClassAd> =>
-      fetchJSON(
-        `${BASE}/collector/ads/${encodeURIComponent(adType)}/${encodeURIComponent(name)}`,
-      ),
+    get: (
+      adType: string,
+      name: string,
+      projection?: string,
+    ): Promise<ClassAd> => {
+      // Default to '*' (all attributes): the by-name endpoint otherwise
+      // applies the collector's small default projection, and the slot
+      // detail page wants the full ad.
+      const proj = projection ?? '*';
+      return fetchJSON(
+        `${BASE}/collector/ads/${encodeURIComponent(adType)}/${encodeURIComponent(
+          name,
+        )}?projection=${encodeURIComponent(proj)}`,
+      );
+    },
   },
 
   placement: {
