@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -222,6 +223,11 @@ func TestBuildSubmitFile(t *testing.T) {
 		// Verification gates publication through these two together.
 		"when_to_transfer_output = ON_SUCCESS",
 		"+JobSuccessExitCode     = 0",
+		// Without these the job has no Out or Err and a failed build is
+		// unreadable; see TestBuildSubmitFileKeepsTheLogOnFailure.
+		"output                  = build.out",
+		"error                   = build.err",
+		"log                     = build.log",
 		"transfer_output_files   = image.sif",
 		`transfer_output_remaps  = "image.sif = osdf:///chtc/staging/b/alice/py311.sif"`,
 		"requirements            = TARGET.HasApptainer",
@@ -253,6 +259,226 @@ func TestBuildSubmitFileOmitsUnsetSiteConfig(t *testing.T) {
 	if strings.Contains(got, "HTTP_API_BUILD_EXTRA_SUBMIT") {
 		t.Errorf("an unset extra-submit block must not emit its header:\n%s", got)
 	}
+}
+
+// The failure path is the one that matters: a build that works needs no
+// log, and a build that does not is worthless without one. The submit
+// file has to satisfy two things at once -- withhold the image on a
+// nonzero exit, and return the log anyway -- and it is easy to render a
+// submit file that does the first and quietly drops the second.
+func TestBuildSubmitFileKeepsTheLogOnFailure(t *testing.T) {
+	got := buildSubmitFile(buildSettings{}, "osdf:///x/py311.sif", 1, 1, 1, false)
+
+	// Naming Out and Err is the whole mechanism. HTCondor sends a failed
+	// job's stdout and stderr back as failure files; a job that names
+	// neither has nothing to send, which is how a build that exited 255
+	// produced zero recoverable bytes.
+	for _, want := range []string{
+		"output                  = build.out",
+		"error                   = build.err",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("submit file missing %q; a failed build would be unreadable\n--- got ---\n%s", want, got)
+		}
+	}
+
+	// ...and the gate it has to coexist with. If either of these goes
+	// away a failed verify starts publishing its image, which is worse
+	// than an unreadable log.
+	for _, want := range []string{
+		"when_to_transfer_output = ON_SUCCESS",
+		"+JobSuccessExitCode     = 0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("submit file missing %q; a failed build would publish its image\n--- got ---\n%s", want, got)
+		}
+	}
+
+	// Streaming must NOT be how we do this. HTCondor's
+	// FileTransfer::shouldSendStdout() drops a streamed file from the
+	// failure-file set, so asking to stream would trade the guarantee
+	// above for a weaker one -- and this repo's submit parser writes
+	// stream_output to the attribute `StreamOutput`, which HTCondor does
+	// not read (it wants `StreamOut`), so the request would not even
+	// arrive. Either way it is the wrong lever.
+	for _, bad := range []string{"stream_output", "stream_error", "StreamOut", "StreamErr"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("submit file asks for %q; streaming removes stdout from the failure-file set "+
+				"that makes a failed build readable\n--- got ---\n%s", bad, got)
+		}
+	}
+}
+
+// The image must still be the only thing published. Naming the log is
+// only safe because the log is not an output file: if it ever reached
+// transfer_output_files it would be remapped to the destination URL
+// alongside -- or instead of -- the image.
+func TestBuildSubmitFileTransfersOnlyTheImage(t *testing.T) {
+	got := buildSubmitFile(buildSettings{}, "osdf:///x/py311.sif", 1, 1, 1, false)
+
+	if !strings.Contains(got, "transfer_output_files   = image.sif\n") {
+		t.Errorf("transfer_output_files must name the image and nothing else\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `transfer_output_remaps  = "image.sif = osdf:///x/py311.sif"`) {
+		t.Errorf("only the image may be remapped to the destination\n--- got ---\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, "transfer_output") {
+			continue
+		}
+		for _, logFile := range []string{"build.out", "build.err", "build.log"} {
+			if strings.Contains(line, logFile) {
+				t.Errorf("the log file %q appears in %q; it must not be transferred as output, "+
+					"the remap would send it to the destination URL", logFile, line)
+			}
+		}
+	}
+}
+
+// Bug: apptainer is on the job's PATH but mksquashfs, which it execs to
+// write the .sif, is in /usr/sbin and is not. The build then fails with
+// an exit status and a message that names nothing.
+func TestBuildScriptPutsSbinOnPathBeforeUsingApptainer(t *testing.T) {
+	script := buildScript(true)
+
+	pathAt := strings.Index(script, `PATH="${PATH:-`)
+	if pathAt < 0 {
+		t.Fatalf("the script never extends PATH:\n%s", script)
+	}
+
+	// The directories mksquashfs and its friends actually live in.
+	pathLine := script[pathAt : strings.Index(script[pathAt:], "\n")+pathAt]
+	for _, dir := range []string{"/usr/local/sbin", "/usr/sbin", "/sbin"} {
+		if !strings.Contains(pathLine, dir) {
+			t.Errorf("PATH assignment %q does not add %s", pathLine, dir)
+		}
+	}
+	// The job's own PATH has to survive: a site that put apptainer
+	// somewhere unusual did so deliberately, and a blind overwrite would
+	// lose it.
+	if !strings.Contains(pathLine, "${PATH") {
+		t.Errorf("PATH assignment %q discards the job's existing PATH", pathLine)
+	}
+	if !strings.Contains(pathLine, "${PATH:-") {
+		t.Errorf("PATH assignment %q has no fallback for an unset or empty PATH", pathLine)
+	}
+	if !strings.Contains(script[pathAt:], "export PATH") {
+		t.Errorf("the extended PATH is never exported, so apptainer's children do not see it:\n%s", script)
+	}
+
+	// Ordering is the assertion that matters. Extending PATH after the
+	// first apptainer call would render exactly the same lines and fix
+	// nothing.
+	for _, after := range []string{
+		"command -v apptainer",
+		"command -v mksquashfs",
+		"apptainer --version",
+		"apptainer build image.sif image.def",
+	} {
+		at := strings.Index(script, after)
+		if at < 0 {
+			t.Errorf("the script never runs %q:\n%s", after, script)
+			continue
+		}
+		if at < pathAt {
+			t.Errorf("%q runs at offset %d, before PATH is extended at %d; "+
+				"the build would search the job's original PATH", after, at, pathAt)
+		}
+	}
+}
+
+// The preflight exists so this failure never again presents as a bare
+// ENOENT: apptainer reports a missing mksquashfs as "FATAL: no such file
+// or directory" and names neither the tool nor where it looked.
+func TestBuildScriptPreflightsMksquashfs(t *testing.T) {
+	script := buildScript(false)
+
+	at := strings.Index(script, "command -v mksquashfs")
+	if at < 0 {
+		t.Fatalf("no mksquashfs preflight:\n%s", script)
+	}
+	// It must stop the build rather than warn, and stop it before
+	// apptainer produces the unattributable error.
+	buildAt := strings.Index(script, "apptainer build image.sif image.def")
+	if buildAt < at {
+		t.Errorf("the mksquashfs preflight at %d runs after the build at %d", at, buildAt)
+	}
+	// Everything between the check and the build: the diagnosis.
+	block := script[at:buildAt]
+	for _, want := range []string{
+		"mksquashfs",     // the tool, by name
+		"PATH searched:", // and where we looked for it
+		"squashfs-tools", // and how to get it
+		"exit 127",       // and a stop, not a warning
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the mksquashfs preflight does not mention %q; the point of the check is "+
+				"that its message says what apptainer's does not\n--- got ---\n%s", want, block)
+		}
+	}
+
+	// The resolved locations go in the log too, so the next build that
+	// fails for a neighbouring reason has the evidence already.
+	for _, want := range []string{`echo "path=$PATH"`, "echo \"mksquashfs=$(command -v mksquashfs)\""} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the script does not record %q in its log:\n%s", want, script)
+		}
+	}
+}
+
+// The script is generated text that nothing compiles, so a quoting
+// mistake in it would reach a build slot before anyone noticed.
+func TestBuildScriptIsValidShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("bash is required to check the generated build script: %v", err)
+	}
+
+	for _, hasVerify := range []bool{false, true} {
+		script := buildScript(hasVerify)
+		cmd := exec.CommandContext(t.Context(), bash, "-n", "/dev/stdin") //nolint:gosec // G204: bash from LookPath, script on stdin
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("generated script (hasVerify=%v) is not valid bash: %v\n%s\n--- script ---\n%s",
+				hasVerify, err, out, script)
+		}
+	}
+
+	// Evaluate the PATH line itself rather than trusting that it reads
+	// correctly: this is the one line whose behaviour depends on shell
+	// expansion rather than on the text we asserted above.
+	script := buildScript(false)
+	pathAt := strings.Index(script, `PATH="${PATH:-`)
+	if pathAt < 0 {
+		t.Fatal("the script never extends PATH")
+	}
+	pathLine := script[pathAt : strings.Index(script[pathAt:], "\n")+pathAt]
+
+	for _, tc := range []struct{ name, start, wantContains string }{
+		{"the job's PATH is preserved", "/opt/site/bin:/usr/bin", "/opt/site/bin:/usr/bin:"},
+		{"an empty PATH still gets the standard dirs", "", "/usr/bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			//nolint:gosec // G204: bash from LookPath; the script is this package's own generated text
+			cmd := exec.CommandContext(t.Context(), bash, "-c", "PATH="+shellQuote(tc.start)+"\n"+pathLine+"\nprintf %s \"$PATH\"")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("evaluating %q failed: %v\n%s", pathLine, err, out)
+			}
+			got := string(out)
+			if !strings.Contains(got, tc.wantContains) {
+				t.Errorf("PATH=%q gave %q, want it to contain %q", tc.start, got, tc.wantContains)
+			}
+			if !strings.Contains(got, "/usr/sbin") {
+				t.Errorf("PATH=%q gave %q, which has no /usr/sbin; mksquashfs would not be found", tc.start, got)
+			}
+		})
+	}
+}
+
+// shellQuote wraps a value in single quotes for the test's own `bash -c`.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
