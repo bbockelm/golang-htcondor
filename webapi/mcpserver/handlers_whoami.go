@@ -130,11 +130,11 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 	}
 	fmt.Fprintf(&sb, "\n%s", raw)
 
-	return map[string]interface{}{
-		"content": []map[string]interface{}{
-			{"type": "text", "text": sb.String()},
-		},
-	}, nil
+	// The same report as structuredContent, not only embedded in the
+	// text. whoami publishes an outputSchema, and a schematised tool that
+	// returns none is rejected outright by the client -- the tool was
+	// unusable on every deployment that served it.
+	return structuredTextResult(sb.String(), rep), nil
 }
 
 // privilegeProvenance explains each tier: what granted it, or the most

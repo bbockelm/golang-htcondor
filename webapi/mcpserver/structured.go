@@ -327,13 +327,20 @@ var outputSchemas = map[string]map[string]interface{}{
 		"Dirty":    boolSchema,
 	}),
 
+	// Mirrors whoamiReport field for field. oauth_scopes is the list of
+	// scope strings the token carries, not an object: the schema said
+	// object, which no caller could have discovered while the tool was
+	// returning no structured content at all.
 	"whoami": obj(map[string]interface{}{
 		"authenticated_user": strSchema,
 		"admin":              boolSchema,
+		"superuser":          boolSchema,
+		"admin_via":          strSchema,
+		"superuser_via":      strSchema,
 		"job_visibility":     strSchema,
 		"confined_to_owner":  strSchema,
 		"access_point":       strSchema,
-		"oauth_scopes":       obj(map[string]interface{}{}),
+		"oauth_scopes":       arr(strSchema),
 	}),
 }
 

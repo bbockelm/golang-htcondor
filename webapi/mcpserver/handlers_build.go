@@ -272,13 +272,38 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("the schedd accepted the build job but spooling its inputs failed: %w", err)
 	}
 
+	return buildContainerResult(clusterID, name, destination, verify, cpus, memoryMB, diskMB), nil
+}
+
+// buildContainerResult renders a submitted build job.
+//
+// Split out from toolBuildContainer because everything above it needs a
+// schedd and this does not: the tool's whole failure was in the response,
+// after the job was already in the queue, and that is the half worth being
+// able to test on its own.
+func buildContainerResult(clusterID int, name, destination, verify string, cpus, memoryMB, diskMB int) map[string]interface{} {
 	jobID := fmt.Sprintf("%d.0", clusterID)
 	verifyNote := "no verify command was given, so the image is published if the build succeeds"
 	if verify != "" {
 		verifyNote = fmt.Sprintf("the image is published only if %q succeeds inside it", verify)
 	}
 
-	return map[string]interface{}{
+	// One map under both keys. structuredContent is what the client
+	// validates against the published outputSchema, and a result carrying
+	// only the content envelope and metadata is rejected wholesale --
+	// which, for a tool that has already submitted the job, reports a
+	// failure for work that happened and invites a duplicate build.
+	structured := map[string]interface{}{
+		"cluster_id":  clusterID,
+		"job_id":      jobID,
+		"name":        name,
+		"destination": destination,
+		"verify":      verify,
+		"cpus":        cpus,
+		"memory_mb":   memoryMB,
+		"disk_mb":     diskMB,
+	}
+	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -292,17 +317,8 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 					jobID, name, destination, verifyNote, clusterID, jobID, jobID),
 			},
 		},
-		"metadata": map[string]interface{}{
-			"cluster_id":  clusterID,
-			"job_id":      jobID,
-			"name":        name,
-			"destination": destination,
-			"verify":      verify,
-			"cpus":        cpus,
-			"memory_mb":   memoryMB,
-			"disk_mb":     diskMB,
-		},
-	}, nil
+		"metadata": structured,
+	}, structured)
 }
 
 // removeBuildJob cleans up a job whose inputs never arrived. Best effort:
