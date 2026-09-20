@@ -808,3 +808,74 @@ queue
 
 	compareClassAds(t, goAd, condorAd, "StreamedStdio")
 }
+
+// TestIntegrationTransferStdioOff covers the transfer_input,
+// transfer_output and transfer_error submit commands: the route by which
+// a standard stream stops being transferred even though the submit file
+// names a real file for it.
+//
+// In, Out, Err, TransferOut and TransferErr are all compared for real
+// here, so the cases also pin that turning transfer off does not disturb
+// the filename.
+//
+// The submit files below deliberately name no input, which leaves
+// transfer_input invisible to the comparison: with no input named,
+// checkStdFile has already turned that stream off, so transfer_input =
+// false changes nothing condor_submit can be asked about. The stdin half
+// is covered by TestSubmitTransferStdioOff.
+func TestIntegrationTransferStdioOff(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		extra string
+	}{
+		{"OutputOff", "transfer_output = false"},
+		{"ErrorOff", "transfer_error = false"},
+		{"BothOff", "transfer_output = false\ntransfer_error = false"},
+		{"OutputOn", "transfer_output = true"},
+		// The bool spellings condor_submit accepts. It rejects
+		// "no"/"yes" outright, which this library's parseBool does not.
+		{"OutputOffZero", "transfer_output = 0"},
+		{"ErrorOffUpper", "transfer_error = FALSE"},
+		{"OutputOnOne", "transfer_output = 1"},
+		// Asking to stream a stream that is not transferred: the
+		// streaming attribute is not written at all.
+		{"OutputOffStreamOn", "transfer_output = false\nstream_output = true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			submitContent := `
+universe = vanilla
+executable = /usr/bin/true
+output = test.out
+error = test.err
+log = test.log
+` + tc.extra + `
+queue
+`
+
+			condorAd, err := runCondorSubmit(submitContent)
+			if err != nil {
+				t.Fatalf("Failed to run condor_submit: %v", err)
+			}
+
+			sf, err := ParseSubmitFile(strings.NewReader(submitContent))
+			if err != nil {
+				t.Fatalf("Failed to parse submit file: %v", err)
+			}
+
+			result, err := sf.Submit(1)
+			if err != nil {
+				t.Fatalf("Submit failed: %v", err)
+			}
+
+			if len(result.ProcAds) == 0 {
+				t.Fatal("No proc ads generated")
+			}
+
+			compareClassAds(t, result.ProcAds[0], condorAd, "TransferStdioOff/"+tc.name)
+		})
+	}
+}
