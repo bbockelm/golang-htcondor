@@ -1,128 +1,160 @@
 import { describe, expect, it } from 'vitest';
 import type { ClassAd } from './api';
-import { groupByMachine, parseSlot, summarize, usageFor } from './pool';
+import {
+  gpuDevices,
+  groupByMachine,
+  parseSlot,
+  runningJobsFor,
+  summarize,
+  usageFor,
+} from './pool';
 
-// A partitionable machine: the partitionable slot holds the UNALLOCATED
-// leftovers (2 cpus free), and a claimed dynamic slot holds the 6 in use.
-// TotalCpus=8 is the machine capacity, repeated on every slot ad.
-const partitionableMachine: ClassAd[] = [
+// A GPU machine as a partitionable slot: 128 cpus / 8 GPUs total, 32 cpus
+// and 2 GPUs free, 6 running jobs. Note the capital-GPU attribute spelling
+// the startd actually publishes (TotalGPUs, not TotalGpus).
+const gpuNode: ClassAd[] = [
   {
-    Name: 'slot1@ep1',
-    Machine: 'ep1',
+    Name: 'slot1@gpu1',
+    Machine: 'gpu1',
     SlotType: 'Partitionable',
     PartitionableSlot: true,
-    Cpus: 2,
-    Memory: 4096,
-    GPUs: 0,
-    TotalCpus: 8,
-    TotalMemory: 16384,
-    TotalGpus: 0,
+    Cpus: 32,
+    Memory: 131072,
+    GPUs: 2,
+    TotalCpus: 128,
+    TotalMemory: 524288,
+    TotalGPUs: 8,
+    NumDynamicSlots: 6,
     State: 'Unclaimed',
     Activity: 'Idle',
-  },
-  {
-    Name: 'slot1_1@ep1',
-    Machine: 'ep1',
-    SlotType: 'Dynamic',
-    DynamicSlot: true,
-    Cpus: 6,
-    Memory: 12288,
-    GPUs: 0,
-    TotalCpus: 8,
-    TotalMemory: 16384,
-    TotalGpus: 0,
-    State: 'Claimed',
-    Activity: 'Busy',
-    RemoteOwner: 'alice@ep1',
   },
 ];
 
-// A static machine: two fixed slots, one claimed one idle. Capacity is the
-// sum of the static slots (TotalCpus reports the machine total, 2).
-const staticMachine: ClassAd[] = [
-  {
-    Name: 'slot1@ep2',
-    Machine: 'ep2',
-    SlotType: 'Static',
-    Cpus: 1,
-    Memory: 1024,
-    TotalCpus: 2,
-    TotalMemory: 2048,
-    State: 'Claimed',
-    Activity: 'Busy',
-  },
-  {
-    Name: 'slot2@ep2',
-    Machine: 'ep2',
-    SlotType: 'Static',
-    Cpus: 1,
-    Memory: 1024,
-    TotalCpus: 2,
-    TotalMemory: 2048,
-    State: 'Unclaimed',
-    Activity: 'Idle',
-  },
-];
+// A backfill slot on the same machine re-advertising the same cores/GPUs.
+const backfillSlot: ClassAd = {
+  Name: 'slot1_backfill@gpu1',
+  Machine: 'gpu1',
+  SlotType: 'Backfill',
+  BackfillSlot: true,
+  Cpus: 96,
+  Memory: 393216,
+  GPUs: 6,
+  TotalCpus: 128,
+  TotalMemory: 524288,
+  TotalGPUs: 8,
+  State: 'Claimed',
+  Activity: 'Busy',
+};
 
 describe('usageFor', () => {
-  it('counts the dynamic carve-out as used and the partitionable leftover as free', () => {
-    const u = usageFor(partitionableMachine.map(parseSlot));
-    expect(u.totalCpus).toBe(8); // machine capacity, counted once
-    expect(u.usedCpus).toBe(6); // the claimed dynamic slot
-    expect(u.usedMemoryMB).toBe(12288);
-    // The partitionable slot itself is never counted as used even though
-    // it is a slot with Cpus.
+  it('reads the capital-GPU total and derives GPU usage from the leftover', () => {
+    const u = usageFor(gpuNode.map(parseSlot));
+    expect(u.totalGpus).toBe(8); // TotalGPUs, not the mis-cased TotalGpus
+    expect(u.usedGpus).toBe(6); // 8 total - 2 free
+    expect(u.totalCpus).toBe(128);
+    expect(u.usedCpus).toBe(96); // 128 - 32
   });
 
-  it('counts a claimed static slot as used and an idle one as free', () => {
-    const u = usageFor(staticMachine.map(parseSlot));
-    expect(u.totalCpus).toBe(2); // TotalCpus counted once per machine
-    expect(u.usedCpus).toBe(1); // only the Claimed static slot
+  it('excludes backfill slots from capacity and usage (they overlap primary cores)', () => {
+    const withBackfill = [...gpuNode, backfillSlot].map(parseSlot);
+    const u = usageFor(withBackfill);
+    // Totals and usage are unchanged by the backfill slot: no double count.
+    expect(u.totalCpus).toBe(128);
+    expect(u.usedCpus).toBe(96);
+    expect(u.totalGpus).toBe(8);
+    expect(u.usedGpus).toBe(6);
   });
 
-  it('does not double-count TotalCpus across a machine with many slots', () => {
-    const u = usageFor(
-      [...partitionableMachine, ...staticMachine].map(parseSlot),
-    );
-    expect(u.totalCpus).toBe(10); // 8 (ep1) + 2 (ep2), not per-slot
-    expect(u.usedCpus).toBe(7); // 6 (ep1 dynamic) + 1 (ep2 static)
+  it('is case-insensitive about attribute names (ClassAds are)', () => {
+    const lowered: ClassAd = {
+      name: 'slot1@x',
+      machine: 'x',
+      slottype: 'Partitionable',
+      partitionableslot: true,
+      cpus: 4,
+      totalcpus: 16,
+      gpus: 1,
+      totalgpus: 4,
+      state: 'Unclaimed',
+    };
+    const u = usageFor([parseSlot(lowered)]);
+    expect(u.totalCpus).toBe(16);
+    expect(u.usedCpus).toBe(12);
+    expect(u.totalGpus).toBe(4);
+    expect(u.usedGpus).toBe(3);
   });
 });
 
-describe('groupByMachine', () => {
-  it('groups slots by machine and sorts by name', () => {
-    const groups = groupByMachine(
-      [...staticMachine, ...partitionableMachine].map(parseSlot),
-    );
-    expect(groups.map((g) => g.machine)).toEqual(['ep1', 'ep2']);
-    expect(groups[0].slots).toHaveLength(2);
-    expect(groups[0].usage.usedCpus).toBe(6);
-    expect(groups[0].stateCounts).toEqual({ Unclaimed: 1, Claimed: 1 });
+describe('runningJobsFor', () => {
+  it('uses NumDynamicSlots on a partitionable slot and skips backfill', () => {
+    expect(runningJobsFor([...gpuNode, backfillSlot].map(parseSlot))).toBe(6);
+  });
+  it('counts a claimed static slot as one job', () => {
+    const staticSlots: ClassAd[] = [
+      { Name: 's1@ep', Machine: 'ep', SlotType: 'Static', Cpus: 1, TotalCpus: 2, State: 'Claimed' },
+      { Name: 's2@ep', Machine: 'ep', SlotType: 'Static', Cpus: 1, TotalCpus: 2, State: 'Unclaimed' },
+    ];
+    expect(runningJobsFor(staticSlots.map(parseSlot))).toBe(1);
   });
 });
 
 describe('summarize', () => {
-  it('reports distinct machines, total slots, and pool-wide usage', () => {
-    const s = summarize(
-      [...partitionableMachine, ...staticMachine].map(parseSlot),
-    );
-    expect(s.machines).toBe(2);
-    expect(s.slots).toBe(4);
-    expect(s.usage.totalCpus).toBe(10);
-    expect(s.usage.usedCpus).toBe(7);
+  it('counts primary machines, running jobs, owner nodes, and backfill cpus', () => {
+    const ownerNode: ClassAd = {
+      Name: 'slot1@ep2',
+      Machine: 'ep2',
+      SlotType: 'Partitionable',
+      PartitionableSlot: true,
+      Cpus: 8,
+      TotalCpus: 8,
+      NumDynamicSlots: 0,
+      State: 'Owner',
+    };
+    const s = summarize([...gpuNode, backfillSlot, ownerNode].map(parseSlot));
+    expect(s.machines).toBe(2); // gpu1, ep2 (backfill is on gpu1, not a new machine)
+    expect(s.runningJobs).toBe(6);
+    expect(s.ownerNodes).toBe(1); // ep2
+    expect(s.backfillCpus).toBe(96); // the claimed backfill slot
   });
 });
 
-describe('parseSlot', () => {
-  it('coerces string-valued numbers and detects partitionable via SlotType', () => {
-    const s = parseSlot({
-      Name: 'slot1@x',
-      Machine: 'x',
-      SlotType: 'Partitionable',
-      Cpus: '4', // some fields can arrive as strings
-      TotalCpus: 4,
+describe('groupByMachine', () => {
+  it('marks an Owner node and keeps its usage', () => {
+    const groups = groupByMachine(gpuNode.map(parseSlot));
+    expect(groups).toHaveLength(1);
+    expect(groups[0].owner).toBe(false);
+    expect(groups[0].runningJobs).toBe(6);
+    expect(groups[0].usage.usedGpus).toBe(6);
+  });
+});
+
+describe('gpuDevices', () => {
+  it('reads flat CUDA* device properties', () => {
+    const devs = gpuDevices({
+      AssignedGPUs: 'CUDA0',
+      CUDADeviceName: 'NVIDIA A100',
+      CUDACapability: '8.0',
+      CUDAGlobalMemoryMb: 40960,
+      CUDADriverVersion: '12.2',
     });
-    expect(s.cpus).toBe(4);
-    expect(s.partitionable).toBe(true);
+    expect(devs).toHaveLength(1);
+    expect(devs[0].name).toBe('NVIDIA A100');
+    expect(devs[0].capability).toBe('8.0');
+    expect(devs[0].globalMemoryMb).toBe(40960);
+  });
+
+  it('reads nested per-device ads keyed by device id', () => {
+    const devs = gpuDevices({
+      AssignedGPUs: 'GPU-aaaa, GPU-bbbb',
+      'GPU-aaaa': { DeviceName: 'H100', Capability: '9.0', GlobalMemoryMb: 81920 },
+      'GPU-bbbb': { DeviceName: 'H100', Capability: '9.0', GlobalMemoryMb: 81920 },
+    });
+    expect(devs.map((d) => d.id)).toEqual(['GPU-aaaa', 'GPU-bbbb']);
+    expect(devs[0].name).toBe('H100');
+    expect(devs[1].globalMemoryMb).toBe(81920);
+  });
+
+  it('returns [] for a CPU-only slot', () => {
+    expect(gpuDevices({ Name: 'slot1@x', Cpus: 4 })).toEqual([]);
   });
 });

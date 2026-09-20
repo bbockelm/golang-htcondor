@@ -3,11 +3,12 @@
 // Per-slot detail: the parsed summary (node, type, resources, state,
 // owner) plus the full raw ClassAd the collector returned for this slot.
 
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, type ClassAd } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
-import { parseSlot, slotStateStyle, gib } from '@/lib/pool';
+import { parseSlot, slotStateStyle, gib, gpuDevices } from '@/lib/pool';
 
 export default function SlotDetailClient() {
   const { name } = useResolvedParams<{ name: string }>('/pool/slots/[name]');
@@ -83,6 +84,8 @@ export default function SlotDetailClient() {
             </dl>
           </div>
 
+          <GpuTable ad={data} />
+
           <RawAd ad={data} />
         </>
       ) : null}
@@ -108,30 +111,96 @@ function Field({
 // RawAd dumps every attribute the collector returned, sorted, so the page
 // is useful for debugging a slot regardless of which attributes the
 // summary surfaces.
-function RawAd({ ad }: { ad: Record<string, unknown> }) {
-  const keys = Object.keys(ad).sort((a, b) => a.localeCompare(b));
+// GpuTable renders one row per GPU device when the slot has any, from the
+// AssignedGPUs/DetectedGPUs device ids and their per-device properties
+// (nested device ads or flat CUDA* attrs). Nothing renders on a CPU slot.
+function GpuTable({ ad }: { ad: ClassAd }) {
+  const devices = gpuDevices(ad);
+  if (devices.length === 0) return null;
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-3 py-2 text-sm font-semibold text-gray-900">
+        GPUs
+      </div>
       <table className="min-w-full text-sm">
         <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
-            <th className="px-3 py-2 text-left">Attribute</th>
-            <th className="px-3 py-2 text-left">Value</th>
+            <th className="px-3 py-2 text-left">Device</th>
+            <th className="px-3 py-2 text-left">Name</th>
+            <th className="px-3 py-2 text-left">Capability</th>
+            <th className="px-3 py-2 text-right">Memory</th>
+            <th className="px-3 py-2 text-left">Driver</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {keys.map((k) => (
-            <tr key={k}>
-              <td className="whitespace-nowrap px-3 py-1.5 font-mono text-xs text-gray-700">
-                {k}
+          {devices.map((d) => (
+            <tr key={d.id}>
+              <td className="px-3 py-1.5 font-mono text-xs text-gray-700">
+                {d.id}
               </td>
-              <td className="px-3 py-1.5 font-mono text-xs break-all text-gray-900">
-                {formatValue(ad[k])}
+              <td className="px-3 py-1.5 text-gray-900">{d.name ?? '—'}</td>
+              <td className="px-3 py-1.5 text-gray-600">{d.capability ?? '—'}</td>
+              <td className="px-3 py-1.5 text-right text-gray-600">
+                {d.globalMemoryMb !== undefined ? gib(d.globalMemoryMb) : '—'}
+              </td>
+              <td className="px-3 py-1.5 text-gray-600">
+                {d.driverVersion ?? '—'}
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function RawAd({ ad }: { ad: ClassAd }) {
+  const [filter, setFilter] = useState('');
+  const allKeys = useMemo(
+    () => Object.keys(ad).sort((a, b) => a.localeCompare(b)),
+    [ad],
+  );
+  const q = filter.trim().toLowerCase();
+  const keys = q
+    ? allKeys.filter(
+        (k) =>
+          k.toLowerCase().includes(q) ||
+          formatValue(ad[k]).toLowerCase().includes(q),
+      )
+    : allKeys;
+  return (
+    <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-3 py-2">
+        <span className="text-sm font-semibold text-gray-900">
+          ClassAd attributes
+        </span>
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter attributes…"
+          className="ml-auto w-56 rounded-sm border border-gray-300 px-2 py-1 text-xs"
+        />
+        <span className="text-xs text-gray-400">
+          {keys.length}/{allKeys.length}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <tbody className="divide-y divide-gray-100">
+            {keys.map((k) => (
+              <tr key={k}>
+                <td className="whitespace-nowrap px-3 py-1.5 font-mono text-xs text-gray-700">
+                  {k}
+                </td>
+                <td className="px-3 py-1.5 font-mono text-xs break-all text-gray-900">
+                  {formatValue(ad[k])}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

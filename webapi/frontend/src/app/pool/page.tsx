@@ -2,9 +2,9 @@
 
 // /pool is the pool overview: a capacity/usage summary across every
 // execute node, a table with one row per node that expands to reveal its
-// slots (the same disclosure pattern the jobs page uses for batches),
+// slots (the disclosure pattern the jobs page uses for batches),
 // click-through to a per-slot page, and a filter that runs either as a
-// free-text substring match (client-side) or as a raw ClassAd expression
+// free-text substring match (client-side) or a raw ClassAd expression
 // (sent to the collector query).
 
 import { useMemo, useState } from 'react';
@@ -17,11 +17,13 @@ import {
   summarize,
   slotStateStyle,
   gib,
+  pct,
   textHaystack,
   SLOT_PROJECTION,
   type Slot,
   type NodeGroup,
   type ResourceUsage,
+  type PoolSummary,
 } from '@/lib/pool';
 
 type FilterMode = 'text' | 'expr';
@@ -30,22 +32,29 @@ export default function PoolPage() {
   const router = useRouter();
   const [mode, setMode] = useState<FilterMode>('text');
   const [input, setInput] = useState('');
-  // In expression mode the constraint is only sent when applied (Enter /
-  // Apply), so we neither hammer the collector on every keystroke nor ship
-  // half-typed, unparseable expressions.
   const [appliedExpr, setAppliedExpr] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const constraint = mode === 'expr' ? appliedExpr : '';
 
-  const { data, isLoading, error, isFetching, refetch } = useQuery({
-    queryKey: ['pool-slots', constraint],
+  // Exclude per-job (dynamic) slots from the query. On a busy pool they
+  // outnumber the machines by orders of magnitude and blew the streamed
+  // response past the point it was truncated. Running-job counts come from
+  // the partitionable slot's NumDynamicSlots instead. A user expression is
+  // ANDed on top. Backfill slots ARE fetched (we surface them separately).
+  const excludeDynamic = 'SlotType =!= "Dynamic"';
+  const effectiveConstraint = constraint
+    ? `(${excludeDynamic}) && (${constraint})`
+    : excludeDynamic;
+
+  const { data, isLoading, error, isFetching } = useQuery({
+    queryKey: ['pool-slots', effectiveConstraint],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
         projection: SLOT_PROJECTION,
         limit: '*',
-        constraint: constraint || undefined,
+        constraint: effectiveConstraint,
       }),
     refetchInterval: 30_000,
     retry: false,
@@ -115,6 +124,16 @@ export default function PoolPage() {
               {exprError}
             </p>
           )}
+          <p className="text-xs text-gray-400">
+            Per-job (dynamic) slots are excluded; usage reflects each
+            machine&apos;s allocated capacity, and backfill slots are counted
+            separately.
+          </p>
+          {data?.error && (
+            <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              The collector query returned only partial results: {data.error}
+            </p>
+          )}
 
           {isLoading ? (
             <p className="text-sm text-gray-400">Loading pool…</p>
@@ -124,12 +143,7 @@ export default function PoolPage() {
             </p>
           ) : (
             <>
-              <SummaryCards
-                machines={summary.machines}
-                slots={summary.slots}
-                usage={summary.usage}
-                stateCounts={summary.stateCounts}
-              />
+              <SummaryPanel summary={summary} />
               {nodes.length === 0 ? (
                 <p className="text-sm text-gray-500">
                   No slots match this {mode === 'expr' ? 'expression' : 'filter'}.
@@ -219,86 +233,87 @@ function FilterControls({
   );
 }
 
-function SummaryCards({
-  machines,
-  slots,
-  usage,
-  stateCounts,
-}: {
-  machines: number;
-  slots: number;
-  usage: ResourceUsage;
-  stateCounts: Record<string, number>;
-}) {
+function SummaryPanel({ summary }: { summary: PoolSummary }) {
+  const u = summary.usage;
+  const rows: {
+    label: string;
+    used: string;
+    total: string;
+    ratio: string;
+  }[] = [
+    {
+      label: 'CPUs',
+      used: u.usedCpus.toLocaleString(),
+      total: u.totalCpus.toLocaleString(),
+      ratio: pct(u.usedCpus, u.totalCpus),
+    },
+    {
+      label: 'Memory',
+      used: gib(u.usedMemoryMB),
+      total: gib(u.totalMemoryMB),
+      ratio: pct(u.usedMemoryMB, u.totalMemoryMB),
+    },
+  ];
+  if (u.totalGpus > 0) {
+    rows.push({
+      label: 'GPUs',
+      used: u.usedGpus.toLocaleString(),
+      total: u.totalGpus.toLocaleString(),
+      ratio: pct(u.usedGpus, u.totalGpus),
+    });
+  }
+
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <StatCard label="Execute nodes" value={machines.toLocaleString()} />
-        <StatCard label="Slots" value={slots.toLocaleString()} />
-        <StatCard
-          label="CPUs (in use / total)"
-          value={`${usage.usedCpus.toLocaleString()} / ${usage.totalCpus.toLocaleString()}`}
-          sub={pct(usage.usedCpus, usage.totalCpus)}
-        />
-        <StatCard
-          label="Memory (in use / total)"
-          value={`${gib(usage.usedMemoryMB)} / ${gib(usage.totalMemoryMB)}`}
-          sub={pct(usage.usedMemoryMB, usage.totalMemoryMB)}
-        />
-        <StatCard
-          label="GPUs (in use / total)"
-          value={`${usage.usedGpus.toLocaleString()} / ${usage.totalGpus.toLocaleString()}`}
-          sub={usage.totalGpus > 0 ? pct(usage.usedGpus, usage.totalGpus) : undefined}
-        />
+    <div className="grid gap-3 lg:grid-cols-3">
+      {/* Vertically-aligned usage table: one resource per row, columns
+          line up so used/total/% are scannable at a glance. */}
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white lg:col-span-2">
+        <table className="min-w-full text-sm tabular-nums">
+          <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className="px-3 py-2 text-left">Resource</th>
+              <th className="px-3 py-2 text-right">In use</th>
+              <th className="px-3 py-2 text-right">Total</th>
+              <th className="px-3 py-2 text-right">%</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {rows.map((r) => (
+              <tr key={r.label}>
+                <td className="px-3 py-2 font-medium text-gray-700">{r.label}</td>
+                <td className="px-3 py-2 text-right text-gray-900">{r.used}</td>
+                <td className="px-3 py-2 text-right text-gray-500">{r.total}</td>
+                <td className="px-3 py-2 text-right text-gray-500">{r.ratio}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      <StatePills counts={stateCounts} />
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard label="Execute nodes" value={summary.machines.toLocaleString()} />
+        <StatCard label="Running jobs" value={summary.runningJobs.toLocaleString()} />
+        <StatCard
+          label="Owner (unavailable)"
+          value={summary.ownerNodes.toLocaleString()}
+        />
+        {summary.backfillCpus > 0 && (
+          <StatCard
+            label="Backfill CPUs"
+            value={summary.backfillCpus.toLocaleString()}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
-function StatCard({
-  label,
-  value,
-  sub,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-}) {
+function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-3">
-      <div className="text-xs uppercase tracking-wide text-gray-500">
-        {label}
-      </div>
+      <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
       <div className="mt-1 text-lg font-semibold text-gray-900">{value}</div>
-      {sub && <div className="text-xs text-gray-400">{sub}</div>}
     </div>
   );
-}
-
-function StatePills({ counts }: { counts: Record<string, number> }) {
-  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (entries.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-2">
-      {entries.map(([state, n]) => (
-        <span
-          key={state}
-          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${slotStateStyle(
-            state,
-          )}`}
-        >
-          {state}
-          <span className="font-normal opacity-70">{n}</span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function pct(used: number, total: number): string {
-  if (!total) return '0%';
-  return `${Math.round((used / total) * 100)}% in use`;
 }
 
 function Caret({ open }: { open: boolean }) {
@@ -310,6 +325,14 @@ function Caret({ open }: { open: boolean }) {
       aria-hidden
     >
       ▶
+    </span>
+  );
+}
+
+function OwnerBadge() {
+  return (
+    <span className="inline-flex rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800">
+      Owner
     </span>
   );
 }
@@ -327,16 +350,15 @@ function NodeTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-      <table className="min-w-full text-sm">
+      <table className="min-w-full text-sm tabular-nums">
         <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th className="w-6 px-3 py-2" />
             <th className="px-3 py-2 text-left">Execute node</th>
-            <th className="px-3 py-2 text-left">Slots</th>
-            <th className="px-3 py-2 text-left">State</th>
-            <th className="px-3 py-2 text-left">CPUs</th>
-            <th className="px-3 py-2 text-left">Memory</th>
-            <th className="px-3 py-2 text-left">GPUs</th>
+            <th className="px-3 py-2 text-right">Running</th>
+            <th className="px-3 py-2 text-right">CPUs</th>
+            <th className="px-3 py-2 text-right">Memory</th>
+            <th className="px-3 py-2 text-right">GPUs</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -353,6 +375,11 @@ function NodeTable({
       </table>
     </div>
   );
+}
+
+function usageCell(used: number, total: number): string {
+  if (total === 0) return '—';
+  return `${used} / ${total}`;
 }
 
 function NodeRow({
@@ -377,24 +404,28 @@ function NodeRow({
         <td className="px-3 py-2">
           <Caret open={open} />
         </td>
-        <td className="px-3 py-2 font-medium text-gray-900">{node.machine}</td>
-        <td className="px-3 py-2 text-gray-600">{node.slots.length}</td>
-        <td className="px-3 py-2">
-          <StatePills counts={node.stateCounts} />
+        <td className="px-3 py-2 font-medium text-gray-900">
+          <span className="inline-flex items-center gap-2">
+            {node.machine}
+            {node.owner && <OwnerBadge />}
+          </span>
         </td>
-        <td className="px-3 py-2 text-gray-600">
-          {u.usedCpus} / {u.totalCpus}
+        <td className="px-3 py-2 text-right text-gray-600">{node.runningJobs}</td>
+        <td className="px-3 py-2 text-right text-gray-600">
+          {usageCell(u.usedCpus, u.totalCpus)}
         </td>
-        <td className="px-3 py-2 text-gray-600">
-          {gib(u.usedMemoryMB)} / {gib(u.totalMemoryMB)}
+        <td className="px-3 py-2 text-right text-gray-600">
+          {u.totalMemoryMB > 0
+            ? `${gib(u.usedMemoryMB)} / ${gib(u.totalMemoryMB)}`
+            : '—'}
         </td>
-        <td className="px-3 py-2 text-gray-600">
-          {u.totalGpus > 0 ? `${u.usedGpus} / ${u.totalGpus}` : '—'}
+        <td className="px-3 py-2 text-right text-gray-600">
+          {usageCell(u.usedGpus, u.totalGpus)}
         </td>
       </tr>
       {open && (
         <tr>
-          <td colSpan={7} className="bg-gray-50 px-3 py-2">
+          <td colSpan={6} className="bg-gray-50 px-3 py-2">
             <SlotSubTable slots={node.slots} onSlot={onSlot} />
           </td>
         </tr>
@@ -412,15 +443,15 @@ function SlotSubTable({
 }) {
   const ordered = [...slots].sort((a, b) => a.name.localeCompare(b.name));
   return (
-    <table className="min-w-full text-xs">
+    <table className="min-w-full text-xs tabular-nums">
       <thead className="text-gray-500">
         <tr>
           <th className="px-2 py-1 text-left">Slot</th>
           <th className="px-2 py-1 text-left">Type</th>
           <th className="px-2 py-1 text-left">State / Activity</th>
-          <th className="px-2 py-1 text-left">CPUs</th>
-          <th className="px-2 py-1 text-left">Memory</th>
-          <th className="px-2 py-1 text-left">GPUs</th>
+          <th className="px-2 py-1 text-right">CPUs</th>
+          <th className="px-2 py-1 text-right">Memory</th>
+          <th className="px-2 py-1 text-right">GPUs</th>
           <th className="px-2 py-1 text-left">Owner</th>
         </tr>
       </thead>
@@ -432,7 +463,15 @@ function SlotSubTable({
             onClick={() => onSlot(s.name)}
           >
             <td className="px-2 py-1 font-mono text-brand-700">{s.name}</td>
-            <td className="px-2 py-1">{s.slotType || '—'}</td>
+            <td className="px-2 py-1">
+              {s.backfill ? (
+                <span className="rounded-full bg-purple-100 px-2 py-0.5 font-medium text-purple-800">
+                  backfill
+                </span>
+              ) : (
+                s.slotType || '—'
+              )}
+            </td>
             <td className="px-2 py-1">
               <span
                 className={`inline-flex rounded-full px-2 py-0.5 font-medium ${slotStateStyle(
@@ -445,9 +484,9 @@ function SlotSubTable({
                 <span className="ml-1 text-gray-400">/ {s.activity}</span>
               )}
             </td>
-            <td className="px-2 py-1">{s.cpus ?? '—'}</td>
-            <td className="px-2 py-1">{gib(s.memoryMB)}</td>
-            <td className="px-2 py-1">{s.gpus ?? '—'}</td>
+            <td className="px-2 py-1 text-right">{s.cpus ?? '—'}</td>
+            <td className="px-2 py-1 text-right">{gib(s.memoryMB)}</td>
+            <td className="px-2 py-1 text-right">{s.gpus ?? '—'}</td>
             <td className="px-2 py-1 text-gray-600">{s.remoteOwner ?? '—'}</td>
           </tr>
         ))}
