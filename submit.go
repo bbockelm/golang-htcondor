@@ -699,21 +699,61 @@ func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
 	return nil
 }
 
+// unixNullFile is UNIX_NULL_FILE from the C++ submit code
+// (src/condor_includes/condor_constants.h): the name condor_submit
+// canonicalizes an unnamed stdin/stdout/stderr to.
+const unixNullFile = "/dev/null"
+
+// checkStdFile mirrors SubmitHash::CheckStdFile
+// (src/condor_utils/submit_utils.cpp): it canonicalizes the filename a
+// submit file gave for one of the standard streams and reports whether
+// that stream is still a candidate for transfer.
+//
+// An absent or empty name, and an explicit /dev/null, are the same
+// thing to condor_submit: the file becomes /dev/null and transfer (and
+// streaming) is turned off for it. Anything else is transferred.
+//
+// Leaving the attribute unset instead is not a harmless shorthand for
+// "no file". The shadow's file-transfer code only treats a stdout/stderr
+// name as "nothing to send back" when it literally reads /dev/null --
+// nullFile() in src/condor_utils/nullfile.cpp matches that string, not
+// the empty one. With the attribute missing, JobStdoutFile stays "",
+// nullFile("") is false, and the FailureFiles seeding in
+// file_transfer.cpp (which, unlike the OutputFiles path, has no
+// hasJobOutput() guard) queues the empty name. The starter then uploads
+// failure files whose list starts with "", which the shadow resolves
+// against the sandbox root and walks.
+func checkStdFile(value string) (file string, transferIt bool) {
+	if value == "" || value == unixNullFile {
+		return unixNullFile, false
+	}
+	return value, true
+}
+
 // setStandardFiles sets input, output, and error file attributes
 func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
-	// Input
-	if input, ok := sf.submitCommand("input"); ok {
-		_ = ad.Set("In", input)
-	}
-
-	// Output
-	if output, ok := sf.submitCommand("output"); ok {
-		_ = ad.Set("Out", output)
-	}
-
-	// Error
-	if errFile, ok := sf.submitCommand("error"); ok {
-		_ = ad.Set("Err", errFile)
+	// In/Out/Err are always assigned, even when the submit file names
+	// none of them: SetStdin/SetStdout/SetStderr in submit_utils.cpp
+	// assign unconditionally, and CheckStdFile has already turned the
+	// missing name into /dev/null. The matching Transfer* attribute is
+	// written only in the not-transferred case, which is also what the
+	// C++ does (it assigns Transfer<X> = false when transfer_it came
+	// back false, and otherwise leaves it to the default).
+	//
+	// The transfer_input / transfer_output / transfer_error submit
+	// commands, which are the other way transfer_it can go false, are
+	// not implemented here; see setFileTransfer.
+	for _, std := range []struct{ key, fileAttr, transferAttr string }{
+		{"input", "In", "TransferIn"},
+		{"output", "Out", "TransferOut"},
+		{"error", "Err", "TransferErr"},
+	} {
+		value, _ := sf.submitCommand(std.key)
+		file, transferIt := checkStdFile(value)
+		_ = ad.Set(std.fileAttr, file)
+		if !transferIt {
+			_ = ad.Set(std.transferAttr, false)
+		}
 	}
 
 	// Log
