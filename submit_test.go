@@ -682,3 +682,109 @@ stream_error = true
 		}
 	})
 }
+
+// TestSubmitTransferStdioOff covers the halves of the transfer_input /
+// transfer_output / transfer_error handling that the differential test
+// against condor_submit cannot see: transfer_input = false is
+// indistinguishable from the null-file default unless an input file is
+// named, and naming one drags in StreamIn, which condor_submit
+// writes for a transferred stdin and the comparison then trips on. The streaming attribute is invisible to the
+// comparison for that same reason.
+//
+// The oracle for the expectations below is condor_submit -dry-run on the
+// same submit files; see TestIntegrationTransferStdioOff.
+func TestSubmitTransferStdioOff(t *testing.T) {
+	// present reports whether the ad carries attr, and its value when
+	// the value is a bool.
+	present := func(ad *classad.ClassAd, attr string) (bool, bool) {
+		expr, ok := ad.Lookup(attr)
+		if !ok {
+			return false, false
+		}
+		b, _ := expr.Eval(nil).BoolValue()
+		return true, b
+	}
+
+	for _, tc := range []struct {
+		name   string
+		submit string
+		// want maps an attribute to its expected boolean value; an
+		// attribute listed in absent must not be in the ad at all.
+		want   map[string]bool
+		absent []string
+	}{
+		{
+			name:   "InputNotTransferred",
+			submit: "input = in.txt\ntransfer_input = false\n",
+			want:   map[string]bool{"TransferIn": false},
+			absent: []string{"StreamIn"},
+		},
+		{
+			name:   "InputTransferredByDefault",
+			submit: "input = in.txt\n",
+			absent: []string{"TransferIn"},
+		},
+		{
+			name:   "InputTransferExplicitlyOn",
+			submit: "input = in.txt\ntransfer_input = true\n",
+			absent: []string{"TransferIn"},
+		},
+		{
+			// Asking to stream a stream that is not transferred leaves
+			// no streaming attribute: in SetStdin/SetStdout/SetStderr
+			// the Stream<X> assignment sits behind "if (transfer_it)".
+			name:   "StreamRequestedButNotTransferred",
+			submit: "output = out.txt\nstream_output = true\ntransfer_output = false\n",
+			want:   map[string]bool{"TransferOut": false},
+			absent: []string{"StreamOut"},
+		},
+		{
+			name:   "StreamRequestedAndTransferred",
+			submit: "output = out.txt\nstream_output = true\n",
+			want:   map[string]bool{"StreamOut": true},
+			absent: []string{"TransferOut"},
+		},
+		{
+			name:   "ErrorNotTransferred",
+			submit: "error = err.txt\nstream_error = true\ntransfer_error = false\n",
+			want:   map[string]bool{"TransferErr": false},
+			absent: []string{"StreamErr"},
+		},
+		{
+			// 0, false and FALSE are the spellings condor_submit
+			// itself accepts here; it rejects "no"/"yes" outright
+			// ("must eval to a boolean"), which parseBool does not.
+			name:   "AllThreeOff",
+			submit: "input = in.txt\noutput = out.txt\nerror = err.txt\ntransfer_input = 0\ntransfer_output = false\ntransfer_error = FALSE\n",
+			want:   map[string]bool{"TransferIn": false, "TransferOut": false, "TransferErr": false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sf, err := ParseSubmitFile(strings.NewReader("executable = /bin/true\n" + tc.submit))
+			if err != nil {
+				t.Fatalf("ParseSubmitFile: %v", err)
+			}
+			result, err := sf.Submit(1)
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			ad := result.ProcAds[0]
+
+			for attr, wantVal := range tc.want {
+				got, gotVal := present(ad, attr)
+				if !got {
+					t.Errorf("%s missing from the ad, want %v", attr, wantVal)
+					continue
+				}
+				if gotVal != wantVal {
+					t.Errorf("%s = %v, want %v", attr, gotVal, wantVal)
+				}
+			}
+			for _, attr := range tc.absent {
+				if got, gotVal := present(ad, attr); got {
+					t.Errorf("%s = %v, want the attribute to be absent", attr, gotVal)
+				}
+			}
+		})
+	}
+}

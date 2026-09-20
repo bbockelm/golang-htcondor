@@ -740,16 +740,17 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 	// C++ does (it assigns Transfer<X> = false when transfer_it came
 	// back false, and otherwise leaves it to the default).
 	//
-	// The transfer_input / transfer_output / transfer_error submit
-	// commands, which are the other way transfer_it can go false, are
-	// not implemented here; see setFileTransfer.
-	for _, std := range []struct{ key, fileAttr, transferAttr string }{
-		{"input", "In", "TransferIn"},
-		{"output", "Out", "TransferOut"},
-		{"error", "Err", "TransferErr"},
-	} {
-		value, _ := sf.submitCommand(std.key)
+	// Two things can make transfer_it false, and the C++ applies them
+	// in this order: the transfer_input / transfer_output /
+	// transfer_error submit command, read first, and then CheckStdFile,
+	// which forces it off for a stream whose file is the null file
+	// whatever the submit command said.
+	for _, std := range stdioStreams {
+		value, _ := sf.submitCommand(std.fileCmd)
 		file, transferIt := checkStdFile(value)
+		if !sf.stdioTransferIt(std.transferCmd) {
+			transferIt = false
+		}
 		_ = ad.Set(std.fileAttr, file)
 		if !transferIt {
 			_ = ad.Set(std.transferAttr, false)
@@ -762,6 +763,44 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 	}
 
 	return nil
+}
+
+// stdioStreams names, for each of the three standard streams, the submit
+// commands that describe it and the job attributes it is written to.
+var stdioStreams = []struct {
+	fileCmd      string // submit command: input / output / error
+	transferCmd  string // submit command: transfer_input / transfer_output / transfer_error
+	streamCmd    string // submit command: stream_input / stream_output / stream_error
+	fileAttr     string // job attribute holding the filename
+	transferAttr string // job attribute written when the stream is not transferred
+	streamAttr   string // job attribute written for the streaming choice
+}{
+	{"input", "transfer_input", "stream_input", "In", "TransferIn", "StreamIn"},
+	{"output", "transfer_output", "stream_output", "Out", "TransferOut", "StreamOut"},
+	{"error", "transfer_error", "stream_error", "Err", "TransferErr", "StreamErr"},
+}
+
+// stdioTransferIt reports whether the submit file leaves the standard
+// stream governed by transferCmd eligible for transfer.
+//
+// condor_submit carries this as the transfer_it flag in
+// SetStdin/SetStdout/SetStderr (src/condor_utils/submit_utils.cpp). It
+// starts true and the transfer_input / transfer_output / transfer_error
+// submit command can turn it off. When it is off the job ad gets
+// Transfer<X> = false and the matching Stream<X> assignment is skipped
+// entirely -- that assignment sits behind "if (transfer_it)" -- so a
+// stream the submit file both asks to stream and asks not to transfer
+// carries no streaming attribute at all.
+//
+// The other route to transfer_it == false is checkStdFile, which turns
+// it off for a stream whose file is the null file; the caller applies
+// that one after this.
+func (sf *SubmitFile) stdioTransferIt(transferCmd string) bool {
+	value, ok := sf.submitCommand(transferCmd)
+	if !ok {
+		return true
+	}
+	return parseBool(value, true)
 }
 
 // setFileTransfer sets file transfer related attributes
@@ -2272,8 +2311,7 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		_ = ad.Set("WantRemoteSyscalls", parseBool(wantSyscalls, false))
 	}
 
-	// StreamIn / StreamOut / StreamErr - stream stdin/stdout/stderr live
-	// to the submit machine instead of transferring the file at the end.
+	// Streaming stdin/stdout/stderr.
 	//
 	// The attribute names are HTCondor's, not the submit commands'.
 	// ATTR_STREAM_INPUT, ATTR_STREAM_OUTPUT and ATTR_STREAM_ERROR in
@@ -2285,24 +2323,24 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 	// write the job's stdout to _condor_stdout and let the shadow rename
 	// it back is guarded by LookupBool(ATTR_STREAM_OUTPUT, stream) &&
 	// !stream, and LookupBool is false for an absent attribute -- so
-	// omitting StreamOut is not the same as setting it false.
+	// omitting StreamOut is not the same as setting it false. condor_submit
+	// writes the attribute with a false default for every transferred
+	// stream, so the submit command being absent is not a reason to skip.
 	//
-	// SetStdin/SetStdout/SetStderr in submit_utils.cpp assign the
-	// attribute whenever the stream is transferred, defaulting to false
-	// when the submit file says nothing, and omit it entirely when it is
-	// not: CheckStdFile forces streaming off for /dev/null, and the
-	// assignment sits behind "if (transfer_it)".
-	for _, std := range []struct{ fileCmd, streamCmd, attr string }{
-		{"input", "stream_input", "StreamIn"},
-		{"output", "stream_output", "StreamOut"},
-		{"error", "stream_error", "StreamErr"},
-	} {
+	// Not being transferred is. The assignment in SetStdin/SetStdout/
+	// SetStderr sits behind "if (transfer_it)", and both routes to
+	// transfer_it == false clear it: checkStdFile for a null file, and an
+	// explicit transfer_<x> = false.
+	for _, std := range stdioStreams {
 		fileValue, _ := sf.submitCommand(std.fileCmd)
 		if _, transferIt := checkStdFile(fileValue); !transferIt {
 			continue
 		}
+		if !sf.stdioTransferIt(std.transferCmd) {
+			continue
+		}
 		stream, _ := sf.submitCommand(std.streamCmd)
-		_ = ad.Set(std.attr, parseBool(stream, false))
+		_ = ad.Set(std.streamAttr, parseBool(stream, false))
 	}
 
 	// JobDescription - human-readable description of job
