@@ -2083,9 +2083,20 @@ request_disk = 1024
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 transfer_executable = false
-transfer_output_files = output.txt, result.json, data.log, stdout.txt, stderr.txt
+transfer_output_files = output.txt, result.json, data.log
 queue
 `
+	// stdout.txt and stderr.txt are deliberately NOT in
+	// transfer_output_files. condor_submit emits StreamOut=false and
+	// StreamErr=false for a transferred stream, and on a job ad that has
+	// those attributes the starter remaps ATTR_JOB_OUTPUT to
+	// _condor_stdout and lets the shadow rename it back
+	// (jic_shadow.cpp, "if LookupBool(ATTR_STREAM_OUTPUT, stream) &&
+	// !stream && !nullFile(...)"). Naming stdout.txt here too makes the
+	// transfer look for a scratch/stdout.txt the starter never wrote, and
+	// the job is held. They still come back -- HTCondor always returns
+	// stdout and stderr -- which is what the fetch of stdout.txt below
+	// checks.
 
 	_, jobID := submitJob(t, client, baseURL, user, submitFile)
 	t.Logf("Submitted job: %s", jobID)
