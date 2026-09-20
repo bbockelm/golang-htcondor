@@ -259,3 +259,32 @@ func TestAdTypeCommandTargetConsistency(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateQueryAdProjectionAttrName pins the server-side projection to
+// the attribute name the collector actually reads (ATTR_PROJECTION =
+// "Projection"). It was previously set as "ProjectionAttributes", which
+// the collector ignores -- so every query fetched all attributes of every
+// ad and a whole-pool query ballooned to tens of MB.
+func TestCreateQueryAdProjectionAttrName(t *testing.T) {
+	ad := createQueryAd("StartdAd", nil, []string{"Name", "Machine", "Cpus"}, 0)
+
+	got, ok := ad.EvaluateAttrString("Projection")
+	if !ok {
+		t.Fatal(`query ad has no "Projection" attribute; the collector applies no projection and returns full ads`)
+	}
+	if got != "Name,Machine,Cpus" {
+		t.Errorf("Projection = %q, want %q", got, "Name,Machine,Cpus")
+	}
+	if _, ok := ad.EvaluateAttrString("ProjectionAttributes"); ok {
+		t.Error(`query ad still sets "ProjectionAttributes" (the collector ignores it)`)
+	}
+}
+
+// TestCreateQueryAdNoProjection: with no projection requested, neither
+// attribute is set (the collector returns its default set).
+func TestCreateQueryAdNoProjection(t *testing.T) {
+	ad := createQueryAd("StartdAd", nil, nil, 0)
+	if _, ok := ad.EvaluateAttrString("Projection"); ok {
+		t.Error("empty projection should not set a Projection attribute")
+	}
+}

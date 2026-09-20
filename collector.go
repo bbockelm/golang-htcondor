@@ -600,16 +600,16 @@ func createQueryAd(adType string, constraint *classad.Expr, projection []string,
 		_ = ad.Set("Requirements", constraint)
 	}
 
-	// Set ProjectionAttributes if projection is specified
+	// Set the server-side projection if one was requested. The collector
+	// reads this from the "Projection" attribute (ATTR_PROJECTION) of the
+	// query ad and returns only those attributes; the earlier
+	// "ProjectionAttributes" name matched nothing, so the collector
+	// silently ignored it and returned every attribute of every ad --
+	// which made a whole-pool query enormous. The schedd query paths
+	// already spell it "Projection" (see schedd.go / userrec.go); match
+	// them. The collector tokenizes on comma or whitespace.
 	if len(projection) > 0 {
-		projectionStr := ""
-		for i, attr := range projection {
-			if i > 0 {
-				projectionStr += ","
-			}
-			projectionStr += attr
-		}
-		_ = ad.Set("ProjectionAttributes", projectionStr)
+		_ = ad.Set("Projection", strings.Join(projection, ","))
 	}
 
 	// Set LimitResults for server-side limit enforcement
