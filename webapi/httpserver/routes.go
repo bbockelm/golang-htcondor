@@ -103,6 +103,10 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/jobs/transfers", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobTransfers))))
 
 	// Credential management endpoints (credd)
+	// Watch share URLs. Only the {id}/share form is served; watches
+	// themselves are registered through MCP.
+	mux.Handle("/api/v1/watches/", cors(h.requireCondorScope(http.HandlerFunc(h.handleWatchPath))))
+
 	mux.Handle("/api/v1/creds/user", cors(h.requireCondorScope(http.HandlerFunc(h.handleUserCredential))))
 	mux.Handle("/api/v1/creds/service", cors(h.requireCondorScope(http.HandlerFunc(h.handleServiceCredentialCollection))))
 	mux.Handle("/api/v1/creds/service/", cors(h.requireCondorScope(http.HandlerFunc(h.handleServiceCredentialItem))))
@@ -134,6 +138,11 @@ func (h *Handler) setupRoutes() {
 	// its sibling and, like it, unconditionally: an MCP-only deployment
 	// (no web UI) mints these too, and the redeem has to land somewhere.
 	mux.Handle("/api/v1/share/input", cors(http.HandlerFunc(h.handleSharedInput)))
+	// Public watch poll via the same kind of URL. Long-polls, or streams
+	// SSE, until the named watch fires. Registered unconditionally like
+	// its siblings: an MCP-only deployment mints these too, and the
+	// redeem has to land somewhere.
+	mux.Handle("/api/v1/share/watch", cors(http.HandlerFunc(h.handleSharedWatch)))
 
 	// Admin endpoints (gated on WebUIAdminGroup membership). The
 	// gating is enforced inside each handler via requireAdmin so we

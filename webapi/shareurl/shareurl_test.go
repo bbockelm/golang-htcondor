@@ -218,3 +218,57 @@ func TestNewSignerRejectsAWeakKey(t *testing.T) {
 		t.Fatal("a 5-byte key was accepted")
 	}
 }
+
+// Each kind addresses its subject with a different field. A token
+// missing the one its kind uses would be redeemed against a zero value
+// -- watch "" or job 0.0 -- instead of being refused.
+func TestVerifyRequiresASubjectForTheKind(t *testing.T) {
+	s := testSigner(t)
+	exp := time.Now().Add(time.Hour).Unix()
+
+	noWatch, err := s.Sign(Payload{Owner: "alice", Exp: exp, Kind: KindWatch})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := s.Verify(noWatch, KindWatch); err == nil {
+		t.Fatal("a watch token naming no watch verified; it would poll watch \"\"")
+	}
+
+	jobWithWatch, err := s.Sign(Payload{
+		Cluster: 1, Proc: 0, Owner: "alice", Exp: exp, Kind: KindInput, Watch: "w1",
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := s.Verify(jobWithWatch, KindInput); err == nil {
+		t.Fatal("a job token carrying a watch id verified; its subject is ambiguous")
+	}
+
+	good, err := s.Sign(Payload{Owner: "alice", Exp: exp, Kind: KindWatch, Watch: "w1"})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	got, err := s.Verify(good, KindWatch)
+	if err != nil {
+		t.Fatalf("a well-formed watch token was refused: %v", err)
+	}
+	if got.Watch != "w1" {
+		t.Fatalf("watch id round-tripped to %q", got.Watch)
+	}
+}
+
+// A watch URL is held for the life of the question, so its lifetime
+// tracks the watch's rather than a transfer's.
+func TestWatchTTLsAreTheWatchLifetimes(t *testing.T) {
+	defaultTTL, maxTTL := Defaults(KindWatch)
+	if defaultTTL != DefaultWatchTTL || maxTTL != MaxWatchTTL {
+		t.Fatalf("Defaults(KindWatch) = (%v, %v), want (%v, %v)",
+			defaultTTL, maxTTL, DefaultWatchTTL, MaxWatchTTL)
+	}
+	if got := ClampTTL(KindWatch, 0); got != DefaultWatchTTL {
+		t.Fatalf("default watch TTL = %v", got)
+	}
+	if got := ClampTTL(KindWatch, 30*24*time.Hour); got != MaxWatchTTL {
+		t.Fatalf("an over-long watch TTL clamped to %v", got)
+	}
+}

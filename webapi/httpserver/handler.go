@@ -310,17 +310,20 @@ type Handler struct {
 	// to a gigabyte, so it buffers to a file; empty means the system
 	// temp directory. Configurable because spilling a gigabyte into a
 	// small /tmp is a way to take the server down with it.
-	spoolBufferDir     string
-	shareSigner        *shareurl.Signer  // HMAC signer for short-lived signed URLs
-	logBuffer          *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
-	idpProvider        *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter    *LoginRateLimiter // Rate limiter for IDP login attempts
-	seedDemoUser       bool              // Seed the non-admin "user" account (demo mode only)
-	streamBufferSize   int               // Buffer size for streaming queries (default: 100)
-	streamWriteTimeout time.Duration     // Write timeout for streaming queries (default: 5s)
-	wg                 sync.WaitGroup    // WaitGroup to track background goroutines
-	pingInterval       time.Duration     // Interval for periodic daemon pings (0 = disabled)
-	pingHealth         *pingHealth       // Recent ping outcomes per daemon, drives /readyz
+	spoolBufferDir string
+	shareSigner    *shareurl.Signer // HMAC signer for short-lived signed URLs
+	// watchHeartbeatEvery overrides the streaming watch-poll heartbeat
+	// cadence. Zero means watchpoll.HeartbeatInterval; only tests set it.
+	watchHeartbeatEvery time.Duration
+	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
+	idpProvider         *IDPProvider      // Built-in IDP provider
+	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
+	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
+	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
+	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
+	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
+	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
+	pingHealth          *pingHealth       // Recent ping outcomes per daemon, drives /readyz
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
 	// Lazily initialized so a Handler with no collector configured pays

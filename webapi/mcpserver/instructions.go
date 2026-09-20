@@ -50,6 +50,9 @@ func defaultInstructions(scheddName string) string {
 		"a watch fires even if it already happened. Call watch_jobs once to register the question; then call " +
 		"check_watches for the answer — it is the one that can wait for you (pass wait_seconds) and the one to " +
 		"call again until it answers. Use query_jobs for a one-off status snapshot.\n")
+	b.WriteString("   create_watch_url — to have something OUTSIDE this conversation do the waiting: it returns " +
+		"a URL that blocks until one watch fires, for an agent framework or poller to hold. check_watches waits " +
+		"inside your turn; that URL waits while you are not running.\n")
 	b.WriteString("4. tail_job_output — while it RUNS, read the end of its stdout/stderr straight from " +
 		"the execute node. This is how you watch progress or find out why a job is stuck, instead of " +
 		"waiting for it to finish. Pass the offsets it returns back on the next call to get only what " +
