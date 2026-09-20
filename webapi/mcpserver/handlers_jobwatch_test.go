@@ -395,13 +395,12 @@ func TestWatchMatchingNothingSaysSo(t *testing.T) {
 	}
 }
 
-// The other half of the same rule. Where the cap is long enough that
-// blocking is the endorsed way to wait (watch_advice.go), a caller
-// asking to wait again is doing what the tool told it to -- a retry
-// after a transport timeout looks exactly like this -- so its wait is
-// honoured. Only the short-cap deployment, where blocking was advised
-// only for something imminent, treats a repeat call as polling.
-func TestReRegisteringStillWaitsWhereBlockingIsTheAdvice(t *testing.T) {
+// The same rule where the cap is long, which is the deployment that hurt:
+// a watch_jobs re-call asking for a long wait blocked for it, and the MCP
+// client timed the request out long before the server's cap -- so the
+// caller got an error instead of the watch. watch_jobs registers; waiting
+// on a watch that exists belongs to check_watches, whatever the cap.
+func TestReRegisteringNeverWaitsHoweverLongTheCap(t *testing.T) {
 	running := classad.New()
 	running.InsertAttr("ClusterId", int64(42))
 	running.InsertAttr("ProcId", int64(0))
@@ -414,13 +413,15 @@ func TestReRegisteringStillWaitsWhereBlockingIsTheAdvice(t *testing.T) {
 
 	started := time.Now()
 	again := text(t, mustWatch(t, s, args))
-	if elapsed := time.Since(started); elapsed < 3*time.Second {
-		t.Errorf("the second call returned after %s; it was asked to wait, on a deployment where waiting is the advice", elapsed)
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Errorf("re-registering blocked for %s on a long-cap deployment; it waited on the watch it already had", elapsed)
 	}
-	// Still told which watch this is -- the explanation does not depend
-	// on whether the wait was honoured.
+	// Still told which watch this is, and where waiting now happens.
 	if !strings.Contains(again, "ALREADY WATCHING") {
 		t.Errorf("the caller was not told this is the watch it already registered:\n%s", again)
+	}
+	if !strings.Contains(again, "wait_seconds") || !strings.Contains(again, "check_watches") {
+		t.Errorf("the caller was not pointed at the tool that can wait for it:\n%s", again)
 	}
 }
 

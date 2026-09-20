@@ -47,8 +47,9 @@ func defaultInstructions(scheddName string) string {
 		"Input spools per proc, so a bare cluster id returns one URL per proc and each takes its " +
 		"own tar.\n")
 	b.WriteString("3. watch_jobs / check_watches — wait for the job to finish (or be held) without polling; " +
-		"a watch fires even if it already happened. Call watch_jobs once to register; call check_watches to " +
-		"see whether it has been answered. Use query_jobs for a one-off status snapshot.\n")
+		"a watch fires even if it already happened. Call watch_jobs once to register the question; then call " +
+		"check_watches for the answer — it is the one that can wait for you (pass wait_seconds) and the one to " +
+		"call again until it answers. Use query_jobs for a one-off status snapshot.\n")
 	b.WriteString("4. tail_job_output — while it RUNS, read the end of its stdout/stderr straight from " +
 		"the execute node. This is how you watch progress or find out why a job is stuck, instead of " +
 		"waiting for it to finish. Pass the offsets it returns back on the next call to get only what " +

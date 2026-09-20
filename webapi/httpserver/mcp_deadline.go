@@ -46,6 +46,17 @@ const (
 	// mcpWatchWaitMargin is reserved for writing the response once a tool
 	// returns. The watch cap derived from the request cap leaves this much
 	// room, so a watch that waits the maximum still has time to answer.
+	//
+	// The cap this yields (14m30s by default) is what THIS server will
+	// honour, and nothing more. The MCP client, and any gateway between
+	// it and here, keeps a timeout of its own -- around a minute in
+	// practice -- which this server cannot see and cannot extend. A block
+	// past that point is severed at the client, which gets an error
+	// instead of a result, so the cap is a ceiling for a caller that asks
+	// for it explicitly and never a recommendation: the watch tools
+	// advise mcpserver.RecommendedWaitSeconds and answer "not yet" rather
+	// than run long. Lower it with HTTP_API_MCP_WATCH_MAX_WAIT where the
+	// path in front is tighter still.
 	mcpWatchWaitMargin = 30 * time.Second
 )
 
