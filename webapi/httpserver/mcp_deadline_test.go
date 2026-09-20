@@ -148,20 +148,37 @@ func TestWatchMaxWaitDerivation(t *testing.T) {
 		want time.Duration
 	}{
 		{
-			name: "derived from the default hard stop",
+			// Not DefaultMCPMaxRequestDuration-mcpWatchWaitMargin: the
+			// request deadline is not the binding constraint, the client's
+			// own timeout is, and advertising 14m30s to an agent is what
+			// made a 120s wait return nothing at all.
+			name: "the default is what the client will wait for, not what we will run",
 			cfg:  HandlerConfig{},
-			want: DefaultMCPMaxRequestDuration - mcpWatchWaitMargin,
+			want: DefaultDeliverableWatchWait,
 		},
 		{
-			name: "derived from a configured hard stop",
+			name: "a configured hard stop still does not raise it past deliverable",
 			cfg:  HandlerConfig{MCPMaxRequestDuration: 5 * time.Minute},
-			want: 5*time.Minute - mcpWatchWaitMargin,
+			want: DefaultDeliverableWatchWait,
+		},
+		{
+			// The tighter of the two wins, whichever it is.
+			name: "a hard stop tighter than deliverable is the cap",
+			cfg:  HandlerConfig{MCPMaxRequestDuration: 50 * time.Second},
+			want: 20 * time.Second,
 		},
 		{
 			// The operator knows the gateway; we do not.
 			name: "an explicit setting always wins",
 			cfg:  HandlerConfig{MCPWatchMaxWait: 15 * time.Second, MCPMaxRequestDuration: 5 * time.Minute},
 			want: 15 * time.Second,
+		},
+		{
+			// Including upwards: an operator whose clients are configured
+			// for a long tool timeout is the only one who can know that.
+			name: "an explicit setting above the deliverable ceiling wins too",
+			cfg:  HandlerConfig{MCPWatchMaxWait: 10 * time.Minute},
+			want: 10 * time.Minute,
 		},
 		{
 			// Nothing sensible to derive: leave the mcpserver default.
@@ -176,5 +193,35 @@ func TestWatchMaxWaitDerivation(t *testing.T) {
 				t.Errorf("watchMaxWait = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDeliverableWatchWaitFitsAClientMinute pins the VALUE, not just the
+// wiring.
+//
+// Everything else about the cap is derived, and this one number deliberately
+// is not: it came from watching a live deployment, where a 45s and a 50s
+// block arrived with their answer and a 120s one returned no payload at all.
+// A test that only checks watchMaxWait returns DefaultDeliverableWatchWait
+// keeps passing while the constant is raised back through the client's own
+// timeout, which is exactly the regression the constant exists to prevent --
+// so the band it has to sit in is asserted here.
+func TestDeliverableWatchWaitFitsAClientMinute(t *testing.T) {
+	// Reported around a minute, and varying by client, which is why the
+	// headroom below is a floor rather than a rounding allowance.
+	const observedClientTimeout = 60 * time.Second
+	// The longest block measured to come back with its answer.
+	const observedLongestDelivered = 50 * time.Second
+	// Left for the evaluation pass that precedes the block and the reply
+	// that follows it, neither of which is inside the wait.
+	const minHeadroom = 10 * time.Second
+
+	if DefaultDeliverableWatchWait <= 0 || DefaultDeliverableWatchWait > observedLongestDelivered {
+		t.Fatalf("DefaultDeliverableWatchWait = %v, want a positive value no greater than the %v that was observed to arrive",
+			DefaultDeliverableWatchWait, observedLongestDelivered)
+	}
+	if h := observedClientTimeout - DefaultDeliverableWatchWait; h < minHeadroom {
+		t.Errorf("DefaultDeliverableWatchWait = %v leaves %v of a %v client timeout; want at least %v for the evaluation pass and the reply",
+			DefaultDeliverableWatchWait, h, observedClientTimeout, minHeadroom)
 	}
 }

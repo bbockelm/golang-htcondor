@@ -46,18 +46,38 @@ const (
 	// mcpWatchWaitMargin is reserved for writing the response once a tool
 	// returns. The watch cap derived from the request cap leaves this much
 	// room, so a watch that waits the maximum still has time to answer.
-	//
-	// The cap this yields (14m30s by default) is what THIS server will
-	// honour, and nothing more. The MCP client, and any gateway between
-	// it and here, keeps a timeout of its own -- around a minute in
-	// practice -- which this server cannot see and cannot extend. A block
-	// past that point is severed at the client, which gets an error
-	// instead of a result, so the cap is a ceiling for a caller that asks
-	// for it explicitly and never a recommendation: the watch tools
-	// advise mcpserver.RecommendedWaitSeconds and answer "not yet" rather
-	// than run long. Lower it with HTTP_API_MCP_WATCH_MAX_WAIT where the
-	// path in front is tighter still.
 	mcpWatchWaitMargin = 30 * time.Second
+
+	// DefaultDeliverableWatchWait is how long a block can be expected to
+	// SURVIVE, as against how long this server is willing to run it.
+	//
+	// The two are different numbers and only one of them is ours. The
+	// deadline extension above settles what this daemon will hold a request
+	// open for -- 14m30s once the reply margin is taken off the default hard
+	// stop -- and says nothing about the MCP client at the other end, which
+	// abandons a tool call on a timer of its own that this server cannot
+	// see, cannot extend and is not told about. Measured against a live
+	// deployment: a 45s and a 50s block both came back with their answer,
+	// while 120s and 600s returned nothing at all -- not a timeout result, no
+	// payload, just the client giving up. Reports of that timer put it near
+	// 60s, and it varies by client: the CLI honours a per-server override,
+	// the desktop app reportedly ignores it, and a progress notification
+	// does not reset it.
+	//
+	// So a cap derived from our own deadline is a number no one can deliver,
+	// and advertising it is worse than advertising a small one. The tool
+	// description is what an agent plans against; told it may wait 14m30s it
+	// asks for minutes, and every such call returns nothing -- which an agent
+	// cannot tell apart from a lost answer, where a wait that runs out and
+	// says "not yet" is unambiguous and costs one more turn. 45s is the
+	// longest block observed to arrive, with the rest of the minute left for
+	// the evaluation pass and the reply.
+	//
+	// This bounds the DEFAULT only. HTTP_API_MCP_WATCH_MAX_WAIT still wins
+	// outright, in both directions: an operator who knows their clients are
+	// configured for longer, or who has a gateway tighter than this, is the
+	// only one who knows, and setting it is how they say so.
+	DefaultDeliverableWatchWait = 45 * time.Second
 )
 
 // writeWindow is how far ahead each extension moves the deadline. Overridable
@@ -150,12 +170,17 @@ func (h *Handler) progressiveWriteDeadline(parent context.Context, w http.Respon
 }
 
 // watchMaxWait is how long watch_jobs may block in-call: the operator's
-// setting when there is one, else derived from the request hard stop.
+// setting when there is one, else the smaller of what this server will run
+// and what the client is expected to wait for.
 //
 // Only the operator knows what sits in front of this daemon, so an explicit
 // HTTP_API_MCP_WATCH_MAX_WAIT is never overridden -- a gateway with a shorter
 // timeout than ours is still the real ceiling, and the deadline extension here
-// does nothing about it.
+// does nothing about it. Unset, the default is deliberately the pessimistic
+// one of the two: the derived cap where the request deadline is the tighter
+// constraint, DefaultDeliverableWatchWait where it is not. A cap nobody can
+// deliver is not a generous default, it is a trap, and the number here is
+// what the tool schema advertises to the agent.
 func watchMaxWait(cfg HandlerConfig) time.Duration {
 	if cfg.MCPWatchMaxWait > 0 {
 		return cfg.MCPWatchMaxWait
@@ -164,5 +189,11 @@ func watchMaxWait(cfg HandlerConfig) time.Duration {
 	if maxRequest <= 0 {
 		maxRequest = DefaultMCPMaxRequestDuration
 	}
-	return derivedWatchMaxWait(maxRequest)
+	derived := derivedWatchMaxWait(maxRequest)
+	// Zero means "nothing sensible to derive"; leave the mcpserver default
+	// in place rather than raising it to the deliverable ceiling.
+	if derived == 0 || derived < DefaultDeliverableWatchWait {
+		return derived
+	}
+	return DefaultDeliverableWatchWait
 }
