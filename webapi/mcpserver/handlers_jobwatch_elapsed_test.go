@@ -24,6 +24,11 @@ func structuredOf(t *testing.T, res interface{}) map[string]interface{} {
 // An agent has no clock across a tool call. Without the elapsed time it
 // cannot tell a watch that came back instantly from one that blocked for
 // ten minutes, and those say very different things about the pool.
+//
+// blocked_seconds is the duration of THIS CALL and watch_age_seconds the
+// age of the watch. They were both called "waited" once, which is what
+// made a caller read a 0-second answer as a watch registered 0 seconds
+// ago; the names now say which is which.
 func TestWatchReportsHowLongItWaited(t *testing.T) {
 	s := watchServer(t, &stubSource{history: []*classad.ClassAd{histAd(42, 0, 4, 0)}})
 
@@ -32,17 +37,26 @@ func TestWatchReportsHowLongItWaited(t *testing.T) {
 		t.Errorf("the text does not say how long the call waited:\n%s", got)
 	}
 	sc := structuredOf(t, res)
-	if _, ok := sc["waited_seconds"]; !ok {
-		t.Errorf("waited_seconds missing from the structured result: %+v", sc)
+	if _, ok := sc["blocked_seconds"]; !ok {
+		t.Errorf("blocked_seconds missing from the structured result: %+v", sc)
+	}
+	if _, ok := sc["waited_seconds"]; ok {
+		t.Errorf("waited_seconds is the age of a watch, not the length of a call; watch_jobs must not "+
+			"report the call duration under that name: %+v", sc)
 	}
 	if _, ok := sc["watch_age_seconds"]; !ok {
 		t.Errorf("watch_age_seconds missing from the structured result: %+v", sc)
 	}
 
 	// And on the reporting side, for a watch answered in an earlier call.
-	report := text(t, mustCheck(t, s, map[string]interface{}{"include_delivered": true}))
-	if !strings.Contains(report, "after waiting") {
+	res = mustCheck(t, s, map[string]interface{}{"include_delivered": true})
+	if report := text(t, res); !strings.Contains(report, "after waiting") {
 		t.Errorf("check_watches does not say how long the question took:\n%s", report)
+	}
+	// Which is a different number from how long the check itself blocked,
+	// and check_watches reports both.
+	if _, ok := structuredOf(t, res)["blocked_seconds"]; !ok {
+		t.Errorf("blocked_seconds missing from the check_watches result: %+v", structuredOf(t, res))
 	}
 }
 

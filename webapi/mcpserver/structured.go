@@ -262,17 +262,20 @@ var outputSchemas = map[string]map[string]interface{}{
 		"fired":      boolSchema,
 		// How long this call blocked, and how long the watch has existed
 		// (they differ once a watch outlives the call that made it).
-		"waited_seconds":    intSchema,
+		"blocked_seconds":   intSchema,
 		"watch_age_seconds": intSchema,
 		// Fired because the state can no longer occur rather than
 		// because it happened -- "it never ran", not "it ran".
 		"unsatisfiable": boolSchema,
 	}, "watch_id"),
 	"check_watches": obj(map[string]interface{}{
-		"watches":       arr(adSchema),
-		"count":         intSchema,
-		"new_count":     intSchema,
-		"waiting_count": intSchema,
+		"watches": arr(adSchema),
+		"count":   intSchema,
+		// How long this CALL blocked, as against each watch's own
+		// waited_seconds, which is how long that watch has been open.
+		"blocked_seconds": intSchema,
+		"new_count":       intSchema,
+		"waiting_count":   intSchema,
 	}, "count"),
 	"cancel_watch": obj(map[string]interface{}{
 		"watch_id":  strSchema,

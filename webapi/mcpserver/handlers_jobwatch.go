@@ -33,8 +33,13 @@ import (
 // so the client gets an error and never receives the watch id, even
 // though the watch was registered. 20s comfortably fits a 30s gateway;
 // deployments behind a tighter (or looser) one tune it with
-// HTTP_API_MCP_WATCH_MAX_WAIT. Anything longer belongs to check_watches,
-// which does not depend on a connection staying open.
+// HTTP_API_MCP_WATCH_MAX_WAIT.
+//
+// It is a ceiling on one call, not on the wait. A watch outlives every
+// call made about it, so a wait longer than the cap is any number of
+// bounded check_watches calls -- which is why the tools recommend
+// RecommendedWaitSeconds rather than the cap, and why a wait that runs
+// out answers "not yet" instead of holding the connection open.
 const MaxWaitSeconds = 20
 
 func (s *Server) jobWatchEnabled() bool {
@@ -55,6 +60,48 @@ func (s *Server) maxWaitSeconds() int {
 	return MaxWaitSeconds
 }
 
+// watchPollInterval is how often a blocking call re-evaluates the
+// owner's watches. There is nothing to be woken by: the evaluator is a
+// sweep over the queue and the history, so a wait is that sweep run
+// again until it has an answer. Two seconds is short enough that the
+// answer is fresh and long enough that a held-open call is not a load
+// source. A var so a test can shorten it; nothing else writes it.
+var watchPollInterval = 2 * time.Second
+
+// awaitAnswer is the one blocking primitive behind both watch_jobs and
+// check_watches: evaluate this owner's watches, ask the caller whether
+// that produced an answer, and if not, sleep and go round until the
+// deadline. A deadline in the past means one evaluation and no sleep,
+// which is the non-blocking call -- so both tools take the same path and
+// "fires straight away if it is already satisfied" cannot hold for one
+// of them and not the other.
+//
+// The last sleep is trimmed to the deadline: a caller that asked for 30
+// seconds gets 30, not 30 rounded up to the next poll.
+func (s *Server) awaitAnswer(ctx context.Context, owner string, deadline time.Time, answered func() (bool, error)) error {
+	for {
+		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
+			s.logger.Warn(logging.DestinationGeneral, "evaluating job watches failed", "error", err)
+		}
+		done, err := answered()
+		if err != nil {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if done || remaining <= 0 {
+			return nil
+		}
+		if remaining > watchPollInterval {
+			remaining = watchPollInterval
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(remaining):
+		}
+	}
+}
+
 // jobWatchTools returns the tool definitions, with the event vocabulary
 // rendered from jobwatch.Events so what the agent is told and what the
 // evaluator implements cannot drift.
@@ -62,6 +109,7 @@ func jobWatchTools(maxWait int) []Tool {
 	// Rendered from the cap, so what the agent is told to do and how long it
 	// is allowed to do it cannot drift apart. See watch_advice.go.
 	advice := waitAdvice(maxWait)
+	checking := checkAdvice(maxWait)
 
 	events := make([]interface{}, 0, len(jobwatch.Events))
 	for _, spec := range jobwatch.Events {
@@ -70,9 +118,10 @@ func jobWatchTools(maxWait int) []Tool {
 	return []Tool{
 		{
 			Name: "watch_jobs",
-			Description: "Wait for something to happen to your jobs WITHOUT polling. " + advice.Strategy + "\n\n" +
-				"CALL THIS ONCE PER QUESTION. To see whether a watch has been answered, call check_watches: " +
-				"calling watch_jobs again resolves back to the same watch and does not check it.\n\n" +
+			Description: "Register a question about your jobs, to be answered WITHOUT polling. " + advice.Strategy + "\n\n" +
+				"CALL THIS ONCE PER QUESTION, to register it. Everything after that is check_watches: it reports the answer, " +
+				"and it is the tool that can wait for it. Calling watch_jobs again resolves back to the same watch, does not " +
+				"check it, and does not wait.\n\n" +
 				"Use this instead of repeatedly calling query_jobs in a loop; query_jobs is for a one-off " +
 				"status snapshot.\n\n" +
 				"IMPORTANT: do not write a constraint like 'JobStatus == 4' to wait for completion. A finished job is removed from " +
@@ -110,9 +159,8 @@ func jobWatchTools(maxWait int) []Tool {
 						"description": "A short name for this watch, echoed back so you can tell several apart.",
 					},
 					"wait_seconds": map[string]interface{}{
-						"type": "integer",
-						"description": advice.WaitParam + " Waiting again by re-calling watch_jobs is not " +
-							"how to check on a watch you already registered; that is check_watches.",
+						"type":        "integer",
+						"description": advice.WaitParam,
 					},
 					"ttl_seconds": map[string]interface{}{
 						"type":        "integer",
@@ -125,14 +173,19 @@ func jobWatchTools(maxWait int) []Tool {
 		{
 			Name: "check_watches",
 			Description: "Collect the answers to watches you registered with watch_jobs — 'what happened while I was gone'. " +
-				"THIS is the tool to call every time you want to know whether a watch has been answered; watch_jobs only " +
-				"registers it. Returns watches that have fired since you last looked, plus the progress of those still waiting. " +
-				"Cheap to call at the start of a turn. Reading does not consume an answer; pass include_delivered to see ones you have already been shown.",
+				"THIS is the tool to call every time you want to know whether a watch has been answered, and to call again " +
+				"until it has been; watch_jobs only registers the question. Returns watches that have fired since you last " +
+				"looked, plus the progress of those still waiting.\n\n" + checking.Waiting + "\n\n" +
+				"Reading does not consume an answer; pass include_delivered to see ones you have already been shown.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"watch_id":          map[string]interface{}{"type": "string", "description": "Only report this watch."},
+					"watch_id":          map[string]interface{}{"type": "string", "description": "Only report this watch. With wait_seconds, wait for this one specifically."},
 					"include_delivered": map[string]interface{}{"type": "boolean", "description": "Also report answers you have already been shown (default false)."},
+					"wait_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": checking.WaitParam,
+					},
 				},
 			},
 		},
@@ -198,46 +251,44 @@ func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{})
 	// so without this the second call blocks all over again -- which is
 	// exactly the polling loop watches exist to replace, and it is what
 	// an agent does when it reads watch_jobs as "get me the state now".
-	// Answer from what is already known and name the tool that does
-	// this properly.
+	// Waiting on a watch that exists is check_watches' job, and it can
+	// do it without this tool's "call me once" rule getting in the way,
+	// so answer from what is already known and name that tool.
 	callStart := time.Now()
 	deadline := callStart.Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
-	if w.Coalesced && !blockingIsPrimary(s.maxWaitSeconds()) {
+	if w.Coalesced {
 		deadline = callStart
 	}
-	for {
-		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
-			s.logger.Warn(logging.DestinationGeneral, "evaluating a new job watch failed", "error", err)
-		}
-		got, err := s.oneWatch(ctx, owner, w.ID)
+	var got *jobwatch.Watch
+	err = s.awaitAnswer(ctx, owner, deadline, func() (bool, error) {
+		found, err := s.oneWatch(ctx, owner, w.ID)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		if got == nil || !got.FiredAt.IsZero() || !time.Now().Before(deadline) {
-			// How long this call blocked. An agent that cannot see the
-			// clock has no other way to tell a watch that fired at once
-			// from one that came back after ten minutes of waiting, and
-			// the two mean very different things about the pool.
-			waited := time.Since(callStart)
-			out := map[string]interface{}{
-				"watch_id":       w.ID,
-				"event":          string(w.Event),
-				"constraint":     w.Constraint,
-				"fired":          got != nil && !got.FiredAt.IsZero(),
-				"waited_seconds": int(waited.Round(time.Second).Seconds()),
-			}
-			if got != nil {
-				out["watch_age_seconds"] = int(time.Since(got.CreatedAt).Round(time.Second).Seconds())
-				out["unsatisfiable"] = got.Unsatisfiable
-			}
-			return structuredTextResult(renderWatchRegistration(got, w, waited), out), nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+		got = found
+		return found == nil || !found.FiredAt.IsZero(), nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	// How long this CALL blocked -- not how long the watch has been
+	// open, which is watch_age_seconds. An agent that cannot see the
+	// clock has no other way to tell a watch that fired at once from one
+	// that came back after ten minutes of waiting, and the two mean very
+	// different things about the pool.
+	blocked := time.Since(callStart)
+	out := map[string]interface{}{
+		"watch_id":        w.ID,
+		"event":           string(w.Event),
+		"constraint":      w.Constraint,
+		"fired":           got != nil && !got.FiredAt.IsZero(),
+		"blocked_seconds": int(blocked.Round(time.Second).Seconds()),
+	}
+	if got != nil {
+		out["watch_age_seconds"] = int(time.Since(got.CreatedAt).Round(time.Second).Seconds())
+		out["unsatisfiable"] = got.Unsatisfiable
+	}
+	return structuredTextResult(renderWatchRegistration(got, w, blocked), out), nil
 }
 
 func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -248,34 +299,34 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 	if err != nil {
 		return nil, err
 	}
-	// Evaluate before reporting: an agent asking "what happened" should
-	// not be told "nothing yet" only because the sweep is a few seconds
-	// out of phase with its turn.
-	if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
-		s.logger.Warn(logging.DestinationGeneral, "evaluating job watches failed", "error", err)
-	}
-
-	all, err := s.jobWatch.ForOwner(ctx, owner, nil)
-	if err != nil {
-		return nil, err
-	}
 	wanted, _ := args["watch_id"].(string)
 	includeDelivered, _ := args["include_delivered"].(bool)
 
+	// Evaluating before reporting is what makes this tool answerable at
+	// all: an agent asking "what happened" should not be told "nothing
+	// yet" only because the sweep is a few seconds out of phase with its
+	// turn. wait_seconds keeps doing exactly that until something fires
+	// or the deadline passes, so waiting is the same sweep, held open --
+	// there is no second mechanism, and an answer that already exists
+	// still comes back on the first pass without blocking.
+	callStart := time.Now()
+	deadline := callStart.Add(time.Duration(s.clampWait(intArg(args, "wait_seconds", 0))) * time.Second)
 	var news, waiting []*jobwatch.Watch
-	var deliver []string
-	for _, w := range all {
-		if wanted != "" && w.ID != wanted {
-			continue
+	err = s.awaitAnswer(ctx, owner, deadline, func() (bool, error) {
+		var err error
+		news, waiting, err = s.sortWatches(ctx, owner, wanted, includeDelivered)
+		if err != nil {
+			return false, err
 		}
-		if w.FiredAt.IsZero() {
-			waiting = append(waiting, w)
-			continue
-		}
-		if !w.DeliveredAt.IsZero() && !includeDelivered && wanted == "" {
-			continue
-		}
-		news = append(news, w)
+		return len(news) > 0, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	blocked := time.Since(callStart)
+
+	deliver := make([]string, 0, len(news))
+	for _, w := range news {
 		deliver = append(deliver, w.ID)
 	}
 	if len(deliver) > 0 {
@@ -310,12 +361,41 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 	for _, w := range waiting {
 		entries = append(entries, watchEntry(w, false))
 	}
-	return structuredTextResult(renderWatchReport(news, waiting, includeDelivered), map[string]interface{}{
-		"watches":       entries,
-		"count":         len(entries),
-		"new_count":     len(news),
-		"waiting_count": len(waiting),
+	return structuredTextResult(renderWatchReport(news, waiting, includeDelivered, blocked), map[string]interface{}{
+		"watches": entries,
+		"count":   len(entries),
+		// How long THIS CALL blocked, as against the per-watch
+		// waited_seconds, which is how long that watch has been open.
+		"blocked_seconds": int(blocked.Round(time.Second).Seconds()),
+		"new_count":       len(news),
+		"waiting_count":   len(waiting),
 	}), nil
+}
+
+// sortWatches splits this owner's watches into the ones with an answer to
+// report and the ones still waiting, applying the same filters the report
+// does -- one watch when watch_id names it, and answers already shown only
+// when they are asked for. A blocking call asks this every pass, so what it
+// waits for and what it finally prints cannot come apart.
+func (s *Server) sortWatches(ctx context.Context, owner, wanted string, includeDelivered bool) (news, waiting []*jobwatch.Watch, err error) {
+	all, err := s.jobWatch.ForOwner(ctx, owner, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, w := range all {
+		if wanted != "" && w.ID != wanted {
+			continue
+		}
+		if w.FiredAt.IsZero() {
+			waiting = append(waiting, w)
+			continue
+		}
+		if !w.DeliveredAt.IsZero() && !includeDelivered && wanted == "" {
+			continue
+		}
+		news = append(news, w)
+	}
+	return news, waiting, nil
 }
 
 func (s *Server) toolCancelWatch(ctx context.Context, args map[string]interface{}) (interface{}, error) {

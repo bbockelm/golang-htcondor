@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"fmt"
-	"time"
 )
 
 // What the agent is told about blocking, derived from how long it is actually
@@ -10,67 +9,83 @@ import (
 //
 // The cap is deployment configuration: it follows the request deadline and,
 // where there is one, the gateway in front of the daemon. The advice around it
-// was not -- it was prose written when the cap was twenty seconds, and at that
-// size "block only if you expect it imminently, otherwise register and collect
-// later" is right. Raise the cap to minutes and the same sentence is wrong:
-// blocking becomes the simple thing to do for most waits, and an agent that
-// keeps returning immediately is doing extra turns for no reason.
+// was not -- it was prose written beside a particular cap, and prose written
+// for twenty seconds is wrong at fifteen minutes and vice versa. So the advice
+// is rendered from the cap instead. One value decides both the number the
+// agent is given and what it is told to do with it, which is the only way they
+// cannot disagree.
 //
-// So the advice is rendered from the cap rather than written beside it. One
-// value decides both the number the agent is given and what it is told to do
-// with it, which is the only way they cannot disagree.
+// The division of labour the advice describes: watch_jobs registers a question
+// once, check_watches is called as often as the agent likes AND is the tool
+// that waits. Blocking used to be offered on watch_jobs alone, which put the
+// only waiting knob on the one tool an agent is told to call once -- so an
+// agent that wanted to wait had no correct move and fell back to the polling
+// loop these tools exist to replace.
 
-// blockingIsPrimaryAbove is where the advice flips. Below it, blocking is worth
-// doing only for something already imminent; above it, a wait long enough to
-// cover a job starting, or a short job finishing, is inside the cap, and
-// telling an agent to return immediately just buys it another round trip.
-const blockingIsPrimaryAbove = 2 * time.Minute
+// RecommendedWaitSeconds is the block to ask for when nothing more specific is
+// known. It is not the cap and it is deliberately far below it: the cap is
+// what this server will honour, while the MCP client or gateway in front of it
+// has a timeout of its own -- observed around a minute -- that this server
+// cannot see. A block the client cuts off returns nothing at all, which is
+// strictly worse than returning "not yet" and being called again.
+const RecommendedWaitSeconds = 30
 
-// blockingIsPrimary reports whether this deployment's cap makes blocking
-// the endorsed way to wait, which decides more than the wording.
-//
-// Re-registering a watch resolves to the one already there. Below the
-// threshold that is an agent using watch_jobs to poll -- it was told to
-// block only for something imminent, it did, the event did not happen,
-// and calling again just stalls the next turn too; it should be handed
-// the current state and pointed at check_watches. Above it, blocking IS
-// the advice, so a caller asking to wait again (a retry after a
-// transport timeout, say) is doing what the tool told it to, and its
-// wait must be honoured.
-func blockingIsPrimary(maxWait int) bool {
-	return time.Duration(maxWait)*time.Second >= blockingIsPrimaryAbove
+// recommendedWait is RecommendedWaitSeconds, or the cap where the cap is
+// tighter -- never advice to ask for more than the server will give.
+func recommendedWait(maxWait int) int {
+	if maxWait < RecommendedWaitSeconds {
+		return maxWait
+	}
+	return RecommendedWaitSeconds
 }
+
+// transportHazard is the warning attached to every blocking knob: the number
+// this server honours is not the number the path in front of it honours.
+const transportHazard = "Longer blocks are a gamble: the MCP client (or a gateway) between you and this " +
+	"server has a timeout of its own, often around a minute, and if it fires first the call returns nothing at all."
 
 // watchWaitAdvice is the cap-dependent text for the watch_jobs tool.
 type watchWaitAdvice struct {
-	// Strategy opens the tool description: what to do with this tool given
-	// how long it may block.
+	// Strategy opens the tool description: what this tool is for, given
+	// that check_watches is where waiting happens.
 	Strategy string
 	// WaitParam describes the wait_seconds parameter.
 	WaitParam string
 }
 
-// waitAdvice renders the advice for a cap of maxWait seconds.
+// waitAdvice renders the watch_jobs advice for a cap of maxWait seconds.
 func waitAdvice(maxWait int) watchWaitAdvice {
-	human := humanizeSeconds(maxWait)
-
-	if !blockingIsPrimary(maxWait) {
-		return watchWaitAdvice{
-			Strategy: "Registers a durable watch and returns immediately; " +
-				"call check_watches later (any time, even in a different session) to collect the answer. " +
-				fmt.Sprintf("This deployment allows blocking in-call for at most %s, so blocking is worth it only for something you expect imminently.", human),
-			WaitParam: fmt.Sprintf("Optionally block up to this many seconds (max %d) waiting for the event before returning. "+
-				"Use a small value only when you expect it imminently; otherwise return at once and use check_watches.", maxWait),
-		}
-	}
-
 	return watchWaitAdvice{
-		Strategy: "Registers a durable watch. " +
-			fmt.Sprintf("You can block on it for up to %s, which is usually the simplest thing to do: pass wait_seconds and the answer comes back in this response. ", human) +
-			"Or return immediately and call check_watches later (any time, even in a different session) to collect the answer — " +
-			"which is what you want for a wait longer than that, or when you would rather not hold the call open.",
-		WaitParam: fmt.Sprintf("Optionally block up to this many seconds (max %d, about %s) waiting for the event before returning. "+
-			"Blocking is fine for anything you expect within that window; for a longer wait return at once and use check_watches.", maxWait, human),
+		Strategy: "Registers a durable watch and returns; " +
+			fmt.Sprintf("to WAIT for it, call check_watches with wait_seconds (%d is a good value, %s the most this deployment allows). ", recommendedWait(maxWait), humanizeSeconds(maxWait)) +
+			"check_watches can be called as often as you like, from any later turn or session, and is where waiting belongs.",
+		WaitParam: fmt.Sprintf("Optionally block up to this many seconds (max %d) before returning, for something you expect within a few seconds of registering. ", maxWait) +
+			"For any longer wait, return at once and block in check_watches instead: re-calling watch_jobs resolves back to this same watch and does not check it. " +
+			transportHazard,
+	}
+}
+
+// checkWaitAdvice is the cap-dependent text for the check_watches tool.
+type checkWaitAdvice struct {
+	// Waiting is appended to the tool description: that this is the tool
+	// that blocks, and for how long.
+	Waiting string
+	// WaitParam describes the wait_seconds parameter.
+	WaitParam string
+}
+
+// checkAdvice renders the check_watches advice for a cap of maxWait seconds.
+func checkAdvice(maxWait int) checkWaitAdvice {
+	rec := recommendedWait(maxWait)
+	return checkWaitAdvice{
+		Waiting: fmt.Sprintf("It is also the tool that WAITS: pass wait_seconds (try %d) and it blocks until one of these watches fires, "+
+			"up to %s in this deployment. ", rec, humanizeSeconds(maxWait)) +
+			"A watch that has already fired comes back straight away, and a wait that runs out comes back with the progress so " +
+			"far — never an error — so the answer to \"is it done yet\" is always this call again.",
+		WaitParam: fmt.Sprintf("Block up to this many seconds (max %d) waiting for a watch to fire. Omit it for an immediate snapshot. "+
+			"Use %d unless you have a reason not to, and call again if it comes back with nothing: repeating a %d-second wait gets you "+
+			"the answer sooner than one long block that may never be delivered. ", maxWait, rec, rec) +
+			transportHazard,
 	}
 }
 

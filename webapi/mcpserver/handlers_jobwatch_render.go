@@ -13,12 +13,13 @@ import (
 // learn whether its jobs finished will sometimes get it wrong; one that
 // reads "FIRED: all 200 jobs are done" will not.
 
-// waited is how long this call blocked before returning, which the text
+// blocked is how long THIS CALL waited before returning, which the text
 // states outright. An agent has no clock of its own across a tool call:
 // without it, a watch that fired immediately and one that came back after
 // a ten-minute wait read identically, and the elapsed time is most of
-// what says whether the pool is moving.
-func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch, waited time.Duration) string {
+// what says whether the pool is moving. It is not the age of the watch,
+// which outlives the call that registered it.
+func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch, blocked time.Duration) string {
 	w := got
 	if w == nil {
 		w = registered
@@ -30,27 +31,27 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch, wa
 	}
 	var b strings.Builder
 	if !w.FiredAt.IsZero() {
-		fmt.Fprintf(&b, "FIRED after %s — %s\n\n", shortDuration(waited), describeFired(w))
+		fmt.Fprintf(&b, "FIRED after %s — %s\n\n", shortDuration(blocked), describeFired(w))
 		fmt.Fprintf(&b, "Watch %s (%s) has already been answered; you do not need to check it again.\n", w.ID, describeQuestion(w))
 		b.WriteString(renderMatched(w))
 		return b.String()
 	}
 
 	// Re-registering an identical question returns the watch that
-	// already exists. An agent reading watch_jobs as "tell me the state
-	// now" otherwise calls it again every turn, waiting each time on a
-	// question it has already arranged to have answered.
+	// already exists, immediately. An agent reading watch_jobs as "tell
+	// me the state now" otherwise calls it again every turn, waiting
+	// each time on a question it has already arranged to have answered.
 	if w.Coalesced {
-		fmt.Fprintf(&b, "ALREADY WATCHING (waited %s in this call) — %s, registered %s ago: %s\n\n",
-			shortDuration(waited),
+		fmt.Fprintf(&b, "ALREADY WATCHING — %s, registered %s ago: %s\n\n",
 			w.ID, shortDuration(time.Since(w.CreatedAt)), describeQuestion(w))
 		b.WriteString(renderWatchProgress(w))
-		fmt.Fprintf(&b, "\nTo check it, call check_watches with {\"watch_id\": %q}. Calling watch_jobs "+
-			"again only returns here.\n", w.ID)
+		fmt.Fprintf(&b, "\nThis call does not wait. To wait for it, call check_watches with "+
+			"{\"watch_id\": %q, \"wait_seconds\": %d}; calling watch_jobs again only returns here.\n",
+			w.ID, RecommendedWaitSeconds)
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "WAITING after %s — watch %s registered: %s\n\n", shortDuration(waited), w.ID, describeQuestion(w))
+	fmt.Fprintf(&b, "WAITING after %s — watch %s registered: %s\n\n", shortDuration(blocked), w.ID, describeQuestion(w))
 	if w.Incomplete {
 		b.WriteString("WARNING: this watch selects more jobs than one read of the queue covers, so it is " +
 			"looking at a sample rather than the whole set. An \"all\" watch will never fire in this state, " +
@@ -59,8 +60,9 @@ func renderWatchRegistration(got *jobwatch.Watch, registered *jobwatch.Watch, wa
 			"or use aggregate_jobs to follow bulk progress instead.\n\n")
 	}
 	b.WriteString(renderWatchProgress(w))
-	fmt.Fprintf(&b, "\nDo not poll. When you next need to know, call check_watches with {\"watch_id\": %q}, "+
-		"or with no arguments to collect every answer at once.\n", w.ID)
+	fmt.Fprintf(&b, "\nDo not poll. To wait for this one, call check_watches with {\"watch_id\": %q, "+
+		"\"wait_seconds\": %d} — it blocks until the watch fires and answers either way. With no arguments it "+
+		"collects every answer at once, without waiting.\n", w.ID, RecommendedWaitSeconds)
 	return b.String()
 }
 
@@ -82,17 +84,28 @@ func renderWatchProgress(w *jobwatch.Watch) string {
 		"yet. Otherwise the constraint is wrong -- check it with query_jobs.\n"
 }
 
-func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool) string {
+// blocked is how long this call waited before answering. A wait that ran
+// out is a normal answer, not a failure: it says "not yet", names what is
+// still open, and tells the caller to come back -- which is the whole
+// point of holding the call rather than letting a transport timeout cut
+// it off and return nothing.
+func renderWatchReport(news, waiting []*jobwatch.Watch, includeDelivered bool, blocked time.Duration) string {
 	var b strings.Builder
+	waitedFor := ""
+	if blocked >= time.Second {
+		waitedFor = fmt.Sprintf(" after waiting %s", shortDuration(blocked))
+	}
 	switch {
 	case len(news) == 1:
-		fmt.Fprintf(&b, "1 watch fired: %s\n\n", describeFired(news[0]))
+		fmt.Fprintf(&b, "1 watch fired%s: %s\n\n", waitedFor, describeFired(news[0]))
 	case len(news) > 1:
-		fmt.Fprintf(&b, "%d watches fired.\n\n", len(news))
+		fmt.Fprintf(&b, "%d watches fired%s.\n\n", len(news), waitedFor)
 	case len(waiting) == 0:
 		return "No watches registered. Use watch_jobs to be told when something happens instead of polling.\n"
 	default:
-		fmt.Fprintf(&b, "Nothing new. %d watch(es) still waiting.\n\n", len(waiting))
+		fmt.Fprintf(&b, "Nothing new%s. %d watch(es) still waiting; they are still registered, so call "+
+			"check_watches again (with wait_seconds to wait for them) — nothing has been lost.\n\n",
+			waitedFor, len(waiting))
 	}
 
 	for _, w := range news {
