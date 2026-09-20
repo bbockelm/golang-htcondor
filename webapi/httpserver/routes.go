@@ -196,8 +196,9 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
 
 	// Collector endpoints
-	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch)))) // SSE ad-change stream (more specific than the dispatcher below)
-	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))             // Pattern with trailing slash catches /api/v1/collector/* paths
+	mux.Handle("/api/v1/collector/pool-summary", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolSummary)))) // aggregated /pool overview (more specific than the dispatcher below)
+	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch))))     // SSE ad-change stream (more specific than the dispatcher below)
+	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))                 // Pattern with trailing slash catches /api/v1/collector/* paths
 
 	// htcondordb mirror status (admin-gated inside the handler). The
 	// data is on /readyz and /metrics too, but both of those answer a
