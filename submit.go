@@ -730,7 +730,14 @@ func checkStdFile(value string) (file string, transferIt bool) {
 	return value, true
 }
 
-// setStandardFiles sets input, output, and error file attributes
+// setStandardFiles sets input, output, and error file attributes.
+//
+// Each of the three standard streams has two accepted submit-command
+// spellings. SetStdin, SetStdout and SetStderr in
+// src/condor_utils/submit_utils.cpp read them as
+// submit_param(SUBMIT_KEY_Input, SUBMIT_KEY_Stdin) and so on, so
+// "stdin", "stdout" and "stderr" name the same files as "input",
+// "output" and "error"; see submitCommandAlt for which one wins.
 func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 	// In/Out/Err are always assigned, even when the submit file names
 	// none of them: SetStdin/SetStdout/SetStderr in submit_utils.cpp
@@ -746,7 +753,7 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 	// which forces it off for a stream whose file is the null file
 	// whatever the submit command said.
 	for _, std := range stdioStreams {
-		value, _ := sf.submitCommand(std.fileCmd)
+		value, _ := sf.submitCommandAlt(std.fileCmd, std.altFileCmd)
 		file, transferIt := checkStdFile(value)
 		if !sf.stdioTransferIt(std.transferCmd) {
 			transferIt = false
@@ -769,15 +776,16 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 // commands that describe it and the job attributes it is written to.
 var stdioStreams = []struct {
 	fileCmd      string // submit command: input / output / error
+	altFileCmd   string // its second accepted spelling: stdin / stdout / stderr
 	transferCmd  string // submit command: transfer_input / transfer_output / transfer_error
 	streamCmd    string // submit command: stream_input / stream_output / stream_error
 	fileAttr     string // job attribute holding the filename
 	transferAttr string // job attribute written when the stream is not transferred
 	streamAttr   string // job attribute written for the streaming choice
 }{
-	{"input", "transfer_input", "stream_input", "In", "TransferIn", "StreamIn"},
-	{"output", "transfer_output", "stream_output", "Out", "TransferOut", "StreamOut"},
-	{"error", "transfer_error", "stream_error", "Err", "TransferErr", "StreamErr"},
+	{"input", "stdin", "transfer_input", "stream_input", "In", "TransferIn", "StreamIn"},
+	{"output", "stdout", "transfer_output", "stream_output", "Out", "TransferOut", "StreamOut"},
+	{"error", "stderr", "transfer_error", "stream_error", "Err", "TransferErr", "StreamErr"},
 }
 
 // stdioTransferIt reports whether the submit file leaves the standard
@@ -2331,8 +2339,12 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 	// SetStderr sits behind "if (transfer_it)", and both routes to
 	// transfer_it == false clear it: checkStdFile for a null file, and an
 	// explicit transfer_<x> = false.
+	//
+	// The file is read through its alias as well: whether the stream is
+	// transferred is a property of the stream, not of which of the two
+	// accepted spellings the submit file used to name it.
 	for _, std := range stdioStreams {
-		fileValue, _ := sf.submitCommand(std.fileCmd)
+		fileValue, _ := sf.submitCommandAlt(std.fileCmd, std.altFileCmd)
 		if _, transferIt := checkStdFile(fileValue); !transferIt {
 			continue
 		}
@@ -2585,4 +2597,28 @@ func (sf *SubmitFile) submitCommand(key string) (string, bool) {
 		return "", false
 	}
 	return sf.cfg.Get(key)
+}
+
+// submitCommandAlt reads a submit-file command that has a second
+// accepted spelling, mirroring
+// SubmitHash::submit_param(name, alt_name) in
+// src/condor_utils/submit_utils.cpp.
+//
+// The primary name wins, and it wins by being present rather than by
+// having a value: submit_param looks the alternate up only when
+// lookup_macro finds nothing at all under the primary, and it does that
+// before expanding either. So
+//
+//	output =
+//	stdout = so.txt
+//
+// leaves condor_submit with no output file -- the empty primary
+// suppresses the alternate instead of deferring to it, and checkStdFile
+// then canonicalizes the unnamed stream to /dev/null -- and the order
+// the two appear in the file makes no difference.
+func (sf *SubmitFile) submitCommandAlt(key, altKey string) (string, bool) {
+	if value, ok := sf.submitCommand(key); ok {
+		return value, true
+	}
+	return sf.submitCommand(altKey)
 }

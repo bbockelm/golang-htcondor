@@ -788,3 +788,42 @@ func TestSubmitTransferStdioOff(t *testing.T) {
 		})
 	}
 }
+
+// TestSubmitStdioAliases pins the stdin alias directly, alongside the
+// differential coverage in TestIntegrationStdioAliases: this one runs
+// without condor_submit installed.
+//
+// The expectations come from condor_submit -dry-run on the same submit
+// files.
+func TestSubmitStdioAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		submit string
+		wantIn string
+	}{
+		{name: "StdinAlias", submit: "stdin = a.in\n", wantIn: "a.in"},
+		{name: "InputBeatsStdin", submit: "stdin = a.in\ninput = p.in\n", wantIn: "p.in"},
+		{name: "InputBeatsStdinReversed", submit: "input = p.in\nstdin = a.in\n", wantIn: "p.in"},
+		// An empty primary is still present, so it suppresses the
+		// alternate and the stream is left unnamed.
+		{name: "EmptyPrimarySuppressesStdin", submit: "input =\nstdin = a.in\n", wantIn: "/dev/null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sf, err := ParseSubmitFile(strings.NewReader("executable = /bin/true\n" + tc.submit))
+			if err != nil {
+				t.Fatalf("ParseSubmitFile: %v", err)
+			}
+			result, err := sf.Submit(1)
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			got, ok := classad.GetAs[string](result.ProcAds[0], "In")
+			if !ok {
+				t.Fatalf("In missing from the ad, want %q", tc.wantIn)
+			}
+			if got != tc.wantIn {
+				t.Errorf("In = %q, want %q", got, tc.wantIn)
+			}
+		})
+	}
+}

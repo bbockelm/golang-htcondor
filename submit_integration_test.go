@@ -879,3 +879,79 @@ queue
 		})
 	}
 }
+
+// TestIntegrationStdioAliases covers the second spelling condor_submit
+// accepts for each standard stream: stdin, stdout and stderr are
+// synonyms for input, output and error
+// (submit_param(SUBMIT_KEY_Output, SUBMIT_KEY_Stdout) and friends in
+// src/condor_utils/submit_utils.cpp).
+//
+// All three streams are covered here. The stdin cases were previously
+// impossible to compare -- condor_submit writes StreamIn for a
+// transferred stdin and this library wrote StreamInput -- which the
+// stream-attribute rename fixed.
+func TestIntegrationStdioAliases(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		files string
+	}{
+		{"StdoutAlias", "stdout = alias.out"},
+		{"StderrAlias", "stderr = alias.err"},
+		{"BothAliases", "stdout = alias.out\nstderr = alias.err"},
+		// The primary spelling wins over the alternate, whichever
+		// order the two appear in.
+		{"OutputBeatsStdout", "output = test.out\nstdout = alias.out"},
+		{"OutputBeatsStdoutReversed", "stdout = alias.out\noutput = test.out"},
+		{"ErrorBeatsStderr", "stderr = alias.err\nerror = test.err"},
+		// The primary wins by being present, not by having a value:
+		// submit_param consults the alternate only when lookup_macro
+		// finds nothing at all under the primary. An empty primary
+		// therefore suppresses the alias and the stream ends up
+		// unnamed, which checkStdFile canonicalizes to /dev/null with
+		// transfer off.
+		{"EmptyPrimarySuppressesStdout", "output =\nstdout = alias.out"},
+		{"EmptyPrimarySuppressesStderr", "error =\nstderr = alias.err"},
+		// Spelling is case-insensitive on both sides.
+		{"UppercaseAlias", "STDOUT = alias.out"},
+		// stdin behaves the same as the other two.
+		{"StdinAlias", "stdin = alias.in"},
+		{"InputBeatsStdin", "input = test.in\nstdin = alias.in"},
+		{"InputBeatsStdinReversed", "stdin = alias.in\ninput = test.in"},
+		{"EmptyPrimarySuppressesStdin", "input =\nstdin = alias.in"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			submitContent := `
+universe = vanilla
+executable = /usr/bin/true
+log = test.log
+` + tc.files + `
+queue
+`
+
+			condorAd, err := runCondorSubmit(submitContent)
+			if err != nil {
+				t.Fatalf("Failed to run condor_submit: %v", err)
+			}
+
+			sf, err := ParseSubmitFile(strings.NewReader(submitContent))
+			if err != nil {
+				t.Fatalf("Failed to parse submit file: %v", err)
+			}
+
+			result, err := sf.Submit(1)
+			if err != nil {
+				t.Fatalf("Submit failed: %v", err)
+			}
+
+			if len(result.ProcAds) == 0 {
+				t.Fatal("No proc ads generated")
+			}
+
+			compareClassAds(t, result.ProcAds[0], condorAd, "StdioAliases/"+tc.name)
+		})
+	}
+}
