@@ -270,7 +270,14 @@ export function summarize(slots: Slot[]): PoolSummary {
 // gib formats a MiB count as a compact GiB string.
 export function gib(mib: number | undefined): string {
   if (mib === undefined) return '—';
-  return `${(mib / 1024).toFixed(mib < 1024 * 10 ? 1 : 0)} GiB`;
+  return `${gibNum(mib)} GiB`;
+}
+
+// gibNum is gib() without the unit suffix, for tables that carry "GiB" in
+// the column header and need the cells to be bare, right-alignable numbers.
+export function gibNum(mib: number | undefined): string {
+  if (mib === undefined) return '—';
+  return (mib / 1024).toFixed(mib < 1024 * 10 ? 1 : 0);
 }
 
 // pct renders used/total as an integer percentage, blank when no capacity.

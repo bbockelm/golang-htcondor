@@ -17,12 +17,12 @@ import {
   summarize,
   slotStateStyle,
   gib,
+  gibNum,
   pct,
   textHaystack,
   SLOT_PROJECTION,
   type Slot,
   type NodeGroup,
-  type ResourceUsage,
   type PoolSummary,
 } from '@/lib/pool';
 
@@ -125,9 +125,9 @@ export default function PoolPage() {
             </p>
           )}
           <p className="text-xs text-gray-400">
-            Per-job (dynamic) slots are excluded; usage reflects each
-            machine&apos;s allocated capacity, and backfill slots are counted
-            separately.
+            Usage reflects each machine&apos;s allocated capacity; expand a
+            node to see its individual slots, including the per-job (dynamic)
+            slots. Backfill slots are counted separately.
           </p>
           {data?.error && (
             <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -248,9 +248,9 @@ function SummaryPanel({ summary }: { summary: PoolSummary }) {
       ratio: pct(u.usedCpus, u.totalCpus),
     },
     {
-      label: 'Memory',
-      used: gib(u.usedMemoryMB),
-      total: gib(u.totalMemoryMB),
+      label: 'Memory (GiB)',
+      used: gibNum(u.usedMemoryMB),
+      total: gibNum(u.totalMemoryMB),
       ratio: pct(u.usedMemoryMB, u.totalMemoryMB),
     },
   ];
@@ -357,7 +357,7 @@ function NodeTable({
             <th className="px-3 py-2 text-left">Execute node</th>
             <th className="px-3 py-2 text-right">Running</th>
             <th className="px-3 py-2 text-right">CPUs</th>
-            <th className="px-3 py-2 text-right">Memory</th>
+            <th className="px-3 py-2 text-right">Memory (GiB)</th>
             <th className="px-3 py-2 text-right">GPUs</th>
           </tr>
         </thead>
@@ -377,9 +377,21 @@ function NodeTable({
   );
 }
 
-function usageCell(used: number, total: number): string {
-  if (total === 0) return '—';
-  return `${used} / ${total}`;
+// UsagePair renders "used / total" so the used figures line up vertically
+// down a column: the used value is right-aligned against the slash and the
+// total is a fixed-width, left-aligned muted suffix, so the slashes (and
+// therefore the used values' right edges) sit at the same x on every row.
+function UsagePair({ used, total }: { used: string; total: string }) {
+  if (total === '—' || total === '0') {
+    return <span className="text-gray-400">—</span>;
+  }
+  return (
+    <span className="inline-flex items-baseline justify-end tabular-nums">
+      <span className="min-w-[4ch] text-right text-gray-800">{used}</span>
+      <span className="px-1 text-gray-300">/</span>
+      <span className="min-w-[4ch] text-left text-gray-500">{total}</span>
+    </span>
+  );
 }
 
 function NodeRow({
@@ -394,6 +406,29 @@ function NodeRow({
   onSlot: (name: string) => void;
 }) {
   const u = node.usage;
+
+  // The overview query excludes per-job (dynamic) slots to keep the payload
+  // small, so node.slots has none. When a node is expanded, fetch its full
+  // slot list — dynamic slots included — for just that machine. This is a
+  // narrow query and only runs while the row is open.
+  const { data: detail, isFetching: detailFetching } = useQuery({
+    queryKey: ['pool-node-slots', node.machine],
+    queryFn: () =>
+      api.collector.list({
+        adType: 'startd',
+        projection: SLOT_PROJECTION,
+        limit: '*',
+        constraint: `Machine == ${JSON.stringify(node.machine)}`,
+      }),
+    enabled: open,
+    refetchInterval: open ? 30_000 : false,
+    retry: false,
+  });
+  const detailSlots = useMemo(
+    () => (detail?.ads ? detail.ads.map(parseSlot) : node.slots),
+    [detail, node.slots],
+  );
+
   return (
     <>
       <tr
@@ -411,22 +446,24 @@ function NodeRow({
           </span>
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{node.runningJobs}</td>
-        <td className="px-3 py-2 text-right text-gray-600">
-          {usageCell(u.usedCpus, u.totalCpus)}
+        <td className="px-3 py-2 text-right">
+          <UsagePair used={String(u.usedCpus)} total={String(u.totalCpus)} />
         </td>
-        <td className="px-3 py-2 text-right text-gray-600">
-          {u.totalMemoryMB > 0
-            ? `${gib(u.usedMemoryMB)} / ${gib(u.totalMemoryMB)}`
-            : '—'}
+        <td className="px-3 py-2 text-right">
+          <UsagePair used={gibNum(u.usedMemoryMB)} total={gibNum(u.totalMemoryMB)} />
         </td>
-        <td className="px-3 py-2 text-right text-gray-600">
-          {usageCell(u.usedGpus, u.totalGpus)}
+        <td className="px-3 py-2 text-right">
+          <UsagePair used={String(u.usedGpus)} total={String(u.totalGpus)} />
         </td>
       </tr>
       {open && (
         <tr>
           <td colSpan={6} className="bg-gray-50 px-3 py-2">
-            <SlotSubTable slots={node.slots} onSlot={onSlot} />
+            <SlotSubTable
+              slots={detailSlots}
+              loading={detailFetching && !detail}
+              onSlot={onSlot}
+            />
           </td>
         </tr>
       )}
@@ -436,9 +473,11 @@ function NodeRow({
 
 function SlotSubTable({
   slots,
+  loading,
   onSlot,
 }: {
   slots: Slot[];
+  loading?: boolean;
   onSlot: (name: string) => void;
 }) {
   const ordered = [...slots].sort((a, b) => a.name.localeCompare(b.name));
@@ -446,7 +485,9 @@ function SlotSubTable({
     <table className="min-w-full text-xs tabular-nums">
       <thead className="text-gray-500">
         <tr>
-          <th className="px-2 py-1 text-left">Slot</th>
+          <th className="px-2 py-1 text-left">
+            Slot{loading && <span className="ml-2 text-gray-400">loading…</span>}
+          </th>
           <th className="px-2 py-1 text-left">Type</th>
           <th className="px-2 py-1 text-left">State / Activity</th>
           <th className="px-2 py-1 text-right">CPUs</th>
