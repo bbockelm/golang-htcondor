@@ -643,6 +643,8 @@ func getScopeDescription(scope string) string {
 		"offline_access":           "Ability to refresh access tokens",
 		"mcp:read":                 "Read-only access to HTCondor jobs and resources via MCP protocol",
 		"mcp:write":                "Full access to submit and manage HTCondor jobs via MCP protocol",
+		"mcp:admin":                "Read every user's jobs, not only your own",
+		"mcp:superuser":            "Change any user's jobs: remove, hold, release, edit",
 		"condor:/READ":             "HTCondor READ authorization - allows reading job and daemon information",
 		"condor:/WRITE":            "HTCondor WRITE authorization - allows submitting and managing jobs",
 		"condor:/ADVERTISE_STARTD": "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
@@ -1214,6 +1216,11 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		"offline_access": true,
 		"mcp:read":       true,
 		"mcp:write":      true,
+		// Requestable, but only granted to members of the configured
+		// group -- see getScopesForGroups. A client asking for them
+		// without the group membership simply does not receive them.
+		"mcp:admin":     true,
+		"mcp:superuser": true,
 	}
 	for _, scope := range regReq.Scopes {
 		// Allow condor:/* scopes

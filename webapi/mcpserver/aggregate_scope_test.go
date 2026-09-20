@@ -92,7 +92,7 @@ func TestAggregateConstraintIsAdminExempt(t *testing.T) {
 	admin.adminUsers = map[string]struct{}{"root@uid.domain": {}}
 
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
-	got, ok := admin.scopeToOwner(ctx, "JobStatus == 5")
+	got, ok := admin.scopeToOwner(ctx, "JobStatus == 5", tierRead)
 	if !ok {
 		t.Fatal("admin must be allowed")
 	}
@@ -102,7 +102,7 @@ func TestAggregateConstraintIsAdminExempt(t *testing.T) {
 
 	user := scopeTestServer(t, true)
 	uctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
-	got, _ = user.scopeToOwner(uctx, "JobStatus == 5")
+	got, _ = user.scopeToOwner(uctx, "JobStatus == 5", tierRead)
 	if !strings.Contains(got, `Owner == "alice"`) {
 		t.Errorf("a normal user's constraint is not owner-scoped: %q", got)
 	}

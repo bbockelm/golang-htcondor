@@ -233,8 +233,13 @@ type Config struct {
 	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup            string // Group required for read operations (empty = all have read)
 	MCPWriteGroup           string // Group required for write operations (empty = all have write)
-	ScheddHost              string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
-	MCPInstructions         string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPAdminGroup / MCPSuperuserGroup gate the two cross-user MCP
+	// privileges. Empty means NOBODY, not everybody -- see
+	// HandlerConfig for why these invert the default above.
+	MCPAdminGroup     string
+	MCPSuperuserGroup string
+	ScheddHost        string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
+	MCPInstructions   string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	// MCPSkillsDir publishes a directory of site-authored Markdown skills
 	// to agents. Empty disables the feature.
 	MCPSkillsDir    string
@@ -389,6 +394,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPAccessGroup:              cfg.MCPAccessGroup,
 		MCPReadGroup:                cfg.MCPReadGroup,
 		MCPWriteGroup:               cfg.MCPWriteGroup,
+		MCPAdminGroup:               cfg.MCPAdminGroup,
+		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,

@@ -41,8 +41,8 @@ func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *dbmirror
 // toolQueryHistoryDB queries completed jobs from the htcondordb "history" archive. Owner-scoped:
 // a non-admin caller only ever sees their own completed jobs.
 func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	scope, _ := s.ownerScope(ctx)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
+	scope, _ := s.ownerScope(ctx, tierRead)
+	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -68,8 +68,8 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 // on the database having time-travel enabled. as_of accepts RFC3339 or a negative Go duration
 // ("-1h") relative to now.
 func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	scope, _ := s.ownerScope(ctx)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
+	scope, _ := s.ownerScope(ctx, tierRead)
+	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -102,8 +102,8 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 // per group -- the right tool for "how many jobs are idle/held/running", cheap because only the
 // grouped result crosses the wire.
 func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	scope, _ := s.ownerScope(ctx)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"))
+	scope, _ := s.ownerScope(ctx, tierRead)
+	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}

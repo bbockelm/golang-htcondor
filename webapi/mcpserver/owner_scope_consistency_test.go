@@ -19,25 +19,25 @@ func TestEveryToolAgreesOnScope(t *testing.T) {
 	adminCtx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
 	userCtx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
 
-	scope, ok := admin.ownerScope(adminCtx)
+	scope, ok := admin.ownerScope(adminCtx, tierRead)
 	if !ok || !scope.AllUsers {
 		t.Fatalf("an admin should be unconfined: %+v ok=%v", scope, ok)
 	}
 	// And the same policy the other tools reach through scopeToOwner.
-	if got, ok := admin.scopeToOwner(adminCtx, "JobStatus == 5"); !ok || got != "JobStatus == 5" {
+	if got, ok := admin.scopeToOwner(adminCtx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
 		t.Errorf("scopeToOwner confined an admin (%q); the two helpers must agree", got)
 	}
 
-	scope, ok = admin.ownerScope(userCtx)
+	scope, ok = admin.ownerScope(userCtx, tierRead)
 	if !ok || scope.AllUsers || scope.Owner != "alice" {
 		t.Fatalf("a normal user must be confined to their own jobs: %+v", scope)
 	}
-	if got, _ := admin.scopeToOwner(userCtx, ""); !strings.Contains(got, `Owner == "alice"`) {
+	if got, _ := admin.scopeToOwner(userCtx, "", tierRead); !strings.Contains(got, `Owner == "alice"`) {
 		t.Errorf("scopeToOwner did not confine a normal user: %q", got)
 	}
 
 	// An unidentified caller is neither.
-	if _, ok := admin.ownerScope(context.Background()); ok {
+	if _, ok := admin.ownerScope(context.Background(), tierRead); ok {
 		t.Error("an unidentified caller must not resolve to a scope")
 	}
 }
