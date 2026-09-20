@@ -942,6 +942,15 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		}
 	}
 
+	// Bring the result up to the contract its published outputSchema
+	// states, before either transport marshals it. See
+	// structured_contract.go: a client rejects the whole result when a
+	// schematised tool returns no structuredContent, or returns one where
+	// an empty collection came out as JSON null.
+	if err == nil {
+		result = s.finalizeToolResult(request.Name, result)
+	}
+
 	// Log the outcome either way. A failing tool used to produce no log
 	// line at all, which left an administrator with nothing to look at
 	// when a user reported that something "just failed".

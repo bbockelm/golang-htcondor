@@ -164,12 +164,27 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	}
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
-	return structuredTextResult(b.String(), map[string]interface{}{
-		"groups":   groups,
-		"group_by": groupBy,
-		"table":    table,
-		"source":   "htcondordb",
-	}), nil
+	return structuredTextResult(b.String(),
+		aggregateStructured(groups, groupBy, table, "htcondordb", false)), nil
+}
+
+// aggregateStructured is the aggregate_jobs payload, shared by the mirror
+// and schedd paths so the two cannot describe the same answer differently
+// -- the mirror path used to omit truncated entirely.
+//
+// group_by arrives from the caller's arguments, where "no grouping" is a
+// nil slice, and the single ungrouped row's key is nil for the same call.
+// Both marshal to JSON null against a schema that says array;
+// finalizeToolResult is what repairs that, for every tool at once, rather
+// than each payload builder remembering to.
+func aggregateStructured(groups []map[string]interface{}, groupBy []string, table, source string, truncated bool) map[string]interface{} {
+	return map[string]interface{}{
+		"groups":    groups,
+		"group_by":  groupBy,
+		"table":     table,
+		"source":    source,
+		"truncated": truncated,
+	}
 }
 
 // --- helpers ---
@@ -330,13 +345,7 @@ func (s *Server) aggregateJobsFromSchedd(ctx context.Context, constraint string,
 	for _, r := range rows {
 		groups = append(groups, map[string]interface{}{"key": r.Group, "count": fmt.Sprintf("%d", r.Count)})
 	}
-	structured := map[string]interface{}{
-		"groups":    groups,
-		"group_by":  groupBy,
-		"table":     "jobs",
-		"source":    "schedd",
-		"truncated": truncated,
-	}
+	structured := aggregateStructured(groups, groupBy, "jobs", "schedd", truncated)
 	return structuredTextResult(renderScheddAggregate(constraint, groupBy, rows, truncated, exactTotal)+
 		"\n"+scope.Note(), structured), nil
 }
