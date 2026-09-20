@@ -18,8 +18,11 @@
 // image to the file-transfer plugin, which already knows how to use the
 // job's OAuth credential; an in-job upload would reimplement that badly.
 // Verification gates it through when_to_transfer_output = ON_SUCCESS: a
-// nonzero exit transfers nothing, so an image that fails its own smoke
-// test is never published.
+// nonzero exit transfers no output files, so an image that fails its own
+// smoke test is never published. The build log is exempt from that gate
+// because the job names it through output/error, which HTCondor returns
+// as failure files; a failed build publishes nothing and still explains
+// itself.
 
 package mcpserver
 
@@ -56,6 +59,16 @@ const buildDefName = "image.def"
 // rather than interpolated into the build script. See buildScript.
 const buildVerifyName = "verify.cmd"
 
+// The build log. These are fixed for the same reason the image name is:
+// the submit file names them, get_job_stdout and get_job_stderr find them
+// through the job's Out and Err attributes, and nothing else needs to
+// agree on a name.
+const (
+	buildOutName = "build.out"
+	buildErrName = "build.err"
+	buildLogName = "build.log"
+)
+
 func buildContainerTool() Tool {
 	return Tool{
 		Name: "build_container",
@@ -66,7 +79,8 @@ func buildContainerTool() Tool {
 			"cache handling, and the transfer of the finished image.\n" +
 			"This returns as soon as the job is submitted, because a real image takes minutes to build. " +
 			"Wait for it with watch_jobs (event=\"done\"), then read get_job_stdout / get_job_stderr for the build log. " +
-			"A build that fails, or whose `verify` command fails, publishes nothing — but its logs still come back, so the failure is diagnosable.\n" +
+			"A build that fails, or whose `verify` command fails, publishes nothing — but the job names its stdout and stderr, " +
+			"and HTCondor returns those even on a failing exit, so the failure is diagnosable.\n" +
 			"Prefer `verify`: an image that cannot run the thing it was built for is worse than no image, because it reaches a shared path " +
 			"where other people may pick it up.",
 		InputSchema: map[string]interface{}{
@@ -436,17 +450,52 @@ func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, disk
 	// RequestDisk is in KiB while the argument is MiB.
 	fmt.Fprintf(&sb, "request_disk            = %d\n", diskMB*1024)
 
+	// Name the build log. Without these the job has no Out or Err at
+	// all, get_job_stdout and get_job_stderr have nothing to read, and a
+	// failed build reports only its exit status -- which is how an
+	// `apptainer build` that could not find mksquashfs surfaced as a
+	// bare 255 with no recoverable bytes anywhere.
+	//
+	// These survive the ON_SUCCESS gate below. When the starter decides
+	// the job failed it uploads its FailureFiles instead of its output
+	// files, and the job's stdout and stderr are always in that set
+	// (condor_utils/file_transfer.cpp: "You always get your standard out
+	// and error back"). So the image is withheld and the log is not.
+	//
+	// Deliberately NOT streamed. stream_output looks like the obvious
+	// way out from under ON_SUCCESS, and it is the wrong lever three
+	// times over. FileTransfer::shouldSendStdout() is false for a
+	// streamed file, so streaming takes stdout out of FailureFiles
+	// rather than reinforcing it. The same predicate runs in the schedd
+	// when it serves condor_transfer_data, which is how get_job_stdout
+	// reads the file -- so a streamed log would sit in the spool
+	// directory and the schedd would refuse to hand it over. And this
+	// repo's submit parser writes stream_output to `StreamOutput`, not
+	// the `StreamOut` HTCondor reads, so today the request would not
+	// even arrive.
+	fmt.Fprintf(&sb, "output                  = %s\n", buildOutName)
+	fmt.Fprintf(&sb, "error                   = %s\n", buildErrName)
+	// The event log records what stdout cannot: a hold, an eviction, or
+	// a match that never ran the script at all. GET /api/v1/jobs/{id}/log
+	// reads it. It is written on the access point by the shadow, so it
+	// is not subject to output transfer in either direction.
+	fmt.Fprintf(&sb, "log                     = %s\n", buildLogName)
+
 	sb.WriteString("should_transfer_files   = YES\n")
 
 	// ON_SUCCESS is what makes verification gate publication: on a
-	// nonzero exit HTCondor transfers no output files, so a failed build
-	// or a failed smoke test publishes nothing. stdout and stderr come
-	// back either way, so the failure is still diagnosable.
+	// failing exit the starter transfers the failure files (the log
+	// above) and no output files, so a failed build or a failed smoke
+	// test publishes nothing.
 	//
-	// JobSuccessExitCode is set as a raw attribute rather than through
-	// the submit command `success_exit_code`, which writes the wrong
-	// attribute name in this parser. Emitting the attribute directly is
-	// correct regardless of whether that fix has landed.
+	// JobSuccessExitCode is the load-bearing half. The starter decides a
+	// job failed by comparing its wait status against this attribute and
+	// does not consult WhenToTransferOutput at all, so ON_SUCCESS
+	// without it degrades silently to ON_EXIT and a failed build
+	// publishes its image. It is emitted as a raw attribute rather than
+	// through the submit command `success_exit_code`, which the parser
+	// now handles correctly but which in HTCondor proper also turns on
+	// job retries; the attribute alone is the narrower request.
 	sb.WriteString("when_to_transfer_output = ON_SUCCESS\n")
 	sb.WriteString("+JobSuccessExitCode     = 0\n")
 
@@ -474,6 +523,9 @@ func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, disk
 // first failure, because the alternative -- letting a failed build fall
 // through to a verification step that then fails for a different reason
 // -- produces a log that describes the wrong problem.
+//
+// The script also has to repair the job's PATH before it can run
+// anything. See the comment on the PATH block below.
 func buildScript(hasVerify bool) string {
 	var sb strings.Builder
 
@@ -482,12 +534,26 @@ func buildScript(hasVerify bool) string {
 #
 # Exit status decides publication: the submit file sets
 # when_to_transfer_output = ON_SUCCESS, so any nonzero exit here transfers
-# no image. stdout and stderr come back regardless.
+# no image. The submit file also names output/error, which HTCondor sends
+# back as failure files, so this log survives a nonzero exit.
 
 echo "=== build host ==="
 hostname
 echo "cpus=$(nproc)"
 df -h . | awk 'NR==2 {print "scratch_free=" $4}'
+
+# A job's PATH is typically just /usr/local/bin:/usr/bin. apptainer itself
+# lives in /usr/bin, so it is found -- but it shells out to mksquashfs to
+# write the .sif, and mksquashfs ships in /usr/sbin. Missing it, apptainer
+# exits 255 with a bare "FATAL: no such file or directory" that names
+# neither the tool nor the path, so the build fails for a reason nothing
+# in the log explains.
+#
+# Append rather than replace: a site whose apptainer is somewhere unusual
+# put it on PATH for a reason, and it keeps winning.
+PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}:/usr/local/sbin:/usr/sbin:/sbin"
+export PATH
+echo "path=$PATH"
 
 if ! command -v apptainer >/dev/null 2>&1; then
     echo "apptainer is not installed on this machine." 1>&2
@@ -495,6 +561,18 @@ if ! command -v apptainer >/dev/null 2>&1; then
     echo "requirements (HTTP_API_BUILD_REQUIREMENTS / HTTP_API_BUILD_EXTRA_SUBMIT)." 1>&2
     exit 127
 fi
+# apptainer reports a missing mksquashfs as an unattributed ENOENT, so
+# check for it here where the message can name it.
+if ! command -v mksquashfs >/dev/null 2>&1; then
+    echo "mksquashfs was not found on PATH; apptainer cannot write a .sif without it." 1>&2
+    echo "PATH searched: $PATH" 1>&2
+    echo "It ships in the squashfs-tools package, usually as /usr/sbin/mksquashfs." 1>&2
+    echo "Without this check the failure appears only as apptainer's" 1>&2
+    echo "\"FATAL: no such file or directory\", which names neither the tool nor the path." 1>&2
+    exit 127
+fi
+echo "apptainer=$(command -v apptainer)"
+echo "mksquashfs=$(command -v mksquashfs)"
 apptainer --version
 
 # Keep the layer cache and the build's temporary root filesystem inside
