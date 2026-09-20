@@ -113,7 +113,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	}
 	// Without an identity we cannot tell whether this call is confined or
 	// deliberately unconfined, so the mirror must not answer it.
-	scope, ok := s.ownerScope(ctx)
+	scope, ok := s.ownerScope(ctx, tierRead)
 	if !ok {
 		return nil, false, decline(dbmirror.ReasonNoOwnerScope,
 			"the caller could not be identified, so the mirror cannot tell whose jobs to return")

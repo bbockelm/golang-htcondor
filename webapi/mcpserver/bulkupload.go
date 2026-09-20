@@ -32,7 +32,7 @@ import (
 // spooling, oldest proc first, confined to the caller's own jobs.
 func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classad.ClassAd, error) {
 	lim := spool.DefaultLimits()
-	constraint, ok := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster))
+	constraint, ok := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}

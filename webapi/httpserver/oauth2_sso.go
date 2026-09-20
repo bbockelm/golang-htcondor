@@ -143,6 +143,28 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				// No groups configured — grant to any authenticated user
 				grantedScopes = append(grantedScopes, scope)
 			}
+		case "mcp:admin":
+			// Read every user's jobs.
+			//
+			// Note the default, which is the opposite of mcp:read and
+			// mcp:write above: those fall back to granting when no group
+			// is configured, because a server with no group policy is a
+			// single-tenant one where every authenticated caller is
+			// already entitled to the surface. That reasoning does not
+			// extend to a cross-user privilege -- "no admin group
+			// configured" has to mean nobody, not everybody.
+			if s.mcpAdminGroups.configured() && s.mcpAdminGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
+		case "mcp:superuser":
+			// Change another user's jobs: remove, hold, release, edit.
+			// Deliberately not implied by mcp:admin -- seeing every job
+			// and being able to remove every job are different powers,
+			// and the group that should hold the second is usually much
+			// smaller than the group that holds the first.
+			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
 		default:
 			// Grant other scopes if requested (profile, email, condor:/*, etc.).
 			//

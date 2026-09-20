@@ -239,6 +239,15 @@ type Handler struct {
 	mcpWriteWindow time.Duration
 	mcpReadGroups  *groupSet // Required for read access
 	mcpWriteGroups *groupSet // Required for write access
+	// mcpAdminGroups grants the mcp:admin scope: reading every user's
+	// jobs through MCP. mcpSuperuserGroups grants mcp:superuser:
+	// changing another user's jobs.
+	//
+	// Both default to DENY when unconfigured, unlike the two above --
+	// see getScopesForGroups. A cross-user privilege with no group
+	// configured has to mean nobody.
+	mcpAdminGroups     *groupSet
+	mcpSuperuserGroups *groupSet
 
 	// superuserGroup gates superuser mode: acting on another user's jobs
 	// as that user. Deliberately NOT the same knob as webuiAdminGroup,
@@ -649,7 +658,21 @@ type HandlerConfig struct {
 	MCPAccessGroup  string // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup    string // Group required for read operations (empty = all have read)
 	MCPWriteGroup   string // Group required for write operations (empty = all have write)
-	MCPInstructions string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPAdminGroup grants the mcp:admin scope -- reading every user's
+	// jobs through MCP. Empty disables it: unlike MCPReadGroup and
+	// MCPWriteGroup, an empty value here grants the privilege to NOBODY
+	// rather than to everybody. HTTP_API_MCP_ADMIN_GROUP.
+	MCPAdminGroup string
+	// MCPSuperuserGroup grants the mcp:superuser scope -- changing
+	// another user's jobs (remove, hold, release, edit). Empty disables.
+	//
+	// Separate from MCPAdminGroup for the same reason SuperuserGroup is
+	// separate from WebUIAdminGroup: seeing every job and being able to
+	// remove every job are different privileges, and the second deserves
+	// its own decision and its own off switch.
+	// HTTP_API_MCP_SUPERUSER_GROUP.
+	MCPSuperuserGroup string
+	MCPInstructions   string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
 	// MCPSkillsDir is a directory of site-authored Markdown skills to
 	// publish to agents. Empty disables the feature.
 	MCPSkillsDir string
@@ -1284,6 +1307,18 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.mcpAccessGroups = newGroupSet(cfg.MCPAccessGroup)
 	h.mcpReadGroups = newGroupSet(cfg.MCPReadGroup)
 	h.mcpWriteGroups = newGroupSet(cfg.MCPWriteGroup)
+	h.mcpAdminGroups = newGroupSet(cfg.MCPAdminGroup)
+	h.mcpSuperuserGroups = newGroupSet(cfg.MCPSuperuserGroup)
+
+	// MCP_ADMIN_USERS grants the read tier only. It used to grant the
+	// mutate tier too, so a deployment that relied on that loses the
+	// ability to act across users at upgrade. Say so, rather than let a
+	// removal start being refused with no explanation.
+	if len(cfg.MCPAdminUsers) > 0 && !h.mcpSuperuserGroups.configured() {
+		logger.Warn(logging.DestinationHTTP,
+			"MCP_ADMIN_USERS grants cross-user READS only; acting on another user's jobs now needs HTTP_API_MCP_SUPERUSER_GROUP, which is unset",
+			"admin_users", len(cfg.MCPAdminUsers))
+	}
 	h.webuiAdminGroups = newGroupSet(cfg.WebUIAdminGroup)
 	h.webuiAccessGroups = newGroupSet(cfg.WebUIAccessGroup)
 

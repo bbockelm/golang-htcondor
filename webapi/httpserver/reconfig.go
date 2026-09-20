@@ -72,6 +72,16 @@ func (h *Handler) SetMCPReadGroups(raw string) { h.mcpReadGroups.set(raw) }
 // SetMCPWriteGroups installs the groups required for MCP write access.
 func (h *Handler) SetMCPWriteGroups(raw string) { h.mcpWriteGroups.set(raw) }
 
+// SetMCPAdminGroups installs the groups whose members may read every
+// user's jobs through MCP. Emptying it revokes the privilege for
+// everyone -- these two, unlike the read/write groups above, have no
+// fallback to a broader group.
+func (h *Handler) SetMCPAdminGroups(raw string) { h.mcpAdminGroups.set(raw) }
+
+// SetMCPSuperuserGroups installs the groups whose members may change
+// another user's jobs through MCP.
+func (h *Handler) SetMCPSuperuserGroups(raw string) { h.mcpSuperuserGroups.set(raw) }
+
 // SetWebUIAccessGroups installs the groups required to log in to the web
 // interface. Emptying it restores the fallback to the MCP access groups.
 func (h *Handler) SetWebUIAccessGroups(raw string) { h.webuiAccessGroups.set(raw) }

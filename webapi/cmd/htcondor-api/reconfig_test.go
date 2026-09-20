@@ -26,13 +26,15 @@ func (f *fakeTarget) record(knob, v string) {
 	f.groups[knob] = append(f.groups[knob], v)
 }
 
-func (f *fakeTarget) SetMCPAccessGroups(v string)   { f.record("mcp_access", v) }
-func (f *fakeTarget) SetMCPReadGroups(v string)     { f.record("mcp_read", v) }
-func (f *fakeTarget) SetMCPWriteGroups(v string)    { f.record("mcp_write", v) }
-func (f *fakeTarget) SetWebUIAccessGroups(v string) { f.record("webui_access", v) }
-func (f *fakeTarget) SetWebUIAdminGroups(v string)  { f.record("webui_admin", v) }
-func (f *fakeTarget) SetSuperuserGroups(v string)   { f.record("superuser", v) }
-func (f *fakeTarget) SetMCPSkillsDir(v string)      { f.record("skills_dir", v) }
+func (f *fakeTarget) SetMCPAccessGroups(v string)    { f.record("mcp_access", v) }
+func (f *fakeTarget) SetMCPReadGroups(v string)      { f.record("mcp_read", v) }
+func (f *fakeTarget) SetMCPWriteGroups(v string)     { f.record("mcp_write", v) }
+func (f *fakeTarget) SetMCPAdminGroups(v string)     { f.record("mcp_admin", v) }
+func (f *fakeTarget) SetMCPSuperuserGroups(v string) { f.record("mcp_superuser", v) }
+func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", v) }
+func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
+func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
+func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 
 // configFrom builds a Config from literal file contents, the way the daemon
 // builds one from CONDOR_CONFIG on reconfigure.

@@ -42,6 +42,8 @@ type reconfigTarget interface {
 	SetMCPAccessGroups(string)
 	SetMCPReadGroups(string)
 	SetMCPWriteGroups(string)
+	SetMCPAdminGroups(string)
+	SetMCPSuperuserGroups(string)
 	SetWebUIAccessGroups(string)
 	SetWebUIAdminGroups(string)
 	SetSuperuserGroups(string)
@@ -84,6 +86,14 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_MCP_WRITE_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetMCPWriteGroups(v) },
+	},
+	{
+		name:  "HTTP_API_MCP_ADMIN_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetMCPAdminGroups(v) },
+	},
+	{
+		name:  "HTTP_API_MCP_SUPERUSER_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetMCPSuperuserGroups(v) },
 	},
 	// Reloaded unconditionally in reconfigure() as well; this entry is what
 	// handles the path being changed or cleared.

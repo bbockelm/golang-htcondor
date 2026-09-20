@@ -37,12 +37,12 @@ func (o OwnerScope) Note() string {
 
 // ownerScope resolves who a call is for and whether it is confined.
 // ok==false means the caller could not be identified.
-func (s *Server) ownerScope(ctx context.Context) (OwnerScope, bool) {
+func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, bool) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
 		return OwnerScope{}, false
 	}
-	if s.isAdmin(actor) {
+	if s.allowsAllUsers(ctx, actor, tier) {
 		return OwnerScope{AllUsers: true}, true
 	}
 	return OwnerScope{Owner: ownerFromActor(actor)}, true
@@ -66,12 +66,12 @@ func (s *Server) ownerScope(ctx context.Context) (OwnerScope, bool) {
 // admins skip this wrapper so they can do cross-user troubleshooting
 // (e.g. "find every held job", "remove all jobs in the stale
 // queue"); normal users always get owner-scoped.
-func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string) (string, bool) {
+func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier privTier) (string, bool) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
 		return "", false
 	}
-	if s.isAdmin(actor) {
+	if s.allowsAllUsers(ctx, actor, tier) {
 		return strings.TrimSpace(llmConstraint), true
 	}
 	owner := fmt.Sprintf("Owner == %s", classadStringLit(ownerFromActor(actor)))
@@ -132,7 +132,7 @@ func (s *Server) selfScopedQueryOptions(ctx context.Context, base *htcondor.Quer
 		copied := *base
 		opts = &copied
 	}
-	if s.isAdmin(actor) {
+	if s.allowsAllUsers(ctx, actor, tierRead) {
 		return opts, true
 	}
 	opts.FetchOpts |= htcondor.FetchMyJobs
@@ -162,16 +162,77 @@ func ownerFromActor(actor string) string {
 	return actor[:i]
 }
 
-// isAdmin reports whether the given authenticated username is in the
-// configured admin list. Match is exact against
-// htcondor.GetAuthenticatedUserFromContext (typically
-// "user@uid.domain"). Returns false when adminUsers is unset.
-func (s *Server) isAdmin(authenticatedUser string) bool {
-	if s == nil || len(s.adminUsers) == 0 {
+// privTier is which cross-user privilege a call needs. Reading every
+// user's jobs and changing every user's jobs are different powers, and
+// conflating them meant anyone who could run a cross-user query could
+// also remove somebody else's jobs.
+//
+// There is deliberately no default. Every call site names its tier, so
+// classifying a new tool is a decision a reviewer sees rather than
+// something a zero value makes silently.
+type privTier int
+
+const (
+	// tierRead covers queries: seeing other users' jobs, history and
+	// epochs. Granted by the mcp:admin scope or by MCP_ADMIN_USERS.
+	tierRead privTier = iota
+	// tierMutate covers acting on another user's jobs -- removal, hold,
+	// release, edit. Granted ONLY by the mcp:superuser scope.
+	tierMutate
+)
+
+func (t privTier) String() string {
+	if t == tierMutate {
+		return "mutate"
+	}
+	return "read"
+}
+
+// Scopes carrying each tier. They are granted at login from the
+// operator's group configuration, the same path mcp:read and mcp:write
+// already take, so a privilege rides in the token and is visible to
+// whoami rather than being re-derived per call.
+const (
+	scopeMCPAdmin     = "mcp:admin"
+	scopeMCPSuperuser = "mcp:superuser"
+)
+
+// allowsAllUsers reports whether this caller may act outside their own
+// jobs at the given tier.
+//
+// MCP_ADMIN_USERS grants the read tier only. It used to grant both, and
+// narrowing it is a real reduction for a deployment that relied on the
+// old behaviour -- which is why the server logs a warning at startup
+// when the list is configured and no superuser group is, rather than
+// letting a removal simply start being refused one day.
+func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, tier privTier) bool {
+	if s == nil || authenticatedUser == "" {
 		return false
 	}
-	_, ok := s.adminUsers[authenticatedUser]
-	return ok
+	switch tier {
+	case tierMutate:
+		return hasScope(ctx, scopeMCPSuperuser)
+	default:
+		if hasScope(ctx, scopeMCPAdmin) {
+			return true
+		}
+		_, ok := s.adminUsers[authenticatedUser]
+		return ok
+	}
+}
+
+// hasScope reports whether the caller's granted scopes include name.
+//
+// A transport that supplies no scopes at all (the stdio server, where
+// the process IS the user) yields false, so the explicit MCP_ADMIN_USERS
+// list remains the way to grant the read tier there.
+func hasScope(ctx context.Context, name string) bool {
+	for _, s := range grantedScopesFromContext(ctx) {
+		if s == name {
+			return true
+		}
+	}
+	return false
 }
 
 // classadStringLit quotes a string as a ClassAd string literal,

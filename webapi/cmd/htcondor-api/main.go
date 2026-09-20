@@ -167,6 +167,8 @@ type mcpConfig struct {
 	mcpAccessGroup        string
 	mcpReadGroup          string
 	mcpWriteGroup         string
+	mcpAdminGroup         string
+	mcpSuperuserGroup     string
 	instructions          string
 	adminUsers            []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
@@ -1011,6 +1013,17 @@ func loadAccessControlGroups(cfg *config.Config, config *mcpConfig, logger *logg
 		config.mcpWriteGroup = writeGroup
 		logger.Info(logging.DestinationHTTP, "MCP write group", "group", writeGroup)
 	}
+	// The two cross-user privileges. Logged at the same level as the
+	// others, because "who can see and change everyone's jobs" is
+	// exactly what an operator wants to find in the startup log.
+	if adminGroup, ok := cfg.Get("HTTP_API_MCP_ADMIN_GROUP"); ok && adminGroup != "" {
+		config.mcpAdminGroup = adminGroup
+		logger.Info(logging.DestinationHTTP, "MCP admin group: members may READ every user's jobs", "group", adminGroup)
+	}
+	if superGroup, ok := cfg.Get("HTTP_API_MCP_SUPERUSER_GROUP"); ok && superGroup != "" {
+		config.mcpSuperuserGroup = superGroup
+		logger.Info(logging.DestinationHTTP, "MCP superuser group: members may CHANGE any user's jobs", "group", superGroup)
+	}
 }
 
 // loadIdentityMapping reads the two independent local-identity settings.
@@ -1736,6 +1749,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPAccessGroup:             mcpCfg.mcpAccessGroup,
 		MCPReadGroup:               mcpCfg.mcpReadGroup,
 		MCPWriteGroup:              mcpCfg.mcpWriteGroup,
+		MCPAdminGroup:              mcpCfg.mcpAdminGroup,
+		MCPSuperuserGroup:          mcpCfg.mcpSuperuserGroup,
 		MCPInstructions:            mcpCfg.instructions,
 		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPAdminUsers:              mcpCfg.adminUsers,

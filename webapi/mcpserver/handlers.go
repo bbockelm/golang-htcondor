@@ -1172,7 +1172,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// any of it. Two tools cannot disagree about whose jobs a session is
 	// looking at; the answer that gets doubted is whichever one the
 	// model happens to read second.
-	scope, ok := s.ownerScope(ctx)
+	scope, ok := s.ownerScope(ctx, tierRead)
 	if !ok && s.delegated {
 		return nil, fmt.Errorf("authentication required: the caller's identity could not be established")
 	}
@@ -1322,7 +1322,7 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	//
 	// Admins are exempt from both for cross-user troubleshooting.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
+	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -1400,7 +1400,7 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	// Owner-scope so a non-admin caller can't analyze another user's
 	// job and harvest its Requirements expression.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
+	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -1510,7 +1510,7 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	// the wrapper for cross-user cleanup. CRITICAL: without this
 	// wrapper an LLM prompt-injection setting constraint = "true"
 	// could mass-remove every user's jobs (modulo schedd ACL).
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint)
+	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierMutate)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -1877,7 +1877,7 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	// instead of a schedd-side refusal after we have already disclosed
 	// which attributes their job has.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
+	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -2070,7 +2070,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// schedd ACL is broadly READ on most pools, so without this
 	// wrapper a `mcp:write` token holder could dump every user's
 	// historical job ads.
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint)
+	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
@@ -2257,7 +2257,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		}
 	} else {
 		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.Cluster, target.Proc)
-		constraint, ok := s.scopeToOwner(ctx, idClause)
+		constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate)
 		if !ok {
 			return nil, fmt.Errorf("authentication required")
 		}
@@ -2413,7 +2413,7 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	// authenticated as someone else — that check is its, not ours. The
 	// owner clause means we do not ask.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause)
+	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}

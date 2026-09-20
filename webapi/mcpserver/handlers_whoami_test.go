@@ -49,13 +49,64 @@ func TestWhoamiReportsAdmin(t *testing.T) {
 	got := whoamiText(ctx, t, s)
 	t.Logf("\n%s", got)
 
-	for _, want := range []string{"bbockelm@ap2001.chtc.wisc.edu", "administrator", `"admin": true`, "all users"} {
+	for _, want := range []string{
+		"bbockelm@ap2001.chtc.wisc.edu",
+		`"admin": true`,
+		"all users",
+		// MCP_ADMIN_USERS grants the read tier only, and the answer has
+		// to say so rather than leave the caller to discover it when a
+		// removal is refused.
+		`"superuser": false`,
+		"mcp:superuser",
+		"MCP_ADMIN_USERS",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("whoami is missing %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "not an administrator") {
 		t.Errorf("an admin was reported as not an admin:\n%s", got)
+	}
+}
+
+// TestWhoamiExplainsAnUnmatchedAdminEntry covers the failure that
+// prompted the split: MCP_ADMIN_USERS is compared verbatim against the
+// identity the schedd reports, so an entry written with the wrong domain
+// never matches -- and the result is indistinguishable from not being
+// listed. whoami has to name the mismatch.
+func TestWhoamiExplainsAnUnmatchedAdminEntry(t *testing.T) {
+	// Configured with the schedd name; the caller authenticates as
+	// user@UID_DOMAIN. This is the real misconfiguration.
+	s := whoamiServer(t, "bbockelm@ap2001.chtc.wisc.edu")
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "bbockelm@chtc.wisc.edu")
+
+	got := whoamiText(ctx, t, s)
+	t.Logf("\n%s", got)
+
+	if !strings.Contains(got, `"admin": false`) {
+		t.Errorf("an unmatched entry must not grant admin:\n%s", got)
+	}
+	// The point: say the list exists and did not match, not merely
+	// "you are not an admin".
+	for _, want := range []string{"MCP_ADMIN_USERS", "bbockelm@chtc.wisc.edu"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("whoami should explain the mismatch, missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A caller holding mcp:superuser may mutate across users even though
+// MCP_ADMIN_USERS does not list them.
+func TestWhoamiReportsSuperuserFromScope(t *testing.T) {
+	s := whoamiServer(t)
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "carol@uid.domain")
+	ctx = WithGrantedScopes(ctx, []string{"mcp:read", "mcp:write", scopeMCPSuperuser})
+
+	got := whoamiText(ctx, t, s)
+	t.Logf("\n%s", got)
+
+	if !strings.Contains(got, `"superuser": true`) {
+		t.Errorf("mcp:superuser must grant the mutate tier:\n%s", got)
 	}
 }
 
@@ -91,7 +142,7 @@ func TestWhoamiAgreesWithEnforcement(t *testing.T) {
 			s := whoamiServer(t, tc.admins...)
 			ctx := htcondor.WithAuthenticatedUser(context.Background(), "bbockelm@ap2001.chtc.wisc.edu")
 
-			scope, ok := s.ownerScope(ctx)
+			scope, ok := s.ownerScope(ctx, tierRead)
 			if !ok {
 				t.Fatal("ownerScope refused an authenticated caller")
 			}

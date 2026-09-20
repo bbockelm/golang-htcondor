@@ -41,7 +41,7 @@ func TestScopeToOwnerNoBypass(t *testing.T) {
 		`JobStatus == 2 || 1 == 1`, // balanced tautology
 	}
 	for _, c := range bypassAttempts {
-		scoped, ok := s.scopeToOwner(ctx, c)
+		scoped, ok := s.scopeToOwner(ctx, c, tierRead)
 		if !ok {
 			t.Fatalf("authenticated caller unexpectedly rejected for %q", c)
 		}
@@ -55,7 +55,7 @@ func TestScopeToOwnerNoBypass(t *testing.T) {
 
 	// Legitimate self-scoped constraints must still see the owner's own jobs.
 	for _, c := range []string{``, `true`, `JobStatus == 2`} {
-		scoped, _ := s.scopeToOwner(ctx, c)
+		scoped, _ := s.scopeToOwner(ctx, c, tierRead)
 		if !admits(t, scoped, "alice") {
 			t.Errorf("legit constraint %q wrongly excludes the owner: %q", c, scoped)
 		}
@@ -70,7 +70,7 @@ func TestScopeToOwnerNoBypass(t *testing.T) {
 func TestScopeToOwnerAdminBypass(t *testing.T) {
 	s := &Server{adminUsers: map[string]struct{}{"root": {}}}
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "root")
-	scoped, ok := s.scopeToOwner(ctx, `JobStatus == 5`)
+	scoped, ok := s.scopeToOwner(ctx, `JobStatus == 5`, tierRead)
 	if !ok || scoped != `JobStatus == 5` {
 		t.Errorf("admin constraint = %q (ok=%v), want unchanged", scoped, ok)
 	}
@@ -79,7 +79,7 @@ func TestScopeToOwnerAdminBypass(t *testing.T) {
 // TestScopeToOwnerUnauthenticated: no authenticated user -> refused.
 func TestScopeToOwnerUnauthenticated(t *testing.T) {
 	s := &Server{}
-	if _, ok := s.scopeToOwner(context.Background(), "true"); ok {
+	if _, ok := s.scopeToOwner(context.Background(), "true", tierRead); ok {
 		t.Error("unauthenticated caller must be refused (ok=false)")
 	}
 }
@@ -143,7 +143,7 @@ func TestScopeToOwnerQualifiedActor(t *testing.T) {
 	s := &Server{}
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
 
-	got, ok := s.scopeToOwner(ctx, "")
+	got, ok := s.scopeToOwner(ctx, "", tierRead)
 	if !ok {
 		t.Fatal("expected a qualified actor to be accepted")
 	}
@@ -154,7 +154,7 @@ func TestScopeToOwnerQualifiedActor(t *testing.T) {
 	// An admin is matched on the qualified identity and keeps the
 	// constraint unscoped.
 	admin := &Server{adminUsers: map[string]struct{}{"alice@uid.domain": {}}}
-	got, ok = admin.scopeToOwner(ctx, "JobStatus == 5")
+	got, ok = admin.scopeToOwner(ctx, "JobStatus == 5", tierRead)
 	if !ok || got != "JobStatus == 5" {
 		t.Errorf("admin scopeToOwner = %q, %v; want the constraint unchanged", got, ok)
 	}
