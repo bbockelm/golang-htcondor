@@ -2151,6 +2151,14 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// preconditions it needs (signing key, trust domain) demo mode
 		// already satisfies.
 		SuperuserGroup: "admin",
+		// The two cross-user MCP scopes, on the same group and for the
+		// same reason. Without these the scopes are advertised and then
+		// granted to nobody, because getScopesForGroups fails closed when
+		// no group is configured -- so demo mode could not exercise the
+		// privilege separation at all, and a browser test of the consent
+		// page would find no checkbox and assert nothing.
+		MCPAdminGroup:     "admin",
+		MCPSuperuserGroup: "admin",
 		// Pick up the LLM/chat knobs in demo mode too so an
 		// operator can hand-test the chat surface against the
 		// embedded mini-condor without spinning up a real pool.
