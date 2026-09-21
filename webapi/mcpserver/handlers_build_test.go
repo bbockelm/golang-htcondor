@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -208,7 +209,7 @@ func TestBuildSubmitFile(t *testing.T) {
 		defMemoryMB:  16384,
 		defDiskMB:    30720,
 	}
-	got := buildSubmitFile(cfg, "osdf:///chtc/staging/b/alice/py311.sif", 8, 16384, 30720, false)
+	got := buildSubmitFile(cfg, "py311.sif", "osdf:///chtc/staging/b/alice/py311.sif", 8, 16384, 30720, false, false)
 
 	mustContain := []string{
 		"executable              = build.sh",
@@ -252,7 +253,7 @@ func TestBuildSubmitFile(t *testing.T) {
 
 func TestBuildSubmitFileOmitsUnsetSiteConfig(t *testing.T) {
 	got := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
-		"osdf:///x/y.sif", 1, 1, 1, false)
+		"y.sif", "osdf:///x/y.sif", 1, 1, 1, false, false)
 	if strings.Contains(got, "requirements") {
 		t.Errorf("an unset requirements must not emit an empty expression:\n%s", got)
 	}
@@ -267,7 +268,7 @@ func TestBuildSubmitFileOmitsUnsetSiteConfig(t *testing.T) {
 // nonzero exit, and return the log anyway -- and it is easy to render a
 // submit file that does the first and quietly drops the second.
 func TestBuildSubmitFileKeepsTheLogOnFailure(t *testing.T) {
-	got := buildSubmitFile(buildSettings{}, "osdf:///x/py311.sif", 1, 1, 1, false)
+	got := buildSubmitFile(buildSettings{}, "py311.sif", "osdf:///x/py311.sif", 1, 1, 1, false, false)
 
 	// Naming Out and Err is the whole mechanism. HTCondor sends a failed
 	// job's stdout and stderr back as failure files; a job that names
@@ -314,7 +315,7 @@ func TestBuildSubmitFileKeepsTheLogOnFailure(t *testing.T) {
 // transfer_output_files it would be remapped to the destination URL
 // alongside -- or instead of -- the image.
 func TestBuildSubmitFileTransfersOnlyTheImage(t *testing.T) {
-	got := buildSubmitFile(buildSettings{}, "osdf:///x/py311.sif", 1, 1, 1, false)
+	got := buildSubmitFile(buildSettings{}, "py311.sif", "osdf:///x/py311.sif", 1, 1, 1, false, false)
 
 	if !strings.Contains(got, "transfer_output_files   = image.sif\n") {
 		t.Errorf("transfer_output_files must name the image and nothing else\n--- got ---\n%s", got)
@@ -339,7 +340,7 @@ func TestBuildSubmitFileTransfersOnlyTheImage(t *testing.T) {
 // write the .sif, is in /usr/sbin and is not. The build then fails with
 // an exit status and a message that names nothing.
 func TestBuildScriptPutsSbinOnPathBeforeUsingApptainer(t *testing.T) {
-	script := buildScript(true)
+	script := buildScript(true, false)
 
 	pathAt := strings.Index(script, `PATH="${PATH:-`)
 	if pathAt < 0 {
@@ -391,7 +392,7 @@ func TestBuildScriptPutsSbinOnPathBeforeUsingApptainer(t *testing.T) {
 // ENOENT: apptainer reports a missing mksquashfs as "FATAL: no such file
 // or directory" and names neither the tool nor where it looked.
 func TestBuildScriptPreflightsMksquashfs(t *testing.T) {
-	script := buildScript(false)
+	script := buildScript(false, false)
 
 	at := strings.Index(script, "command -v mksquashfs")
 	if at < 0 {
@@ -435,7 +436,7 @@ func TestBuildScriptIsValidShell(t *testing.T) {
 	}
 
 	for _, hasVerify := range []bool{false, true} {
-		script := buildScript(hasVerify)
+		script := buildScript(hasVerify, false)
 		cmd := exec.CommandContext(t.Context(), bash, "-n", "/dev/stdin") //nolint:gosec // G204: bash from LookPath, script on stdin
 		cmd.Stdin = strings.NewReader(script)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -447,7 +448,7 @@ func TestBuildScriptIsValidShell(t *testing.T) {
 	// Evaluate the PATH line itself rather than trusting that it reads
 	// correctly: this is the one line whose behaviour depends on shell
 	// expansion rather than on the text we asserted above.
-	script := buildScript(false)
+	script := buildScript(false, false)
 	pathAt := strings.Index(script, `PATH="${PATH:-`)
 	if pathAt < 0 {
 		t.Fatal("the script never extends PATH")
@@ -482,7 +483,7 @@ func shellQuote(s string) string {
 }
 
 func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
-	withVerify := buildScript(true)
+	withVerify := buildScript(true, false)
 
 	for _, want := range []string{
 		"apptainer build image.sif image.def",
@@ -508,7 +509,7 @@ func TestBuildScriptGatesPublicationOnVerify(t *testing.T) {
 	// Without a verify command there must be no verify block at all,
 	// rather than an empty `apptainer exec image.sif` that would fail
 	// and suppress a perfectly good image.
-	noVerify := buildScript(false)
+	noVerify := buildScript(false, false)
 	if strings.Contains(noVerify, "=== verify ===") {
 		t.Errorf("a build with no verify command must not emit a verify block:\n%s", noVerify)
 	}
@@ -531,14 +532,17 @@ func TestBuildContainerToolDeclared(t *testing.T) {
 	if !ok {
 		t.Fatal("input schema has no properties")
 	}
-	for _, arg := range []string{"definition", "name", "destination", "verify", "cpus", "memory_mb", "disk_mb"} {
+	for _, arg := range []string{"definition", "dockerfile", "name", "destination", "verify", "cpus", "memory_mb", "disk_mb"} {
 		if _, ok := props[arg]; !ok {
 			t.Errorf("input schema is missing the %q argument", arg)
 		}
 	}
+	// Only `name` is required by the schema. The recipe is one of two
+	// arguments, which JSON Schema `required` cannot express and the
+	// handler enforces instead -- see TestBuildContainerNeedsExactlyOneRecipe.
 	req, ok := tool.InputSchema["required"].([]string)
-	if !ok || len(req) != 2 {
-		t.Fatalf("required = %v, want definition and name", tool.InputSchema["required"])
+	if !ok || len(req) != 1 || req[0] != "name" {
+		t.Fatalf("required = %v, want [name]", tool.InputSchema["required"])
 	}
 }
 
@@ -547,7 +551,7 @@ func TestBuildContainerToolDeclared(t *testing.T) {
 // "true\nexit 0" published an image that was never verified -- the one
 // thing this feature exists to prevent.
 func TestVerifyCommandIsNotScriptText(t *testing.T) {
-	script := buildScript(true)
+	script := buildScript(true, false)
 
 	// Whatever the caller wrote, none of it is in the script.
 	// Distinctive strings only: "\nexit 0" would also match the script's
@@ -572,13 +576,13 @@ func TestVerifyCommandIsNotScriptText(t *testing.T) {
 // fails reading a file that was never transferred.
 func TestVerifyFileIsTransferred(t *testing.T) {
 	with := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
-		"osdf:///x/y.sif", 1, 1, 1, true)
+		"y.sif", "osdf:///x/y.sif", 1, 1, 1, true, false)
 	if !strings.Contains(with, "transfer_input_files    = image.def, verify.cmd") {
 		t.Errorf("verify.cmd must be transferred when a verify command is given:\n%s", with)
 	}
 
 	without := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
-		"osdf:///x/y.sif", 1, 1, 1, false)
+		"y.sif", "osdf:///x/y.sif", 1, 1, 1, false, false)
 	if strings.Contains(without, "verify.cmd") {
 		t.Errorf("verify.cmd must not be requested when there is no verify command:\n%s", without)
 	}
@@ -588,9 +592,121 @@ func TestVerifyFileIsTransferred(t *testing.T) {
 // failure naming the remap -- blaming the destination for a build that
 // silently produced nothing.
 func TestScriptRefusesSuccessWithoutAnImage(t *testing.T) {
-	for _, script := range []string{buildScript(true), buildScript(false)} {
+	for _, script := range []string{buildScript(true, false), buildScript(false, false)} {
 		if !strings.Contains(script, "if [ ! -s image.sif ]; then") {
 			t.Errorf("the script must not report success without the image:\n%s", script)
 		}
+	}
+}
+
+// The submit file carries a batch name, so the jobs page and
+// condor_q -batch group builds and say which image each is producing
+// instead of showing a row of identical "build.sh".
+func TestBuildSubmitFileNamesTheBatch(t *testing.T) {
+	got := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
+		"py311.sif", "osdf:///x/py311.sif", 1, 1, 1, false, false)
+	if !strings.Contains(got, "batch_name              = container-build-py311.sif") {
+		t.Errorf("the build is not named for its image:\n%s", got)
+	}
+	// `batch_name` is the spelling the in-process submit parser
+	// recognises; `job_batch_name` is silently dropped.
+	if strings.Contains(got, "job_batch_name") {
+		t.Error("job_batch_name is not a submit command; the parser only reads batch_name")
+	}
+}
+
+// A batch name is a submit-file line, so anything the caller controls in
+// it has to be sanitised. validateBuildName rejects paths and a leading
+// dash -- what a shell cares about -- and says nothing about a newline,
+// which here would start a new submit command.
+func TestBatchNameCannotInjectSubmitCommands(t *testing.T) {
+	hostile := "py311\nrequirements = false\n.sif"
+	got := batchNameForBuild(hostile)
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("batch name kept a newline, which is a new submit command: %q", got)
+	}
+	if strings.Contains(got, "requirements = false") {
+		t.Errorf("batch name carried a submit command through verbatim: %q", got)
+	}
+
+	// The ordinary case survives intact, or the grouping is useless.
+	if got := batchNameForBuild("py311.sif"); got != "container-build-py311.sif" {
+		t.Errorf("batchNameForBuild(py311.sif) = %q", got)
+	}
+	if got := batchNameForBuild("my_image-v2.sif"); got != "container-build-my_image-v2.sif" {
+		t.Errorf("dots, dashes and underscores must survive: %q", got)
+	}
+}
+
+// A Dockerfile build hands apptainer the context DIRECTORY, because that
+// is what its buildkit bootstrap takes. Pointing it at the file would
+// fail on the execute node, minutes after submit.
+func TestDockerfileBuildUsesTheBuildkitBootstrap(t *testing.T) {
+	script := buildScript(false, true)
+	if !strings.Contains(script, "apptainer build image.sif buildkit:./context") {
+		t.Errorf("the build does not use the buildkit bootstrap on the context directory:\n%s", script)
+	}
+	if strings.Contains(script, "buildkit:./context/Dockerfile") {
+		t.Error("buildkit: takes the context directory, not the Dockerfile itself")
+	}
+	// The log has to carry the recipe, or a failing build is unreadable.
+	if !strings.Contains(script, "cat Dockerfile") {
+		t.Errorf("the Dockerfile is not echoed into the build log:\n%s", script)
+	}
+	// The context is assembled on the execute node, because a spooled
+	// input arrives under its base name whatever path it was given.
+	if !strings.Contains(script, "mkdir -p context && cp Dockerfile context/Dockerfile") {
+		t.Errorf("the script does not assemble the build context:\n%s", script)
+	}
+
+	// The definition path is untouched by any of this.
+	def := buildScript(false, false)
+	if !strings.Contains(def, "apptainer build image.sif image.def") {
+		t.Errorf("a definition build must still build the definition:\n%s", def)
+	}
+}
+
+// The Dockerfile has to be transferred at its path inside the context,
+// so the directory exists on the execute node with the file in it.
+func TestDockerfileBuildTransfersTheContext(t *testing.T) {
+	got := buildSubmitFile(buildSettings{defCpus: 1, defMemoryMB: 1, defDiskMB: 1},
+		"py311.sif", "osdf:///x/py311.sif", 1, 1, 1, false, true)
+	// Flat, because that is how a spooled input arrives however it is
+	// named here. The script makes the directory apptainer wants.
+	if !strings.Contains(got, "transfer_input_files    = Dockerfile") {
+		t.Errorf("the Dockerfile is not transferred:\n%s", got)
+	}
+	if strings.Contains(got, "image.def") {
+		t.Errorf("a Dockerfile build must not ask for a definition file that was never spooled:\n%s", got)
+	}
+}
+
+// The two recipes are alternatives, and JSON Schema `required` cannot say
+// so -- the handler has to. Accepting both and picking one would publish
+// an image the caller did not describe, under the name they chose for the
+// other; accepting neither would submit a job that cannot build anything.
+func TestBuildContainerNeedsExactlyOneRecipe(t *testing.T) {
+	s := &Server{}
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+		want string
+	}{
+		{"neither", map[string]interface{}{"name": "x.sif"}, "either"},
+		{
+			"both",
+			map[string]interface{}{"name": "x.sif", "definition": "Bootstrap: docker\nFrom: alpine", "dockerfile": "FROM alpine"},
+			"not both",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.toolBuildContainer(context.Background(), tc.args)
+			if err == nil {
+				t.Fatal("accepted, want an error naming the two arguments")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+		})
 	}
 }

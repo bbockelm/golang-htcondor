@@ -55,6 +55,21 @@ const buildImageName = "image.sif"
 // buildDefName is the definition file as spooled into the job.
 const buildDefName = "image.def"
 
+// buildDockerfileName is the Dockerfile as spooled into the job, and
+// buildContextDir the directory the build script assembles around it.
+//
+// The Dockerfile is spooled FLAT and the context is built on the execute
+// node. apptainer's `buildkit:` bootstrap takes a directory, so the
+// obvious move is to spool "context/Dockerfile" and point at "context"
+// -- but spooled inputs arrive under their base names, so the file would
+// land as "Dockerfile" beside an empty context directory and the build
+// would fail there rather than here. One mkdir avoids depending on how
+// transfer treats a path.
+const (
+	buildContextDir     = "context"
+	buildDockerfileName = "Dockerfile"
+)
+
 // buildVerifyName holds the caller's verify command, spooled as a file
 // rather than interpolated into the build script. See buildScript.
 const buildVerifyName = "verify.cmd"
@@ -69,12 +84,38 @@ const (
 	buildLogName = "build.log"
 )
 
+// buildBatchPrefix marks a build job by JobBatchName, so the jobs page
+// and condor_q -batch group builds together and name the image each one
+// is producing, rather than showing a row of identical "build.sh".
+const buildBatchPrefix = "container-build-"
+
+// batchNameForBuild is the JobBatchName for an image.
+//
+// The name is sanitised rather than trusted: validateBuildName rejects
+// paths and a leading dash, which is what the shell and apptainer care
+// about, but says nothing about the characters a submit file reads
+// specially. A newline in a batch name is a new submit command.
+func batchNameForBuild(name string) string {
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
+	return buildBatchPrefix + clean
+}
+
 func buildContainerTool() Tool {
 	return Tool{
 		Name: "build_container",
-		Description: "Build an Apptainer/Singularity container image from a definition file, as a job on the pool's build machines, " +
-			"and publish the resulting .sif to object storage.\n" +
-			"Pass the definition file contents verbatim in `definition` — the same text you would give to `apptainer build`. " +
+		Description: "Build an Apptainer/Singularity container image from a definition file or a Dockerfile, as a job on the pool's " +
+			"build machines, and publish the resulting .sif to object storage.\n" +
+			"Pass the definition file contents verbatim in `definition` — the same text you would give to `apptainer build` — " +
+			"or a Dockerfile in `dockerfile`, which apptainer builds directly. One or the other, never both.\n" +
 			"The tool supplies what the definition does not: the submit attributes that reach build-capable slots, resource requests, " +
 			"cache handling, and the transfer of the finished image.\n" +
 			"This returns as soon as the job is submitted, because a real image takes minutes to build. " +
@@ -89,7 +130,15 @@ func buildContainerTool() Tool {
 				"definition": map[string]interface{}{
 					"type": "string",
 					"description": "Apptainer definition file contents, e.g. a \"Bootstrap: docker\" header followed by %post/%environment/%runscript sections. " +
-						"Passed to `apptainer build` unchanged.",
+						"Passed to `apptainer build` unchanged. Give either this or `dockerfile`, not both.",
+				},
+				"dockerfile": map[string]interface{}{
+					"type": "string",
+					"description": "Dockerfile contents, if you would rather write one than an Apptainer definition. " +
+						"Apptainer builds it directly (its `buildkit:` bootstrap); nothing here translates between the two formats, " +
+						"so Dockerfile semantics are whatever the builder on the execute node implements. " +
+						"Requires a container builder on the build machine, which not every site has — if none is found the job fails saying so. " +
+						"Give either this or `definition`, not both.",
 				},
 				"name": map[string]interface{}{
 					"type": "string",
@@ -112,7 +161,7 @@ func buildContainerTool() Tool {
 				"memory_mb": map[string]interface{}{"type": "integer", "description": "Memory in MiB for the build."},
 				"disk_mb":   map[string]interface{}{"type": "integer", "description": "Scratch disk in MiB. Must hold the unpacked root filesystem plus the image plus the layer cache — several times the finished image size."},
 			},
-			"required": []string{"definition", "name"},
+			"required": []string{"name"},
 		},
 	}
 }
@@ -215,9 +264,15 @@ func clampBuildResource(requested, fallback, limit int) int {
 }
 
 func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	definition := stringArg(args, "definition")
-	if strings.TrimSpace(definition) == "" {
-		return nil, fmt.Errorf("definition is required: pass the Apptainer definition file contents")
+	definition := strings.TrimSpace(stringArg(args, "definition"))
+	dockerfile := strings.TrimSpace(stringArg(args, "dockerfile"))
+	switch {
+	case definition == "" && dockerfile == "":
+		return nil, fmt.Errorf("give either definition (Apptainer definition file contents) or dockerfile (Dockerfile contents)")
+	case definition != "" && dockerfile != "":
+		// Building both and picking one would publish an image the
+		// caller did not describe, under a name they chose for the other.
+		return nil, fmt.Errorf("give definition or dockerfile, not both")
 	}
 
 	name := strings.TrimSpace(stringArg(args, "name"))
@@ -248,7 +303,7 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	memoryMB := clampBuildResource(intArg(args, "memory_mb", 0), cfg.defMemoryMB, cfg.maxMemoryMB)
 	diskMB := clampBuildResource(intArg(args, "disk_mb", 0), cfg.defDiskMB, cfg.maxDiskMB)
 
-	submitFile := buildSubmitFile(cfg, destination, cpus, memoryMB, diskMB, verify != "")
+	submitFile := buildSubmitFile(cfg, name, destination, cpus, memoryMB, diskMB, verify != "", dockerfile != "")
 
 	schedd := s.getSchedd()
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
@@ -261,8 +316,12 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	// as the submitting user, and a file on disk would need cleaning up
 	// on every failure path.
 	stage := fstest.MapFS{
-		"build.sh":   &fstest.MapFile{Data: []byte(buildScript(verify != "")), Mode: 0o755},
-		buildDefName: &fstest.MapFile{Data: []byte(definition), Mode: 0o644},
+		"build.sh": &fstest.MapFile{Data: []byte(buildScript(verify != "", dockerfile != "")), Mode: 0o755},
+	}
+	if dockerfile != "" {
+		stage[buildDockerfileName] = &fstest.MapFile{Data: []byte(dockerfile), Mode: 0o644}
+	} else {
+		stage[buildDefName] = &fstest.MapFile{Data: []byte(definition), Mode: 0o644}
 	}
 	if verify != "" {
 		stage[buildVerifyName] = &fstest.MapFile{Data: []byte(verify), Mode: 0o644}
@@ -446,7 +505,7 @@ func validateStagingOwner(owner string) error {
 // Resource values are emitted as bare numbers in the attributes' own
 // units, never with a "GB" suffix, so the result does not depend on how
 // the submit parser handles suffixes.
-func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, diskMB int, hasVerify bool) string {
+func buildSubmitFile(cfg buildSettings, name, destination string, cpus, memoryMB, diskMB int, hasVerify, fromDockerfile bool) string {
 	var sb strings.Builder
 
 	sb.WriteString("universe                = vanilla\n")
@@ -456,10 +515,17 @@ func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, disk
 	// it has to be listed here or it would be spooled and then not
 	// transferred, and the build would fail reading it.
 	inputs := buildDefName
+	if fromDockerfile {
+		inputs = buildDockerfileName
+	}
 	if hasVerify {
 		inputs += ", " + buildVerifyName
 	}
 	fmt.Fprintf(&sb, "transfer_input_files    = %s\n", inputs)
+
+	// Groups the build in the jobs page and in condor_q -batch, and says
+	// which image it is producing.
+	fmt.Fprintf(&sb, "batch_name              = %s\n", batchNameForBuild(name))
 
 	fmt.Fprintf(&sb, "request_cpus            = %d\n", cpus)
 	fmt.Fprintf(&sb, "request_memory          = %d\n", memoryMB)
@@ -542,7 +608,7 @@ func buildSubmitFile(cfg buildSettings, destination string, cpus, memoryMB, disk
 //
 // The script also has to repair the job's PATH before it can run
 // anything. See the comment on the PATH block below.
-func buildScript(hasVerify bool) string {
+func buildScript(hasVerify, fromDockerfile bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(`#!/bin/bash
@@ -601,15 +667,31 @@ mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 cleanup() { rm -rf "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"; }
 
 echo
-echo "=== definition ==="
-cat `)
-	sb.WriteString(buildDefName)
+`)
+	// Echo whichever recipe this build was given, so the log is
+	// self-contained: a build that fails on line 12 is unreadable
+	// without the file it was building.
+	if fromDockerfile {
+		fmt.Fprintf(&sb, "echo \"=== Dockerfile ===\"\ncat %s\n", buildDockerfileName)
+	} else {
+		fmt.Fprintf(&sb, "echo \"=== definition ===\"\ncat %s\n", buildDefName)
+	}
 	sb.WriteString(`
-
 echo
 echo "=== build ==="
 `)
-	fmt.Fprintf(&sb, "apptainer build %s %s\n", buildImageName, buildDefName)
+	// apptainer's buildkit bootstrap takes the context DIRECTORY and
+	// finds the Dockerfile in it. It shells out to a container builder
+	// (buildctl, else docker) on the execute node, so a site without one
+	// fails here rather than at submit -- there is nothing this server
+	// can check about a machine it has not matched yet.
+	spec := buildDefName
+	if fromDockerfile {
+		fmt.Fprintf(&sb, "mkdir -p %s && cp %s %s/Dockerfile\n",
+			buildContextDir, buildDockerfileName, buildContextDir)
+		spec = "buildkit:./" + buildContextDir
+	}
+	fmt.Fprintf(&sb, "apptainer build %s %s\n", buildImageName, spec)
 	sb.WriteString(`rc=$?
 echo "apptainer_build_exit=$rc"
 if [ "$rc" -ne 0 ]; then
