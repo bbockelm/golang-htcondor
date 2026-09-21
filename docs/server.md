@@ -566,6 +566,36 @@ HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS = [ \
 | `identity_domain` | Local identity is `<sub>@this`. Defaults to the issuer's host. |
 | `allowed_scopes` | Ceiling of scopes a token from this issuer may obtain. |
 
+## Disabling tools
+
+Some tools cannot work at some sites for reasons this server cannot see.
+Where policy forbids `condor_ssh_to_job`, for example, the tools built on
+it will fail however the pool is configured. Offering them anyway costs
+an agent a turn to discover that, and the error it gets back describes a
+permission problem rather than a decision somebody made.
+
+`HTTP_API_MCP_DISABLED_TOOLS` names the tools this access point does not
+offer:
+
+```
+# One tool, a family, or both. Commas or whitespace, either is fine.
+HTTP_API_MCP_DISABLED_TOOLS = exec_in_job interactive_session_*
+```
+
+Patterns are shell-style globs matched against the tool name. A disabled
+tool is left out of `tools/list` and refused if called anyway — a client
+may be holding a catalogue from before the setting changed. The refusal
+names this parameter, so whoever reads the agent's transcript knows where
+the decision lives, and tells the agent not to retry.
+
+Applied on SIGHUP (or `condor_reconfig`), including for sessions already
+connected: a tool withdrawn because policy changed stops working without
+waiting for agents to reconnect. Clearing the setting restores the tools.
+
+A pattern that is not a valid glob is logged as an error and ignored,
+leaving the tools it was meant to disable still offered — check the log
+after setting one.
+
 ## Site skills
 
 A site can publish its own documentation to agents: how work is actually
@@ -776,6 +806,7 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_OAUTH2_REQUIREMENTS` | ClassAd expression over the token's claims; the login proceeds only if it is true. See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |
 | `HTTP_API_MCP_SKILLS_DIR` | Directory of site-authored Markdown skills to publish to agents. Reloaded on SIGHUP. See [Site skills](#site-skills). |
+| `HTTP_API_MCP_DISABLED_TOOLS` | MCP tools this access point does not offer, as glob patterns separated by commas or whitespace. Applied on SIGHUP. See [Disabling tools](#disabling-tools). |
 | `HTTP_API_TRUSTED_PROXIES` | Comma-separated CIDRs (or bare addresses) whose `X-Forwarded-For` / `X-Real-IP` are honored when recording a client address. Unset means none are, and the peer address is logged. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |

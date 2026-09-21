@@ -240,6 +240,9 @@ type Config struct {
 	MCPSuperuserGroup string
 	ScheddHost        string // SCHEDD_HOST: the host (optionally name@host, optionally with a port) whose schedd to use
 	MCPInstructions   string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
+	// offer, as path.Match patterns separated by commas or whitespace.
+	MCPDisabledTools string
 	// MCPSkillsDir publishes a directory of site-authored Markdown skills
 	// to agents. Empty disables the feature.
 	MCPSkillsDir    string
@@ -397,6 +400,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPAdminGroup:               cfg.MCPAdminGroup,
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
+		MCPDisabledTools:            cfg.MCPDisabledTools,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,

@@ -793,6 +793,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	scopes := grantedScopesFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
+		// A tool the site has turned off is not offered to anyone, so
+		// this runs before the scope filter rather than beside it: the
+		// answer does not depend on who is asking.
+		if s.toolDisabled(t.Name) {
+			continue
+		}
 		if scopesAllowTool(scopes, t.Name) {
 			filtered = append(filtered, t)
 		}
@@ -843,6 +849,18 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		"session_id", SessionIDFromContext(ctx),
 		"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
 		"arg_keys", argKeys(request.Arguments))
+
+	// Withholding a disabled tool from tools/list is not enough to stop
+	// it being called: a client can hold a catalogue from before the
+	// setting changed, the SDK transport caches one per scope set, and
+	// an agent can name a tool it read about anywhere. Refuse here, on
+	// the one path every transport shares.
+	if s.toolDisabled(request.Name) {
+		err := errToolDisabled(request.Name)
+		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: disabled by configuration",
+			"tool", request.Name, "trace_id", traceID)
+		return nil, err
+	}
 
 	// Route to appropriate handler
 	var result interface{}

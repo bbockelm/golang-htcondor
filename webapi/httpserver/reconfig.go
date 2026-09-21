@@ -46,6 +46,16 @@ func (h *Handler) SetMCPSkillsDir(dir string) {
 	h.mcpServer.SetSkillsDir(dir)
 }
 
+// SetMCPDisabledTools installs the site's disabled-tool patterns.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPDisabledTools(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpServer.SetDisabledTools(spec)
+}
+
 // The authorization group lists are dynamic.
 //
 // They are the settings an operator most often gets wrong on a first
