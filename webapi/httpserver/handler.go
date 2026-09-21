@@ -3380,11 +3380,27 @@ func (h *Handler) registerSystemGroupOracle(logger *logging.Logger) {
 		return
 	}
 	h.revocationOracles = append(h.revocationOracles, &systemGroupOracle{
-		identity:  h.localIdentity,
-		validate:  h.validateGroupAccess,
-		scopesFor: h.getScopesForGroups,
-		logger:    logger,
+		identity:            h.localIdentity,
+		validate:            h.validateGroupAccess,
+		scopesFor:           h.getScopesForGroups,
+		logger:              logger,
+		subjectsAreAccounts: h.localIdentity.mapsAccount(),
 	})
 	logger.Info(logging.DestinationHTTP,
 		"Refresh grants will re-read group membership from the system")
+
+	// Groups come from the system, but subjects are not mapped to
+	// accounts, so what gets looked up is whatever the IdP calls people.
+	// Where that is not also a login name the oracle can never answer,
+	// and the live-membership re-check an operator thinks they enabled
+	// silently does nothing -- it fails open on every refresh. Say so
+	// once at startup rather than leaving it to be inferred from an
+	// absence of log lines.
+	if !h.localIdentity.mapsAccount() {
+		logger.Warn(logging.DestinationHTTP,
+			"HTTP_API_GROUP_SOURCE reads groups from the system but subjects are not mapped to "+
+				"local accounts; membership is only re-checked for subjects that are themselves "+
+				"login names, and a deleted account cannot be detected at all",
+			"hint", "set HTTP_API_IDENTITY_MAP to map subjects to accounts")
+	}
 }
