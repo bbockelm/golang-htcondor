@@ -520,6 +520,29 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	return nil, fmt.Errorf("%w (and locally: %w)", err, localErr)
 }
 
+// mirrorQueryOptions asks the collector for the mirror ad in full.
+//
+// The projection is the load-bearing part. A QueryOptions with no
+// Projection does not mean "everything" -- it falls back to
+// DefaultCollectorProjection, which is Name, Machine, MyType, State,
+// Activity and MyAddress. That default is right for the machine-ad
+// queries it was written for and catastrophic here: every attribute
+// ParseAd reads is outside it, so the ad arrived carrying an address and
+// nothing else. Sync health, the gap flags and TimeTravelEnabled all
+// parsed to their zero values, and because absence and zero are the same
+// false/0, the result was not an error but a confident wrong answer --
+// a mirror reported as advertising no live-queue sync at all while its
+// ad in the collector plainly carried it.
+//
+// "*" is requested rather than a list of the attributes ParseAd happens
+// to read today, because the failure mode of an out-of-date list is
+// exactly the one above: silent, and indistinguishable from the mirror
+// not reporting. htcondordb adds attributes to this ad as it grows new
+// sync sources, and there are only ever a handful of mirrors.
+func mirrorQueryOptions() *htcondor.QueryOptions {
+	return &htcondor.QueryOptions{Limit: 64, Projection: []string{"*"}}
+}
+
 func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.collector == nil {
 		return nil, fmt.Errorf("no collector is configured")
@@ -528,7 +551,7 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.opts.Name != "" {
 		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
 	}
-	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, &htcondor.QueryOptions{Limit: 64})
+	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, mirrorQueryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
 	}

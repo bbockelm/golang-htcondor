@@ -147,7 +147,16 @@ func creddFromSchedd(ctx context.Context, cfg creddLookup, logger *logging.Logge
 		return "", fmt.Errorf("neither a schedd name nor an address is known, so its credd cannot be identified")
 	}
 
-	ads, _, err := cfg.collector.QueryAdsWithOptions(qctx, "ScheddAd", constraint, nil)
+	ads, _, err := cfg.collector.QueryAdsWithOptions(qctx, "ScheddAd", constraint, &htcondor.QueryOptions{
+		// Naming the projection is not an optimisation here, it is the
+		// difference between working and not. Passing nil selects
+		// DefaultCollectorProjection -- Name, Machine, MyType, State,
+		// Activity, MyAddress -- which does not include CredDIpAddr, so
+		// the ad came back without the one attribute this function
+		// exists to read and every lookup failed with "carries no
+		// CredDIpAddr" against a schedd that was advertising it.
+		Projection: creddQueryProjection(),
+	})
 	if err != nil {
 		return "", fmt.Errorf("querying the collector for the schedd ad: %w", err)
 	}
@@ -167,6 +176,17 @@ func creddFromSchedd(ctx context.Context, cfg creddLookup, logger *logging.Logge
 		return "", fmt.Errorf("the schedd ad carries no %s", creddAddressAttr)
 	}
 	return strings.TrimSpace(addr), nil
+}
+
+// creddQueryProjection is what the schedd ad must carry for this lookup.
+//
+// It has to name creddAddressAttr explicitly. Passing nil options, which
+// reads as "no preference", actually selects DefaultCollectorProjection
+// -- Name, Machine, MyType, State, Activity, MyAddress -- and CredDIpAddr
+// is not in it, so every lookup failed with "the schedd ad carries no
+// CredDIpAddr" against a schedd that was advertising it perfectly well.
+func creddQueryProjection() []string {
+	return []string{"Name", "Machine", "MyType", "MyAddress", creddAddressAttr}
 }
 
 // creddFromAddressFileMetadata reads CredDIpAddr from an HTCondor address
