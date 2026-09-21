@@ -412,7 +412,14 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
           <Row
             label="History"
             value={
-              health.history_gap ? (
+              health.history_reported === false ? (
+                // No history sync advertised, so there is no staleness to
+                // report. Rendering the zero value here said "0s behind",
+                // which reads as a mirror that is perfectly current.
+                <span className="text-gray-600">
+                  not reported — this mirror does not advertise history sync
+                </span>
+              ) : health.history_gap ? (
                 <span className="text-red-700">
                   durability gap reported — history routing is stopped
                 </span>

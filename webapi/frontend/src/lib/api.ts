@@ -277,6 +277,9 @@ export interface DBMirrorHealth {
   // meaningful.
   job_queue_reported?: boolean;
   job_queue_staleness_seconds?: number;
+  // The same for history sync, whose staleness is likewise omitted when
+  // the mirror advertised none.
+  history_reported?: boolean;
   history_staleness_seconds?: number;
   history_gap: boolean;
   jobs_tolerance_seconds: number;

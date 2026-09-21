@@ -43,3 +43,28 @@ func TestReportedFlagDrivesStalenessPresence(t *testing.T) {
 		t.Fatal("an empty ad must not report the live queue")
 	}
 }
+
+// The same distinction for history, which had no flag at all: the panel
+// rendered HistoryStaleness unconditionally, so an ad carrying no history
+// figures produced a confident "0s behind" -- the exact reading
+// JobQueueReported exists to prevent, on the row next to it.
+func TestParseAdRecordsWhetherHistoryWasReported(t *testing.T) {
+	withHistory := classad.New()
+	_ = withHistory.Set("HistoryCaughtUp", true)
+	_ = withHistory.Set("HistorySecondsSinceSync", int64(9))
+	if info := ParseAd(withHistory); !info.HistoryReported {
+		t.Error("an ad carrying HistoryCaughtUp must report history sync")
+	}
+
+	queueOnly := classad.New()
+	_ = queueOnly.Set("JobQueueCaughtUp", true)
+	info := ParseAd(queueOnly)
+	if info.HistoryReported {
+		t.Error("an ad with no HistoryCaughtUp must NOT report history sync")
+	}
+	// As above: the zero values are there, and the flag is the only thing
+	// separating them from a measured 0.
+	if info.SecondsSinceSync != 0 || info.HistoryLastSyncTime != 0 {
+		t.Errorf("queue-only ad parsed unexpected history values: %+v", info)
+	}
+}

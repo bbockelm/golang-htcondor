@@ -19,8 +19,8 @@ func TestProjectionCoversEverythingParseAdReads(t *testing.T) {
 	// distinguishable from an unset one.
 	values := map[string]any{
 		"Name": "db@ap2001", "MyAddress": "<128.105.68.112:9618>",
-		"TimeTravelEnabled":  true,
-		"HistoryGapDetected": true, "HistoryLastSyncTime": int64(1790001700),
+		"TimeTravelEnabled": true,
+		"HistoryCaughtUp":   true, "HistoryGapDetected": true, "HistoryLastSyncTime": int64(1790001700),
 		"HistorySecondsSinceSync": int64(9), "HistoryLagBytes": int64(4096),
 		"JobQueueCaughtUp": true, "JobQueueLastSyncTime": int64(1790001757),
 		"JobQueueSecondsSinceSync": int64(17), "JobQueueLagBytes": int64(1671914),
