@@ -3627,7 +3627,7 @@ func scheddJobListTrailer(jobCount, limit int, errorMsg string) string {
 
 	if errorMsg == "" && limit > 0 && jobCount >= limit {
 		trailer += `,"has_more":true,"pagination_unavailable":` +
-			`"more jobs match; this schedd cannot be paged through, so raise limit or narrow the constraint"`
+			`"More jobs match but are not displayed; consider a narrower filter."`
 	} else {
 		trailer += `,"has_more":false`
 	}
