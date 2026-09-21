@@ -233,6 +233,11 @@ type Config struct {
 	MCPAccessGroup          string // Group required for any MCP access (empty = all authenticated)
 	MCPReadGroup            string // Group required for read operations (empty = all have read)
 	MCPWriteGroup           string // Group required for write operations (empty = all have write)
+	// UpstreamRefresh is HTTP_API_UPSTREAM_REFRESH: auto, on or off.
+	// Decides whether this server keeps the identity provider's refresh
+	// token so it can ask about a user later. See upstream_refresh.go.
+	UpstreamRefresh string
+
 	// MCPAdminGroup / MCPSuperuserGroup gate the two cross-user MCP
 	// privileges. Empty means NOBODY, not everybody -- see
 	// HandlerConfig for why these invert the default above.
@@ -398,6 +403,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
+		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,
 		RequiredCredentials:         cfg.RequiredCredentials,

@@ -332,6 +332,13 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// File the provider's refresh token, if it gave one, before the
+	// identity below is translated to a local account: this is keyed by
+	// the provider's own subject, because it is that provider this
+	// credential will be presented back to.
+	s.rememberUpstreamRefresh(ctx, userInfo.Subject, token.RefreshToken,
+		scopesFromToken(token, s.oauth2Config.Scopes))
+
 	// Extract groups
 	userGroups := extractGroups(userInfo.Groups)
 

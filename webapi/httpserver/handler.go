@@ -164,6 +164,12 @@ type Handler struct {
 	// underlying AES-GCM is goroutine-safe.
 	sealer *seal.Sealer
 
+	// upstreamRefreshMode and upstreamRefresh hold the identity
+	// provider's own refresh token, so this server can ask that provider
+	// about a user after they have gone home. See upstream_refresh.go.
+	upstreamRefreshMode UpstreamRefreshMode
+	upstreamRefresh     *upstreamRefreshStore
+
 	// chatEngine is non-nil when HTTP_API_LLM_API_KEY_FILE is
 	// configured AND MCP is enabled. The chat handler at
 	// /api/v1/chat uses it; everything else ignores it.
@@ -741,6 +747,9 @@ type HandlerConfig struct {
 	// path creates a placeholder for any that is missing; see
 	// required_creds.go.
 	RequiredCredentials []string
+	// UpstreamRefresh is HTTP_API_UPSTREAM_REFRESH. See Config.
+	UpstreamRefresh string
+
 	// MCPUseSDKTransport serves /mcp with the upstream MCP SDK's transport
 	// instead of the hand-rolled JSON-RPC handler. HTTP_API_MCP_TRANSPORT.
 	MCPUseSDKTransport bool
@@ -1216,6 +1225,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		_ = appDB.Close()
 		return nil, fmt.Errorf("KEK setup: %w", err)
 	}
+	mode, err := ParseUpstreamRefreshMode(cfg.UpstreamRefresh)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HTTP_API_UPSTREAM_REFRESH: %w", err)
+	}
+	h.upstreamRefreshMode = mode
+	if mode != UpstreamRefreshOff {
+		h.upstreamRefresh = &upstreamRefreshStore{db: h.db, sealer: sealer, logger: logger}
+	}
+
 	if sealer != nil {
 		h.sealer = sealer
 		logger.Info(logging.DestinationHTTP, "Envelope encryption enabled",

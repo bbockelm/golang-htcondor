@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 )
@@ -204,4 +206,90 @@ func (s *upstreamRefreshStore) MarkChecked(ctx context.Context, subject, issuer 
 		`UPDATE upstream_refresh_tokens SET last_checked_at = ? WHERE subject = ? AND issuer = ?`,
 		at.UTC(), subject, issuer)
 	return err
+}
+
+// upstreamIssuer names the provider a stored credential belongs to.
+//
+// The token endpoint rather than a nominal issuer string, because that is
+// the thing the credential is redeemable at and it is always known -- the
+// issuer URL is only present when the deployment configured OIDC
+// discovery, and is discarded once the endpoints are resolved.
+func (h *Handler) upstreamIssuer() string {
+	if h.oauth2Config == nil {
+		return ""
+	}
+	return h.oauth2Config.Endpoint.TokenURL
+}
+
+// rememberUpstreamRefresh stores the provider's refresh token for a user who
+// has just logged in.
+//
+// Keyed by the PROVIDER's subject, not the local account this login may have
+// been mapped to: the credential is for asking that provider about that
+// user, and it is the provider's own name for them that it will answer to.
+//
+// Failures are logged and swallowed. A login that worked must not be undone
+// because a credential for a later background check could not be filed --
+// the worst case is the check not running, which is where every deployment
+// without this feature already is.
+func (h *Handler) rememberUpstreamRefresh(ctx context.Context, subject, refreshToken string, grantedScopes []string) {
+	if h.upstreamRefresh == nil || h.upstreamRefreshMode == UpstreamRefreshOff {
+		return
+	}
+	issuer := h.upstreamIssuer()
+	if subject == "" || issuer == "" {
+		return
+	}
+
+	if strings.TrimSpace(refreshToken) == "" {
+		// Nothing came back. Under "on" the operator asked to be told,
+		// because they configured this expecting it to work and it is not
+		// working; under "auto" this is the ordinary case for a provider
+		// that does not release offline_access, and saying so on every
+		// login would be noise.
+		if h.upstreamRefreshMode == UpstreamRefreshOn {
+			h.logger.Warn(logging.DestinationHTTP,
+				"HTTP_API_UPSTREAM_REFRESH is on but the identity provider returned no refresh token; "+
+					"membership will not be re-checked for this user",
+				"subject", subject, "issuer", issuer,
+				"hint", "add offline_access to HTTP_API_OAUTH2_SCOPES, and check the provider releases it")
+		}
+		// Still a delete: see Save. A provider that stops renewing has
+		// retired the old credential whatever the mode says.
+		if err := h.upstreamRefresh.Delete(ctx, subject, issuer); err != nil {
+			h.logger.Warn(logging.DestinationHTTP, "Could not forget a stale upstream refresh token",
+				"subject", subject, "error", err)
+		}
+		return
+	}
+
+	if err := h.upstreamRefresh.Save(ctx, upstreamGrant{
+		Subject:       subject,
+		Issuer:        issuer,
+		RefreshToken:  refreshToken,
+		GrantedScopes: grantedScopes,
+		ObtainedAt:    time.Now().UTC(),
+	}); err != nil {
+		h.logger.Warn(logging.DestinationHTTP, "Could not store the upstream refresh token",
+			"subject", subject, "issuer", issuer, "error", err)
+		return
+	}
+	h.logger.Info(logging.DestinationHTTP, "Stored the identity provider's refresh token",
+		"subject", subject, "issuer", issuer)
+}
+
+// scopesFromToken reads the scopes the provider actually granted.
+//
+// Providers report this in the token response's "scope" field, which
+// oauth2.Token carries as an extra. An absent field is not "none granted":
+// it means the provider did not say, and the request's own scopes are the
+// best available answer.
+func scopesFromToken(tok *oauth2.Token, requested []string) []string {
+	if tok == nil {
+		return nil
+	}
+	if raw, ok := tok.Extra("scope").(string); ok && strings.TrimSpace(raw) != "" {
+		return strings.Fields(raw)
+	}
+	return requested
 }

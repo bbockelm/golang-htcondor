@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"golang.org/x/oauth2"
 )
 
 func upstreamStore(t *testing.T, sealed bool) *upstreamRefreshStore {
@@ -178,5 +179,90 @@ func TestParseUpstreamRefreshMode(t *testing.T) {
 	if _, err := ParseUpstreamRefreshMode("sometimes"); err == nil {
 		t.Error("an unrecognised mode was accepted; which one is in force decides whether a " +
 			"deployment checks its users at all")
+	}
+}
+
+// handlerWithUpstream builds the smallest Handler that can file a
+// credential: a store, a mode, and an upstream to attribute it to.
+func handlerWithUpstream(t *testing.T, mode UpstreamRefreshMode) *Handler {
+	t.Helper()
+	store := upstreamStore(t, false)
+	logger, _ := logging.New(&logging.Config{OutputPath: "stderr"})
+	return &Handler{
+		logger:              logger,
+		upstreamRefreshMode: mode,
+		upstreamRefresh:     store,
+		oauth2Config: &oauth2.Config{
+			Endpoint: oauth2.Endpoint{TokenURL: "https://cilogon.org/oauth2/token"},
+		},
+	}
+}
+
+// Auto keeps what the provider hands over. The mode is about what to do
+// with the answer, not about asking a different question.
+func TestUpstreamAutoKeepsWhatTheProviderGave(t *testing.T) {
+	h := handlerWithUpstream(t, UpstreamRefreshAuto)
+	h.rememberUpstreamRefresh(context.Background(), "sub-1", "rt-abc",
+		[]string{"openid", "offline_access"})
+
+	got, err := h.upstreamRefresh.Load(context.Background(), "sub-1", h.upstreamIssuer())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RefreshToken != "rt-abc" {
+		t.Errorf("stored %q, want rt-abc", got.RefreshToken)
+	}
+	if !got.HasOfflineAccess() {
+		t.Error("the granted scopes were not recorded, so auto cannot tell a provider that " +
+			"withheld offline_access from one that was never asked")
+	}
+}
+
+// Off stores nothing. A deployment that would rather not hold a long-lived
+// key to somebody else's provider gets to not hold one.
+func TestUpstreamOffStoresNothing(t *testing.T) {
+	h := handlerWithUpstream(t, UpstreamRefreshAuto)
+	h.upstreamRefreshMode = UpstreamRefreshOff
+
+	h.rememberUpstreamRefresh(context.Background(), "sub-1", "rt-abc", []string{"offline_access"})
+	if _, err := h.upstreamRefresh.Load(context.Background(), "sub-1", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("a credential was stored with the feature off: %v", err)
+	}
+}
+
+// A later login that returns nothing retires the credential rather than
+// leaving the old one to be used against a provider that has moved on.
+func TestUpstreamLoginWithoutTokenRetiresTheOldOne(t *testing.T) {
+	h := handlerWithUpstream(t, UpstreamRefreshAuto)
+	ctx := context.Background()
+	h.rememberUpstreamRefresh(ctx, "sub-1", "rt-abc", []string{"offline_access"})
+	h.rememberUpstreamRefresh(ctx, "sub-1", "", []string{"openid"})
+
+	if _, err := h.upstreamRefresh.Load(ctx, "sub-1", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("the old credential survived a login that returned none: %v", err)
+	}
+}
+
+// The scopes recorded are the ones the PROVIDER returned, not the ones
+// asked for: a provider may quietly drop a scope it will not grant, and
+// believing the request would have auto acting on a privilege it does not
+// hold.
+func TestScopesFromTokenPrefersWhatWasGranted(t *testing.T) {
+	requested := []string{"openid", "offline_access"}
+
+	granted := scopesFromToken(
+		(&oauth2.Token{}).WithExtra(map[string]any{"scope": "openid profile"}), requested)
+	for _, s := range granted {
+		if s == "offline_access" {
+			t.Errorf("reported offline_access as granted when the provider returned %v", granted)
+		}
+	}
+
+	// A provider that says nothing has not refused: the request is then
+	// the best answer available, and treating silence as refusal would
+	// disable the feature against every such provider.
+	silent := scopesFromToken(&oauth2.Token{}, requested)
+	if len(silent) != len(requested) {
+		t.Errorf("a silent provider yielded %v, want the requested %v", silent, requested)
 	}
 }
