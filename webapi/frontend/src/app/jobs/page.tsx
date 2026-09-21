@@ -427,8 +427,7 @@ function TruncationNotice({
   return (
     <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
       <span>
-        Showing the first <strong>{shown.toLocaleString()}</strong> jobs. More
-        jobs exist.
+        Showing the first <strong>{shown.toLocaleString()}</strong> jobs.
       </span>{' '}
       {canPage ? (
         <>
@@ -454,7 +453,9 @@ function TruncationNotice({
           {/* The server's own explanation. Better than paraphrasing it
               here, because the reason differs by backend and version. */}
           {page.pagination_unavailable && (
-            <span className="text-amber-800">{page.pagination_unavailable}. </span>
+            // Rendered as it arrives: the server sends whole sentences,
+            // and the reason differs by backend and version.
+            <span className="text-amber-800">{page.pagination_unavailable} </span>
           )}
           {loadedAll ? (
             // Already asked for everything and the answer is still
@@ -476,7 +477,7 @@ function TruncationNotice({
               </button>
               <span className="text-amber-800">
                 {' '}
-                — one large request; slow on a big queue.
+                — may take several seconds on a big queue.
               </span>
             </>
           )}
