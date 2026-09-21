@@ -189,6 +189,18 @@ var outputSchemas = map[string]map[string]interface{}{
 		"procs_failed":    intSchema,
 	}),
 
+	"create_watch_url": obj(map[string]interface{}{
+		"url":                  strSchema,
+		"watch_id":             strSchema,
+		"owner":                strSchema,
+		"event":                strSchema,
+		"label":                strSchema,
+		"expires_at":           strSchema,
+		"ttl_seconds":          intSchema,
+		"max_wait_seconds":     intSchema,
+		"default_wait_seconds": intSchema,
+	}, "url", "watch_id"),
+
 	"create_input_upload_url": obj(map[string]interface{}{
 		"cluster_id":  intSchema,
 		"owner":       strSchema,

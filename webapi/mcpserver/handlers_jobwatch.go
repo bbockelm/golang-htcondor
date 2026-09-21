@@ -9,6 +9,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 )
 
 // The watch tools exist because an agent has no way to be woken. Between
@@ -79,27 +80,10 @@ var watchPollInterval = 2 * time.Second
 // The last sleep is trimmed to the deadline: a caller that asked for 30
 // seconds gets 30, not 30 rounded up to the next poll.
 func (s *Server) awaitAnswer(ctx context.Context, owner string, deadline time.Time, answered func() (bool, error)) error {
-	for {
-		if _, err := s.jobWatchEval.CheckOwner(ctx, owner); err != nil {
+	return jobwatch.Await(ctx, s.jobWatchEval, owner, deadline, watchPollInterval,
+		func(err error) {
 			s.logger.Warn(logging.DestinationGeneral, "evaluating job watches failed", "error", err)
-		}
-		done, err := answered()
-		if err != nil {
-			return err
-		}
-		remaining := time.Until(deadline)
-		if done || remaining <= 0 {
-			return nil
-		}
-		if remaining > watchPollInterval {
-			remaining = watchPollInterval
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(remaining):
-		}
-	}
+		}, answered)
 }
 
 // jobWatchTools returns the tool definitions, with the event vocabulary
@@ -187,6 +171,34 @@ func jobWatchTools(maxWait int) []Tool {
 						"description": checking.WaitParam,
 					},
 				},
+			},
+		},
+		{
+			Name: "create_watch_url",
+			Description: "Hand the waiting to something that runs while you do not. Returns a URL that " +
+				"reports whether ONE watch has fired, and blocks until it does.\n\n" +
+				"check_watches waits inside your turn; this waits outside it. Give the URL to an agent " +
+				"framework, a poller, a CI step or a colleague: a GET blocks until the watch fires, then " +
+				"answers, so the waiting costs you nothing and the wake-up is not late. The URL needs no " +
+				"credentials -- possession is the authorization -- and it reports that one watch and " +
+				"nothing else.\n\n" +
+				"Register the watch with watch_jobs first; this tool takes its id. Do NOT poll the URL " +
+				"yourself in a loop; inside a turn, check_watches is the cheaper way to wait.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"watch_id": map[string]interface{}{"type": "string", "description": "The id returned by watch_jobs."},
+					"ttl_seconds": map[string]interface{}{
+						"type": "integer",
+						// Built from the constants rather than restated, so the
+						// documented numbers cannot drift from the enforced ones.
+						"description": fmt.Sprintf("How long the URL stays valid, in seconds. Default %d, "+
+							"maximum %d. The watch's own lifetime is the real limit: once it expires the "+
+							"URL answers \"gone\".",
+							int(shareurl.DefaultWatchTTL.Seconds()), int(shareurl.MaxWatchTTL.Seconds())),
+					},
+				},
+				"required": []string{"watch_id"},
 			},
 		},
 		{

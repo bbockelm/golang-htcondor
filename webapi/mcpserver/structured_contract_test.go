@@ -483,6 +483,13 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"upload_job_input", map[string]interface{}{
 			"job_id": "1.0", "files": []string(nil), "file_count": 0,
 			"total_size": 0, "released": true}},
+		// A watch URL always names a watch; the "empty" case is the one
+		// where the watch carries no optional detail yet.
+		{"create_watch_url", map[string]interface{}{
+			"url": "", "watch_id": "", "owner": "", "event": "", "label": "",
+			"expires_at": "", "ttl_seconds": 0,
+			"max_wait_seconds": 0, "default_wait_seconds": 0}},
+
 		{"create_input_upload_url", map[string]interface{}{
 			"cluster_id": 0, "owner": "", "expires_at": "", "ttl_seconds": 0,
 			"count": 0, "uploads": []map[string]interface{}(nil)}},

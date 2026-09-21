@@ -308,6 +308,7 @@ var routePatterns = []routePattern{
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/input/multipart$`), template: "/api/v1/jobs/{id}/input/multipart"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/output/share$`), template: "/api/v1/jobs/{id}/output/share"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/input/share$`), template: "/api/v1/jobs/{id}/input/share"},
+	{re: regexp.MustCompile(`^/api/v1/watches/[^/]+/share$`), template: "/api/v1/watches/{id}/share"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/(input|output|stdout|stderr|log|hold|release|ssh)$`), template: "/api/v1/jobs/{id}/{action}"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+$`), template: "/api/v1/jobs/{id}"},
 
@@ -337,6 +338,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/schedd/ping", template: "/api/v1/schedd/ping"},
 	{exact: "/api/v1/share/output", template: "/api/v1/share/output"},
 	{exact: "/api/v1/share/input", template: "/api/v1/share/input"},
+	{exact: "/api/v1/share/watch", template: "/api/v1/share/watch"},
 	{re: regexp.MustCompile(`^/api/v1/admin/.*$`), template: "/api/v1/admin/*"},
 
 	// MCP / IDP — bucket aggressively; these aren't user-facing flows.

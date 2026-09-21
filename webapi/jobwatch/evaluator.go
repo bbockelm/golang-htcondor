@@ -279,3 +279,55 @@ func projectionFor(watches []*Watch) []string {
 	}
 	return out
 }
+
+// Await runs the evaluator for one owner and asks answered whether there
+// is something to report, repeating until there is, until deadline, or
+// until ctx ends.
+//
+// Evaluating before reporting is what makes a watch answerable at all: a
+// caller asking "what happened" should not be told "nothing yet" only
+// because the background sweep is a few seconds out of phase with the
+// question. Waiting is that same sweep held open -- there is no second
+// mechanism -- so an answer that already exists comes back on the first
+// pass without blocking.
+//
+// An evaluation error does not end the wait. The sweep is best-effort
+// here: the watch may already have fired and be sitting in storage, and
+// refusing to look because a refresh failed would withhold an answer
+// that is already known. onError, when set, sees each such error.
+func Await(
+	ctx context.Context,
+	eval *Evaluator,
+	owner string,
+	deadline time.Time,
+	poll time.Duration,
+	onError func(error),
+	answered func() (bool, error),
+) error {
+	if poll <= 0 {
+		poll = time.Second
+	}
+	for {
+		if eval != nil {
+			if _, err := eval.CheckOwner(ctx, owner); err != nil && onError != nil {
+				onError(err)
+			}
+		}
+		done, err := answered()
+		if err != nil {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if done || remaining <= 0 {
+			return nil
+		}
+		if remaining > poll {
+			remaining = poll
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(remaining):
+		}
+	}
+}

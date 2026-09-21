@@ -38,6 +38,11 @@ const (
 	KindOutput Kind = ""
 	// KindInput authorizes uploading input files into a job's spool.
 	KindInput Kind = "input"
+	// KindWatch authorizes asking whether one registered watch has
+	// fired, and waiting for it to. Read-only, and narrower than the
+	// other two: it names a single watch, and answers only about that
+	// watch's own outcome.
+	KindWatch Kind = "watch"
 )
 
 // Lifetimes. Downloads default short -- the URL is meant for "drop this
@@ -55,12 +60,23 @@ const (
 	MaxOutputTTL     = 1 * time.Hour
 	DefaultInputTTL  = 1 * time.Hour
 	MaxInputTTL      = 24 * time.Hour
+	// A watch URL is held by whatever is polling it -- typically an
+	// external agent framework -- for as long as the question is open,
+	// so its lifetime tracks the watch's rather than a transfer's. These
+	// mirror jobwatch's own DefaultTTL and MaxTTL; a URL that outlived
+	// its watch would only be able to report that it is gone, and one
+	// that died first would strand a poller holding it.
+	DefaultWatchTTL = 24 * time.Hour
+	MaxWatchTTL     = 7 * 24 * time.Hour
 )
 
 // Defaults returns the default and maximum lifetime for a kind.
 func Defaults(k Kind) (defaultTTL, maxTTL time.Duration) {
-	if k == KindInput {
+	switch k {
+	case KindInput:
 		return DefaultInputTTL, MaxInputTTL
+	case KindWatch:
+		return DefaultWatchTTL, MaxWatchTTL
 	}
 	return DefaultOutputTTL, MaxOutputTTL
 }
@@ -91,6 +107,9 @@ type Payload struct {
 	Owner   string `json:"o"`
 	Exp     int64  `json:"e"`
 	Kind    Kind   `json:"k,omitempty"`
+	// Watch is the watch id a KindWatch token names. Empty for the job
+	// kinds, which address their subject with Cluster and Proc instead.
+	Watch string `json:"w,omitempty"`
 }
 
 // Expired reports whether the payload's expiry has passed.
@@ -200,6 +219,12 @@ func (s *Signer) Verify(tok string, want Kind) (*Payload, error) {
 	}
 	if p.Owner == "" {
 		return nil, fmt.Errorf("token names no owner")
+	}
+	// Each kind addresses its subject with a different field, and a
+	// token missing the one its kind uses would be redeemed against a
+	// zero value -- watch "" or job 0.0 -- rather than refused.
+	if (p.Kind == KindWatch) != (p.Watch != "") {
+		return nil, fmt.Errorf("token does not name a subject for its kind")
 	}
 	return &p, nil
 }

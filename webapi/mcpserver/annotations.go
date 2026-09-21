@@ -125,6 +125,10 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// the first nor changes anything, so: additive, and idempotent in the
 	// only sense that matters (calling twice leaves the same state).
 	"create_input_upload_url": writeAnn(false, true),
+	// create_watch_url does not touch the watch -- it hands back a
+	// read-only capability naming it. Minting a second URL for the same
+	// watch neither replaces the first nor changes anything.
+	"create_watch_url": writeAnn(false, true),
 	// storing a credential overwrites any prior one for the service/handle;
 	// deleting one removes it. Both are idempotent on a repeat.
 	"store_service_credential":  writeAnn(true, true),

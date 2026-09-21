@@ -896,6 +896,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolWatchJobs(ctx, request.Arguments)
 	case "check_watches":
 		result, err = s.toolCheckWatches(ctx, request.Arguments)
+	case "create_watch_url":
+		result, err = s.toolCreateWatchURL(ctx, request.Arguments)
 	case "cancel_watch":
 		result, err = s.toolCancelWatch(ctx, request.Arguments)
 	case "query_history_db":
