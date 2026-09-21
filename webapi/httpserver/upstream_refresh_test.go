@@ -193,6 +193,7 @@ func handlerWithUpstream(t *testing.T, mode UpstreamRefreshMode) *Handler {
 		upstreamRefreshMode: mode,
 		upstreamRefresh:     store,
 		oauth2Config: &oauth2.Config{
+			//nolint:gosec // G101: a provider's public token endpoint, not a credential
 			Endpoint: oauth2.Endpoint{TokenURL: "https://cilogon.org/oauth2/token"},
 		},
 	}
