@@ -167,6 +167,19 @@ type Info struct {
 	JobQueueReported bool
 }
 
+// mirrorAdAttrs is every attribute ParseAd reads, for callers that fetch
+// the ad with a projection. An attribute missing here parses as absent
+// rather than failing, so TestProjectionCoversEverythingParseAdReads
+// holds the two in step.
+func mirrorAdAttrs() []string {
+	return []string{
+		"Name", "MyAddress", "TimeTravelEnabled",
+		"HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
+		"JobQueueCaughtUp", "JobQueueLastSyncTime", "JobQueueSecondsSinceSync", "JobQueueLagBytes",
+		"EpochCaughtUp", "EpochGapDetected", "EpochLastSyncTime", "EpochSecondsSinceSync", "EpochLagBytes",
+	}
+}
+
 // ParseAd reads a mirror's collector advertisement.
 func ParseAd(ad *classad.ClassAd) *Info {
 	info := &Info{}
@@ -520,6 +533,14 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	return nil, fmt.Errorf("%w (and locally: %w)", err, localErr)
 }
 
+// mirrorQueryOptions asks the collector for the mirror ads, projected to
+// the attributes ParseAd reads. The projection has to be named: a
+// QueryOptions without one falls back to DefaultCollectorProjection,
+// which carries none of them.
+func mirrorQueryOptions() *htcondor.QueryOptions {
+	return &htcondor.QueryOptions{Limit: 64, Projection: mirrorAdAttrs()}
+}
+
 func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.collector == nil {
 		return nil, fmt.Errorf("no collector is configured")
@@ -528,7 +549,7 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.opts.Name != "" {
 		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
 	}
-	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, &htcondor.QueryOptions{Limit: 64})
+	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, mirrorQueryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
 	}

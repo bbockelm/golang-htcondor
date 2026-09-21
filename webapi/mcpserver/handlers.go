@@ -1797,7 +1797,12 @@ func (s *Server) resourceScheddStatus(ctx context.Context) (interface{}, error) 
 		}, nil
 	}
 
-	ads, _, err := s.collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
+	// This resource returns the whole ad, so it asks for the whole ad.
+	// A QueryOptions with no projection falls back to
+	// DefaultCollectorProjection, which is six identity attributes.
+	ads, _, err := s.collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, &htcondor.QueryOptions{
+		Projection: []string{"*"},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query collector: %w", err)
 	}

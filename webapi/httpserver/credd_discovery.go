@@ -147,7 +147,9 @@ func creddFromSchedd(ctx context.Context, cfg creddLookup, logger *logging.Logge
 		return "", fmt.Errorf("neither a schedd name nor an address is known, so its credd cannot be identified")
 	}
 
-	ads, _, err := cfg.collector.QueryAdsWithOptions(qctx, "ScheddAd", constraint, nil)
+	ads, _, err := cfg.collector.QueryAdsWithOptions(qctx, "ScheddAd", constraint, &htcondor.QueryOptions{
+		Projection: creddQueryProjection(),
+	})
 	if err != nil {
 		return "", fmt.Errorf("querying the collector for the schedd ad: %w", err)
 	}
@@ -167,6 +169,14 @@ func creddFromSchedd(ctx context.Context, cfg creddLookup, logger *logging.Logge
 		return "", fmt.Errorf("the schedd ad carries no %s", creddAddressAttr)
 	}
 	return strings.TrimSpace(addr), nil
+}
+
+// creddQueryProjection is the schedd-ad projection this lookup needs:
+// the one attribute it reads. It has to be named, because a QueryOptions
+// with no projection falls back to DefaultCollectorProjection, which does
+// not carry it.
+func creddQueryProjection() []string {
+	return []string{creddAddressAttr}
 }
 
 // creddFromAddressFileMetadata reads CredDIpAddr from an HTCondor address
