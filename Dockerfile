@@ -73,6 +73,16 @@ RUN for attempt in 1 2 3 4 5; do \
 RUN dnf install -y 'condor >= 25.7.2' && \
     dnf clean all
 
+# openssh-server, for the ssh-to-job integration tests.
+#
+# Without it those tests skip, and a skip is indistinguishable from a pass in
+# the job summary: the webapi integration run reported "1712 tests, 2 skipped"
+# and the two were the only tests covering reaching into a running job. The
+# starter runs this sshd on the execute node, and HTCondor's own
+# condor_ssh_to_job_sshd_config_template comes from the condor package above.
+RUN dnf install -y openssh-server && \
+    dnf clean all
+
 # Create workspace directory
 WORKDIR /workspace
 

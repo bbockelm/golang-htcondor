@@ -31,12 +31,11 @@ import (
 //
 // The pool is arranged the way the deployment that motivated this one is. The
 // startd and starter sit on a "private" network and register with the
-// collector's built-in CCB server, so their advertised addresses carry a
+// collector's built-in C++ CCB server, so their advertised addresses carry a
 // ccbid and nothing can reach them directly. The API server is given an
-// inbound shared port and is NOT allowed to fall back to streaming -- which
-// makes the test strict about what it proves: the broker in this harness is
-// the C++ one, and if the shared-port path did not work there would be no
-// other way through and the shell would never open.
+// inbound shared port and is NOT allowed to fall back to streaming, so the
+// shared port is the only way in: if it did not work the shell would never
+// open, whatever the broker is capable of.
 //
 // Routed > 0 at the end is the oracle. It can only be non-zero if the execute
 // node dialed back to this process's shared port and the router matched it to
@@ -190,9 +189,14 @@ queue
 	defer func() { _ = router.Close() }()
 	t.Logf("API server shared port: %s", router.AdvertisedAddr())
 
-	// Streaming off on purpose. The harness broker is too old for it anyway,
-	// but saying so explicitly means a shared-port regression cannot be
-	// covered up by a fallback that happens to work.
+	// Streaming off on purpose, and the guarantee rests on this line rather
+	// than on the broker's version: with it off the dialer has exactly one
+	// mode to try, so a shared-port regression cannot be covered up by a
+	// fallback that happens to work. HTCondor versions differ by where this
+	// runs -- the CI image ships 25.13, which CAN relay, while a developer's
+	// local build may predate it -- and a test whose strictness depended on
+	// that would quietly stop being strict on the machine that had the newer
+	// one.
 	ccbDialer := htcondor.NewCCBDialer(htcondor.CCBDialerConfig{
 		Router:    router,
 		Streaming: false,
