@@ -793,8 +793,14 @@ export interface AdminToken {
   kind: 'access' | 'refresh';
   signature_prefix: string;
   client_id: string;
+  /** The client's own label and the operator's note, from the clients page. */
+  client_name?: string;
+  notes?: string;
   subject?: string;
+  /** In force now. */
   scopes?: string[];
+  /** Everything this authorization ended with; the difference is switched off. */
+  authorized_scopes?: string[];
   active: boolean;
   requested_at: string;
   expires_at?: string;
@@ -1264,9 +1270,9 @@ export const api = {
         body: JSON.stringify(body),
       }),
 
-    // Narrows a grant to a subset of what it already holds. Removal only:
-    // the server refuses a scope the grant does not have, because adding
-    // one here would have no consent and no group policy behind it.
+    // Sets which of a grant's AUTHORIZED scopes are in force. A scope can
+    // be switched off and back on; the server refuses anything the
+    // authorization never included, which would have no consent behind it.
     setTokenScopes: (body: {
       kind: string;
       fingerprint: string;
