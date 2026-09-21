@@ -264,7 +264,7 @@ queue
 			rx.Write(payload)
 		}
 	}
-	t.Logf("shell echoed the sentinel: the job is reachable through the API server's shared port")
+	t.Logf("shell echoed the sentinel; the job is reachable -- by which path is the next check")
 
 	closeJSON, _ := json.Marshal(wsControlMsg{Type: "close"})
 	_ = wsConn.WriteMessage(websocket.TextMessage, closeJSON)
