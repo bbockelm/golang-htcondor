@@ -556,6 +556,18 @@ func (h *CondorTestHarness) printStartdLog() {
 	h.t.Logf("=== StartLog contents ===\n%s\n=== End StartLog ===", string(data))
 }
 
+// PrintCollectorLog prints the collector log contents for debugging. The
+// collector also hosts the pool's built-in CCB server, so this is where a
+// failed connection reversal explains itself.
+func (h *CondorTestHarness) PrintCollectorLog() {
+	h.printCollectorLog()
+}
+
+// PrintStartdLog prints the startd log contents for debugging.
+func (h *CondorTestHarness) PrintStartdLog() {
+	h.printStartdLog()
+}
+
 // PrintScheddLog prints the schedd log contents for debugging
 func (h *CondorTestHarness) PrintScheddLog() {
 	scheddLog := filepath.Join(h.logDir, "ScheddLog")

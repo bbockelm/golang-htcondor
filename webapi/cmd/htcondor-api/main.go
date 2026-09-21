@@ -38,6 +38,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
 )
 
 var (
@@ -1681,7 +1682,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			strings.TrimSpace(v) == "1"
 	}
 
-	// Create and start server
+	// Create and start server.
+	//
+	// The CCB shared-port router comes first because the dial policy every
+	// surface uses is built from it: with an inbound path, reaching a starter
+	// behind a broker prefers connection reversal through that path over
+	// asking the broker to relay, which only newer brokers can do.
+	ccbRouter := startCCBSharedPortRouter(cfg, logger)
+	if ccbRouter != nil {
+		defer func() { _ = ccbRouter.Close() }()
+	}
+	ccbDialer := loadCCBDialer(cfg, logger, ccbRouter)
+
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
@@ -1697,7 +1709,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ListenAddr:               listenAddrFromConfig,
 		MCPListenAddr:            mcpListenAddrFromConfig,
 		MCPBaseURL:               firstConfigValue(cfg, "HTTP_API_MCP_BASE_URL"),
-		CCBStreaming:             loadCCBStreaming(cfg, logger),
+		CCB:                      ccbDialer,
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
 		ScheddAddrDiscovered:     scheddAddrDiscovered,
@@ -2696,8 +2708,8 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 //	HTTP_API_DBMIRROR_REQUIRED never fall back to the schedd; a read the
 //	                           mirror cannot serve fails instead
 //
-// loadCCBStreaming decides how this server reaches daemons that sit behind a
-// Condor Connection Broker.
+// loadCCBStreaming decides whether this server may ask a broker to relay a CCB
+// connection rather than having the execute node dial back to it.
 //
 // CCB's default is for the private daemon to dial back to the client, which
 // requires the client to be reachable from the execute node. Running under
@@ -2707,6 +2719,11 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 // silent: the broker tells the starter to connect to an address nothing
 // routes to, and condor_ssh_to_job times out having explained nothing.
 // Streaming mode has the broker relay instead, so no inbound path is needed.
+//
+// Relaying is not free, though: it needs a broker from HTCondor 25.13 or
+// newer, and which broker a dial uses is decided by the execute node. So when
+// HTTP_API_SHARED_PORT gives this server an inbound path of its own, that path
+// is tried first and this is the fallback -- see loadCCBDialer.
 //
 // Detected from the environment rather than taken from the daemon handle
 // because the server is constructed before daemon.New runs; this is the same
@@ -2765,6 +2782,135 @@ func loadCCBStreaming(cfg *config.Config, logger *logging.Logger) bool {
 		"streaming", streaming, "source", source,
 		"under_condor_master", daemon.UnderCondorMaster())
 	return streaming
+}
+
+// startCCBSharedPortRouter opens this server's own inbound HTCondor port, if
+// the operator configured one, and returns the router that multiplexes it.
+// Returns nil when HTTP_API_SHARED_PORT is unset or disabled.
+//
+// This is the inbound path that makes CCB connection reversal possible from a
+// host execute nodes cannot otherwise reach. It is off by default because it
+// opens a listening port, which is the operator's decision to make.
+//
+//	HTTP_API_SHARED_PORT          port or host:port to listen on (e.g. 9618)
+//	HTTP_API_SHARED_PORT_ADDRESS  host or host:port execute nodes should dial,
+//	                              when that differs from what we bind --
+//	                              behind NAT, a container port map, or a
+//	                              Kubernetes Service
+func startCCBSharedPortRouter(cfg *config.Config, logger *logging.Logger) *sharedportrouter.Router {
+	listen := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_SHARED_PORT"))
+	if listen == "" || isConfigDisabled(listen) {
+		return nil
+	}
+	advertised, err := advertisedSharedPortAddr(cfg, listen)
+	if err != nil {
+		// Fatal rather than starting without it: an operator who set this was
+		// solving a reachability problem, and a router advertising an address
+		// nothing routes to fails later, on the execute node, as a connection
+		// that never arrives -- the exact silent failure this exists to end.
+		log.Fatalf("invalid HTTP_API_SHARED_PORT/HTTP_API_SHARED_PORT_ADDRESS: %v", err)
+	}
+	router, err := sharedportrouter.Start(sharedportrouter.Config{
+		Listen:     listen,
+		Advertised: advertised,
+		Logger:     logger.Slog(logging.DestinationHTTP),
+	})
+	if err != nil {
+		log.Fatalf("failed to open the HTCondor shared port on %q: %v", listen, err)
+	}
+	logger.Info(logging.DestinationHTTP,
+		"HTCondor shared port open for CCB connection reversal",
+		"listen", listen, "advertised", router.AdvertisedAddr())
+	return router
+}
+
+// loadCCBDialer builds the policy every surface uses to reach a daemon behind
+// a Condor Connection Broker. router may be nil.
+func loadCCBDialer(cfg *config.Config, logger *logging.Logger, router *sharedportrouter.Router) *htcondor.CCBDialer {
+	dcfg := htcondor.CCBDialerConfig{
+		Streaming: loadCCBStreaming(cfg, logger),
+		Logger:    logger.Slog(logging.DestinationHTTP),
+	}
+	if router != nil {
+		dcfg.Router = router
+	}
+	if raw := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_CCB_LEARNED_TTL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			log.Fatalf("invalid HTTP_API_CCB_LEARNED_TTL=%q: must be a positive duration (e.g. 15m)", raw)
+		}
+		dcfg.LearnedTTL = d
+	}
+	logger.Info(logging.DestinationHTTP, "CCB dial policy",
+		"inbound_shared_port", router != nil, "streaming_allowed", dcfg.Streaming)
+	return htcondor.NewCCBDialer(dcfg)
+}
+
+// advertisedSharedPortAddr resolves what execute nodes should dial to reach
+// our shared port: HTTP_API_SHARED_PORT_ADDRESS if set, otherwise the bound
+// address when it names a specific host, otherwise HTCondor's own answer for
+// "how peers reach this machine" (TCP_FORWARDING_HOST, else FULL_HOSTNAME).
+//
+// Returning "" is fine when the listen address already names a host; the
+// router derives it from the listener in that case.
+func advertisedSharedPortAddr(cfg *config.Config, listen string) (string, error) {
+	port, listenHost, err := splitListen(listen)
+	if err != nil {
+		return "", err
+	}
+	if explicit := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_SHARED_PORT_ADDRESS")); explicit != "" {
+		if _, _, err := net.SplitHostPort(explicit); err == nil {
+			return explicit, nil
+		}
+		// A bare host: pair it with the port we are actually listening on.
+		if port == "" {
+			return "", fmt.Errorf("HTTP_API_SHARED_PORT_ADDRESS=%q has no port and HTTP_API_SHARED_PORT=%q does not supply one", explicit, listen)
+		}
+		return net.JoinHostPort(explicit, port), nil
+	}
+	if ip := net.ParseIP(listenHost); listenHost != "" && (ip == nil || !ip.IsUnspecified()) {
+		return "", nil // the bound address is dialable; let the router use it
+	}
+	host := strings.TrimSpace(firstConfigValue(cfg, "TCP_FORWARDING_HOST"))
+	if host == "" {
+		host = strings.TrimSpace(firstConfigValue(cfg, "FULL_HOSTNAME"))
+	}
+	if host == "" {
+		host, _ = os.Hostname()
+	}
+	if strings.TrimSpace(host) == "" {
+		return "", fmt.Errorf("HTTP_API_SHARED_PORT=%q binds every interface and there is no hostname to advertise; set HTTP_API_SHARED_PORT_ADDRESS", listen)
+	}
+	if port == "" {
+		return "", fmt.Errorf("HTTP_API_SHARED_PORT=%q does not name a port", listen)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// splitListen pulls the port and (possibly empty) host out of a listen address
+// given as a bare port, ":port", or "host:port".
+func splitListen(listen string) (port, host string, err error) {
+	if !strings.Contains(listen, ":") {
+		if _, convErr := strconv.Atoi(listen); convErr != nil {
+			return "", "", fmt.Errorf("HTTP_API_SHARED_PORT=%q is neither a port nor a host:port", listen)
+		}
+		return listen, "", nil
+	}
+	host, port, err = net.SplitHostPort(listen)
+	if err != nil {
+		return "", "", fmt.Errorf("HTTP_API_SHARED_PORT=%q is not a valid listen address: %w", listen, err)
+	}
+	return port, host, nil
+}
+
+// isConfigDisabled reports whether a string-valued knob was explicitly turned
+// off, so an operator can disable an inherited value without blanking it.
+func isConfigDisabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "no", "off", "disabled":
+		return true
+	}
+	return false
 }
 
 func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, address string, required bool) {

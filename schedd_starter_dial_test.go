@@ -42,11 +42,11 @@ func TestStarterConfigIsTheSameForEveryStarterCommand(t *testing.T) {
 	}
 }
 
-// The streaming choice has to reach the dial, for every starter command.
-// Without it the broker tells the execute node to connect back to an
-// address nothing routes to, and the attempt times out having explained
-// nothing -- which is what tailing output did until this shared dialer.
-func TestStarterDialRequestsStreamingForEveryCommand(t *testing.T) {
+// The CCB policy has to reach the dial, for every starter command. Without
+// it the broker tells the execute node to connect back to an address nothing
+// routes to, and the attempt times out having explained nothing -- which is
+// what tailing output did until this shared dialer.
+func TestStarterDialAppliesTheCCBPolicyForEveryCommand(t *testing.T) {
 	info := &JobConnectInfo{
 		StarterAddr: "<10.0.0.1:9618?CCBID=192.0.2.1:9618%2342>",
 		ClaimID:     validTestClaimID(t),
@@ -55,14 +55,18 @@ func TestStarterDialRequestsStreamingForEveryCommand(t *testing.T) {
 	for _, command := range []int{startSSHDCommand, starterPeekCommand} {
 		var gotAddr string
 		var gotOpts *DialOptions
-		restore := dialStarterConn
-		dialStarterConn = func(_ context.Context, addr string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
+		restore := ccbDialSinful
+		ccbDialSinful = func(_ context.Context, addr string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
 			gotAddr, gotOpts = addr, opts
 			return nil, errTestDialIntercepted
 		}
-		_, err := info.dialStarter(context.Background(), command, true)
-		dialStarterConn = restore
+		_, err := info.dialStarter(context.Background(), command,
+			NewCCBDialer(CCBDialerConfig{Streaming: true, Logger: quietTestLogger()}))
+		ccbDialSinful = restore
 
+		if err == nil {
+			t.Fatalf("command %d: the intercepted dial reported success", command)
+		}
 		if !errors.Is(err, errTestDialIntercepted) {
 			t.Fatalf("command %d: the dial was not reached: %v", command, err)
 		}
@@ -75,19 +79,19 @@ func TestStarterDialRequestsStreamingForEveryCommand(t *testing.T) {
 	}
 }
 
-// And it must not be requested when the caller did not ask: on a host that
+// And it must not be requested when no policy asked for it: on a host that
 // can accept the reverse connection, that path is the cheaper one.
 func TestStarterDialLeavesStreamingOffByDefault(t *testing.T) {
 	info := &JobConnectInfo{StarterAddr: "<10.0.0.1:9618>", ClaimID: validTestClaimID(t)}
 
 	var gotOpts *DialOptions
-	restore := dialStarterConn
-	dialStarterConn = func(_ context.Context, _ string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
+	restore := ccbDialSinful
+	ccbDialSinful = func(_ context.Context, _ string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
 		gotOpts = opts
 		return nil, errTestDialIntercepted
 	}
-	_, _ = info.dialStarter(context.Background(), startSSHDCommand, false)
-	dialStarterConn = restore
+	_, _ = info.dialStarter(context.Background(), startSSHDCommand, nil)
+	ccbDialSinful = restore
 
 	if gotOpts == nil || gotOpts.CCBRequireStreaming {
 		t.Error("streaming was requested without being asked for")
@@ -115,13 +119,16 @@ func TestPeekPassesStreamingToTheDial(t *testing.T) {
 	}
 
 	var gotOpts *DialOptions
-	restore := dialStarterConn
-	dialStarterConn = func(_ context.Context, _ string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
+	restore := ccbDialSinful
+	ccbDialSinful = func(_ context.Context, _ string, _ *security.SecurityConfig, opts *DialOptions) (*client.HTCondorClient, error) {
 		gotOpts = opts
 		return nil, errTestDialIntercepted
 	}
-	_, _, err := info.peekOutput(context.Background(), PeekRequest{Stdout: true, CCBStreaming: true})
-	dialStarterConn = restore
+	_, _, err := info.peekOutput(context.Background(), PeekRequest{
+		Stdout: true,
+		CCB:    NewCCBDialer(CCBDialerConfig{Streaming: true, Logger: quietTestLogger()}),
+	})
+	ccbDialSinful = restore
 
 	if !errors.Is(err, errTestDialIntercepted) {
 		t.Fatalf("the dial was not reached: %v", err)

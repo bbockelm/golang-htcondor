@@ -1,4 +1,4 @@
-package daemon
+package logging
 
 import (
 	"log/slog"
@@ -6,26 +6,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 func TestExtractDestination(t *testing.T) {
 	cases := []struct {
 		name     string
 		args     []any
-		wantDest logging.Destination
+		wantDest Destination
 		wantArgs []any
 	}{
-		{"absent", []any{"k", "v"}, logging.DestinationGeneral, []any{"k", "v"}},
-		{"cedar", []any{"destination", "cedar", "k", "v"}, logging.DestinationCedar, []any{"k", "v"}},
-		{"cedar-middle", []any{"a", 1, "destination", "cedar"}, logging.DestinationCedar, []any{"a", 1}},
-		{"unknown-string", []any{"destination", "bogus", "k", "v"}, logging.DestinationGeneral, []any{"k", "v"}},
-		{"dangling-key", []any{"k", "v", "odd"}, logging.DestinationGeneral, []any{"k", "v", "odd"}},
+		{"absent", []any{"k", "v"}, DestinationGeneral, []any{"k", "v"}},
+		{"cedar", []any{"destination", "cedar", "k", "v"}, DestinationCedar, []any{"k", "v"}},
+		{"cedar-middle", []any{"a", 1, "destination", "cedar"}, DestinationCedar, []any{"a", 1}},
+		{"unknown-string", []any{"destination", "bogus", "k", "v"}, DestinationGeneral, []any{"k", "v"}},
+		{"dangling-key", []any{"k", "v", "odd"}, DestinationGeneral, []any{"k", "v", "odd"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dest, args := extractDestination(tc.args)
+			dest, args := extractDestination(tc.args, DestinationGeneral)
 			if dest != tc.wantDest {
 				t.Errorf("dest = %v, want %v", dest, tc.wantDest)
 			}
@@ -47,16 +45,16 @@ func TestExtractDestination(t *testing.T) {
 // record carrying two destination attributes.
 func TestSlogBridgeRoutesDestination(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bridge.log")
-	l, err := logging.New(&logging.Config{
+	l, err := New(&Config{
 		OutputPath:        path,
 		SkipGlobalInstall: true,
-		DestinationLevels: map[logging.Destination]logging.Verbosity{logging.DestinationCedar: logging.VerbosityWarn},
-		DefaultLevel:      logging.VerbosityInfo,
+		DestinationLevels: map[Destination]Verbosity{DestinationCedar: VerbosityWarn},
+		DefaultLevel:      VerbosityInfo,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sl := slog.New(&slogBridge{log: l})
+	sl := slog.New(&slogBridge{log: l, dest: DestinationGeneral})
 
 	// Cedar Info -> routed to cedar (Warn) -> suppressed, exactly as in production where the
 	// bug let this handshake chatter leak into the General stream.

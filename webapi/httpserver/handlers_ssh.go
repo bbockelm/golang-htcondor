@@ -212,7 +212,7 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sshClient, err := schedd.OpenJobShell(openCtx, cluster, proc, &htcondor.JobShellOptions{
-		CCBStreaming: s.ccbStreaming,
+		CCB: s.ccbDialer,
 	})
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "OpenJobShell failed",
