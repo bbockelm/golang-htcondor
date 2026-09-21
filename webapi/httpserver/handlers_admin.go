@@ -489,7 +489,14 @@ func queryTokenTable(
 	// gosec G202: table is selected by the caller from a fixed allowlist
 	// (oauth2_access_tokens / oauth2_refresh_tokens), not from user input.
 	//nolint:gosec
-	q := "SELECT signature, client_id, subject, scopes, active, requested_at, expires_at FROM " + table
+	// granted_scopes, not scopes. The `scopes` column is what the CLIENT
+	// ASKED for; granted_scopes is what the authorization actually gave
+	// it, after consent and the group policy had their say. Those differ
+	// whenever a request was refused something -- which is now the normal
+	// case, since a client may ask for mcp:admin and not be in the group
+	// for it. Listing the request made a refused privilege look granted,
+	// which is the opposite of what an operator reading this page needs.
+	q := "SELECT signature, client_id, subject, granted_scopes, active, requested_at, expires_at FROM " + table
 	args := []any{}
 	conds := []string{}
 	if clientFilter != "" {
@@ -844,6 +851,150 @@ func (s *Handler) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, http.StatusOK, AdminRevokeTokenResponse{
 		Revoked: n, ClientID: grant.ClientID, Subject: grant.Subject,
 	})
+}
+
+// AdminSetTokenScopesRequest narrows one grant from the admin listing.
+type AdminSetTokenScopesRequest struct {
+	// Kind is "access" or "refresh" -- which table the fingerprint is in.
+	Kind string `json:"kind"`
+	// Fingerprint is the redacted signature shown in the listing.
+	Fingerprint string `json:"fingerprint"`
+	// Scopes is the set to keep. Anything currently granted and absent
+	// here is removed; anything here that is not currently granted is an
+	// error rather than an addition.
+	Scopes []string `json:"scopes"`
+}
+
+// AdminSetTokenScopesResponse reports what the narrowing actually did.
+type AdminSetTokenScopesResponse struct {
+	ClientID string   `json:"client_id"`
+	Subject  string   `json:"subject,omitempty"`
+	Scopes   []string `json:"scopes"`
+	Removed  []string `json:"removed,omitempty"`
+	Rows     int64    `json:"rows"`
+}
+
+// handleAdminSetTokenScopes handles POST /api/v1/admin/oauth2/tokens/scopes.
+//
+// Takes privileges away from a grant without ending it: an agent that was
+// given more than it needed can be cut back to what it needs, rather than
+// revoked and re-authorized, which for a long-lived bot means somebody has
+// to be present to click Authorize again.
+//
+// It NARROWS ONLY. A scope this grant does not already hold is refused
+// rather than added, and that is a boundary rather than a convenience:
+// a token's scopes are what the client asked for, the user consented to,
+// and the group policy allowed, all three. Adding one here would have none
+// of those behind it -- an operator could hand an agent mcp:superuser that
+// its owner never approved and its group never entitled it to, which is
+// precisely the escalation the unchecked-by-default consent box exists to
+// prevent. Granting more remains the authorization endpoint's job, where
+// the user is present to agree.
+//
+// Like revocation, it applies to the whole grant. Narrowing only the
+// access token would be undone at the next refresh by a client still
+// holding a refresh token that carries the old set.
+func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.oauth2Provider == nil {
+		s.writeError(w, http.StatusNotFound, "OAuth2 is not enabled on this server")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req AdminSetTokenScopesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	storage := s.oauth2Provider.GetStorage()
+	grant, err := storage.FindGrantBySignaturePrefix(r.Context(), req.Kind, req.Fingerprint)
+	switch {
+	case errors.Is(err, ErrTokenNotFound):
+		s.writeError(w, http.StatusNotFound, "No token matches that fingerprint; it may already have expired")
+		return
+	case errors.Is(err, ErrTokenAmbiguous):
+		s.writeError(w, http.StatusConflict,
+			"More than one token matches that fingerprint; refusing to guess which")
+		return
+	case err != nil:
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	current, err := storage.GrantScopes(r.Context(), grant.RequestID)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to read a grant's scopes",
+			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to read the token's scopes")
+		return
+	}
+
+	keep, added := intersectAndAdded(current, req.Scopes)
+	if len(added) > 0 {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"This only removes scopes. %s was not granted to this token; "+
+				"granting it requires a new authorization, where the user can agree to it.",
+			strings.Join(added, ", ")))
+		return
+	}
+
+	removed := subtractScopes(current, keep)
+	if len(removed) == 0 {
+		s.writeJSON(w, http.StatusOK, AdminSetTokenScopesResponse{
+			ClientID: grant.ClientID, Subject: grant.Subject, Scopes: keep,
+		})
+		return
+	}
+
+	rows, err := storage.SetGrantScopes(r.Context(), grant.RequestID, keep)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to narrow a grant's scopes",
+			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to update the token's scopes")
+		return
+	}
+
+	// Info, not Debug: this is an administrative action against somebody
+	// else's access, and the operator who did it should be on the record.
+	s.logger.Info(logging.DestinationHTTP, "Administrator narrowed one OAuth2 grant",
+		"client_id", grant.ClientID, "subject", grant.Subject,
+		"kind", req.Kind, "fingerprint", redactSignature(grant.Signature),
+		"was", current, "now", keep, "removed", removed, "rows", rows)
+
+	s.writeJSON(w, http.StatusOK, AdminSetTokenScopesResponse{
+		ClientID: grant.ClientID, Subject: grant.Subject,
+		Scopes: keep, Removed: removed, Rows: rows,
+	})
+}
+
+// intersectAndAdded splits want into the part current already holds and
+// the part it does not. The second is what makes a narrowing a widening.
+func intersectAndAdded(current, want []string) (keep, added []string) {
+	held := make(map[string]bool, len(current))
+	for _, s := range current {
+		held[s] = true
+	}
+	seen := make(map[string]bool, len(want))
+	for _, s := range want {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		if held[s] {
+			keep = append(keep, s)
+		} else {
+			added = append(added, s)
+		}
+	}
+	return keep, added
 }
 
 // handleAdminRevokeTokens handles POST /api/v1/admin/oauth2/revoke.

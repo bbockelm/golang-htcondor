@@ -8,6 +8,10 @@ import (
 
 // signatureFor returns the stored signature of a subject's token, which is
 // what the admin listing shows a prefix of.
+// a question ("the refresh signature for alice"); that every test so far asks
+// about the same user is not a reason to bake the name into the helper.
+//
+//nolint:unparam // table and subject are named at the call site so it reads as
 func signatureFor(t *testing.T, f *reauthFixture, table, subject string) string {
 	t.Helper()
 	db := f.server.oauth2Provider.GetStorage().GetDB()

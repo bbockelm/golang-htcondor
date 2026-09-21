@@ -1263,6 +1263,26 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }),
+
+    // Narrows a grant to a subset of what it already holds. Removal only:
+    // the server refuses a scope the grant does not have, because adding
+    // one here would have no consent and no group policy behind it.
+    setTokenScopes: (body: {
+      kind: string;
+      fingerprint: string;
+      scopes: string[];
+    }): Promise<{
+      client_id: string;
+      subject?: string;
+      scopes: string[];
+      removed?: string[];
+      rows: number;
+    }> =>
+      fetchJSON(`${BASE}/admin/oauth2/tokens/scopes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ''}`),
     // Read the running HTCondor config (admin only). The backend

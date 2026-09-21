@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AdminToken } from "@/lib/api";
-import { ChipList } from "@/components/ChipList";
 import { ConfirmButton } from "@/components/ConfirmButton";
 
 export default function AdminTokensPage() {
@@ -14,6 +13,19 @@ export default function AdminTokensPage() {
   const revoke = useMutation({
     mutationFn: (t: AdminToken) =>
       api.admin.revokeToken({ kind: t.kind, fingerprint: t.signature_prefix }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "tokens"] }),
+  });
+
+  // Narrowing sends the scopes to KEEP. The server refuses anything the
+  // grant does not already hold, so this cannot widen; see
+  // handleAdminSetTokenScopes.
+  const narrow = useMutation({
+    mutationFn: ({ token, drop }: { token: AdminToken; drop: string }) =>
+      api.admin.setTokenScopes({
+        kind: token.kind,
+        fingerprint: token.signature_prefix,
+        scopes: (token.scopes ?? []).filter((s) => s !== drop),
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "tokens"] }),
   });
 
@@ -38,6 +50,11 @@ export default function AdminTokensPage() {
           tokens. Revoking one row here revokes the whole grant — the access
           token and the refresh token issued with it — because revoking an
           access token on its own only lasts until the client refreshes.
+          Scopes shown are what each grant was actually GRANTED, which can be
+          less than the client asked for. Removing one applies to the whole
+          grant for the same reason; scopes cannot be added here, because
+          adding one would have neither the user&rsquo;s consent nor the group
+          policy behind it.
         </p>
       </div>
 
@@ -89,7 +106,8 @@ export default function AdminTokensPage() {
                   key={`${t.kind}-${t.signature_prefix}-${i}`}
                   token={t}
                   onRevoke={() => revoke.mutate(t)}
-                  busy={revoke.isPending}
+                  onDropScope={(scope) => narrow.mutate({ token: t, drop: scope })}
+                  busy={revoke.isPending || narrow.isPending}
                 />
               ))}
             </tbody>
@@ -100,13 +118,67 @@ export default function AdminTokensPage() {
   );
 }
 
+// privilegedScopes act on other people's jobs rather than the holder's
+// own. Marked so an operator scanning this page can see at a glance which
+// agent is carrying one, which is the reason the page is worth reading.
+const privilegedScopes = new Set(["mcp:admin", "mcp:superuser"]);
+
+function ScopeChips({
+  token,
+  onDropScope,
+  busy,
+}: {
+  token: AdminToken;
+  onDropScope: (scope: string) => void;
+  busy: boolean;
+}) {
+  const scopes = token.scopes ?? [];
+  if (scopes.length === 0) {
+    return <span className="text-gray-400">—</span>;
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {scopes.map((scope) => {
+        const privileged = privilegedScopes.has(scope);
+        return (
+          <span
+            key={scope}
+            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+              privileged
+                ? "bg-amber-100 text-amber-900 ring-1 ring-amber-300"
+                : "bg-blue-100 text-blue-800"
+            }`}
+            title={privileged ? `${scope} — acts on other users' jobs` : scope}
+          >
+            {scope}
+            {token.active && (
+              <button
+                type="button"
+                onClick={() => onDropScope(scope)}
+                disabled={busy}
+                aria-label={`Remove ${scope} from this grant`}
+                title={`Remove ${scope} from this grant and its paired token`}
+                className="leading-none text-current/60 hover:text-current disabled:opacity-40"
+              >
+                ×
+              </button>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function TokenRow({
   token,
   onRevoke,
+  onDropScope,
   busy,
 }: {
   token: AdminToken;
   onRevoke: () => void;
+  onDropScope: (scope: string) => void;
   busy: boolean;
 }) {
   return (
@@ -130,7 +202,7 @@ function TokenRow({
       <td className="px-3 py-2 font-mono text-xs">{token.client_id}</td>
       <td className="px-3 py-2 text-xs">{token.subject || "—"}</td>
       <td className="px-3 py-2 text-xs">
-        <ChipList items={token.scopes} tone="blue" />
+        <ScopeChips token={token} onDropScope={onDropScope} busy={busy} />
       </td>
       <td className="px-3 py-2 text-xs">
         {new Date(token.requested_at).toLocaleString()}
