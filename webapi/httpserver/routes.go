@@ -164,6 +164,7 @@ func (h *Handler) setupRoutes() {
 	// Revoking one token from the listing revokes its whole grant; see
 	// handleAdminRevokeToken.
 	mux.Handle("/api/v1/admin/oauth2/tokens/revoke", cors(http.HandlerFunc(h.handleAdminRevokeToken)))
+	mux.Handle("/api/v1/admin/oauth2/tokens/scopes", cors(http.HandlerFunc(h.handleAdminSetTokenScopes)))
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
 	mux.Handle("/api/v1/admin/condor-config", cors(http.HandlerFunc(h.handleAdminCondorConfig)))
 	// API key management (admin-only). The collection path covers

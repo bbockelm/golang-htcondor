@@ -995,6 +995,75 @@ func (s *OAuth2Storage) RevokeGrant(ctx context.Context, requestID string) (int6
 	return total, nil
 }
 
+// GrantScopes reads the scopes currently granted under one grant.
+//
+// Read from the access token where there is one, falling back to the
+// refresh token: the two carry the same granted set by construction, and
+// a grant whose access token has expired still has a refresh token an
+// operator may want to narrow.
+func (s *OAuth2Storage) GrantScopes(ctx context.Context, requestID string) ([]string, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return nil, fmt.Errorf("request id is required")
+	}
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		var raw string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT granted_scopes FROM "+table+" WHERE request_id = ? LIMIT 1", requestID). //nolint:gosec // G202: table is from a fixed literal list
+			Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading granted scopes from %s for grant %s: %w", table, requestID, err)
+		}
+		var scopes []string
+		if err := json.Unmarshal([]byte(raw), &scopes); err != nil {
+			return nil, fmt.Errorf("decoding granted scopes for grant %s: %w", requestID, err)
+		}
+		return scopes, nil
+	}
+	return nil, ErrTokenNotFound
+}
+
+// SetGrantScopes rewrites the granted scopes of every token issued under
+// one grant.
+//
+// Applied to the whole grant for the same reason RevokeGrant is: narrowing
+// only the access token would be undone at the next refresh, minutes
+// later, by a client that still holds a refresh token carrying the old
+// set. The operator reaching for this wants the narrowing to stick.
+//
+// Only granted_scopes is rewritten. The `scopes` column records what was
+// REQUESTED, which is a fact about a past request and not this server's to
+// revise -- and reauthorizeRefreshGrant re-derives the allowed set from
+// the granted one, so that is the column that decides what the token can
+// do.
+func (s *OAuth2Storage) SetGrantScopes(ctx context.Context, requestID string, scopes []string) (int64, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return 0, fmt.Errorf("request id is required")
+	}
+	if scopes == nil {
+		scopes = []string{}
+	}
+	encoded, err := json.Marshal(scopes)
+	if err != nil {
+		return 0, fmt.Errorf("encoding scopes for grant %s: %w", requestID, err)
+	}
+	var total int64
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		res, err := s.db.ExecContext(ctx,
+			"UPDATE "+table+" SET granted_scopes = ? WHERE request_id = ?", //nolint:gosec // G202: table is from a fixed literal list
+			string(encoded), requestID)
+		if err != nil {
+			return total, fmt.Errorf("narrowing %s for grant %s: %w", table, requestID, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, nil
+}
+
 // tokenTableFor maps the listing's "kind" to its table.
 func tokenTableFor(kind string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
