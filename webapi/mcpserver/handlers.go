@@ -1797,12 +1797,9 @@ func (s *Server) resourceScheddStatus(ctx context.Context) (interface{}, error) 
 		}, nil
 	}
 
-	// The whole ad: this resource is the schedd's status, and nil options
-	// select DefaultCollectorProjection -- Name, Machine, MyType, State,
-	// Activity, MyAddress. Everything that makes the ad a status report
-	// (the job counts, the version, the sync and duty-cycle figures) is
-	// outside that set, so the resource was returning four identity
-	// attributes under a name that promises the schedd's state.
+	// This resource returns the whole ad, so it asks for the whole ad.
+	// A QueryOptions with no projection falls back to
+	// DefaultCollectorProjection, which is six identity attributes.
 	ads, _, err := s.collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, &htcondor.QueryOptions{
 		Projection: []string{"*"},
 	})

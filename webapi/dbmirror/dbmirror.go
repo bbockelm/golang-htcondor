@@ -167,6 +167,19 @@ type Info struct {
 	JobQueueReported bool
 }
 
+// mirrorAdAttrs is every attribute ParseAd reads, for callers that fetch
+// the ad with a projection. An attribute missing here parses as absent
+// rather than failing, so TestProjectionCoversEverythingParseAdReads
+// holds the two in step.
+func mirrorAdAttrs() []string {
+	return []string{
+		"Name", "MyAddress", "TimeTravelEnabled",
+		"HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
+		"JobQueueCaughtUp", "JobQueueLastSyncTime", "JobQueueSecondsSinceSync", "JobQueueLagBytes",
+		"EpochCaughtUp", "EpochGapDetected", "EpochLastSyncTime", "EpochSecondsSinceSync", "EpochLagBytes",
+	}
+}
+
 // ParseAd reads a mirror's collector advertisement.
 func ParseAd(ad *classad.ClassAd) *Info {
 	info := &Info{}
@@ -520,27 +533,12 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	return nil, fmt.Errorf("%w (and locally: %w)", err, localErr)
 }
 
-// mirrorQueryOptions asks the collector for the mirror ad in full.
-//
-// The projection is the load-bearing part. A QueryOptions with no
-// Projection does not mean "everything" -- it falls back to
-// DefaultCollectorProjection, which is Name, Machine, MyType, State,
-// Activity and MyAddress. That default is right for the machine-ad
-// queries it was written for and catastrophic here: every attribute
-// ParseAd reads is outside it, so the ad arrived carrying an address and
-// nothing else. Sync health, the gap flags and TimeTravelEnabled all
-// parsed to their zero values, and because absence and zero are the same
-// false/0, the result was not an error but a confident wrong answer --
-// a mirror reported as advertising no live-queue sync at all while its
-// ad in the collector plainly carried it.
-//
-// "*" is requested rather than a list of the attributes ParseAd happens
-// to read today, because the failure mode of an out-of-date list is
-// exactly the one above: silent, and indistinguishable from the mirror
-// not reporting. htcondordb adds attributes to this ad as it grows new
-// sync sources, and there are only ever a handful of mirrors.
+// mirrorQueryOptions asks the collector for the mirror ads, projected to
+// the attributes ParseAd reads. The projection has to be named: a
+// QueryOptions without one falls back to DefaultCollectorProjection,
+// which carries none of them.
 func mirrorQueryOptions() *htcondor.QueryOptions {
-	return &htcondor.QueryOptions{Limit: 64, Projection: []string{"*"}}
+	return &htcondor.QueryOptions{Limit: 64, Projection: mirrorAdAttrs()}
 }
 
 func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
