@@ -98,8 +98,14 @@ type Config struct {
 	// document to name the resource the client asked about, and a client
 	// that reaches MCP on another origin asked about that origin. Naming
 	// the web UI's instead makes the document one the client must reject.
-	MCPBaseURL    string
-	CCBStreaming  bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
+	MCPBaseURL string
+	// CCB decides how to reach a daemon behind a Condor Connection Broker:
+	// on an inbound path of this server's own (see sharedportrouter), or by
+	// having the broker relay. Set once by the operator and applied to every
+	// surface that reaches into a running job -- a shell, a session, tailing
+	// output -- so two of them cannot disagree. Nil keeps cedar's default,
+	// which only works on a host the execute nodes can reach.
+	CCB           *htcondor.CCBDialer
 	TLSCertFile   string              // Path to TLS certificate file (optional, enables HTTPS)
 	TLSKeyFile    string              // Path to TLS key file (optional, enables HTTPS)
 	TLSCACertFile string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
@@ -357,7 +363,7 @@ func NewServer(cfg Config) (*Server, error) {
 		UIDDomain:                   cfg.UIDDomain,
 		HTTPBaseURL:                 cfg.HTTPBaseURL,
 		MCPBaseURL:                  cfg.MCPBaseURL,
-		CCBStreaming:                cfg.CCBStreaming,
+		CCB:                         cfg.CCB,
 		TLSCACertFile:               cfg.TLSCACertFile,
 		Collector:                   cfg.Collector,
 		JobQueueLogPath:             cfg.JobQueueLogPath,

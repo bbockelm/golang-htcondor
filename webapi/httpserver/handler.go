@@ -52,7 +52,7 @@ type Handler struct {
 	// /api/v1/version so the Info page can show how long the access
 	// point has been running.
 	startTime        time.Time
-	ccbStreaming     bool // route CCB dials through the broker; see HandlerConfig.CCBStreaming
+	ccbDialer        *htcondor.CCBDialer // how to traverse CCB; see HandlerConfig.CCB
 	schedd           *htcondor.Schedd
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
@@ -487,8 +487,14 @@ type HandlerConfig struct {
 	// document to name the resource the client asked about, and a client
 	// that reaches MCP on another origin asked about that origin. Naming
 	// the web UI's instead makes the document one the client must reject.
-	MCPBaseURL    string
-	CCBStreaming  bool                // reach CCB daemons through the broker instead of a dial-back; see htcondor.DialOptions.CCBRequireStreaming
+	MCPBaseURL string
+	// CCB decides how to reach a daemon behind a Condor Connection Broker:
+	// on an inbound path of this server's own (see sharedportrouter), or by
+	// having the broker relay. Set once by the operator and applied to every
+	// surface that reaches into a running job -- a shell, a session, tailing
+	// output -- so two of them cannot disagree. Nil keeps cedar's default,
+	// which only works on a host the execute nodes can reach.
+	CCB           *htcondor.CCBDialer
 	TLSCACertFile string              // Path to TLS CA certificate file (optional, for trusting self-signed certs)
 	Collector     *htcondor.Collector // Collector for metrics (optional)
 
@@ -914,7 +920,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		httpBaseURL:               cfg.HTTPBaseURL,
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
-		ccbStreaming:              cfg.CCBStreaming,
+		ccbDialer:                 cfg.CCB,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
 		jupyterWorkDir:            cfg.JupyterWorkDir,
@@ -1702,7 +1708,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
 		InteractiveRequirements: h.interactiveRequirements,
 		Build:                   h.build,
-		CCBStreaming:            h.ccbStreaming,
+		CCB:                     h.ccbDialer,
 		SigningKeyPath:          h.signingKeyPath,
 		TrustDomain:             h.trustDomain,
 		UIDDomain:               h.uidDomain,

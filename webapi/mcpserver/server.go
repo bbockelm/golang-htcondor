@@ -94,12 +94,11 @@ type Server struct {
 	// every authenticated caller is treated as a normal user).
 	adminUsers map[string]struct{}
 
-	// ccbStreaming routes dials at daemons behind a Condor Connection
-	// Broker through the broker, instead of having the remote daemon
-	// dial back. An API server that cannot accept inbound connections
-	// needs it; see HandlerConfig.CCBStreaming, which is where the
-	// operator sets it once for every surface.
-	ccbStreaming bool
+	// ccbDialer decides how to reach a daemon behind a Condor Connection
+	// Broker. An API server that cannot accept inbound connections needs
+	// one; see HandlerConfig.CCB, which is where the operator sets it
+	// once for every surface.
+	ccbDialer *htcondor.CCBDialer
 
 	// htcondorConfig is the ambient HTCondor configuration, used to build the CLIENT security
 	// config when dialing the htcondordb database for the DB-backed tools. nil disables them.
@@ -226,13 +225,13 @@ type Config struct {
 	// exactly the kind this exists to satisfy.
 	SubmitPolicy submitpolicy.Policy
 
-	// CCBStreaming routes CCB dials through the broker rather than
-	// having the execute node dial back. Same setting the REST surface
-	// uses (HandlerConfig.CCBStreaming), and it applies to everything
-	// here that reaches a daemon behind CCB: an interactive session's
-	// shell, and tailing a running job through its starter. An API
-	// server that cannot accept inbound connections needs it for both.
-	CCBStreaming bool
+	// CCB decides how to reach a daemon behind a Condor Connection
+	// Broker. Same setting the REST surface uses (HandlerConfig.CCB),
+	// and it applies to everything here that reaches a daemon behind
+	// CCB: an interactive session's shell, and tailing a running job
+	// through its starter. An API server that cannot accept inbound
+	// connections needs it for both.
+	CCB *htcondor.CCBDialer
 	// InteractiveRequirements is the operator's interactive-job
 	// Requirements expression (HTTP_API_INTERACTIVE_REQUIREMENTS). The
 	// REST terminal applies it; sessions are the same kind of job on the
@@ -336,7 +335,7 @@ func NewServer(cfg Config) (*Server, error) {
 		stdout:         stdout,
 		adminUsers:     adminUsers,
 		htcondorConfig: cfg.HTCondorConfig,
-		ccbStreaming:   cfg.CCBStreaming,
+		ccbDialer:      cfg.CCB,
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
 		dbMirror:       cfg.DBMirror,
@@ -390,7 +389,7 @@ func NewServer(cfg Config) (*Server, error) {
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
 		ExtraSubmit:  cfg.InteractiveExtraSubmit,
-		CCBStreaming: cfg.CCBStreaming,
+		CCB:          cfg.CCB,
 		Requirements: cfg.InteractiveRequirements,
 	})
 	if err != nil {

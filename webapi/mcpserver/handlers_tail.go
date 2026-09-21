@@ -124,7 +124,7 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 		// server that cannot accept inbound connections needs the broker
 		// to relay, or the execute node is told to dial an address
 		// nothing routes to.
-		CCBStreaming: s.ccbStreaming,
+		CCB: s.ccbDialer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reading output from the execute node: %w", err)

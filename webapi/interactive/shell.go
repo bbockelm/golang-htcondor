@@ -69,14 +69,14 @@ type ScheddClient interface {
 // one operation here that is not part of the narrow interface, because
 // nothing about it is faked in tests — the fake substitutes at the
 // Dialer instead.
-func sshDialer(scheddFn func() ScheddClient, ccbStreaming bool) Dialer {
+func sshDialer(scheddFn func() ScheddClient, ccbDialer *htcondor.CCBDialer) Dialer {
 	return func(ctx context.Context, cluster, proc int) (Shell, error) {
 		schedd, ok := scheddFn().(*htcondor.Schedd)
 		if !ok || schedd == nil {
 			return nil, errors.New("condor_ssh_to_job needs a real schedd connection")
 		}
 		client, err := openJobShell(ctx, schedd, cluster, proc, &htcondor.JobShellOptions{
-			CCBStreaming: ccbStreaming,
+			CCB: ccbDialer,
 		})
 		if err != nil {
 			return nil, err

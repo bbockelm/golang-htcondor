@@ -88,12 +88,10 @@ type PeekRequest struct {
 	// Zero or negative falls back to DefaultPeekMaxBytes.
 	MaxBytes int64
 
-	// CCBStreaming reaches a starter behind CCB by having the broker relay
-	// the connection instead of having the execute node dial back to us.
-	// Set it when this process cannot accept inbound connections -- see
-	// JobShellOptions.CCBStreaming, which is the same choice for the same
-	// reason on the shell path.
-	CCBStreaming bool
+	// CCB decides how to reach a starter behind a Condor Connection Broker --
+	// see JobShellOptions.CCB, which is the same choice for the same reason on
+	// the shell path.
+	CCB *CCBDialer
 }
 
 // PeekedStream is what came back for one of the requested streams.
@@ -183,7 +181,7 @@ func (s *Schedd) PeekJobOutput(ctx context.Context, cluster, proc int, req PeekR
 // requested streams it never got to read, because an empty file frame
 // forces the connection closed before the later frames arrive.
 func (info *JobConnectInfo) peekOutput(ctx context.Context, req PeekRequest) (*PeekResult, []peekFileKind, error) {
-	htcondorClient, err := info.dialStarter(ctx, starterPeekCommand, req.CCBStreaming)
+	htcondorClient, err := info.dialStarter(ctx, starterPeekCommand, req.CCB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resume starter session at %s: %w", info.StarterAddr, err)
 	}

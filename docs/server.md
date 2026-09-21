@@ -773,6 +773,56 @@ $ curl http://localhost:9618/healthz
 {"status":"ok"}
 ```
 
+## Reaching jobs behind CCB
+
+Anything that reaches *into* a running job — a shell, `tail_job_output`,
+`exec_in_job`, an interactive session — connects to the starter on the execute
+node. When that node is firewalled, its address carries a Condor Connection
+Broker contact and the connection has to go through the broker.
+
+CCB offers two ways through, and on a host that is itself firewalled neither is
+automatic:
+
+- **Connection reversal** (the default). The broker tells the starter to dial
+  *us*. That needs this server to be reachable from the execute node — which an
+  API server in a container, behind NAT, or in a Kubernetes pod is not. The
+  failure is silent: the starter connects to an address nothing routes to and
+  the request times out without naming CCB.
+- **Streaming**, where the broker relays both directions itself. No inbound path
+  needed, but it requires a broker running HTCondor 25.13 or newer, and *which*
+  broker a given dial uses is decided by the execute node, not by this server.
+
+Setting `HTTP_API_SHARED_PORT` gives this server the inbound path, using the
+same mechanism the access point already uses for `condor_ssh_to_job`: one port,
+multiplexed. Each dial registers an unguessable id and advertises
+`<host:port?sock=ID>` as its reverse-connect address, so any number of
+concurrent sessions share the one port. No `condor_shared_port` daemon is
+involved — the routing happens inside this process.
+
+```
+# The port execute nodes will connect back to.
+HTTP_API_SHARED_PORT = 9618
+
+# Only when that is not what they should dial -- a Kubernetes Service, a
+# published container port, a NAT.
+HTTP_API_SHARED_PORT_ADDRESS = htcondor-api.example.org:9618
+```
+
+With it set, connection reversal through that port is tried first, because it
+works with every broker version. If the execute node turns out not to be able
+to reach it after all, the server falls back to streaming (unless
+`HTTP_API_CCB_STREAMING = false`), and remembers the answer per broker for
+`HTTP_API_CCB_LEARNED_TTL` so later requests do not pay the timeout again. A
+broker too old to relay is likewise remembered and not asked again.
+
+Open the port in the host firewall, and check the log line at startup — it
+prints the address being advertised, which is the thing that is wrong when this
+does not work:
+
+```
+HTCondor shared port open for CCB connection reversal listen=9618 advertised=htcondor-api.example.org:9618
+```
+
 ## Configuration
 
 Settings live in HTCondor config (`condor_config_val`-readable) and
@@ -812,6 +862,10 @@ are prefixed `HTTP_API_*`. Frequently-used knobs:
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
 | `HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE` | Site-policy text appended to every chat system prompt. |
+| `HTTP_API_SHARED_PORT` | Open an inbound HTCondor port (a port or `host:port`, e.g. `9618`) so this server can be reached by execute nodes behind a Condor Connection Broker. Off by default. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
+| `HTTP_API_SHARED_PORT_ADDRESS` | The `host` or `host:port` execute nodes should dial to reach that port, when it differs from what this process binds — behind NAT, a container port map, or a Kubernetes Service. Defaults to `TCP_FORWARDING_HOST`, else `FULL_HOSTNAME`, paired with the listen port. |
+| `HTTP_API_CCB_STREAMING` | Allow asking the broker to relay a CCB connection instead of being dialed back. Default: on unless running under `condor_master`. With `HTTP_API_SHARED_PORT` set this is the fallback, not the first choice. |
+| `HTTP_API_CCB_LEARNED_TTL` | How long what this server learned about a broker (whether execute nodes can reach it, whether the broker can relay) is reused before being rechecked. Default `15m`. |
 
 Schedd / collector rate limiting (also applies to the HTTP server,
 since it reuses the library):

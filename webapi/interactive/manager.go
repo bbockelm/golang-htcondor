@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
@@ -80,7 +81,7 @@ type Options struct {
 	// not, because this manager built the submit file itself and nothing
 	// carried the value across -- so a session could land on exactly the
 	// machines an operator had excluded, which is how it was noticed.
-	// That is the second setting to go missing this way (CCBStreaming
+	// That is the second setting to go missing this way (the CCB policy
 	// was the first); once both are in, they are worth collapsing into
 	// one operator-policy struct so the next knob cannot be forgotten by
 	// one surface.
@@ -108,20 +109,21 @@ type Options struct {
 	// MaxOutputBytes caps each of stdout and stderr per exec.
 	MaxOutputBytes int
 
-	// CCBStreaming reaches a starter behind CCB by having the broker
-	// relay the connection instead of having the execute node dial back
-	// to us.
+	// CCB decides how to reach a starter behind a Condor Connection
+	// Broker: on an inbound path of this server's own, or by having the
+	// broker relay.
 	//
-	// The dial-back default needs this process to be reachable FROM the
-	// execute node, which an access point's API server generally is not
-	// -- in a container, behind NAT, anywhere but a pool host. The
-	// broker then tells the starter to connect to an address nothing
-	// routes to and the dial fails with "ccb: broker failure: failed to
-	// connect". The REST terminal has carried this setting since it hit
-	// exactly that; a session is the same dial and needs the same
-	// answer, so the host passes the operator's one setting to both
-	// rather than having two that can disagree.
-	CCBStreaming bool
+	// It matters because the remaining option -- having the execute node
+	// dial back to us -- needs this process to be reachable FROM that
+	// node, which an access point's API server generally is not: in a
+	// container, behind NAT, anywhere but a pool host. The broker then
+	// tells the starter to connect to an address nothing routes to and
+	// the dial fails with "ccb: broker failure: failed to connect". The
+	// REST terminal has carried this setting since it hit exactly that;
+	// a session is the same dial and needs the same answer, so the host
+	// passes the operator's one setting to both rather than having two
+	// that can disagree.
+	CCB *htcondor.CCBDialer
 
 	// Dial opens a Shell into a running job. Defaults to
 	// condor_ssh_to_job; tests substitute a fake.
@@ -336,7 +338,7 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Now = time.Now
 	}
 	if opts.Dial == nil {
-		opts.Dial = sshDialer(opts.Schedd, opts.CCBStreaming)
+		opts.Dial = sshDialer(opts.Schedd, opts.CCB)
 	}
 	m := &Manager{
 		opts:     opts,

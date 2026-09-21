@@ -208,7 +208,7 @@ func starterSecurityConfig(ctx context.Context, starterAddr string, command int,
 //
 // The caller owns the returned client and must Close it, except where it
 // hands the underlying conn to something else.
-func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbStreaming bool) (*client.HTCondorClient, error) {
+func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbDialer *CCBDialer) (*client.HTCondorClient, error) {
 	claim := security.ParseClaimID(info.ClaimID)
 	if claim == nil || claim.SecSessionID() == "" {
 		return nil, fmt.Errorf("malformed ClaimId: missing session id")
@@ -239,22 +239,24 @@ func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbStr
 		return nil, err
 	}
 
-	// CCB streaming when this process cannot accept inbound connections:
-	// the execute node is commonly firewalled, and the broker relays rather
-	// than asking the starter to dial back to an address nothing routes to.
-	return dialStarterConn(ctx, info.StarterAddr, secConfig, &DialOptions{
-		CCBRequireStreaming: ccbStreaming,
-	})
+	// The execute node is commonly firewalled, so how to traverse CCB is a
+	// decision, not a default; CCBDialer makes it, falls back when its first
+	// choice turns out not to work, and remembers the answer per broker. A nil
+	// dialer is cedar's own behavior, for a caller on a pool host that never
+	// configured any of this.
+	return dialStarterConn(ctx, info.StarterAddr, secConfig, ccbDialer)
 }
 
-// dialStarterConn is DialSinful, indirected so tests can observe what
-// dialStarter asks for. Whether the streaming flag survives the trip is
-// otherwise invisible without a live starter behind a real broker -- and
-// it reaching the wire is the whole point of the call.
-var dialStarterConn = DialSinful
+// dialStarterConn performs the starter dial, indirected so tests can observe
+// what dialStarter asks for. Which CCB mode it picks is otherwise invisible
+// without a live starter behind a real broker -- and it reaching the wire is
+// the whole point of the call.
+var dialStarterConn = func(ctx context.Context, addr string, sec *security.SecurityConfig, ccbDialer *CCBDialer) (*client.HTCondorClient, error) {
+	return ccbDialer.Dial(ctx, addr, sec, nil)
+}
 
-func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbStreaming bool) (net.Conn, *sshKeyPair, error) {
-	htcondorClient, err := info.dialStarter(ctx, startSSHDCommand, ccbStreaming)
+func (info *JobConnectInfo) startSSHDOnStarter(ctx context.Context, ccbDialer *CCBDialer) (net.Conn, *sshKeyPair, error) {
+	htcondorClient, err := info.dialStarter(ctx, startSSHDCommand, ccbDialer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resume starter session at %s: %w", info.StarterAddr, err)
 	}
@@ -372,17 +374,18 @@ type JobShellOptions struct {
 	// HandshakeTimeout caps the SSH handshake (NewClientConn). Default 30s.
 	HandshakeTimeout time.Duration
 
-	// CCBStreaming reaches a starter behind CCB by having the broker relay
-	// the connection, instead of having the execute node dial back to us.
+	// CCB decides how to reach a starter that sits behind a Condor Connection
+	// Broker: on an inbound path of our own, or by having the broker relay.
 	//
-	// The default (dial back) needs this process to be reachable from the
-	// execute node, which is not true of an API server in a container or
-	// behind NAT: the broker tells the starter to connect to an address
-	// nothing routes to, and the attempt times out with nothing to show
-	// for it. Set this when we cannot accept inbound connections. It costs
+	// It matters because the default -- having the execute node dial back to
+	// us -- needs this process to be reachable from that node, which is not
+	// true of an API server in a container or behind NAT. The broker then
+	// tells the starter to connect to an address nothing routes to and the
+	// attempt times out with nothing to show for it. A nil CCB keeps that
+	// default, which is right for a tool running on a pool host. It costs
 	// nothing when the starter is not behind CCB -- the address decides
 	// whether CCB is involved at all.
-	CCBStreaming bool
+	CCB *CCBDialer
 }
 
 // OpenJobShell is the end-to-end convenience: GET_JOB_CONNECT_INFO + START_SSHD
@@ -443,7 +446,7 @@ func (info *JobConnectInfo) OpenSSH(ctx context.Context, opts *JobShellOptions) 
 		timeout = 30 * time.Second
 	}
 
-	rawConn, keys, err := info.startSSHDOnStarter(ctx, opts.CCBStreaming)
+	rawConn, keys, err := info.startSSHDOnStarter(ctx, opts.CCB)
 	if err != nil {
 		return nil, err
 	}

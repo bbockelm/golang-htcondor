@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bbockelm/cedar/ccb"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/security"
 )
@@ -28,6 +29,16 @@ type DialOptions struct {
 	// Setting this alone is enough to select streaming; CCBReturnAddr is
 	// filled in for you. See DialSinful.
 	CCBRequireStreaming bool
+
+	// CCBReverseListener supplies the inbound path for a standard-mode CCB
+	// dial instead of a private TCP socket, letting a caller with no port of
+	// its own still accept connection reversal -- see
+	// ccb.DialOptions.ReverseListener and CCBDialer, which is what normally
+	// sets this.
+	//
+	// Ignored when CCBRequireStreaming or CCBReturnAddr select streaming: in
+	// streaming mode nothing reverses.
+	CCBReverseListener ccb.ReverseListenerFunc
 }
 
 // ccbProxyPlaceholderAddr stands in for a streaming client's reverse-connect
@@ -72,6 +83,7 @@ func dialConfig(address string, secConfig *security.SecurityConfig, opts *DialOp
 	cfg.Timeout = opts.Timeout
 	cfg.CCBReturnAddr = opts.CCBReturnAddr
 	cfg.CCBRequireStreaming = opts.CCBRequireStreaming
+	cfg.CCBReverseListener = opts.CCBReverseListener
 	// Mode selection keys on the return address alone, so asking for
 	// streaming without supplying one would silently get the standard
 	// reverse-connect dial -- the opposite of what was asked for, and

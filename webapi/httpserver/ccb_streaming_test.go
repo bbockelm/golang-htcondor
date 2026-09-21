@@ -3,6 +3,7 @@ package httpserver
 import (
 	"testing"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -17,18 +18,22 @@ func TestCCBStreamingReachesTheHandler(t *testing.T) {
 		if err != nil {
 			t.Fatalf("logger: %v", err)
 		}
+		dialer := htcondor.NewCCBDialer(htcondor.CCBDialerConfig{Streaming: want})
 		s, err := NewServer(Config{
 			Logger:       logger,
 			ScheddName:   "test-schedd",
 			ScheddAddr:   "127.0.0.1:9618",
 			OAuth2DBPath: t.TempDir() + "/oauth2.db",
-			CCBStreaming: want,
+			CCB:          dialer,
 		})
 		if err != nil {
 			t.Fatalf("failed to create server: %v", err)
 		}
-		if s.ccbStreaming != want {
-			t.Errorf("CCBStreaming=%v did not reach the handler (got %v)", want, s.ccbStreaming)
+		if s.ccbDialer != dialer {
+			t.Fatalf("the CCB policy did not reach the handler (got %v)", s.ccbDialer)
+		}
+		if s.ccbDialer.Streaming() != want {
+			t.Errorf("CCB streaming=%v did not reach the handler (got %v)", want, s.ccbDialer.Streaming())
 		}
 	}
 }

@@ -643,6 +643,7 @@ func TestStaleHeartbeatDoesNotCloseItsSuccessor(t *testing.T) {
 // while every local test passed.
 func TestCCBStreamingReachesTheDial(t *testing.T) {
 	for name, streaming := range map[string]bool{"enabled": true, "disabled": false} {
+		streaming := streaming
 		t.Run(name, func(t *testing.T) {
 			var captured *htcondor.JobShellOptions
 			restore := openJobShell
@@ -652,23 +653,27 @@ func TestCCBStreamingReachesTheDial(t *testing.T) {
 			}
 			defer func() { openJobShell = restore }()
 
+			dialer := htcondor.NewCCBDialer(htcondor.CCBDialerConfig{Streaming: streaming})
 			schedd := newFakeSchedd()
 			mgr, _ := testManager(t, schedd, Options{
-				CCBStreaming: streaming,
+				CCB: dialer,
 				// Force the real dialer: the point is what IT asks for.
 				Dial: nil,
 			})
 			mgr.opts.Dial = sshDialer(func() ScheddClient {
 				return htcondor.NewSchedd("test", "127.0.0.1:1")
-			}, streaming)
+			}, dialer)
 
 			_, _ = mgr.opts.Dial(context.Background(), 1, 0)
 
 			if captured == nil {
 				t.Fatal("the dialer passed no JobShellOptions; nil means CCB dial-back")
 			}
-			if captured.CCBStreaming != streaming {
-				t.Errorf("CCBStreaming = %v, want %v", captured.CCBStreaming, streaming)
+			if captured.CCB == nil {
+				t.Fatal("the dialer passed no CCB policy; nil means CCB dial-back")
+			}
+			if captured.CCB.Streaming() != streaming {
+				t.Errorf("CCB.Streaming() = %v, want %v", captured.CCB.Streaming(), streaming)
 			}
 		})
 	}
@@ -686,8 +691,8 @@ func TestNewManagerHandsStreamingToTheDialer(t *testing.T) {
 	defer func() { openJobShell = restore }()
 
 	mgr, err := NewManager(Options{
-		Schedd:       func() ScheddClient { return htcondor.NewSchedd("test", "127.0.0.1:1") },
-		CCBStreaming: true,
+		Schedd: func() ScheddClient { return htcondor.NewSchedd("test", "127.0.0.1:1") },
+		CCB:    htcondor.NewCCBDialer(htcondor.CCBDialerConfig{Streaming: true}),
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -695,7 +700,7 @@ func TestNewManagerHandsStreamingToTheDialer(t *testing.T) {
 	defer mgr.Close()
 
 	_, _ = mgr.opts.Dial(context.Background(), 1, 0)
-	if captured == nil || !captured.CCBStreaming {
+	if captured == nil || captured.CCB == nil || !captured.CCB.Streaming() {
 		t.Errorf("NewManager built a dialer that does not request CCB streaming: %+v", captured)
 	}
 }
