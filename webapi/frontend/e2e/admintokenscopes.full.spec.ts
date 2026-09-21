@@ -135,14 +135,20 @@ test('an operator removes a scope and the client cannot refresh it back', async 
   // made, not to whatever else the demo server has issued.
   await page.getByPlaceholder(/client/i).fill(client.clientId);
 
-  const remove = page.getByRole('button', { name: 'Remove mcp:write from this grant' }).first();
-  await expect(remove, 'no removable mcp:write chip for the new grant').toBeVisible();
-  await remove.click();
+  const off = page.getByRole('button', { name: 'Switch mcp:write off for this grant and its paired token' }).first();
+  await expect(off, 'no switchable mcp:write chip for the new grant').toBeVisible();
+  await off.click();
 
+  // The chip stays, and now offers to switch the scope back on. It
+  // vanishing is what made a mis-click unrecoverable -- there was nothing
+  // left to click -- so its continued presence IS the fix.
+  // One grant, two rows -- the access token and the refresh token -- and
+  // narrowing applies to both, so do not be precise about how many chips
+  // that is. What matters is that the scope is still there to click.
   await expect(
-    page.getByRole('button', { name: 'Remove mcp:write from this grant' }),
-    'the scope is still offered for removal, so the listing still shows it',
-  ).toHaveCount(0);
+    page.getByRole('button', { name: 'Switch mcp:write back on' }).first(),
+    'the scope disappeared instead of switching off, so it cannot be restored',
+  ).toBeVisible();
 
   // The client still works -- narrowing is not revocation -- but cannot
   // get the scope back by refreshing, which is what writing only the
@@ -155,4 +161,21 @@ test('an operator removes a scope and the client cannot refresh it back', async 
   expect(String(after.body.scope ?? ''), 'refreshing dropped the scopes that were kept').toContain(
     'mcp:read',
   );
+
+  // Switch it back on. This is the half that makes the control a toggle
+  // rather than a one-way door: an operator who mis-clicks can undo it,
+  // instead of revoking the grant and finding somebody to authorize the
+  // agent again.
+  await page.getByRole('button', { name: 'Switch mcp:write back on' }).first().click();
+  await expect(
+    page.getByRole('button', { name: 'Switch mcp:write off for this grant and its paired token' }).first(),
+    'the scope did not come back on',
+  ).toBeVisible();
+
+  const restored = await refresh(request, baseURL!, client, after.body.refresh_token);
+  expect(restored.status, `the grant broke after restoring: ${JSON.stringify(restored.body)}`).toBe(200);
+  expect(
+    String(restored.body.scope ?? ''),
+    'the restored scope did not survive the refresh',
+  ).toContain('mcp:write');
 });

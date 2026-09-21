@@ -189,6 +189,10 @@ function ScopeChips({
             onClick={() => onToggleScope(scope, !on)}
             disabled={busy || !token.active}
             aria-pressed={on}
+            // The visible text is the scope, so without this the button
+            // announces itself as "mcp:write" and says nothing about what
+            // clicking it does -- to a screen reader or to a test.
+            aria-label={token.active ? label : scope}
             title={token.active ? label : scope}
             className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${tone} ${
               token.active ? "cursor-pointer hover:brightness-95" : "cursor-default"
