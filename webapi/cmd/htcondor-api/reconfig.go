@@ -48,6 +48,7 @@ type reconfigTarget interface {
 	SetWebUIAdminGroups(string)
 	SetSuperuserGroups(string)
 	SetMCPSkillsDir(string)
+	SetMCPDisabledTools(string)
 }
 
 // reconfigParams is the table described above. It is deliberately a list of
@@ -64,6 +65,19 @@ var reconfigParams = []reconfigParam{
 		name: "MCP_INSTRUCTIONS",
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPInstructions(v)
+		},
+	},
+
+	// Which MCP tools this site offers. The catalogue is rebuilt per
+	// call and the check runs on every dispatch, so nothing is
+	// constructed from this and a change takes effect on the next
+	// request -- including for sessions already connected, which is the
+	// point: a tool withdrawn because policy changed should stop working
+	// without waiting for agents to reconnect.
+	{
+		name: "HTTP_API_MCP_DISABLED_TOOLS",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPDisabledTools(v)
 		},
 	},
 

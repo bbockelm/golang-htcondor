@@ -274,6 +274,7 @@ type Handler struct {
 	// open by contract; see RevocationOracle.
 	revocationOracles []RevocationOracle
 	mcpInstructions   string   // Server-level instructions provided to agents via MCP initialize
+	mcpDisabledTools  string   // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
 	mcpSkillsDir      string   // Directory of site-authored Markdown skills (empty disables)
 	mcpAdminUsers     []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// mcpServer handles /mcp/message. One long-lived instance: it holds
@@ -676,6 +677,9 @@ type HandlerConfig struct {
 	// HTTP_API_MCP_SUPERUSER_GROUP.
 	MCPSuperuserGroup string
 	MCPInstructions   string // Server-level instructions provided to all MCP agents (e.g., AP-specific guidance)
+	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
+	// offer, as path.Match patterns separated by commas or whitespace.
+	MCPDisabledTools string
 	// MCPSkillsDir is a directory of site-authored Markdown skills to
 	// publish to agents. Empty disables the feature.
 	MCPSkillsDir string
@@ -1439,6 +1443,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
 		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
+		h.mcpDisabledTools = cfg.MCPDisabledTools
 		h.mcpSkillsDir = cfg.MCPSkillsDir
 		h.mcpAdminUsers = cfg.MCPAdminUsers
 
@@ -1656,6 +1661,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		HTCondorConfig: h.htcondorConfig,
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
+		DisabledTools:  h.mcpDisabledTools,
 		SubmitPolicy:   h.submitPolicy,
 		// An agent's interactive session is the same kind of job as the
 		// SPA's terminal, on the same pool, so it gets the same

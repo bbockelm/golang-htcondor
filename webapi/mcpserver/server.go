@@ -49,6 +49,10 @@ type Server struct {
 	// the initialize text can be rebuilt when the skills library changes
 	// without the operator having to set it again.
 	customInstructions atomic.Pointer[string]
+	// disabledTools is the operator's HTTP_API_MCP_DISABLED_TOOLS matcher. Swapped
+	// atomically because a reconfigure can install a new one while a
+	// tools/list or a tool call is being served.
+	disabledTools atomic.Pointer[disabledToolMatcher]
 	// catalogGen counts changes to what a caller would be served -- the
 	// instructions and the tool catalogue built beside them. The SDK
 	// transport caches a server per scope set, and this is how those
@@ -152,6 +156,10 @@ type Config struct {
 	// offers them when a credd is present.
 	CreddProvider func() htcondor.CreddClient
 	Instructions  string // Server-level instructions provided to all agents in the MCP initialize response
+	// DisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
+	// offer, as path.Match patterns separated by commas or whitespace.
+	// See disabled_tools.go.
+	DisabledTools string
 	// SkillsDir is a directory of site-authored Markdown skills to publish
 	// to agents. Empty disables the feature.
 	SkillsDir       string
@@ -354,6 +362,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if dir := strings.TrimSpace(cfg.SkillsDir); dir != "" {
 		s.SetSkillsDir(dir)
 	}
+	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{

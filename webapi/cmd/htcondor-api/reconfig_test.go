@@ -35,6 +35,7 @@ func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", 
 func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
+func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
 
 // configFrom builds a Config from literal file contents, the way the daemon
 // builds one from CONDOR_CONFIG on reconfigure.
@@ -204,5 +205,30 @@ func TestReconfigAppliesAnEmptiedGroup(t *testing.T) {
 	}
 	if got := target.groups["webui_admin"]; !reflect.DeepEqual(got, []string{""}) {
 		t.Errorf("server received %v, want the empty value", got)
+	}
+}
+
+// A tool withdrawn because site policy changed -- CHTC forbids
+// condor_ssh_to_job, so the tools built on it can never work there --
+// has to stop being offered on a reconfigure, without restarting the
+// daemon and dropping every live session.
+//
+// The failure this guards against is the one the table exists for: the
+// parameter is read at startup, the operator edits it, SIGHUP reports
+// success, and the setting never takes.
+func TestReconfigAppliesDisabledTools(t *testing.T) {
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, "HTTP_API_MCP_DISABLED_TOOLS = \n"), target, nil)
+
+	applied, needRestart := w.diff(configFrom(t, "HTTP_API_MCP_DISABLED_TOOLS = exec_in_job interactive_session_*\n"))
+
+	if want := []string{"HTTP_API_MCP_DISABLED_TOOLS"}; !reflect.DeepEqual(applied, want) {
+		t.Errorf("applied = %v, want %v", applied, want)
+	}
+	if len(needRestart) != 0 {
+		t.Errorf("needRestart = %v, want none: this parameter is dynamic", needRestart)
+	}
+	if want := []string{"exec_in_job interactive_session_*"}; !reflect.DeepEqual(target.groups["disabled_tools"], want) {
+		t.Errorf("server received %v, want %v", target.groups["disabled_tools"], want)
 	}
 }

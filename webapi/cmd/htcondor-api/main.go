@@ -143,6 +143,7 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 type mcpConfig struct {
 	enabled                bool
 	skillsDir              string
+	disabledTools          string
 	oauth2DBPath           string
 	oauth2Issuer           string
 	oauth2ClientID         string
@@ -1212,6 +1213,11 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 			"dir", config.skillsDir)
 	}
 
+	if disabled, ok := cfg.Get("HTTP_API_MCP_DISABLED_TOOLS"); ok && strings.TrimSpace(disabled) != "" {
+		config.disabledTools = disabled
+		logger.Info(logging.DestinationMCP, "MCP tools disabled by configuration", "patterns", disabled)
+	}
+
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
 		logger.Info(logging.DestinationMCP, "MCP instructions configured", "length", len(instructions))
@@ -1752,6 +1758,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPAdminGroup:              mcpCfg.mcpAdminGroup,
 		MCPSuperuserGroup:          mcpCfg.mcpSuperuserGroup,
 		MCPInstructions:            mcpCfg.instructions,
+		MCPDisabledTools:           mcpCfg.disabledTools,
 		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
