@@ -1025,6 +1025,46 @@ func (s *OAuth2Storage) GrantScopes(ctx context.Context, requestID string) ([]st
 	return nil, ErrTokenNotFound
 }
 
+// GrantAuthorizedScopes reads what a grant's authorization ENDED with: the
+// set an operator may restore it to.
+//
+// Read from the stored session rather than a column of its own, because that
+// session is what fosite carries forward across every refresh -- a column
+// would have to be re-derived on each new token row, and the set it has to
+// preserve is the one from the ORIGINAL authorization, not from whatever the
+// grant has been narrowed to since.
+//
+// A grant issued before this was recorded has none. Its current scopes are
+// then the only defensible bound: the alternative is inventing an
+// authorization nobody made.
+func (s *OAuth2Storage) GrantAuthorizedScopes(ctx context.Context, requestID string) ([]string, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return nil, fmt.Errorf("request id is required")
+	}
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		var raw string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT session_data FROM "+table+" WHERE request_id = ? LIMIT 1", requestID). //nolint:gosec // G202: table is from a fixed literal list
+			Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading the session for grant %s: %w", requestID, err)
+		}
+		var sess Session
+		if err := json.Unmarshal([]byte(raw), &sess); err != nil {
+			return nil, fmt.Errorf("decoding the session for grant %s: %w", requestID, err)
+		}
+		if len(sess.AuthorizedScopes) > 0 {
+			return sess.AuthorizedScopes, nil
+		}
+		// Pre-dates the field. Fall through to what it holds now.
+		return s.GrantScopes(ctx, requestID)
+	}
+	return nil, ErrTokenNotFound
+}
+
 // SetGrantScopes rewrites the granted scopes of every token issued under
 // one grant.
 //

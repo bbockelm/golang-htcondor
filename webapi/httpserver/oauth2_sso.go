@@ -474,7 +474,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// are persisted with the grant so reauthorizeRefreshGrant can re-run
 	// getScopesForGroups when the grant is refreshed — this is the only
 	// place they are ever read, and they would otherwise be dropped here.
-	session := DefaultOpenIDConnectSession(subject).WithGroups(userGroups)
+	session := DefaultOpenIDConnectSession(subject).
+		WithGroups(userGroups).
+		WithAuthorizedScopes(grantedScopes)
 
 	// Generate OAuth2 response
 	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
