@@ -26,9 +26,33 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AdminClient } from "@/lib/api";
 import { ChipList } from "@/components/ChipList";
 import { ConfirmButton } from "@/components/ConfirmButton";
+import {
+  ScrollableTable,
+  SortableHeader,
+  useSortState,
+  useSortedRows,
+} from "@/components/SortableTable";
+
+type ClientSortKey = "client" | "type" | "lastUsed" | "created";
+
+// Sorted on the value, not the rendered cell: "Last used" renders as a
+// locale string, and ordering that text puts April before January.
+function clientSortValue(c: AdminClient, key: ClientSortKey) {
+  switch (key) {
+    case "client":
+      return c.name || c.id;
+    case "type":
+      return c.public ? "public" : "confidential";
+    case "lastUsed":
+      return c.last_used_at ? new Date(c.last_used_at) : undefined;
+    case "created":
+      return new Date(c.created_at);
+  }
+}
 
 export default function AdminClientsPage() {
   const qc = useQueryClient();
+  const [sort, setSort] = useSortState<ClientSortKey>("created");
   const { data, isLoading, error } = useQuery({
     queryKey: ["admin", "clients"],
     queryFn: api.admin.listClients,
@@ -57,6 +81,8 @@ export default function AdminClientsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'clients'] }),
   });
 
+  const clients = useSortedRows(data?.clients ?? [], sort, clientSortValue);
+
   return (
     <div className="space-y-4 max-w-6xl">
       <div>
@@ -74,27 +100,27 @@ export default function AdminClientsPage() {
         <p className="text-red-600 text-sm">{(error as Error).message}</p>
       )}
 
-      {data && data.clients.length === 0 && (
+      {data && clients.length === 0 && (
         <p className="text-gray-500 text-sm">No clients registered.</p>
       )}
 
-      {data && data.clients.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      {data && clients.length > 0 && (
+        <ScrollableTable>
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
               <tr>
-                <th className="px-3 py-2">Client</th>
-                <th className="px-3 py-2">Type</th>
+                <SortableHeader label="Client" sortKey="client" sort={sort} onSort={setSort} />
+                <SortableHeader label="Type" sortKey="type" sort={sort} onSort={setSort} />
                 <th className="px-3 py-2">Grants</th>
-                <th className="px-3 py-2">Last used</th>
+                <SortableHeader label="Last used" sortKey="lastUsed" sort={sort} onSort={setSort} />
                 <th className="px-3 py-2">Recent users</th>
                 <th className="px-3 py-2">Scopes</th>
-                <th className="px-3 py-2">Created</th>
+                <SortableHeader label="Created" sortKey="created" sort={sort} onSort={setSort} />
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {data.clients.map((c) => (
+              {clients.map((c) => (
                 <ClientRow
                   key={c.id}
                   client={c}
@@ -119,7 +145,7 @@ export default function AdminClientsPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </ScrollableTable>
       )}
 
       {remove.isError && (

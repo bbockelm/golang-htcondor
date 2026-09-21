@@ -1693,6 +1693,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
+	tokenRetention := loadTokenRetention(cfg, logger)
 	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
 	creddAddress := firstConfigValue(cfg, "HTTP_API_CREDD_ADDRESS")
@@ -1795,6 +1796,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPWatchMaxWait:             mcpWatchMaxWait,
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
 		UpstreamRefresh:             upstreamRefresh,
+		TokenRetention:              tokenRetention,
 		MCPUseSDKTransport:          mcpUseSDKTransport,
 		RequiredCredentials:         requiredCredentials,
 		CreddAddress:                creddAddress,
@@ -2914,6 +2916,30 @@ func loadUpstreamRefresh(cfg *config.Config, logger *logging.Logger) string {
 		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_UPSTREAM_REFRESH: refusing to start",
 			"value", raw, "error", err)
 		log.Fatalf("invalid HTTP_API_UPSTREAM_REFRESH=%q: %v", raw, err)
+	}
+	return raw
+}
+
+// loadTokenRetention reads HTTP_API_TOKEN_RETENTION.
+//
+//	unset    keep dead token rows for 90 days
+//	2160h    a duration, with a unit
+//	off / 0  keep them forever
+//
+// Only rows that are already dead -- revoked or expired -- are ever removed;
+// a live grant is somebody's session whatever its age. See oauth2_retention.go.
+//
+// A bare number is refused rather than read as nanoseconds, which is what
+// ParseDuration would do with "90" and is never what anybody means.
+func loadTokenRetention(cfg *config.Config, logger *logging.Logger) string {
+	raw, ok := cfg.Get("HTTP_API_TOKEN_RETENTION")
+	if !ok {
+		return ""
+	}
+	if _, err := httpserver.ParseTokenRetention(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_TOKEN_RETENTION: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_TOKEN_RETENTION=%q: %v", raw, err)
 	}
 	return raw
 }

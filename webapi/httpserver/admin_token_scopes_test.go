@@ -160,3 +160,106 @@ func TestListingReportsGrantedNotRequestedScopes(t *testing.T) {
 		t.Errorf("the listing shows a scope the token was refused:\n%s", rec.Body.String())
 	}
 }
+
+// TestARemovedScopeCanBePutBack is the whole reason this is a toggle.
+//
+// Removal used to be a one-way door behind a single click: an operator who
+// mis-clicked could not undo it, and the grant had to be revoked and
+// re-authorized -- which for an unattended agent means finding somebody to
+// approve it again.
+//
+// Restoring is safe because the bound is what the authorization ENDED with:
+// the user already agreed to it. Granting something they never agreed to is
+// still refused, which the next test covers.
+func TestARemovedScopeCanBePutBack(t *testing.T) {
+	f := newReauthFixture(t, Config{})
+	_, refreshToken, _ := f.grant(t, "alice", nil)
+	sig := signatureFor(t, f, "oauth2_access_tokens", "alice")
+
+	status, body := setScopes(t, f, "access", sig[:8], []string{"openid", "offline_access", "mcp:read"})
+	if status != http.StatusOK {
+		t.Fatalf("narrowing failed with %d: %v", status, body)
+	}
+
+	// Put it back.
+	// Addressed by the REFRESH token's fingerprint this time: either row
+	// names the same grant, and an operator clicks whichever one the
+	// listing happened to show them.
+	refreshSig := signatureFor(t, f, "oauth2_refresh_tokens", "alice")
+	status, body = setScopes(t, f, "refresh", refreshSig[:8],
+		[]string{"openid", "offline_access", "mcp:read", "mcp:write"})
+	if status != http.StatusOK {
+		t.Fatalf("restoring a scope this grant was authorized with failed with %d: %v", status, body)
+	}
+
+	// And it is really back: the client refreshes and carries it again.
+	status, refreshed := f.refresh(t, refreshToken)
+	if status != http.StatusOK {
+		t.Fatalf("the grant stopped working: %d %v", status, refreshed)
+	}
+	if got, _ := refreshed["scope"].(string); !strings.Contains(got, "mcp:write") {
+		t.Errorf("the restored scope did not survive the refresh: %q", got)
+	}
+}
+
+// Restoring is bounded by what the authorization ended with, so a scope the
+// user never agreed to is still refused -- including one they unticked at
+// the consent page, which never enters the authorized set.
+func TestRestoringCannotExceedTheAuthorization(t *testing.T) {
+	f := newReauthFixture(t, Config{})
+	f.grant(t, "alice", nil)
+	sig := signatureFor(t, f, "oauth2_access_tokens", "alice")
+
+	status, body := setScopes(t, f, "access", sig[:8],
+		[]string{"openid", "offline_access", "mcp:read", "mcp:write", "mcp:superuser"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("a scope outside the authorization was accepted with %d: %v", status, body)
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "mcp:superuser") {
+		t.Errorf("the refusal does not name the scope it refused: %v", body)
+	}
+}
+
+// The page cannot offer a toggle without knowing what to toggle back ON, so
+// the listing reports both sets.
+func TestListingReportsWhatCanBeRestored(t *testing.T) {
+	f := newReauthFixture(t, Config{})
+	f.grant(t, "alice", nil)
+	sig := signatureFor(t, f, "oauth2_access_tokens", "alice")
+
+	if status, body := setScopes(t, f, "access", sig[:8],
+		[]string{"openid", "offline_access", "mcp:read"}); status != http.StatusOK {
+		t.Fatalf("narrowing failed with %d: %v", status, body)
+	}
+
+	req := asAdmin(t, f)(http.MethodGet, "/api/v1/admin/oauth2/tokens", "")
+	rec := httptest.NewRecorder()
+	f.server.handleAdminListTokens(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listing failed with %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var listed struct {
+		Tokens []AdminToken `json:"tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tok := range listed.Tokens {
+		if tok.Subject != "alice" {
+			continue
+		}
+		found = true
+		if containsString(tok.Scopes, "mcp:write") {
+			t.Errorf("a switched-off scope is still reported as in force: %v", tok.Scopes)
+		}
+		if !containsString(tok.AuthorizedScopes, "mcp:write") {
+			t.Errorf("the page has no way to switch mcp:write back on: authorized=%v",
+				tok.AuthorizedScopes)
+		}
+	}
+	if !found {
+		t.Fatal("the listing returned no token for alice; this asserted nothing")
+	}
+}

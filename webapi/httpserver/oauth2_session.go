@@ -43,6 +43,18 @@ type Session struct {
 	// It is deliberately NOT refreshed when the grant is refreshed.
 	AuthTime time.Time `json:"authTime,omitempty"`
 
+	// AuthorizedScopes is what this authorization ENDED with: the set the
+	// policy allowed and the user did not untick, recorded once at
+	// consent and carried unchanged across every refresh.
+	//
+	// It is the bound on what an operator may re-enable from the admin
+	// page. GrantedScope is the set in force now, which an operator may
+	// have narrowed; this is the set that narrowing started from, so
+	// putting one back is restoring something this user already agreed
+	// to rather than granting something new. A scope the user unticked at
+	// consent never appears here, so no operator can undo that choice.
+	AuthorizedScopes []string `json:"authorizedScopes,omitempty"`
+
 	// Actor names the client that obtained this token by RFC 8693 token
 	// exchange on the subject's behalf (delegation): the token acts AS Subject
 	// but was minted FOR this actor. Empty for tokens obtained directly. It is
@@ -84,7 +96,24 @@ func (s *Session) Clone() fosite.Session {
 	if s.Groups != nil {
 		clone.Groups = append([]string(nil), s.Groups...)
 	}
+	if s.AuthorizedScopes != nil {
+		clone.AuthorizedScopes = append([]string(nil), s.AuthorizedScopes...)
+	}
 	return clone
+}
+
+// WithAuthorizedScopes records what this authorization ended with, which is
+// the bound on what an operator may later re-enable. See AuthorizedScopes.
+//
+// Called at every site that grants scopes, so that a grant made through a
+// path which forgets is visible as a grant nothing can be restored to,
+// rather than one an operator can quietly widen.
+func (s *Session) WithAuthorizedScopes(scopes []string) *Session {
+	if s == nil {
+		return nil
+	}
+	s.AuthorizedScopes = append([]string(nil), scopes...)
+	return s
 }
 
 // WithGroups records the group memberships that authorized this grant and

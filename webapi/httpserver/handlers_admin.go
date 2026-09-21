@@ -141,14 +141,39 @@ type AdminClientUse struct {
 // fingerprint, so admins can correlate against logs without being able
 // to use the token themselves.
 type AdminToken struct {
-	Kind            string    `json:"kind"` // "access" or "refresh"
-	SignaturePrefix string    `json:"signature_prefix"`
-	ClientID        string    `json:"client_id"`
-	Subject         string    `json:"subject,omitempty"`
-	Scopes          []string  `json:"scopes,omitempty"`
-	Active          bool      `json:"active"`
-	RequestedAt     time.Time `json:"requested_at"`
-	ExpiresAt       time.Time `json:"expires_at,omitempty"`
+	Kind            string `json:"kind"` // "access" or "refresh"
+	SignaturePrefix string `json:"signature_prefix"`
+	ClientID        string `json:"client_id"`
+	// ClientName and Notes are the client's own label and the operator's
+	// annotation, carried over from the clients page. A client id is a
+	// generated string; "OpenClaw MCP" is what somebody reading this page
+	// is actually looking for.
+	ClientName string   `json:"client_name,omitempty"`
+	Notes      string   `json:"notes,omitempty"`
+	Subject    string   `json:"subject,omitempty"`
+	Scopes     []string `json:"scopes,omitempty"`
+	// AuthorizedScopes is everything this authorization ended with. Scopes
+	// is the subset in force now, so the difference is what an operator
+	// switched off and may switch back on.
+	AuthorizedScopes []string  `json:"authorized_scopes,omitempty"`
+	Active           bool      `json:"active"`
+	RequestedAt      time.Time `json:"requested_at"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+}
+
+// authorizedFromSession reads what a grant was authorized with.
+//
+// Falls back to the scopes in force for a grant written before the field
+// existed: the page would otherwise offer nothing to switch back on, which
+// reads as "this grant was authorized with nothing".
+func authorizedFromSession(sessionData, grantedScopes string) []string {
+	var sess Session
+	if sessionData != "" {
+		if err := json.Unmarshal([]byte(sessionData), &sess); err == nil && len(sess.AuthorizedScopes) > 0 {
+			return sess.AuthorizedScopes
+		}
+	}
+	return decodeStringList(grantedScopes)
 }
 
 // handleAdminListClients handles GET /api/v1/admin/oauth2/clients.
@@ -496,22 +521,28 @@ func queryTokenTable(
 	// case, since a client may ask for mcp:admin and not be in the group
 	// for it. Listing the request made a refused privilege look granted,
 	// which is the opposite of what an operator reading this page needs.
-	q := "SELECT signature, client_id, subject, granted_scopes, active, requested_at, expires_at FROM " + table
+	// LEFT JOIN, not JOIN: a token whose client row has been deleted is
+	// exactly the one an operator is here to find, and an inner join would
+	// hide it.
+	q := "SELECT t.signature, t.client_id, t.subject, t.granted_scopes, t.session_data, " +
+		"t.active, t.requested_at, t.expires_at, " +
+		"COALESCE(c.client_name, ''), COALESCE(c.notes, '') " +
+		"FROM " + table + " t LEFT JOIN oauth2_clients c ON c.id = t.client_id"
 	args := []any{}
 	conds := []string{}
 	if clientFilter != "" {
-		conds = append(conds, "client_id = ?")
+		conds = append(conds, "t.client_id = ?")
 		args = append(args, clientFilter)
 	}
 	if activeOnly {
-		conds = append(conds, "active != 0")
-		conds = append(conds, "(expires_at IS NULL OR expires_at > ?)")
+		conds = append(conds, "t.active != 0")
+		conds = append(conds, "(t.expires_at IS NULL OR t.expires_at > ?)")
 		args = append(args, time.Now().UTC())
 	}
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY requested_at DESC LIMIT ?"
+	q += " ORDER BY t.requested_at DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := db.QueryContext(r.Context(), q, args...)
@@ -524,24 +555,27 @@ func queryTokenTable(
 
 	out := make([]AdminToken, 0, limit)
 	for rows.Next() {
-		var sig, clientID, subject, scopes string
+		var sig, clientID, subject, scopes, sessionData, clientName, notes string
 		var active int
 		var requestedAt time.Time
 		var expiresAt sql.NullTime
-		if err := rows.Scan(&sig, &clientID, &subject, &scopes, &active,
-			&requestedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&sig, &clientID, &subject, &scopes, &sessionData, &active,
+			&requestedAt, &expiresAt, &clientName, &notes); err != nil {
 			logger.Warn(logging.DestinationHTTP, "Skipping malformed token row",
 				"table", table, "error", err)
 			continue
 		}
 		t := AdminToken{
-			Kind:            kind,
-			SignaturePrefix: redactSignature(sig),
-			ClientID:        clientID,
-			Subject:         subject,
-			Scopes:          decodeStringList(scopes),
-			Active:          active != 0,
-			RequestedAt:     requestedAt,
+			Kind:             kind,
+			SignaturePrefix:  redactSignature(sig),
+			ClientID:         clientID,
+			ClientName:       clientName,
+			Notes:            notes,
+			Subject:          subject,
+			Scopes:           decodeStringList(scopes),
+			AuthorizedScopes: authorizedFromSession(sessionData, scopes),
+			Active:           active != 0,
+			RequestedAt:      requestedAt,
 		}
 		if expiresAt.Valid {
 			t.ExpiresAt = expiresAt.Time
@@ -871,6 +905,7 @@ type AdminSetTokenScopesResponse struct {
 	Subject  string   `json:"subject,omitempty"`
 	Scopes   []string `json:"scopes"`
 	Removed  []string `json:"removed,omitempty"`
+	Added    []string `json:"added,omitempty"`
 	Rows     int64    `json:"rows"`
 }
 
@@ -937,17 +972,32 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	keep, added := intersectAndAdded(current, req.Scopes)
+	// The bound is what this authorization ENDED with, not what the grant
+	// holds right now. Turning a scope back on is restoring something the
+	// user already agreed to -- which is what makes the control on the
+	// page a toggle rather than a one-way door somebody can trip by
+	// accident. Anything outside that set is still refused: it would have
+	// no consent and no group policy behind it.
+	authorized, err := storage.GrantAuthorizedScopes(r.Context(), grant.RequestID)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to read a grant's authorized scopes",
+			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to read the token's authorization")
+		return
+	}
+
+	keep, added := intersectAndAdded(authorized, req.Scopes)
 	if len(added) > 0 {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf(
-			"This only removes scopes. %s was not granted to this token; "+
-				"granting it requires a new authorization, where the user can agree to it.",
+			"%s was never authorized for this token. It can be turned off and back on, "+
+				"but granting something new requires a fresh authorization, where the user agrees to it.",
 			strings.Join(added, ", ")))
 		return
 	}
 
 	removed := subtractScopes(current, keep)
-	if len(removed) == 0 {
+	restored := subtractScopes(keep, current)
+	if len(removed) == 0 && len(restored) == 0 {
 		s.writeJSON(w, http.StatusOK, AdminSetTokenScopesResponse{
 			ClientID: grant.ClientID, Subject: grant.Subject, Scopes: keep,
 		})
@@ -964,14 +1014,14 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 
 	// Info, not Debug: this is an administrative action against somebody
 	// else's access, and the operator who did it should be on the record.
-	s.logger.Info(logging.DestinationHTTP, "Administrator narrowed one OAuth2 grant",
+	s.logger.Info(logging.DestinationHTTP, "Administrator changed one OAuth2 grant's scopes",
 		"client_id", grant.ClientID, "subject", grant.Subject,
 		"kind", req.Kind, "fingerprint", redactSignature(grant.Signature),
-		"was", current, "now", keep, "removed", removed, "rows", rows)
+		"was", current, "now", keep, "removed", removed, "restored", restored, "rows", rows)
 
 	s.writeJSON(w, http.StatusOK, AdminSetTokenScopesResponse{
 		ClientID: grant.ClientID, Subject: grant.Subject,
-		Scopes: keep, Removed: removed, Rows: rows,
+		Scopes: keep, Removed: removed, Added: restored, Rows: rows,
 	})
 }
 

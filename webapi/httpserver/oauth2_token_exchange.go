@@ -96,6 +96,11 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	session := DefaultOpenIDConnectSession(subject)
 	session.Actor = client.GetID()
 	session.Groups = subjectGroups
+	// An exchanged token holds no refresh credential and so is never
+	// narrowed and restored. The field is set anyway: an empty one reads
+	// to the admin page as "authorized nothing", which is a different
+	// statement from "this grant is not adjustable".
+	session.WithAuthorizedScopes(granted)
 
 	// Mint an opaque access token via the low-level strategy (the device-code
 	// path's template). No refresh token: an exchanged token is short-lived and

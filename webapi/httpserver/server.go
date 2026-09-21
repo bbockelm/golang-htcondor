@@ -237,6 +237,10 @@ type Config struct {
 	// Decides whether this server keeps the identity provider's refresh
 	// token so it can ask about a user later. See upstream_refresh.go.
 	UpstreamRefresh string
+	// TokenRetention is HTTP_API_TOKEN_RETENTION: how long a dead token
+	// row is kept before deletion. Empty means the default (90 days),
+	// "off" keeps them forever. See oauth2_retention.go.
+	TokenRetention string
 
 	// MCPAdminGroup / MCPSuperuserGroup gate the two cross-user MCP
 	// privileges. Empty means NOBODY, not everybody -- see
@@ -409,6 +413,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
+		TokenRetention:              cfg.TokenRetention,
 		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,
 		RequiredCredentials:         cfg.RequiredCredentials,
 		CreddAddress:                cfg.CreddAddress,

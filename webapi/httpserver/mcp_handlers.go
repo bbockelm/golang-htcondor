@@ -788,6 +788,15 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 				ar.GrantScope(scope)
 			}
 
+			// Remember what this authorization ended with, so an
+			// operator who narrows the grant later can put a scope
+			// back. Recorded here rather than derived later because
+			// this is the only point that knows what the user
+			// actually agreed to: a scope they unticked is absent
+			// from acceptedScopes and so never lands here, and no
+			// operator can undo that choice from the admin page.
+			session.WithAuthorizedScopes(grantedScopes)
+
 			h.logger.Info(logging.DestinationHTTP, "User approved consent",
 				"username", username, "client_id", ar.GetClient().GetID(),
 				"requested_scopes", requestedScopes,
@@ -1811,6 +1820,10 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// with "openid" alone.
 			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form, "consent_form_version")
 			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
+			// The set an operator may later restore this grant to. Same
+			// reasoning as the consent handler: recorded where what the
+			// user agreed to is known.
+			session.WithAuthorizedScopes(acceptedScopes)
 
 			// Approve the device code with the user-narrowed scope set.
 			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {

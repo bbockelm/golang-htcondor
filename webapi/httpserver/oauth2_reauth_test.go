@@ -29,6 +29,7 @@ func TestSessionCloneDeepPreservesFields(t *testing.T) {
 	authTime := time.Now().UTC().Add(-3 * time.Hour).Round(time.Second)
 	orig := DefaultOpenIDConnectSession("alice").WithGroups([]string{"condor-writers"})
 	orig.AuthTime = authTime
+	orig.AuthorizedScopes = []string{"mcp:read", "mcp:write"}
 
 	cloned, ok := orig.Clone().(*Session)
 	if !ok {
@@ -44,10 +45,21 @@ func TestSessionCloneDeepPreservesFields(t *testing.T) {
 		t.Errorf("Subject lost through Clone: got %q", cloned.GetSubject())
 	}
 
+	// The set an operator may re-enable to. Lost through Clone, every
+	// refresh would forget what this grant was authorized with, and a
+	// narrowed scope could never be put back.
+	if len(cloned.AuthorizedScopes) != 2 {
+		t.Errorf("AuthorizedScopes lost through Clone: got %v", cloned.AuthorizedScopes)
+	}
+
 	// Deep, not shallow: mutating the clone must not reach the original.
 	cloned.Groups[0] = "mutated"
 	if orig.Groups[0] != "condor-writers" {
 		t.Errorf("Clone shares the Groups backing array with the original")
+	}
+	cloned.AuthorizedScopes[0] = "mutated"
+	if orig.AuthorizedScopes[0] != "mcp:read" {
+		t.Errorf("Clone shares the AuthorizedScopes backing array with the original")
 	}
 }
 
