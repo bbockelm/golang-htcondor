@@ -169,6 +169,9 @@ type Handler struct {
 	// about a user after they have gone home. See upstream_refresh.go.
 	upstreamRefreshMode UpstreamRefreshMode
 	upstreamRefresh     *upstreamRefreshStore
+	// tokenRetentionFor is how long a dead token row is kept before being
+	// deleted. Negative keeps them forever; zero means the default.
+	tokenRetentionFor time.Duration
 
 	// chatEngine is non-nil when HTTP_API_LLM_API_KEY_FILE is
 	// configured AND MCP is enabled. The chat handler at
@@ -758,6 +761,9 @@ type HandlerConfig struct {
 	// instead of the hand-rolled JSON-RPC handler. HTTP_API_MCP_TRANSPORT.
 	MCPUseSDKTransport bool
 
+	// TokenRetention is HTTP_API_TOKEN_RETENTION. See Config.
+	TokenRetention string
+
 	// MCPMaxRequestDuration is the hard stop on an MCP request that is
 	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
 	// request runs, its write deadline is moved forward rather than being
@@ -1237,6 +1243,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if mode != UpstreamRefreshOff {
 		h.upstreamRefresh = &upstreamRefreshStore{db: h.db, sealer: sealer, logger: logger}
 	}
+	retention, err := ParseTokenRetention(cfg.TokenRetention)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HTTP_API_TOKEN_RETENTION: %w", err)
+	}
+	h.tokenRetentionFor = retention
 
 	if sealer != nil {
 		h.sealer = sealer
@@ -2107,6 +2118,13 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Start OAuth2 state store cleanup if it exists
 	if h.oauth2StateStore != nil {
 		h.oauth2StateStore.Start(ctx)
+	}
+
+	// Delete token rows once they are dead and old enough to be of no use
+	// to anybody. Negative retention is the operator asking to keep them
+	// forever, which is a policy some deployments have.
+	if h.oauth2Provider != nil && h.tokenRetentionFor >= 0 {
+		go h.runTokenRetention(ctx)
 	}
 
 	// Start schedd address updater whenever we have a collector to query
