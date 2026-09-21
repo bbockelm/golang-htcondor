@@ -431,15 +431,15 @@ type HandlerConfig struct {
 	// Build is the site's container-build configuration, handed to the
 	// MCP server's build_container tool. See mcpserver.BuildConfig.
 	Build mcpserver.BuildConfig
-	// SubmitFileDefaults are submit-file lines applied to every
-	// submission ONLY where the submit file is silent, so a user who
-	// sets the same command keeps their own value. Configure via
-	// HTTP_API_SUBMIT_FILE_DEFAULTS.
 	// DBMirrorTokenSubject overrides the identity the htcondordb token
 	// asserts, default "condor@<trust domain>". Configure via
 	// HTTP_API_DBMIRROR_TOKEN_SUBJECT.
 	DBMirrorTokenSubject string
 
+	// SubmitFileDefaults are submit-file lines applied to every
+	// submission ONLY where the submit file is silent, so a user who
+	// sets the same command keeps their own value. Configure via
+	// HTTP_API_SUBMIT_FILE_DEFAULTS.
 	SubmitFileDefaults string
 	// SubmitFileOverrides are submit-file lines applied to every
 	// submission that WIN over whatever the submit file says. Use for
