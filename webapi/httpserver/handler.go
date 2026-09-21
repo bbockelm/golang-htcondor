@@ -1453,6 +1453,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// upstream credential, which is exactly why it was not possible
 		// with token-sourced groups.
 		h.registerSystemGroupOracle(logger)
+		h.registerUpstreamOracle(logger)
 
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
 		h.mcpUseSDK = cfg.MCPUseSDKTransport

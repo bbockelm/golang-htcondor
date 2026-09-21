@@ -68,12 +68,20 @@ func ParseUpstreamRefreshMode(raw string) (UpstreamRefreshMode, error) {
 
 // upstreamGrant is one stored credential.
 type upstreamGrant struct {
-	Subject       string
-	Issuer        string
-	RefreshToken  string
-	GrantedScopes []string
-	ObtainedAt    time.Time
-	LastCheckedAt time.Time
+	// Subject is the SESSION subject -- what a grant carries, and so what
+	// the refresh path looks this up by.
+	Subject string
+	// ProviderSubject is the identity provider's own name for the same
+	// user. The two differ wherever identities are mapped to local
+	// accounts. Kept so a userinfo answer can be checked against the user
+	// it was supposed to be about: the call names nobody, the credential
+	// decides whose claims come back.
+	ProviderSubject string
+	Issuer          string
+	RefreshToken    string
+	GrantedScopes   []string
+	ObtainedAt      time.Time
+	LastCheckedAt   time.Time
 }
 
 // HasOfflineAccess reports whether the provider granted the scope this
@@ -128,9 +136,11 @@ func (s *upstreamRefreshStore) Save(ctx context.Context, g upstreamGrant) error 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO upstream_refresh_tokens
-			(subject, issuer, refresh_token, refresh_token_dek, granted_scopes, obtained_at, last_checked_at)
-		VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-		g.Subject, g.Issuer, data, dek, strings.Join(g.GrantedScopes, " "), g.ObtainedAt.UTC())
+			(subject, provider_subject, issuer, refresh_token, refresh_token_dek,
+			 granted_scopes, obtained_at, last_checked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+		g.Subject, g.ProviderSubject, g.Issuer, data, dek,
+		strings.Join(g.GrantedScopes, " "), g.ObtainedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("storing the upstream refresh token for %q: %w", g.Subject, err)
 	}
@@ -143,15 +153,16 @@ func (s *upstreamRefreshStore) Load(ctx context.Context, subject, issuer string)
 		return upstreamGrant{}, sql.ErrNoRows
 	}
 	var (
-		data, dek   []byte
-		scopes      string
-		obtained    time.Time
-		lastChecked sql.NullTime
+		data, dek       []byte
+		providerSubject string
+		scopes          string
+		obtained        time.Time
+		lastChecked     sql.NullTime
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT refresh_token, refresh_token_dek, granted_scopes, obtained_at, last_checked_at
+		SELECT refresh_token, refresh_token_dek, provider_subject, granted_scopes, obtained_at, last_checked_at
 		FROM upstream_refresh_tokens WHERE subject = ? AND issuer = ?`,
-		subject, issuer).Scan(&data, &dek, &scopes, &obtained, &lastChecked)
+		subject, issuer).Scan(&data, &dek, &providerSubject, &scopes, &obtained, &lastChecked)
 	if err != nil {
 		return upstreamGrant{}, err
 	}
@@ -173,11 +184,12 @@ func (s *upstreamRefreshStore) Load(ctx context.Context, subject, issuer string)
 	}
 
 	g := upstreamGrant{
-		Subject:       subject,
-		Issuer:        issuer,
-		RefreshToken:  token,
-		GrantedScopes: strings.Fields(scopes),
-		ObtainedAt:    obtained,
+		Subject:         subject,
+		ProviderSubject: providerSubject,
+		Issuer:          issuer,
+		RefreshToken:    token,
+		GrantedScopes:   strings.Fields(scopes),
+		ObtainedAt:      obtained,
 	}
 	if lastChecked.Valid {
 		g.LastCheckedAt = lastChecked.Time
@@ -224,15 +236,18 @@ func (h *Handler) upstreamIssuer() string {
 // rememberUpstreamRefresh stores the provider's refresh token for a user who
 // has just logged in.
 //
-// Keyed by the PROVIDER's subject, not the local account this login may have
-// been mapped to: the credential is for asking that provider about that
-// user, and it is the provider's own name for them that it will answer to.
+// Keyed by the SESSION subject, which is what a later refresh grant carries
+// and therefore the only thing it can look this up by. Where identities are
+// mapped that is the local account; the provider's own name for the user is
+// kept beside it, because the userinfo answer has to be checked against the
+// user it was meant to be about -- that call names nobody, so the credential
+// alone decides whose claims come back.
 //
 // Failures are logged and swallowed. A login that worked must not be undone
 // because a credential for a later background check could not be filed --
 // the worst case is the check not running, which is where every deployment
 // without this feature already is.
-func (h *Handler) rememberUpstreamRefresh(ctx context.Context, subject, refreshToken string, grantedScopes []string) {
+func (h *Handler) rememberUpstreamRefresh(ctx context.Context, subject, providerSubject, refreshToken string, grantedScopes []string) {
 	if h.upstreamRefresh == nil || h.upstreamRefreshMode == UpstreamRefreshOff {
 		return
 	}
@@ -264,11 +279,12 @@ func (h *Handler) rememberUpstreamRefresh(ctx context.Context, subject, refreshT
 	}
 
 	if err := h.upstreamRefresh.Save(ctx, upstreamGrant{
-		Subject:       subject,
-		Issuer:        issuer,
-		RefreshToken:  refreshToken,
-		GrantedScopes: grantedScopes,
-		ObtainedAt:    time.Now().UTC(),
+		Subject:         subject,
+		ProviderSubject: providerSubject,
+		Issuer:          issuer,
+		RefreshToken:    refreshToken,
+		GrantedScopes:   grantedScopes,
+		ObtainedAt:      time.Now().UTC(),
 	}); err != nil {
 		h.logger.Warn(logging.DestinationHTTP, "Could not store the upstream refresh token",
 			"subject", subject, "issuer", issuer, "error", err)

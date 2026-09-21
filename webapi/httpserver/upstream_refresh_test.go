@@ -203,10 +203,10 @@ func handlerWithUpstream(t *testing.T, mode UpstreamRefreshMode) *Handler {
 // with the answer, not about asking a different question.
 func TestUpstreamAutoKeepsWhatTheProviderGave(t *testing.T) {
 	h := handlerWithUpstream(t, UpstreamRefreshAuto)
-	h.rememberUpstreamRefresh(context.Background(), "sub-1", "rt-abc",
+	h.rememberUpstreamRefresh(context.Background(), "alice", "sub-1", "rt-abc",
 		[]string{"openid", "offline_access"})
 
-	got, err := h.upstreamRefresh.Load(context.Background(), "sub-1", h.upstreamIssuer())
+	got, err := h.upstreamRefresh.Load(context.Background(), "alice", h.upstreamIssuer())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -225,8 +225,8 @@ func TestUpstreamOffStoresNothing(t *testing.T) {
 	h := handlerWithUpstream(t, UpstreamRefreshAuto)
 	h.upstreamRefreshMode = UpstreamRefreshOff
 
-	h.rememberUpstreamRefresh(context.Background(), "sub-1", "rt-abc", []string{"offline_access"})
-	if _, err := h.upstreamRefresh.Load(context.Background(), "sub-1", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
+	h.rememberUpstreamRefresh(context.Background(), "alice", "sub-1", "rt-abc", []string{"offline_access"})
+	if _, err := h.upstreamRefresh.Load(context.Background(), "alice", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("a credential was stored with the feature off: %v", err)
 	}
 }
@@ -236,10 +236,10 @@ func TestUpstreamOffStoresNothing(t *testing.T) {
 func TestUpstreamLoginWithoutTokenRetiresTheOldOne(t *testing.T) {
 	h := handlerWithUpstream(t, UpstreamRefreshAuto)
 	ctx := context.Background()
-	h.rememberUpstreamRefresh(ctx, "sub-1", "rt-abc", []string{"offline_access"})
-	h.rememberUpstreamRefresh(ctx, "sub-1", "", []string{"openid"})
+	h.rememberUpstreamRefresh(ctx, "alice", "sub-1", "rt-abc", []string{"offline_access"})
+	h.rememberUpstreamRefresh(ctx, "alice", "sub-1", "", []string{"openid"})
 
-	if _, err := h.upstreamRefresh.Load(ctx, "sub-1", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := h.upstreamRefresh.Load(ctx, "alice", h.upstreamIssuer()); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("the old credential survived a login that returned none: %v", err)
 	}
 }

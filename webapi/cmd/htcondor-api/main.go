@@ -1686,6 +1686,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	pingInterval := loadPingInterval(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
+	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
 	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
 	creddAddress := firstConfigValue(cfg, "HTTP_API_CREDD_ADDRESS")
@@ -1786,6 +1787,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PingInterval:                pingInterval,
 		MCPWatchMaxWait:             mcpWatchMaxWait,
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
+		UpstreamRefresh:             upstreamRefresh,
 		MCPUseSDKTransport:          mcpUseSDKTransport,
 		RequiredCredentials:         requiredCredentials,
 		CreddAddress:                creddAddress,
@@ -2872,6 +2874,33 @@ func loadMCPUseSDKTransport(cfg *config.Config, logger *logging.Logger) bool {
 		log.Fatalf("invalid HTTP_API_MCP_TRANSPORT=%q: expected builtin or sdk", raw)
 		return false
 	}
+}
+
+// loadUpstreamRefresh reads HTTP_API_UPSTREAM_REFRESH.
+//
+//	auto  keep the identity provider's refresh token when it gives one (default)
+//	on    the same, and complain when it does not
+//	off   never keep it
+//
+// It decides whether this server holds a credential to the identity provider
+// so it can ask, on a later refresh, whether a user is still a member of the
+// groups they logged in with. Without it that membership is frozen at
+// consent; see upstream_refresh.go.
+//
+// An unrecognised value refuses to start. Which mode is in force decides
+// whether a deployment re-checks its users at all, and guessing it would be
+// found out by a user who should have been cut off and was not.
+func loadUpstreamRefresh(cfg *config.Config, logger *logging.Logger) string {
+	raw, ok := cfg.Get("HTTP_API_UPSTREAM_REFRESH")
+	if !ok {
+		return ""
+	}
+	if _, err := httpserver.ParseUpstreamRefreshMode(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid HTTP_API_UPSTREAM_REFRESH: refusing to start",
+			"value", raw, "error", err)
+		log.Fatalf("invalid HTTP_API_UPSTREAM_REFRESH=%q: %v", raw, err)
+	}
+	return raw
 }
 
 func loadMCPMaxRequestDuration(cfg *config.Config, logger *logging.Logger) time.Duration {

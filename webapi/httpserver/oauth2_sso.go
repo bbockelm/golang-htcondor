@@ -332,13 +332,6 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// File the provider's refresh token, if it gave one, before the
-	// identity below is translated to a local account: this is keyed by
-	// the provider's own subject, because it is that provider this
-	// credential will be presented back to.
-	s.rememberUpstreamRefresh(ctx, userInfo.Subject, token.RefreshToken,
-		scopesFromToken(token, s.oauth2Config.Scopes))
-
 	// Extract groups
 	userGroups := extractGroups(userInfo.Groups)
 
@@ -389,6 +382,14 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO",
 		"subject", subject, "groups", userGroups)
+
+	// File the provider's refresh token, if it gave one. After the
+	// mapping, because it is keyed by the session subject -- the name a
+	// later refresh grant carries and can look it up by -- with the
+	// provider's own name kept beside it to check the eventual answer
+	// against.
+	s.rememberUpstreamRefresh(ctx, subject, userInfo.Subject, token.RefreshToken,
+		scopesFromToken(token, s.oauth2Config.Scopes))
 
 	// Which gate applies depends on what is being logged in to. The web
 	// interface and MCP are separate grants: somebody may be entitled to
