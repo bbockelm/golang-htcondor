@@ -170,19 +170,29 @@ func TestSystemGroupOracleFailsOpen(t *testing.T) {
 	}
 }
 
-// An account that has vanished from the database entirely is the same
-// case: an error, so the caller fails open and the lifetime cap bounds
-// the exposure instead.
-func TestSystemGroupOracleTreatsAMissingAccountAsNoOpinion(t *testing.T) {
+// A lookup that fails without saying the account is unknown is still no
+// opinion, even though it looks like a missing account from here.
+//
+// The distinction is the whole safety of revoking on deletion: only
+// ErrUnknownUser means "every source answered and none had a record".
+// An error that does not carry it might be a malfunction, and this
+// oracle cannot tell which -- so it declines to guess, and the lifetime
+// cap bounds the exposure instead.
+//
+// This test previously asserted that a vanished account was ALWAYS no
+// opinion, which was the behaviour before deletion was detectable. It
+// kept passing only because its stub does not report the sentinel.
+func TestSystemGroupOracleTreatsAnUnclassifiedFailureAsNoOpinion(t *testing.T) {
 	src := &stubGroups{groups: map[string][]string{}}
 	o := oracleFor(t, src, "condor-users")
+	o.subjectsAreAccounts = true
 
 	got, err := o.Check(context.Background(), "ghost", []string{"mcp:read"})
 	if err == nil {
-		t.Fatal("a missing account should surface as an error")
+		t.Fatal("an unclassified lookup failure should surface as an error")
 	}
 	if got.Status == UserStatusRevoked {
-		t.Errorf("status = revoked; see the fail-open requirement")
+		t.Errorf("status = revoked on an error that never said the account was unknown")
 	}
 }
 
@@ -284,5 +294,98 @@ func TestSystemGroupOracleStillRevokesOnACompleteRead(t *testing.T) {
 	}
 	if got.Status != UserStatusRevoked {
 		t.Errorf("status = %v; a complete read showing lost membership must revoke", got.Status)
+	}
+}
+
+// unknownUserGroups reports that no source knows the name, the way the
+// chain does once every source has answered and none had a record.
+type unknownUserGroups struct{}
+
+func (unknownUserGroups) Name() string { return "unknown-user" }
+func (unknownUserGroups) LookupGroups(_ context.Context, username string) ([]string, error) {
+	return nil, fmt.Errorf("%w: no configured source knows %q", droppriv.ErrUnknownUser, username)
+}
+
+// TestSystemGroupOracleRevokesWhenTheAccountIsGone: losing a group was
+// already noticed at refresh; losing the whole account was not. The
+// lookup fails, and every failure was treated as "no opinion", so a
+// deleted user's agent kept refreshing indefinitely.
+func TestSystemGroupOracleRevokesWhenTheAccountIsGone(t *testing.T) {
+	o := oracleFor(t, unknownUserGroups{}, "condor-users")
+	o.subjectsAreAccounts = true
+
+	got, err := o.Check(context.Background(), "tannenba", []string{"mcp:read"})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if got.Status != UserStatusRevoked {
+		t.Errorf("status = %v, want revoked once the account is gone", got.Status)
+	}
+	if got.Reason == "" {
+		t.Error("a revocation must carry a reason for the operator log")
+	}
+}
+
+// The same answer must NOT revoke where subjects are not account names.
+// There, "no account by that name" is the normal state of every subject,
+// so acting on it logs out the entire deployment at once.
+func TestSystemGroupOracleKeepsUnmappedSubjects(t *testing.T) {
+	o := oracleFor(t, unknownUserGroups{}, "condor-users")
+	o.subjectsAreAccounts = false
+
+	got, err := o.Check(context.Background(), "bbockelm@morgridge.org", []string{"mcp:read"})
+	if err == nil {
+		t.Fatal("expected no opinion, reported as an error")
+	}
+	if got.Status == UserStatusRevoked {
+		t.Error("revoked a subject that was never expected to be an account name")
+	}
+}
+
+// An outage must not present as a deletion. The chain returns a degraded
+// error when nothing answered AND something was broken, and that has to
+// keep winning over the unknown-account check that now follows it.
+func TestSystemGroupOracleOutageIsNotADeletion(t *testing.T) {
+	o := oracleFor(t, &stubGroups{err: &droppriv.DegradedError{
+		Source: "sssd",
+		Err:    errors.New("connection refused"),
+	}}, "condor-users")
+	o.subjectsAreAccounts = true
+
+	got, err := o.Check(context.Background(), "tannenba", []string{"mcp:read"})
+	if err == nil {
+		t.Fatal("expected a degraded read to be reported as no opinion")
+	}
+	if got.Status == UserStatusRevoked {
+		t.Error("an unavailable directory revoked a grant; an outage would log everybody out")
+	}
+}
+
+// TestSystemGroupOracleDegradedWinsOverUnknown pins the ordering the
+// revocation depends on.
+//
+// Today the chain cannot report both at once -- "nothing answered AND
+// something was broken" comes back degraded, never unknown -- which is
+// exactly why acting on unknown is safe. That exclusivity is an
+// invariant of another package, not of this one, and the direction it
+// protects is the expensive one: reading an outage as a deletion revokes
+// every grant that refreshes during it.
+//
+// So the safe reading must win even for an error carrying both, and this
+// asserts the order rather than trusting the invariant to hold forever.
+func TestSystemGroupOracleDegradedWinsOverUnknown(t *testing.T) {
+	both := fmt.Errorf("%w: %w",
+		droppriv.ErrUnknownUser,
+		&droppriv.DegradedError{Source: "sssd", Err: errors.New("connection refused")})
+	o := oracleFor(t, &stubGroups{err: both}, "condor-users")
+	o.subjectsAreAccounts = true
+
+	got, err := o.Check(context.Background(), "tannenba", []string{"mcp:read"})
+	if err == nil {
+		t.Fatal("expected no opinion when the read was degraded")
+	}
+	if got.Status == UserStatusRevoked {
+		t.Error("a degraded read that also said 'unknown user' revoked the grant; " +
+			"an outage must never present as a deletion")
 	}
 }

@@ -51,6 +51,15 @@ type systemGroupOracle struct {
 	validate  func(groups []string) error
 	scopesFor func(groups, requested []string) []string
 	logger    *logging.Logger
+
+	// subjectsAreAccounts says whether the name this oracle is handed is
+	// a local login name. Only then does "no account by that name" mean
+	// the account was deleted; otherwise it is the ordinary state of a
+	// deployment whose subjects are whatever the IdP calls people.
+	//
+	// A field rather than a call into identity, so the precondition is
+	// stated where it is relied on and a test can set it.
+	subjectsAreAccounts bool
 }
 
 // Name identifies the oracle in log lines.
@@ -77,6 +86,32 @@ func (o *systemGroupOracle) Check(ctx context.Context, username string, scopes [
 			"not re-checking %q: %s was unavailable, so a shorter group list may be an outage rather than lost membership: %w",
 			username, degraded.Source, degraded.Err)
 	}
+	// The account is gone. This is the one error worth acting on, and the
+	// chain has already ruled out the reading that would make acting on it
+	// dangerous: ErrUnknownUser is returned only when every source
+	// answered and none knew the name. A source that was merely
+	// unavailable comes back as the DegradedError handled above, so an
+	// outage cannot present as a deleted account.
+	//
+	// Gated on the subject being a local login name, which is only
+	// guaranteed where subjects are mapped to accounts.
+	// HTTP_API_GROUP_SOURCE and HTTP_API_IDENTITY_MAP are independent, so
+	// a deployment can read groups from the system while its subjects are
+	// still whatever the IdP calls people -- and there "no account by that
+	// name" is the normal state of affairs, not a deletion. Revoking on it
+	// would log out everybody at once.
+	if errors.Is(err, droppriv.ErrUnknownUser) {
+		if !o.subjectsAreAccounts {
+			return ReauthDecision{}, fmt.Errorf(
+				"not re-checking %q: no account by that name, and this deployment does not map "+
+					"subjects to accounts, so the name is not expected to be one: %w", username, err)
+		}
+		return ReauthDecision{
+			Status: UserStatusRevoked,
+			Reason: "the local account this grant was issued to no longer exists",
+		}, nil
+	}
+
 	if err != nil {
 		// Deliberately an error, not a revocation: the caller logs it and
 		// treats it as no opinion.
