@@ -6,7 +6,7 @@ replace github.com/bbockelm/golang-htcondor => ../..
 
 require (
 	github.com/PelicanPlatform/classad v0.29.14
-	github.com/bbockelm/cedar v0.6.19
+	github.com/bbockelm/cedar v0.7.0
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 )
 

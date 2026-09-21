@@ -8,7 +8,7 @@ require github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 
 require (
 	github.com/PelicanPlatform/classad v0.29.14 // indirect
-	github.com/bbockelm/cedar v0.6.19 // indirect
+	github.com/bbockelm/cedar v0.7.0 // indirect
 	github.com/bbockelm/gosssd v0.0.4 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
