@@ -635,6 +635,43 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 }
 
 // getScopeDescription returns a human-readable description of an OAuth2 scope
+// grantableScopes is the subset of requested scopes this user could
+// actually be granted, given their groups.
+//
+// The consent page used to offer every scope the client asked for, which
+// meant a user outside the admin group was shown an "administer the access
+// point" checkbox that did nothing: ticking it changed nothing, because
+// getScopesForGroups drops it at grant time. That is a poor thing to show
+// anybody -- it reads either as a privilege they hold and do not, or as a
+// refusal they were not given. Offer what can be granted, and let the POST
+// handler remain the thing that enforces it.
+//
+// Enforcement is unchanged and still lives in getScopesForGroups. This only
+// decides what is worth showing; a caller who posts a scope that was never
+// rendered still does not receive it.
+func (h *Handler) grantableScopes(userGroups, requested []string) []string {
+	allowed := make(map[string]bool, len(requested))
+	for _, scope := range h.getScopesForGroups(userGroups, requested) {
+		allowed[scope] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, scope := range requested {
+		if allowed[scope] {
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
+// privilegedScopes are the scopes that grant power over other people's
+// work rather than the caller's own. They are checked against this list
+// rather than a prefix so that adding a scope is a decision someone makes
+// here, not something a naming convention decides for them.
+var privilegedScopes = map[string]bool{
+	"mcp:admin":     true,
+	"mcp:superuser": true,
+}
+
 func getScopeDescription(scope string) string {
 	descriptions := map[string]string{
 		"openid":                   "Basic authentication information",
@@ -706,7 +743,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		// Display consent form
-		h.renderConsentPage(w, consentPageParams{
+		h.renderConsentPage(w, groups, consentPageParams{
 			Title:           "Authorize Application",
 			Username:        username,
 			ClientID:        ar.GetClient().GetID(),
@@ -1300,6 +1337,19 @@ var oauth2AdvertisedScopes = []string{
 	"openid", "profile", "email",
 	"offline_access",
 	"mcp:read", "mcp:write",
+	// Requestable by any client, granted only to members of the operator's
+	// admin/superuser groups (getScopesForGroups). Unadvertised they were
+	// unreachable: a client asks for what the server advertises, so nothing
+	// ever requested them and the two-tier privilege model below them was
+	// dead in practice.
+	//
+	// Advertising them is what makes a privilege separable from an
+	// identity. Before this, an admin's every token carried their admin
+	// powers because the powers came from who they were; now a token
+	// carries them only if this authorization granted them, so an agent
+	// can be given an access point to look after without being given its
+	// owner's ability to remove anybody's jobs.
+	"mcp:admin", "mcp:superuser",
 	"condor:/READ", "condor:/WRITE",
 	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
 }
@@ -1806,13 +1856,19 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 
 // consentPageParams defines the parameters for rendering a consent page.
 type consentPageParams struct {
-	Title           string            // Page title (e.g., "Authorize Application" or "Authorize Device")
-	Username        string            // Authenticated username
-	ClientID        string            // OAuth2 client ID
-	RequestedScopes []string          // Scopes being requested
-	FormAction      string            // Form POST target URL
-	HiddenFields    map[string]string // Hidden form fields (e.g., "state" or "user_code")
-	DeviceCode      string            // If non-empty, show device code verification section
+	Title           string   // Page title (e.g., "Authorize Application" or "Authorize Device")
+	Username        string   // Authenticated username
+	ClientID        string   // OAuth2 client ID
+	RequestedScopes []string // Scopes being requested
+	// UserGroups is the approving user's group membership. The renderer
+	// filters RequestedScopes through it, rather than each call site
+	// filtering first: a page that forgets would silently offer
+	// checkboxes that grant nothing, and there is no way to see that from
+	// the rendered page.
+	UserGroups   []string
+	FormAction   string            // Form POST target URL
+	HiddenFields map[string]string // Hidden form fields (e.g., "state" or "user_code")
+	DeviceCode   string            // If non-empty, show device code verification section
 }
 
 // renderConsentPage renders a unified OAuth2 consent page for both authorization code and device flows.
@@ -1825,7 +1881,16 @@ type consentPageParams struct {
 // intersects the user-selected subset with the group-allowed set
 // returned by getScopesForGroups, so the user can never grant more
 // than the policy allows but can grant less.
-func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) {
+// userGroups is a separate argument rather than a field on the params so
+// that a page which forgets it does not compile. As a field it defaulted
+// to nil, and nil reads as "no groups" -- which fails closed for the
+// privileged scopes, so the mistake would show up as those checkboxes
+// silently never appearing, which is indistinguishable from the user not
+// being entitled to them.
+func (h *Handler) renderConsentPage(w http.ResponseWriter, userGroups []string, p consentPageParams) {
+	// Offer only what this user could actually be granted.
+	p.RequestedScopes = h.grantableScopes(userGroups, p.RequestedScopes)
+
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
 	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
@@ -1843,6 +1908,23 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
 					"                </li>\n", escScope, escScope, desc)
 			continue
 		}
+		// A privileged scope starts UNCHECKED, which is the whole point.
+		// Rendering it checked like the others would mean an admin grants
+		// every client power over everyone's jobs unless they remember to
+		// decline, on every authorization, forever -- and forgetting once
+		// is not visible afterwards. Unchecked makes granting it an act,
+		// so an agent gets these only if somebody decided it should.
+		if privilegedScopes[scope] {
+			fmt.Fprintf(&scopesHTML,
+				"                <li class=\"scope-privileged\">\n"+
+					"                    <label>\n"+
+					"                        <input type=\"checkbox\" name=\"scope\" value=\"%s\">\n"+
+					"                        <strong>%s</strong> <span class=\"privileged-tag\">affects other users</span>\n"+
+					"                        <p>%s</p>\n"+
+					"                    </label>\n"+
+					"                </li>\n", escScope, escScope, desc)
+			continue
+		}
 		fmt.Fprintf(&scopesHTML,
 			"                <li class=\"scope-optional\">\n"+
 				"                    <label>\n"+
@@ -1853,6 +1935,22 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
 				"                </li>\n", escScope, escScope, desc)
 	}
 	scopesHTML.WriteString("            </ul>")
+
+	// The banner appears only when there is something to warn about, so it
+	// keeps its meaning. A warning on every consent page is furniture.
+	var privilegedWarning string
+	for _, scope := range p.RequestedScopes {
+		if privilegedScopes[scope] {
+			privilegedWarning = `
+        <div class="privileged-warning">
+            <strong>This application is asking for administrative access.</strong>
+            <p>The marked permissions let it act on other people's jobs, not just your own.
+               They are unchecked by default. Leave them unchecked unless this application
+               is meant to administer the access point.</p>
+        </div>`
+			break
+		}
+	}
 
 	// Build device code section if applicable
 	var deviceCodeSection string
@@ -2008,6 +2106,57 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
             grid-row: 2;
             grid-column: 2;
         }
+        /* A privileged scope is styled to be noticed, because it is
+           unchecked and easy to skim past -- the risk here is a reader
+           granting it without registering that they did. */
+        .scopes-list li.scope-privileged {
+            display: grid;
+            grid-template-columns: 18px 1fr;
+            gap: 4px 10px;
+            border: 1px solid #f0b429;
+            background: #fffaf0;
+            border-radius: 6px;
+            padding: 10px;
+        }
+        .scopes-list li.scope-privileged label {
+            display: contents;
+        }
+        .scopes-list li.scope-privileged input[type="checkbox"] {
+            grid-row: 1;
+            grid-column: 1;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .scopes-list li.scope-privileged strong {
+            grid-row: 1;
+            grid-column: 2;
+        }
+        .scopes-list li.scope-privileged p {
+            grid-row: 2;
+            grid-column: 2;
+        }
+        .privileged-tag {
+            color: #a15c00;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 6px;
+        }
+        .privileged-warning {
+            border: 1px solid #f0b429;
+            background: #fff8e6;
+            border-radius: 6px;
+            padding: 12px 14px;
+            margin-bottom: 15px;
+            color: #6b4a00;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .privileged-warning p {
+            margin-top: 6px;
+        }
         .scopes-list li.scope-fixed .required {
             color: #999;
             font-size: 11px;
@@ -2089,6 +2238,7 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
                 This application is requesting access to:
             </p>
             %s
+            %s
         </div>
 
 %s            <input type="hidden" name="action" value="" id="actionInput">
@@ -2126,6 +2276,7 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
 		// FormAction now precedes the scope list: the permissions block
 		// moved inside the <form>, so the form tag is emitted first.
 		html.EscapeString(p.FormAction),
+		privilegedWarning,
 		scopesHTML.String(),
 		hiddenFieldsHTML.String(),
 	)
@@ -2136,8 +2287,21 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, p consentPageParams) 
 }
 
 // renderDeviceConsentPage renders the consent page for device code flow
-func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, _ *http.Request, username, userCode string, request fosite.Requester) {
-	h.renderConsentPage(w, consentPageParams{
+func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request, username, userCode string, request fosite.Requester) {
+	// The approver's groups decide what is worth offering, the same as on
+	// the authorization-code page. Resolved from the request rather than
+	// passed in because this is the one identity that matters here -- the
+	// person at the browser approving the code, not whoever started the
+	// device flow on another machine.
+	//
+	// A nil request means a caller with no browser context. Treat that as
+	// "no group information" rather than crashing the page: the policy
+	// still runs, and a renderer is the wrong place to take a process down.
+	var groups []string
+	if r != nil {
+		_, groups = h.deviceApprovalIdentity(r.Context(), r)
+	}
+	h.renderConsentPage(w, groups, consentPageParams{
 		Title:           "Authorize Device",
 		Username:        username,
 		ClientID:        request.GetClient().GetID(),

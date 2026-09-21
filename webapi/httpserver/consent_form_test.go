@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -60,7 +62,9 @@ func TestConsentFormSubmitsEveryScope(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	h.renderConsentPage(rec, consentPageParams{
+	// No group policy is configured on this handler, so every scope here
+	// is grantable and the filter is a pass-through.
+	h.renderConsentPage(rec, nil, consentPageParams{
 		Title:           "Authorize",
 		Username:        "bbockelm",
 		ClientID:        "https://claude.ai/oauth/claude-code-client-metadata",
@@ -97,7 +101,10 @@ func TestDeviceConsentFormSubmitsEveryScope(t *testing.T) {
 
 	requested := []string{"openid", "mcp:read", "mcp:write", "offline_access"}
 	rec := httptest.NewRecorder()
-	h.renderDeviceConsentPage(rec, nil, "bbockelm", "ABCD-EFGH",
+	// A real request, because the renderer now reads the approver's groups
+	// off it to decide which scopes are worth offering.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/mcp/oauth2/device/verify", nil)
+	h.renderDeviceConsentPage(rec, req, "bbockelm", "ABCD-EFGH",
 		deviceRequestLike(requested, nil))
 
 	got := scopeInputsInsideForm(t, rec.Body.String())
