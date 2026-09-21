@@ -326,12 +326,59 @@ func attemptSSOLogin(t *testing.T, baseURL, ssoBaseURL, username, password strin
 	return cbResp.StatusCode, string(body)
 }
 
+// A first-time authorization must STOP at consent.
+//
+// completeSSOLogin now walks the consent step, which makes it tolerant of
+// either behaviour -- it would pass just as well if the callback went
+// back to completing the grant itself. This asserts the thing that was
+// actually wrong: the callback hands off to consent rather than issuing
+// a code on the user's behalf.
+//
+// The path matters because it is the one nobody was testing. Consent was
+// reached only when the browser already held a session, so a user's FIRST
+// authorization of a client -- the one worth asking about, and the one
+// that can hand over mcp:admin and mcp:superuser -- was the only one
+// never asked.
+func TestSSOFirstAuthorizationStopsAtConsent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spins up a server and an SSO provider")
+	}
+	_, passwdPath, _ := e2eLocalAccount(t)
+
+	ssoServer, ssoStorage, ssoBaseURL := setupMockSSOServer(t, "")
+	t.Cleanup(func() { shutdownMockSSOServer(t, ssoServer) })
+	ssoStorage.userInfos["ssouser"] = map[string]interface{}{
+		"sub":   e2eAssertedSubject,
+		"email": "e2e@example.com",
+		"name":  "End To End",
+	}
+
+	_, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, "", "")
+	ssoStorage.callbackURL = baseURL + "/mcp/oauth2/callback"
+
+	status, target := attemptSSOLogin(t, baseURL, ssoBaseURL, "ssouser", "ssopassword")
+	if status != http.StatusFound && status != http.StatusSeeOther {
+		t.Fatalf("callback did not redirect: status %d, %s", status, target)
+	}
+	if !strings.Contains(target, "/mcp/oauth2/consent") {
+		t.Errorf("the callback completed the authorization instead of asking: %s", target)
+	}
+	if strings.Contains(target, "code=") {
+		t.Errorf("an authorization code was issued without consent: %s", target)
+	}
+}
+
 // completeSSOLogin runs the flow to a usable access token.
 func completeSSOLogin(t *testing.T, baseURL, ssoBaseURL, username, password string) string {
 	t.Helper()
 	status, target := attemptSSOLogin(t, baseURL, ssoBaseURL, username, password)
 	if status != http.StatusFound && status != http.StatusSeeOther {
 		t.Fatalf("callback did not redirect back to the client: status %d, %s", status, target)
+	}
+	// A first-time authorization now stops at consent instead of the
+	// callback completing the grant on the user's behalf; walk it.
+	if strings.Contains(target, "/mcp/oauth2/consent") {
+		target = approveSSOConsent(t, baseURL, target)
 	}
 	u, err := url.Parse(target)
 	if err != nil {
@@ -455,4 +502,39 @@ func TestIdentityMappingReadsTheConfiguredClaim(t *testing.T) {
 		t.Error("the opaque sub reached the session; the configured claim was not used")
 	}
 	t.Logf("eppn %q resolved to account %q while sub was ignored", e2eAssertedSubject, who.User)
+}
+
+// approveSSOConsent approves the consent page a first-time SSO
+// authorization now stops at, returning the redirect it produces.
+func approveSSOConsent(t *testing.T, baseURL, consentURL string) string {
+	t.Helper()
+	if !strings.HasPrefix(consentURL, "http") {
+		consentURL = baseURL + consentURL
+	}
+	u, err := url.Parse(consentURL)
+	if err != nil {
+		t.Fatalf("parsing consent URL %q: %v", consentURL, err)
+	}
+	state := u.Query().Get("state")
+	if state == "" {
+		t.Fatalf("consent redirect carried no state: %s", consentURL)
+	}
+
+	client := &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.PostForm(baseURL+"/mcp/oauth2/consent",
+		url.Values{"state": {state}, "action": {"approve"}})
+	if err != nil {
+		t.Fatalf("approving consent: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("consent approval did not redirect: status %d, body: %s", resp.StatusCode, string(body))
+	}
+	return loc
 }

@@ -238,8 +238,16 @@ func TestMCPWithSSO(t *testing.T) {
 	}
 	defer callbackResp.Body.Close()
 
-	// Should redirect to original client callback with MCP authorization code
+	// The callback hands off to the consent page rather than completing
+	// the grant itself. It used to redirect straight back to the client
+	// with a code, and this assertion encoded that -- so the one test
+	// covering a first-time SSO authorization asserted that the user was
+	// never asked. See handleOAuth2Callback.
 	clientCallbackURL := callbackResp.Header.Get("Location")
+	if strings.Contains(clientCallbackURL, "/mcp/oauth2/consent") {
+		t.Logf("MCP callback redirected to consent: %s", clientCallbackURL)
+		clientCallbackURL = approveConsent(t, client, mcpBaseURL, clientCallbackURL)
+	}
 	if !strings.Contains(clientCallbackURL, mcpBaseURL+"/callback") {
 		body, _ := io.ReadAll(callbackResp.Body)
 		t.Fatalf("Expected redirect to client callback, got status %d, location: %s, body: %s",
@@ -511,7 +519,13 @@ func TestMCPGroupMembership(t *testing.T) {
 				return
 			}
 
-			// User should have access - verify we got a code
+			// The user has access, so the flow reaches consent; approving
+			// there is what produces the code. Access denial is decided
+			// before consent, which is why the check above still reads
+			// the callback's own redirect.
+			if strings.Contains(clientCallbackURL, "/mcp/oauth2/consent") {
+				clientCallbackURL = approveConsent(t, client, mcpBaseURL, clientCallbackURL)
+			}
 			if !strings.Contains(clientCallbackURL, "code=") {
 				body, _ := io.ReadAll(callbackResp.Body)
 				t.Fatalf("Expected code in callback, got: %s, body: %s", clientCallbackURL, string(body))
@@ -1457,4 +1471,40 @@ func (s *mockSSOStorage) GetOpenIDConnectSession(ctx context.Context, signature 
 
 func (s *mockSSOStorage) DeleteOpenIDConnectSession(ctx context.Context, signature string) error {
 	return nil
+}
+
+// approveConsent walks the consent step a first-time SSO authorization
+// now stops at, and returns the redirect it produces.
+//
+// consentURL is the Location the callback handed back; it carries the
+// state that identifies the pending request. Approving without ticking
+// anything keeps the ordinary scopes and withholds the privileged ones,
+// which is the consent page's whole design.
+func approveConsent(t *testing.T, client *http.Client, baseURL, consentURL string) string {
+	t.Helper()
+	if !strings.HasPrefix(consentURL, "http") {
+		consentURL = baseURL + consentURL
+	}
+	u, err := url.Parse(consentURL)
+	if err != nil {
+		t.Fatalf("parsing consent URL %q: %v", consentURL, err)
+	}
+	state := u.Query().Get("state")
+	if state == "" {
+		t.Fatalf("consent redirect carried no state: %s", consentURL)
+	}
+
+	form := url.Values{"state": {state}, "action": {"approve"}}
+	resp, err := client.PostForm(baseURL+"/mcp/oauth2/consent", form)
+	if err != nil {
+		t.Fatalf("approving consent: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("consent approval did not redirect: status %d, body: %s", resp.StatusCode, string(body))
+	}
+	return loc
 }

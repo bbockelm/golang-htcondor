@@ -3,10 +3,10 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -456,51 +456,40 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine granted scopes based on group membership
-	requestedScopes := ar.GetRequestedScopes()
-	grantedScopes := s.getScopesForGroups(userGroups, requestedScopes)
-
-	s.logger.Info(logging.DestinationHTTP, "Granting scopes based on group membership",
-		"subject", subject,
-		"requested_scopes", requestedScopes,
-		"granted_scopes", grantedScopes)
-
-	// Grant scopes
-	for _, scope := range grantedScopes {
-		ar.GrantScope(scope)
-	}
-
-	// Create session with the authenticated user. The IDP-asserted groups
-	// are persisted with the grant so reauthorizeRefreshGrant can re-run
-	// getScopesForGroups when the grant is refreshed — this is the only
-	// place they are ever read, and they would otherwise be dropped here.
-	session := DefaultOpenIDConnectSession(subject).
-		WithGroups(userGroups).
-		WithAuthorizedScopes(grantedScopes)
-
-	// Generate OAuth2 response
-	response, err := s.oauth2Provider.GetProvider().NewAuthorizeResponse(ctx, ar, session)
+	// Hand back to the consent step rather than finishing here.
+	//
+	// This path used to grant scopes and write the authorize response
+	// itself. That meant the user who had to log in -- their FIRST
+	// authorization of a client, the one most worth asking about -- was
+	// the only one never asked: consent was reached only when the browser
+	// already had a session, so the safeguard was exactly inverted.
+	//
+	// It matters beyond the missing page. The consent form renders the
+	// privileged scopes (mcp:admin, mcp:superuser) UNCHECKED precisely so
+	// that granting one is a deliberate act; completing here skipped that
+	// and handed over whatever group membership happened to permit.
+	//
+	// getScopesForGroups still applies, on the consent POST, over the
+	// scopes the user kept. It is the ceiling; consent narrows within it.
+	// The groups gathered here travel with the request so that path can
+	// apply the same ceiling, and so a refreshed grant can re-run it.
+	consentState, err := s.oauth2StateStore.GenerateState()
 	if err != nil {
-		// Extract more detailed error information
-		errorDetails := fmt.Sprintf("%v", err)
-		var rfc6749Err *fosite.RFC6749Error
-		if errors.As(err, &rfc6749Err) {
-			errorDetails = fmt.Sprintf("RFC6749Error: name=%s, description=%s, hint=%s, debug=%s",
-				rfc6749Err.ErrorField, rfc6749Err.DescriptionField, rfc6749Err.HintField, rfc6749Err.DebugField)
-		}
-
-		s.logger.Error(logging.DestinationHTTP, "Failed to create authorize response",
-			"error", err, "error_details", errorDetails,
-			"subject", subject, "client_id", ar.GetClient().GetID())
-		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar, err)
+		s.logger.Error(logging.DestinationHTTP, "Failed to generate consent state",
+			"error", err, "subject", subject)
+		s.oauth2Provider.GetProvider().WriteAuthorizeError(ctx, w, ar,
+			fosite.ErrServerError.WithDescription("Failed to continue authorization"))
 		return
 	}
+	s.oauth2StateStore.StoreWithUsername(consentState, ar, "", subject, userGroups)
+	s.oauth2StateStore.Remove(state)
 
-	s.logger.Info(logging.DestinationHTTP, "OAuth2 callback completed successfully",
-		"subject", subject, "granted_scopes", grantedScopes)
+	s.logger.Info(logging.DestinationHTTP, "Authenticated via SSO, redirecting to consent",
+		"subject", subject, "groups", userGroups,
+		"client_id", ar.GetClient().GetID(),
+		"requested_scopes", ar.GetRequestedScopes())
 
-	// OAuth2 client flow - write the standard OAuth2 response
-	s.oauth2Provider.GetProvider().WriteAuthorizeResponse(ctx, w, ar, response)
+	http.Redirect(w, r, "/mcp/oauth2/consent?state="+url.QueryEscape(consentState), http.StatusFound)
 }
 
 // handleLogin initiates the OAuth2 login flow
