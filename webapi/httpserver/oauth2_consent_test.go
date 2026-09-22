@@ -143,7 +143,9 @@ func TestOAuth2ConsentPage_GetConsentPage(t *testing.T) {
 			"openid",
 			"mcp:read",
 			"mcp:write",
-			"Basic authentication information",
+			// The sign-in scopes render as one fixed line rather than a
+			// description each; see signInScopes.
+			"Sign you in",
 			"Read-only access to HTCondor jobs",
 			"Full access to submit and manage HTCondor jobs",
 			"Authorize",
@@ -154,6 +156,20 @@ func TestOAuth2ConsentPage_GetConsentPage(t *testing.T) {
 			if !strings.Contains(body, expected) {
 				t.Errorf("Expected consent page to contain '%s', but it was not found", expected)
 			}
+		}
+
+		// A sign-in scope must not render as a checkbox. It grants
+		// nothing, so offering a choice invites a decision that changes
+		// nothing -- which is the clutter this grouping removes. It must
+		// still be SUBMITTED, or a client that asked for it stops
+		// receiving it.
+		for _, scope := range []string{"openid", "profile", "email"} {
+			if strings.Contains(body, `type="checkbox" name="scope" value="`+scope+`"`) {
+				t.Errorf("%s renders as a checkbox; it grants nothing and should be fixed", scope)
+			}
+		}
+		if !strings.Contains(body, `type="hidden" name="scope" value="openid"`) {
+			t.Error("openid is no longer submitted with the form")
 		}
 	})
 }

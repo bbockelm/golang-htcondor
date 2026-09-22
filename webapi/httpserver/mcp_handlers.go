@@ -667,6 +667,21 @@ func (h *Handler) grantableScopes(userGroups, requested []string) []string {
 // work rather than the caller's own. They are checked against this list
 // rather than a prefix so that adding a scope is a decision someone makes
 // here, not something a naming convention decides for them.
+// signInScopes carry no authorization here. openid is mandatory in OIDC;
+// profile and email are accepted because OIDC clients conventionally ask
+// for them, and rejecting one fails the client's registration outright --
+// but this server reads neither claim. The IDP's email and name are
+// parsed at the callback and never looked at again.
+//
+// They are rendered as a single fixed line rather than three checkboxes.
+// A checkbox invites a decision, and there is no decision here: ticking
+// or unticking them changes nothing a caller can do.
+var signInScopes = map[string]bool{
+	"openid":  true,
+	"profile": true,
+	"email":   true,
+}
+
 var privilegedScopes = map[string]bool{
 	"mcp:admin":     true,
 	"mcp:superuser": true,
@@ -674,23 +689,20 @@ var privilegedScopes = map[string]bool{
 
 func getScopeDescription(scope string) string {
 	descriptions := map[string]string{
-		"openid":                   "Basic authentication information",
-		"profile":                  "Access to your profile information",
-		"email":                    "Access to your email address",
-		"offline_access":           "Ability to refresh access tokens",
-		"mcp:read":                 "Read-only access to HTCondor jobs and resources via MCP protocol",
-		"mcp:write":                "Full access to submit and manage HTCondor jobs via MCP protocol",
-		"mcp:admin":                "Read every user's jobs, not only your own",
-		"mcp:superuser":            "Change any user's jobs: remove, hold, release, edit",
-		"condor:/READ":             "HTCondor READ authorization - allows reading job and daemon information",
-		"condor:/WRITE":            "HTCondor WRITE authorization - allows submitting and managing jobs",
-		"condor:/ADVERTISE_STARTD": "HTCondor ADVERTISE_STARTD authorization - allows advertising startd daemons",
-		"condor:/ADVERTISE_SCHEDD": "HTCondor ADVERTISE_SCHEDD authorization - allows advertising schedd daemons",
-		"condor:/ADVERTISE_MASTER": "HTCondor ADVERTISE_MASTER authorization - allows advertising master daemons",
-		"condor:/ADMINISTRATOR":    "HTCondor ADMINISTRATOR authorization - full administrative access",
-		"condor:/CONFIG":           "HTCondor CONFIG authorization - allows modifying configuration",
-		"condor:/DAEMON":           "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
-		"condor:/NEGOTIATOR":       "HTCondor NEGOTIATOR authorization - allows negotiator operations",
+		"openid":                "Basic authentication information",
+		"profile":               "Accepted for OIDC compatibility; this server reads no profile claim",
+		"email":                 "Accepted for OIDC compatibility; this server reads no email claim",
+		"offline_access":        "Ability to refresh access tokens",
+		"mcp:read":              "Read-only access to HTCondor jobs and resources via MCP protocol",
+		"mcp:write":             "Full access to submit and manage HTCondor jobs via MCP protocol",
+		"mcp:admin":             "Read every user's jobs, not only your own",
+		"mcp:superuser":         "Change any user's jobs: remove, hold, release, edit",
+		"condor:/READ":          "HTCondor READ authorization - allows reading job and daemon information",
+		"condor:/WRITE":         "HTCondor WRITE authorization - allows submitting and managing jobs",
+		"condor:/ADMINISTRATOR": "HTCondor ADMINISTRATOR authorization - full administrative access",
+		"condor:/CONFIG":        "HTCondor CONFIG authorization - allows modifying configuration",
+		"condor:/DAEMON":        "HTCondor DAEMON authorization - allows daemon-to-daemon communication",
+		"condor:/NEGOTIATOR":    "HTCondor NEGOTIATOR authorization - allows negotiator operations",
 	}
 
 	if desc, ok := descriptions[scope]; ok {
@@ -1359,8 +1371,12 @@ var oauth2AdvertisedScopes = []string{
 	// can be given an access point to look after without being given its
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
+	// READ and WRITE only. The ADVERTISE_* levels were advertised as
+	// scopes but nothing in this server ever consulted them:
+	// advertise_to_collector publishes with the server's own collector
+	// client, not the caller's credential, so the scopes granted nothing
+	// and only lengthened the consent page.
 	"condor:/READ", "condor:/WRITE",
-	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
 }
 
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
@@ -1907,20 +1923,37 @@ func (h *Handler) renderConsentPage(w http.ResponseWriter, userGroups []string, 
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
 	scopesHTML.WriteString("<ul class=\"scopes-list\">\n")
+
+	// The sign-in scopes go out as one line, with hidden inputs so the
+	// form still carries them, rather than as three separate entries the
+	// reader has to weigh.
+	var signIn []string
 	for _, scope := range p.RequestedScopes {
-		desc := html.EscapeString(getScopeDescription(scope))
-		escScope := html.EscapeString(scope)
-		// openid is mandatory in OIDC; render as a fixed item with
-		// a hidden input so the form still carries it on submit.
-		if scope == "openid" {
-			fmt.Fprintf(&scopesHTML,
-				"                <li class=\"scope-fixed\">\n"+
-					"                    <input type=\"hidden\" name=\"scope\" value=\"%s\">\n"+
-					"                    <strong>%s</strong> <span class=\"required\">(required)</span>\n"+
-					"                    <p>%s</p>\n"+
-					"                </li>\n", escScope, escScope, desc)
+		if signInScopes[scope] {
+			signIn = append(signIn, scope)
+		}
+	}
+	if len(signIn) > 0 {
+		var hidden strings.Builder
+		for _, scope := range signIn {
+			fmt.Fprintf(&hidden,
+				"                    <input type=\"hidden\" name=\"scope\" value=\"%s\">\n",
+				html.EscapeString(scope))
+		}
+		fmt.Fprintf(&scopesHTML,
+			"                <li class=\"scope-fixed\">\n"+
+				"%s"+
+				"                    <strong>Sign you in</strong> <span class=\"required\">(required)</span>\n"+
+				"                    <p>Confirms who you are. Grants no access to your jobs or data (%s).</p>\n"+
+				"                </li>\n", hidden.String(), html.EscapeString(strings.Join(signIn, ", ")))
+	}
+
+	for _, scope := range p.RequestedScopes {
+		if signInScopes[scope] {
 			continue
 		}
+		desc := html.EscapeString(getScopeDescription(scope))
+		escScope := html.EscapeString(scope)
 		// A privileged scope starts UNCHECKED, which is the whole point.
 		// Rendering it checked like the others would mean an admin grants
 		// every client power over everyone's jobs unless they remember to
@@ -2544,10 +2577,9 @@ func mapCondorScopesToAuthz(scopes []string) []string {
 		authLevel := strings.TrimPrefix(scope, "condor:/")
 		authLevel = strings.ToUpper(authLevel)
 
-		// Map scope 1-to-1 to HTCondor authorization levels
-		// Supported: READ, WRITE, ADVERTISE_STARTD, ADVERTISE_SCHEDD, ADVERTISE_MASTER
+		// Map scope 1-to-1 to HTCondor authorization levels.
 		switch authLevel {
-		case "READ", "WRITE", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER":
+		case "READ", "WRITE":
 			authzMap[authLevel] = true
 		default:
 			// Unknown authorization level, ignore
@@ -2612,8 +2644,11 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		}
 
 		if hasWrite {
-			// Full access for write scope
-			authz = []string{"WRITE", "READ", "ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"}
+			// READ and WRITE are what this server's tools use. The
+			// ADVERTISE_* levels used to be included here too, so every
+			// mcp:write caller's minted token carried them without
+			// anything asking for them or using them.
+			authz = []string{"WRITE", "READ"}
 		} else {
 			// Read-only access for read scope
 			authz = []string{"READ"}
