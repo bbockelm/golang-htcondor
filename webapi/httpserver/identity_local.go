@@ -53,6 +53,14 @@ import (
 // warmUpTimeout bounds the startup index build.
 const warmUpTimeout = 30 * time.Second
 
+// maxNamedAccounts caps how many account names one log line carries.
+//
+// These are not secrets -- getent passwd shows them to any user on the
+// access point -- but the list this bounds can be the whole directory,
+// and a 4000-name log line is not read by anybody. The count is always
+// reported in full.
+const maxNamedAccounts = 20
+
 // The index is rebuilt on this cadence whether or not anybody logs in.
 //
 // Rebuilding only on demand meant the first snapshot could be served for a
@@ -198,6 +206,14 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 		// replace good knowledge with worse -- a restored index against a
 		// directory that is not up yet -- and reporting that as "every
 		// login will be refused" would be both alarming and false.
+		//
+		// This branch only ever sees builds that FAILED. The build that
+		// caused the outage this was rewritten for did not fail; it
+		// succeeded with a fraction of the directory. That case is
+		// handled structurally -- a successful build merges rather than
+		// replaces -- and reported by logRetention on the success path
+		// below, so both now end in somebody being told an index was
+		// kept.
 		if held, _, _ := l.resolver.Stats(); held > 0 {
 			l.logger.Info(logging.DestinationHTTP,
 				"Kept the account index already held; this build could not improve on it",
@@ -212,6 +228,7 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	accounts, ambiguous, _ := l.resolver.Stats()
 	l.logger.Info(logging.DestinationHTTP, "Indexed accounts by GECOS for identity mapping",
 		"accounts", accounts, "ambiguous", ambiguous)
+	l.logRetention()
 	l.saveIndex(ctx)
 	if accounts == 0 {
 		l.logger.Warn(logging.DestinationHTTP,
@@ -244,6 +261,54 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 			"Several accounts share a GECOS; nobody presenting one of these can log in",
 			"gecos", l.resolver.AmbiguousGecos())
 	}
+}
+
+// logRetention reports accounts the index held that the last enumeration
+// did not mention.
+//
+// This is the visibility half of making the index a union. A rebuild can
+// no longer evict anybody for being missing once, so a partial
+// enumeration is now harmless -- and therefore silent, which is worse: it
+// would be absorbed with no trace at all. These names ARE the trace. A
+// line naming a handful of accounts is ordinary churn; a line naming
+// hundreds is an enumeration that came back short, and is the thing to
+// look at when logins start failing.
+//
+// It also completes a guard that until now only covered half the cases.
+// warmUp's "Kept the account index already held" fires when a build
+// FAILS, but the enumeration behind this outage did not fail: it
+// succeeded and returned 17 of 4439 accounts. Nothing reported that,
+// because from the inside it was an ordinary successful build. The union
+// is what makes the successful-but-partial case survivable; this is what
+// makes it visible, so both branches now end in an operator being told
+// that an index was kept rather than replaced.
+func (l *localIdentity) logRetention() {
+	report, ok := l.resolver.LastBuild()
+	if !ok || !report.Shrank() {
+		return
+	}
+	l.logger.Warn(logging.DestinationHTTP,
+		"This enumeration of the account database did not list accounts the index already held; "+
+			"they are kept, and dropped only after several enumerations in a row miss them. "+
+			"A large number here means the enumeration came back short, not that accounts were deleted",
+		"enumerated", report.Enumerated,
+		"held", report.Held,
+		"missing_now", len(report.Retained),
+		"missing_accounts", capNames(report.Retained),
+		"dropped", len(report.Evicted),
+		"dropped_accounts", capNames(report.Evicted))
+}
+
+// capNames trims a list of account names to something a log line can
+// carry, saying how many were left out rather than pretending there were
+// none.
+func capNames(names []string) []string {
+	if len(names) <= maxNamedAccounts {
+		return names
+	}
+	out := make([]string, 0, maxNamedAccounts+1)
+	out = append(out, names[:maxNamedAccounts]...)
+	return append(out, fmt.Sprintf("... and %d more", len(names)-maxNamedAccounts))
 }
 
 // saveIndex persists the index if it is complete enough to be worth
@@ -302,6 +367,7 @@ func (l *localIdentity) refreshLoop(ctx context.Context) {
 			continue
 		}
 
+		l.logRetention()
 		l.saveIndex(ctx)
 
 		accounts, ambiguous, _ := l.resolver.Stats()

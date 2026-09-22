@@ -69,6 +69,36 @@ import (
 // a rebuild that never returns.
 const buildTimeout = 30 * time.Second
 
+// absenceLimit is how many CONSECUTIVE enumerations may fail to mention
+// an account before the index forgets it.
+//
+// A rebuild used to replace the index outright, which made every
+// enumeration a referendum on who exists. SSSD's enumeration is not
+// stable enough to hold one. Measured on a single access point inside a
+// few minutes:
+//
+//	just after the pod restarted (cold cache)   17 accounts
+//	a few seconds later (warm)                4439 accounts
+//	the index built at 18:46                  3639 accounts
+//	the index restored at startup             4396 accounts
+//
+// A rebuild landing on one of the small answers evicted thousands of
+// real accounts and refused all of them until the next good one. There
+// is no completeness signal to detect that with: EnumerateWithProvenance
+// reports only whether a directory contributed AT ALL, and a partial
+// success looks exactly like a bulk deletion.
+//
+// So absence is treated as evidence that accumulates rather than as a
+// verdict. Absent once is noise; absent three times running is a
+// deletion. Three, not two, because the observed bad answers arrive in
+// bursts around a restart, and two consecutive cold enumerations is an
+// ordinary thing for a container to do.
+//
+// Retaining an entry too long is cheap: every index hit is re-confirmed
+// against the live account database by name before it is believed (see
+// resolveByGecos), so a stale entry delays nothing and admits nobody.
+const absenceLimit = 3
+
 var (
 	// ErrNoMatch means no account carries this subject as its GECOS.
 	ErrNoMatch = errors.New("no account has this subject as its GECOS")
@@ -170,6 +200,57 @@ type Snapshot struct {
 	// Restoring it means the next run KNOWS a directory exists here, and
 	// so must not let an index built without one replace it.
 	FromDirectory bool `json:"from_directory"`
+
+	// Entries is the index proper: one row per account, which is what the
+	// resolver actually keys on.
+	//
+	// The three fields above are DERIVED from it and are still written so
+	// that a binary predating this field can read a row written by one
+	// that has it; a rollback should cost a worse index, not an
+	// unreadable one. Restore prefers Entries and falls back to them.
+	//
+	// Absence counters are deliberately NOT here. See Restore.
+	Entries []SnapshotEntry `json:"entries,omitempty"`
+}
+
+// SnapshotEntry is one account as the index holds it.
+type SnapshotEntry struct {
+	Username string `json:"username"`
+	Gecos    string `json:"gecos,omitempty"`
+}
+
+// RetentionReport describes what the last rebuild did with accounts the
+// enumeration did not mention.
+//
+// It exists to be logged. A shrinking enumeration is the one failure mode
+// this package cannot distinguish from a real change in the account
+// database, so the names are put in front of an operator instead of being
+// silently absorbed.
+type RetentionReport struct {
+	// Enumerated is how many accounts this enumeration listed.
+	Enumerated int
+	// Held is how many the index holds after merging, which is at least
+	// Enumerated.
+	Held int
+	// Retained names accounts the index kept although this enumeration
+	// did not list them. Sorted.
+	Retained []string
+	// Evicted names accounts dropped for having been absent from
+	// absenceLimit enumerations in a row. Sorted.
+	Evicted []string
+}
+
+// Shrank reports whether this enumeration failed to mention something the
+// index already held -- the signature of a partial answer.
+func (r RetentionReport) Shrank() bool { return len(r.Retained) > 0 || len(r.Evicted) > 0 }
+
+// indexEntry is one account in the index, with the evidence for
+// forgetting it.
+type indexEntry struct {
+	gecos string
+	// absences counts consecutive enumerations that did not mention this
+	// account. Reset to zero the moment one does.
+	absences int
 }
 
 // Resolver maps subjects to local account names.
@@ -197,12 +278,22 @@ type Resolver struct {
 	// concurrent logins at TTL expiry cause ONE of them.
 	buildMu sync.Mutex
 
-	mu         sync.RWMutex
-	byGecos    map[string]string // gecos -> username, absent when ambiguous
-	ambiguous  map[string]int    // gecos -> how many accounts claim it
-	knownUsers map[string]bool   // every username the index saw
-	builtAt    time.Time
-	count      int
+	mu sync.RWMutex
+	// entries is the index. It is a UNION across rebuilds rather than the
+	// output of the last one: see absenceLimit.
+	entries map[string]indexEntry // username -> what is known about it
+	// byGecos and ambiguous are derived from entries on every merge, so
+	// an account retained from an earlier round still takes part in
+	// duplicate detection. Rebuilding them rather than patching them is
+	// what keeps that true.
+	byGecos   map[string]string // gecos -> username, absent when ambiguous
+	ambiguous map[string]int    // gecos -> how many accounts claim it
+	builtAt   time.Time
+	lastBuild RetentionReport
+	// merged records that lastBuild describes a real enumeration, as
+	// opposed to a restored index that no build in this process has
+	// touched yet.
+	merged bool
 }
 
 // Option configures a Resolver.
@@ -337,10 +428,23 @@ func (r *Resolver) localPart(subject string) (string, bool) {
 // is exactly the asymmetry that makes a cheap probe possible when a
 // caller already has a good guess at the answer.
 //
-// It is only ever a CONFIRMATION of a proposal made elsewhere. It cannot
-// see that two accounts share this GECOS, because answering that needs the
-// index -- so a caller must not use this to accept a proposal from an
-// untrusted source, only one it knows was made under complete knowledge.
+// It is only ever a CONFIRMATION of a proposal made elsewhere, and it
+// cannot see that two accounts share this GECOS, because answering that
+// needs the index. What follows is a limit on WHO may make the proposal,
+// not on how good the index is: the proposal must come from something
+// that is not the caller. A session cookie's remembered account and a
+// name this package derived from the subject itself both qualify; a value
+// the caller chose does not, because an attacker who names their own
+// account is not confirming anything.
+//
+// Two in-tree callers make such a proposal:
+//
+//   - identity_cookie.go, from a mapping this process made earlier.
+//   - probeByName below, from the subject itself.
+//
+// The second one accepts ambiguity that a complete index would have
+// refused. That is a deliberate trade, taken because the index cannot be
+// relied on to be complete; probeByName documents it.
 func (r *Resolver) Confirm(ctx context.Context, subject, account string) bool {
 	if subject == "" || account == "" || r.verifier == nil {
 		return false
@@ -368,6 +472,11 @@ func (r *Resolver) Confirm(ctx context.Context, subject, account string) bool {
 // should be.
 func (r *Resolver) resolveByGecos(ctx context.Context, subject string) (string, error) {
 	if err := r.ensureFresh(ctx); err != nil {
+		// There is no usable index. The probe does not need one, and this
+		// is the case where it is worth the most.
+		if account, ok := r.probeByName(ctx, subject); ok {
+			return account, nil
+		}
 		return "", err
 	}
 
@@ -377,9 +486,15 @@ func (r *Resolver) resolveByGecos(ctx context.Context, subject string) (string, 
 	r.mu.RUnlock()
 
 	if dupes > 1 {
+		// Ambiguity is decided BEFORE the probe, so a duplicate the index
+		// can see still refuses. The probe only reaches subjects the
+		// index knows nothing about.
 		return "", fmt.Errorf("%w: %q is the GECOS of %d accounts", ErrAmbiguous, subject, dupes)
 	}
 	if !ok {
+		if account, probed := r.probeByName(ctx, subject); probed {
+			return account, nil
+		}
 		return "", fmt.Errorf("%w: %q is no account's GECOS", ErrNoMatch, subject)
 	}
 
@@ -389,15 +504,88 @@ func (r *Resolver) resolveByGecos(ctx context.Context, subject string) (string, 
 			return "", fmt.Errorf("confirming %q still maps to %q: %w", username, subject, err)
 		}
 		if gecos != subject {
-			// The index is behind the database. Refusing is right even
-			// though a rebuild might agree: the account this would have
-			// returned is, right now, somebody whose GECOS is not this
-			// subject.
+			// The index is behind the database. Refusing what it said is
+			// right: the account it would have returned is, right now,
+			// somebody whose GECOS is not this subject. But the index
+			// being wrong about one account says nothing about the
+			// account actually named after the subject, so the probe
+			// still gets its turn.
+			if account, probed := r.probeByName(ctx, subject); probed {
+				return account, nil
+			}
 			return "", fmt.Errorf("%w: the index said %q, but its GECOS is now %q",
 				ErrNoMatch, username, gecos)
 		}
 	}
 	return username, nil
+}
+
+// probeByName is the GECOS strategy's index-free fallback: when the index
+// has no answer, guess that the account is simply named after the subject
+// and check that guess against the live account database.
+//
+// At the site this was written for the guess is right for the great
+// majority of accounts -- "clock" has GECOS "clock" -- and, crucially, it
+// is checkable without enumerating anything. getpwnam answers while
+// getpwent is still cold; that asymmetry was measured directly, with
+// `getent passwd clock` succeeding in a window where enumeration returned
+// 17 of 4439 accounts. It is the whole reason this works.
+//
+// It runs on EVERY miss, not only when Degraded() is set, because the
+// failure it exists for does not set Degraded(). Degraded means a
+// directory could not be READ; a partial enumeration is a successful one,
+// and is indistinguishable from a real answer. Gating the probe on the
+// one signal that the outage did not raise would have fixed nothing. The
+// cost of running it always is one by-name lookup -- cached, and only on
+// the path that was about to refuse the login anyway.
+//
+// WHAT THIS GIVES UP, deliberately and with the operator's agreement:
+// Confirm cannot see a second account with the same GECOS, so a subject
+// the index would have refused as ambiguous can be accepted here. The
+// exposure is narrow -- an index that can see the duplicate refuses
+// before reaching this, so it takes an index that knows neither account
+// -- but it is real. It is accepted because at this site the username
+// and the GECOS are the same string for ~95% of accounts, which makes
+// two accounts sharing a GECOS both unlikely and, where it happens,
+// preferable to refusing everyone during an enumeration wobble.
+//
+// It gives up nothing else. The probe cannot admit anybody whose live
+// GECOS does not equal the subject, which is the same test the index path
+// ends with -- it is strictly stronger than StrategyUsername, which
+// accepts any account that merely exists under that name.
+func (r *Resolver) probeByName(ctx context.Context, subject string) (string, bool) {
+	if r.verifier == nil {
+		return "", false
+	}
+	// Try the subject as a login name, then -- when stripping is on --
+	// its local part, which is the same candidate order Resolve uses.
+	for _, candidate := range []string{subject, r.strippedLocalPart(subject)} {
+		if !looksLikeLoginName(candidate) {
+			continue
+		}
+		if r.Confirm(ctx, subject, candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// strippedLocalPart is localPart with the "not applicable" case folded
+// into an empty string, for use where a loop wants a candidate list.
+func (r *Resolver) strippedLocalPart(subject string) string {
+	local, ok := r.localPart(subject)
+	if !ok {
+		return ""
+	}
+	return local
+}
+
+// looksLikeLoginName screens a string before it is used as an account
+// name. A GECOS is free text -- "John Smith", or worse -- and must never
+// become an argv element or a lookup key on the strength of having been
+// asserted.
+func looksLikeLoginName(s string) bool {
+	return s != "" && !strings.ContainsAny(s, ":/\\ \t\n")
 }
 
 // resolveByUsername accepts the subject as a login name if such an
@@ -407,7 +595,7 @@ func (r *Resolver) resolveByGecos(ctx context.Context, subject string) (string, 
 // so it answers for accounts the index never saw -- a directory that
 // will not enumerate still resolves a single name.
 func (r *Resolver) resolveByUsername(ctx context.Context, subject string) (string, error) {
-	if strings.ContainsAny(subject, ":/\\ \t\n") {
+	if !looksLikeLoginName(subject) {
 		// Not a login name on any system this runs on, and worth
 		// refusing explicitly rather than handing to a lookup.
 		return "", fmt.Errorf("%w: %q is not a valid login name", ErrNoMatch, subject)
@@ -417,7 +605,7 @@ func (r *Resolver) resolveByUsername(ctx context.Context, subject string) (strin
 			return "", err
 		}
 		r.mu.RLock()
-		_, ok := r.knownUsers[subject]
+		_, ok := r.entries[subject]
 		r.mu.RUnlock()
 		if !ok {
 			return "", fmt.Errorf("%w: no account named %q", ErrNoMatch, subject)
@@ -431,6 +619,13 @@ func (r *Resolver) resolveByUsername(ctx context.Context, subject string) (strin
 }
 
 // Stats reports what the current index holds, for logging and /readyz.
+//
+// accounts is how many accounts the index HOLDS, which since the index
+// became a union is not the same as how many the last enumeration
+// listed: it includes entries kept across an enumeration that did not
+// mention them. That is the honest number for "how many logins can this
+// map", which is what the callers ask it for. LastBuild has the
+// breakdown for anyone who needs to know how the last answer was made.
 func (r *Resolver) Stats() (accounts, ambiguous int, builtAt time.Time) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -440,7 +635,7 @@ func (r *Resolver) Stats() (accounts, ambiguous int, builtAt time.Time) {
 			amb++
 		}
 	}
-	return r.count, amb, r.builtAt
+	return len(r.entries), amb, r.builtAt
 }
 
 // AmbiguousGecos lists the GECOS values shared by more than one account,
@@ -567,35 +762,18 @@ func (r *Resolver) build(ctx context.Context) error {
 		return fmt.Errorf("enumerating accounts via %s: %w", r.enum.Name(), err)
 	}
 
-	byGecos := make(map[string]string, len(accounts))
-	counts := make(map[string]int, len(accounts))
-	known := make(map[string]bool, len(accounts))
-	for _, a := range accounts {
-		known[a.Username] = true
-		g := strings.TrimSpace(a.Gecos)
-		if g == "" {
-			// Accounts with no GECOS are the overwhelming majority on a
-			// normal system; they cannot be anybody's subject.
-			continue
-		}
-		counts[g]++
-		byGecos[g] = a.Username
-	}
-	// Ambiguous entries are removed rather than left to a count check, so
-	// that a future caller reading byGecos directly cannot get a winner.
-	for g, n := range counts {
-		if n > 1 {
-			delete(byGecos, g)
-		}
-	}
-
 	r.mu.Lock()
 	// A degraded build must not replace knowledge we already have. On a
 	// container start the directory is typically unreadable for the first
 	// minutes, and installing that partial view would throw away a
 	// complete index -- one restored from cache, or built before the
 	// directory went away -- and refuse logins that were working.
-	if degraded != nil && r.degraded == nil && r.count > 0 {
+	//
+	// The merge below no longer throws anything away outright, but a
+	// degraded build would still spend one of every absent account's
+	// three lives, so the refusal is kept: three degraded builds in a row
+	// would evict the directory.
+	if degraded != nil && r.degraded == nil && len(r.entries) > 0 {
 		r.mu.Unlock()
 		return fmt.Errorf("keeping the existing complete index: %w", err)
 	}
@@ -605,15 +783,12 @@ func (r *Resolver) build(ctx context.Context) error {
 	// what the first seconds look like -- so without this, a cold start
 	// replaces an index restored from cache with the image's own handful
 	// of accounts.
-	if !fromDirectory && r.fromDirectory && r.count > 0 {
+	if !fromDirectory && r.fromDirectory && len(r.entries) > 0 {
 		r.mu.Unlock()
 		return fmt.Errorf("keeping the existing index, which covers a directory this build could not reach")
 	}
-	r.byGecos = byGecos
-	r.ambiguous = counts
-	r.knownUsers = known
+	r.lastBuild, r.merged = r.mergeLocked(accounts), true
 	r.builtAt = r.now()
-	r.count = len(accounts)
 	r.fromDirectory = fromDirectory
 	// Cleared on a clean build: a directory that has come back must stop
 	// being reported as down.
@@ -626,6 +801,109 @@ func (r *Resolver) build(ctx context.Context) error {
 	return nil
 }
 
+// mergeLocked folds one enumeration into the index and reports what it
+// did with the accounts the enumeration did not mention.
+//
+// This is a UNION, not a replacement. An enumerated account is written
+// through -- the live answer always wins for the accounts it covers, so a
+// GECOS that changed takes effect at once -- while an account the
+// enumeration missed keeps its entry and spends one of its lives. See
+// absenceLimit for why absence is weighed rather than obeyed.
+func (r *Resolver) mergeLocked(accounts []Account) RetentionReport {
+	if r.entries == nil {
+		r.entries = make(map[string]indexEntry, len(accounts))
+	}
+
+	seen := make(map[string]struct{}, len(accounts))
+	for _, a := range accounts {
+		if a.Username == "" {
+			continue
+		}
+		seen[a.Username] = struct{}{}
+		// absences resets to zero by construction: the entry is replaced,
+		// not patched. One sighting clears the whole debt, which is the
+		// point -- only CONSECUTIVE absences count.
+		r.entries[a.Username] = indexEntry{gecos: strings.TrimSpace(a.Gecos)}
+	}
+
+	var retained, evicted []string
+	for name, e := range r.entries {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		e.absences++
+		if e.absences >= absenceLimit {
+			delete(r.entries, name)
+			evicted = append(evicted, name)
+			continue
+		}
+		r.entries[name] = e
+		retained = append(retained, name)
+	}
+	sort.Strings(retained)
+	sort.Strings(evicted)
+
+	r.reindexLocked()
+	return RetentionReport{
+		Enumerated: len(seen),
+		Held:       len(r.entries),
+		Retained:   retained,
+		Evicted:    evicted,
+	}
+}
+
+// reindexLocked recomputes the GECOS lookup from the entries.
+//
+// It is rebuilt wholesale rather than patched so that ambiguity is always
+// counted over everything the index holds. An account retained from an
+// earlier enumeration is as capable of colliding with a new one as any
+// other, and a duplicate GECOS that only half the index can see would be
+// resolved to the half that is visible -- which is exactly the pick-a-
+// victim outcome the package refuses to make.
+func (r *Resolver) reindexLocked() {
+	byGecos := make(map[string]string, len(r.entries))
+	counts := make(map[string]int, len(r.entries))
+	for name, e := range r.entries {
+		if e.gecos == "" {
+			// Accounts with no GECOS are the overwhelming majority on a
+			// normal system; they cannot be anybody's subject.
+			continue
+		}
+		counts[e.gecos]++
+		// Map iteration is unordered, so which of several claimants lands
+		// here is arbitrary -- and irrelevant, because ambiguous keys are
+		// deleted below rather than being allowed a winner.
+		byGecos[e.gecos] = name
+	}
+	for g, n := range counts {
+		if n > 1 {
+			delete(byGecos, g)
+		}
+	}
+	r.byGecos = byGecos
+	r.ambiguous = counts
+}
+
+// LastBuild reports what the most recent successful merge did with
+// accounts the enumeration did not mention, and whether there has been
+// one in this process.
+//
+// A caller is expected to log it. A partial enumeration is invisible from
+// inside this package -- the only trace it leaves is a set of accounts
+// that were there a minute ago and are not in this answer -- so naming
+// them is the whole detection mechanism.
+func (r *Resolver) LastBuild() (RetentionReport, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.merged {
+		return RetentionReport{}, false
+	}
+	report := r.lastBuild
+	report.Retained = append([]string(nil), r.lastBuild.Retained...)
+	report.Evicted = append([]string(nil), r.lastBuild.Evicted...)
+	return report, true
+}
+
 // Snapshot returns the current index for persisting, and reports whether
 // it is worth persisting at all.
 //
@@ -635,16 +913,17 @@ func (r *Resolver) build(ctx context.Context) error {
 func (r *Resolver) Snapshot() (Snapshot, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.degraded != nil || r.count == 0 {
+	if r.degraded != nil || len(r.entries) == 0 {
 		return Snapshot{}, false
 	}
 
 	snap := Snapshot{
 		ByGecos:       make(map[string]string, len(r.byGecos)),
 		Counts:        make(map[string]int, len(r.ambiguous)),
-		Users:         make([]string, 0, len(r.knownUsers)),
+		Users:         make([]string, 0, len(r.entries)),
+		Entries:       make([]SnapshotEntry, 0, len(r.entries)),
 		BuiltAt:       r.builtAt,
-		Count:         r.count,
+		Count:         len(r.entries),
 		FromDirectory: r.fromDirectory,
 	}
 	for k, v := range r.byGecos {
@@ -653,10 +932,14 @@ func (r *Resolver) Snapshot() (Snapshot, bool) {
 	for k, v := range r.ambiguous {
 		snap.Counts[k] = v
 	}
-	for u := range r.knownUsers {
+	for u, e := range r.entries {
 		snap.Users = append(snap.Users, u)
+		snap.Entries = append(snap.Entries, SnapshotEntry{Username: u, Gecos: e.gecos})
 	}
 	sort.Strings(snap.Users)
+	sort.Slice(snap.Entries, func(i, j int) bool {
+		return snap.Entries[i].Username < snap.Entries[j].Username
+	})
 	return snap, true
 }
 
@@ -671,32 +954,60 @@ func (r *Resolver) Snapshot() (Snapshot, bool) {
 //
 // BuiltAt is preserved rather than reset, so the index is exactly as
 // stale as it really is and the ordinary TTL rebuild applies to it.
+//
+// Absence counters are NOT preserved -- every restored entry starts with
+// its full budget, and the snapshot does not carry them. That is a
+// deliberate choice rather than an omission: the enumerations immediately
+// after a restart are the least complete ones there are (17 accounts
+// against a warm 4439, measured), so a restart is exactly the wrong
+// moment to arrive halfway to evicting somebody. Nothing is lost by it,
+// because eviction is only housekeeping: a retained entry that no longer
+// exists is refused by the forward check, not admitted.
 func (r *Resolver) Restore(snap Snapshot) {
-	if len(snap.ByGecos) == 0 {
+	if len(snap.Entries) == 0 && len(snap.ByGecos) == 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.byGecos = make(map[string]string, len(snap.ByGecos))
-	for k, v := range snap.ByGecos {
-		r.byGecos[k] = v
+	r.entries = make(map[string]indexEntry, len(snap.Users))
+	if len(snap.Entries) > 0 {
+		for _, e := range snap.Entries {
+			if e.Username == "" {
+				continue
+			}
+			r.entries[e.Username] = indexEntry{gecos: strings.TrimSpace(e.Gecos)}
+		}
+	} else {
+		// A row written before Entries existed. Users and ByGecos are
+		// enough to rebuild it, except for accounts whose GECOS was
+		// AMBIGUOUS: ByGecos deletes those keys, so the restored entry
+		// has no GECOS and resolves to nobody -- which is what an
+		// ambiguous GECOS resolves to anyway. The first rebuild restores
+		// the full picture.
+		owner := make(map[string]string, len(snap.ByGecos))
+		for gecos, user := range snap.ByGecos {
+			owner[user] = gecos
+		}
+		for _, u := range snap.Users {
+			r.entries[u] = indexEntry{gecos: owner[u]}
+		}
+		for user, gecos := range owner {
+			// A ByGecos entry for an account missing from Users; keep it
+			// rather than lose the mapping.
+			if _, ok := r.entries[user]; !ok {
+				r.entries[user] = indexEntry{gecos: gecos}
+			}
+		}
 	}
-	r.ambiguous = make(map[string]int, len(snap.Counts))
-	for k, v := range snap.Counts {
-		r.ambiguous[k] = v
-	}
-	r.knownUsers = make(map[string]bool, len(snap.Users))
-	for _, u := range snap.Users {
-		r.knownUsers[u] = true
-	}
+	r.reindexLocked()
+
 	r.builtAt = snap.BuiltAt
-	r.count = snap.Count
 	r.fromDirectory = snap.FromDirectory
-	if r.count == 0 {
-		r.count = len(snap.ByGecos)
-	}
 	r.degraded = nil
+	// A restored index has not been merged with an enumeration in this
+	// process, so there is nothing to report about one.
+	r.lastBuild, r.merged = RetentionReport{}, false
 }
 
 // Degraded reports why the current index is incomplete, or nil if it is
@@ -723,7 +1034,7 @@ func (r *Resolver) ShadowedUsernames() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []string
-	for name := range r.knownUsers {
+	for name := range r.entries {
 		if owner, ok := r.byGecos[name]; ok && owner != name {
 			out = append(out, name+" (GECOS of "+owner+")")
 		}
