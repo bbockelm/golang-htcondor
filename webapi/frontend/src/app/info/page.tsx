@@ -299,6 +299,26 @@ function MirrorTestButton() {
               ? `Mirror answered in ${result.total_millis} ms`
               : 'Mirror did not answer — the failing stage is marked below'}
           </div>
+          {/* Reachable and used are different answers. Three green
+              stages next to "live job reads: declined (never synced)"
+              is the shape this panel exists to show, and showing only
+              the stages once read as a working mirror. */}
+          {result.routing && result.routing.some((r) => !r.use) && (
+            <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-900">
+              Reachable, but not every read would use it:
+              <ul className="mt-1 space-y-0.5">
+                {result.routing
+                  .filter((r) => !r.use)
+                  .map((r) => (
+                    <li key={r.kind}>
+                      <span className="font-mono text-xs">{r.kind}</span> — declined
+                      {r.reason ? ` (${r.reason})` : ''}
+                      {r.note ? `: ${r.note}` : ''}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
           <table className="min-w-full text-sm">
             <tbody className="divide-y divide-gray-100">
               {result.stages.map((stage) => (

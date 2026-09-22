@@ -303,9 +303,20 @@ export interface DBMirrorTestStage {
   millis: number;
 }
 
+// What a real read would decide about the mirror, which the stages
+// cannot say: every stage can pass while every read declines it on
+// freshness and goes to the schedd instead.
+export interface DBMirrorRoutingDecision {
+  kind: string;
+  use: boolean;
+  reason: string;
+  note?: string;
+}
+
 export interface DBMirrorTest {
   ok: boolean;
   stages: DBMirrorTestStage[];
+  routing?: DBMirrorRoutingDecision[];
   constraint: string;
   total_millis: number;
 }
