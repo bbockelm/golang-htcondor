@@ -118,6 +118,30 @@ func readBuild() Build {
 // reported as one.
 const devel = "(devel)"
 
+// zeroPseudo is the version the toolchain records for a requirement that
+// has no version of its own -- which is what a local `replace` directive
+// produces. webapi/go.mod replaces golang-htcondor with "../", so the
+// dependency entry for it always reads this, tagged build or not.
+const zeroPseudo = "v0.0.0-00010101000000-000000000000"
+
+// depVersion is a dependency's version, or "" when the toolchain has
+// none to give.
+//
+// A module satisfied by a local directory has no version: the entry
+// carries zeroPseudo and a Replace pointing at a path. Reporting that
+// verbatim put "golang-htcondor v0.0.0-00010101000000-000000000000" in
+// the startup banner of every release container, which reads as a
+// broken build rather than as an absent answer.
+func depVersion(d *debug.Module) string {
+	if d == nil || d.Replace != nil {
+		return ""
+	}
+	if d.Version == devel || d.Version == zeroPseudo {
+		return ""
+	}
+	return d.Version
+}
+
 // buildFrom assembles the Build from embedded info. Split out so the
 // resolution rules can be tested against a realistic build -- a test
 // binary's own build info always says "(devel)" with no VCS stamp, so
@@ -161,15 +185,31 @@ func buildFrom(bi *debug.BuildInfo, ok bool) Build {
 	if bi.Main.Path == pathGolangHTCondor && bi.Main.Version != devel {
 		b.Stack.GolangHTCondor = bi.Main.Version
 	}
+	linkedIn := bi.Main.Path == pathGolangHTCondor
 	for _, d := range bi.Deps {
 		switch d.Path {
 		case pathGolangHTCondor:
-			b.Stack.GolangHTCondor = d.Version
+			linkedIn = true
+			b.Stack.GolangHTCondor = depVersion(d)
 		case pathClassAd:
-			b.Stack.ClassAd = d.Version
+			b.Stack.ClassAd = depVersion(d)
 		case pathCedar:
-			b.Stack.Cedar = d.Version
+			b.Stack.Cedar = depVersion(d)
 		}
+	}
+
+	// This library is linked in but the toolchain cannot say which
+	// version, because it came from a local directory rather than a
+	// module download. That directory is this repository -- webapi
+	// replaces golang-htcondor with its own parent -- so the code linked
+	// in is this build, and the version stamped into this build is the
+	// honest answer.
+	//
+	// Only from -ldflags. Inferring it from anything the replace itself
+	// provides would be inventing a number: the replacement records
+	// "(devel)" and nothing else.
+	if linkedIn && b.Stack.GolangHTCondor == "" && b.Version != "" && b.Version != "dev" {
+		b.Stack.GolangHTCondor = b.Version
 	}
 	return b
 }

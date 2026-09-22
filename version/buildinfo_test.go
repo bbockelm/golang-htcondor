@@ -225,3 +225,113 @@ func TestStampedBuildsDoNotApologize(t *testing.T) {
 		})
 	}
 }
+
+// replacedSelf is the build shape every htcondor-api release container
+// has: webapi/go.mod replaces golang-htcondor with "../", so the
+// toolchain records the dependency with no version of its own and a
+// Replace pointing at a directory. Confirmed with `go version -m` on a
+// built binary:
+//
+//	dep  github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+//	=>   ../  (devel)
+func replacedSelf() *debug.BuildInfo {
+	return &debug.BuildInfo{
+		// No VCS stamp: .dockerignore excludes .git, which is why the
+		// release build injects the version with -ldflags at all.
+		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor/webapi", Version: devel},
+		Deps: []*debug.Module{
+			{Path: "github.com/PelicanPlatform/classad", Version: "v0.29.14"},
+			{Path: "github.com/bbockelm/cedar", Version: "v0.6.19"},
+			{
+				Path:    "github.com/bbockelm/golang-htcondor",
+				Version: "v0.0.0-00010101000000-000000000000",
+				Replace: &debug.Module{Path: "../", Version: devel},
+			},
+		},
+	}
+}
+
+// The reported bug: a tagged container logged "golang-htcondor
+// v0.0.0-00010101000000-000000000000" in its startup banner. The tag was
+// reaching the build -- it is injected with -ldflags -- but the stack
+// line took this library's version from the dependency entry, which a
+// local replace leaves empty of meaning.
+func TestReplacedSelfReportsTheInjectedVersion(t *testing.T) {
+	saved := Version
+	defer func() { Version = saved }()
+	Version = "v0.19.0" // as the release container's -ldflags sets it
+
+	b := buildFrom(replacedSelf(), true)
+
+	if b.Stack.GolangHTCondor != "v0.19.0" {
+		t.Errorf("Stack.GolangHTCondor = %q, want the injected version", b.Stack.GolangHTCondor)
+	}
+	if strings.Contains(b.Stack.String(), "00010101000000") {
+		t.Errorf("the placeholder reached the banner: %q", b.Stack.String())
+	}
+	// The other two are ordinary module downloads and must be unaffected.
+	if b.Stack.ClassAd != "v0.29.14" || b.Stack.Cedar != "v0.6.19" {
+		t.Errorf("classad = %q cedar = %q, want the versions from Deps", b.Stack.ClassAd, b.Stack.Cedar)
+	}
+}
+
+// Without an injected version there is nothing true to report, and the
+// banner omits an empty entry. Printing the placeholder instead read as
+// a broken build rather than as an absent answer.
+func TestReplacedSelfWithoutLdflagsReportsNothing(t *testing.T) {
+	saved := Version
+	defer func() { Version = saved }()
+	Version = "dev"
+
+	b := buildFrom(replacedSelf(), true)
+
+	if b.Stack.GolangHTCondor != "" {
+		t.Errorf("Stack.GolangHTCondor = %q, want empty rather than a placeholder", b.Stack.GolangHTCondor)
+	}
+	if strings.Contains(b.Stack.String(), "golang-htcondor") {
+		t.Errorf("banner names a version it does not have: %q", b.Stack.String())
+	}
+}
+
+// A replaced classad or cedar has no version either, and there is no
+// -ldflags value standing in for one -- so it is omitted rather than
+// reported as a placeholder. This is what a workspace build looks like.
+func TestReplacedDependenciesAreOmitted(t *testing.T) {
+	b := buildFrom(&debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor/webapi", Version: devel},
+		Deps: []*debug.Module{
+			{
+				Path:    "github.com/PelicanPlatform/classad",
+				Version: "v0.0.0-00010101000000-000000000000",
+				Replace: &debug.Module{Path: "../classad", Version: devel},
+			},
+			{Path: "github.com/bbockelm/cedar", Version: "v0.6.19"},
+		},
+	}, true)
+
+	if b.Stack.ClassAd != "" {
+		t.Errorf("Stack.ClassAd = %q, want empty for a replaced module", b.Stack.ClassAd)
+	}
+	if b.Stack.Cedar != "v0.6.19" {
+		t.Errorf("Stack.Cedar = %q, want the real version beside it", b.Stack.Cedar)
+	}
+}
+
+// The fallback is for a library that IS linked in and whose version the
+// toolchain cannot name. A binary that does not link golang-htcondor at
+// all must not be given this build's version, or the banner claims a
+// component that is not there.
+func TestUnlinkedLibraryIsNotInvented(t *testing.T) {
+	saved := Version
+	defer func() { Version = saved }()
+	Version = "v0.19.0"
+
+	b := buildFrom(&debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/somebody/else", Version: "v1.0.0"},
+		Deps: []*debug.Module{{Path: "github.com/bbockelm/cedar", Version: "v0.6.19"}},
+	}, true)
+
+	if b.Stack.GolangHTCondor != "" {
+		t.Errorf("Stack.GolangHTCondor = %q for a binary that does not link it", b.Stack.GolangHTCondor)
+	}
+}
