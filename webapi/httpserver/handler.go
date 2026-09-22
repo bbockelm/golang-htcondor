@@ -2188,7 +2188,12 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
-		h.logger.Info(logging.DestinationHTTP, "Following the htcondordb jobs table for job watches")
+		// Which mirror is not known yet: discovery runs per dial attempt
+		// inside watchJobsTable, which logs the identity once it has one.
+		// This line marks the feature as enabled, which is the thing that
+		// cannot be inferred from the absence of the other -- "enabled but
+		// never connected" and "not enabled" would otherwise look alike.
+		h.logger.Info(logging.DestinationHTTP, "Job watch feed enabled; connecting to the htcondordb mirror")
 		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
 	}()
 }
@@ -2225,7 +2230,7 @@ func (h *Handler) startJobWatchNudge(ctx context.Context) {
 // moved or restarted. The returned stop closes the session as well as
 // ending the stream.
 func (h *Handler) watchJobsTable(ctx context.Context) (<-chan jobwatch.WatchEvent, func(), error) {
-	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	dbc, closer, info, err := h.dbMirror.Client(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2243,6 +2248,17 @@ func (h *Handler) watchJobsTable(ctx context.Context) (<-chan jobwatch.WatchEven
 		return nil, nil, fmt.Errorf("opening the jobs watch: %w", err)
 	}
 
+	// Now that there is a connection, say which mirror it is to. Answering
+	// "which htcondordb is this pod following?" meant cross-referencing
+	// /readyz, or /api/v1/dbmirror/status which is admin-gated, because
+	// this line carried no identifying detail.
+	//
+	// Logged per connection rather than once at startup. The feed
+	// reconnects with backoff and discovery re-runs on each attempt, so a
+	// mirror that has moved or been replaced is a different answer than
+	// the one startup would have recorded.
+	h.logJobWatchFeedConnected(info)
+
 	out := make(chan jobwatch.WatchEvent, 64)
 	go func() {
 		defer close(out)
@@ -2255,6 +2271,21 @@ func (h *Handler) watchJobsTable(ctx context.Context) (<-chan jobwatch.WatchEven
 		}
 	}()
 	return out, func() { stop(); closer() }, nil
+}
+
+// logJobWatchFeedConnected names the mirror the job-watch feed is
+// following, in the fields /readyz uses for the same facts.
+func (h *Handler) logJobWatchFeedConnected(info *dbmirror.Info) {
+	attrs := []any{}
+	if info != nil {
+		if info.Name != "" {
+			attrs = append(attrs, "name", info.Name)
+		}
+		if info.Address != "" {
+			attrs = append(attrs, "address", info.Address)
+		}
+	}
+	h.logger.Info(logging.DestinationHTTP, "Following the htcondordb jobs table for job watches", attrs...)
 }
 
 // startJobWatchEvaluator runs the watch loop for the life of the
