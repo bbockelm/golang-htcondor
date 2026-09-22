@@ -8,38 +8,43 @@
 // Click anywhere on a batch row (except the action buttons) to expand
 // it inline and see the individual jobs in that batch.
 //
-// Server-side projection has to include QDate explicitly: HTCondor's
-// schedd does not backfill it, and the submit code now sets QDate at
-// submit time (see submit.go).
+// Three filters stack, and they narrow different things:
+//   - the status strip and the text box run in the browser, over the
+//     job ads already fetched;
+//   - a ClassAd expression goes to the server as a query constraint,
+//     which is the only one that can reach jobs this page has not
+//     loaded.
+// The summary panel totals whatever survives all three, so it always
+// describes the table underneath it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useInfiniteQuery,
-  useMutation,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
-  displayJobStatus,
-  type ClassAd,
   type DisplayStatus,
-  type DisplayStatusInfo,
   type JobListResponse,
 } from '@/lib/api';
-import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
-import { ConfirmButton } from '@/components/ConfirmButton';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
-
-// HoldReasonCode is part of the projection so we can re-label "Held
-// + spool" as "Uploading Inputs" client-side. See displayJobStatus
-// in lib/api.ts.
-const PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,Iwd';
+import { FilterControls, type FilterMode } from '@/components/FilterControls';
+import { JobStatusStrip } from '@/components/JobStatusStrip';
+import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
+import { BatchTable } from '@/components/BatchTable';
+import {
+  applyBatchFilter,
+  filterAdsByStatus,
+  groupIntoBatches,
+  num,
+  summarizeJobs,
+  BATCH_PROJECTION,
+} from '@/lib/batches';
 
 // How many job ads to pull per request. The queue can be far larger than
 // this -- an access point with 30k queued jobs is ordinary -- so the
@@ -52,7 +57,6 @@ const PAGE_SIZE = 1000;
 // decidedly not for thirty.
 const REFRESH_MS = 15_000;
 const REFRESH_MS_FULL = 60_000;
-
 
 export default function JobsPage() {
   const searchParams = useSearchParams();
@@ -73,8 +77,42 @@ export default function JobsPage() {
   // dashboard's panels drill in: clicking a hold reason lands here
   // showing exactly those jobs. `why` is the human sentence to put on
   // the banner, because a raw ClassAd expression is not one.
-  const constraint = searchParams.get('constraint') ?? undefined;
+  const urlConstraint = searchParams.get('constraint') ?? undefined;
   const why = searchParams.get('why') ?? undefined;
+
+  // Filter mode. Text is the default: it is instant, forgiving, and
+  // covers "where is my training run". The expression mode is the
+  // precise tool and the only one that can narrow the server-side
+  // query, which is what a queue too big to load whole needs.
+  const [mode, setMode] = useState<FilterMode>('text');
+  // Two inputs, not one: switching modes should not throw away what the
+  // user typed in the other, and only the active one is applied.
+  const [filter, setFilter] = useState('');
+  const [exprInput, setExprInput] = useState('');
+  const [appliedExpr, setAppliedExpr] = useState('');
+  const textFilter = mode === 'text' ? filter : '';
+  const exprConstraint = mode === 'expr' ? appliedExpr.trim() : '';
+
+  // A drill-in constraint from the URL and a user expression both
+  // narrow; ANDing them keeps the banner's promise ("showing jobs held
+  // for X") true while the user refines inside it.
+  const constraint =
+    [urlConstraint, exprConstraint]
+      .filter((c): c is string => !!c)
+      .map((c) => `(${c})`)
+      .join(' && ') || undefined;
+
+  // Status chips. An empty set means "every status" — see JobStatusStrip.
+  const [statuses, setStatuses] = useState<Set<DisplayStatus>>(new Set());
+  const toggleStatus = useCallback((key: DisplayStatus) => {
+    setStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  const clearStatuses = useCallback(() => setStatuses(new Set()), []);
 
   // "Load everything" is opt-in per scope: the default keeps a bounded
   // first page so opening /jobs on a 30k-job queue is not a multi-second
@@ -95,7 +133,7 @@ export default function JobsPage() {
     queryFn: ({ pageParam }) =>
       api.jobs.list({
         constraint,
-        projection: PROJECTION,
+        projection: BATCH_PROJECTION,
         // "*" is the server's unlimited sentinel. Only ever sent because
         // the user asked for it after being told the answer was cut off.
         limit: loadAll ? '*' : PAGE_SIZE,
@@ -106,7 +144,19 @@ export default function JobsPage() {
     // query; a live schedd cannot be paged through.
     getNextPageParam: (last) => last.next_page_token ?? undefined,
     refetchInterval: loadAll ? REFRESH_MS_FULL : REFRESH_MS,
+    // A rejected expression is not worth retrying -- it will be rejected
+    // three more times and the user waits out the backoff before seeing
+    // their typo. Everything else keeps the default resilience.
+    retry: exprConstraint ? false : 3,
   });
+
+  // A rejected expression is a typo, not an outage. Reported next to the
+  // input that caused it rather than as "could not load jobs", which
+  // would read as the server being down.
+  const exprError =
+    mode === 'expr' && appliedExpr && error instanceof ApiError
+      ? error.message
+      : null;
 
   // "Load all" for the paginated (htcondordb mirror) path: walk the cursor
   // to exhaustion instead of making the user click "Load more" once per
@@ -137,6 +187,35 @@ export default function JobsPage() {
   const lastPage = pages?.pages[pages.pages.length - 1];
   const data = pages ? { jobs } : undefined;
 
+  // Counts for the strip come from the jobs BEFORE the status filter:
+  // while looking at the running jobs you still want to see that eleven
+  // are held, and the chip is how you get to them.
+  const statusCounts = useMemo(() => summarizeJobs(jobs).counts, [jobs]);
+
+  const statusFiltered = useMemo(
+    () => filterAdsByStatus(jobs, statuses),
+    [jobs, statuses],
+  );
+
+  const batches = useMemo(
+    () => applyBatchFilter(groupIntoBatches(statusFiltered), textFilter),
+    [statusFiltered, textFilter],
+  );
+
+  // The summary totals exactly the jobs the table is showing. The text
+  // filter matches whole batches, so the ads it keeps are the ones whose
+  // cluster survived it.
+  const summary = useMemo(() => {
+    if (!textFilter) return summarizeJobs(statusFiltered);
+    const clusters = new Set(batches.map((b) => b.batchID));
+    return summarizeJobs(
+      statusFiltered.filter((j) => {
+        const c = num(j.ClusterId);
+        return c !== undefined && clusters.has(c);
+      }),
+    );
+  }, [statusFiltered, textFilter, batches]);
+
   // Chat surface gating. We hit /api/v1/chat/info on mount; the
   // server returns enabled=false (with a reason) when the LLM key
   // isn't configured or MCP is off. We additionally require the
@@ -153,11 +232,8 @@ export default function JobsPage() {
   const chatVisible = !!chatInfo?.enabled && (data?.jobs.length ?? 0) > 0;
 
   // Lifted state so the chat's client-side tools can drive the
-  // table view: filter substring, expanded-batch set, and a brief
-  // highlight on a specific job row. The BatchTable consumes
-  // them as props; the ChatPanel consumes them as imperative
-  // hooks.
-  const [filter, setFilter] = useState('');
+  // table view: expanded-batch set and a brief highlight on a
+  // specific job row. (The filter is lifted for the same reason.)
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [highlighted, setHighlighted] = useState<string | null>(null); // "cluster.proc"
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -207,6 +283,10 @@ export default function JobsPage() {
       set_filter: (input) => {
         const q = typeof input.query === 'string' ? input.query : '';
         setFilter(q);
+        // The text box is only applied in text mode, so a set_filter
+        // that landed while the user was writing an expression would
+        // otherwise do nothing visible.
+        setMode('text');
         return { ok: true, applied_query: q };
       },
       expand_batch: (input) => {
@@ -286,19 +366,27 @@ export default function JobsPage() {
 
       {isLoading && <p className="text-gray-400">Loading…</p>}
 
-      {error && (
+      {error && !exprError && (
         <p className="text-red-600 text-sm">
           Could not load jobs: {(error as Error).message}
         </p>
       )}
 
-      {data && data.jobs.length === 0 && (
+      {data && data.jobs.length === 0 && !constraint && (
         <p className="text-gray-500 text-sm">
           No batches in the queue.{' '}
           <Link href="/submit" className="text-brand-700 hover:underline">
             Submit one
           </Link>{' '}
           to get started.
+        </p>
+      )}
+
+      {/* A narrowed query that matched nothing. Distinct from the empty
+          queue above: the jobs may well be there, just not these. */}
+      {data && data.jobs.length === 0 && constraint && (
+        <p className="text-gray-500 text-sm">
+          No jobs in the queue match this query.
         </p>
       )}
 
@@ -316,31 +404,73 @@ export default function JobsPage() {
         />
       )}
 
+      {urlConstraint && (
+        <div className="flex items-baseline gap-3 rounded border border-brand-200 bg-brand-50 px-3 py-2 text-sm">
+          <span className="text-gray-700">
+            Showing {why ?? 'a filtered set of jobs'}
+          </span>
+          {/* Without a way out, a narrowed list looks like a broken
+              jobs page: the counts do not match anything and the
+              jobs someone expected are simply absent. */}
+          <Link href="/jobs" className="ml-auto text-xs text-brand-700 underline">
+            show all jobs
+          </Link>
+        </div>
+      )}
+
+      <FilterControls
+        mode={mode}
+        input={mode === 'text' ? filter : exprInput}
+        onMode={setMode}
+        onInput={mode === 'text' ? setFilter : setExprInput}
+        onApplyExpr={() => setAppliedExpr(exprInput.trim())}
+        textPlaceholder="Filter batches (name, cluster id, user, status…)"
+        exprPlaceholder={'ClassAd, e.g. JobStatus == 5 && RequestCpus > 4'}
+      />
+      {exprError && (
+        <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {exprError}
+        </p>
+      )}
+
       {data && data.jobs.length > 0 && (
         <>
-          {constraint && (
-            <div className="mb-3 flex items-baseline gap-3 rounded border border-brand-200 bg-brand-50 px-3 py-2 text-sm">
-              <span className="text-gray-700">
-                Showing {why ?? 'a filtered set of jobs'}
-              </span>
-              {/* Without a way out, a narrowed list looks like a broken
-                  jobs page: the counts do not match anything and the
-                  jobs someone expected are simply absent. */}
-              <Link href="/jobs" className="ml-auto text-xs text-brand-700 underline">
-                show all jobs
-              </Link>
-            </div>
-          )}
-
-          <FilterBar value={filter} onChange={setFilter} />
-          <BatchTable
-            jobs={data.jobs}
-            filter={filter}
-            expanded={expanded}
-            setExpanded={setExpanded}
-            highlighted={highlighted}
-            onChange={() => refetch()}
+          <JobStatusStrip
+            counts={statusCounts}
+            selected={statuses}
+            onToggle={toggleStatus}
+            onClear={clearStatuses}
+            total={jobs.length}
           />
+
+          <JobsSummaryPanel summary={summary} showOwners={!ownedByMe} />
+
+          {batches.length === 0 ? (
+            <p className="text-sm text-gray-500">
+              No batches match this filter.{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setFilter('');
+                  clearStatuses();
+                }}
+                className="text-brand-700 hover:underline"
+              >
+                Clear it
+              </button>{' '}
+              to see the rest.
+            </p>
+          ) : (
+            <BatchTable
+              batches={batches}
+              resetKey={`${textFilter}\u0000${[...statuses].sort().join(',')}`}
+              showOwner={!ownedByMe}
+              expanded={expanded}
+              setExpanded={setExpanded}
+              highlighted={highlighted}
+              onChange={() => refetch()}
+            />
+          )}
         </>
       )}
 
@@ -485,747 +615,4 @@ function TruncationNotice({
       )}
     </div>
   );
-}
-
-// FilterBar is the small substring-search input above the batches.
-// Bound to the lifted `filter` state on JobsPage so the chat's
-// `set_filter` tool can drive it programmatically.
-function FilterBar({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="text-gray-500">Filter:</span>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="batch name, cluster id, status…"
-        className="min-w-0 flex-1 max-w-sm rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
-      />
-      {value && (
-        <button
-          type="button"
-          onClick={() => onChange('')}
-          className="text-gray-500 hover:text-gray-800"
-        >
-          clear
-        </button>
-      )}
-    </div>
-  );
-}
-
-// Batch is what we render: one batch's worth of jobs aggregated.
-interface Batch {
-  batchID: number; // HTCondor's ClusterId — internal name only
-  // Display name: BatchName if set, else batch id, else "?".
-  name: string;
-  // Representative command (the first job's Cmd we found). All jobs
-  // in a batch nearly always share the same Cmd; we don't bother
-  // showing multiple even when they differ.
-  cmd?: string;
-  args?: string;
-  // QDate of the oldest job (= when the batch was submitted).
-  submittedUnix?: number;
-  // Per-status counts — keyed by DisplayStatus so spool-held shows
-  // up as "Uploading Inputs" instead of being lumped under "Held".
-  statusCounts: Record<DisplayStatus, number>;
-  jobCount: number;
-  // The individual jobs, kept around so the row can expand inline.
-  jobs: BatchJob[];
-}
-
-interface BatchJob {
-  // Display id used in URLs ("3.0").
-  id: string;
-  jobIdx: number; // ProcId
-  display: DisplayStatusInfo;
-  cmd?: string;
-  args?: string;
-  submittedUnix?: number;
-}
-
-function groupIntoBatches(jobs: ClassAd[]): Batch[] {
-  const map = new Map<number, Batch>();
-  for (const j of jobs) {
-    const cluster = num(j.ClusterId);
-    const proc = num(j.ProcId);
-    if (cluster === undefined) continue;
-
-    let b = map.get(cluster);
-    if (!b) {
-      b = {
-        batchID: cluster,
-        name: str(j.JobBatchName) ?? String(cluster),
-        cmd: str(j.Cmd),
-        args: str(j.Args),
-        submittedUnix: num(j.QDate),
-        statusCounts: {} as Record<DisplayStatus, number>,
-        jobCount: 0,
-        jobs: [],
-      };
-      map.set(cluster, b);
-    }
-
-    b.jobCount++;
-    const display = displayJobStatus({
-      status: j.JobStatus as number | string | null | undefined,
-      holdReasonCode: j.HoldReasonCode as number | string | null | undefined,
-    });
-    b.statusCounts[display.key] = (b.statusCounts[display.key] ?? 0) + 1;
-    const q = num(j.QDate);
-    if (q !== undefined && (b.submittedUnix === undefined || q < b.submittedUnix)) {
-      b.submittedUnix = q;
-    }
-    if (!b.cmd) b.cmd = str(j.Cmd);
-    if (!b.args) b.args = str(j.Args);
-    const bn = str(j.JobBatchName);
-    if (bn && b.name === String(b.batchID)) {
-      b.name = bn;
-    }
-
-    b.jobs.push({
-      id: `${cluster}.${proc ?? 0}`,
-      jobIdx: proc ?? 0,
-      display,
-      cmd: str(j.Cmd),
-      args: str(j.Args),
-      submittedUnix: q,
-    });
-  }
-
-  // Sort jobs within each batch by job index for stable display.
-  for (const b of map.values()) {
-    b.jobs.sort((a, b) => a.jobIdx - b.jobIdx);
-  }
-
-  // Newest batch first.
-  return Array.from(map.values()).sort((a, b) => b.batchID - a.batchID);
-}
-
-// applyBatchFilter does the user-facing substring filter. Both the
-// FilterBar input and the chat's `set_filter` tool drive this. We
-// match against a flat string built per batch — every field a user
-// might reference in the input box: name, cluster id, owner,
-// command line, and the display-status names of the jobs inside.
-//
-// Empty query returns the input unchanged. Multi-token queries
-// useInfiniteList paginates a (possibly polling-refreshed) array via
-// IntersectionObserver — when the returned `sentinelRef` element
-// scrolls into view, the visible window grows by `pageSize`. Used by
-// BatchTable and JobsSubTable to cap initial render at ~20-25 rows
-// without giving up the "scroll to see more" affordance the user
-// expects.
-//
-// Reset semantics: when `resetKey` changes (e.g., the user types a
-// new filter, or expands a different batch), the visible window
-// snaps back to `pageSize`. Polling refreshes that grow `items`
-// in place leave the visible count alone — the user keeps seeing
-// the rows they were reading.
-//
-// `Show all` is exposed for the "show remaining N" link below the
-// table, since some users skip the scroll affordance.
-function useInfiniteList<T>(
-  items: T[],
-  pageSize: number,
-  resetKey?: unknown,
-): {
-  visible: T[];
-  sentinelRef: (el: Element | null) => void;
-  showAll: () => void;
-  hasMore: boolean;
-  total: number;
-  shown: number;
-} {
-  const [count, setCount] = useState(pageSize);
-
-  // Snap back to one page when the caller signals a fresh context.
-  // We deliberately do NOT key on `items` — a poll-driven array
-  // identity change must not scroll the user back to the top mid-read.
-  //
-  // Compared during render rather than assigned from an effect, so the
-  // list never paints one frame at the old length before snapping back.
-  const resetSignal = `${pageSize}\u0000${String(resetKey)}`;
-  const [prevResetSignal, setPrevResetSignal] = useState(resetSignal);
-  if (prevResetSignal !== resetSignal) {
-    setPrevResetSignal(resetSignal);
-    setCount(pageSize);
-  }
-
-  // Clamp when the source list shrinks below the visible window
-  // (e.g., the filter narrowed) — without this, hasMore would
-  // briefly read false and the sentinel observer would stay
-  // disconnected even after the user clears the filter.
-  const total = items.length;
-  const shown = Math.min(count, total);
-  const hasMore = total > shown;
-
-  // Callback ref so we can connect/disconnect the IntersectionObserver
-  // when the sentinel mounts/unmounts (and re-mounts on rerender).
-  // Using a closure-captured Observer keeps the wiring local; no
-  // module-level state.
-  const sentinelRef = useCallback(
-    (el: Element | null) => {
-      if (!el || !hasMore) return;
-      const obs = new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries) {
-            if (entry.isIntersecting) {
-              setCount((c) => c + pageSize);
-            }
-          }
-        },
-        // rootMargin pre-fetches the next page when the sentinel is
-        // ~200px below the viewport — gives a continuous-scroll
-        // feel rather than a noticeable pause when the user hits
-        // the bottom.
-        { rootMargin: '200px' },
-      );
-      obs.observe(el);
-      // Disconnect on unmount via the ref-callback's cleanup form.
-      return () => obs.disconnect();
-    },
-    [hasMore, pageSize],
-  );
-
-  const showAll = useCallback(() => setCount(total), [total]);
-
-  // Slice once per render and return — slicing is cheap relative to
-  // the rendering cost we're avoiding.
-  const visible = items.slice(0, shown);
-
-  return { visible, sentinelRef, showAll, hasMore, total, shown };
-}
-
-// (whitespace-separated) require ALL tokens to match SOMEWHERE
-// in the haystack — feels natural for "held training-run" type
-// inputs.
-function applyBatchFilter(batches: Batch[], query: string): Batch[] {
-  const q = query.trim().toLowerCase();
-  if (q === '') return batches;
-  const tokens = q.split(/\s+/);
-  return batches.filter((b) => {
-    const haystack = [
-      b.name,
-      String(b.batchID),
-      b.cmd ?? '',
-      b.args ?? '',
-      // The status names the user actually reads in the row, e.g.
-      // "running", "held", "uploading inputs". Lower-cased so the
-      // substring compare against the lower-cased query is direct.
-      Object.entries(b.statusCounts)
-        .filter(([, n]) => n > 0)
-        .map(([k]) => k)
-        .join(' '),
-    ]
-      .join(' ')
-      .toLowerCase();
-    return tokens.every((t) => haystack.includes(t));
-  });
-}
-
-function BatchTable({
-  jobs,
-  filter,
-  expanded,
-  setExpanded,
-  highlighted,
-  onChange,
-}: {
-  jobs: ClassAd[];
-  filter: string;
-  expanded: Set<number>;
-  setExpanded: React.Dispatch<React.SetStateAction<Set<number>>>;
-  highlighted: string | null; // "cluster.proc" of the chat-highlighted job
-  onChange: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const allBatches = groupIntoBatches(jobs);
-  const batches = applyBatchFilter(allBatches, filter);
-  // Cap the initial render at 20 batches; the sentinel below the
-  // table reveals the next 20 each time it scrolls into view. The
-  // filter string drives the reset — typing a new query brings the
-  // user back to the first page of matches instead of leaving them
-  // halfway down a long list of mismatches.
-  const {
-    visible: visibleBatches,
-    sentinelRef: batchSentinelRef,
-    showAll: showAllBatches,
-    hasMore: hasMoreBatches,
-    total: totalBatches,
-    shown: shownBatches,
-  } = useInfiniteList(batches, 20, filter);
-
-  const toggle = (id: number) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const removeBatchMut = useMutation({
-    mutationFn: (batchID: number) =>
-      api.jobs.removeByConstraint(`ClusterId == ${batchID}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      onChange();
-    },
-  });
-
-  const removeJobMut = useMutation({
-    mutationFn: (jobID: string) => api.jobs.remove(jobID),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      onChange();
-    },
-  });
-
-  const releaseJobMut = useMutation({
-    mutationFn: (jobID: string) => api.jobs.release(jobID),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      onChange();
-    },
-  });
-
-  const removeError =
-    removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
-
-  return (
-    <div className="space-y-2">
-      {removeError && (
-        <div className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {/* Failure message is shared between Remove and Release —
-              both kinds of mutation surface here, label with whichever
-              actually failed so the user can tell what happened. */}
-          {releaseJobMut.error ? 'Release' : 'Remove'} failed:{' '}
-          {removeError instanceof ApiError
-            ? removeError.message
-            : String(removeError)}
-        </div>
-      )}
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
-            <tr>
-              <th className="px-3 py-2 w-6"></th>
-              <th className="px-3 py-2">Batch</th>
-              <th className="px-3 py-2">Jobs</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Submitted</th>
-              <th className="px-3 py-2">Command</th>
-              <th className="px-3 py-2 w-1 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {visibleBatches.map((b) => (
-              <BatchRow
-                key={b.batchID}
-                batch={b}
-                expanded={expanded.has(b.batchID)}
-                highlighted={highlighted}
-                onToggle={() => toggle(b.batchID)}
-                onRemoveBatch={() => removeBatchMut.mutate(b.batchID)}
-                onRemoveJob={(jobID) => removeJobMut.mutate(jobID)}
-                onReleaseJob={(jobID) => releaseJobMut.mutate(jobID)}
-                pendingBatch={
-                  removeBatchMut.isPending && removeBatchMut.variables === b.batchID
-                }
-                pendingJob={removeJobMut.variables}
-                pendingJobActive={removeJobMut.isPending}
-                pendingRelease={releaseJobMut.variables}
-                pendingReleaseActive={releaseJobMut.isPending}
-              />
-            ))}
-            {/* Sentinel + "showing N of M" footer. The sentinel <tr>
-                triggers IntersectionObserver to grow the visible
-                window; the "show all" link lets users skip the
-                scroll. Rendered as a single full-width row so the
-                table layout doesn't shift between paginated/full
-                states. */}
-            {totalBatches > 0 && (
-              <tr ref={batchSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
-                <td colSpan={7} className="px-3 py-2 text-xs text-gray-500">
-                  Showing {shownBatches.toLocaleString()} of{' '}
-                  {totalBatches.toLocaleString()} batches
-                  {hasMoreBatches && (
-                    <>
-                      {' '}— scroll to load more, or{' '}
-                      <button
-                        type="button"
-                        onClick={showAllBatches}
-                        className="text-brand-700 hover:underline"
-                      >
-                        show all
-                      </button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function BatchRow({
-  batch,
-  expanded,
-  highlighted,
-  onToggle,
-  onRemoveBatch,
-  onRemoveJob,
-  onReleaseJob,
-  pendingBatch,
-  pendingJob,
-  pendingJobActive,
-  pendingRelease,
-  pendingReleaseActive,
-}: {
-  batch: Batch;
-  expanded: boolean;
-  highlighted: string | null;
-  onToggle: () => void;
-  onRemoveBatch: () => void;
-  onRemoveJob: (jobID: string) => void;
-  onReleaseJob: (jobID: string) => void;
-  pendingBatch: boolean;
-  pendingJob: string | undefined;
-  pendingJobActive: boolean;
-  pendingRelease: string | undefined;
-  pendingReleaseActive: boolean;
-}) {
-  return (
-    <>
-      <tr
-        className="hover:bg-gray-50 cursor-pointer"
-        onClick={onToggle}
-        aria-expanded={expanded}
-      >
-        <td className="px-3 py-2 text-gray-400 text-center">
-          <DisclosureCaret expanded={expanded} />
-        </td>
-        <td className="px-3 py-2 font-mono text-xs">
-          <span className="text-gray-900">{batch.name}</span>
-          {batch.name !== String(batch.batchID) && (
-            <span className="ml-2 text-gray-400">#{batch.batchID}</span>
-          )}
-        </td>
-        <td className="px-3 py-2 text-gray-700 tabular-nums">
-          {batch.jobCount}
-        </td>
-        <td className="px-3 py-2">
-          <StatusBreakdown counts={batch.statusCounts} />
-        </td>
-        <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
-          {batch.submittedUnix
-            ? new Date(batch.submittedUnix * 1000).toLocaleString()
-            : '—'}
-        </td>
-        <td className="px-3 py-2 text-gray-700 max-w-md truncate">
-          {batch.cmd ? (
-            <span className="font-mono text-xs">
-              {batch.cmd}
-              {batch.args ? ' ' + batch.args : ''}
-            </span>
-          ) : (
-            '—'
-          )}
-        </td>
-        <td
-          className="px-3 py-2 whitespace-nowrap text-right"
-          // Stop the row's click handler from firing when the user
-          // interacts with the action buttons.
-          onClick={(e) => e.stopPropagation()}
-        >
-          <ConfirmButton
-            compact
-            onConfirm={onRemoveBatch}
-            pending={pendingBatch}
-            title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
-          />
-        </td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td className="px-3 py-2 bg-gray-50" />
-          <td colSpan={6} className="bg-gray-50 p-0">
-            <JobsSubTable
-              jobs={batch.jobs}
-              highlighted={highlighted}
-              onRemoveJob={onRemoveJob}
-              onReleaseJob={onReleaseJob}
-              pendingJob={pendingJob}
-              pendingJobActive={pendingJobActive}
-              pendingRelease={pendingRelease}
-              pendingReleaseActive={pendingReleaseActive}
-            />
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-function JobsSubTable({
-  jobs,
-  highlighted,
-  onRemoveJob,
-  onReleaseJob,
-  pendingJob,
-  pendingJobActive,
-  pendingRelease,
-  pendingReleaseActive,
-}: {
-  jobs: BatchJob[];
-  highlighted: string | null;
-  onRemoveJob: (id: string) => void;
-  onReleaseJob: (id: string) => void;
-  pendingJob: string | undefined;
-  pendingJobActive: boolean;
-  pendingRelease: string | undefined;
-  pendingReleaseActive: boolean;
-}) {
-  const router = useRouter();
-  // Cap each expanded batch at 25 visible jobs initially; the
-  // sentinel row at the bottom reveals 25 more on each scroll. This
-  // sub-table mounts/unmounts as the user expands/collapses batches,
-  // so a separate resetKey isn't needed — fresh mount = fresh count.
-  const {
-    visible: visibleJobs,
-    sentinelRef: jobSentinelRef,
-    showAll: showAllJobs,
-    hasMore: hasMoreJobs,
-    total: totalJobs,
-    shown: shownJobs,
-  } = useInfiniteList(jobs, 25);
-  return (
-    <div className="border-t border-gray-200">
-      <table className="min-w-full text-xs">
-        <thead className="bg-gray-100 text-left text-[10px] uppercase tracking-wide text-gray-500">
-          <tr>
-            <th className="px-3 py-1.5">Job</th>
-            <th className="px-3 py-1.5">Status</th>
-            <th className="px-3 py-1.5">Submitted</th>
-            <th className="px-3 py-1.5">Command</th>
-            <th className="px-3 py-1.5 w-1 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200">
-          {visibleJobs.map((j) => (
-            <tr
-              key={j.id}
-              // Clicking anywhere on the row that isn't already an
-              // interactive element (the job-id link, the action
-              // buttons, the open-icon link) navigates to the detail
-              // page. The Actions <td> stops propagation; the job-id
-              // <td> doesn't need to because the inner <Link> does
-              // its own navigation and Next's router.push to the
-              // same href is a no-op.
-              onClick={() => router.push(`/jobs/${j.id}`)}
-              className={
-                'cursor-pointer ' +
-                (j.id === highlighted
-                  ? // animate-pulse-twice would be cute but we don't
-                    // have a custom keyframe; a yellow flash via the
-                    // standard pulse class for ~4 seconds (controlled
-                    // by setHighlighted(null) on a timer in the
-                    // parent) reads as "the assistant is pointing
-                    // here right now".
-                    'bg-yellow-100 animate-pulse'
-                  : 'hover:bg-white')
-              }>
-              <td className="px-3 py-1.5 font-mono">
-                <Link
-                  href={`/jobs/${j.id}`}
-                  className="text-brand-700 hover:underline"
-                >
-                  {j.id}
-                </Link>
-              </td>
-              <td className="px-3 py-1.5">
-                <JobStatusPill display={j.display} />
-              </td>
-              <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
-                {j.submittedUnix
-                  ? new Date(j.submittedUnix * 1000).toLocaleString()
-                  : '—'}
-              </td>
-              <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
-                {j.cmd ? (
-                  <span className="font-mono">
-                    {j.cmd}
-                    {j.args ? ' ' + j.args : ''}
-                  </span>
-                ) : (
-                  '—'
-                )}
-              </td>
-              <td
-                className="px-3 py-1.5 text-right whitespace-nowrap"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="inline-flex items-center gap-1.5">
-                  {j.display.key === 'held' && (
-                    <button
-                      type="button"
-                      onClick={() => onReleaseJob(j.id)}
-                      disabled={
-                        pendingReleaseActive && pendingRelease === j.id
-                      }
-                      className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
-                      title={`Release held job ${j.id}`}
-                    >
-                      {pendingReleaseActive && pendingRelease === j.id
-                        ? '…'
-                        : 'Release'}
-                    </button>
-                  )}
-                  <ConfirmButton
-                    compact
-                    onConfirm={() => onRemoveJob(j.id)}
-                    pending={pendingJobActive && pendingJob === j.id}
-                    title={`Remove job ${j.id}`}
-                  />
-                </div>
-              </td>
-            </tr>
-          ))}
-          {/* Same sentinel + show-all pattern as the batch table.
-              Lives inside the sub-table's <tbody> so it scrolls
-              with the parent page (no inner scroll container) and
-              the IntersectionObserver fires off the natural
-              window scroll. */}
-          {totalJobs > 0 && (
-            <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
-              <td colSpan={5} className="px-3 py-1.5 text-[11px] text-gray-500">
-                Showing {shownJobs.toLocaleString()} of {totalJobs.toLocaleString()} jobs
-                {hasMoreJobs && (
-                  <>
-                    {' '}— scroll to load more, or{' '}
-                    <button
-                      type="button"
-                      onClick={showAllJobs}
-                      className="text-brand-700 hover:underline"
-                    >
-                      show all
-                    </button>
-                  </>
-                )}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// DisclosureCaret rotates 90° when the row is expanded.
-function DisclosureCaret({ expanded }: { expanded: boolean }) {
-  return (
-    <span
-      className={`inline-block transition-transform ${expanded ? 'rotate-90' : ''}`}
-      aria-hidden
-    >
-      ▶
-    </span>
-  );
-}
-
-// Stable order so the breakdown reads consistently between renders.
-const DISPLAY_STATUS_ORDER: DisplayStatus[] = [
-  'running',
-  'idle',
-  'uploading',
-  'transferring',
-  'held',
-  'suspended',
-  'completed',
-  'removed',
-  'unknown',
-];
-
-const DISPLAY_STATUS_LABEL: Record<DisplayStatus, string> = {
-  idle: 'Idle',
-  running: 'Running',
-  removed: 'Removed',
-  completed: 'Completed',
-  held: 'Held',
-  transferring: 'Transferring Output',
-  suspended: 'Suspended',
-  uploading: 'Uploading Inputs',
-  unknown: 'Unknown',
-};
-
-// StatusBreakdown summarizes "5 Running, 2 Uploading Inputs" in pill
-// form. Counts come from groupIntoBatches keyed on DisplayStatus.
-function StatusBreakdown({
-  counts,
-}: {
-  counts: Record<DisplayStatus, number>;
-}) {
-  const entries = DISPLAY_STATUS_ORDER.filter((k) => (counts[k] ?? 0) > 0);
-  if (entries.length === 0) return <span className="text-gray-400">—</span>;
-  return (
-    <div className="flex flex-wrap gap-1">
-      {entries.map((key) => (
-        <StatusPill key={key} statusKey={key} count={counts[key]!} />
-      ))}
-    </div>
-  );
-}
-
-function StatusPill({
-  statusKey,
-  count,
-}: {
-  statusKey: DisplayStatus;
-  count: number;
-}) {
-  const label = DISPLAY_STATUS_LABEL[statusKey];
-  return (
-    <span
-      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${statusPillCls(statusKey)}`}
-    >
-      {count > 1 ? `${count} ` : ''}
-      {label}
-    </span>
-  );
-}
-
-// JobStatusPill renders the per-job badge inside the expanded
-// sub-table. Uses the per-job DisplayStatusInfo (which already
-// carries the "Uploading Inputs" pseudo-label).
-function JobStatusPill({ display }: { display: DisplayStatusInfo }) {
-  return (
-    <span
-      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusPillCls(display.key)}`}
-    >
-      {display.label}
-    </span>
-  );
-}
-
-function num(v: unknown): number | undefined {
-  if (typeof v === 'number') return v;
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (!Number.isNaN(n)) return n;
-  }
-  return undefined;
-}
-
-function str(v: unknown): string | undefined {
-  if (typeof v === 'string' && v !== '') return v;
-  if (v === undefined || v === null) return undefined;
-  if (typeof v === 'string') return undefined;
-  return String(v);
 }

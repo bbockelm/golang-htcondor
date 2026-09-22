@@ -11,6 +11,7 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
+import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import {
   parseSlot,
   groupByMachine,
@@ -25,8 +26,6 @@ import {
   type NodeGroup,
   type PoolSummary,
 } from '@/lib/pool';
-
-type FilterMode = 'text' | 'expr';
 
 export default function PoolPage() {
   const router = useRouter();
@@ -118,6 +117,8 @@ export default function PoolPage() {
             }}
             onInput={setInput}
             onApplyExpr={() => setAppliedExpr(input.trim())}
+            textPlaceholder="Filter slots (host, state, owner, arch…)"
+            exprPlaceholder={'ClassAd, e.g. GPUs > 0 && State == "Unclaimed"'}
           />
           {exprError && (
             <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -161,73 +162,6 @@ export default function PoolPage() {
             </>
           )}
         </>
-      )}
-    </div>
-  );
-}
-
-function FilterControls({
-  mode,
-  input,
-  onMode,
-  onInput,
-  onApplyExpr,
-}: {
-  mode: FilterMode;
-  input: string;
-  onMode: (m: FilterMode) => void;
-  onInput: (v: string) => void;
-  onApplyExpr: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="inline-flex overflow-hidden rounded-sm border border-gray-300">
-        {(['text', 'expr'] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => onMode(m)}
-            className={`px-3 py-1.5 text-sm ${
-              mode === m
-                ? 'bg-brand-600 text-white'
-                : 'bg-white text-gray-600 hover:bg-gray-50'
-            }`}
-          >
-            {m === 'text' ? 'Text' : 'ClassAd expression'}
-          </button>
-        ))}
-      </div>
-      {mode === 'text' ? (
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => onInput(e.target.value)}
-          placeholder="Filter slots (host, state, owner, arch…)"
-          className="min-w-[20rem] flex-1 rounded-sm border border-gray-300 px-3 py-1.5 text-sm"
-        />
-      ) : (
-        <form
-          className="flex flex-1 items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onApplyExpr();
-          }}
-        >
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => onInput(e.target.value)}
-            placeholder={'ClassAd, e.g. GPUs > 0 && State == "Unclaimed"'}
-            spellCheck={false}
-            className="min-w-[20rem] flex-1 rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
-          />
-          <button
-            type="submit"
-            className="rounded-sm bg-brand-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Apply
-          </button>
-        </form>
       )}
     </div>
   );
