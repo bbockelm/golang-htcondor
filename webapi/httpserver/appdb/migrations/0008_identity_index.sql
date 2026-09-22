@@ -27,6 +27,19 @@
 -- Contents are account names and GECOS fields -- the same thing getent
 -- passwd shows any user on the access point -- so they are stored as
 -- they are rather than through the envelope sealer.
+--
+-- The stored snapshot carries the index's accounts one per row (its
+-- "entries"), because the index is a union across rebuilds rather than
+-- the output of the last one: SSSD's enumeration is unstable enough that
+-- one short answer must not be read as a mass deletion. The older
+-- by-GECOS form is still written alongside, so a rollback reads a worse
+-- index rather than an unreadable row.
+--
+-- What is NOT stored is how many enumerations in a row have missed an
+-- account. A restored entry starts over with its full budget on purpose:
+-- the enumerations immediately after a restart are the least complete
+-- ones there are, and that is the worst possible moment to arrive
+-- halfway to forgetting somebody.
 CREATE TABLE identity_index (
     -- One row. The index is process-wide, not per-user.
     id INTEGER PRIMARY KEY CHECK (id = 1),
