@@ -138,8 +138,8 @@ func TestTheConfiguredACLOracleIsFound(t *testing.T) {
 	if h.scheddACLOracle() == nil {
 		t.Fatal("the configured schedd-acl oracle was not found")
 	}
-	real := &ScheddACLOracle{}
-	if real.Name() != OracleScheddACL {
-		t.Errorf("the real oracle calls itself %q; the lookup keys on %q", real.Name(), OracleScheddACL)
+	production := &ScheddACLOracle{}
+	if production.Name() != OracleScheddACL {
+		t.Errorf("the real oracle calls itself %q; the lookup keys on %q", production.Name(), OracleScheddACL)
 	}
 }
