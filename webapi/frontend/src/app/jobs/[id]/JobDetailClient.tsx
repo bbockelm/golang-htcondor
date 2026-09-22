@@ -68,6 +68,19 @@ export default function JobDetailClient(_props: {
     },
   });
 
+  // Hold is the counterpart to Release, and offered on the same terms
+  // Remove is: anything not already finished. A held job is excluded
+  // because holding it again does nothing, and the button beside it
+  // already says Release.
+  const holdMut = useMutation({
+    mutationFn: () => api.jobs.hold(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
+    },
+  });
+  const canHold = data !== undefined && !isTerminal && !isHeld;
+
   // Split "<batch>.<job>" — id is e.g. "3.0" where 3 is the batch
   // (cluster) id and 0 is the job (proc) index inside it.
   const [batchID, jobIdx] = id.split('.');
@@ -96,6 +109,17 @@ export default function JobDetailClient(_props: {
               {releaseMut.isPending ? 'Releasing…' : 'Release'}
             </button>
           )}
+          {canHold && (
+            <button
+              type="button"
+              onClick={() => holdMut.mutate()}
+              disabled={holdMut.isPending}
+              className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              title={`Hold job ${id}`}
+            >
+              {holdMut.isPending ? 'Holding…' : 'Hold'}
+            </button>
+          )}
           {!isTerminal && data && (
             <ConfirmButton
               onConfirm={() => removeMut.mutate()}
@@ -105,6 +129,15 @@ export default function JobDetailClient(_props: {
           )}
         </div>
       </div>
+
+      {holdMut.error && (
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          Hold failed:{' '}
+          {holdMut.error instanceof ApiError
+            ? holdMut.error.message
+            : String(holdMut.error)}
+        </div>
+      )}
 
       {removeMut.error && (
         <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -233,7 +266,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         )}
       </div>
 
-      <OutputFilesPanel jobID={jobID} status={status} />
+      <OutputFilesPanel jobID={jobID} status={status} job={job} />
 
       <LiveTailPanel jobID={jobID} status={status} />
 
@@ -713,17 +746,32 @@ function TerminalPanel({
 // OutputFilesPanel exposes the job's transferred-back files as a tar
 // download or a short-lived shareable link.
 //
-// Output files only exist once the job has finished — the starter
-// transfers them to the schedd's spool when JobStatus moves to 4
-// (Completed) or 3 (Removed, after a rough exit). For any earlier
-// state we keep the panel visible but greyed out so users don't get
-// surprised by an empty download or a 4xx from the API.
+// Output files land in the schedd's spool when the starter transfers
+// them back, which happens when the job finishes -- JobStatus 4
+// (Completed) or 3 (Removed, after a rough exit).
+//
+// Finishing is not the only way to get there. A job that ran and was
+// then put back in the queue -- held mid-run, evicted, released to idle
+// for another attempt -- can have left a sandbox behind from the
+// attempt that ended, and gating on the terminal states alone greys out
+// the download for exactly the case where somebody is trying to find
+// out what the failed attempt produced.
+//
+// So the gate is "has this job ever run", which the ad answers durably:
+// the schedd writes JobStartDate into the queue when it spawns the
+// shadow. What that cannot promise is that files are actually there --
+// nothing transfers back from an attempt still running, and a job held
+// before it started has nothing -- so the hint says "may" and the
+// download is allowed to come back empty rather than being refused
+// here on a guess.
 function OutputFilesPanel({
   jobID,
   status,
+  job,
 }: {
   jobID: string;
   status: number | undefined;
+  job?: ClassAd;
 }) {
   const [share, setShare] = useState<{
     url: string;
@@ -737,18 +785,22 @@ function OutputFilesPanel({
       setShare({ url: resp.url, expires: new Date(resp.expires_at) }),
   });
 
-  // 3 = Removed, 4 = Completed. Both terminal states; both have (or
-  // had) a chance to leave files behind. Anything else → disabled.
-  const ready = status === 3 || status === 4;
-  const hint = ready
+  // 3 = Removed, 4 = Completed. Both terminal; both have had their
+  // chance to leave files behind.
+  const finished = status === 3 || status === 4;
+  const ran = job ? everRan(job) : false;
+  const ready = finished || ran;
+  const hint = finished
     ? null
-    : status === 1
-      ? 'Job is idle; output files appear once it completes.'
-      : status === 2
-        ? 'Job is running; output files appear once it completes.'
-        : status === 5
-          ? 'Job is held; output files appear once it completes.'
-          : 'Output files appear once the job completes.';
+    : ran
+      ? 'From an earlier run attempt; may be empty or partial.'
+      : status === 1
+        ? 'Job is idle and has not run yet; output files appear once it runs.'
+        : status === 2
+          ? 'Job is running; output files appear once it completes.'
+          : status === 5
+            ? 'Job is held and has not run yet; output files appear once it runs.'
+            : 'Output files appear once the job runs.';
 
   const handleCopy = () => {
     if (!share) return;
@@ -1659,26 +1711,52 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   // Each row pulls a "requested" attribute and an "actual usage"
   // attribute. Most usage attributes are present only after the job
   // has run at least once; treat absence as "—".
-  const rows: { label: string; requested: string; used: string }[] = [
+  // Each row carries the formatted strings AND the two raw numbers, so
+  // the bar can be drawn from the same values the text reports rather
+  // than from a second reading of the ad.
+  const rows: {
+    label: string;
+    requested: string;
+    used: string;
+    // Raw numbers in one unit, for the proportion. Undefined where the
+    // ad does not say, which draws no bar.
+    reqN?: number;
+    usedN?: number;
+  }[] = [
     {
       label: 'CPUs',
       requested: fmtRequested(job.RequestCpus),
       used: fmtUsage(job.CpusUsage ?? job.CumulativeRemoteSysCpu),
+      reqN: num(job.RequestCpus),
+      usedN: num(job.CpusUsage),
     },
     {
       label: 'Memory',
       requested: fmtMiB(job.RequestMemory),
       used: fmtMemoryUsed(job),
+      reqN: num(job.RequestMemory),
+      usedN: memoryUsedMiB(job),
     },
     {
       label: 'Disk',
       requested: fmtKiBAsMiB(job.RequestDisk),
       used: fmtKiBAsMiB(job.DiskUsage ?? job.DiskUsage_RAW),
+      // Both sides are KiB on the wire, so the ratio needs no
+      // conversion -- only the display does.
+      reqN: num(job.RequestDisk),
+      usedN: num(job.DiskUsage ?? job.DiskUsage_RAW),
     },
     {
+      // HTCondor capitalises this acronym: the attributes are
+      // RequestGPUs and GPUsUsage, not RequestGpus/GpusUsage. ClassAd
+      // attribute names are case-insensitive, a JSON object's keys are
+      // not, so the misspelled lookups were always undefined and the
+      // row was dropped from every job -- including the GPU ones.
       label: 'GPUs',
-      requested: fmtRequested(job.RequestGpus),
-      used: fmtUsage(job.GpusUsage),
+      requested: fmtRequested(job.RequestGPUs),
+      used: fmtUsage(job.GPUsUsage),
+      reqN: num(job.RequestGPUs),
+      usedN: num(job.GPUsUsage),
     },
   ];
 
@@ -1699,6 +1777,7 @@ export function ResourceTable({ job }: { job: ClassAd }) {
               <th className="px-3 py-1.5 w-32">Resource</th>
               <th className="px-3 py-1.5">Requested</th>
               <th className="px-3 py-1.5">Used</th>
+              <th className="px-3 py-1.5 w-40">Used of requested</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -1707,11 +1786,77 @@ export function ResourceTable({ job }: { job: ClassAd }) {
                 <td className="px-3 py-1.5 font-medium text-gray-700">{r.label}</td>
                 <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.requested}</td>
                 <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.used}</td>
+                <td className="px-3 py-1.5">
+                  <UsageBar requested={r.reqN} used={r.usedN} />
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// memoryUsedMiB is fmtMemoryUsed's number, in the same unit as
+// RequestMemory. ResidentSetSize is KiB on the wire where MemoryUsage is
+// already MiB, and dividing the wrong one by 1024 is how a job using
+// half its request comes to look like it used none of it.
+function memoryUsedMiB(job: ClassAd): number | undefined {
+  const direct = num(job.MemoryUsage);
+  if (direct !== undefined) return direct;
+  const kib = num(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
+  return kib === undefined ? undefined : kib / 1024;
+}
+
+// UsageBar is the "did I ask for the right amount" glance.
+//
+// A number beside a number makes the reader do the division; the point
+// of this column is that they should not have to. The bar is filled to
+// used/requested and coloured by band: comfortable, most of it, and
+// over -- the last being the interesting one, because a job over its
+// request is the one about to be held for going over it.
+//
+// Drawn only when both numbers are real. A missing usage attribute is
+// the normal state of a job that has not run, and inventing a zero-width
+// bar for it would read as "used nothing" rather than "nothing measured
+// yet".
+export function UsageBar({
+  requested,
+  used,
+}: {
+  requested?: number;
+  used?: number;
+}) {
+  if (requested === undefined || used === undefined || requested <= 0) {
+    return <span className="text-xs text-gray-400">—</span>;
+  }
+  const ratio = used / requested;
+  const pct = ratio * 100;
+  // The bar is clamped so an over-request stays inside the column; the
+  // percentage beside it is not, because "112%" is the fact worth
+  // reading and a full bar alone would hide it.
+  const width = Math.max(0, Math.min(ratio, 1)) * 100;
+  const tone =
+    ratio > 1
+      ? { bar: 'bg-red-500', text: 'text-red-700' }
+      : ratio >= 0.9
+        ? { bar: 'bg-amber-500', text: 'text-amber-700' }
+        : { bar: 'bg-green-500', text: 'text-green-700' };
+  const label = `${pct.toLocaleString(undefined, {
+    maximumFractionDigits: pct < 10 ? 1 : 0,
+  })}%`;
+
+  return (
+    <div className="flex items-center gap-2" title={`${label} of requested`}>
+      <div
+        className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-gray-200"
+        role="img"
+        aria-label={`${label} of requested`}
+      >
+        <div className={`h-full ${tone.bar}`} style={{ width: `${width}%` }} />
+      </div>
+      <span className={`text-xs tabular-nums ${tone.text}`}>{label}</span>
     </div>
   );
 }
@@ -1798,6 +1943,21 @@ export function RawClassAd({ job }: { job: ClassAd }) {
 }
 
 // --- Tiny formatting helpers -----------------------------------------
+
+// everRan reports whether the job has executed at least once.
+//
+// JobStartDate is the load-bearing one: the schedd writes it into the
+// job queue when it spawns the shadow, so it is durable and survives the
+// job going back to idle or held. NumJobStarts is accepted too but not
+// relied on alone -- the shadow updates it lazily, so it can lag or, if
+// the shadow dies first, never be written.
+export function everRan(job: ClassAd): boolean {
+  for (const attr of ['JobStartDate', 'JobCurrentStartDate', 'NumJobStarts']) {
+    const n = num(job[attr]);
+    if (n !== undefined && n > 0) return true;
+  }
+  return false;
+}
 
 function fmtRequested(v: unknown): string {
   const n = num(v);

@@ -64,13 +64,28 @@ export function LogViewerPanel({ jobID }: { jobID: string }) {
       )}
 
       {data && data.events.length > 0 && (
-        <ol className="space-y-2">
-          {data.events.map((ev, i) => (
-            <li key={i}>
-              <EventRow ev={ev} />
-            </li>
-          ))}
-        </ol>
+        <>
+          {/* A long-running job's log runs to thousands of events, and
+              rendered in full it pushed every other panel off the page
+              -- the log is the tallest thing on it by an order of
+              magnitude. Capped and scrolled in place, so the panel keeps
+              a fixed share of the page however long the log is. Short
+              logs are unaffected: the cap is a maximum, not a height. */}
+          <div className="max-h-[32rem] overflow-y-auto pr-1">
+            <ol className="space-y-2">
+              {data.events.map((ev, i) => (
+                <li key={i}>
+                  <EventRow ev={ev} />
+                </li>
+              ))}
+            </ol>
+          </div>
+          <p className="text-[11px] text-gray-400">
+            {data.events.length.toLocaleString()} event
+            {data.events.length === 1 ? '' : 's'}
+            {data.truncated ? ' (log truncated by the server)' : ''}
+          </p>
+        </>
       )}
 
       {data && data.parseError && (
