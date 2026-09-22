@@ -76,9 +76,14 @@ func TestMapCondorScopesToAuthz(t *testing.T) {
 			expected: []string{"WRITE"},
 		},
 		{
-			name:     "ADVERTISE scopes",
+			// The ADVERTISE_* levels were dropped: nothing in this server
+			// consulted them (advertise_to_collector publishes with the
+			// server's own client, not the caller's), so they granted
+			// nothing and only lengthened the consent page. A client that
+			// still asks is ignored rather than refused.
+			name:     "ADVERTISE scopes are no longer mapped",
 			scopes:   []string{"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER"},
-			expected: []string{"ADVERTISE_STARTD", "ADVERTISE_SCHEDD", "ADVERTISE_MASTER"},
+			expected: nil,
 		},
 		{
 			name:     "multiple scopes",

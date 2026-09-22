@@ -35,7 +35,7 @@ func consentTestHandler(t *testing.T, adminGroup, superuserGroup string) *Handle
 func renderConsentFor(t *testing.T, h *Handler, groups, requested []string) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.renderConsentPage(rec, groups, consentPageParams{
+	h.renderConsentPage(context.Background(), rec, groups, consentPageParams{
 		Title:           "Authorize Application",
 		Username:        "bbockelm",
 		ClientID:        "test-client",

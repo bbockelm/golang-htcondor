@@ -4,7 +4,7 @@
 // run of text.
 //
 // The admin tables show OAuth2 scopes and grant types, which are dense and
-// punctuation-heavy ("condor:/ADVERTISE_STARTD", "offline_access"). Joined
+// punctuation-heavy ("condor:/WRITE", "offline_access"). Joined
 // with spaces they read as one long token and it is genuinely hard to see
 // where one ends and the next begins; as chips the boundaries are visible
 // without the reader parsing them.
