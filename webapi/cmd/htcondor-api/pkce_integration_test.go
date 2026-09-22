@@ -292,17 +292,35 @@ SEC_PASSWORD_DIRECTORY = %s
 	}
 	defer resp.Body.Close()
 
+	// Logging in lands on the consent page: the callback hands off there
+	// rather than issuing a code itself, so that a user authorizing a
+	// client for the first time is actually asked. Approve it, which is
+	// what a person would do, and carry on to the redirect that produces.
+	//
+	// This used to be a TODO that failed with "not implemented yet", and
+	// it only looked for the IDP's own /idp/consent -- so the MCP consent
+	// page went unhandled and unnoticed.
+	if strings.Contains(resp.Request.URL.Path, "/mcp/oauth2/consent") {
+		consentState := resp.Request.URL.Query().Get("state")
+		if consentState == "" {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("consent page carried no state. URL: %s. Body: %s", resp.Request.URL.String(), body)
+		}
+		_ = resp.Body.Close()
+		t.Logf("Reached the consent page; approving (state=%s)", consentState)
+
+		resp, err = client.PostForm(serverURL+"/mcp/oauth2/consent", url.Values{
+			"state":  {consentState},
+			"action": {"approve"},
+		})
+		if err != nil {
+			t.Fatalf("Failed to POST consent approval: %v", err)
+		}
+		defer resp.Body.Close()
+	}
+
 	// Check if we got the redirect to the callback
 	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
-		// If we are not redirected, maybe we are at the consent page?
-		if strings.Contains(resp.Request.URL.Path, "/idp/consent") {
-			t.Log("Hit consent page, approving...")
-			// TODO: Handle consent if needed. For now assume swagger-client might skip it or we need to implement it.
-			// But let's see what happens.
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("Stopped at consent page (not implemented yet) or error. Status: %d. Body: %s", resp.StatusCode, body)
-		}
-
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("Login failed. Expected redirect, got status %d. URL: %s. Body: %s", resp.StatusCode, resp.Request.URL.String(), body)
 	}
