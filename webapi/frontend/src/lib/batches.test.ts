@@ -5,6 +5,7 @@ import {
   filterAdsByStatus,
   groupIntoBatches,
   statusRank,
+  summarizeBatchUsage,
   summarizeJobs,
 } from './batches';
 
@@ -167,5 +168,77 @@ describe('statusRank', () => {
     const held = batches.find((b) => b.batchID === 12)!;
     expect(statusRank(running)).toBeLessThan(statusRank(idle));
     expect(statusRank(idle)).toBeLessThan(statusRank(held));
+  });
+});
+
+describe('summarizeBatchUsage', () => {
+  // One batch: two running jobs reporting usage, one idle, one held.
+  const batch: ClassAd[] = [
+    {
+      ClusterId: 7, ProcId: 0, JobStatus: 2,
+      RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
+      CPUsUsage: 3.5, MemoryUsage: 1024, DiskUsage: 262144,
+    },
+    {
+      ClusterId: 7, ProcId: 1, JobStatus: 2,
+      RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
+      CPUsUsage: 0.5, ResidentSetSize: 524288, DiskUsage: 262144,
+    },
+    {
+      ClusterId: 7, ProcId: 2, JobStatus: 1,
+      RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
+    },
+    { ClusterId: 7, ProcId: 3, JobStatus: 5, RequestCpus: 4, RequestMemory: 4096 },
+  ];
+  const row = (u: ReturnType<typeof summarizeBatchUsage>, label: string) =>
+    u.rows.find((r) => r.label === label)!;
+
+  it('compares usage against what the RUNNING jobs were given', () => {
+    const u = summarizeBatchUsage(batch);
+    expect(u.running).toBe(2);
+    expect(u.idle).toBe(1);
+    // Two running jobs at 4 CPUs. Totalling the idle and held jobs in
+    // here would make the batch look like it was wasting most of an
+    // allocation the pool never gave it.
+    expect(row(u, 'CPUs').allocated).toBe(8);
+    expect(row(u, 'CPUs').used).toBe(4);
+    expect(row(u, 'CPUs').waiting).toBe(4);
+  });
+
+  it('falls back to ResidentSetSize when MemoryUsage is not a number', () => {
+    // MemoryUsage is an expression in the job ad more often than not;
+    // only ResidentSetSize (KiB) is reliably a literal.
+    const u = summarizeBatchUsage(batch);
+    // 1024 MiB reported directly + 524288 KiB = 512 MiB.
+    expect(row(u, 'Memory').used).toBe(1536);
+  });
+
+  it('leaves a measurement missing rather than counting it as zero', () => {
+    const justStarted = summarizeBatchUsage([
+      { ClusterId: 8, ProcId: 0, JobStatus: 2, RequestCpus: 2, RequestMemory: 2048 },
+    ]);
+    expect(justStarted.running).toBe(1);
+    // A batch that started ten seconds ago has reported nothing. Zero
+    // would render as "using none of its allocation", which is a claim
+    // about the job rather than about the absence of a report.
+    expect(justStarted.reporting).toBe(0);
+    expect(row(justStarted, 'CPUs').used).toBeUndefined();
+    expect(row(justStarted, 'CPUs').allocated).toBe(2);
+  });
+
+  it('offers a GPU row only when something asked for one', () => {
+    expect(summarizeBatchUsage(batch).rows.map((r) => r.label)).toContain('GPUs');
+    const noGpu = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 2, RequestCpus: 1, RequestMemory: 1024 },
+    ]);
+    expect(noGpu.rows.map((r) => r.label)).not.toContain('GPUs');
+  });
+
+  it('counts output transfer as still holding the allocation', () => {
+    const u = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 3, RequestMemory: 1024, CPUsUsage: 0.1 },
+    ]);
+    expect(u.running).toBe(1);
+    expect(row(u, 'CPUs').allocated).toBe(3);
   });
 });
