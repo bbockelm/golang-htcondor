@@ -986,6 +986,15 @@ export const api = {
         body: JSON.stringify({ constraint, reason }),
       }),
 
+    // Hold a single job. The Go side maps this to condor_hold for the
+    // matching cluster.proc: the job stops (or stops being scheduled)
+    // and moves to JobStatus=5, from where release() puts it back.
+    hold: (id: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/hold`, {
+        method: 'POST',
+        body: JSON.stringify(reason ? { reason } : {}),
+      }),
+
     // Release a single held job. The Go side maps this to
     // condor_release for the matching cluster.proc; the queue moves
     // the job from JobStatus=5 (Held) back to Idle.
