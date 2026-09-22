@@ -64,7 +64,7 @@ func TestConsentFormSubmitsEveryScope(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// No group policy is configured on this handler, so every scope here
 	// is grantable and the filter is a pass-through.
-	h.renderConsentPage(rec, nil, consentPageParams{
+	h.renderConsentPage(context.Background(), rec, nil, consentPageParams{
 		Title:           "Authorize",
 		Username:        "bbockelm",
 		ClientID:        "https://claude.ai/oauth/claude-code-client-metadata",

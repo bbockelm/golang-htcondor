@@ -755,7 +755,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		// Display consent form
-		h.renderConsentPage(w, groups, consentPageParams{
+		h.renderConsentPage(ctx, w, groups, consentPageParams{
 			Title:           "Authorize Application",
 			Username:        username,
 			ClientID:        ar.GetClient().GetID(),
@@ -796,6 +796,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// Grant scopes based on group membership intersected
 			// with what the user accepted on the form.
 			grantedScopes := h.getScopesForGroups(groups, acceptedScopes)
+			grantedScopes = h.scopesAllowedByScheddACL(ctx, username, grantedScopes)
 			for _, scope := range grantedScopes {
 				ar.GrantScope(scope)
 			}
@@ -1836,6 +1837,7 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// with "openid" alone.
 			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form, "consent_form_version")
 			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
+			acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
 			// The set an operator may later restore this grant to. Same
 			// reasoning as the consent handler: recorded where what the
 			// user agreed to is known.
@@ -1916,9 +1918,13 @@ type consentPageParams struct {
 // privileged scopes, so the mistake would show up as those checkboxes
 // silently never appearing, which is indistinguishable from the user not
 // being entitled to them.
-func (h *Handler) renderConsentPage(w http.ResponseWriter, userGroups []string, p consentPageParams) {
-	// Offer only what this user could actually be granted.
+func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, userGroups []string, p consentPageParams) {
+	// Offer only what this user could actually be granted: what the
+	// group policy allows, and then what the access point itself would
+	// authorize. Asking here is what keeps the page honest -- otherwise
+	// it offers scopes the first refresh will strip.
 	p.RequestedScopes = h.grantableScopes(userGroups, p.RequestedScopes)
+	p.RequestedScopes = h.scopesAllowedByScheddACL(ctx, p.Username, p.RequestedScopes)
 
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
@@ -2343,11 +2349,16 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 	// A nil request means a caller with no browser context. Treat that as
 	// "no group information" rather than crashing the page: the policy
 	// still runs, and a renderer is the wrong place to take a process down.
+	// The ACL probe needs a context; a caller with no request gets the
+	// background one, which still lets the probe run and time out on its
+	// own rather than being skipped.
+	ctx := context.Background()
 	var groups []string
 	if r != nil {
-		_, groups = h.deviceApprovalIdentity(r.Context(), r)
+		ctx = r.Context()
+		_, groups = h.deviceApprovalIdentity(ctx, r)
 	}
-	h.renderConsentPage(w, groups, consentPageParams{
+	h.renderConsentPage(ctx, w, groups, consentPageParams{
 		Title:           "Authorize Device",
 		Username:        username,
 		ClientID:        request.GetClient().GetID(),

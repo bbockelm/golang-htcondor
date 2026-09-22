@@ -403,3 +403,74 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 
 // userRecordLookup adapts the handler's schedd accessor to UserRecordLookup.
 func (h *Handler) userRecordLookup() UserRecordLookup { return h.getSchedd() }
+
+// scheddACLOracle returns the configured schedd-ACL oracle, or nil.
+//
+// Consent-time filtering follows the oracle's own configuration rather
+// than a knob of its own: the point is for the page to offer what a
+// refresh will keep, so it should probe exactly when refreshes probe. An
+// operator who has not enabled the oracle pays no schedd round trips.
+// It returns a nil INTERFACE when there is none, not a typed nil pointer
+// wrapped in one, so callers can compare against nil and get the answer
+// they expect.
+func (h *Handler) scheddACLOracle() RevocationOracle {
+	for _, o := range h.revocationOracles {
+		if acl, ok := o.(*ScheddACLOracle); ok {
+			return acl
+		}
+	}
+	return nil
+}
+
+// scopesAllowedByScheddACL drops scopes the access point would refuse
+// this user, so the consent page offers what the grant will keep.
+//
+// Without this the issuer grants what the refresh path then takes away:
+// a user the schedd denies WRITE could be offered mcp:write, approve it,
+// work until the first refresh, and silently lose it. Asking the same
+// question at both ends removes that.
+//
+// Fails OPEN. A probe that errors -- schedd down, timeout, no token
+// minter -- returns the scopes unchanged, matching how the refresh path
+// treats an oracle error as "no opinion". Stripping a scope because a
+// daemon was briefly unreachable would be the worse failure, and unlike
+// the refresh path there is a person watching who cannot tell the
+// difference between "you may not have this" and "we could not ask".
+func (h *Handler) scopesAllowedByScheddACL(ctx context.Context, username string, scopes []string) []string {
+	return h.filterScopesByOracle(ctx, h.scheddACLOracle(), username, scopes)
+}
+
+// filterScopesByOracle is the policy half of scopesAllowedByScheddACL,
+// separated from finding the oracle so the two can be reasoned about --
+// and tested -- apart.
+func (h *Handler) filterScopesByOracle(ctx context.Context, oracle RevocationOracle, username string, scopes []string) []string {
+	if oracle == nil || username == "" || len(scopes) == 0 {
+		return scopes
+	}
+
+	decision, err := oracle.Check(ctx, username, scopes)
+	if err != nil {
+		h.logger.Warn(logging.DestinationHTTP,
+			"Could not ask the access point which scopes it allows; offering all of them",
+			"username", username, "error", err)
+		return scopes
+	}
+	if len(decision.DeniedScopes) == 0 {
+		return scopes
+	}
+
+	denied := make(map[string]bool, len(decision.DeniedScopes))
+	for _, s := range decision.DeniedScopes {
+		denied[s] = true
+	}
+	kept := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		if !denied[s] {
+			kept = append(kept, s)
+		}
+	}
+	h.logger.Info(logging.DestinationHTTP,
+		"Withholding scopes the access point does not authorize for this user",
+		"username", username, "denied", decision.DeniedScopes, "offered", kept)
+	return kept
+}
