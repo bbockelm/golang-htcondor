@@ -1065,6 +1065,81 @@ func (s *OAuth2Storage) GrantAuthorizedScopes(ctx context.Context, requestID str
 	return nil, ErrTokenNotFound
 }
 
+// EnsureGrantAuthorizedScopes records what a grant was authorized with, for
+// grants that predate its being captured at consent.
+//
+// Every grant in existence when that started being recorded has none, and
+// without this the admin page reads the scopes in force as the whole
+// authorization. Switching one off then shrinks the set it would restore
+// from, so the scope cannot be put back -- the one-way door the toggle
+// exists to remove, for exactly the grants an operator already had.
+//
+// Called with the set in force BEFORE a change, which for a grant nobody has
+// touched is what it was authorized with. A no-op once a value is present,
+// so a later narrowing cannot overwrite the original.
+//
+// The session is rewritten through a generic map rather than the Session
+// type: decoding into Session and re-encoding would drop any field this
+// build does not know about, and a token session carries the OIDC claims.
+func (s *OAuth2Storage) EnsureGrantAuthorizedScopes(ctx context.Context, requestID string, scopes []string) error {
+	if strings.TrimSpace(requestID) == "" || len(scopes) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(scopes)
+	if err != nil {
+		return fmt.Errorf("encoding authorized scopes for grant %s: %w", requestID, err)
+	}
+
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		rows, err := s.db.QueryContext(ctx,
+			"SELECT signature, session_data FROM "+table+" WHERE request_id = ?", requestID) //nolint:gosec // G202: table is from a fixed literal list
+		if err != nil {
+			return fmt.Errorf("reading sessions from %s for grant %s: %w", table, requestID, err)
+		}
+		type pending struct{ sig, data string }
+		var updates []pending
+		for rows.Next() {
+			var sig, data string
+			if err := rows.Scan(&sig, &data); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scanning %s for grant %s: %w", table, requestID, err)
+			}
+			fields := map[string]json.RawMessage{}
+			if data != "" {
+				if err := json.Unmarshal([]byte(data), &fields); err != nil {
+					// A session this build cannot parse is one it must not
+					// rewrite; leaving it alone costs the restore, while
+					// replacing it would cost the grant.
+					continue
+				}
+			}
+			if raw, ok := fields["authorizedScopes"]; ok && len(raw) > 0 && string(raw) != "null" {
+				continue
+			}
+			fields["authorizedScopes"] = encoded
+			merged, err := json.Marshal(fields)
+			if err != nil {
+				continue
+			}
+			updates = append(updates, pending{sig: sig, data: string(merged)})
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("reading %s for grant %s: %w", table, requestID, err)
+		}
+		_ = rows.Close()
+
+		for _, u := range updates {
+			if _, err := s.db.ExecContext(ctx,
+				"UPDATE "+table+" SET session_data = ? WHERE signature = ?", //nolint:gosec // G202: table is from a fixed literal list
+				u.data, u.sig); err != nil {
+				return fmt.Errorf("recording authorized scopes in %s for grant %s: %w", table, requestID, err)
+			}
+		}
+	}
+	return nil
+}
+
 // SetGrantScopes rewrites the granted scopes of every token issued under
 // one grant.
 //

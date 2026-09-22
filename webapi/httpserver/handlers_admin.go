@@ -972,6 +972,19 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Before anything changes: a grant issued before the authorized set was
+	// recorded has none, and the read below would then fall back to the
+	// scopes in force. Narrowing shrinks those, so the fallback would
+	// report the smaller set as the whole authorization and the scope could
+	// never be put back. Capturing what it holds NOW -- which for an
+	// untouched grant is what it was authorized with -- is what keeps the
+	// toggle a toggle for every grant that already existed. A no-op once a
+	// value is present.
+	if err := storage.EnsureGrantAuthorizedScopes(r.Context(), grant.RequestID, current); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Could not record a grant's original scopes",
+			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
+	}
+
 	// The bound is what this authorization ENDED with, not what the grant
 	// holds right now. Turning a scope back on is restoring something the
 	// user already agreed to -- which is what makes the control on the
