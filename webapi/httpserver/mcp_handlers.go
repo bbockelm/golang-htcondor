@@ -1375,17 +1375,30 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 	issuer := h.oauth2Provider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
-		"issuer":                                issuer,
-		"authorization_endpoint":                issuer + "/mcp/oauth2/authorize",
-		"token_endpoint":                        issuer + "/mcp/oauth2/token",
-		"registration_endpoint":                 issuer + "/mcp/oauth2/register",
-		"introspection_endpoint":                issuer + "/mcp/oauth2/introspect",
-		"revocation_endpoint":                   issuer + "/mcp/oauth2/revoke",
-		"device_authorization_endpoint":         issuer + "/mcp/oauth2/device/authorize",
-		"response_types_supported":              []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
+		"issuer":                        issuer,
+		"authorization_endpoint":        issuer + "/mcp/oauth2/authorize",
+		"token_endpoint":                issuer + "/mcp/oauth2/token",
+		"registration_endpoint":         issuer + "/mcp/oauth2/register",
+		"introspection_endpoint":        issuer + "/mcp/oauth2/introspect",
+		"revocation_endpoint":           issuer + "/mcp/oauth2/revoke",
+		"device_authorization_endpoint": issuer + "/mcp/oauth2/device/authorize",
+		// This is an OAuth2 authorization server (RFC 8414), not an
+		// OpenID Connect provider. It used to advertise otherwise --
+		// id_token response types, subject_types_supported and
+		// id_token_signing_alg_values_supported -- while publishing no
+		// jwks_uri and serving no JWKS, so a client that believed the
+		// advertisement had no way to verify what it was given.
+		//
+		// authlib, which OpenWebUI uses, takes that at face value: it
+		// sees an id_token in the token response and a nonce it sent,
+		// tries to validate the token, looks for jwks_uri and fails the
+		// whole login with `Missing "jwks_uri" in metadata`.
+		//
+		// Nothing here consumed that id_token. The honest advertisement
+		// is the smaller one; see also the OIDC handler left out of the
+		// fosite composition in oauth2_provider.go.
+		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code", tokenExchangeGrantType},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      oauth2AdvertisedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},

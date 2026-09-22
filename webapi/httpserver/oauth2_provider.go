@@ -164,7 +164,20 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 		compose.OAuth2AuthorizeExplicitFactory,
 		compose.OAuth2RefreshTokenGrantFactory,
 		compose.OAuth2ClientCredentialsGrantFactory,
-		compose.OpenIDConnectExplicitFactory,
+		// Deliberately NOT compose.OpenIDConnectExplicitFactory.
+		//
+		// It issued an id_token whenever the openid scope was granted.
+		// Nothing here read that token, no jwks_uri was published, and
+		// no JWKS was served, so nobody could verify it either. What it
+		// did do was convince OIDC-aware clients that this is an OpenID
+		// provider: authlib sees the id_token, tries to validate it, and
+		// fails the login outright with `Missing "jwks_uri" in metadata`.
+		//
+		// The openid scope is still accepted -- rejecting it would fail
+		// registration for the many clients that ask as a matter of
+		// course -- it simply no longer produces an ID token. Restoring
+		// this line means also publishing a jwks_uri and serving the
+		// keys, the way the internal IDP does.
 		compose.OAuth2TokenIntrospectionFactory,
 		compose.OAuth2TokenRevocationFactory,
 		compose.OAuth2PKCEFactory,
