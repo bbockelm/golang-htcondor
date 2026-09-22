@@ -37,6 +37,17 @@ function istr(m: AdIndex, key: string): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+// idisp reads an attribute for display when it may arrive as either a
+// string or a number. GPU properties are a mix: DeviceName is a string but
+// Capability (8) and DriverVersion (12.6) are published as numbers, so a
+// string-only read drops them and the cell shows "—".
+function idisp(m: AdIndex, key: string): string | undefined {
+  const v = m.get(key.toLowerCase());
+  if (typeof v === 'string') return v.trim() === '' ? undefined : v;
+  if (typeof v === 'number') return String(v);
+  return undefined;
+}
+
 function ibool(m: AdIndex, key: string): boolean {
   const v = m.get(key.toLowerCase());
   if (typeof v === 'boolean') return v;
@@ -350,39 +361,68 @@ export function gpuDevices(ad: ClassAd): GpuDevice[] {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const devices: GpuDevice[] = [];
-  for (const id of ids) {
-    // Nested style: a nested ad keyed by the device id (e.g. ad["CUDA0"]).
-    const nested = m.get(id.toLowerCase());
-    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
-      const nm = indexAd(nested as ClassAd);
-      devices.push({
-        id,
-        name: istr(nm, 'DeviceName'),
-        capability: istr(nm, 'Capability'),
-        globalMemoryMb: inum(nm, 'GlobalMemoryMb'),
-        driverVersion: istr(nm, 'DriverVersion') ?? istr(nm, 'DriverVersionStr'),
-      });
-      continue;
+  // Nested per-device ads. HTCondor publishes each detected GPU as its own
+  // nested ClassAd under an attribute named <Resource>_<sanitized id> --
+  // e.g. AssignedGPUs = "GPU-74a71a79" but the nested ad is at
+  // "GPUs_GPU_74a71a79" (resource-prefixed, '-' rewritten to '_'). Rather
+  // than reconstruct that name, scan for GPU-ish nested objects and key
+  // them by their own Id field, which echoes the AssignedGPUs id.
+  const nestedById = new Map<string, AdIndex>();
+  const nestedInOrder: AdIndex[] = [];
+  for (const [key, value] of Object.entries(ad)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    if (!key.toLowerCase().includes('gpu')) continue;
+    const nm = indexAd(value as ClassAd);
+    if (istr(nm, 'DeviceName') === undefined && istr(nm, 'Id') === undefined) {
+      continue; // not a per-device ad (e.g. a usage rollup)
     }
-    devices.push({ id });
+    nestedInOrder.push(nm);
+    const nid = istr(nm, 'Id');
+    if (nid) nestedById.set(nid.toLowerCase(), nm);
   }
 
-  // Flat style / common-property fallback: if we found ids but no nested
-  // props (or no ids at all but flat CUDA* attrs exist), surface the
-  // common CUDA* properties as a single synthesized row.
-  const flatName = istr(m, 'CUDADeviceName') ?? istr(m, 'OCLDeviceName');
-  const haveDetail = devices.some((d) => d.name || d.capability);
-  if (!haveDetail && flatName) {
-    const flat: GpuDevice = {
-      id: ids[0] ?? 'GPU',
-      name: flatName,
-      capability: istr(m, 'CUDACapability'),
-      globalMemoryMb: inum(m, 'CUDAGlobalMemoryMb'),
-      driverVersion: istr(m, 'CUDADriverVersion'),
-    };
-    if (devices.length > 0) devices[0] = { ...devices[0], ...flat };
-    else devices.push(flat);
+  // Common properties, published either resource-prefixed (GPUs_*, the
+  // current form) or as the older flat CUDA*/OCL* attributes. These fill
+  // fields an individual device ad omits (notably Capability) and stand in
+  // as the whole row when there is no per-device ad at all.
+  const flat: Omit<GpuDevice, 'id'> = {
+    name:
+      istr(m, 'GPUs_DeviceName') ??
+      istr(m, 'CUDADeviceName') ??
+      istr(m, 'OCLDeviceName'),
+    capability: idisp(m, 'GPUs_Capability') ?? idisp(m, 'CUDACapability'),
+    globalMemoryMb:
+      inum(m, 'GPUs_GlobalMemoryMb') ?? inum(m, 'CUDAGlobalMemoryMb'),
+    driverVersion:
+      idisp(m, 'GPUs_DriverVersion') ?? idisp(m, 'CUDADriverVersion'),
+  };
+
+  const fromNested = (nm: AdIndex, id: string): GpuDevice => ({
+    id,
+    name: istr(nm, 'DeviceName') ?? flat.name,
+    capability: idisp(nm, 'Capability') ?? flat.capability,
+    globalMemoryMb: inum(nm, 'GlobalMemoryMb') ?? flat.globalMemoryMb,
+    driverVersion:
+      idisp(nm, 'DriverVersion') ?? idisp(nm, 'NvidiaDriver') ?? flat.driverVersion,
+  });
+
+  const devices: GpuDevice[] = [];
+  if (ids.length > 0) {
+    for (const id of ids) {
+      const nm = nestedById.get(id.toLowerCase());
+      devices.push(nm ? fromNested(nm, id) : { id, ...flat });
+    }
+  } else if (nestedInOrder.length > 0) {
+    for (const nm of nestedInOrder) {
+      devices.push(fromNested(nm, istr(nm, 'Id') ?? 'GPU'));
+    }
+  } else if (
+    flat.name ||
+    flat.capability ||
+    flat.globalMemoryMb !== undefined ||
+    flat.driverVersion
+  ) {
+    devices.push({ id: 'GPU', ...flat });
   }
   return devices;
 }

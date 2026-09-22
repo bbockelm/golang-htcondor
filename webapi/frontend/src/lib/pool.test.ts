@@ -143,14 +143,31 @@ describe('gpuDevices', () => {
     expect(devs[0].globalMemoryMb).toBe(40960);
   });
 
-  it('reads nested per-device ads keyed by device id', () => {
+  it('reads nested per-device ads as HTCondor publishes them', () => {
+    // The nested ad is at <Resource>_<sanitized id> (GPUs_GPU_aaaa), not at
+    // the bare device id, and carries an Id echoing AssignedGPUs. Capability
+    // lives only in the common GPUs_* props; DriverVersion is a number.
     const devs = gpuDevices({
       AssignedGPUs: 'GPU-aaaa, GPU-bbbb',
-      'GPU-aaaa': { DeviceName: 'H100', Capability: '9.0', GlobalMemoryMb: 81920 },
-      'GPU-bbbb': { DeviceName: 'H100', Capability: '9.0', GlobalMemoryMb: 81920 },
+      GPUs_Capability: 9,
+      GPUs_DriverVersion: 12.6,
+      GPUs_GPU_aaaa: {
+        Id: 'GPU-aaaa',
+        DeviceName: 'H100',
+        GlobalMemoryMb: 81920,
+        DriverVersion: 12.6,
+      },
+      GPUs_GPU_bbbb: {
+        Id: 'GPU-bbbb',
+        DeviceName: 'H100',
+        GlobalMemoryMb: 81920,
+        DriverVersion: 12.6,
+      },
     });
     expect(devs.map((d) => d.id)).toEqual(['GPU-aaaa', 'GPU-bbbb']);
     expect(devs[0].name).toBe('H100');
+    expect(devs[0].capability).toBe('9'); // number coerced, from the common prop
+    expect(devs[0].driverVersion).toBe('12.6'); // number coerced
     expect(devs[1].globalMemoryMb).toBe(81920);
   });
 

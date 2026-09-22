@@ -156,10 +156,16 @@ function GpuTable({ ad }: { ad: ClassAd }) {
 
 function RawAd({ ad }: { ad: ClassAd }) {
   const [filter, setFilter] = useState('');
+  const [copied, setCopied] = useState(false);
   const allKeys = useMemo(
     () => Object.keys(ad).sort((a, b) => a.localeCompare(b)),
     [ad],
   );
+  const copyJson = () => {
+    navigator.clipboard?.writeText(JSON.stringify(ad, null, 2));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
   const q = filter.trim().toLowerCase();
   const keys = q
     ? allKeys.filter(
@@ -184,6 +190,14 @@ function RawAd({ ad }: { ad: ClassAd }) {
         <span className="text-xs text-gray-400">
           {keys.length}/{allKeys.length}
         </span>
+        <button
+          type="button"
+          onClick={copyJson}
+          className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+          title="Copy the full slot ClassAd as JSON"
+        >
+          {copied ? 'Copied' : 'Copy as JSON'}
+        </button>
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm">
