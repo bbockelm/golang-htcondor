@@ -3,7 +3,9 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -92,5 +94,52 @@ func TestConsentSkipsTheProbeWithoutAUsername(t *testing.T) {
 	}
 	if spy.calls != 0 {
 		t.Errorf("probed %d times for an empty username, want 0", spy.calls)
+	}
+}
+
+// namedACLOracle answers to the configured name, so the handler's lookup
+// finds it the way it finds the real one.
+type namedACLOracle struct{ denied []string }
+
+func (n *namedACLOracle) Name() string { return OracleScheddACL }
+func (n *namedACLOracle) Check(context.Context, string, []string) (ReauthDecision, error) {
+	return ReauthDecision{Status: UserStatusActive, DeniedScopes: n.denied}, nil
+}
+
+// The wiring, not the policy. The filter above can be perfect and still
+// buy nothing if the consent page never calls it, which is exactly the
+// shape of the bug this whole change is about -- a safeguard that exists
+// and is not reached.
+func TestConsentPageDoesNotRenderScopesTheScheddRefuses(t *testing.T) {
+	h := aclTestHandler(t, &namedACLOracle{denied: []string{"mcp:write"}})
+	rec := httptest.NewRecorder()
+
+	h.renderConsentPage(context.Background(), rec, nil, consentPageParams{
+		Title:           "Authorize Application",
+		Username:        "alice",
+		ClientID:        "c",
+		RequestedScopes: []string{"openid", "mcp:read", "mcp:write"},
+		FormAction:      "/mcp/oauth2/consent",
+	})
+
+	body := rec.Body.String()
+	if strings.Contains(body, `value="mcp:write"`) {
+		t.Error("the page offered mcp:write although the access point refuses it")
+	}
+	if !strings.Contains(body, `value="mcp:read"`) {
+		t.Error("the page dropped mcp:read, which the access point allows")
+	}
+}
+
+// And the same oracle must be found through the handler's own lookup,
+// or the filter silently never runs in production.
+func TestTheConfiguredACLOracleIsFound(t *testing.T) {
+	h := aclTestHandler(t, &namedACLOracle{})
+	if h.scheddACLOracle() == nil {
+		t.Fatal("the configured schedd-acl oracle was not found")
+	}
+	real := &ScheddACLOracle{}
+	if real.Name() != OracleScheddACL {
+		t.Errorf("the real oracle calls itself %q; the lookup keys on %q", real.Name(), OracleScheddACL)
 	}
 }

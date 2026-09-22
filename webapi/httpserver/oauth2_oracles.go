@@ -415,8 +415,11 @@ func (h *Handler) userRecordLookup() UserRecordLookup { return h.getSchedd() }
 // they expect.
 func (h *Handler) scheddACLOracle() RevocationOracle {
 	for _, o := range h.revocationOracles {
-		if acl, ok := o.(*ScheddACLOracle); ok {
-			return acl
+		// Matched by NAME rather than concrete type, which is the same
+		// vocabulary the configuration uses -- an operator writes
+		// "schedd-acl" and gets the oracle that calls itself that.
+		if o != nil && o.Name() == OracleScheddACL {
+			return o
 		}
 	}
 	return nil
