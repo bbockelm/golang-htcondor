@@ -37,6 +37,7 @@ import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
+import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
 import {
   applyBatchFilter,
   filterAdsByStatus,
@@ -114,14 +115,17 @@ export default function JobsPage() {
   }, []);
   const clearStatuses = useCallback(() => setStatuses(new Set()), []);
 
-  // "Load everything" is opt-in per scope: the default keeps a bounded
-  // first page so opening /jobs on a 30k-job queue is not a multi-second
-  // download, and the banner below offers the rest.
-  const [loadAll, setLoadAll] = useState(false);
+  // "Load everything" is opt-in: the default keeps a bounded first page
+  // so opening /jobs on a 30k-job queue is not a multi-second download,
+  // and the banner below offers the rest. Asking for it is remembered
+  // (lib/loadAll.ts) -- a poll cycle that dropped back to the first
+  // page would otherwise re-ask a question the user has answered.
+  const [loadAll, setLoadAll] = useLoadAllJobs();
 
   const {
     data: pages,
     isLoading,
+    isFetching,
     error,
     refetch,
     fetchNextPage,
@@ -158,25 +162,20 @@ export default function JobsPage() {
       ? error.message
       : null;
 
-  // "Load all" for the paginated (htcondordb mirror) path: walk the cursor
-  // to exhaustion instead of making the user click "Load more" once per
-  // page. The mirror clamps a single request's limit (that is why it pages
-  // at all), so limit="*" would not pull everything -- the only way to get
-  // the whole answer is to follow every page token. Awaited sequentially so
-  // react-query never has two in-flight next-page fetches, with a generous
-  // iteration cap as a backstop against a cursor that never terminates.
-  const [loadingAllPages, setLoadingAllPages] = useState(false);
-  const loadAllPages = useCallback(async () => {
-    setLoadingAllPages(true);
-    try {
-      for (let i = 0; i < 10000; i++) {
-        const res = await fetchNextPage();
-        if (res.isError || !res.hasNextPage) break;
-      }
-    } finally {
-      setLoadingAllPages(false);
-    }
-  }, [fetchNextPage]);
+  // The paginated (htcondordb mirror) path: the mirror clamps a single
+  // request's limit, which is why it pages at all, so limit="*" does not
+  // pull everything -- the only way to get the whole answer is to follow
+  // every page token. The walk runs off the preference rather than a
+  // button press, so it resumes after a refetch instead of stopping at
+  // whatever page the poll left behind.
+  const pageCount = pages?.pages.length ?? 0;
+  useAutoLoadAll({
+    enabled: loadAll,
+    hasNextPage: !!hasNextPage,
+    isFetching,
+    pageCount,
+    fetchNextPage,
+  });
 
   // Flatten the loaded pages, and read the truncation state off the
   // LAST one -- earlier pages always report has_more.
@@ -396,11 +395,10 @@ export default function JobsPage() {
           page={lastPage}
           canPage={!!hasNextPage}
           fetchingMore={isFetchingNextPage}
-          loadedAll={loadAll}
-          loadingAllPages={loadingAllPages}
+          loadAll={loadAll}
+          capped={pageCount >= MAX_AUTO_PAGES}
           onLoadMore={() => fetchNextPage()}
-          onLoadAllPages={loadAllPages}
-          onLoadAll={() => setLoadAll(true)}
+          onSetLoadAll={setLoadAll}
         />
       )}
 
@@ -496,38 +494,37 @@ export default function JobsPage() {
 
 // TruncationNotice is the answer to "am I looking at all my jobs?".
 //
-// The server has always reported has_more, and when it cannot paginate
-// it even explains why -- this page used to throw both away and render a
-// truncated list as though it were the whole queue. On an access point
-// with 30k queued jobs that is not a cosmetic problem: it is the UI
-// asserting something false.
+// The server reports has_more, and when it cannot paginate it even
+// explains why. Rendering a truncated list as though it were the whole
+// queue is not a cosmetic problem on an access point with 30k queued
+// jobs: it is the UI asserting something false.
 //
-// Two ways out, depending on which backend answered:
-//   - An htcondordb mirror gives a cursor, so "Load more" appends the
-//     next page.
-//   - A live schedd has no cursor to resume from, so the only options
-//     are to pull the whole answer in one request or to narrow the
-//     query. We offer the former and say so plainly.
+// Two ways to get the rest, depending on which backend answered:
+//   - An htcondordb mirror gives a cursor, so the page walks it.
+//   - A live schedd has no cursor to resume from, so the only option is
+//     to pull the whole answer in one request.
+// Either way the choice is remembered, so this notice's job once it has
+// been made is to report what is loaded and offer the way back.
 function TruncationNotice({
   shown,
   page,
   canPage,
   fetchingMore,
-  loadedAll,
-  loadingAllPages,
+  loadAll,
+  capped,
   onLoadMore,
-  onLoadAllPages,
-  onLoadAll,
+  onSetLoadAll,
 }: {
   shown: number;
   page: JobListResponse;
   canPage: boolean;
   fetchingMore: boolean;
-  loadedAll: boolean;
-  loadingAllPages: boolean;
+  loadAll: boolean;
+  // The cursor walk hit its backstop. Reported rather than silently
+  // stopping, which would look exactly like "this is the whole queue".
+  capped: boolean;
   onLoadMore: () => void;
-  onLoadAllPages: () => void;
-  onLoadAll: () => void;
+  onSetLoadAll: (next: boolean) => void;
 }) {
   // A partial-result error is worth showing even when nothing was
   // truncated: the ads that arrived are valid, but the answer is short
@@ -541,25 +538,41 @@ function TruncationNotice({
     );
   }
 
-  if (!page.has_more) {
-    // Everything that matched is on screen. Say so only when the number
-    // is big enough that the question would otherwise come up.
-    if (loadedAll && shown > PAGE_SIZE) {
+  if (loadAll) {
+    if (capped) {
+      return (
+        <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Stopped after {shown.toLocaleString()} jobs — that is as far as this
+          page will page automatically. Narrow the query to see the rest.{' '}
+          <StopLoadingAll onSetLoadAll={onSetLoadAll} />
+        </div>
+      );
+    }
+    if (canPage || page.has_more) {
       return (
         <p className="text-xs text-gray-500">
-          Showing all {shown.toLocaleString()} matching jobs.
+          Loading the whole queue — {shown.toLocaleString()} job
+          {shown === 1 ? '' : 's'} so far.{' '}
+          <StopLoadingAll onSetLoadAll={onSetLoadAll} />
         </p>
       );
     }
-    return null;
+    return (
+      <p className="text-xs text-gray-500">
+        Showing all {shown.toLocaleString()} matching jobs, and will keep
+        doing so. <StopLoadingAll onSetLoadAll={onSetLoadAll} />
+      </p>
+    );
   }
+
+  if (!page.has_more) return null;
 
   return (
     <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
       <span>
         Showing the first <strong>{shown.toLocaleString()}</strong> jobs.
       </span>{' '}
-      {canPage ? (
+      {canPage && (
         <>
           <button
             type="button"
@@ -567,52 +580,49 @@ function TruncationNotice({
             disabled={fetchingMore}
             className="font-medium underline hover:text-amber-950 disabled:opacity-50"
           >
-            {fetchingMore && !loadingAllPages ? 'Loading…' : 'Load more'}
+            {fetchingMore ? 'Loading…' : 'Load more'}
           </button>{' '}
-          <button
-            type="button"
-            onClick={onLoadAllPages}
-            disabled={fetchingMore}
-            className="font-medium underline hover:text-amber-950 disabled:opacity-50"
-          >
-            {loadingAllPages ? 'Loading all…' : 'Load all'}
-          </button>
-        </>
-      ) : (
-        <>
-          {/* The server's own explanation. Better than paraphrasing it
-              here, because the reason differs by backend and version. */}
-          {page.pagination_unavailable && (
-            // Rendered as it arrives: the server sends whole sentences,
-            // and the reason differs by backend and version.
-            <span className="text-amber-800">{page.pagination_unavailable} </span>
-          )}
-          {loadedAll ? (
-            // Already asked for everything and the answer is still
-            // short. Offering the same button again would imply there
-            // is something left to try; narrowing the view is the only
-            // remaining move.
-            <span className="text-amber-800">
-              Narrow the view with the filter below, or switch scope.
-            </span>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={onLoadAll}
-                disabled={fetchingMore}
-                className="font-medium underline hover:text-amber-950 disabled:opacity-50"
-              >
-                Load all matching jobs
-              </button>
-              <span className="text-amber-800">
-                {' '}
-                — may take several seconds on a big queue.
-              </span>
-            </>
-          )}
         </>
       )}
+      {/* The server's own explanation of why there is no cursor. Better
+          than paraphrasing it here, because the reason differs by
+          backend and version. */}
+      {!canPage && page.pagination_unavailable && (
+        <span className="text-amber-800">{page.pagination_unavailable} </span>
+      )}
+      <button
+        type="button"
+        onClick={() => onSetLoadAll(true)}
+        disabled={fetchingMore}
+        className="font-medium underline hover:text-amber-950 disabled:opacity-50"
+      >
+        Load them all
+      </button>
+      <span className="text-amber-800">
+        {' '}
+        — may take several seconds on a big queue, and stays on until you
+        turn it off.
+      </span>
     </div>
+  );
+}
+
+// StopLoadingAll is the way back to the bounded default. It exists
+// because the preference outlives the page view: without a visible way
+// off, a user who once asked for a 200k-job queue would pay for it on
+// every visit with no idea why the page had become slow.
+function StopLoadingAll({
+  onSetLoadAll,
+}: {
+  onSetLoadAll: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSetLoadAll(false)}
+      className="underline hover:text-gray-800"
+    >
+      Stop loading everything
+    </button>
   );
 }
