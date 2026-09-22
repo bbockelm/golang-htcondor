@@ -226,10 +226,15 @@ type dbMirrorHealthStatus struct {
 	// the live queue.
 	JobQueueReported      bool   `json:"job_queue_reported"`
 	JobQueueStalenessSecs *int64 `json:"job_queue_staleness_seconds,omitempty"`
-	HistoryStalenessSecs  *int64 `json:"history_staleness_seconds,omitempty"`
-	HistoryGap            bool   `json:"history_gap"`
-	JobsToleranceSecs     int64  `json:"jobs_tolerance_seconds"`
-	HistoryToleranceSecs  int64  `json:"history_tolerance_seconds"`
+	// HistoryReported is the same distinction for history sync. Without
+	// it the staleness below was sent as a literal 0 for an ad that
+	// carried no history figures at all, which reads as a mirror that is
+	// perfectly caught up rather than one that said nothing.
+	HistoryReported      bool   `json:"history_reported"`
+	HistoryStalenessSecs *int64 `json:"history_staleness_seconds,omitempty"`
+	HistoryGap           bool   `json:"history_gap"`
+	JobsToleranceSecs    int64  `json:"jobs_tolerance_seconds"`
+	HistoryToleranceSecs int64  `json:"history_tolerance_seconds"`
 
 	LastError string `json:"last_error,omitempty"`
 	// DialError is why the last attempt to connect to the mirror failed,
@@ -309,8 +314,14 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 	out.Name, out.Address = h.Info.Name, h.Info.Address
 	out.JobQueueReported = h.Info.JobQueueReported
 	out.JobQueueCaughtUp = h.Info.JobQueueCaughtUp
+	out.HistoryReported = h.Info.HistoryReported
 	historyStale := dbmirror.HistoryStaleness(h.Info)
-	out.HistoryStalenessSecs = &historyStale
+	// Reported for the same reason as the live-queue figure below, and
+	// withheld on the same condition: a mirror that advertised no
+	// history sync is not zero seconds behind.
+	if h.Info.HistoryReported {
+		out.HistoryStalenessSecs = &historyStale
+	}
 	// Only report a live-queue staleness when the mirror actually
 	// advertised one; otherwise the number is a zero-value placeholder,
 	// not a measurement, and the panel would render "0s behind" for a
@@ -340,7 +351,7 @@ func mirrorHealth(l *dbmirror.Locator, now time.Time) *dbMirrorHealthStatus {
 	case !h.Info.JobQueueCaughtUp,
 		h.Info.JobQueueReported && dbmirror.JobQueueStaleness(h.Info) > dbmirror.JobsToleranceSecs,
 		h.Info.HistoryGap,
-		historyStale > dbmirror.HistoryToleranceSecs:
+		h.Info.HistoryReported && historyStale > dbmirror.HistoryToleranceSecs:
 		out.Status = "warning"
 	default:
 		out.Status = "ok"

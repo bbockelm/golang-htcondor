@@ -158,6 +158,13 @@ type Info struct {
 	EpochLagBytes    int64
 	EpochLagReported bool
 
+	// HistoryReported is whether the ad carried history sync information
+	// at all, on the same footing as JobQueueReported: without it,
+	// "no history sync" and "history sync with nothing to report" are
+	// both the zero value, and a panel renders the second when it means
+	// the first.
+	HistoryReported bool
+
 	// JobQueueReported is whether the ad carried live-queue sync
 	// information at all. A mirror that syncs only history advertises no
 	// JobQueueCaughtUp attribute, which parses to the zero value -- so
@@ -174,7 +181,7 @@ type Info struct {
 func mirrorAdAttrs() []string {
 	return []string{
 		"Name", "MyAddress", "TimeTravelEnabled",
-		"HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
+		"HistoryCaughtUp", "HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
 		"JobQueueCaughtUp", "JobQueueLastSyncTime", "JobQueueSecondsSinceSync", "JobQueueLagBytes",
 		"EpochCaughtUp", "EpochGapDetected", "EpochLastSyncTime", "EpochSecondsSinceSync", "EpochLagBytes",
 	}
@@ -189,6 +196,10 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	info.HistoryGap, _ = ad.EvaluateAttrBool("HistoryGapDetected")
 	info.HistoryLastSyncTime, _ = ad.EvaluateAttrInt("HistoryLastSyncTime")
 	info.SecondsSinceSync, _ = ad.EvaluateAttrInt("HistorySecondsSinceSync")
+	// htcondordb advertises CaughtUp for every sync source it runs, so
+	// its presence is what says this mirror syncs history at all.
+	_, historyCaughtUpOK := ad.EvaluateAttrBool("HistoryCaughtUp")
+	info.HistoryReported = historyCaughtUpOK
 	var caughtUpOK bool
 	info.JobQueueCaughtUp, caughtUpOK = ad.EvaluateAttrBool("JobQueueCaughtUp")
 	info.JobQueueLastSyncTime, _ = ad.EvaluateAttrInt("JobQueueLastSyncTime")
