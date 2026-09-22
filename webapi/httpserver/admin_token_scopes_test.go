@@ -263,3 +263,81 @@ func TestListingReportsWhatCanBeRestored(t *testing.T) {
 		t.Fatal("the listing returned no token for alice; this asserted nothing")
 	}
 }
+
+// stripAuthorizedScopes makes a grant look like one issued before the
+// authorized set was recorded -- which is every grant in existence at the
+// moment this shipped.
+func stripAuthorizedScopes(t *testing.T, f *reauthFixture, subject string) {
+	t.Helper()
+	db := f.server.oauth2Provider.GetStorage().GetDB()
+	for _, table := range []string{"oauth2_access_tokens", "oauth2_refresh_tokens"} {
+		if _, err := db.ExecContext(context.Background(),
+			"UPDATE "+table+" SET session_data = json_remove(session_data, '$.authorizedScopes') WHERE subject = ?", //nolint:gosec // G202: fixed literals
+			subject); err != nil {
+			t.Fatalf("stripping %s: %v", table, err)
+		}
+	}
+}
+
+// TestATokenIssuedBeforeThisFeatureCanStillBeRestored reproduces what an
+// operator hit on a live deployment: click a scope, it vanishes, and it
+// cannot be put back.
+//
+// Every grant that existed when this shipped has no recorded authorized
+// set, so the listing fell back to the scopes in force. Switching one off
+// shrank that set, the fallback then reported the smaller set as the whole
+// authorization, and the scope was gone for good -- the one-way door this
+// feature was meant to remove, for exactly the grants somebody already had.
+//
+// The existing round-trip test could not catch it: its fixture creates a
+// fresh grant, which does carry the authorized set.
+func TestATokenIssuedBeforeThisFeatureCanStillBeRestored(t *testing.T) {
+	f := newReauthFixture(t, Config{})
+	_, refreshToken, _ := f.grant(t, "alice", nil)
+	stripAuthorizedScopes(t, f, "alice")
+
+	sig := signatureFor(t, f, "oauth2_access_tokens", "alice")
+	status, body := setScopes(t, f, "access", sig[:8], []string{"openid", "offline_access", "mcp:read"})
+	if status != http.StatusOK {
+		t.Fatalf("switching a scope off failed with %d: %v", status, body)
+	}
+
+	// The listing must still offer it, or there is nothing left to click.
+	req := asAdmin(t, f)(http.MethodGet, "/api/v1/admin/oauth2/tokens", "")
+	rec := httptest.NewRecorder()
+	f.server.handleAdminListTokens(rec, req)
+	var listed struct {
+		Tokens []AdminToken `json:"tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tok := range listed.Tokens {
+		if tok.Subject != "alice" {
+			continue
+		}
+		found = true
+		if !containsString(tok.AuthorizedScopes, "mcp:write") {
+			t.Errorf("%s token: mcp:write is no longer offered, so it cannot be switched back on "+
+				"(authorized=%v, in force=%v)", tok.Kind, tok.AuthorizedScopes, tok.Scopes)
+		}
+	}
+	if !found {
+		t.Fatal("no token for alice; this asserted nothing")
+	}
+
+	// And it can actually be restored.
+	status, body = setScopes(t, f, "access", sig[:8],
+		[]string{"openid", "offline_access", "mcp:read", "mcp:write"})
+	if status != http.StatusOK {
+		t.Fatalf("restoring failed with %d: %v", status, body)
+	}
+	status, refreshed := f.refresh(t, refreshToken)
+	if status != http.StatusOK {
+		t.Fatalf("the grant broke: %d %v", status, refreshed)
+	}
+	if got, _ := refreshed["scope"].(string); !strings.Contains(got, "mcp:write") {
+		t.Errorf("the restored scope did not survive the refresh: %q", got)
+	}
+}
