@@ -116,6 +116,38 @@ var outputSchemas = map[string]map[string]interface{}{
 	}, "job_id"),
 
 	// --- submit / mutate ---------------------------------------------
+	// dag_status is open: DAGMan publishes a set of progress attributes
+	// that grows between releases, and a client that rejected a result
+	// carrying a new one would break on a pool upgrade.
+	"dag_status": obj(map[string]interface{}{
+		"cluster_id":        strSchema,
+		"job_status":        intSchema,
+		"hold_reason_code":  intSchema,
+		"dag_status":        intSchema,
+		"dag_nodestotal":    intSchema,
+		"dag_nodesdone":     intSchema,
+		"dag_nodesready":    intSchema,
+		"dag_nodesqueued":   intSchema,
+		"dag_nodesfailed":   intSchema,
+		"dag_nodesunready":  intSchema,
+		"dag_nodesfutile":   intSchema,
+		"dag_jobsidle":      intSchema,
+		"dag_jobsrunning":   intSchema,
+		"dag_jobsheld":      intSchema,
+		"dag_jobscompleted": intSchema,
+	}, "cluster_id"),
+	// submit_dag reports what it staged and what the caller still owes,
+	// so an agent can act on the outstanding work without re-reading prose.
+	"submit_dag": obj(map[string]interface{}{
+		"cluster_id":  intSchema,
+		"job_id":      strSchema,
+		"dag_name":    strSchema,
+		"input_files": arr(strSchema),
+		"notes":       arr(strSchema),
+		"deferred":    arr(strSchema),
+		"dry_run":     boolSchema,
+		"submit_file": strSchema,
+	}),
 	"submit_job": obj(map[string]interface{}{
 		"cluster_id":   intSchema,
 		"job_ids":      arr(strSchema),

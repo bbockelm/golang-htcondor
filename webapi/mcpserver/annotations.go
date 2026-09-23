@@ -96,12 +96,15 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"get_version":                   readOnlyAnn(false),
 	"whoami":                        readOnlyAnn(false),
 	"check_watches":                 readOnlyAnn(false),
+	"dag_status":                    readOnlyAnn(false),
 	"cancel_watch":                  readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;
 	// each call makes a new job, so it is not idempotent.
 	"submit_job": writeAnn(true, false),
+	// submit_dag creates a new workflow on every call, like submit_job.
+	"submit_dag": writeAnn(true, false),
 	// build_container submits a job like submit_job does. Not
 	// idempotent: calling it again runs another build and overwrites
 	// whatever is at the destination. Open-world because the image

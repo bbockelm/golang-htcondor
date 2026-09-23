@@ -108,6 +108,13 @@ type Handler struct {
 	// operator can write any submit-file directive.
 	interactiveExtraSubmit string
 
+	// dagmanPath is the access point's condor_dagman binary, for
+	// submit_dag (HTTP_API_DAGMAN_PATH).
+	dagmanPath string
+	// dagmanEnv is extra environment for DAGMan
+	// (HTTP_API_DAGMAN_ENVIRONMENT).
+	dagmanEnv map[string]string
+
 	// interactiveRequirements is an operator-supplied ClassAd expression
 	// ANDed into the interactive terminal job's Requirements, to keep
 	// those jobs off machines where attaching to them cannot work.
@@ -412,6 +419,14 @@ type HandlerConfig struct {
 	// disables the feature. Configurable via
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
+
+	// DagmanPath is where condor_dagman lives on the access point
+	// (HTTP_API_DAGMAN_PATH). Empty means the package default.
+	DagmanPath string
+
+	// DagmanEnvironment is extra environment for the DAGMan manager job
+	// (HTTP_API_DAGMAN_ENVIRONMENT).
+	DagmanEnvironment map[string]string
 
 	// InteractiveRequirements is an optional ClassAd expression ANDed into
 	// the interactive terminal job's Requirements.
@@ -997,6 +1012,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP,
 			"Interactive submit-file extras configured",
 			"bytes", len(cfg.InteractiveExtraSubmit))
+	}
+
+	if p := strings.TrimSpace(cfg.DagmanPath); p != "" {
+		h.dagmanPath = p
+		logger.Info(logging.DestinationHTTP, "condor_dagman path configured for submit_dag", "path", p)
+	}
+
+	if len(cfg.DagmanEnvironment) > 0 {
+		h.dagmanEnv = cfg.DagmanEnvironment
+		logger.Info(logging.DestinationHTTP, "extra DAGMan environment configured", "count", len(cfg.DagmanEnvironment))
 	}
 
 	// Wire up the userHeader trust policy. Three states:
@@ -1706,6 +1731,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// daemon behind CCB -- which tailing a running job through its
 		// starter needs just as much as a session's shell does.
 		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
+		DagmanPath:              h.dagmanPath,
+		DagmanEnvironment:       h.dagmanEnv,
 		InteractiveRequirements: h.interactiveRequirements,
 		Build:                   h.build,
 		CCB:                     h.ccbDialer,

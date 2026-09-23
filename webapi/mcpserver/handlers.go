@@ -790,6 +790,11 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// The two tools that reach into a live job.
 	tools = append(tools, tailTool(), execInJobTool())
 
+	// Workflows. A DAG is submitted and tracked differently enough from
+	// a job that it gets its own pair rather than more arguments on
+	// submit_job.
+	tools = append(tools, dagTools()...)
+
 	scopes := grantedScopesFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
@@ -868,6 +873,10 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	switch request.Name {
 	case "submit_job":
 		result, err = s.toolSubmitJob(ctx, request.Arguments)
+	case "submit_dag":
+		result, err = s.toolSubmitDag(ctx, request.Arguments)
+	case "dag_status":
+		result, err = s.toolDagStatus(ctx, request.Arguments)
 	case "query_jobs":
 		result, err = s.toolQueryJobs(ctx, request.Arguments)
 	case "get_job":

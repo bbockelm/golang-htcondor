@@ -460,6 +460,16 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"submit_job", map[string]interface{}{
 			"cluster_id": 0, "job_ids": []string(nil), "proc_count": 0,
 			"needs_upload": false, "warnings": []string(nil)}},
+		// submit_dag: a workflow with nothing referenced and nothing
+		// outstanding. Slices are nil rather than empty because that is
+		// what the analysis returns when it found nothing.
+		{"submit_dag", map[string]interface{}{
+			"cluster_id": 0, "job_id": "0.0", "dag_name": "workflow.dag",
+			"input_files": []string(nil), "notes": []string(nil), "deferred": []string(nil)}},
+		// dag_status before DAGMan has published anything: it has parsed
+		// nothing yet, so only the cluster id is known. This is the real
+		// shape of the first call after a submit.
+		{"dag_status", map[string]interface{}{"cluster_id": "1"}},
 		{"build_container", structuredOf(buildContainerResult(0, "", "", "", 0, 0, 0))},
 		{"remove_job", map[string]interface{}{"job_id": "1.0", "action": "remove", "success": true}},
 		{"hold_job", map[string]interface{}{"job_id": "1.0", "action": "hold", "success": true}},

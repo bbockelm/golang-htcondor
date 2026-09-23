@@ -138,6 +138,16 @@ type Config struct {
 	// HTTP_API_INTERACTIVE_EXTRA_SUBMIT.
 	InteractiveExtraSubmit string
 
+	// DagmanPath is where condor_dagman lives on the access point, for
+	// the submit_dag tool. See HandlerConfig.DagmanPath. Configurable
+	// via HTTP_API_DAGMAN_PATH.
+	DagmanPath string
+
+	// DagmanEnvironment is extra environment for the DAGMan manager job.
+	// See HandlerConfig.DagmanEnvironment. Configurable via
+	// HTTP_API_DAGMAN_ENVIRONMENT.
+	DagmanEnvironment map[string]string
+
 	// InteractiveRequirements is an optional ClassAd expression ANDed into
 	// the interactive terminal job's Requirements. See
 	// HandlerConfig.InteractiveRequirements.
@@ -380,6 +390,8 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
+		DagmanPath:                  cfg.DagmanPath,
+		DagmanEnvironment:           cfg.DagmanEnvironment,
 		InteractiveRequirements:     cfg.InteractiveRequirements,
 		Build:                       cfg.Build,
 		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,
