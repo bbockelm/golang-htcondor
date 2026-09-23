@@ -158,6 +158,14 @@ var readOnlyMCPTools = map[string]bool{
 	// get_version reports only this binary's build identity.
 	"get_version": true,
 	"whoami":      true,
+	// Retrieving a finished job's output reads its sandbox and changes
+	// nothing -- which is what annotations.go has always told clients.
+	// The three were missing here for the same reason dag_status was,
+	// and TestAnnotationsAgreeWithReadOnlyClassification now keeps the
+	// two lists from disagreeing again.
+	"get_job_stdout": true,
+	"get_job_stderr": true,
+	"get_job_output": true,
 }
 
 // handleListTools returns the list of available tools, filtered by
