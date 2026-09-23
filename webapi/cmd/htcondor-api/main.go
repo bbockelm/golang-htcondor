@@ -604,6 +604,41 @@ func loadInteractiveExtraSubmit(cfg *config.Config) string {
 	return ""
 }
 
+// loadDagmanEnvironment reads extra environment for the DAGMan manager
+// job (HTTP_API_DAGMAN_ENVIRONMENT), written as whitespace-separated
+// KEY=VALUE pairs.
+//
+// An access point that keeps its configuration somewhere other than the
+// default needs CONDOR_CONFIG here. Nothing else can supply it: the
+// schedd gives a scheduler-universe job only the environment its ad
+// carries, and condor_submit_dag's usual answer -- `getenv = CONDOR_CONFIG`
+// -- would capture this server's environment, which belongs to a
+// different machine entirely.
+//
+// A malformed entry is logged and skipped rather than fatal: losing one
+// variable is a smaller failure than an access point that will not start.
+func loadDagmanEnvironment(cfg *config.Config, logger *logging.Logger) map[string]string {
+	raw, ok := cfg.Get("HTTP_API_DAGMAN_ENVIRONMENT")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Fields(raw) {
+		k, v, found := strings.Cut(pair, "=")
+		if !found || k == "" {
+			logger.Warn(logging.DestinationHTTP,
+				"ignoring malformed HTTP_API_DAGMAN_ENVIRONMENT entry; expected KEY=VALUE",
+				"entry", pair)
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // loadBuildConfig reads the operator's container-build settings. A site
 // selects its build machines by its own convention -- an attribute a
 // schedd transform recognises, or an explicit Requirements expression --
@@ -1785,6 +1820,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
+		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
+		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
 		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
 		Build:                      loadBuildConfig(cfg, logger),
 		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),

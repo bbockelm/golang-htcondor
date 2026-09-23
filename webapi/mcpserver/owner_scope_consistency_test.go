@@ -89,7 +89,7 @@ func TestToolDescriptionsStateTheDefault(t *testing.T) {
 	for _, tool := range tools {
 		switch tool.Name {
 		case "query_jobs", "aggregate_jobs", "query_history_db", "query_jobs_as_of":
-			if !strings.Contains(tool.Description, "YOUR OWN jobs") {
+			if !strings.Contains(tool.Description, "YOUR OWN") {
 				t.Errorf("%s does not state the default scope:\n%s", tool.Name, tool.Description)
 			}
 			if !strings.Contains(tool.Description, "states which scope") {

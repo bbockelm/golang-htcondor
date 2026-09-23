@@ -403,3 +403,37 @@ queue param in (alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota, kapp
 		t.Errorf("Expected 10 proc ads, got %d", len(result.ProcAds))
 	}
 }
+
+// TestSubmitMacrosAreCaseInsensitive pins the fix for a macro that silently
+// expands to nothing.
+//
+// HTCondor macro names do not distinguish case: $(cluster), $(Cluster) and
+// $(CLUSTER) are one macro, and condor_submit_dag writes the lowercase
+// spelling into the submit file it generates. This library resolved the
+// submit-time macros through a raw map index, which is case-sensitive, so
+// $(cluster) expanded to the empty string while $(Cluster) expanded to the
+// cluster id. Nothing failed: the job was submitted with an argument, a file
+// name or an OtherJobRemoveRequirements that had a hole in it.
+func TestSubmitMacrosAreCaseInsensitive(t *testing.T) {
+	sf, err := ParseSubmitFile(strings.NewReader(
+		"universe = vanilla\n" +
+			"executable = /bin/true\n" +
+			`arguments = "$(cluster) $(process) $(Cluster) $(CLUSTER) $(ClusterId) $(clusterid)"` + "\n" +
+			"queue\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ad, err := sf.MakeJobAd(JobID{Cluster: 42, Proc: 7}, nil)
+	if err != nil {
+		t.Fatalf("MakeJobAd: %v", err)
+	}
+	args, ok := ad.EvaluateAttrString("Arguments")
+	if !ok {
+		if args, ok = ad.EvaluateAttrString("Args"); !ok {
+			t.Fatal("job ad has neither Arguments nor Args")
+		}
+	}
+	if want := "42 7 42 42 42 42"; args != want {
+		t.Errorf("arguments = %q, want %q: a macro spelled in the wrong case expanded to nothing", args, want)
+	}
+}

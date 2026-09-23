@@ -685,18 +685,47 @@ func processNewStyleArguments(s string) string {
 	return result.String()
 }
 
-// setEnvironment sets the environment attribute
+// setEnvironment sets the environment attribute.
+//
+// The submit-file value and the job-ad value are not the same string, and
+// storing one as the other loses the environment silently -- the job runs,
+// with variables named things like `"PATH`.
+//
+// HTCondor reads the ad with Env::MergeFrom (condor_utils/env.cpp): the
+// `Environment` attribute is parsed as V2 RAW, and `Env` as V1. Neither
+// accepts the surrounding double quotes that mark the V2 form in a SUBMIT
+// FILE. So `environment = "A=1 B=2"` has to reach the ad as `A=1 B=2`,
+// with the doubled `""` escapes collapsed; and the unquoted legacy form
+// belongs under `Env`, where the delimiter is auto-detected, rather than
+// under `Environment`, where a `;`-separated list would become one
+// variable whose value contains the rest.
 func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
 	env, ok := sf.submitCommand("environment")
 	if !ok {
 		env, ok = sf.submitCommand("env")
 	}
-
-	if ok && env != "" {
-		_ = ad.Set("Environment", env)
+	if !ok || env == "" {
+		return nil
 	}
 
+	if raw, isV2 := envV2Raw(env); isV2 {
+		_ = ad.Set("Environment", raw)
+		return nil
+	}
+	_ = ad.Set("Env", env)
 	return nil
+}
+
+// envV2Raw converts the submit file's V2 environment form -- the whole
+// list wrapped in double quotes, with `""` standing for a literal quote --
+// into the V2 raw form the job ad carries. Reports false for anything that
+// is not in the V2 form.
+func envV2Raw(env string) (string, bool) {
+	trimmed := strings.TrimSpace(env)
+	if len(trimmed) < 2 || !strings.HasPrefix(trimmed, `"`) || !strings.HasSuffix(trimmed, `"`) {
+		return "", false
+	}
+	return strings.ReplaceAll(trimmed[1:len(trimmed)-1], `""`, `"`), true
 }
 
 // unixNullFile is UNIX_NULL_FILE from the C++ submit code
@@ -1065,6 +1094,36 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, "("+req+")")
 	}
 
+	// A scheduler- or local-universe job is never matched to a machine.
+	// The schedd evaluates its Requirements against the SCHEDD's own ad
+	// (Scheduler::jobCanRun, condor_schedd.V6/schedd.cpp: EvalBool with the
+	// job as MY and scheduler.publish()'s ad as TARGET), and undefined is
+	// treated as false.
+	//
+	// That ad is not empty: Scheduler::publish assigns Arch, OpSys,
+	// OpSysVer, Memory, Disk and Cpus, so TARGET.Arch and friends would
+	// actually resolve. What it does NOT assign is HasFileTransfer -- and
+	// that is the clause that silently killed the job: the transfer clause
+	// evaluated to undefined, Requirements went false, and the job sat Idle
+	// forever with nothing in the log but "SchedUniverseJobsIdle = 1".
+	// FileSystemDomain and the GPU attributes are absent from the schedd ad
+	// too.
+	//
+	// condor_submit does not add the transfer clauses for these universes
+	// either. SetRequirements (condor_utils/submit_utils.cpp) has no early
+	// return; the HasFileTransfer / FileSystemDomain / per-file-encryption
+	// clauses are gated on mightTransfer(JobUniverse), which is true only
+	// for vanilla, mpi, parallel, java and vm.
+	//
+	// Dropping the rest of the machine clauses as well (Arch, OpSys,
+	// Memory, Disk) goes further than condor_submit does, and is safe: a
+	// job that is never matched has no use for them, and jobCanRun skips
+	// the Requirements check entirely when the attribute is absent. What
+	// the user wrote in `requirements` is kept, since that IS evaluated.
+	if sf.universe == UniverseScheduler || sf.universe == UniverseLocal {
+		return sf.finishRequirements(ad, reqParts)
+	}
+
 	// Add TARGET.OpSys check for non-grid jobs
 	if sf.universe != UniverseGrid {
 		// Target type requirement - must be a machine (not another job, etc.)
@@ -1138,6 +1197,13 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		}
 	}
 
+	return sf.finishRequirements(ad, reqParts)
+}
+
+// finishRequirements joins the collected clauses and sets Requirements.
+// Split out so the universes that take none of the machine-oriented
+// clauses share the one place that writes the attribute.
+func (sf *SubmitFile) finishRequirements(ad *classad.ClassAd, reqParts []string) error {
 	if len(reqParts) > 0 {
 		requirements := strings.Join(reqParts, " && ")
 		// Requirements is an expression, not a string - parse it
@@ -1148,6 +1214,35 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		_ = ad.Set("Requirements", reqExpr)
 	}
 
+	return nil
+}
+
+// setExprAttr stores a submit command whose value is a ClassAd expression,
+// not a string.
+//
+// The job policy evaluator does not coerce. user_job_policy.cpp
+// (AnalyzePolicy, ~lines 415-427) evaluates each policy expression and
+// requires the result to be a number; anything else -- including a string
+// that happens to read "ExitCode == 0" -- is not a boolean, so the
+// expression is treated as unsatisfied and evaluation falls through to the
+// default action. For on_exit_remove that default is REMOVE, which is
+// exactly backwards: a DAGMan job that should have been requeued after an
+// abnormal exit was removed from the queue instead. Storing these as
+// strings is therefore not a cosmetic difference; it inverts the policy.
+//
+// A blank value means the command was not really given (condor_submit sets
+// no attribute in that case), so nothing is stored. A value that does not
+// parse is an error rather than a silently stored string.
+func setExprAttr(ad *classad.ClassAd, attr, command, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	expr, err := classad.ParseExpr(value)
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", command, value, err)
+	}
+	_ = ad.Set(attr, expr)
 	return nil
 }
 
@@ -1317,9 +1412,13 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// retry_until - expression for when to stop retrying
+	// retry_until - expression (or integer exit code) for when to stop
+	// retrying. condor_submit stores it unevaluated, and the schedd's retry
+	// handling evaluates it, so it is an expression here too.
 	if retryUntil, ok := sf.submitCommand("retry_until"); ok {
-		_ = ad.Set("RetryUntil", retryUntil)
+		if err := setExprAttr(ad, "RetryUntil", "retry_until", retryUntil); err != nil {
+			return err
+		}
 	}
 
 	// success_exit_code - the exit status that counts as success.
@@ -1335,9 +1434,15 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// leave_in_queue - keep job in queue after completion
+	// leave_in_queue - keep job in queue after completion. Documented as a
+	// ClassAd boolean expression, and the schedd evaluates it against the
+	// job ad (e.g. `JobStatus == 4 && (time() - CompletionDate) < 864000`),
+	// so it cannot go through parseBool: every non-literal expression
+	// collapsed to false and the job left the queue immediately.
 	if leaveInQueue, ok := sf.submitCommand("leave_in_queue"); ok {
-		_ = ad.Set("LeaveJobInQueue", parseBool(leaveInQueue, false))
+		if err := setExprAttr(ad, "LeaveJobInQueue", "leave_in_queue", leaveInQueue); err != nil {
+			return err
+		}
 	}
 
 	// keep_claim_idle - keep claim after job completes
@@ -1907,7 +2012,9 @@ func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
 func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 	// periodic_hold - Expression to periodically hold job
 	if periodicHold, ok := sf.submitCommand("periodic_hold"); ok {
-		_ = ad.Set("PeriodicHold", periodicHold)
+		if err := setExprAttr(ad, "PeriodicHold", "periodic_hold", periodicHold); err != nil {
+			return err
+		}
 	}
 
 	// periodic_hold_reason - Reason string when periodic hold triggers
@@ -1924,17 +2031,23 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 
 	// periodic_release - Expression to periodically release held job
 	if periodicRelease, ok := sf.submitCommand("periodic_release"); ok {
-		_ = ad.Set("PeriodicRelease", periodicRelease)
+		if err := setExprAttr(ad, "PeriodicRelease", "periodic_release", periodicRelease); err != nil {
+			return err
+		}
 	}
 
 	// periodic_remove - Expression to periodically remove job
 	if periodicRemove, ok := sf.submitCommand("periodic_remove"); ok {
-		_ = ad.Set("PeriodicRemove", periodicRemove)
+		if err := setExprAttr(ad, "PeriodicRemove", "periodic_remove", periodicRemove); err != nil {
+			return err
+		}
 	}
 
 	// on_exit_hold - Hold job based on exit condition
 	if onExitHold, ok := sf.submitCommand("on_exit_hold"); ok {
-		_ = ad.Set("OnExitHold", onExitHold)
+		if err := setExprAttr(ad, "OnExitHold", "on_exit_hold", onExitHold); err != nil {
+			return err
+		}
 	}
 
 	// on_exit_hold_reason - Reason for on_exit hold
@@ -1951,9 +2064,18 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 
 	// on_exit_remove - Remove job based on exit condition
 	if onExitRemove, ok := sf.submitCommand("on_exit_remove"); ok {
-		_ = ad.Set("OnExitRemove", onExitRemove)
+		if err := setExprAttr(ad, "OnExitRemove", "on_exit_remove", onExitRemove); err != nil {
+			return err
+		}
 	}
 
+	return sf.setCronAndDeferral(ad)
+}
+
+// setCronAndDeferral sets the cron_* and deferral_* attributes. Split out of
+// setPeriodicExpressions only to keep that function's branch count in hand;
+// nothing here is policy.
+func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
 	// cron_* parameters for job deferral
 	if cronMinute, ok := sf.submitCommand("cron_minute"); ok {
 		_ = ad.Set("CronMinute", cronMinute)

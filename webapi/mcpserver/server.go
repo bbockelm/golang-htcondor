@@ -76,8 +76,26 @@ type Server struct {
 	prometheusExporter *metricsd.PrometheusExporter
 	delegated          bool
 	submitPolicy       submitpolicy.Policy
-	stdin              io.Reader
-	stdout             io.Writer
+	// dagmanPath is the access point's condor_dagman binary. See
+	// Config.DagmanPath.
+	dagmanPath string
+	// dagmanEnv is extra environment for the DAGMan manager job. See
+	// Config.DagmanEnvironment.
+	dagmanEnv map[string]string
+	// dagmanLayoutOnce memoises what the schedd's own configuration says
+	// about its DAGMan installation, so a workflow submission costs at
+	// most one extra DC_CONFIG_VAL round trip per process. It is never
+	// refreshed: an access point that moves its binaries is restarting
+	// its daemons anyway. See Server.dagmanLayout.
+	dagmanLayoutOnce   sync.Once
+	dagmanLayoutBin    string
+	dagmanLayoutNoPort bool
+	// dagmanLayoutFn replaces that discovery, so the precedence between
+	// configuration, discovery and the package default can be tested
+	// without a schedd. nil uses discoverDagmanLayout.
+	dagmanLayoutFn func(context.Context) (string, bool)
+	stdin          io.Reader
+	stdout         io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by the analyze_job_match tool. Same
 	// motivation as the httpserver Handler equivalent: keep the slot
@@ -251,6 +269,21 @@ type Config struct {
 	// transform then turns into the real slot requirements -- and no
 	// agent can be expected to know that convention.
 	Build BuildConfig
+
+	// DagmanPath is where condor_dagman lives on the access point
+	// (HTTP_API_DAGMAN_PATH). condor_submit_dag finds this with which()
+	// on the submitting machine, which is no help here: this server
+	// submits to a schedd it shares no filesystem with, so the path has
+	// to be configured. Empty uses dagman.DefaultDagmanPath.
+	DagmanPath string
+
+	// DagmanEnvironment is extra environment for the DAGMan manager job
+	// (HTTP_API_DAGMAN_ENVIRONMENT), as KEY=VALUE pairs. Needed by an
+	// access point whose configuration is not in the default place: the
+	// schedd hands a scheduler-universe job only what its ad carries, and
+	// getenv is no help because it would capture THIS server's
+	// environment rather than the access point's.
+	DagmanEnvironment map[string]string
 }
 
 // NewServer creates a new MCP server
@@ -338,6 +371,8 @@ func NewServer(cfg Config) (*Server, error) {
 		ccbDialer:      cfg.CCB,
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
+		dagmanPath:     cfg.DagmanPath,
+		dagmanEnv:      cfg.DagmanEnvironment,
 		dbMirror:       cfg.DBMirror,
 		jobWatch:       cfg.JobWatch,
 		jobWatchEval:   cfg.JobWatchEval,
