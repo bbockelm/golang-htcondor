@@ -17,7 +17,7 @@ func dagStatusText(t *testing.T, attrs map[string]interface{}) string {
 			t.Fatalf("setting %s: %v", k, err)
 		}
 	}
-	return renderDagStatus("7", OwnerScope{Owner: "alice"}, ad)
+	return renderDagStatus(7, OwnerScope{Owner: "alice"}, ad)
 }
 
 // TestDagStatusSeparatesSpoolingFromStuck is the distinction that decides

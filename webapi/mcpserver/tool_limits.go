@@ -50,3 +50,17 @@ func truncationNote(effective int, capped bool) string {
 		"narrow the query, or use aggregate_jobs to count without listing every row.",
 		effective, maxToolResults)
 }
+
+// maxDagSubmissionBytes caps one submit_dag call: the DAG description
+// plus every file staged with it.
+//
+// The same reasoning as maxToolResults, from the other direction. Every
+// byte here travelled through a model's context window to get here, and
+// then has to be spooled into a job ad's sandbox in one transfer. A
+// workflow's own description -- the graph, the node submit descriptions,
+// the PRE/POST scripts -- is kilobytes; anything approaching a megabyte
+// is data, and data belongs at the execute node, fetched from a URL by
+// the node job that needs it. Refusing is therefore not a limitation to
+// work around but a redirection to the path that scales, which is why
+// the error names it.
+const maxDagSubmissionBytes = 1 << 20

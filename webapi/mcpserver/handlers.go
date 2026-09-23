@@ -158,6 +158,10 @@ var readOnlyMCPTools = map[string]bool{
 	// get_version reports only this binary's build identity.
 	"get_version": true,
 	"whoami":      true,
+	// dag_status only queries the DAGMan job's ad. It was missing here
+	// while annotations.go declared it readOnly, so a read-scoped token
+	// was told the tool was safe and then refused when it called it.
+	"dag_status": true,
 	// Retrieving a finished job's output reads its sandbox and changes
 	// nothing -- which is what annotations.go has always told clients.
 	// The three were missing here for the same reason dag_status was,

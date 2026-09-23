@@ -469,7 +469,7 @@ func emptyCases(t *testing.T) []emptyCase {
 		// dag_status before DAGMan has published anything: it has parsed
 		// nothing yet, so only the cluster id is known. This is the real
 		// shape of the first call after a submit.
-		{"dag_status", map[string]interface{}{"cluster_id": "1"}},
+		{"dag_status", map[string]interface{}{"cluster_id": 1}},
 		{"build_container", structuredOf(buildContainerResult(0, "", "", "", 0, 0, 0))},
 		{"remove_job", map[string]interface{}{"job_id": "1.0", "action": "remove", "success": true}},
 		{"hold_job", map[string]interface{}{"job_id": "1.0", "action": "hold", "success": true}},

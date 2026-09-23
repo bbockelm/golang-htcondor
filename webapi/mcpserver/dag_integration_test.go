@@ -152,11 +152,19 @@ SUBMIT-DESCRIPTION step {
 JOB A step
 JOB B step
 JOB C final.sub
+SCRIPT PRE A setup
 VARS A NodeName="A"
 VARS B NodeName="B"
 PARENT A CHILD B
 PARENT B CHILD C
 `
+	// A PRE script with no extension. DAGMan execs it out of the spool
+	// directory, so it has to arrive with the execute bit set -- and the
+	// rule that set it used to be "the name ends in .sh", which is the
+	// one thing this file's name does not do. Staged 0644 it fails with
+	// EACCES, reported as a node failure with no stated cause.
+	preScript := "#!/bin/sh\nexit 0\n"
+
 	finalSub := `
 executable = /bin/sh
 transfer_executable = false
@@ -177,7 +185,7 @@ queue
 		"dag":        dag,
 		"dag_name":   "diamond.dag",
 		"batch_name": "mcp-dag-itest",
-		"files":      map[string]interface{}{"final.sub": finalSub},
+		"files":      map[string]interface{}{"final.sub": finalSub, "setup": preScript},
 	})
 	if isErr {
 		t.Fatalf("submit_dag failed: %s", text)
@@ -204,7 +212,7 @@ queue
 	for _, f := range files {
 		got = append(got, fmt.Sprint(f))
 	}
-	for _, want := range []string{"diamond.dag", "final.sub"} {
+	for _, want := range []string{"diamond.dag", "final.sub", "setup"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("input_files = %v, missing %s", got, want)
 		}
@@ -247,7 +255,26 @@ queue
 
 	// And it has to finish: the DAGMan job leaves the queue when the
 	// workflow completes.
-	waitForDagComplete(t, ctx, schedd, cluster, 8*time.Minute)
+	//
+	// The node jobs are watched while it runs rather than afterwards,
+	// because a node job leaves the queue the moment it finishes. What
+	// is being checked is the link between them and the manager --
+	// DAGManJobId -- which is what dag_status's node listing reads and
+	// what OtherJobRemoveRequirements matches on, so nothing else in
+	// this test would notice if DAGMan stopped setting it.
+	sawNodeJobs := 0
+	waitForDagComplete(t, ctx, schedd, cluster, 8*time.Minute, func() {
+		ads, err := schedd.Query(ctx, fmt.Sprintf("DAGManJobId == %d", cluster),
+			[]string{"ClusterId", "DAGNodeName"})
+		if err == nil && len(ads) > sawNodeJobs {
+			sawNodeJobs = len(ads)
+		}
+	})
+	if sawNodeJobs == 0 {
+		t.Error("no node job ever carried DAGManJobId == the manager's cluster; the workflow's jobs are " +
+			"not attributable to it, which is what dag_status's node listing and the remove-the-whole-" +
+			"workflow rule both depend on")
+	}
 
 	// The proof that the workflow really ran is in its spool directory:
 	// each node's output came back there. If DAGMan had started in the
@@ -265,6 +292,117 @@ queue
 				node, keysOf(sandbox))
 		}
 	}
+
+	// Second phase, on the same harness: removing the workflow has to
+	// remove the work.
+	//
+	// The manager job carries OtherJobRemoveRequirements = "DAGManJobId
+	// =?= $(cluster)", and $(cluster) is a submit-file macro -- if it
+	// expanded to nothing, or to the wrong thing, the expression would
+	// still be accepted and every node job would be left running after
+	// the workflow it belongs to was gone. Nothing observable at submit
+	// time distinguishes the two, which is why this was broken without
+	// anyone noticing: the only symptom is orphaned jobs on someone
+	// else's access point.
+	removeTakesTheNodeJobsWithIt(t, ctx, server, schedd)
+}
+
+// removeTakesTheNodeJobsWithIt submits a workflow whose one node sleeps,
+// waits for that node to be RUNNING, removes the manager job through the
+// tool a caller would use, and checks the node job goes with it.
+func removeTakesTheNodeJobsWithIt(t *testing.T, ctx context.Context, server *Server, schedd *htcondor.Schedd) {
+	t.Helper()
+	dag := `
+JOB sleeper {
+    executable = /bin/sleep
+    transfer_executable = false
+    should_transfer_files = YES
+    when_to_transfer_output = ON_EXIT
+    arguments = "600"
+    output = sleeper.out
+    error  = sleeper.err
+    log    = sleeper.log
+    request_cpus = 1
+    request_memory = 64
+    request_disk = 64
+}
+`
+	text, meta, isErr := callToolOverMCP(t, server, ctx, "submit_dag", map[string]interface{}{
+		"dag":        dag,
+		"dag_name":   "sleeper.dag",
+		"batch_name": "mcp-dag-remove-itest",
+	})
+	if isErr {
+		t.Fatalf("submit_dag failed: %s", text)
+	}
+	clusterFloat, ok := meta["cluster_id"].(float64)
+	if !ok {
+		t.Fatalf("submit_dag returned no cluster_id: %v", meta)
+	}
+	cluster := int(clusterFloat)
+	defer func() {
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer rmCancel()
+		_, _ = schedd.RemoveJobs(rmCtx, fmt.Sprintf("ClusterId == %d || DAGManJobId == %d", cluster, cluster),
+			"dag remove test cleanup")
+	}()
+
+	// Wait for the node job to be RUNNING. A node job that is merely
+	// submitted proves nothing: the interesting case is the one where
+	// work is in flight on an execute machine.
+	nodeConstraint := fmt.Sprintf("DAGManJobId == %d", cluster)
+	deadline := time.Now().Add(3 * time.Minute)
+	running := false
+	for time.Now().Before(deadline) && !running {
+		ads, err := schedd.Query(ctx, nodeConstraint, []string{"ClusterId", "ProcId", "JobStatus"})
+		if err != nil {
+			t.Fatalf("querying the node job: %v", err)
+		}
+		for _, ad := range ads {
+			if st, _ := ad.EvaluateAttrInt("JobStatus"); st == 2 {
+				running = true
+			}
+		}
+		if !running {
+			time.Sleep(3 * time.Second)
+		}
+	}
+	if !running {
+		t.Fatal("the sleeping node job never started; there is nothing for the removal to have to clean up")
+	}
+
+	text, _, isErr = callToolOverMCP(t, server, ctx, "remove_job", map[string]interface{}{
+		"job_id": fmt.Sprintf("%d.0", cluster),
+		"reason": "dag removal test",
+	})
+	if isErr {
+		t.Fatalf("remove_job on the DAGMan job failed: %s", text)
+	}
+
+	// The node job has to leave the queue on its own. The schedd acts on
+	// OtherJobRemoveRequirements when the manager job is removed, so a
+	// node job still in the queue a minute later is a workflow whose
+	// removal did not remove the work.
+	deadline = time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		ads, err := schedd.Query(ctx, nodeConstraint, []string{"ClusterId", "ProcId", "JobStatus"})
+		if err != nil {
+			t.Fatalf("querying the node job: %v", err)
+		}
+		left := true
+		for _, ad := range ads {
+			if st, _ := ad.EvaluateAttrInt("JobStatus"); st != 3 {
+				left = false
+			}
+		}
+		if left {
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	ads, _ := schedd.Query(ctx, nodeConstraint, []string{"ClusterId", "ProcId", "JobStatus"})
+	t.Errorf("removing the DAGMan job left %d node job(s) in the queue: the workflow is gone and its work "+
+		"is still running (OtherJobRemoveRequirements did not match)", len(ads))
 }
 
 // TestMCPSubmitDagRefusesAnUnstartableWorkflowIntegration checks the
@@ -382,11 +520,17 @@ func waitForDagProgress(t *testing.T, ctx context.Context, server *Server, clust
 // finishes, which is what makes its spool directory still there to
 // retrieve. A test that waited for the job to vanish would time out on a
 // workflow that succeeded.
-func waitForDagComplete(t *testing.T, ctx context.Context, schedd *htcondor.Schedd, cluster int, timeout time.Duration) {
+// onPoll runs once per polling round, for a caller that needs to observe
+// something that only exists WHILE the workflow runs.
+func waitForDagComplete(t *testing.T, ctx context.Context, schedd *htcondor.Schedd, cluster int,
+	timeout time.Duration, onPoll func()) {
 	t.Helper()
 	constraint := fmt.Sprintf("ClusterId == %d", cluster)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if onPoll != nil {
+			onPoll()
+		}
 		ads, err := schedd.Query(ctx, constraint,
 			[]string{"ClusterId", "JobStatus", "HoldReason", "HoldReasonCode", "ExitCode"})
 		if err != nil {

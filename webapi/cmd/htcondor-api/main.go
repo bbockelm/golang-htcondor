@@ -597,6 +597,13 @@ func loadTemplateGlobalPath(cfg *config.Config) string {
 // HandlerConfig.InteractiveExtraSubmit for the trust model. Restart
 // the API server to pick up changes (the value is read once at
 // startup).
+func loadInteractiveExtraSubmit(cfg *config.Config) string {
+	if v, ok := cfg.Get("HTTP_API_INTERACTIVE_EXTRA_SUBMIT"); ok {
+		return v
+	}
+	return ""
+}
+
 // loadDagmanEnvironment reads extra environment for the DAGMan manager
 // job (HTTP_API_DAGMAN_ENVIRONMENT), written as whitespace-separated
 // KEY=VALUE pairs.
@@ -630,13 +637,6 @@ func loadDagmanEnvironment(cfg *config.Config, logger *logging.Logger) map[strin
 		return nil
 	}
 	return out
-}
-
-func loadInteractiveExtraSubmit(cfg *config.Config) string {
-	if v, ok := cfg.Get("HTTP_API_INTERACTIVE_EXTRA_SUBMIT"); ok {
-		return v
-	}
-	return ""
 }
 
 // loadBuildConfig reads the operator's container-build settings. A site

@@ -82,8 +82,20 @@ type Server struct {
 	// dagmanEnv is extra environment for the DAGMan manager job. See
 	// Config.DagmanEnvironment.
 	dagmanEnv map[string]string
-	stdin     io.Reader
-	stdout    io.Writer
+	// dagmanLayoutOnce memoises what the schedd's own configuration says
+	// about its DAGMan installation, so a workflow submission costs at
+	// most one extra DC_CONFIG_VAL round trip per process. It is never
+	// refreshed: an access point that moves its binaries is restarting
+	// its daemons anyway. See Server.dagmanLayout.
+	dagmanLayoutOnce   sync.Once
+	dagmanLayoutBin    string
+	dagmanLayoutNoPort bool
+	// dagmanLayoutFn replaces that discovery, so the precedence between
+	// configuration, discovery and the package default can be tested
+	// without a schedd. nil uses discoverDagmanLayout.
+	dagmanLayoutFn func(context.Context) (string, bool)
+	stdin          io.Reader
+	stdout         io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by the analyze_job_match tool. Same
 	// motivation as the httpserver Handler equivalent: keep the slot

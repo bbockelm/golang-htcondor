@@ -120,7 +120,9 @@ var outputSchemas = map[string]map[string]interface{}{
 	// that grows between releases, and a client that rejected a result
 	// carrying a new one would break on a pool upgrade.
 	"dag_status": obj(map[string]interface{}{
-		"cluster_id":        strSchema,
+		// An integer, the same type submit_dag returns, so a caller can
+		// hand one tool's answer straight to the other.
+		"cluster_id":        intSchema,
 		"job_status":        intSchema,
 		"hold_reason_code":  intSchema,
 		"dag_status":        intSchema,
@@ -147,6 +149,10 @@ var outputSchemas = map[string]map[string]interface{}{
 		"deferred":    arr(strSchema),
 		"dry_run":     boolSchema,
 		"submit_file": strSchema,
+		// A dry run reports a workflow that cannot start rather than
+		// refusing it, so it needs somewhere to say so.
+		"fatal":  boolSchema,
+		"errors": arr(strSchema),
 	}),
 	"submit_job": obj(map[string]interface{}{
 		"cluster_id":   intSchema,
