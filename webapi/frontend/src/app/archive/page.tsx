@@ -19,6 +19,13 @@
 //     archived jobs without the page blowing up.
 //   - The chat panel is wired up the same way as /jobs, with a
 //     dedicated server-side query_jobs_archive tool.
+//
+// Filtering works on two levels, and the difference matters here more
+// than it does on /jobs: text, status and user narrow the records this
+// page has already paged in, while a ClassAd expression goes to the
+// schedd and searches all of history. History is far too big to load,
+// so the expression is the only one that can find something nobody has
+// scrolled to.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
@@ -26,11 +33,26 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
+  ApiError,
   type ClassAd,
   type HistoryListResponse,
 } from '@/lib/api';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
+import { FilterControls, type FilterMode } from '@/components/FilterControls';
+import { StatusStrip } from '@/components/StatusStrip';
+import {
+  archiveStatus,
+  archiveStatusCls,
+  countArchiveStatuses,
+  filterAdsByArchiveStatus,
+  filterAdsByOwner,
+  filterAdsByText,
+  ownersOf,
+  ARCHIVE_STATUS_LABEL,
+  ARCHIVE_STATUS_ORDER,
+  type ArchiveStatus,
+} from '@/lib/archive';
 
 // Default projection for the listing. Slightly wider than the server
 // default so the UI can show submission/completion times and exit
@@ -58,6 +80,21 @@ interface PageData {
 
 export default function ArchivePage() {
   const [filter, setFilter] = useState('');
+  const [mode, setMode] = useState<FilterMode>('text');
+  const [exprInput, setExprInput] = useState('');
+  const [appliedExpr, setAppliedExpr] = useState('');
+  const [statuses, setStatuses] = useState<Set<ArchiveStatus>>(new Set());
+  const [owner, setOwner] = useState('');
+
+  const toggleStatus = useCallback((key: ArchiveStatus) => {
+    setStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  const clearStatuses = useCallback(() => setStatuses(new Set()), []);
 
   // Same Mine/Everyone selector as the dashboard and /jobs, sharing one
   // stored choice (lib/scope.ts). Only admins see it: the server
@@ -76,8 +113,18 @@ export default function ArchivePage() {
   // jobs are gone from the queue, so the archive is the only page that
   // can answer.
   const searchParams = useSearchParams();
-  const constraint = searchParams.get('constraint') ?? undefined;
+  const urlConstraint = searchParams.get('constraint') ?? undefined;
   const why = searchParams.get('why') ?? undefined;
+
+  // The drill-in constraint and a user expression both narrow; ANDing
+  // them keeps the banner's promise true while the user refines inside
+  // it.
+  const exprConstraint = mode === 'expr' ? appliedExpr.trim() : '';
+  const constraint =
+    [urlConstraint, exprConstraint]
+      .filter((c): c is string => !!c)
+      .map((c) => `(${c})`)
+      .join(' && ') || undefined;
 
   const {
     data,
@@ -126,7 +173,32 @@ export default function ArchivePage() {
     () => (data?.pages ?? []).flatMap((p) => p.ads),
     [data],
   );
-  const filteredAds = useMemo(() => filterAds(ads, filter), [ads, filter]);
+  // Counts for the strip come from everything loaded, before the
+  // status filter: while looking at the failures you still want to see
+  // how many completed, and the chip is how you get back to them.
+  const statusCounts = useMemo(() => countArchiveStatuses(ads), [ads]);
+  const owners = useMemo(() => ownersOf(ads, owner), [ads, owner]);
+
+  const textFilter = mode === 'text' ? filter : '';
+  const filteredAds = useMemo(
+    () =>
+      filterAdsByText(
+        filterAdsByOwner(filterAdsByArchiveStatus(ads, statuses), owner),
+        textFilter,
+      ),
+    [ads, statuses, owner, textFilter],
+  );
+
+  // Whether anything is hiding loaded records, which changes what the
+  // count under the table means.
+  const narrowed = !!textFilter || statuses.size > 0 || !!owner;
+
+  // A rejected expression is a typo, not an outage; reported next to
+  // the input rather than as "could not load archive".
+  const exprError =
+    mode === 'expr' && appliedExpr && error instanceof ApiError
+      ? error.message
+      : null;
 
   // Chat hooks — same shape as /jobs.
   const chatHooks = useMemo<
@@ -136,6 +208,10 @@ export default function ArchivePage() {
       set_filter: (input) => {
         const q = typeof input.query === 'string' ? input.query : '';
         setFilter(q);
+        // The text box is only applied in text mode, so a set_filter
+        // that landed while the user was writing an expression would
+        // otherwise do nothing visible.
+        setMode('text');
         return { ok: true, applied_query: q };
       },
     }),
@@ -211,7 +287,7 @@ export default function ArchivePage() {
         onServerToolComplete={handleServerToolComplete}
       />
 
-      {constraint && (
+      {urlConstraint && (
         <div className="mb-3 flex items-baseline gap-3 rounded border border-brand-200 bg-brand-50 px-3 py-2 text-sm">
           <span className="text-gray-700">Showing {why ?? 'a filtered set of jobs'}</span>
           <Link href="/archive" className="ml-auto text-xs text-brand-700 underline">
@@ -220,35 +296,102 @@ export default function ArchivePage() {
         </div>
       )}
 
-      <FilterBar value={filter} onChange={setFilter} />
+      <FilterControls
+        mode={mode}
+        input={mode === 'text' ? filter : exprInput}
+        onMode={setMode}
+        onInput={mode === 'text' ? setFilter : setExprInput}
+        onApplyExpr={() => setAppliedExpr(exprInput.trim())}
+        textPlaceholder="Filter by id, owner, batch name, command, or status…"
+        exprPlaceholder={'ClassAd, e.g. ExitCode != 0 && QDate > 1757000000'}
+      />
+      {exprError && (
+        <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {exprError}
+        </p>
+      )}
+
+      {ads.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          <StatusStrip
+            chips={ARCHIVE_STATUS_ORDER.filter(
+              (k) => (statusCounts[k] ?? 0) > 0 || statuses.has(k),
+            ).map((key) => ({
+              key,
+              label: ARCHIVE_STATUS_LABEL[key],
+              cls: archiveStatusCls(key),
+              count: statusCounts[key] ?? 0,
+            }))}
+            selected={statuses}
+            onToggle={toggleStatus}
+            onClear={clearStatuses}
+            total={ads.length}
+            label="Filter by outcome"
+            noun="records"
+          />
+          {/* Only worth a control when there is more than one user to
+              choose between — in the Mine view there never is. */}
+          {(owners.length > 1 || owner) && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-500">
+              User:
+              <select
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+                className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-800"
+              >
+                <option value="">All users</option>
+                {owners.map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
 
       {isLoading && <p className="text-gray-400">Loading history…</p>}
 
-      {error && (
+      {error && !exprError && (
         <p className="text-red-600 text-sm">
           Could not load archive: {error.message}
         </p>
       )}
 
-      {!isLoading && ads.length === 0 && (
+      {!isLoading && !error && ads.length === 0 && (
         <p className="text-gray-500 text-sm">
-          No history records. New jobs land here once they complete or
-          are removed.
+          {constraint
+            ? 'No history records match this query.'
+            : 'No history records. New jobs land here once they complete or are removed.'}
         </p>
       )}
 
       {ads.length > 0 && (
         <>
-          <ArchiveTable ads={filteredAds} />
+          <ArchiveTable ads={filteredAds} onOwner={setOwner} />
           <div className="flex items-center justify-between gap-3 text-xs text-gray-500">
             <span>
-              Showing {filteredAds.length}
-              {filter ? ` of ${ads.length}` : ''} record
-              {filteredAds.length === 1 ? '' : 's'}
+              Showing {filteredAds.length.toLocaleString()}
+              {narrowed ? ` of ${ads.length.toLocaleString()}` : ''} record
+              {/* The noun agrees with the number it follows: "1 of 3
+                  records", not "1 of 3 record". */}
+              {(narrowed ? ads.length : filteredAds.length) === 1 ? '' : 's'}
+              {narrowed && ' loaded so far'}
               {!hasNextPage && ' (end of history)'}
             </span>
             {isFetchingNextPage && <span>Loading more…</span>}
           </div>
+          {/* The distinction that matters on this page: these three
+              filters only see what has been paged in. Someone hunting a
+              failure from last month will not find it by scrolling. */}
+          {narrowed && hasNextPage && (
+            <p className="text-xs text-gray-400">
+              Text, outcome and user filters apply to the records loaded so
+              far; scroll to load more, or switch to a ClassAd expression to
+              search all of history.
+            </p>
+          )}
           {/* Infinite-scroll sentinel. The IntersectionObserver in
               the effect above watches this element; when it scrolls
               into view (within 200px of viewport bottom) the next
@@ -264,67 +407,13 @@ export default function ArchivePage() {
   );
 }
 
-// FilterBar — substring filter input. Mirrors the affordance on
-// /jobs so users see the same shape across the two pages.
-function FilterBar({
-  value,
-  onChange,
+function ArchiveTable({
+  ads,
+  onOwner,
 }: {
-  value: string;
-  onChange: (v: string) => void;
+  ads: ClassAd[];
+  onOwner: (owner: string) => void;
 }) {
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Filter by id, owner, batch name, command, or status…"
-        className="min-w-0 flex-1 max-w-md rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
-      />
-      {value && (
-        <button
-          type="button"
-          onClick={() => onChange('')}
-          className="text-xs text-gray-500 hover:text-gray-800"
-        >
-          clear
-        </button>
-      )}
-    </div>
-  );
-}
-
-// filterAds runs a multi-token AND substring match against a flat
-// haystack built from each ad's user-visible fields. Mirrors the
-// /jobs filter behavior so the user sees consistent semantics.
-//
-// Note: the filter is CLIENT-side, applied to the records we've
-// already fetched. Records still on disk in the schedd's history
-// but never paged in won't match — the user has to scroll to fetch
-// more, or use the chat assistant for server-side constraint
-// queries.
-function filterAds(ads: ClassAd[], query: string): ClassAd[] {
-  const q = query.trim().toLowerCase();
-  if (q === '') return ads;
-  const tokens = q.split(/\s+/);
-  return ads.filter((ad) => {
-    const haystack = [
-      String(num(ad.ClusterId) ?? ''),
-      String(num(ad.ProcId) ?? ''),
-      str(ad.Owner) ?? '',
-      str(ad.JobBatchName) ?? '',
-      str(ad.Cmd) ?? '',
-      str(ad.Args) ?? '',
-      historyStatus(ad).label.toLowerCase(),
-    ]
-      .join(' ')
-      .toLowerCase();
-    return tokens.every((t) => haystack.includes(t));
-  });
-}
-
-function ArchiveTable({ ads }: { ads: ClassAd[] }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
       <table className="min-w-full text-sm">
@@ -351,7 +440,9 @@ function ArchiveTable({ ads }: { ads: ClassAd[] }) {
               </td>
             </tr>
           ) : (
-            ads.map((ad) => <ArchiveRow key={archiveKey(ad)} ad={ad} />)
+            ads.map((ad) => (
+              <ArchiveRow key={archiveKey(ad)} ad={ad} onOwner={onOwner} />
+            ))
           )}
         </tbody>
       </table>
@@ -359,12 +450,18 @@ function ArchiveTable({ ads }: { ads: ClassAd[] }) {
   );
 }
 
-function ArchiveRow({ ad }: { ad: ClassAd }) {
+function ArchiveRow({
+  ad,
+  onOwner,
+}: {
+  ad: ClassAd;
+  onOwner: (owner: string) => void;
+}) {
   const router = useRouter();
   const cluster = num(ad.ClusterId);
   const proc = num(ad.ProcId);
   const id = `${cluster ?? '?'}.${proc ?? 0}`;
-  const status = historyStatus(ad);
+  const status = archiveStatus(ad);
   const owner = str(ad.Owner);
   const batch = str(ad.JobBatchName);
   const qdate = num(ad.QDate);
@@ -407,8 +504,24 @@ function ArchiveRow({ ad }: { ad: ClassAd }) {
           {status.label}
         </span>
       </td>
-      <td className="px-3 py-2 text-gray-700 text-xs whitespace-nowrap">
-        {owner ?? '—'}
+      <td className="px-3 py-2 text-xs whitespace-nowrap">
+        {owner ? (
+          <button
+            type="button"
+            // Narrows in place rather than opening the user's page:
+            // /users/<owner> is the live queue, and this row is history.
+            onClick={(e) => {
+              e.stopPropagation();
+              onOwner(owner);
+            }}
+            title={`Show only ${owner}'s records`}
+            className="rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-800 hover:bg-indigo-200"
+          >
+            {owner}
+          </button>
+        ) : (
+          <span className="text-gray-700">—</span>
+        )}
       </td>
       <td className="px-3 py-2 text-gray-700 text-xs">{batch ?? '—'}</td>
       <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
@@ -432,38 +545,6 @@ function ArchiveRow({ ad }: { ad: ClassAd }) {
       </td>
     </tr>
   );
-}
-
-interface HistoryStatus {
-  label: string;
-  cls: string;
-}
-
-// historyStatus collapses the (JobStatus, ExitCode, ExitBySignal)
-// tuple of a history entry into a single user-readable label.
-// History only ever shows terminal-state jobs (Completed=4 or
-// Removed=3), so this is much narrower than displayJobStatus.
-function historyStatus(ad: ClassAd): HistoryStatus {
-  const status = num(ad.JobStatus);
-  const exitCode = num(ad.ExitCode);
-  const bySignal =
-    ad.ExitBySignal === true || ad.ExitBySignal === 'true';
-  if (status === 3) {
-    return { label: 'Removed', cls: 'bg-rose-100 text-rose-800' };
-  }
-  if (status === 4) {
-    if (bySignal) {
-      return { label: 'Killed', cls: 'bg-amber-100 text-amber-800' };
-    }
-    if (exitCode !== undefined && exitCode !== 0) {
-      return {
-        label: `Failed (${exitCode})`,
-        cls: 'bg-rose-100 text-rose-800',
-      };
-    }
-    return { label: 'Completed', cls: 'bg-emerald-100 text-emerald-800' };
-  }
-  return { label: 'Unknown', cls: 'bg-gray-100 text-gray-700' };
 }
 
 // humanRuntime formats a wall-clock-seconds count as a short

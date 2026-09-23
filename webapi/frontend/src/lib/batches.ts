@@ -301,3 +301,158 @@ export function str(v: unknown): string | undefined {
   if (typeof v === 'string') return undefined;
   return String(v);
 }
+
+// --- Per-batch usage, for the panel inside an expanded batch row ---
+
+// What the expanded row asks for on demand. Deliberately not part of
+// BATCH_PROJECTION: these attributes are worth a column of bytes per job
+// on a queue of 30k, and they are only ever read for the one batch
+// somebody opened.
+export const BATCH_USAGE_PROJECTION =
+  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CPUsUsage,MemoryUsage,ResidentSetSize,DiskUsage';
+
+// How a row's numbers should be read. The lib keeps HTCondor's own
+// units -- MiB for memory, KiB for disk -- and the panel formats them.
+export type ResourceUnit = 'count' | 'mib' | 'kib';
+
+export interface BatchUsageRow {
+  label: string;
+  unit: ResourceUnit;
+  // Requested by the jobs that are running: what the pool handed this
+  // batch. undefined when no running job carried a literal request.
+  allocated?: number;
+  // Measured by the execute nodes. undefined where nothing reports it
+  // (GPUs), or where no running job has reported yet.
+  used?: number;
+  // Requested by the idle jobs: what the batch is still waiting for.
+  waiting?: number;
+}
+
+export interface BatchUsage {
+  running: number;
+  idle: number;
+  // Running jobs that have reported any measurement at all. A batch
+  // that just started matches "running > 0, reporting == 0", which is
+  // why the panel can say "not reported yet" instead of showing zero
+  // usage as though the jobs were idling.
+  reporting: number;
+  rows: BatchUsageRow[];
+}
+
+// summarizeBatchUsage totals one batch's requests against what the
+// execute nodes measured.
+//
+// Requests are split by state on purpose. Comparing usage against the
+// WHOLE batch's request would make a batch with two running jobs and a
+// hundred queued ones look like it was wasting 98% of its allocation,
+// when the pool has handed it nothing for those hundred.
+//
+// Usage attributes only exist for jobs that are running, and only after
+// the starter's first report -- so every one of them is optional, and a
+// missing value stays missing rather than being counted as a zero.
+export function summarizeBatchUsage(ads: ClassAd[]): BatchUsage {
+  const alloc = { cpus: 0, mem: 0, disk: 0, gpus: 0 };
+  const wait = { cpus: 0, mem: 0, disk: 0, gpus: 0 };
+  const used = { cpus: 0, mem: 0, disk: 0 };
+  const seen = { alloc: false, wait: false, cpus: false, mem: false, disk: false };
+  let running = 0;
+  let idle = 0;
+  let reporting = 0;
+
+  for (const j of ads) {
+    const display = displayJobStatus({
+      status: j.JobStatus as number | string | null | undefined,
+      holdReasonCode: j.HoldReasonCode as number | string | null | undefined,
+    });
+    // Output transfer and suspension still hold the slot, so they are
+    // counted as running here just as they are in the queue summary.
+    const isRunning =
+      display.key === 'running' ||
+      display.key === 'transferring' ||
+      display.key === 'suspended';
+    const isIdle = display.key === 'idle';
+    if (!isRunning && !isIdle) continue;
+
+    const req = {
+      cpus: num(j.RequestCpus),
+      mem: num(j.RequestMemory),
+      disk: num(j.RequestDisk),
+      gpus: num(j.RequestGpus),
+    };
+    const into = isRunning ? alloc : wait;
+    for (const k of ['cpus', 'mem', 'disk', 'gpus'] as const) {
+      const v = req[k];
+      if (v === undefined) continue;
+      into[k] += v;
+      if (isRunning) seen.alloc = true;
+      else seen.wait = true;
+    }
+
+    if (isRunning) {
+      running++;
+      const cpus = num(j.CPUsUsage);
+      // MemoryUsage is an expression in the job ad more often than not,
+      // so ResidentSetSize -- which the starter writes as a literal in
+      // KiB -- is the one that can be trusted to be a number.
+      const rss = num(j.ResidentSetSize);
+      const mem = num(j.MemoryUsage) ?? (rss !== undefined ? rss / 1024 : undefined);
+      const disk = num(j.DiskUsage);
+      let any = false;
+      if (cpus !== undefined) {
+        used.cpus += cpus;
+        seen.cpus = true;
+        any = true;
+      }
+      if (mem !== undefined) {
+        used.mem += mem;
+        seen.mem = true;
+        any = true;
+      }
+      if (disk !== undefined) {
+        used.disk += disk;
+        seen.disk = true;
+        any = true;
+      }
+      if (any) reporting++;
+    } else {
+      idle++;
+    }
+  }
+
+  const rows: BatchUsageRow[] = [
+    {
+      label: 'CPUs',
+      unit: 'count',
+      allocated: seen.alloc ? alloc.cpus : undefined,
+      used: seen.cpus ? used.cpus : undefined,
+      waiting: seen.wait ? wait.cpus : undefined,
+    },
+    {
+      label: 'Memory',
+      unit: 'mib',
+      allocated: seen.alloc ? alloc.mem : undefined,
+      used: seen.mem ? used.mem : undefined,
+      waiting: seen.wait ? wait.mem : undefined,
+    },
+    {
+      label: 'Disk',
+      unit: 'kib',
+      allocated: seen.alloc ? alloc.disk : undefined,
+      used: seen.disk ? used.disk : undefined,
+      waiting: seen.wait ? wait.disk : undefined,
+    },
+  ];
+  // GPUs only when something asked for one. Nothing measures GPU use in
+  // the job ad, so that column stays empty by design rather than by
+  // accident.
+  if (alloc.gpus > 0 || wait.gpus > 0) {
+    rows.push({
+      label: 'GPUs',
+      unit: 'count',
+      allocated: seen.alloc ? alloc.gpus : undefined,
+      waiting: seen.wait ? wait.gpus : undefined,
+    });
+  }
+
+  return { running, idle, reporting, rows };
+}

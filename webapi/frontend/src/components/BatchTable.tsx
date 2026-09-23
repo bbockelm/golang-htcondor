@@ -4,8 +4,8 @@
 // expandable to the jobs inside it, sortable by column, with the
 // submitting user shown when the listing spans more than one.
 
-import { useCallback, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api, ApiError, type DisplayStatus, type DisplayStatusInfo } from '@/lib/api';
@@ -17,8 +17,11 @@ import {
   useSortedRows,
   type SortState,
 } from '@/components/SortableTable';
+import { BatchUsagePanel } from '@/components/BatchUsagePanel';
 import {
   statusRank,
+  summarizeBatchUsage,
+  BATCH_USAGE_PROJECTION,
   DISPLAY_STATUS_LABEL,
   DISPLAY_STATUS_ORDER,
   type Batch,
@@ -343,6 +346,7 @@ function BatchRow({
         <tr>
           <td className="px-3 py-2 bg-gray-50" />
           <td colSpan={showOwner ? 7 : 6} className="bg-gray-50 p-0">
+            <BatchUsage batchID={batch.batchID} />
             <JobsSubTable
               jobs={batch.jobs}
               highlighted={highlighted}
@@ -358,6 +362,49 @@ function BatchRow({
       )}
     </>
   );
+}
+
+// BatchUsage fetches the expanded batch's request and usage attributes.
+//
+// A separate, narrow query rather than more columns on the listing: the
+// usage attributes are worth real bytes per job on a 30k queue, and they
+// are only ever read for the one batch somebody opened. Same shape as
+// the pool page's per-node slot query.
+function BatchUsage({ batchID }: { batchID: number }) {
+  const { data, isFetching, error } = useQuery({
+    queryKey: ['batch-usage', batchID],
+    queryFn: () =>
+      api.jobs.list({
+        constraint: `ClusterId == ${batchID}`,
+        projection: BATCH_USAGE_PROJECTION,
+        limit: '*',
+        // The constraint already names one cluster, and the server
+        // confines a session that may not see other people's jobs
+        // whatever we ask for -- so this works for an admin looking at
+        // somebody else's batch and for a user looking at their own.
+        owned_by_me: false,
+      }),
+    // Usage moves while the row is open, and stops mattering when it
+    // is closed.
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const usage = useMemo(
+    () => summarizeBatchUsage(data?.jobs ?? []),
+    [data],
+  );
+
+  if (error) {
+    return (
+      <div className="border-t border-gray-200 bg-white px-3 py-2 text-[11px] text-gray-500">
+        Could not load this batch&apos;s resource usage:{' '}
+        {error instanceof ApiError ? error.message : String(error)}
+      </div>
+    );
+  }
+
+  return <BatchUsagePanel usage={usage} loading={isFetching && !data} />;
 }
 
 function JobsSubTable({

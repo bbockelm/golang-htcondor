@@ -15,6 +15,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api, ApiError, type DisplayStatus, type JobListResponse } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
@@ -66,9 +67,14 @@ export default function UserDetailClient() {
   // string literal and change the expression's meaning.
   const constraint = `Owner == ${JSON.stringify(decoded)}`;
 
+  // Shared with /jobs: someone who asked that page for the whole queue
+  // meant it here too.
+  const [loadAll] = useLoadAllJobs();
+
   const {
     data: pages,
     isLoading,
+    isFetching,
     error,
     refetch,
     fetchNextPage,
@@ -95,6 +101,15 @@ export default function UserDetailClient() {
     // query for.
     enabled: !!decoded && decoded !== '_',
     retry: false,
+  });
+
+  const pageCount = pages?.pages.length ?? 0;
+  useAutoLoadAll({
+    enabled: loadAll,
+    hasNextPage: !!hasNextPage,
+    isFetching,
+    pageCount,
+    fetchNextPage,
   });
 
   const jobs = useMemo(
@@ -144,7 +159,15 @@ export default function UserDetailClient() {
         </p>
       )}
 
-      {lastPage?.has_more && (
+      {lastPage?.has_more && loadAll && (
+        <p className="text-xs text-gray-500">
+          {pageCount >= MAX_AUTO_PAGES
+            ? `Stopped after ${jobs.length.toLocaleString()} jobs — that is as far as this page will page automatically.`
+            : `Loading everything — ${jobs.length.toLocaleString()} jobs so far.`}
+        </p>
+      )}
+
+      {lastPage?.has_more && !loadAll && (
         <div className="rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           Showing the first <strong>{jobs.length.toLocaleString()}</strong> jobs.{' '}
           {hasNextPage ? (
