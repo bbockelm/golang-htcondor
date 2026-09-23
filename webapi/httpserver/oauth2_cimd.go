@@ -346,21 +346,29 @@ func (r *cimdResolver) fetch(ctx context.Context, clientID string) (*fosite.Defa
 }
 
 // cimdClientScopes is the scope set a CIMD client may request: the advertised
-// set, narrowed to what the document declares when it declares any (least
-// privilege when the client is specific, parity with a DCR client otherwise).
-// The user still consents and the schedd's ALLOW_<LEVEL> still gates, so this
-// bounds what can be *asked for*, not what is granted.
+// set plus the deprecated ones its existing grants may still carry, narrowed
+// to what the document declares when it declares any (least privilege when
+// the client is specific, parity with a DCR client otherwise). The user still
+// consents and the schedd's ALLOW_<LEVEL> still gates, so this bounds what can
+// be *asked for*, not what is granted.
+//
+// A DCR client stores its scopes at registration and keeps them; a CIMD client
+// has no stored list, so this function is the whole of its scope record and is
+// consulted afresh on every authorize and every refresh.
 func cimdClientScopes(declared string) []string {
+	requestable := make([]string, 0, len(oauth2AdvertisedScopes)+len(oauth2DeprecatedScopes))
+	requestable = append(requestable, oauth2AdvertisedScopes...)
+	requestable = append(requestable, oauth2DeprecatedScopes...)
 	if strings.TrimSpace(declared) == "" {
-		return append([]string(nil), oauth2AdvertisedScopes...)
+		return requestable
 	}
-	advertised := make(map[string]bool, len(oauth2AdvertisedScopes))
-	for _, s := range oauth2AdvertisedScopes {
-		advertised[s] = true
+	allowed := make(map[string]bool, len(requestable))
+	for _, s := range requestable {
+		allowed[s] = true
 	}
 	var out []string
 	for _, s := range strings.Fields(declared) {
-		if advertised[s] {
+		if allowed[s] {
 			out = append(out, s)
 		}
 	}
