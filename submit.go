@@ -685,18 +685,47 @@ func processNewStyleArguments(s string) string {
 	return result.String()
 }
 
-// setEnvironment sets the environment attribute
+// setEnvironment sets the environment attribute.
+//
+// The submit-file value and the job-ad value are not the same string, and
+// storing one as the other loses the environment silently -- the job runs,
+// with variables named things like `"PATH`.
+//
+// HTCondor reads the ad with Env::MergeFrom (condor_utils/env.cpp): the
+// `Environment` attribute is parsed as V2 RAW, and `Env` as V1. Neither
+// accepts the surrounding double quotes that mark the V2 form in a SUBMIT
+// FILE. So `environment = "A=1 B=2"` has to reach the ad as `A=1 B=2`,
+// with the doubled `""` escapes collapsed; and the unquoted legacy form
+// belongs under `Env`, where the delimiter is auto-detected, rather than
+// under `Environment`, where a `;`-separated list would become one
+// variable whose value contains the rest.
 func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
 	env, ok := sf.submitCommand("environment")
 	if !ok {
 		env, ok = sf.submitCommand("env")
 	}
-
-	if ok && env != "" {
-		_ = ad.Set("Environment", env)
+	if !ok || env == "" {
+		return nil
 	}
 
+	if raw, isV2 := envV2Raw(env); isV2 {
+		_ = ad.Set("Environment", raw)
+		return nil
+	}
+	_ = ad.Set("Env", env)
 	return nil
+}
+
+// envV2Raw converts the submit file's V2 environment form -- the whole
+// list wrapped in double quotes, with `""` standing for a literal quote --
+// into the V2 raw form the job ad carries. Reports false for anything that
+// is not in the V2 form.
+func envV2Raw(env string) (string, bool) {
+	trimmed := strings.TrimSpace(env)
+	if len(trimmed) < 2 || !strings.HasPrefix(trimmed, `"`) || !strings.HasSuffix(trimmed, `"`) {
+		return "", false
+	}
+	return strings.ReplaceAll(trimmed[1:len(trimmed)-1], `""`, `"`), true
 }
 
 // unixNullFile is UNIX_NULL_FILE from the C++ submit code
@@ -1065,6 +1094,21 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, "("+req+")")
 	}
 
+	// A scheduler- or local-universe job is never matched to a machine.
+	// The schedd evaluates its Requirements against the SCHEDD's own ad
+	// (Scheduler::jobCanRun, condor_schedd.V6/schedd.cpp), and a schedd ad
+	// carries none of the machine attributes below -- so every clause here
+	// evaluates to undefined, which the schedd treats as false, and the job
+	// sits Idle forever with nothing in the log but
+	// "SchedUniverseJobsIdle = 1".
+	//
+	// condor_submit does not add them either: SetTransferFiles returns
+	// early for these universes (condor_utils/submit_utils.cpp). Whatever
+	// the user wrote in `requirements` is kept, since that IS evaluated.
+	if sf.universe == UniverseScheduler || sf.universe == UniverseLocal {
+		return sf.finishRequirements(ad, reqParts)
+	}
+
 	// Add TARGET.OpSys check for non-grid jobs
 	if sf.universe != UniverseGrid {
 		// Target type requirement - must be a machine (not another job, etc.)
@@ -1138,6 +1182,13 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		}
 	}
 
+	return sf.finishRequirements(ad, reqParts)
+}
+
+// finishRequirements joins the collected clauses and sets Requirements.
+// Split out so the universes that take none of the machine-oriented
+// clauses share the one place that writes the attribute.
+func (sf *SubmitFile) finishRequirements(ad *classad.ClassAd, reqParts []string) error {
 	if len(reqParts) > 0 {
 		requirements := strings.Join(reqParts, " && ")
 		// Requirements is an expression, not a string - parse it
