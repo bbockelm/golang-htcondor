@@ -3,6 +3,7 @@ package dagman
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -10,9 +11,10 @@ import (
 // Severity separates "this DAG cannot start" from "this may be fine".
 //
 // The split is the whole value of the analysis. A DAG that discovers its
-// own shape as it runs -- the SUBDAG idiom -- legitimately references
-// files that do not exist yet, so a check that treats every absent file
-// as an error would fire hardest on the most interesting workflows.
+// own shape as it runs -- the SUBDAG idiom, and the submit file an
+// earlier node writes -- legitimately references files that do not exist
+// yet, so a check that treats every absent file as an error would fire
+// hardest on the most interesting workflows.
 type Severity int
 
 const (
@@ -42,6 +44,9 @@ type Finding struct {
 	Severity Severity
 	Message  string
 	Line     int
+	// Source is the INCLUDE'd or SPLICE'd file Line belongs to, empty for
+	// the top-level DAG.
+	Source string
 }
 
 // Report is what Analyze concluded.
@@ -54,8 +59,9 @@ type Report struct {
 	// asked for: an undeclared file is silently skipped at spool time,
 	// not rejected, so a list the caller writes by hand fails invisibly.
 	Required []string
-	// Deferred are files referenced by SUBDAG nodes that are not staged.
-	// These are expected to be produced during the run.
+	// Deferred are files the DAG reads only once it is running -- a
+	// sub-DAG description, or a node's submit file -- that are not staged
+	// now. These are expected to be produced during the run.
 	Deferred []string
 }
 
@@ -80,6 +86,25 @@ func (r *Report) Errors() []string {
 	return out
 }
 
+// add records a finding, naming the included file when the line number
+// belongs to one rather than to the DAG the caller wrote.
+func (r *Report) add(sev Severity, line int, source, msg string) {
+	if source != "" {
+		msg = fmt.Sprintf("%s (line %d of %s)", msg, line, source)
+	}
+	r.Findings = append(r.Findings, Finding{Severity: sev, Line: line, Source: source, Message: msg})
+}
+
+// deferFile records a file that will only exist once the run produces it.
+func (r *Report) deferFile(p string) {
+	for _, existing := range r.Deferred {
+		if existing == p {
+			return
+		}
+	}
+	r.Deferred = append(r.Deferred, p)
+}
+
 // Input is a workflow as the caller supplied it.
 type Input struct {
 	// DagName is the file name the DAG description will be written as.
@@ -95,6 +120,32 @@ type Input struct {
 	Declared []string
 }
 
+// rescueName matches the rescue DAGs DAGMan writes and a caller may hand
+// straight back to resubmit a partly-finished workflow. Nothing in the
+// DAG text references one by name, so it must not be called unused.
+var rescueName = regexp.MustCompile(`\.rescue[0-9]*`)
+
+// analysis is the state the per-node checks share. It exists so the three
+// places that resolve a node's body, and the two that defer a file, agree
+// with each other -- they used to disagree, which is how a node could be
+// both "unreferenced" and "required".
+type analysis struct {
+	r  *Report
+	d  *DAG
+	in Input
+	// have is every name that will be in the spool allow-set: supplied
+	// now, or promised for later.
+	have map[string]bool
+	// referenced is every name something in the DAG asked for.
+	referenced map[string]bool
+	// blind collects the reasons this analysis cannot see every
+	// reference, which is what makes "supplied but unreferenced" a guess
+	// rather than a finding.
+	deferredDescs int
+	deferredDags  int
+	macroRefs     bool
+}
+
 // Analyze cross-checks a parsed DAG against the files supplied with it.
 //
 // It answers three questions the caller cannot answer for itself:
@@ -102,47 +153,54 @@ type Input struct {
 // and which of the gaps are expected to close on their own while the
 // workflow runs.
 func Analyze(in Input) *Report {
-	d := Parse(in.Dag)
 	r := &Report{}
+	d := parseText(in.Dag, &resolver{
+		lookup: func(name string) (string, bool) {
+			s, ok := in.Files[name]
+			return s, ok
+		},
+		stack: []string{in.DagName},
+	})
 
-	have := map[string]bool{}
+	a := &analysis{r: r, d: d, in: in, have: map[string]bool{}, referenced: map[string]bool{}}
 	for name := range in.Files {
-		have[name] = true
+		a.have[name] = true
 	}
 	for _, name := range in.Declared {
-		have[name] = true
+		a.have[name] = true
 	}
 
-	// Referenced tracks what was asked for, so files supplied and used by
-	// nothing can be reported. The DAG itself is always "used".
-	referenced := map[string]bool{}
-	need := func(p string, sev Severity, what string, line int) {
+	need := func(p string, sev Severity, what string, line int, source string) {
 		if p == "" || isURL(p) || strings.HasPrefix(p, "/") {
 			// A URL is fetched by whoever needs it; an absolute path
 			// refers to the access point's filesystem, which we cannot
 			// see from here. Neither is ours to stage.
 			return
 		}
-		referenced[p] = true
-		if have[p] {
+		a.referenced[p] = true
+		if a.have[p] {
 			return
 		}
-		r.Findings = append(r.Findings, Finding{
-			Severity: sev,
-			Line:     line,
-			Message:  fmt.Sprintf("%s is not among the supplied files (%s)", p, what),
-		})
+		r.add(sev, line, source, fmt.Sprintf("%s is not among the supplied files (%s)", p, what))
+	}
+
+	if in.DagName == "" {
+		r.add(Fatal, 0, "", "the workflow has no file name for its DAG description, so nothing can be "+
+			"written to the spool; give the DAG a file name such as workflow.dag")
 	}
 
 	for _, ref := range d.Includes {
-		need(ref.Path, Fatal, "INCLUDE is read when DAGMan parses the DAG, so the workflow cannot start without it", ref.Line)
+		need(ref.Path, Fatal, "INCLUDE is read when DAGMan parses the DAG, so the workflow cannot start without it", ref.Line, ref.Source)
 	}
 	for _, ref := range d.Configs {
-		need(ref.Path, Fatal, "CONFIG is read when DAGMan parses the DAG", ref.Line)
+		need(ref.Path, Fatal, "CONFIG is read when DAGMan parses the DAG", ref.Line, ref.Source)
+	}
+	for _, ref := range d.DotIncludes {
+		need(ref.Path, Warning, "DOT ... INCLUDE names a header file DAGMan reads to write the dot output", ref.Line, ref.Source)
 	}
 	for _, s := range d.Scripts {
 		need(s.Executable, Warning,
-			fmt.Sprintf("SCRIPT %s for node %s runs on the access point", s.When, s.Node), s.Line)
+			fmt.Sprintf("SCRIPT %s for node %s runs on the access point", s.When, s.Node), s.Line, s.Source)
 	}
 
 	for i := range d.Nodes {
@@ -150,45 +208,42 @@ func Analyze(in Input) *Report {
 		switch n.Type {
 		case NodeSplice:
 			need(n.Descriptor, Fatal,
-				fmt.Sprintf("SPLICE %s is inlined when DAGMan parses the DAG, so it must be supplied now", n.Name), n.Line)
+				fmt.Sprintf("SPLICE %s is inlined when DAGMan parses the DAG, so it must be supplied now", n.Name), n.Line, n.Source)
 		case NodeSubdag:
-			analyzeSubdag(r, d, n, have, referenced)
+			if analyzeDeferredFile(r, d, in, n.Name, n.Descriptor, "SUBDAG", a.have, a.referenced, n.Line, n.Source) {
+				a.deferredDags++
+			}
 		default:
-			analyzeJobNode(d, n, in, need)
+			a.analyzeJobNode(n, need)
 		}
 		if n.Dir != "" {
-			r.Findings = append(r.Findings, Finding{
-				Severity: Fatal,
-				Line:     n.Line,
-				Message: fmt.Sprintf("node %s uses DIR %q, which a spooled workflow cannot honor: "+
+			r.add(Fatal, n.Line, n.Source,
+				fmt.Sprintf("node %s uses DIR %q, which a spooled workflow cannot honor: "+
 					"the schedd flattens a spooled sandbox to basenames in one directory. "+
-					"Remove the DIR and give the files distinct names.", n.Name, n.Dir),
-			})
+					"Remove the DIR and give the files distinct names.", n.Name, n.Dir))
 		}
 	}
 
+	if len(d.Nodes) == 0 && !d.Incomplete {
+		r.add(Fatal, 0, "", `the DAG declares no nodes; nothing would run. If you wrote the workflow on `+
+			`one line, note that DAG syntax is line-oriented: use real newlines, not \n.`)
+	}
+
+	checkDuplicateNodes(r, d)
 	checkGraph(r, d)
 	checkCollisions(r, d, in)
-
-	for name := range in.Files {
-		if name == in.DagName || referenced[name] {
-			continue
-		}
-		r.Findings = append(r.Findings, Finding{
-			Severity: Warning,
-			Message: fmt.Sprintf("%s was supplied but nothing in the DAG references it. "+
-				"A spooled file that no job declares is silently dropped, so this is usually a "+
-				"misspelling of a name the DAG does reference.", name),
-		})
-	}
+	a.checkUnreferenced()
 
 	for _, e := range d.Errors {
-		r.Findings = append(r.Findings, Finding{Severity: Warning, Line: e.Line, Message: e.Why + ": " + e.Text})
+		r.add(Warning, e.Line, e.Source, e.Why+": "+e.Text)
+	}
+	for _, e := range d.Fatals {
+		r.add(Fatal, e.Line, e.Source, e.Why+": "+e.Text)
 	}
 
 	r.Staged = sortedKeys(in.Files)
 	r.Required = buildRequired(in)
-	sort.Slice(r.Findings, func(i, j int) bool {
+	sort.SliceStable(r.Findings, func(i, j int) bool {
 		if r.Findings[i].Severity != r.Findings[j].Severity {
 			return r.Findings[i].Severity > r.Findings[j].Severity
 		}
@@ -197,57 +252,130 @@ func Analyze(in Input) *Report {
 	return r
 }
 
-// analyzeSubdag applies the rule that makes this package usable on real
-// workflows: a SUBDAG file absent at submit time is normal, because the
-// idiom is for an earlier node to generate it. The useful question is not
-// "is it here" but "does anything produce it, and does that happen first".
-func analyzeSubdag(r *Report, d *DAG, n *Node, have, referenced map[string]bool) {
-	if n.Descriptor == "" || isURL(n.Descriptor) || strings.HasPrefix(n.Descriptor, "/") {
-		return
+// checkUnreferenced reports files that were supplied and that nothing
+// asked for. A spooled file no job declares is silently dropped, so a
+// near-miss name is worth naming -- but only when the analysis can
+// actually see every reference. When a submit description will be written
+// during the run, or a file is named through a VARS macro, or a
+// parse-time inclusion was not supplied, it cannot, and saying
+// "misspelling" would be a guess dressed as a diagnosis.
+func (a *analysis) checkUnreferenced() {
+	outputs := map[string]bool{}
+	for _, ref := range a.d.Outputs {
+		outputs[ref.Path] = true
 	}
-	referenced[n.Descriptor] = true
-	if have[n.Descriptor] {
-		return
+
+	var blind []string
+	if a.deferredDescs > 0 {
+		blind = append(blind, fmt.Sprintf("%d submit descriptions are generated at run time", a.deferredDescs))
 	}
-	r.Deferred = append(r.Deferred, n.Descriptor)
+	if a.deferredDags > 0 {
+		blind = append(blind, fmt.Sprintf("%d sub-DAG descriptions are generated at run time", a.deferredDags))
+	}
+	if a.d.Incomplete {
+		blind = append(blind, "an INCLUDE or SPLICE file was not supplied, so part of the DAG could not be read")
+	}
+	if a.macroRefs {
+		blind = append(blind, "files referenced through VARS macros cannot be checked")
+	}
+
+	for _, name := range sortedKeys(a.in.Files) {
+		if name == a.in.DagName || a.referenced[name] || outputs[name] || rescueName.MatchString(name) {
+			continue
+		}
+		if len(blind) > 0 {
+			a.r.add(Advisory, 0, "", fmt.Sprintf(
+				"%s was supplied but nothing this analysis can read references it. That may well be "+
+					"fine: %s. A spooled file that no job declares is silently dropped, so check that "+
+					"whatever uses it names it.", name, strings.Join(blind, "; ")))
+			continue
+		}
+		a.r.add(Advisory, 0, "", fmt.Sprintf(
+			"%s was supplied but nothing in the DAG references it. A spooled file that no job "+
+				"declares is silently dropped, so this is usually a misspelling of a name the DAG "+
+				"does reference.", name))
+	}
+}
+
+// analyzeDeferredFile applies the rule that makes this package usable on
+// real workflows: a file DAGMan does not read until a node becomes ready
+// is legitimately absent at submit time, because the idiom is for an
+// earlier node to generate it. That covers a SUBDAG's .dag description
+// and, just as much, a node's submit file -- writing or rewriting a
+// submit file from an earlier node's output is standard practice.
+//
+// The useful question is therefore not "is it here" but "does anything
+// produce it, and does that happen first". It returns whether the file
+// was deferred.
+func analyzeDeferredFile(r *Report, d *DAG, in Input, nodeName, filePath, kind string,
+	have, referenced map[string]bool, line int, source string) bool {
+
+	if filePath == "" || isURL(filePath) || strings.HasPrefix(filePath, "/") {
+		return false
+	}
+	referenced[filePath] = true
+	if have[filePath] {
+		return false
+	}
+	r.deferFile(filePath)
+
+	var reads, why string
+	if kind == "SUBDAG" {
+		reads = fmt.Sprintf("SUBDAG %s reads %s", nodeName, filePath)
+		why = "DAGMan reads a sub-DAG description only when the node becomes ready"
+	} else {
+		reads = fmt.Sprintf("node %s uses %s as its submit description", nodeName, filePath)
+		why = "DAGMan does not read a node's submit file until that node is submitted, so a submit " +
+			"file generated during the run is expected and fully supported"
+	}
 
 	// Can anything plausibly produce it? We can only attribute a producer
 	// when a node's submit description names the file in
 	// transfer_output_files, which is often unset (the default brings
 	// back everything new in the sandbox). So an unattributed file is the
 	// common case and must not be reported as an error.
-	producers := producersOf(d, n.Descriptor)
+	producers := producersOf(d, in, filePath)
 	if len(producers) == 0 {
-		r.Findings = append(r.Findings, Finding{
-			Severity: Advisory,
-			Line:     n.Line,
-			Message: fmt.Sprintf("SUBDAG %s reads %s, which is not supplied. That is normal when an "+
-				"earlier node generates it -- DAGMan reads a sub-DAG only when the node becomes ready. "+
-				"No node declares it in transfer_output_files, so this could not be verified: make sure "+
-				"some ancestor of %s produces it.", n.Name, n.Descriptor, n.Name),
-		})
-		return
+		r.add(Advisory, line, source, fmt.Sprintf(
+			"%s, which is not supplied. That is normal when an earlier node generates it: %s. "+
+				"No node declares it in transfer_output_files, so this could not be verified: make "+
+				"sure some ancestor of %s produces it.", reads, why, nodeName))
+		return true
 	}
 	// A producer we can name lets us check the ordering, which is the
-	// finding worth having: without an edge the sub-DAG node can become
-	// ready before the file exists, and it fails nondeterministically.
+	// finding worth having: without an edge the node can become ready
+	// before the file exists, and it fails nondeterministically.
 	var unordered []string
 	for _, p := range producers {
-		if !reachable(d, p, n.Name) {
+		if !reachable(d, p, nodeName) {
 			unordered = append(unordered, p)
 		}
 	}
 	if len(unordered) > 0 {
-		r.Findings = append(r.Findings, Finding{
-			Severity: Warning,
-			Line:     n.Line,
-			Message: fmt.Sprintf("SUBDAG %s reads %s, which node %s produces, but %s is not an ancestor of %s. "+
-				"Nothing orders them, so %s may become ready before the file exists. "+
-				"Add PARENT %s CHILD %s.",
-				n.Name, n.Descriptor, strings.Join(unordered, ", "), strings.Join(unordered, ", "),
-				n.Name, n.Name, unordered[0], n.Name),
-		})
+		list := strings.Join(unordered, ", ")
+		r.add(Warning, line, source, fmt.Sprintf(
+			"%s, which node %s produces, but %s is not an ancestor of %s. Nothing orders them, so "+
+				"%s may become ready before the file exists. Add PARENT %s CHILD %s.",
+			reads, list, list, nodeName, nodeName, unordered[0], nodeName))
 	}
+	return true
+}
+
+// bodyFor resolves a node's submit description the three ways DAGMan
+// does: written inline, named by a SUBMIT-DESCRIPTION block, or held in a
+// file the caller supplied. resolved is false when the text is not in
+// hand -- which is not the same as the node being broken.
+func bodyFor(d *DAG, n *Node, in Input) (body string, resolved bool) {
+	if n.Inline {
+		return n.InlineBody, true
+	}
+	if desc, ok := d.Descriptions[strings.ToLower(n.Descriptor)]; ok {
+		return desc.Body, true
+	}
+	if body, ok := in.Files[n.Descriptor]; ok {
+		return body, true
+	}
+	return "", false
 }
 
 // analyzeJobNode resolves a node's submit description and pulls the files
@@ -255,64 +383,127 @@ func analyzeSubdag(r *Report, d *DAG, n *Node, have, referenced map[string]bool)
 // spool directory, so THEIR inputs have to be staged with the DAG -- the
 // step most easily forgotten, and the one that fails at run time rather
 // than at submit time.
-func analyzeJobNode(d *DAG, n *Node, in Input, need func(string, Severity, string, int)) {
-
-	body := n.InlineBody
-	if !n.Inline {
-		if desc, ok := d.Descriptions[strings.ToLower(n.Descriptor)]; ok {
-			body = desc.Body
-		} else {
-			need(n.Descriptor, Warning,
-				fmt.Sprintf("node %s names it as its submit description", n.Name), n.Line)
-			body = in.Files[n.Descriptor]
+func (a *analysis) analyzeJobNode(n *Node, need func(string, Severity, string, int, string)) {
+	body, resolved := bodyFor(a.d, n, a.in)
+	if !resolved {
+		if a.have[n.Descriptor] {
+			// Promised for later upload. The name is in the allow-set, so
+			// the reference is satisfied, but the text is not here and its
+			// own inputs cannot be checked.
+			a.referenced[n.Descriptor] = true
+			a.r.add(Advisory, n.Line, n.Source, fmt.Sprintf(
+				"node %s takes its submit description from %s, which you declared rather than supplied, "+
+					"so the files that description names cannot be checked here: every file it "+
+					"references must be declared or supplied now too.", n.Name, n.Descriptor))
+			return
 		}
-	}
-	if body == "" {
+		if analyzeDeferredFile(a.r, a.d, a.in, n.Name, n.Descriptor, "JOB",
+			a.have, a.referenced, n.Line, n.Source) {
+			a.deferredDescs++
+		}
 		return
 	}
+	if !n.Inline {
+		// A descriptor can be both a SUBMIT-DESCRIPTION name and a file
+		// the caller supplied. Resolving it as the former does not make
+		// the latter unused.
+		a.referenced[n.Descriptor] = true
+	}
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	if submitHasMacroInput(body) {
+		a.macroRefs = true
+	}
+	if dir := submitString(body, "initialdir"); dir != "" && !strings.Contains(dir, "$(") {
+		a.r.add(Fatal, n.Line, n.Source, fmt.Sprintf(
+			"node %s sets initialdir %q, which a spooled workflow cannot honor: the schedd flattens a "+
+				"spooled sandbox to basenames in one directory, so a relative initialdir names a "+
+				"subdirectory that does not exist. Remove the initialdir and give the files distinct names.",
+			n.Name, dir))
+	}
+	for _, dir := range submitDirTransfers(body) {
+		a.r.add(Warning, n.Line, n.Source, fmt.Sprintf(
+			"node %s transfers %q, which asks for a directory's contents: the schedd flattens a "+
+				"spooled sandbox to basenames in one directory, so a directory transfer cannot "+
+				"survive the rewrite. Name the files individually.", n.Name, dir))
+	}
 	for _, f := range submitInputFiles(body) {
-		need(f, Warning, fmt.Sprintf("node %s transfers it as input", n.Name), n.Line)
+		need(f, Warning, fmt.Sprintf("node %s transfers it as input", n.Name), n.Line, n.Source)
+	}
+}
+
+// checkDuplicateNodes catches the same node name declared twice, which
+// DAGMan refuses outright.
+func checkDuplicateNodes(r *Report, d *DAG) {
+	first := map[string]int{}
+	for i := range d.Nodes {
+		key := strings.ToLower(d.Nodes[i].Name)
+		if prev, ok := first[key]; ok {
+			r.add(Fatal, d.Nodes[i].Line, d.Nodes[i].Source, fmt.Sprintf(
+				"node %s is declared twice (first at line %d); DAGMan refuses a DAG with duplicate node names",
+				d.Nodes[i].Name, prev))
+			continue
+		}
+		first[key] = d.Nodes[i].Line
 	}
 }
 
 // checkGraph reports edges naming nodes that do not exist, and cycles.
+//
+// When a parse-time inclusion could not be read the node set in hand is
+// admittedly partial, so "not declared" would be this package's ignorance
+// rather than the DAG's mistake, and is not reported.
 func checkGraph(r *Report, d *DAG) {
-	for _, e := range d.Edges {
-		if _, ok := d.NodeByName(e.Parent); !ok {
-			r.Findings = append(r.Findings, Finding{Severity: Fatal, Line: e.Line,
-				Message: fmt.Sprintf("PARENT %s names a node that is not declared", e.Parent)})
+	if !d.Incomplete {
+		for _, e := range d.Edges {
+			if _, ok := d.NodeByName(e.Parent); !ok {
+				r.add(Fatal, e.Line, e.Source, fmt.Sprintf("PARENT %s names a node that is not declared", e.Parent))
+			}
+			if _, ok := d.NodeByName(e.Child); !ok {
+				r.add(Fatal, e.Line, e.Source, fmt.Sprintf("CHILD %s names a node that is not declared", e.Child))
+			}
 		}
-		if _, ok := d.NodeByName(e.Child); !ok {
-			r.Findings = append(r.Findings, Finding{Severity: Fatal, Line: e.Line,
-				Message: fmt.Sprintf("CHILD %s names a node that is not declared", e.Child)})
+		for _, s := range d.Scripts {
+			if _, ok := d.NodeByName(s.Node); !ok && !isAllNodes(s.Node) {
+				r.add(Warning, s.Line, s.Source,
+					fmt.Sprintf("SCRIPT %s names node %s, which is not declared", s.When, s.Node))
+			}
 		}
-	}
-	for _, s := range d.Scripts {
-		if _, ok := d.NodeByName(s.Node); !ok {
-			r.Findings = append(r.Findings, Finding{Severity: Warning, Line: s.Line,
-				Message: fmt.Sprintf("SCRIPT %s names node %s, which is not declared", s.When, s.Node)})
-		}
-	}
-	for name := range d.Vars {
-		if _, ok := d.NodeByName(name); !ok {
-			r.Findings = append(r.Findings, Finding{Severity: Warning,
-				Message: fmt.Sprintf("VARS names node %s, which is not declared", name)})
+		for _, key := range sortedVarNodes(d) {
+			if _, ok := d.NodeByName(key); ok || isAllNodes(key) {
+				continue
+			}
+			name := d.VarNames[key]
+			if name == "" {
+				name = key
+			}
+			r.add(Warning, 0, "", fmt.Sprintf("VARS names node %s, which is not declared", name))
 		}
 	}
 	if cycle := findCycle(d); len(cycle) > 0 {
-		r.Findings = append(r.Findings, Finding{Severity: Fatal,
-			Message: fmt.Sprintf("the graph has a cycle: %s", strings.Join(cycle, " -> "))})
+		r.add(Fatal, 0, "", fmt.Sprintf("the graph has a cycle: %s", strings.Join(cycle, " -> ")))
 	}
+}
+
+func sortedVarNodes(d *DAG) []string {
+	out := make([]string, 0, len(d.Vars))
+	for k := range d.Vars {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // checkCollisions catches two distinct paths that land on the same name
 // in the spool directory. The schedd rewrites a spooled sandbox to
 // basenames in one flat directory, so these clobber each other with no
-// diagnostic from either DAGMan or the schedd.
+// diagnostic from either DAGMan or the schedd -- and a bare name collides
+// with a subdirectory path just as surely as two subdirectory paths do.
 func checkCollisions(r *Report, d *DAG, in Input) {
 	byBase := map[string]map[string]bool{}
 	note := func(p string) {
-		if p == "" || isURL(p) || !strings.Contains(p, "/") {
+		if p == "" || isURL(p) || strings.HasPrefix(p, "/") {
 			return
 		}
 		b := path.Base(p)
@@ -321,32 +512,45 @@ func checkCollisions(r *Report, d *DAG, in Input) {
 		}
 		byBase[b][p] = true
 	}
+	for name := range in.Files {
+		note(name)
+	}
+	for _, s := range d.Scripts {
+		note(s.Executable)
+	}
+	for _, refs := range [][]FileRef{d.Includes, d.Configs, d.DotIncludes} {
+		for _, ref := range refs {
+			note(ref.Path)
+		}
+	}
 	for i := range d.Nodes {
-		body := d.Nodes[i].InlineBody
-		if !d.Nodes[i].Inline {
-			if desc, ok := d.Descriptions[strings.ToLower(d.Nodes[i].Descriptor)]; ok {
-				body = desc.Body
-			} else {
-				body = in.Files[d.Nodes[i].Descriptor]
-			}
+		note(d.Nodes[i].Descriptor)
+		body, ok := bodyFor(d, &d.Nodes[i], in)
+		if !ok {
+			continue
 		}
 		for _, f := range submitInputFiles(body) {
 			note(f)
 		}
 	}
-	for base, paths := range byBase {
+	bases := make([]string, 0, len(byBase))
+	for b := range byBase {
+		bases = append(bases, b)
+	}
+	sort.Strings(bases)
+	for _, base := range bases {
+		paths := byBase[base]
 		if len(paths) < 2 {
 			continue
 		}
-		var list []string
+		list := make([]string, 0, len(paths))
 		for p := range paths {
 			list = append(list, p)
 		}
 		sort.Strings(list)
-		r.Findings = append(r.Findings, Finding{Severity: Fatal,
-			Message: fmt.Sprintf("%s and %s both become %q in the spool directory, which flattens to "+
-				"basenames; one would silently overwrite the other. Give them distinct names.",
-				list[0], list[1], base)})
+		r.add(Fatal, 0, "", fmt.Sprintf(
+			"%s and %s both become %q in the spool directory, which flattens to basenames; one would "+
+				"silently overwrite the other. Give them distinct names.", list[0], list[1], base))
 	}
 }
 
@@ -357,7 +561,10 @@ func checkCollisions(r *Report, d *DAG, in Input) {
 // transfer fail outright, which is worse than the run-time error the
 // caller has already been warned about.
 func buildRequired(in Input) []string {
-	set := map[string]bool{in.DagName: true}
+	set := map[string]bool{}
+	if in.DagName != "" {
+		set[in.DagName] = true
+	}
 	for name := range in.Files {
 		set[name] = true
 	}
@@ -373,19 +580,20 @@ func buildRequired(in Input) []string {
 }
 
 // producersOf finds nodes whose submit description names p in
-// transfer_output_files.
-func producersOf(d *DAG, p string) []string {
+// transfer_output_files. It resolves the description exactly as
+// analyzeJobNode does -- including from a supplied file, which it used
+// not to, so a producer written in a .sub file went unseen.
+func producersOf(d *DAG, in Input, p string) []string {
 	var out []string
 	for i := range d.Nodes {
-		body := d.Nodes[i].InlineBody
-		if !d.Nodes[i].Inline {
-			if desc, ok := d.Descriptions[strings.ToLower(d.Nodes[i].Descriptor)]; ok {
-				body = desc.Body
-			}
+		body, ok := bodyFor(d, &d.Nodes[i], in)
+		if !ok {
+			continue
 		}
 		for _, f := range submitValues(body, "transfer_output_files") {
 			if f == p {
 				out = append(out, d.Nodes[i].Name)
+				break
 			}
 		}
 	}
@@ -393,24 +601,25 @@ func producersOf(d *DAG, p string) []string {
 	return out
 }
 
-// reachable reports whether there is a directed path from -> to.
+// reachable reports whether there is a directed path from -> to. A node
+// reaches itself only through a real cycle, so the target is checked
+// after a step, never before one.
 func reachable(d *DAG, from, to string) bool {
 	adj := map[string][]string{}
 	for _, e := range d.Edges {
-		adj[strings.ToLower(e.Parent)] = append(adj[strings.ToLower(e.Parent)], strings.ToLower(e.Child))
+		p := strings.ToLower(e.Parent)
+		adj[p] = append(adj[p], strings.ToLower(e.Child))
 	}
+	target := strings.ToLower(to)
 	seen := map[string]bool{}
 	var walk func(string) bool
 	walk = func(n string) bool {
-		if n == strings.ToLower(to) {
-			return true
-		}
 		if seen[n] {
 			return false
 		}
 		seen[n] = true
 		for _, c := range adj[n] {
-			if walk(c) {
+			if c == target || walk(c) {
 				return true
 			}
 		}

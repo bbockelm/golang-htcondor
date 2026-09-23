@@ -10,8 +10,11 @@ import (
 //
 // condor_submit_dag resolves this with which() on the submitting machine,
 // which is not available to us: this server submits to a schedd it does
-// not share a filesystem with. Operators whose access point puts the
-// binary elsewhere override it.
+// not share a filesystem with. The RPM installs it under %_bindir and the
+// Debian package under usr/bin, so this is right for a packaged access
+// point and wrong for a tarball or a relocated install -- which is what
+// SubmitOptions.BinDir is for. Operators can still override DagmanPath
+// outright.
 const DefaultDagmanPath = "/usr/bin/condor_dagman"
 
 // DefaultDagmanPATH is the PATH given to DAGMan, and through it to every
@@ -29,6 +32,18 @@ const DefaultDagmanPath = "/usr/bin/condor_dagman"
 // point's own configuration in the usual place, which is what a remote
 // submitter wants. A site whose access point keeps it elsewhere sets
 // ExtraEnv.
+//
+// HOME, USER and TZ are NOT set either, and deliberately cannot be: the
+// schedd gives a scheduler-universe job only what the job ad carries, and
+// this server has no way to know the owner's home directory or login name
+// on an access point it does not share a filesystem with. Guessing would
+// be worse than leaving them unset -- a wrong HOME sends every tool's
+// dot-file lookup somewhere that is not the user's. PRE/POST scripts must
+// therefore not rely on HOME, USER or TZ; a script that needs one has to
+// be given it through ExtraEnv or work it out itself.
+//
+// /usr/sbin is deliberately absent: every HTCondor tool a script would
+// call installs to bindir.
 const DefaultDagmanPATH = "/usr/bin:/bin:/usr/local/bin"
 
 // SubmitOptions is what varies between one DAGMan submission and another.
@@ -37,11 +52,31 @@ type SubmitOptions struct {
 	// spool directory.
 	DagName string
 	// DagmanPath is the access point's condor_dagman. Defaults to
-	// DefaultDagmanPath.
+	// BinDir + "/condor_dagman" when BinDir is set, and to
+	// DefaultDagmanPath otherwise.
 	DagmanPath string
+	// BinDir is the access point's $(BIN), discovered by the caller by
+	// asking the schedd for it (DC_CONFIG_VAL "BIN"). It is what makes a
+	// tarball or relocated install work without an operator setting
+	// anything: it supplies both condor_dagman's directory and the front
+	// of DAGMan's PATH, so PRE/POST scripts find condor_submit and the
+	// rest of the tools from the same install DAGMan came from.
+	//
+	// DefaultDagmanPath remains the fallback for a packaged install (RPM
+	// %_bindir, Debian usr/bin). An explicit DagmanPath wins over both.
+	BinDir string
 	// CondorVersion is the version string handed to DAGMan as
-	// -CsdVersion. DAGMan refuses a submit file it considers too old;
-	// its floor is 7.1.2, so any current version string clears it.
+	// -CsdVersion, and it is OPTIONAL.
+	//
+	// It must be the ACCESS POINT's version if it is given at all.
+	// Passing this library's own compatibility version is a false claim
+	// about the AP: DAGMan compares it against its own binary, and a site
+	// running DAGMAN_USE_STRICT = 3 treats any mismatch as fatal.
+	//
+	// Left empty, no -CsdVersion is passed and DAGMan initialises
+	// csdVersion to its OWN version (dagman_main.cpp), which is exactly
+	// the right answer when we do not know the AP's. Only a SUPPLIED
+	// value that DAGMan cannot parse is fatal.
 	CondorVersion string
 	// InputFiles is transfer_input_files for the manager job: the DAG,
 	// the node submit descriptions, the scripts, and every node's own
@@ -54,6 +89,20 @@ type SubmitOptions struct {
 	// MaxIdle, MaxJobs, MaxPre, MaxPost throttle DAGMan. Zero means
 	// unset.
 	MaxIdle, MaxJobs, MaxPre, MaxPost int
+	// DisablePort mirrors the access point's DAGMAN_DISABLE_PORT. When
+	// set, DAGMan is started with "-p 0" and the job ad does NOT carry
+	// IsDaemonCore, so the schedd sets up no command socket. A site that
+	// configures DAGMAN_DISABLE_PORT and gets a submit file that asks for
+	// a port anyway ends up with a DAGMan that cannot be reached and a
+	// schedd that thinks it can.
+	DisablePort bool
+	// ConfigFile is a per-DAG DAGMan configuration file, as named in the
+	// spool directory. It is passed through _CONDOR_DAGMAN_CONFIG_FILE,
+	// which is the ONLY way DAGMan reads one (dagman_utils.cpp): a DAG's
+	// own CONFIG line is parsed by condor_submit_dag, not by DAGMan, so a
+	// workflow whose CONFIG file is merely transferred is silently
+	// ignored.
+	ConfigFile string
 	// ExtraEnv is additional environment for DAGMan itself, merged into
 	// the environment line (HTTP_API_DAGMAN_ENVIRONMENT). An access point
 	// whose configuration is not in the default place needs CONDOR_CONFIG
@@ -87,16 +136,18 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 	if strings.ContainsAny(opt.DagName, "/\\") {
 		return "", fmt.Errorf("DagName %q must be a bare file name: the spool directory is flat", opt.DagName)
 	}
+	binDir := strings.TrimRight(strings.TrimSpace(opt.BinDir), "/")
 	exe := opt.DagmanPath
 	if exe == "" {
-		exe = DefaultDagmanPath
+		if binDir != "" {
+			exe = binDir + "/condor_dagman"
+		} else {
+			exe = DefaultDagmanPath
+		}
 	}
-	version := opt.CondorVersion
-	if version == "" {
-		// DAGMan treats an unparseable version as fatal unless
-		// -AllowVersionMismatch is passed, so refusing here beats
-		// submitting a job that exits immediately.
-		return "", fmt.Errorf("CondorVersion is required: DAGMan rejects a submit file whose -CsdVersion it cannot parse")
+	path := DefaultDagmanPATH
+	if binDir != "" {
+		path = binDir + ":" + DefaultDagmanPATH
 	}
 
 	base := strings.TrimSuffix(opt.DagName, ".dag")
@@ -115,13 +166,19 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 	p("remove_kill_sig = SIGUSR1")
 
 	// Removing the DAGMan job removes the node jobs it submitted.
-	p(`My.OtherJobRemoveRequirements = "DAGManJobId =?= $(cluster)"`)
+	// $(Cluster), not condor_submit_dag's $(cluster): macro names are
+	// case-insensitive in HTCondor, but this submit file is expanded by
+	// this project's own submit library, and the capitalised spelling is
+	// the one every version of it resolves.
+	p(`My.OtherJobRemoveRequirements = "DAGManJobId =?= $(Cluster)"`)
 	// Ask the schedd for a command port, so condor_dagman can be talked
 	// to (halt, and the tools that query a running DAG). This is
 	// condor_submit_dag's default; an access point that sets
-	// DAGMAN_DISABLE_PORT would want the opposite, which is not
-	// something this server can see from here.
-	p("My.IsDaemonCore = True")
+	// DAGMAN_DISABLE_PORT wants the opposite, which the caller passes as
+	// DisablePort.
+	if !opt.DisablePort {
+		p("My.IsDaemonCore = True")
+	}
 
 	// Requeue DAGMan if it dies abnormally or the access point reboots,
 	// rather than losing a part-finished workflow.
@@ -131,7 +188,13 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 		p(`My.JobBatchName = %s`, quote(opt.BatchName))
 	}
 
-	args := []string{"-f", "-l", "."}
+	// -p 0 runs DAGMan without a command socket, and has to come before
+	// the other DaemonCore arguments, as condor_submit_dag writes it.
+	var args []string
+	if opt.DisablePort {
+		args = append(args, "-p", "0")
+	}
+	args = append(args, "-f", "-l", ".")
 	args = append(args, "-Lockfile", base+".dag.lock")
 	args = append(args, "-Dag", opt.DagName)
 	if opt.MaxIdle > 0 {
@@ -146,13 +209,18 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 	if opt.MaxPost > 0 {
 		args = append(args, "-MaxPost", fmt.Sprint(opt.MaxPost))
 	}
-	args = append(args, "-CsdVersion", version)
+	if opt.CondorVersion != "" {
+		args = append(args, "-CsdVersion", opt.CondorVersion)
+	}
 	p("arguments = %s", argsV2(args))
 
 	env := map[string]string{
 		"_CONDOR_DAGMAN_LOG":     base + ".dagman.out",
 		"_CONDOR_MAX_DAGMAN_LOG": "0",
-		"PATH":                   DefaultDagmanPATH,
+		"PATH":                   path,
+	}
+	if opt.ConfigFile != "" {
+		env["_CONDOR_DAGMAN_CONFIG_FILE"] = opt.ConfigFile
 	}
 	for k, v := range opt.ExtraEnv {
 		env[k] = v

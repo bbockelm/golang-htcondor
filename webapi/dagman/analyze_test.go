@@ -51,20 +51,115 @@ PARENT A CHILD B
 	}
 }
 
-func TestAnalyzeMissingSubmitFileIsReported(t *testing.T) {
+func TestAnalyzeMissingSubmitFileIsDeferredNotDemanded(t *testing.T) {
+	// A submit file written to disk is not read until the node is
+	// submitted, so a DAG may legitimately name one that an earlier node
+	// will write. It is deferred exactly like a sub-DAG description.
 	r := Analyze(Input{
 		DagName: "wf.dag",
 		Dag:     "JOB A analysis.sub\n",
 		Files:   map[string]string{"analyze.sub": "executable = /bin/true\nqueue\n"},
 	})
-	if f := findingAbout(r, "analysis.sub", "not among the supplied files"); f == nil {
-		t.Errorf("the missing submit file was not reported: %+v", r.Findings)
+	f := findingAbout(r, "analysis.sub")
+	if f == nil {
+		t.Fatalf("the unsupplied submit file was not mentioned at all: %+v", r.Findings)
 	}
-	// The supplied-but-unused half is the one that names the typo. Without
-	// it the caller is told a file is missing but not that they sent a
-	// near-miss, and a spooled file nothing references is silently dropped.
-	if f := findingAbout(r, "analyze.sub", "nothing in the DAG references it"); f == nil {
-		t.Errorf("the unreferenced supplied file was not reported: %+v", r.Findings)
+	if f.Severity != Advisory {
+		t.Errorf("an unattributable submit file is severity %v, want Advisory: %s", f.Severity, f.Message)
+	}
+	if !strings.Contains(f.Message, "generated during the run is expected") {
+		t.Errorf("the note does not say a generated submit file is supported: %s", f.Message)
+	}
+	if len(r.Deferred) != 1 || r.Deferred[0] != "analysis.sub" {
+		t.Errorf("Deferred = %v, want [analysis.sub]", r.Deferred)
+	}
+	// The supplied-but-unused half still names the near-miss, but softly:
+	// with a description generated at run time this analysis cannot see
+	// every reference, so it must not call the file a misspelling.
+	u := findingAbout(r, "analyze.sub", "references it")
+	if u == nil {
+		t.Fatalf("the unreferenced supplied file was not reported: %+v", r.Findings)
+	}
+	if u.Severity != Advisory {
+		t.Errorf("unreferenced-file severity = %v, want Advisory", u.Severity)
+	}
+	if strings.Contains(u.Message, "usually a misspelling") {
+		t.Errorf("the analyzer claimed a misspelling it cannot see: %s", u.Message)
+	}
+	if !strings.Contains(u.Message, "generated at run time") {
+		t.Errorf("the note does not say why it cannot tell: %s", u.Message)
+	}
+}
+
+func TestAnalyzeUnreferencedFileIsBluntWhenNothingIsHidden(t *testing.T) {
+	// The softened wording is for when the analyzer is blind. When every
+	// referrer IS visible, the near-miss diagnosis is earned.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+}
+`,
+		Files: map[string]string{"stray.dat": "x\n"},
+	})
+	f := findingAbout(r, "stray.dat", "references it")
+	if f == nil {
+		t.Fatalf("the unreferenced supplied file was not reported: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, "usually a misspelling") {
+		t.Errorf("a fully visible DAG should still name the near-miss: %s", f.Message)
+	}
+}
+
+func TestAnalyzeDeferredSubmitFileOrdering(t *testing.T) {
+	// The reviewer's input: a node generates another node's submit file.
+	// With the edge in place there is nothing to report; without it, the
+	// sub-DAG ordering warning applies to submit files too.
+	dag := `
+SUBMIT-DESCRIPTION gen {
+    executable = /bin/sh
+    transfer_executable = false
+    transfer_output_files = a.sub
+}
+JOB G gen
+JOB A a.sub
+%s
+`
+	ordered := Analyze(Input{DagName: "wf.dag", Dag: strings.Replace(dag, "%s", "PARENT G CHILD A", 1)})
+	for _, f := range ordered.Findings {
+		if f.Severity > Advisory {
+			t.Errorf("a generated submit file with an edge produced %v: %s", f.Severity, f.Message)
+		}
+	}
+	if len(ordered.Deferred) != 1 || ordered.Deferred[0] != "a.sub" {
+		t.Errorf("Deferred = %v, want [a.sub]", ordered.Deferred)
+	}
+
+	unordered := Analyze(Input{DagName: "wf.dag", Dag: strings.Replace(dag, "%s", "", 1)})
+	f := findingAbout(unordered, "a.sub", "not an ancestor")
+	if f == nil {
+		t.Fatalf("an unordered submit-file producer was not reported: %+v", unordered.Findings)
+	}
+	if f.Severity != Warning {
+		t.Errorf("severity = %v, want Warning", f.Severity)
+	}
+}
+
+func TestAnalyzeDeclaredSubmitDescriptionIsFlagged(t *testing.T) {
+	// A description that arrives later is satisfied as a name, but its own
+	// inputs cannot be checked -- and they have to be declared too.
+	r := Analyze(Input{DagName: "wf.dag", Dag: "JOB A a.sub\n", Declared: []string{"a.sub"}})
+	f := findingAbout(r, "a.sub", "cannot be checked here")
+	if f == nil {
+		t.Fatalf("a declared-only submit description was not flagged: %+v", r.Findings)
+	}
+	if f.Severity != Advisory {
+		t.Errorf("severity = %v, want Advisory", f.Severity)
+	}
+	if len(r.Deferred) != 0 {
+		t.Errorf("a declared file is not deferred: %v", r.Deferred)
 	}
 }
 
@@ -114,12 +209,33 @@ func TestAnalyzeAbsoluteExecutableIsNotStaged(t *testing.T) {
 JOB A {
     executable = /bin/sh
     transfer_executable = false
+    transfer_input_files = sibling.dat
 }
 `,
+		Files: map[string]string{"sibling.dat": "x\n"},
 	})
 	if len(r.Findings) != 0 {
 		t.Errorf("/bin/sh was treated as something to stage: %+v", r.Findings)
 	}
+	// The control: the analyzer IS looking at this body, so the relative
+	// sibling next to the absolute executable must be in the allow-set.
+	// Without this a no-op analyzer passes the assertion above.
+	if !contains(r.Required, "sibling.dat") {
+		t.Errorf("Required = %v, want it to contain sibling.dat", r.Required)
+	}
+	// And an absolute path is not silently in the allow-set either.
+	if contains(r.Required, "/bin/sh") {
+		t.Errorf("an absolute executable was put in the allow-set: %v", r.Required)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAnalyzeSpliceIsFatalButSubdagIsNot(t *testing.T) {
@@ -297,12 +413,432 @@ func TestAnalyzeMacroValuesAreNotGuessed(t *testing.T) {
 JOB A {
     executable = /bin/true
     transfer_executable = false
-    transfer_input_files = $(infile)
+    transfer_input_files = $(infile), sidecar.dat
 }
 VARS A infile="a.dat"
 `,
+		Files: map[string]string{"sidecar.dat": "x\n"},
 	})
 	if len(r.Findings) != 0 {
 		t.Errorf("a macro-valued input produced findings: %+v", r.Findings)
+	}
+	// The control: the analyzer read this body, and the literal sibling in
+	// it is staged. Without this a no-op analyzer satisfies the assertion
+	// above by doing nothing at all.
+	if !contains(r.Required, "sidecar.dat") {
+		t.Errorf("Required = %v, want it to contain sidecar.dat", r.Required)
+	}
+	// And the macro itself is neither demanded nor invented as a file.
+	if findingAbout(r, "$(") != nil {
+		t.Errorf("the macro reference was demanded as a file: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeBareNameCollidesWithSubdirectoryPath(t *testing.T) {
+	// The spool is flat, so a supplied "data.txt" and a node's
+	// "runB/data.txt" land on the same name. The old check only compared
+	// paths that contained a slash, so this pair went unnoticed -- the
+	// more likely shape of the two, since the caller supplies bare names.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = runB/data.txt
+}
+`,
+		Files: map[string]string{"data.txt": "1\n"},
+	})
+	if !r.Fatal() {
+		t.Fatalf("a bare name colliding with a subdirectory path should be fatal: %+v", r.Findings)
+	}
+	if findingAbout(r, "data.txt", "runB/data.txt", "overwrite") == nil {
+		t.Errorf("the collision was not explained: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeCollisionNeedsTwoDistinctPaths(t *testing.T) {
+	// The same path named twice is not a collision. Feeding in the
+	// supplied files and the node bodies makes that easy to get wrong.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = data.txt
+}
+JOB B {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = data.txt
+}
+`,
+		Files: map[string]string{"data.txt": "1\n"},
+	})
+	if f := findingAbout(r, "overwrite"); f != nil {
+		t.Errorf("one path used twice was reported as a collision: %s", f.Message)
+	}
+}
+
+func TestAnalyzeSuppliedIncludeIsParsed(t *testing.T) {
+	// INCLUDE is textual inclusion at parse time. When the file is in
+	// hand the nodes it declares are part of the graph, so an edge naming
+	// one is not "not declared".
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "INCLUDE more.dag\nPARENT A CHILD B\n",
+		Files: map[string]string{
+			"more.dag": "JOB A a.sub\nJOB B b.sub\n",
+			"a.sub":    "executable = /bin/true\nqueue\n",
+			"b.sub":    "executable = /bin/true\nqueue\n",
+		},
+	})
+	if r.Fatal() {
+		t.Fatalf("a supplied INCLUDE was still refused: %v", r.Errors())
+	}
+	if f := findingAbout(r, "not declared"); f != nil {
+		t.Errorf("a node declared in the INCLUDE was not seen: %s", f.Message)
+	}
+	if f := findingAbout(r, "more.dag", "references it"); f != nil {
+		t.Errorf("the INCLUDE file was called unreferenced: %s", f.Message)
+	}
+}
+
+func TestParseIncludeMergesTheIncludedGraph(t *testing.T) {
+	d := parseText("INCLUDE more.dag\nPARENT A CHILD B\n", &resolver{
+		lookup: func(name string) (string, bool) {
+			if name == "more.dag" {
+				return "JOB A a.sub\nJOB B b.sub\n", true
+			}
+			return "", false
+		},
+	})
+	if len(d.Nodes) != 2 {
+		t.Fatalf("nodes = %+v, want 2 from the included file", d.Nodes)
+	}
+	if len(d.Edges) != 1 {
+		t.Fatalf("edges = %+v, want 1", d.Edges)
+	}
+	if d.Incomplete {
+		t.Error("a supplied INCLUDE must not leave the graph incomplete")
+	}
+	if d.Nodes[0].Source != "more.dag" {
+		t.Errorf("node source = %q, want more.dag so its line number means something", d.Nodes[0].Source)
+	}
+}
+
+func TestAnalyzeUnsuppliedIncludeSuppressesUndeclaredNodes(t *testing.T) {
+	// A missing INCLUDE is fatal, but the node set in hand is admittedly
+	// partial: calling the edge's nodes undeclared is this package's
+	// ignorance, not the DAG's mistake.
+	r := Analyze(Input{DagName: "wf.dag", Dag: "INCLUDE more.dag\nPARENT A CHILD B\n"})
+	if !r.Fatal() {
+		t.Fatalf("a missing INCLUDE should be fatal: %+v", r.Findings)
+	}
+	if f := findingAbout(r, "not declared"); f != nil {
+		t.Errorf("an incomplete graph claimed a node is undeclared: %s", f.Message)
+	}
+}
+
+func TestAnalyzeIncludeCycleTerminates(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "INCLUDE a.dag\n",
+		Files:   map[string]string{"a.dag": "INCLUDE b.dag\nJOB A a.sub\n", "b.dag": "INCLUDE a.dag\n"},
+	})
+	if findingAbout(r, "already being parsed") == nil {
+		t.Errorf("an include cycle was not reported: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeSuppliedSpliceIsParsed(t *testing.T) {
+	// A splice is inlined at parse time, so its nodes' files are the
+	// parent DAG's problem: they have to be in the spool now.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "SPLICE SP pieces.dag\n",
+		Files:   map[string]string{"pieces.dag": "JOB X x.sub\n"},
+	})
+	if findingAbout(r, "x.sub") == nil {
+		t.Fatalf("a spliced node's submit file was not noticed: %+v", r.Findings)
+	}
+
+	withFile := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "SPLICE SP pieces.dag\n",
+		Files:   map[string]string{"pieces.dag": "JOB X x.sub\n", "x.sub": "executable = /bin/true\nqueue\n"},
+	})
+	if !contains(withFile.Required, "x.sub") {
+		t.Errorf("Required = %v, want it to contain the spliced node's submit file", withFile.Required)
+	}
+	if f := findingAbout(withFile, "x.sub", "references it"); f != nil {
+		t.Errorf("a spliced node's submit file was called unreferenced: %s", f.Message)
+	}
+}
+
+func TestParseSplicePrefixesNodeNames(t *testing.T) {
+	d := parseText("SPLICE SP pieces.dag\n", &resolver{
+		lookup: func(name string) (string, bool) {
+			if name == "pieces.dag" {
+				return "JOB X x.sub\nJOB Y y.sub\nPARENT X CHILD Y\n", true
+			}
+			return "", false
+		},
+	})
+	if _, ok := d.NodeByName("SP+X"); !ok {
+		t.Fatalf("spliced nodes were not scoped: %+v", d.Nodes)
+	}
+	if len(d.Edges) != 1 || d.Edges[0].Parent != "SP+X" || d.Edges[0].Child != "SP+Y" {
+		t.Errorf("spliced edges were not scoped: %+v", d.Edges)
+	}
+}
+
+func TestAnalyzeEmptyDagIsFatal(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: "# nothing but a comment\n"})
+	if !r.Fatal() {
+		t.Fatalf("a DAG with no nodes should be fatal: %+v", r.Findings)
+	}
+	if findingAbout(r, "declares no nodes") == nil {
+		t.Errorf("the empty DAG was not explained: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeOneLineDagIsFatalAndSaysWhy(t *testing.T) {
+	// The failure mode this message exists for: a caller that writes the
+	// whole workflow as one string with literal backslash-n in it. DAG
+	// syntax is line-oriented, so nothing is declared at all.
+	r := Analyze(Input{DagName: "wf.dag", Dag: `\nJOB A a.sub\nJOB B b.sub\n`})
+	if !r.Fatal() {
+		t.Fatalf("a one-line DAG declares no nodes and should be fatal: %+v", r.Findings)
+	}
+	f := findingAbout(r, "declares no nodes")
+	if f == nil {
+		t.Fatalf("the empty DAG was not explained: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, `use real newlines, not \n`) {
+		t.Errorf("the message does not name the likely cause: %s", f.Message)
+	}
+}
+
+func TestAnalyzeEmptyDagNameIsFatalAndStaysOutOfRequired(t *testing.T) {
+	r := Analyze(Input{Dag: "JOB A a.sub\n", Files: map[string]string{"a.sub": "queue\n"}})
+	if !r.Fatal() {
+		t.Fatalf("a workflow with no DAG file name should be fatal: %+v", r.Findings)
+	}
+	for _, name := range r.Required {
+		if name == "" {
+			t.Fatalf("an empty name reached the spool allow-set: %q", r.Required)
+		}
+	}
+}
+
+func TestAnalyzeAllNodesResolves(t *testing.T) {
+	// ALL_NODES is a stand-in for every node, not a node that is missing.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "JOB A a.sub\nSCRIPT PRE ALL_NODES pre.sh\nVARS all_nodes k=\"v\"\n",
+		Files:   map[string]string{"a.sub": "queue\n", "pre.sh": "#!/bin/sh\n"},
+	})
+	if f := findingAbout(r, "not declared"); f != nil {
+		t.Errorf("ALL_NODES was treated as an undeclared node: %s", f.Message)
+	}
+}
+
+func TestAnalyzeVarsNamesTheNodeAsWritten(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: "JOB A a.sub\nVARS MissinG k=\"v\"\n",
+		Files: map[string]string{"a.sub": "queue\n"}})
+	f := findingAbout(r, "VARS names node")
+	if f == nil {
+		t.Fatalf("an undeclared VARS node was not reported: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, "MissinG") {
+		t.Errorf("the message lost the author's spelling: %s", f.Message)
+	}
+}
+
+func TestAnalyzeDuplicateAndReservedNodeNamesAreFatal(t *testing.T) {
+	dup := Analyze(Input{DagName: "wf.dag", Dag: "JOB A a.sub\nJOB a b.sub\n",
+		Files: map[string]string{"a.sub": "queue\n", "b.sub": "queue\n"}})
+	if findingAbout(dup, "declared twice") == nil {
+		t.Errorf("a duplicate node name was not reported: %+v", dup.Findings)
+	}
+	if !dup.Fatal() {
+		t.Errorf("a duplicate node name should be fatal")
+	}
+
+	reserved := Analyze(Input{DagName: "wf.dag", Dag: "JOB CHILD a.sub\n",
+		Files: map[string]string{"a.sub": "queue\n"}})
+	if !reserved.Fatal() || findingAbout(reserved, "reserved word") == nil {
+		t.Errorf("a reserved node name should be fatal: %+v", reserved.Findings)
+	}
+
+	plus := Analyze(Input{DagName: "wf.dag", Dag: "JOB A+B a.sub\n",
+		Files: map[string]string{"a.sub": "queue\n"}})
+	if !plus.Fatal() || findingAbout(plus, "'+'") == nil {
+		t.Errorf("a node name containing '+' should be fatal: %+v", plus.Findings)
+	}
+}
+
+func TestAnalyzeSubdagProducerInASuppliedSubmitFile(t *testing.T) {
+	// The producer's description lives in a file the caller supplied, not
+	// in an inline block. Resolving a body three different ways in three
+	// different functions is how this came out as "no node declares it".
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "JOB G g.sub\nSUBDAG EXTERNAL S stage2.dag\n",
+		Files: map[string]string{
+			"g.sub": "executable = /bin/sh\ntransfer_executable = false\ntransfer_output_files = stage2.dag\nqueue\n",
+		},
+	})
+	if findingAbout(r, "stage2.dag", "not an ancestor") == nil {
+		t.Fatalf("a producer written in a supplied submit file was not seen: %+v", r.Findings)
+	}
+	if f := findingAbout(r, "No node declares it"); f != nil {
+		t.Errorf("the producer was missed and reported as unattributable: %s", f.Message)
+	}
+}
+
+func TestAnalyzeInitialdirIsRefused(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    initialdir = work
+}
+`})
+	if !r.Fatal() {
+		t.Fatalf("initialdir cannot be honored in a flat spool: %+v", r.Findings)
+	}
+	if findingAbout(r, "initialdir", "flattens") == nil {
+		t.Errorf("the initialdir refusal was not explained: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeShouldTransferFilesNoNeedsNothingStaged(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    should_transfer_files = NO
+    transfer_input_files = on_the_share.dat
+}
+`})
+	if f := findingAbout(r, "on_the_share.dat"); f != nil {
+		t.Errorf("a node that transfers nothing was still asked to stage a file: %s", f.Message)
+	}
+}
+
+func TestAnalyzeDirectoryTransferIsWarned(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = inputs/
+}
+`})
+	f := findingAbout(r, "inputs/", "directory")
+	if f == nil {
+		t.Fatalf("a directory transfer was not reported: %+v", r.Findings)
+	}
+	if f.Severity != Warning {
+		t.Errorf("severity = %v, want Warning", f.Severity)
+	}
+}
+
+func TestAnalyzeUrlQueryCommaIsNotAFileSeparator(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = data.csv, https://example.org/get?keys=1,2
+}
+`, Files: map[string]string{"data.csv": "1\n"}})
+	if f := findingAbout(r, `2 is not among`); f != nil {
+		t.Errorf("a URL query string was split into a bogus file: %s", f.Message)
+	}
+	if len(r.Findings) != 0 {
+		t.Errorf("unexpected findings: %+v", r.Findings)
+	}
+}
+
+func TestAnalyzeRescueDagAndOutputsAreNotUnreferenced(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+}
+NODE_STATUS_FILE status.txt
+`,
+		Files: map[string]string{"wf.dag.rescue001": "JOB A a.sub\n", "status.txt": ""},
+	})
+	if f := findingAbout(r, "rescue001", "references it"); f != nil {
+		t.Errorf("a rescue DAG was called unreferenced: %s", f.Message)
+	}
+	if f := findingAbout(r, "status.txt", "references it"); f != nil {
+		t.Errorf("a declared DAG output was called unreferenced: %s", f.Message)
+	}
+}
+
+func TestAnalyzeDotIncludeHeaderIsDemanded(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+}
+DOT wf.dot UPDATE INCLUDE header.dot
+`})
+	if findingAbout(r, "header.dot", "not among the supplied files") == nil {
+		t.Errorf("the DOT INCLUDE header was not demanded: %+v", r.Findings)
+	}
+	if f := findingAbout(r, "wf.dot", "not among"); f != nil {
+		t.Errorf("the dot output file was demanded as an input: %s", f.Message)
+	}
+}
+
+func TestReachableIsNotTrueForANodeWithNoEdges(t *testing.T) {
+	d := Parse("JOB A a.sub\n")
+	if reachable(d, "A", "A") {
+		t.Error("a node with no edges must not be reachable from itself")
+	}
+	cyc := Parse("JOB A a.sub\nPARENT A CHILD A\n")
+	if !reachable(cyc, "A", "A") {
+		t.Error("a real self-edge is a path")
+	}
+}
+
+func TestAnalyzeDescriptorThatIsBothADescriptionAndAFile(t *testing.T) {
+	// A name can be a SUBMIT-DESCRIPTION and a supplied file at once.
+	// Resolving it as the former does not make the latter unused, and
+	// calling the caller's file unreferenced would tell them to delete
+	// the thing the workflow may actually run.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+SUBMIT-DESCRIPTION work {
+    executable = /bin/echo
+    transfer_executable = false
+}
+JOB A work
+`,
+		Files: map[string]string{"work": "executable = /bin/echo\nqueue\n"},
+	})
+	if f := findingAbout(r, "work", "references it"); f != nil {
+		t.Errorf("a file that shares a description's name was called unreferenced: %s", f.Message)
+	}
+}
+
+func TestAnalyzeDeferredIsDeduplicated(t *testing.T) {
+	// Two nodes can read the same generated file. Listing it twice makes
+	// the caller think there are two things to produce.
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "SUBDAG EXTERNAL S1 stage2.dag\nSUBDAG EXTERNAL S2 stage2.dag\n",
+	})
+	if len(r.Deferred) != 1 || r.Deferred[0] != "stage2.dag" {
+		t.Errorf("Deferred = %v, want [stage2.dag] once", r.Deferred)
 	}
 }

@@ -26,7 +26,7 @@ func submitValues(body, key string) []string {
 		if !ok || !strings.EqualFold(k, key) {
 			continue
 		}
-		for _, f := range strings.Split(v, ",") {
+		for _, f := range splitFileList(v) {
 			f = strings.TrimSpace(f)
 			f = strings.Trim(f, `"`)
 			if f == "" || strings.Contains(f, "$(") {
@@ -89,7 +89,19 @@ func submitInputFiles(body string) []string {
 		seen[f] = true
 		out = append(out, f)
 	}
+	// should_transfer_files = NO means nothing is transferred at all, so
+	// the node's declared inputs are not ours to stage: they are expected
+	// to be on the execute machine already (a shared filesystem).
+	if !transfersFiles(body) {
+		return nil
+	}
 	for _, f := range submitValues(body, "transfer_input_files") {
+		// A trailing slash asks for a directory's CONTENTS. That cannot
+		// survive the flat spool rewrite, and the name is not a file to
+		// look for; analyzeJobNode reports it separately.
+		if strings.HasSuffix(f, "/") {
+			continue
+		}
 		add(f)
 	}
 	if in := submitString(body, "input"); in != "" && !strings.Contains(in, "$(") {
@@ -128,4 +140,74 @@ func submitAssignment(line string) (key, value string, ok bool) {
 		return "", "", false
 	}
 	return key, value, true
+}
+
+// splitFileList splits a submit-file list on commas, except inside a URL
+// query string: `?a=1,2` is one URL, not two files.
+//
+// The discriminator is the missing space. A list an author wrote reads
+// "a.txt, b.txt"; a comma inside a query string has nothing after it, so
+// a fragment with no leading whitespace that follows a URL bearing a `?`
+// is a continuation of that URL rather than the next entry.
+func splitFileList(v string) []string {
+	parts := strings.Split(v, ",")
+	if !strings.Contains(v, "://") {
+		return parts
+	}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if n := len(out); n > 0 {
+			prev := out[n-1]
+			q := strings.Index(prev, "?")
+			noLeadingSpace := p == strings.TrimLeft(p, " \t")
+			if strings.Contains(prev, "://") && q > strings.Index(prev, "://") &&
+				!strings.Contains(p, "://") && noLeadingSpace {
+				out[n-1] = prev + "," + p
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// transfersFiles reports whether the node transfers files at all.
+func transfersFiles(body string) bool {
+	switch strings.ToLower(submitString(body, "should_transfer_files")) {
+	case "no", "never", "false":
+		return false
+	}
+	return true
+}
+
+// submitDirTransfers returns the transfer_input_files entries that name a
+// directory's contents with a trailing slash.
+func submitDirTransfers(body string) []string {
+	var out []string
+	for _, f := range submitValues(body, "transfer_input_files") {
+		if strings.HasSuffix(f, "/") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// submitHasMacroInput reports whether any file-naming key in the body has
+// a value this reader deliberately drops because it depends on a macro.
+// Those files exist but cannot be checked, which is what stops the
+// analysis calling a supplied file unreferenced.
+func submitHasMacroInput(body string) bool {
+	sc := bufio.NewScanner(strings.NewReader(body))
+	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
+	for sc.Scan() {
+		k, v, ok := submitAssignment(sc.Text())
+		if !ok || !strings.Contains(v, "$(") {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "transfer_input_files", "input", "executable":
+			return true
+		}
+	}
+	return false
 }

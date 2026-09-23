@@ -13,18 +13,23 @@
 // The distinction that matters most here is WHEN a referenced file has to
 // exist:
 //
-//   - SPLICE is resolved at parse time. DAGMan reads the splice file and
-//     inlines its nodes into the parent graph before anything runs, so a
-//     missing splice file means the DAG cannot start at all.
+//   - SPLICE and INCLUDE are resolved at parse time. DAGMan reads the
+//     file and inlines it into the parent graph before anything runs, so
+//     a missing one means the DAG cannot start at all.
 //   - SUBDAG EXTERNAL is resolved when the node becomes ready. The DAG
 //     description "only needs to exist just before node submission time"
 //     (docs/automated-workflows/dagman-using-other-dags.rst), which is
 //     the whole point of the idiom: an earlier node generates it. A
 //     SUBDAG file that is absent at submit time is the NORMAL case, not a
 //     mistake.
+//   - A node's submit file, when it is a file on disk rather than an
+//     inline description, is read when that node is submitted. Writing or
+//     rewriting a submit file from an earlier node's output is a standard
+//     DAGMan trick, so an absent submit file is deferred exactly like a
+//     sub-DAG description, not reported as a missing input.
 //
-// Conflating those two is the easiest way to make this package reject
-// good workflows, so they are separate types all the way through.
+// Conflating those is the easiest way to make this package reject good
+// workflows, so they are separate paths all the way through.
 package dagman
 
 import (
@@ -58,6 +63,16 @@ var nodeKeywords = map[string]NodeType{
 	"SERVICE":     NodeService,
 }
 
+// allNodes is DAG::ALL_NODES: a stand-in that resolves to every node, so
+// it is never an undeclared node name.
+const allNodes = "ALL_NODES"
+
+// reservedNames is DAG::RESERVED (dag_commands.cpp): words a node may not
+// be named, because the parser cannot tell them from syntax.
+var reservedNames = map[string]bool{"PARENT": true, "CHILD": true, allNodes: true}
+
+func isAllNodes(name string) bool { return strings.EqualFold(name, allNodes) }
+
 // Node is one node of the graph.
 type Node struct {
 	Name string
@@ -80,6 +95,9 @@ type Node struct {
 	NOOP bool
 	Done bool
 	Line int
+	// Source is the file this came from, when it was not the top-level
+	// DAG: an INCLUDE'd or SPLICE'd file. Line numbers are relative to it.
+	Source string
 }
 
 // ScriptWhen is which script slot a SCRIPT command filled.
@@ -101,6 +119,7 @@ type Script struct {
 	Executable string
 	Args       []string
 	Line       int
+	Source     string
 }
 
 // Edge is one PARENT/CHILD dependency.
@@ -108,6 +127,7 @@ type Edge struct {
 	Parent string
 	Child  string
 	Line   int
+	Source string
 }
 
 // FileRef is a file named by a command, with the line that named it.
@@ -115,22 +135,25 @@ type FileRef struct {
 	Path    string
 	Command string
 	Line    int
+	Source  string
 }
 
 // Description is a named SUBMIT-DESCRIPTION block.
 type Description struct {
-	Name string
-	Body string
-	Line int
+	Name   string
+	Body   string
+	Line   int
+	Source string
 }
 
 // ParseError is a line this package could not make sense of. It is
 // advisory: DAGMan is the authority, and an unparsed line may well be
 // valid syntax this package has not been taught.
 type ParseError struct {
-	Line int
-	Text string
-	Why  string
+	Line   int
+	Text   string
+	Why    string
+	Source string
 }
 
 func (e ParseError) Error() string {
@@ -149,6 +172,9 @@ type DAG struct {
 	// one is fatal before any node runs.
 	Includes []FileRef
 	Configs  []FileRef
+	// DotIncludes are DOT ... INCLUDE header files. Unlike the other DOT
+	// arguments they are read, not written.
+	DotIncludes []FileRef
 	// Outputs are files the DAG writes (NODE_STATUS_FILE, JOBSTATE_LOG,
 	// SAVE_POINT_FILE, DOT). Tracked so nothing mistakes them for inputs
 	// that must be staged.
@@ -156,12 +182,23 @@ type DAG struct {
 	// Vars are VARS assignments per node, lower-cased node name to the
 	// raw remainder of the line. Kept for reporting, not expanded.
 	Vars map[string][]string
+	// VarNames maps the lower-cased key of Vars back to the spelling the
+	// DAG used, so a message about it quotes the author's own text.
+	VarNames map[string]string
 	// Unrecognized are lines whose leading keyword this package does not
 	// know. They are passed through to DAGMan untouched.
 	Unrecognized []ParseError
 	// Errors are lines whose keyword IS known but whose arguments did not
 	// parse.
 	Errors []ParseError
+	// Fatals are lines DAGMan itself rejects: a duplicate or reserved
+	// node name, for instance. Unlike Errors these are not "this package
+	// did not understand it", they are "DAGMan will refuse this".
+	Fatals []ParseError
+	// Incomplete is set when a parse-time inclusion (INCLUDE or SPLICE)
+	// could not be read, so the node set in hand is admittedly partial.
+	// Nothing may conclude "that node is not declared" from it.
+	Incomplete bool
 }
 
 // NodeByName finds a node, case-insensitively, as DAGMan does.
@@ -175,41 +212,81 @@ func (d *DAG) NodeByName(name string) (*Node, bool) {
 	return nil, false
 }
 
+// resolver supplies the text of a file named by INCLUDE or SPLICE, which
+// DAGMan reads at parse time. Analyze passes one built from the files the
+// caller supplied; the bare Parse entry point has none, and then a
+// parse-time inclusion simply leaves the DAG Incomplete.
+type resolver struct {
+	lookup func(name string) (string, bool)
+	// stack is the chain of files currently being parsed, so a file that
+	// includes itself is caught rather than recursed into forever.
+	stack []string
+}
+
+func (rs *resolver) has(name string) bool {
+	if rs == nil || rs.lookup == nil {
+		return false
+	}
+	_, ok := rs.lookup(name)
+	return ok
+}
+
+func (rs *resolver) cycle(name string) bool {
+	for _, s := range rs.stack {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (rs *resolver) child(name string) *resolver {
+	next := make([]string, 0, len(rs.stack)+1)
+	next = append(next, rs.stack...)
+	next = append(next, name)
+	return &resolver{lookup: rs.lookup, stack: next}
+}
+
 // Parse reads a DAG description.
 //
 // It never returns an error for unrecognized input: everything it could
-// not interpret lands in DAG.Unrecognized or DAG.Errors, and the caller
-// decides what that is worth. The only way to get nothing back is a read
-// failure on the reader itself.
+// not interpret lands in DAG.Unrecognized, DAG.Errors or DAG.Fatals, and
+// the caller decides what that is worth.
+//
+// Parse sees only the text it is given, so an INCLUDE or SPLICE leaves
+// the result Incomplete. Analyze parses those recursively, because it is
+// the one that knows which files the caller supplied.
 func Parse(text string) *DAG {
-	d := &DAG{
+	return parseText(text, nil)
+}
+
+func newDAG() *DAG {
+	return &DAG{
 		Descriptions: map[string]Description{},
 		Vars:         map[string][]string{},
+		VarNames:     map[string]string{},
 	}
+}
 
-	sc := bufio.NewScanner(strings.NewReader(text))
-	// DAG lines are short, but an inline submit description can make a
-	// logical line long; raise the cap so a big one does not truncate
-	// into a confusing parse error.
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+func parseText(text string, rs *resolver) *DAG {
+	d := newDAG()
+	lr := newLineReader(text)
 
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		raw := sc.Text()
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	for {
+		line, lineNo, ok := lr.next()
+		if !ok {
+			break
 		}
-
 		fields := splitFields(line)
 		if len(fields) == 0 {
 			continue
 		}
-		keyword := strings.ToUpper(fields[0])
+		// dag_parser.cpp:965 folds '-' to '_' before looking the command
+		// up, which is what makes PRE-SKIP and PRE_SKIP the same command.
+		keyword := strings.ToUpper(strings.ReplaceAll(fields[0], "-", "_"))
 
 		if nt, ok := nodeKeywords[keyword]; ok {
-			d.parseNode(nt, fields, lineNo, sc, &lineNo)
+			d.parseNode(nt, fields, lineNo, lr)
 			continue
 		}
 
@@ -217,21 +294,36 @@ func Parse(text string) *DAG {
 		case "SUBDAG":
 			d.parseSubdag(fields, lineNo)
 		case "SPLICE":
-			d.parseSplice(fields, lineNo)
-		case "SUBMIT-DESCRIPTION":
-			d.parseDescription(fields, lineNo, sc, &lineNo)
+			d.parseSplice(fields, lineNo, rs)
+		case "SUBMIT_DESCRIPTION":
+			d.parseDescription(fields, lineNo, lr)
 		case "SCRIPT":
 			d.parseScript(fields, lineNo)
 		case "PARENT":
 			d.parseParent(fields, lineNo)
+		case "WEAK":
+			// WEAK PARENT ... CHILD ... is a PARENT/CHILD edge with a
+			// weaker ordering guarantee; the graph is the same shape.
+			if len(fields) >= 2 && strings.EqualFold(fields[1], "PARENT") {
+				d.parseParent(fields[1:], lineNo)
+			} else {
+				d.errf(lineNo, line, "expected WEAK PARENT p1 [p2 ...] CHILD c1 [c2 ...]")
+			}
 		case "VARS":
 			if len(fields) >= 2 {
 				n := strings.ToLower(fields[1])
 				d.Vars[n] = append(d.Vars[n], strings.Join(fields[2:], " "))
+				if _, ok := d.VarNames[n]; !ok {
+					d.VarNames[n] = fields[1]
+				}
+			} else {
+				d.errf(lineNo, line, "VARS needs a node name")
 			}
 		case "INCLUDE":
 			if len(fields) >= 2 {
-				d.Includes = append(d.Includes, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
+				p := unquote(fields[1])
+				d.Includes = append(d.Includes, FileRef{Path: p, Command: keyword, Line: lineNo})
+				d.include(p, lineNo, line, rs)
 			} else {
 				d.errf(lineNo, line, "INCLUDE needs a file name")
 			}
@@ -241,7 +333,21 @@ func Parse(text string) *DAG {
 			} else {
 				d.errf(lineNo, line, "CONFIG needs a file name")
 			}
-		case "NODE_STATUS_FILE", "JOBSTATE_LOG", "DOT":
+		case "DOT":
+			// DOT <file> [UPDATE] [OVERWRITE] [INCLUDE <header>]. The dot
+			// file is written; the INCLUDE header is read, so it has to be
+			// staged like any other input.
+			if len(fields) >= 2 {
+				d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
+			}
+			for i := 2; i+1 < len(fields); i++ {
+				if strings.EqualFold(fields[i], "INCLUDE") {
+					d.DotIncludes = append(d.DotIncludes, FileRef{
+						Path: unquote(fields[i+1]), Command: "DOT INCLUDE", Line: lineNo})
+					break
+				}
+			}
+		case "NODE_STATUS_FILE", "JOBSTATE_LOG":
 			// Outputs, not inputs. Recorded so the analyzer does not ask
 			// the caller to stage a file the DAG is going to write.
 			if len(fields) >= 2 {
@@ -253,9 +359,9 @@ func Parse(text string) *DAG {
 			if len(fields) >= 3 {
 				d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[2]), Command: keyword, Line: lineNo})
 			}
-		case "RETRY", "ABORT-DAG-ON", "PRIORITY", "CATEGORY", "MAXJOBS",
+		case "RETRY", "ABORT_DAG_ON", "PRIORITY", "CATEGORY", "MAXJOBS",
 			"PRE_SKIP", "DONE", "REJECT", "SET_JOB_ATTR", "ENV",
-			"CONNECT", "PIN_IN", "PIN_OUT":
+			"CONNECT", "PIN_IN", "PIN_OUT", "TOLERANCE":
 			// Known, and referencing no file. Nothing to collect.
 		default:
 			d.Unrecognized = append(d.Unrecognized, ParseError{
@@ -270,58 +376,194 @@ func (d *DAG) errf(line int, text, why string) {
 	d.Errors = append(d.Errors, ParseError{Line: line, Text: text, Why: why})
 }
 
+func (d *DAG) fatalf(line int, text, why string) {
+	d.Fatals = append(d.Fatals, ParseError{Line: line, Text: text, Why: why})
+}
+
+// addNode applies the two cheap rules DAGMan enforces on a node name
+// (dag_parser.cpp:316-323, condor_dagman/parse.cpp:112-122): it may not be
+// a reserved word, and it may not contain '+', which is the separator
+// DAGMan itself uses to scope splice node names.
+func (d *DAG) addNode(n Node, text string) {
+	if reservedNames[strings.ToUpper(n.Name)] {
+		d.fatalf(n.Line, text, fmt.Sprintf("node name %q is a reserved word", n.Name))
+		return
+	}
+	if strings.Contains(n.Name, "+") {
+		d.fatalf(n.Line, text, fmt.Sprintf("node name %q contains '+', which DAGMan reserves for splice scopes", n.Name))
+		return
+	}
+	d.Nodes = append(d.Nodes, n)
+}
+
 // parseNode handles JOB / FINAL / PROVISIONER / SERVICE, including the
 // inline submit description forms.
 //
 //	JOB NodeName SubmitDescription [DIR directory] [NOOP] [DONE]
-//	JOB NodeName { ... }
-//	JOB NodeName @=tag ... @tag
-func (d *DAG) parseNode(nt NodeType, fields []string, line int, sc *bufio.Scanner, lineNo *int) {
+//	JOB NodeName { ... } [DIR directory]
+//	JOB NodeName @=tag ... @tag [DIR directory]
+func (d *DAG) parseNode(nt NodeType, fields []string, line int, lr *lineReader) {
+	text := strings.Join(fields, " ")
 	if len(fields) < 3 {
-		d.errf(line, strings.Join(fields, " "), string(nt)+" needs a name and a submit description")
+		d.errf(line, text, string(nt)+" needs a name and a submit description")
 		return
 	}
-	n := Node{Name: fields[1], Type: nt, Line: line}
+	n := Node{Name: unquote(fields[1]), Type: nt, Line: line}
 
 	if end, ok := inlineDescEnd(fields[2]); ok {
-		body, err := readInlineDesc(sc, end, lineNo)
+		body, rest, err := readInlineDesc(lr, end)
 		if err != nil {
-			d.errf(line, strings.Join(fields, " "), err.Error())
+			d.errf(line, text, err.Error())
 			return
 		}
 		n.Inline = true
 		n.InlineBody = body
-		// Options after the closing delimiter are not supported here; a
-		// DIR on an inline node is vanishingly rare and guessing would be
-		// worse than not claiming to know.
+		// DAGMan re-lexes whatever followed the closing delimiter
+		// (dag_parser.cpp:268), so `} DIR sub` is a node with a DIR.
+		applyNodeOptions(&n, splitFields(rest))
 	} else {
 		n.Descriptor = unquote(fields[2])
 		applyNodeOptions(&n, fields[3:])
 	}
-	d.Nodes = append(d.Nodes, n)
+	d.addNode(n, text)
 }
 
 // parseSubdag handles `SUBDAG EXTERNAL Name DagFile [DIR d] [NOOP] [DONE]`.
 func (d *DAG) parseSubdag(fields []string, line int) {
+	text := strings.Join(fields, " ")
 	// EXTERNAL is the only supported form, and is required.
 	if len(fields) < 4 || !strings.EqualFold(fields[1], "EXTERNAL") {
-		d.errf(line, strings.Join(fields, " "), "expected SUBDAG EXTERNAL <name> <dagfile>")
+		d.errf(line, text, "expected SUBDAG EXTERNAL <name> <dagfile>")
 		return
 	}
-	n := Node{Name: fields[2], Type: NodeSubdag, Descriptor: unquote(fields[3]), Line: line}
+	n := Node{Name: unquote(fields[2]), Type: NodeSubdag, Descriptor: unquote(fields[3]), Line: line}
 	applyNodeOptions(&n, fields[4:])
-	d.Nodes = append(d.Nodes, n)
+	d.addNode(n, text)
 }
 
 // parseSplice handles `SPLICE Name DagFile [DIR d]`.
-func (d *DAG) parseSplice(fields []string, line int) {
+//
+// A splice is inlined at parse time, so when the file is in hand this
+// reads it and merges its graph in, with every node name prefixed
+// "Name+" -- the scope separator condor_dagman/parse.cpp uses
+// (current_splice_scope). Without the file the graph is Incomplete.
+func (d *DAG) parseSplice(fields []string, line int, rs *resolver) {
+	text := strings.Join(fields, " ")
 	if len(fields) < 3 {
-		d.errf(line, strings.Join(fields, " "), "expected SPLICE <name> <dagfile>")
+		d.errf(line, text, "expected SPLICE <name> <dagfile>")
 		return
 	}
-	n := Node{Name: fields[1], Type: NodeSplice, Descriptor: unquote(fields[2]), Line: line}
+	n := Node{Name: unquote(fields[1]), Type: NodeSplice, Descriptor: unquote(fields[2]), Line: line}
 	applyNodeOptions(&n, fields[3:])
-	d.Nodes = append(d.Nodes, n)
+	before := len(d.Nodes)
+	d.addNode(n, text)
+	if len(d.Nodes) == before {
+		return // the name was refused; nothing to splice into
+	}
+
+	if !rs.has(n.Descriptor) {
+		d.Incomplete = true
+		return
+	}
+	if rs.cycle(n.Descriptor) {
+		d.errf(line, text, "SPLICE "+n.Descriptor+" is already being parsed; a splice cannot contain itself")
+		d.Incomplete = true
+		return
+	}
+	body, _ := rs.lookup(n.Descriptor)
+	sub := parseText(body, rs.child(n.Descriptor))
+	d.merge(sub, n.Descriptor, n.Name+"+")
+}
+
+// include merges an INCLUDE'd file, which DAGMan reads at parse time as
+// if its text had been written in place.
+func (d *DAG) include(p string, line int, text string, rs *resolver) {
+	if !rs.has(p) {
+		// Still Fatal in the analysis -- but the node set in hand is now
+		// admittedly partial, so nothing may call a node undeclared.
+		d.Incomplete = true
+		return
+	}
+	if rs.cycle(p) {
+		d.errf(line, text, "INCLUDE "+p+" is already being parsed; a file cannot include itself")
+		d.Incomplete = true
+		return
+	}
+	body, _ := rs.lookup(p)
+	sub := parseText(body, rs.child(p))
+	d.merge(sub, p, "")
+}
+
+// merge folds a parsed INCLUDE or SPLICE into its parent. prefix is the
+// splice scope ("" for an INCLUDE, which has no scope of its own), and
+// source is the file the merged material came from, so a finding can say
+// which file a line number belongs to.
+func (d *DAG) merge(o *DAG, source, prefix string) {
+	pfx := func(name string) string {
+		if prefix == "" || isAllNodes(name) {
+			return name
+		}
+		return prefix + name
+	}
+	src := func(s string) string {
+		if s != "" {
+			return s
+		}
+		return source
+	}
+	for _, n := range o.Nodes {
+		n.Name = pfx(n.Name)
+		n.Source = src(n.Source)
+		d.Nodes = append(d.Nodes, n)
+	}
+	for _, e := range o.Edges {
+		e.Parent, e.Child, e.Source = pfx(e.Parent), pfx(e.Child), src(e.Source)
+		d.Edges = append(d.Edges, e)
+	}
+	for _, s := range o.Scripts {
+		s.Node, s.Source = pfx(s.Node), src(s.Source)
+		d.Scripts = append(d.Scripts, s)
+	}
+	for k, v := range o.Descriptions {
+		if _, ok := d.Descriptions[k]; ok {
+			continue
+		}
+		v.Source = src(v.Source)
+		d.Descriptions[k] = v
+	}
+	for k, vals := range o.Vars {
+		orig := o.VarNames[k]
+		if orig == "" {
+			orig = k
+		}
+		nk := strings.ToLower(pfx(k))
+		d.Vars[nk] = append(d.Vars[nk], vals...)
+		if _, ok := d.VarNames[nk]; !ok {
+			d.VarNames[nk] = pfx(orig)
+		}
+	}
+	refs := func(dst *[]FileRef, in []FileRef) {
+		for _, f := range in {
+			f.Source = src(f.Source)
+			*dst = append(*dst, f)
+		}
+	}
+	refs(&d.Includes, o.Includes)
+	refs(&d.Configs, o.Configs)
+	refs(&d.DotIncludes, o.DotIncludes)
+	refs(&d.Outputs, o.Outputs)
+	errs := func(dst *[]ParseError, in []ParseError) {
+		for _, e := range in {
+			e.Source = src(e.Source)
+			*dst = append(*dst, e)
+		}
+	}
+	errs(&d.Unrecognized, o.Unrecognized)
+	errs(&d.Errors, o.Errors)
+	errs(&d.Fatals, o.Fatals)
+	if o.Incomplete {
+		d.Incomplete = true
+	}
 }
 
 func applyNodeOptions(n *Node, rest []string) {
@@ -341,27 +583,30 @@ func applyNodeOptions(n *Node, rest []string) {
 }
 
 // parseDescription handles `SUBMIT-DESCRIPTION Name { ... }`.
-func (d *DAG) parseDescription(fields []string, line int, sc *bufio.Scanner, lineNo *int) {
+func (d *DAG) parseDescription(fields []string, line int, lr *lineReader) {
+	text := strings.Join(fields, " ")
 	if len(fields) < 3 {
-		d.errf(line, strings.Join(fields, " "), "expected SUBMIT-DESCRIPTION <name> { ... }")
+		d.errf(line, text, "expected SUBMIT-DESCRIPTION <name> { ... }")
 		return
 	}
 	end, ok := inlineDescEnd(fields[2])
 	if !ok {
-		d.errf(line, strings.Join(fields, " "), "SUBMIT-DESCRIPTION must open an inline block with { or @=tag")
+		d.errf(line, text, "SUBMIT-DESCRIPTION must open an inline block with { or @=tag")
 		return
 	}
-	body, err := readInlineDesc(sc, end, lineNo)
+	body, _, err := readInlineDesc(lr, end)
 	if err != nil {
-		d.errf(line, strings.Join(fields, " "), err.Error())
+		d.errf(line, text, err.Error())
 		return
 	}
-	d.Descriptions[strings.ToLower(fields[1])] = Description{Name: fields[1], Body: body, Line: line}
+	name := unquote(fields[1])
+	d.Descriptions[strings.ToLower(name)] = Description{Name: name, Body: body, Line: line}
 }
 
 // parseScript handles
 // `SCRIPT [DEFER n s] [DEBUG file type] PRE|POST|HOLD node exe [args]`.
 func (d *DAG) parseScript(fields []string, line int) {
+	text := strings.Join(fields, " ")
 	// DEFER and DEBUG are optional modifiers that sit between the SCRIPT
 	// keyword and the script type, each taking two arguments.
 	i := 1
@@ -373,7 +618,7 @@ func (d *DAG) parseScript(fields []string, line int) {
 		i += 3
 	}
 	if i+2 >= len(fields) {
-		d.errf(line, strings.Join(fields, " "), "expected SCRIPT [DEFER n s] PRE|POST|HOLD <node> <executable>")
+		d.errf(line, text, "expected SCRIPT [DEFER n s] PRE|POST|HOLD <node> <executable>")
 		return
 	}
 	var when ScriptWhen
@@ -385,11 +630,11 @@ func (d *DAG) parseScript(fields []string, line int) {
 	case "HOLD":
 		when = ScriptHold
 	default:
-		d.errf(line, strings.Join(fields, " "), "SCRIPT type must be PRE, POST or HOLD")
+		d.errf(line, text, "SCRIPT type must be PRE, POST or HOLD")
 		return
 	}
 	d.Scripts = append(d.Scripts, Script{
-		Node:       fields[i+1],
+		Node:       unquote(fields[i+1]),
 		When:       when,
 		Executable: unquote(fields[i+2]),
 		Args:       fields[i+3:],
@@ -399,6 +644,7 @@ func (d *DAG) parseScript(fields []string, line int) {
 
 // parseParent handles `PARENT p1 p2 ... CHILD c1 c2 ...`.
 func (d *DAG) parseParent(fields []string, line int) {
+	text := strings.Join(fields, " ")
 	split := -1
 	for i, f := range fields {
 		if strings.EqualFold(f, "CHILD") {
@@ -407,18 +653,18 @@ func (d *DAG) parseParent(fields []string, line int) {
 		}
 	}
 	if split < 0 {
-		d.errf(line, strings.Join(fields, " "), "PARENT list has no CHILD keyword")
+		d.errf(line, text, "PARENT list has no CHILD keyword")
 		return
 	}
 	parents := fields[1:split]
 	children := fields[split+1:]
 	if len(parents) == 0 || len(children) == 0 {
-		d.errf(line, strings.Join(fields, " "), "PARENT/CHILD needs at least one node on each side")
+		d.errf(line, text, "PARENT/CHILD needs at least one node on each side")
 		return
 	}
 	for _, p := range parents {
 		for _, c := range children {
-			d.Edges = append(d.Edges, Edge{Parent: p, Child: c, Line: line})
+			d.Edges = append(d.Edges, Edge{Parent: unquote(p), Child: unquote(c), Line: line})
 		}
 	}
 }
@@ -437,43 +683,130 @@ func inlineDescEnd(tok string) (string, bool) {
 	return "", false
 }
 
-// readInlineDesc consumes lines up to the closing delimiter and returns
-// the body. lineNo is advanced so later errors still carry true line
-// numbers.
-func readInlineDesc(sc *bufio.Scanner, end string, lineNo *int) (string, error) {
+// lineReader turns physical lines into the logical lines DAGMan parses.
+//
+// A line whose trimmed form ends in a backslash continues onto the next,
+// joined with a single space (dag_parser.cpp:231-235). The logical line's
+// number is that of its FIRST physical line, so a finding points at the
+// command the author wrote rather than its last fragment.
+type lineReader struct {
+	sc     *bufio.Scanner
+	lineNo int
+}
+
+func newLineReader(text string) *lineReader {
+	sc := bufio.NewScanner(strings.NewReader(text))
+	// DAG lines are short, but an inline submit description can make a
+	// logical line long; raise the cap so a big one does not truncate
+	// into a confusing parse error.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	return &lineReader{sc: sc}
+}
+
+// raw returns the next physical line, verbatim.
+func (lr *lineReader) raw() (string, int, bool) {
+	if !lr.sc.Scan() {
+		return "", 0, false
+	}
+	lr.lineNo++
+	return lr.sc.Text(), lr.lineNo, true
+}
+
+// next returns the next logical line: comments and blanks skipped,
+// continuations joined.
+func (lr *lineReader) next() (string, int, bool) {
 	var b strings.Builder
-	for sc.Scan() {
-		*lineNo++
-		line := sc.Text()
-		if strings.TrimSpace(line) == end {
-			return b.String(), nil
+	first := 0
+	started := false
+	for {
+		raw, n, ok := lr.raw()
+		if !ok {
+			if started {
+				return b.String(), first, true
+			}
+			return "", 0, false
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !started {
+			first, started = n, true
+		} else {
+			b.WriteString(" ")
+		}
+		if strings.HasSuffix(line, `\`) {
+			b.WriteString(strings.TrimSuffix(line, `\`))
+			continue
+		}
+		b.WriteString(line)
+		return b.String(), first, true
+	}
+}
+
+// readInlineDesc consumes lines up to the closing delimiter and returns
+// the body plus whatever followed the delimiter on its own line, which
+// DAGMan re-lexes as further node options.
+func readInlineDesc(lr *lineReader, end string) (body, rest string, err error) {
+	var b strings.Builder
+	for {
+		line, _, ok := lr.raw()
+		if !ok {
+			return "", "", fmt.Errorf("inline submit description is never closed (expected a line containing only %q)", end)
+		}
+		t := strings.TrimSpace(line)
+		if t == end {
+			return b.String(), "", nil
+		}
+		if strings.HasPrefix(t, end+" ") || strings.HasPrefix(t, end+"\t") {
+			return b.String(), strings.TrimSpace(t[len(end):]), nil
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	return "", fmt.Errorf("inline submit description is never closed (expected a line containing only %q)", end)
 }
 
-// splitFields splits on whitespace while keeping a double-quoted run
-// together, since submit-description names and paths may be quoted.
+// splitFields splits a line into tokens the way DagLexer does
+// (dag_parser.cpp:35-77): whitespace separates, either quote character
+// groups, and a backslash inside quotes escapes the next character. The
+// quotes are kept on the token; unquote strips them.
 func splitFields(line string) []string {
 	var out []string
 	var cur strings.Builder
-	inQuote := false
+	quote := rune(0)
+	escaped := false
+	started := false
 	flush := func() {
-		if cur.Len() > 0 {
+		if started {
 			out = append(out, cur.String())
 			cur.Reset()
+			started = false
 		}
 	}
 	for _, r := range line {
 		switch {
-		case r == '"':
-			inQuote = !inQuote
+		case escaped:
 			cur.WriteRune(r)
-		case (r == ' ' || r == '\t') && !inQuote:
+			escaped = false
+		case quote != 0:
+			started = true
+			switch r {
+			case '\\':
+				escaped = true
+			case quote:
+				cur.WriteRune(r)
+				quote = 0
+			default:
+				cur.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+			started = true
+			cur.WriteRune(r)
+		case r == ' ' || r == '\t' || r == '\r':
 			flush()
 		default:
+			started = true
 			cur.WriteRune(r)
 		}
 	}
@@ -482,8 +815,11 @@ func splitFields(line string) []string {
 }
 
 func unquote(s string) string {
-	if len(s) >= 2 && strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) {
-		return s[1 : len(s)-1]
+	if len(s) >= 2 {
+		if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
+			(strings.HasPrefix(s, `'`) && strings.HasSuffix(s, `'`)) {
+			return s[1 : len(s)-1]
+		}
 	}
 	return s
 }
