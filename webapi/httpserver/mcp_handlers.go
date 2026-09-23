@@ -663,6 +663,26 @@ func (h *Handler) grantableScopes(userGroups, requested []string) []string {
 	return out
 }
 
+// withoutDeprecatedScopes drops the scopes that are still requestable only
+// so existing grants can refresh (see oauth2DeprecatedScopes). They grant
+// nothing, so offering one on the consent page would ask the reader to
+// weigh a line that means nothing -- and re-granting it would keep it
+// alive for another refresh cycle. Dropped here, a deprecated scope
+// disappears from the grant the moment its client authorizes again.
+func withoutDeprecatedScopes(requested []string) []string {
+	deprecated := make(map[string]bool, len(oauth2DeprecatedScopes))
+	for _, scope := range oauth2DeprecatedScopes {
+		deprecated[scope] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, scope := range requested {
+		if !deprecated[scope] {
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
 // privilegedScopes are the scopes that grant power over other people's
 // work rather than the caller's own. They are checked against this list
 // rather than a prefix so that adding a scope is a decision someone makes
@@ -1380,6 +1400,23 @@ var oauth2AdvertisedScopes = []string{
 	"condor:/READ", "condor:/WRITE",
 }
 
+// oauth2DeprecatedScopes were advertised once and are not any more. They
+// grant nothing -- mapCondorScopesToAuthz ignores every condor level but
+// READ and WRITE -- but they must stay *requestable*, because a client
+// registered through a client ID metadata document has no stored scope
+// list: cimdClientScopes recomputes what it may ask for on every request,
+// so a scope dropped from the advertised set stops being requestable
+// immediately, and every existing grant that carries it fails to refresh
+// with "the OAuth 2.0 Client is not allowed to request scope ...". The
+// client cannot recover by itself; the user has to re-authorize it.
+//
+// Keeping them here costs an entry in a list nobody sees. Removing one
+// breaks every session still holding it, so a scope leaves this list only
+// once no live grant can carry it.
+var oauth2DeprecatedScopes = []string{
+	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
+}
+
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
 // Implements RFC 8414: OAuth 2.0 Authorization Server Metadata
 func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
@@ -1938,6 +1975,7 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
 	// it offers scopes the first refresh will strip.
 	p.RequestedScopes = h.grantableScopes(userGroups, p.RequestedScopes)
 	p.RequestedScopes = h.scopesAllowedByScheddACL(ctx, p.Username, p.RequestedScopes)
+	p.RequestedScopes = withoutDeprecatedScopes(p.RequestedScopes)
 
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
