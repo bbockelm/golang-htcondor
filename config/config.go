@@ -220,6 +220,24 @@ func (c *Config) resolveKey(key string) (string, bool) {
 	return "", false
 }
 
+// lookupValue returns the value stored for a parameter, applying the
+// subsystem/local-name scoping Get uses and matching the parameter name
+// case-insensitively.
+//
+// Macro expansion used to index c.values directly. scopedLookupKey hands back
+// the bare name unchanged when no scoped definition exists, and a raw map index
+// on that name is case-sensitive -- so `$(cluster)` in a submit file expanded to
+// the empty string while `$(Cluster)` expanded to the cluster id. HTCondor macro
+// names do not distinguish case (condor_submit writes `$(cluster)` itself in the
+// DAGMan submit file it generates), so neither can this.
+func (c *Config) lookupValue(key string) (string, bool) {
+	actual, ok := c.resolveKey(c.scopedLookupKey(key))
+	if !ok {
+		return "", false
+	}
+	return c.values[actual], true
+}
+
 // hasKey reports whether a parameter is defined, case-insensitively.
 func (c *Config) hasKey(key string) bool {
 	_, ok := c.resolveKey(key)
@@ -1096,7 +1114,7 @@ func (c *Config) expandMacros(value string) (string, error) {
 		// and any `$(KNOB)` picks up a `SUBSYS.KNOB` override -- matching HTCondor,
 		// where macro expansion is subsystem-scoped.
 		replacement := defaultVal
-		if val, ok := c.values[c.scopedLookupKey(varName)]; ok {
+		if val, ok := c.lookupValue(varName); ok {
 			replacement = val
 		}
 

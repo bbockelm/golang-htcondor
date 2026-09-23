@@ -9,11 +9,20 @@ import (
 // job that submits cleanly and then never runs.
 //
 // The schedd does not matchmake a scheduler- or local-universe job. It
-// evaluates the job's Requirements against its OWN ad (Scheduler::jobCanRun),
-// and a schedd ad has no Arch, OpSys, Disk or HasFileTransfer -- so a
-// vanilla-shaped Requirements is undefined, which the schedd treats as
-// false. The only symptom is the job sitting Idle with
-// "SchedUniverseJobsIdle = 1" repeating in the schedd log, which is why
+// evaluates the job's Requirements against its OWN ad (Scheduler::jobCanRun,
+// with Scheduler::publish's ad as TARGET), and treats undefined as false.
+//
+// That ad does carry Arch, OpSys, Memory, Disk and Cpus -- Scheduler::publish
+// assigns all of them -- so the clause that actually broke DAGMan was
+// TARGET.HasFileTransfer, which the schedd ad does not have (nor
+// FileSystemDomain, nor the GPU attributes). condor_submit does not emit the
+// transfer clauses here either: SetRequirements gates them on
+// mightTransfer(JobUniverse), true only for vanilla/mpi/parallel/java/vm.
+//
+// Dropping the remaining machine clauses too is deliberate and safe: the job
+// is never matched, and jobCanRun skips the check entirely when Requirements
+// is absent. The only symptom of getting this wrong is the job sitting Idle
+// with "SchedUniverseJobsIdle = 1" repeating in the schedd log, which is why
 // this is worth a test rather than a comment.
 func TestSchedulerUniverseRequirementsHaveNoMachineClauses(t *testing.T) {
 	for _, universe := range []string{"scheduler", "local"} {

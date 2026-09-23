@@ -106,7 +106,7 @@ func (c *Config) evalNumericMacro(args string, wantInt bool) (string, error) {
 
 	// The argument is a macro name: look it up (scoped, as Get does) and fall
 	// back to the literal when it is not a defined macro.
-	if v, ok := c.values[c.scopedLookupKey(value)]; ok {
+	if v, ok := c.lookupValue(value); ok {
 		value = v
 	}
 	// Expand any macros in the resolved value ($(FULL_HOSTNAME), nested $INT, ...).
@@ -191,7 +191,7 @@ func (c *Config) evalSTRING(args string) (string, error) {
 	}
 
 	// The argument is a macro name: look it up (scoped, as Get does), else the literal.
-	if v, ok := c.values[c.scopedLookupKey(value)]; ok {
+	if v, ok := c.lookupValue(value); ok {
 		value = v
 	}
 	// Expand any macros in the resolved value ($(FULL_HOSTNAME), nested functions, ...).
@@ -442,7 +442,7 @@ func (c *Config) expandMacrosWithFunctions(value string) (string, error) {
 					// `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster
 					// and any `$(KNOB)` honors a `SUBSYS.KNOB` override, matching
 					// HTCondor's subsystem-scoped macro expansion.
-					replacement, ok := c.values[c.scopedLookupKey(varName)]
+					replacement, ok := c.lookupValue(varName)
 					if !ok {
 						replacement = defaultVal
 					}
