@@ -384,3 +384,69 @@ func splitArgsV2(s string) []string {
 	}
 	return out
 }
+
+// TestSubmitFileJobAdSetJobAttr: each SET_JOB_ATTR value reaches the ad
+// with the TYPE the DAG wrote, which is the whole reason the value is
+// emitted verbatim. Re-quoting it would make 17 the string "17", and a
+// policy expression that compares it to a number would silently stop
+// matching.
+func TestSubmitFileJobAdSetJobAttr(t *testing.T) {
+	opt := testSubmitOptions()
+	opt.JobAttrs = []JobAttr{
+		{Name: "DagLabel", Value: `"set-from-dag"`},
+		{Name: "DagNumber", Value: "17"},
+		{Name: "DagExpr", Value: "DagNumber + 1"},
+		// Refused: the guard is in the emitter as well as in the
+		// analysis, so a caller that skipped Analyze cannot break the
+		// removal semantics either.
+		{Name: "OtherJobRemoveRequirements", Value: `"False"`},
+	}
+	ad := dagmanJobAd(t, opt)
+
+	if s, ok := ad.EvaluateAttrString("DagLabel"); !ok || s != "set-from-dag" {
+		expr, _ := ad.Lookup("DagLabel")
+		t.Errorf("DagLabel = %v (string=%v), want the string set-from-dag", expr, ok)
+	}
+	if n, ok := ad.EvaluateAttrInt("DagNumber"); !ok || n != 17 {
+		expr, _ := ad.Lookup("DagNumber")
+		t.Errorf("DagNumber = %v (int=%v), want 17 as a number", expr, ok)
+	}
+	if n, ok := ad.EvaluateAttrInt("DagExpr"); !ok || n != 18 {
+		expr, _ := ad.Lookup("DagExpr")
+		t.Errorf("DagExpr = %v (int=%v), want the expression to evaluate to 18", expr, ok)
+	}
+	if s, ok := ad.EvaluateAttrString("OtherJobRemoveRequirements"); !ok || s != "DAGManJobId =?= 42" {
+		t.Errorf("OtherJobRemoveRequirements = %q (string=%v): the DAG overwrote it", s, ok)
+	}
+}
+
+// TestSubmitFileJobAdEnvSet: an ENV SET variable reaches the manager
+// job's Environment, and the operator's own configuration still wins
+// over it -- a workflow must not be able to redirect CONDOR_CONFIG or
+// BEARER_TOKEN_FILE by writing one line of DAG.
+func TestSubmitFileJobAdEnvSet(t *testing.T) {
+	opt := testSubmitOptions()
+	opt.EnvSet = map[string]string{"DAG_TEST_VAR": "hello", "CONDOR_CONFIG": "/from/the/dag"}
+	opt.ExtraEnv = map[string]string{"CONDOR_CONFIG": "/from/the/operator"}
+	ad := dagmanJobAd(t, opt)
+
+	env, ok := ad.EvaluateAttrString("Environment")
+	if !ok {
+		e, _ := ad.Lookup("Environment")
+		t.Fatalf("Environment is not a string: %v", e)
+	}
+	if !strings.Contains(env, "DAG_TEST_VAR=hello") {
+		t.Errorf("Environment = %q, missing the ENV SET variable", env)
+	}
+	if !strings.Contains(env, "CONDOR_CONFIG=/from/the/operator") {
+		t.Errorf("Environment = %q: the DAG overrode the operator's configuration", env)
+	}
+	if strings.Contains(env, "/from/the/dag") {
+		t.Errorf("Environment = %q still carries the DAG's CONDOR_CONFIG", env)
+	}
+	// The generated defaults are still there: ENV SET adds to the
+	// environment, it does not replace it.
+	if !strings.Contains(env, "_CONDOR_DAGMAN_LOG=wf.dagman.out") {
+		t.Errorf("Environment = %q lost _CONDOR_DAGMAN_LOG", env)
+	}
+}

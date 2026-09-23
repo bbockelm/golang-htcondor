@@ -138,6 +138,43 @@ type FileRef struct {
 	Source  string
 }
 
+// JobAttr is one SET_JOB_ATTR command: an attribute set on the DAGMan
+// MANAGER job's ClassAd, not on the node jobs
+// (docs/automated-workflows/dagman-advance-functionality.rst).
+//
+// Value is the text after the first "=", verbatim and unquoted-nothing:
+// it is a ClassAd expression, and the quotes around a string literal are
+// part of it. condor_submit_dag keeps the whole line and writes
+// `My.<line>` into the manager's submit file (dagman_utils.cpp), so
+// anything that reinterpreted the value would change what the attribute
+// means.
+type JobAttr struct {
+	Name   string
+	Value  string
+	Line   int
+	Source string
+}
+
+// EnvVar is one ENV SET pair: a variable put into the DAGMan manager
+// job's environment, and through it into every PRE/POST script and node
+// submission DAGMan performs.
+type EnvVar struct {
+	Name   string
+	Value  string
+	Line   int
+	Source string
+}
+
+// EnvGet is one ENV GET command: the variable names it asks to be copied
+// from the environment of the process that SUBMITS the DAG. That process
+// is condor_submit_dag for a local submission and this server for a
+// remote one, which is why Analyze reports it rather than honouring it.
+type EnvGet struct {
+	Names  []string
+	Line   int
+	Source string
+}
+
 // Description is a named SUBMIT-DESCRIPTION block.
 type Description struct {
 	Name   string
@@ -179,6 +216,15 @@ type DAG struct {
 	// SAVE_POINT_FILE, DOT). Tracked so nothing mistakes them for inputs
 	// that must be staged.
 	Outputs []FileRef
+	// JobAttrs are SET_JOB_ATTR commands, in the order they were written.
+	// Later ones win, as they do in condor_submit_dag: it appends every
+	// line to the submit file and submit takes the last assignment.
+	JobAttrs []JobAttr
+	// EnvSet and EnvGet are the two halves of the ENV command. EnvSet
+	// pairs are put into the manager job's environment; EnvGet names are
+	// only reported, because the environment they name is not ours.
+	EnvSet []EnvVar
+	EnvGet []EnvGet
 	// Vars are VARS assignments per node, lower-cased node name to the
 	// raw remainder of the line. Kept for reporting, not expanded.
 	Vars map[string][]string
@@ -319,48 +365,14 @@ func parseText(text string, rs *resolver) *DAG {
 			} else {
 				d.errf(lineNo, line, "VARS needs a node name")
 			}
-		case "INCLUDE":
-			if len(fields) >= 2 {
-				p := unquote(fields[1])
-				d.Includes = append(d.Includes, FileRef{Path: p, Command: keyword, Line: lineNo})
-				d.include(p, lineNo, line, rs)
-			} else {
-				d.errf(lineNo, line, "INCLUDE needs a file name")
-			}
-		case "CONFIG":
-			if len(fields) >= 2 {
-				d.Configs = append(d.Configs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
-			} else {
-				d.errf(lineNo, line, "CONFIG needs a file name")
-			}
-		case "DOT":
-			// DOT <file> [UPDATE] [OVERWRITE] [INCLUDE <header>]. The dot
-			// file is written; the INCLUDE header is read, so it has to be
-			// staged like any other input.
-			if len(fields) >= 2 {
-				d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
-			}
-			for i := 2; i+1 < len(fields); i++ {
-				if strings.EqualFold(fields[i], "INCLUDE") {
-					d.DotIncludes = append(d.DotIncludes, FileRef{
-						Path: unquote(fields[i+1]), Command: "DOT INCLUDE", Line: lineNo})
-					break
-				}
-			}
-		case "NODE_STATUS_FILE", "JOBSTATE_LOG":
-			// Outputs, not inputs. Recorded so the analyzer does not ask
-			// the caller to stage a file the DAG is going to write.
-			if len(fields) >= 2 {
-				d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
-			}
-		case "SAVE_POINT_FILE":
-			// SAVE_POINT_FILE <node> [filename] -- the file is the
-			// SECOND argument, and is optional.
-			if len(fields) >= 3 {
-				d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[2]), Command: keyword, Line: lineNo})
-			}
+		case "INCLUDE", "CONFIG", "DOT", "NODE_STATUS_FILE", "JOBSTATE_LOG", "SAVE_POINT_FILE":
+			d.parseFileCommand(keyword, fields, lineNo, line, rs)
+		case "SET_JOB_ATTR":
+			d.parseSetJobAttr(fields, lineNo, line)
+		case "ENV":
+			d.parseEnv(fields, lineNo, line)
 		case "RETRY", "ABORT_DAG_ON", "PRIORITY", "CATEGORY", "MAXJOBS",
-			"PRE_SKIP", "DONE", "REJECT", "SET_JOB_ATTR", "ENV",
+			"PRE_SKIP", "DONE", "REJECT",
 			"CONNECT", "PIN_IN", "PIN_OUT", "TOLERANCE":
 			// Known, and referencing no file. Nothing to collect.
 		default:
@@ -370,6 +382,57 @@ func parseText(text string, rs *resolver) *DAG {
 		}
 	}
 	return d
+}
+
+// parseFileCommand handles the commands whose argument is a file name.
+//
+// They are grouped because the distinction that matters is not which
+// keyword it is but WHEN the file is read: INCLUDE and CONFIG are read
+// when DAGMan parses the DAG, so a missing one is fatal, while the
+// others are written by the run and must never be asked of the caller.
+func (d *DAG) parseFileCommand(keyword string, fields []string, lineNo int, line string, rs *resolver) {
+	switch keyword {
+	case "INCLUDE":
+		if len(fields) >= 2 {
+			p := unquote(fields[1])
+			d.Includes = append(d.Includes, FileRef{Path: p, Command: keyword, Line: lineNo})
+			d.include(p, lineNo, line, rs)
+		} else {
+			d.errf(lineNo, line, "INCLUDE needs a file name")
+		}
+	case "CONFIG":
+		if len(fields) >= 2 {
+			d.Configs = append(d.Configs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
+		} else {
+			d.errf(lineNo, line, "CONFIG needs a file name")
+		}
+	case "DOT":
+		// DOT <file> [UPDATE] [OVERWRITE] [INCLUDE <header>]. The dot
+		// file is written; the INCLUDE header is read, so it has to be
+		// staged like any other input.
+		if len(fields) >= 2 {
+			d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
+		}
+		for i := 2; i+1 < len(fields); i++ {
+			if strings.EqualFold(fields[i], "INCLUDE") {
+				d.DotIncludes = append(d.DotIncludes, FileRef{
+					Path: unquote(fields[i+1]), Command: "DOT INCLUDE", Line: lineNo})
+				break
+			}
+		}
+	case "NODE_STATUS_FILE", "JOBSTATE_LOG":
+		// Outputs, not inputs. Recorded so the analyzer does not ask
+		// the caller to stage a file the DAG is going to write.
+		if len(fields) >= 2 {
+			d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[1]), Command: keyword, Line: lineNo})
+		}
+	case "SAVE_POINT_FILE":
+		// SAVE_POINT_FILE <node> [filename] -- the file is the
+		// SECOND argument, and is optional.
+		if len(fields) >= 3 {
+			d.Outputs = append(d.Outputs, FileRef{Path: unquote(fields[2]), Command: keyword, Line: lineNo})
+		}
+	}
 }
 
 func (d *DAG) errf(line int, text, why string) {
@@ -542,6 +605,18 @@ func (d *DAG) merge(o *DAG, source, prefix string) {
 			d.VarNames[nk] = pfx(orig)
 		}
 	}
+	for _, a := range o.JobAttrs {
+		a.Source = src(a.Source)
+		d.JobAttrs = append(d.JobAttrs, a)
+	}
+	for _, e := range o.EnvSet {
+		e.Source = src(e.Source)
+		d.EnvSet = append(d.EnvSet, e)
+	}
+	for _, e := range o.EnvGet {
+		e.Source = src(e.Source)
+		d.EnvGet = append(d.EnvGet, e)
+	}
 	refs := func(dst *[]FileRef, in []FileRef) {
 		for _, f := range in {
 			f.Source = src(f.Source)
@@ -667,6 +742,119 @@ func (d *DAG) parseParent(fields []string, line int) {
 			d.Edges = append(d.Edges, Edge{Parent: unquote(p), Child: unquote(c), Line: line})
 		}
 	}
+}
+
+// parseSetJobAttr handles `SET_JOB_ATTR <name> = <value>`.
+//
+// DAGMan's own parser (dag_parser.cpp, DAG::CMD::SET_JOB_ATTR) does not
+// look at the line at all beyond checking it is non-empty: it keeps the
+// remainder verbatim and condor_submit_dag writes `My.<remainder>` into
+// the manager job's submit file. Splitting at the FIRST "=" is therefore
+// only for reporting and for the reserved-name guard -- the value is
+// reassembled unchanged, quotes included, because those quotes are what
+// make it a string rather than a bare identifier.
+func (d *DAG) parseSetJobAttr(fields []string, line int, text string) {
+	rest := strings.TrimSpace(strings.Join(fields[1:], " "))
+	if rest == "" {
+		d.errf(line, text, "expected SET_JOB_ATTR <name> = <value>")
+		return
+	}
+	i := strings.Index(rest, "=")
+	if i < 0 {
+		d.errf(line, text, "SET_JOB_ATTR needs an assignment: <name> = <value>")
+		return
+	}
+	name := strings.TrimSpace(rest[:i])
+	value := strings.TrimSpace(rest[i+1:])
+	if name == "" {
+		d.errf(line, text, "SET_JOB_ATTR has no attribute name before the '='")
+		return
+	}
+	if value == "" {
+		d.errf(line, text, "SET_JOB_ATTR "+name+" has no value after the '='")
+		return
+	}
+	d.JobAttrs = append(d.JobAttrs, JobAttr{Name: name, Value: value, Line: line})
+}
+
+// parseEnv handles `ENV SET Key=Value;Key=Value; ...` and
+// `ENV GET VAR-1 [VAR-2 ...]`, mirroring DagParser::ParseEnv.
+//
+// The two halves have DIFFERENT delimiters, which is the detail worth
+// getting right: GET takes a whitespace-separated list of names, while
+// SET takes the remainder of the line as an HTCondor environment string
+// -- semicolon-delimited in V1 raw form, or the whole thing in double
+// quotes and space-separated in V2 form, which is what
+// Env::MergeFromV1RawOrV2Quoted accepts.
+func (d *DAG) parseEnv(fields []string, line int, text string) {
+	if len(fields) < 2 {
+		d.errf(line, text, "expected ENV SET <pairs> or ENV GET <names>")
+		return
+	}
+	switch strings.ToUpper(fields[1]) {
+	case "GET":
+		var names []string
+		for _, f := range fields[2:] {
+			if n := strings.TrimSpace(unquote(f)); n != "" {
+				names = append(names, n)
+			}
+		}
+		if len(names) == 0 {
+			d.errf(line, text, "ENV GET needs at least one environment variable name")
+			return
+		}
+		d.EnvGet = append(d.EnvGet, EnvGet{Names: names, Line: line})
+	case "SET":
+		rest := strings.TrimSpace(strings.Join(fields[2:], " "))
+		if rest == "" {
+			d.errf(line, text, "ENV SET needs at least one key=value pair")
+			return
+		}
+		pairs, err := splitEnvPairs(rest)
+		if err != nil {
+			d.errf(line, text, err.Error())
+			return
+		}
+		for _, p := range pairs {
+			p.Line = line
+			d.EnvSet = append(d.EnvSet, p)
+		}
+	default:
+		d.errf(line, text, "ENV needs a sub-command, SET or GET, before the variables")
+	}
+}
+
+// splitEnvPairs reads the argument of ENV SET.
+//
+// V2 quoted form ("A=1 B=2") is space-delimited; everything else is the
+// V1 raw form, which on Unix is delimited with ';' (env.cpp's
+// env_delimiter). Getting this backwards would turn `A=one two;B=3` into
+// three variables, two of them nonsense.
+func splitEnvPairs(rest string) ([]EnvVar, error) {
+	var parts []string
+	if len(rest) >= 2 && strings.HasPrefix(rest, `"`) && strings.HasSuffix(rest, `"`) {
+		parts = strings.Fields(rest[1 : len(rest)-1])
+	} else {
+		parts = strings.Split(rest, ";")
+	}
+	var out []EnvVar
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			// A trailing ';' is how the documented example is written
+			// (Key=Value;Key=Value; ...), so it is not an error.
+			continue
+		}
+		i := strings.Index(p, "=")
+		if i <= 0 {
+			return nil, fmt.Errorf("ENV SET %q is not a key=value pair", p)
+		}
+		out = append(out, EnvVar{Name: strings.TrimSpace(p[:i]), Value: p[i+1:]})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("ENV SET needs at least one key=value pair")
+	}
+	return out, nil
 }
 
 // inlineDescEnd mirrors get_inline_desc_end in condor_dagman/parse.cpp:

@@ -453,6 +453,12 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
 		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
 		{"aggregate_jobs", aggregateStructured(nil, nil, "jobs", "schedd", false)},
+		// The dag object is absent here on purpose: it is present only
+		// for a DAGMan manager job, and the emptiest get_job result is
+		// an ordinary job's. The shape it takes when it IS present --
+		// a manager job before DAGMan has published anything, so only
+		// the manager's own status is known -- is checked separately in
+		// TestGetJobDagSectionValidatesAgainstTheSchema.
 		{"get_job", map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}}},
 		{"analyze_job_match", map[string]interface{}{
 			"job_id": "1.0", "requirements": "", "result": nil, "slot_cache": nil}},
@@ -466,10 +472,6 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"submit_dag", map[string]interface{}{
 			"cluster_id": 0, "job_id": "0.0", "dag_name": "workflow.dag",
 			"input_files": []string(nil), "notes": []string(nil), "deferred": []string(nil)}},
-		// dag_status before DAGMan has published anything: it has parsed
-		// nothing yet, so only the cluster id is known. This is the real
-		// shape of the first call after a submit.
-		{"dag_status", map[string]interface{}{"cluster_id": 1}},
 		{"build_container", structuredOf(buildContainerResult(0, "", "", "", 0, 0, 0))},
 		{"remove_job", map[string]interface{}{"job_id": "1.0", "action": "remove", "success": true}},
 		{"hold_job", map[string]interface{}{"job_id": "1.0", "action": "hold", "success": true}},
@@ -600,5 +602,33 @@ func TestEveryOutputSchemaHasAnEmptyCase(t *testing.T) {
 		if outputSchemaFor(name) == nil {
 			t.Errorf("emptyCases() lists %q, which publishes no output schema", name)
 		}
+	}
+}
+
+// TestGetJobDagSectionValidatesAgainstTheSchema. The dag object is
+// optional, so the empty-result guard above cannot cover it: the
+// emptiest get_job result is an ordinary job's, which has none. This is
+// the first answer a caller gets after submit_dag -- the manager job
+// held for spooling, DAGMan not yet started -- and the fullest one.
+func TestGetJobDagSectionValidatesAgainstTheSchema(t *testing.T) {
+	s := contractServer(t)
+	for _, tc := range []struct {
+		name string
+		dag  map[string]interface{}
+	}{
+		{"nothing published yet", map[string]interface{}{"job_status": 5, "hold_reason_code": 16}},
+		{"running workflow", dagStructuredFields(dagAd(t, map[string]interface{}{
+			"JobStatus": 2, "DAG_Status": 0, "DAG_NodesTotal": 3, "DAG_NodesDone": 1,
+			"DAG_NodesQueued": 1, "DAG_NodesUnready": 1, "DAG_JobsRunning": 1,
+			"Arguments": "-f -l . -Dag diamond.dag",
+		}))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]interface{}{
+				"job_id": "1.0", "job": map[string]interface{}{}, "dag": tc.dag,
+			}
+			sc := finalized(t, s, "get_job", structuredTextResult("", payload))
+			validateStructured(t, "get_job", sc)
+		})
 	}
 }

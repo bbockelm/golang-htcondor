@@ -96,7 +96,6 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"get_version":                   readOnlyAnn(false),
 	"whoami":                        readOnlyAnn(false),
 	"check_watches":                 readOnlyAnn(false),
-	"dag_status":                    readOnlyAnn(false),
 	"cancel_watch":                  readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---

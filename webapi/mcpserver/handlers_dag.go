@@ -2,14 +2,12 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"path"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing/fstest"
 
@@ -78,16 +76,16 @@ naming an undeclared node, a missing SPLICE or INCLUDE); anything more doubtful 
 A SUBDAG whose .dag file an earlier node generates is expected and supported: only its name is needed now.
 Use dry_run to check a workflow without submitting it.`
 
-// dagStatusDescription is dag_status's. The scope sentence is the one
-// every read tool carries: which jobs the answer covers is not something
-// a model can infer from the answer itself.
-const dagStatusDescription = `Report progress of a running DAGMan workflow: how many nodes are done, ready, queued, failed or
-unready, the state of its node jobs, and whether the DAG is in recovery. DAGMan publishes these into its own
-job ad, so this is a single cheap query rather than a log scrape. Pass the cluster id that submit_dag returned.
-Returns YOUR OWN workflows; MCP admins get every user's. Each answer states which scope it used.`
-
 // dagTools are the workflow tools, kept together so the catalogue entry
 // and the dispatch stay in one place.
+//
+// There is only one. A workflow's progress used to have a tool of its
+// own, which did nothing get_job could not: it read the manager job's
+// ad, which is where DAGMan publishes its node counts. A
+// second tool for the same query is a second thing a model has to know
+// exists -- and the one it reaches for, having just been handed a job
+// id, is get_job. So the rendering moved there (renderDagSection) and
+// the tool went away.
 func dagTools() []Tool {
 	return []Tool{
 		{
@@ -123,24 +121,6 @@ func dagTools() []Tool {
 					"dry_run":  map[string]interface{}{"type": "boolean", "description": "Parse and check the workflow, report what would be submitted, and submit nothing"},
 				},
 				"required": []string{"dag"},
-			},
-		},
-		{
-			Name:        "dag_status",
-			Description: dagStatusDescription,
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"job_id": map[string]interface{}{
-						"type":        []string{"string", "integer"},
-						"description": "The DAGMan job's cluster id, as returned by submit_dag (1234, \"1234\" or \"1234.0\")",
-					},
-					"include_nodes": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Also list the workflow's node jobs with their per-node status (default false)",
-					},
-				},
-				"required": []string{"job_id"},
 			},
 		},
 	}
@@ -270,8 +250,14 @@ func (s *Server) dagmanSubmitFile(ctx context.Context, dagName string,
 		MaxJobs:       intArg(args, "max_jobs", 0),
 		MaxPre:        intArg(args, "max_pre", 0),
 		MaxPost:       intArg(args, "max_post", 0),
-		ExtraEnv:      s.dagmanEnv,
-		Append:        stringArg(args, "append"),
+		// Straight from the analysis rather than from a second parse: the
+		// report already dropped the attributes this tool owns and told
+		// the caller which ones those were, and re-deriving them here
+		// would be a second answer to the same question.
+		JobAttrs: report.JobAttrs,
+		EnvSet:   report.EnvSet,
+		ExtraEnv: s.dagmanEnv,
+		Append:   stringArg(args, "append"),
 	})
 }
 
@@ -686,7 +672,7 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 	fmt.Fprintf(&sb, "Staged into the workflow's spool directory: %s\n", strings.Join(report.Required, ", "))
 	writeDagNotes(&sb, report, notes)
 	fmt.Fprintf(&sb, "\n%s\n", dagWaitAdvice(clusterID))
-	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID))
+	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, dagName))
 	fmt.Fprintf(&sb, "Removing job %d.0 removes the whole workflow, including node jobs already running.\n", clusterID)
 
 	structured := map[string]interface{}{
@@ -709,20 +695,108 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 // the manager job: a remotely-submitted job carries LeaveJobInQueue, so
 // it sits at JobStatus 4 rather than vanishing. Telling a caller to
 // "watch_jobs on cluster N" instead left it guessing at an argument that
-// does not exist, and the fallback it guessed was a dag_status loop.
+// does not exist, and the fallback it guessed was a polling loop.
 func dagWaitAdvice(clusterID int) string {
 	return fmt.Sprintf(`To wait for the whole workflow, register watch_jobs(constraint="ClusterId == %d", `+
-		`event="done") and collect it with check_watches -- do not call dag_status in a loop. `+
-		`Use dag_status for a one-off "how far along is it".`, clusterID)
+		`event="done") and collect it with check_watches -- do not call get_job in a loop. `+
+		`Use get_job(job_id="%d.0") for a one-off "how far along is it".`, clusterID, clusterID)
 }
 
 // dagOutputAdvice is where a finished workflow's results are. Node
 // outputs return to the DAG's Iwd, which is the manager job's spool --
 // not to any node job's sandbox, which is gone.
-func dagOutputAdvice(clusterID int) string {
+//
+// dagFile is the workflow's own .dag name when it is known, so the log
+// can be named rather than described: "diamond.dagman.out" is a file the
+// caller can look for in what get_job_output returns, and
+// "<dag>.dagman.out" is a riddle.
+func dagOutputAdvice(clusterID int, dagFile string) string {
 	return fmt.Sprintf(`Node outputs come back into the workflow's own spool directory. Retrieve them with `+
 		`get_job_output(job_id="%d.0") -- that returns the whole spool, including DAGMan's own `+
-		`<dag>.dagman.out log.`, clusterID)
+		`%s log.`, clusterID, dagmanOutName(dagFile))
+}
+
+// dagmanOutName is DAGMan's own log, named after the DAG: SubmitFile
+// sets _CONDOR_DAGMAN_LOG to the DAG name minus ".dag" plus
+// ".dagman.out". Empty in, placeholder out.
+func dagmanOutName(dagFile string) string {
+	if dagFile == "" {
+		return "<dag>.dagman.out"
+	}
+	return strings.TrimSuffix(dagFile, ".dag") + ".dagman.out"
+}
+
+// dagRescueName is the rescue DAG DAGMan writes when nodes fail:
+// DagmanUtils::RescueDagName appends ".rescue" and a three-digit number
+// to the PRIMARY DAG FILE NAME -- "diamond.dag.rescue001", not
+// "diamond.rescue001".
+func dagRescueName(dagFile string) string {
+	if dagFile == "" {
+		return "<dag>.dag.rescue001"
+	}
+	return dagFile + ".rescue001"
+}
+
+// dagFileFromAd recovers the workflow's .dag file name from the manager
+// job's arguments, so the section can name the files a caller has to
+// look for instead of printing a placeholder.
+//
+// The ad is the only place it survives: nothing stores the DAG name as
+// an attribute, and the spool directory it lives in is not visible from
+// here. SubmitFile writes "-Dag <name>" into an "new syntax" argument
+// list, so the value is the token after -Dag.
+func dagFileFromAd(ad *classad.ClassAd) string {
+	raw, ok := ad.EvaluateAttrString("Arguments")
+	if !ok || raw == "" {
+		raw, ok = ad.EvaluateAttrString("Args")
+		if !ok {
+			return ""
+		}
+	}
+	tokens := splitV2Args(raw)
+	for i, tok := range tokens {
+		if strings.EqualFold(tok, "-Dag") && i+1 < len(tokens) {
+			return tokens[i+1]
+		}
+	}
+	return ""
+}
+
+// splitV2Args undoes HTCondor's "new syntax" argument quoting as it
+// reaches the job ad: arguments are separated by whitespace outside
+// single quotes, whitespace inside them is literal, and a doubled single
+// quote is one literal quote. The outer double quotes belong to the
+// SUBMIT FILE and are gone by the time the value is an attribute.
+func splitV2Args(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inQuote, started := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\'':
+			if inQuote && i+1 < len(s) && s[i+1] == '\'' {
+				cur.WriteByte('\'')
+				i++
+				continue
+			}
+			inQuote = !inQuote
+			started = true
+		case !inQuote && (c == ' ' || c == '\t'):
+			if started {
+				out = append(out, cur.String())
+				cur.Reset()
+				started = false
+			}
+		default:
+			cur.WriteByte(c)
+			started = true
+		}
+	}
+	if started {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // writeDagNotes renders the analysis.
@@ -751,18 +825,6 @@ func findingStrings(report *dagman.Report) []string {
 	return out
 }
 
-// dagProgressAttrs are what DAGMan publishes into its own job ad
-// (condor_dagman/dagman_classad.cpp). Reading them is why this tool is a
-// query rather than a log parser.
-var dagProgressAttrs = []string{
-	"ClusterId", "ProcId", "Owner", "JobStatus", "JobBatchName", "Cmd", "Args", "Arguments",
-	"HoldReason", "HoldReasonCode",
-	"DAG_NodesTotal", "DAG_NodesDone", "DAG_NodesReady", "DAG_NodesQueued",
-	"DAG_NodesPrerun", "DAG_NodesPostrun", "DAG_NodesFailed", "DAG_NodesUnready",
-	"DAG_NodesFutile", "DAG_Status", "DAG_InRecovery", "DAG_AdUpdateTime",
-	"DAG_JobsSubmitted", "DAG_JobsIdle", "DAG_JobsRunning", "DAG_JobsHeld", "DAG_JobsCompleted",
-}
-
 // dagStatusNames maps DAG_Status to the enum in dagman_utils.h.
 var dagStatusNames = map[int64]string{
 	0: "OK",
@@ -774,113 +836,72 @@ var dagStatusNames = map[int64]string{
 	6: "HALTED",
 }
 
-// dagClusterArg reads the cluster id a caller passed.
+// isDagManJob reports whether a job ad belongs to a DAGMan manager job,
+// which is what makes get_job add the workflow section.
 //
-// It accepts a JSON number as well as a string because submit_dag hands
-// back cluster_id as an integer, and an agent that passes its own
-// structured output straight back in is doing the obvious thing. The
-// value is parsed rather than spliced: owner scoping confines a normal
-// user whatever they send, but an MCP admin's constraint is used as
-// written.
-func dagClusterArg(args map[string]interface{}) (int, error) {
-	var raw string
-	switch v := args["job_id"].(type) {
-	case string:
-		raw = strings.TrimSpace(v)
-	case float64:
-		raw = strconv.FormatInt(int64(v), 10)
-	case int:
-		raw = strconv.Itoa(v)
-	case int64:
-		raw = strconv.FormatInt(v, 10)
-	case json.Number:
-		raw = v.String()
-	case nil:
-		return 0, fmt.Errorf("job_id is required: the cluster id submit_dag returned")
-	default:
-		return 0, fmt.Errorf("job_id must be a cluster id, not %T", v)
+// Two tests, because neither alone covers the life of a workflow.
+// DAG_NodesTotal is conclusive but only appears once DAGMan has parsed
+// the DAG and published -- so a workflow that is still spooling, or held
+// and never going to start, would not be recognized by it, which is
+// precisely when a caller most needs to be told what they are looking
+// at. Cmd is there from the moment the job is submitted; it is the
+// access point's condor_dagman path, so it is matched on the basename
+// rather than compared to this server's idea of where DAGMan lives.
+func isDagManJob(ad *classad.ClassAd) bool {
+	if _, ok := ad.EvaluateAttrInt("DAG_NodesTotal"); ok {
+		return true
 	}
-	if raw == "" {
-		return 0, fmt.Errorf("job_id is required: the cluster id submit_dag returned")
-	}
-	if i := strings.Index(raw, "."); i >= 0 {
-		raw = raw[:i]
-	}
-	cluster, err := strconv.Atoi(raw)
-	if err != nil || cluster < 0 {
-		return 0, fmt.Errorf("job_id %q is not a cluster id; pass what submit_dag returned (1234 or \"1234.0\")",
-			stringArg(args, "job_id"))
-	}
-	return cluster, nil
-}
-
-// toolDagStatus reports a workflow's progress.
-func (s *Server) toolDagStatus(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	cluster, err := dagClusterArg(args)
-	if err != nil {
-		return nil, err
-	}
-
-	scope, ok := s.ownerScope(ctx, tierRead)
+	cmd, ok := ad.EvaluateAttrString("Cmd")
 	if !ok {
-		return nil, fmt.Errorf("no authenticated caller to scope this query to")
+		return false
 	}
-	constraint := fmt.Sprintf("ClusterId == %d", cluster)
-	if !scope.AllUsers {
-		scoped, err := ownerScopedConstraint(scope.Owner, constraint)
-		if err != nil {
-			return nil, err
-		}
-		constraint = scoped
-	}
-
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: dagProgressAttrs,
-		Limit:      1,
-		FetchOpts:  fetchOptsFor(scope),
-		Owner:      scope.Owner,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("querying the DAGMan job failed: %w", err)
-	}
-	if len(ads) == 0 {
-		return nil, fmt.Errorf("no job with cluster id %d %s. "+
-			"A finished workflow leaves the queue; look for it with query_job_archive instead", cluster, scope.Note())
-	}
-	ad := ads[0]
-
-	sb := &strings.Builder{}
-	sb.WriteString(renderDagStatus(cluster, scope, ad))
-	if boolFlag(args, "include_nodes") {
-		s.appendNodeJobs(ctx, sb, cluster, scope)
-	}
-
-	return dagStatusResult(sb.String(), cluster, ad), nil
+	cmd = strings.TrimSpace(cmd)
+	return cmd == "condor_dagman" || strings.HasSuffix(cmd, "/condor_dagman")
 }
 
-// renderDagStatus turns a DAGMan job ad into the report a caller reads.
+// appendDagSection is what get_job does with a job ad that turns out to
+// be a DAGMan manager: it adds the workflow report to the text and the
+// progress counts to the structured result, and leaves an ordinary job's
+// answer exactly as it was.
 //
-// Split out from toolDagStatus so the decisions in it -- above all,
+// Split out from the handler so both halves of that decision -- the
+// section appears for a workflow, and does NOT appear for anything else
+// -- can be tested without a schedd.
+func appendDagSection(text string, structured map[string]interface{}, cluster int, ad *classad.ClassAd) string {
+	if !isDagManJob(ad) {
+		return text
+	}
+	structured["dag"] = dagStructuredFields(ad)
+	return text + renderDagSection(cluster, ad)
+}
+
+// renderDagSection turns a DAGMan job ad into the workflow report
+// get_job appends to a manager job's answer.
+//
+// Split out from the handler so the decisions in it -- above all,
 // whether a held manager job is spooling or stuck -- can be exercised
 // against a crafted ad. Those two states are the same JobStatus and
 // differ only in a hold code, and getting them confused tells a caller to
 // keep waiting on a workflow that is already dead.
-func renderDagStatus(cluster int, scope OwnerScope, ad *classad.ClassAd) string {
+func renderDagSection(cluster int, ad *classad.ClassAd) string {
+	dagFile := dagFileFromAd(ad)
 	total, hasTotal := ad.EvaluateAttrInt("DAG_NodesTotal")
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "DAGMan workflow %d.0 %s\n", cluster, scope.Note())
-	if name, ok := ad.EvaluateAttrString("JobBatchName"); ok && name != "" {
-		fmt.Fprintf(&sb, "batch name: %s\n", name)
+	sb.WriteString("\n--- DAGMan workflow ---\n")
+	if dagFile != "" {
+		fmt.Fprintf(&sb, "DAG file: %s\n", dagFile)
 	}
 	status, _ := ad.EvaluateAttrInt("JobStatus")
-	fmt.Fprintf(&sb, "manager job status: %s\n", describeJobStatus(int(status)))
 
 	// A finished manager job means the results are sitting in its spool,
 	// which is the one place a caller does not think to look: the node
 	// jobs' own sandboxes are long gone, and their output came back here.
 	finish := func() string {
+		fmt.Fprintf(&sb, "\nNode jobs still in the queue: query_jobs(constraint=\"DAGManJobId == %d\"). "+
+			"Finished ones: query_job_archive with the same constraint; a failed node's job carries "+
+			"DAGNodeName and its exit code / HoldReason.\n", cluster)
 		if status == 4 {
-			fmt.Fprintf(&sb, "\n%s\n", dagOutputAdvice(cluster))
+			fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(cluster, dagFile))
 		}
 		return sb.String()
 	}
@@ -964,9 +985,9 @@ func renderDagStatus(cluster int, scope OwnerScope, ad *classad.ClassAd) string 
 	if failed, ok := ad.EvaluateAttrInt("DAG_NodesFailed"); ok && failed > 0 {
 		fmt.Fprintf(&sb, "\n%d node(s) failed. The reason is in the node's own job -- query_job_archive with "+
 			"constraint DAGManJobId == %d shows how each node job ended.\n", failed, cluster)
-		sb.WriteString("DAGMan wrote a rescue DAG (<dag>.dag.rescue001) into the workflow's spool listing " +
-			"the nodes that still need to run. To resume, fetch it with get_job_output and submit a new " +
-			"workflow with the same dag_name, passing the rescue file in files.\n")
+		fmt.Fprintf(&sb, "DAGMan wrote a rescue DAG (%s) into the workflow's spool listing "+
+			"the nodes that still need to run. To resume, fetch it with get_job_output and submit a new "+
+			"workflow with the same dag_name, passing the rescue file in files.\n", dagRescueName(dagFile))
 	}
 	if futile, ok := ad.EvaluateAttrInt("DAG_NodesFutile"); ok && futile > 0 {
 		fmt.Fprintf(&sb, "%d node(s) are futile: they can never run because an ancestor failed.\n", futile)
@@ -974,64 +995,24 @@ func renderDagStatus(cluster int, scope OwnerScope, ad *classad.ClassAd) string 
 	return finish()
 }
 
-// appendNodeJobs lists the workflow's node jobs. They are linked to the
-// manager by DAGManJobId, which DAGMan sets on every job it submits.
-func (s *Server) appendNodeJobs(ctx context.Context, sb *strings.Builder, cluster int, scope OwnerScope) {
-	constraint := fmt.Sprintf("DAGManJobId == %d", cluster)
-	if !scope.AllUsers {
-		scoped, err := ownerScopedConstraint(scope.Owner, constraint)
-		if err != nil {
-			return
+// dagStructuredFields is the workflow's progress as structured data,
+// which get_job files under "dag".
+//
+// The manager job's own status travels with the DAG's, because they
+// answer different questions and a caller needs both: a DAG that reports
+// no progress because DAGMan has not started yet is waiting, and one
+// that reports none because the manager already exited is finished or
+// broken. Without this the two are indistinguishable. The hold code is
+// what separates "spooling, will clear" from "stuck".
+func dagStructuredFields(ad *classad.ClassAd) map[string]interface{} {
+	out := map[string]interface{}{}
+	// These two are named, not derived: lower-casing the attribute is how
+	// every DAG_* key is spelled, and it would turn JobStatus into
+	// "jobstatus" rather than the "job_status" the schema publishes.
+	for key, attr := range map[string]string{"job_status": "JobStatus", "hold_reason_code": "HoldReasonCode"} {
+		if v, ok := ad.EvaluateAttrInt(attr); ok {
+			out[key] = v
 		}
-		constraint = scoped
-	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "JobStatus", "DAGNodeName", "HoldReason"},
-		Limit:      200,
-		FetchOpts:  fetchOptsFor(scope),
-		Owner:      scope.Owner,
-	})
-	if err != nil {
-		fmt.Fprintf(sb, "\n(could not list node jobs: %v)\n", err)
-		return
-	}
-	if len(ads) == 0 {
-		sb.WriteString("\nNo node jobs are in the queue right now. Nodes that have already finished leave it; " +
-			"query_job_archive with the same constraint finds them.\n")
-		return
-	}
-	sb.WriteString("\nnode jobs in the queue:\n")
-	for _, ad := range ads {
-		c, _ := ad.EvaluateAttrInt("ClusterId")
-		p, _ := ad.EvaluateAttrInt("ProcId")
-		st, _ := ad.EvaluateAttrInt("JobStatus")
-		name, _ := ad.EvaluateAttrString("DAGNodeName")
-		fmt.Fprintf(sb, "  %d.%d  %-10s  %s", c, p, describeJobStatus(int(st)), name)
-		if reason, ok := ad.EvaluateAttrString("HoldReason"); ok && reason != "" {
-			fmt.Fprintf(sb, "  [held: %s]", reason)
-		}
-		sb.WriteString("\n")
-	}
-}
-
-func dagStatusResult(text string, cluster int, ad interface {
-	EvaluateAttrInt(string) (int64, bool)
-}) map[string]interface{} {
-	// cluster_id is an integer here because it is an integer in
-	// submit_dag's result, and a client that feeds one tool's output to
-	// the other should not have to convert between them.
-	structured := map[string]interface{}{"cluster_id": cluster}
-	// The manager job's own status, alongside the workflow's. They answer
-	// different questions and a caller needs both: a DAG that reports no
-	// progress because DAGMan has not started yet is waiting, and one that
-	// reports none because the manager already exited is finished or
-	// broken. Without this the two are indistinguishable.
-	if v, ok := ad.EvaluateAttrInt("JobStatus"); ok {
-		structured["job_status"] = v
-	}
-	// The hold code is what separates "spooling, will clear" from "stuck".
-	if v, ok := ad.EvaluateAttrInt("HoldReasonCode"); ok {
-		structured["hold_reason_code"] = v
 	}
 	for _, attr := range []string{
 		"DAG_NodesTotal", "DAG_NodesDone", "DAG_NodesReady", "DAG_NodesQueued",
@@ -1039,13 +1020,13 @@ func dagStatusResult(text string, cluster int, ad interface {
 		"DAG_JobsIdle", "DAG_JobsRunning", "DAG_JobsHeld", "DAG_JobsCompleted",
 	} {
 		if v, ok := ad.EvaluateAttrInt(attr); ok {
-			structured[strings.ToLower(attr)] = v
+			out[strings.ToLower(attr)] = v
 		}
 	}
-	return withStructured(map[string]interface{}{
-		"content":  []map[string]interface{}{{"type": "text", "text": text}},
-		"metadata": structured,
-	}, structured)
+	if f := dagFileFromAd(ad); f != "" {
+		out["dag_file"] = f
+	}
+	return out
 }
 
 // stringMapArg reads a JSON object of string values.

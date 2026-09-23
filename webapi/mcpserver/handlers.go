@@ -158,15 +158,13 @@ var readOnlyMCPTools = map[string]bool{
 	// get_version reports only this binary's build identity.
 	"get_version": true,
 	"whoami":      true,
-	// dag_status only queries the DAGMan job's ad. It was missing here
-	// while annotations.go declared it readOnly, so a read-scoped token
-	// was told the tool was safe and then refused when it called it.
-	"dag_status": true,
 	// Retrieving a finished job's output reads its sandbox and changes
 	// nothing -- which is what annotations.go has always told clients.
-	// The three were missing here for the same reason dag_status was,
-	// and TestAnnotationsAgreeWithReadOnlyClassification now keeps the
-	// two lists from disagreeing again.
+	// The three were missing here while annotations.go declared them
+	// readOnly, so a read-scoped token was told the tools were safe and
+	// then refused when it called them;
+	// TestAnnotationsAgreeWithReadOnlyClassification now keeps the two
+	// lists from disagreeing again.
 	"get_job_stdout": true,
 	"get_job_stderr": true,
 	"get_job_output": true,
@@ -255,8 +253,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
-			Name:        "get_job",
-			Description: "Get details of a specific HTCondor job by ID",
+			Name: "get_job",
+			Description: "Get details of a specific HTCondor job by ID. " +
+				"For a DAGMan workflow (the cluster submit_dag returned) this also reports node progress: " +
+				"how many nodes are done, ready, queued, failed, and whether the workflow is stuck.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -887,8 +887,6 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolSubmitJob(ctx, request.Arguments)
 	case "submit_dag":
 		result, err = s.toolSubmitDag(ctx, request.Arguments)
-	case "dag_status":
-		result, err = s.toolDagStatus(ctx, request.Arguments)
 	case "query_jobs":
 		result, err = s.toolQueryJobs(ctx, request.Arguments)
 	case "get_job":
@@ -1394,10 +1392,30 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("failed to serialize job: %w", err)
 	}
 
-	return structuredTextResult(
-		fmt.Sprintf("Job %s:\n%s", jobID, string(jobJSON)),
-		map[string]interface{}{"job": jobAds[0], "job_id": jobID},
-	), nil
+	text := fmt.Sprintf("Job %s:\n%s", jobID, string(jobJSON))
+	structured := map[string]interface{}{"job": jobAds[0], "job_id": jobID}
+
+	// A DAGMan manager job is a job, and this is the tool a caller
+	// reaches for having just been handed its cluster id -- so the
+	// workflow's own progress is reported here rather than behind a
+	// second tool nothing told the model about. The counts are already
+	// in hand: get_job sends NO projection, so the schedd returns the
+	// whole ad, DAG_* attributes and all. There is no projection
+	// argument on this tool to merge them into or to skip the section
+	// for; if one is ever added it must merge in what renderDagSection
+	// and dagStructuredFields read (DAG_*, JobStatus, HoldReason,
+	// HoldReasonCode, Cmd, Arguments/Args), or the section will silently
+	// stop appearing on the workflows it exists for.
+	text = appendDagSection(text, structured, cluster, jobAds[0])
+
+	// Both keys carry the same map. structuredContent is what a modern
+	// client validates against the published outputSchema; metadata is
+	// the older name this server's own callers (the integration tests
+	// among them) still read.
+	return withStructured(map[string]interface{}{
+		"content":  []map[string]interface{}{{"type": "text", "text": text}},
+		"metadata": structured,
+	}, structured), nil
 }
 
 // matchAnalysisProvider lazily allocates the slot provider used by the

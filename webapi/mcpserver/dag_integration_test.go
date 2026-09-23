@@ -157,6 +157,8 @@ VARS A NodeName="A"
 VARS B NodeName="B"
 PARENT A CHILD B
 PARENT B CHILD C
+SET_JOB_ATTR DagTestMarker = "set-from-dag"
+ENV SET DAG_TEST_VAR=hello
 `
 	// A PRE script with no extension. DAGMan execs it out of the spool
 	// directory, so it has to arrive with the execute bit set -- and the
@@ -253,13 +255,25 @@ queue
 	// "will never run" except waiting.
 	waitForDagProgress(t, ctx, server, cluster, 5*time.Minute)
 
+	// SET_JOB_ATTR and ENV SET are honoured, and the proof is in the
+	// manager job's own ad -- the only place either lands.
+	//
+	// Both were silently dropped before: the parser knew the keywords
+	// and collected nothing, so a DAG that set an attribute its own
+	// PRE/POST scripts or a site's policy expression depended on
+	// submitted cleanly and behaved as if the line had not been written.
+	// Nothing in the submit path would have noticed, which is why this
+	// is checked against a real schedd rather than against the generated
+	// submit file.
+	checkDagManagerAttributes(t, ctx, schedd, cluster)
+
 	// And it has to finish: the DAGMan job leaves the queue when the
 	// workflow completes.
 	//
 	// The node jobs are watched while it runs rather than afterwards,
 	// because a node job leaves the queue the moment it finishes. What
 	// is being checked is the link between them and the manager --
-	// DAGManJobId -- which is what dag_status's node listing reads and
+	// DAGManJobId -- which is what get_job's workflow section points a caller at and
 	// what OtherJobRemoveRequirements matches on, so nothing else in
 	// this test would notice if DAGMan stopped setting it.
 	sawNodeJobs := 0
@@ -272,7 +286,7 @@ queue
 	})
 	if sawNodeJobs == 0 {
 		t.Error("no node job ever carried DAGManJobId == the manager's cluster; the workflow's jobs are " +
-			"not attributable to it, which is what dag_status's node listing and the remove-the-whole-" +
+			"not attributable to it, which is what get_job's workflow section and the remove-the-whole-" +
 			"workflow rule both depend on")
 	}
 
@@ -469,20 +483,28 @@ func waitForDagProgress(t *testing.T, ctx context.Context, server *Server, clust
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		text, meta, isErr := callToolOverMCP(t, server, ctx, "dag_status", map[string]interface{}{
-			"job_id": fmt.Sprintf("%d", cluster),
+		text, meta, isErr := callToolOverMCP(t, server, ctx, "get_job", map[string]interface{}{
+			"job_id": fmt.Sprintf("%d.0", cluster),
 		})
 		if isErr {
 			// The job leaving the queue this early means the workflow
 			// failed outright; there is nothing to wait for.
-			t.Fatalf("dag_status failed while waiting for DAGMan to start: %s", text)
+			t.Fatalf("get_job failed while waiting for DAGMan to start: %s", text)
 		}
 		last = text
+		// The workflow's progress lives under "dag": get_job adds it for
+		// a DAGMan manager job and for nothing else, so an empty object
+		// here would mean the detection stopped recognizing one.
+		dag, _ := meta["dag"].(map[string]interface{})
+		if dag == nil {
+			t.Fatalf("get_job returned no dag object for the DAGMan job -- the workflow section is not "+
+				"being attached. Metadata: %v\nText:\n%s", meta, text)
+		}
 		// A manager job that has already left Running without publishing
 		// anything is never going to: it failed to start, or exited
 		// immediately. Waiting out the window would cost five minutes to
 		// learn what this call already knows.
-		if status, ok := meta["job_status"].(float64); ok {
+		if status, ok := dag["job_status"].(float64); ok {
 			switch int(status) {
 			case 3, 4:
 				t.Fatalf("the DAGMan job reached %s without ever publishing progress -- "+
@@ -492,12 +514,12 @@ func waitForDagProgress(t *testing.T, ctx context.Context, server *Server, clust
 				// Spooling (code 16) clears on its own. Any other hold
 				// does not, so waiting out the window would only cost
 				// five minutes to learn what this call already knows.
-				if code, ok := meta["hold_reason_code"].(float64); !ok || int(code) != 16 {
+				if code, ok := dag["hold_reason_code"].(float64); !ok || int(code) != 16 {
 					t.Fatalf("the DAGMan job is held and will not start. Last status:\n%s", last)
 				}
 			}
 		}
-		if total, ok := meta["dag_nodestotal"].(float64); ok && total > 0 {
+		if total, ok := dag["dag_nodestotal"].(float64); ok && total > 0 {
 			t.Logf("DAGMan is running: %s", text)
 			if total != 3 {
 				t.Errorf("DAG_NodesTotal = %v, want 3 -- DAGMan parsed a different graph than we sent", total)
@@ -673,4 +695,48 @@ func readSpoolDir(spool string, cluster int) map[string]string {
 		out[e.Name()] = string(body)
 	}
 	return out
+}
+
+// checkDagManagerAttributes verifies that the DAG's SET_JOB_ATTR and ENV
+// SET commands reached the manager job.
+//
+// The environment is asserted on the MANAGER, not on a node job, because
+// node jobs do not inherit it: DAGMan submits them as ordinary jobs
+// whose environment is whatever their own submit description says. What
+// ENV SET buys is DAGMan's own environment, and through it the PRE/POST
+// scripts DAGMan execs -- so the manager's Environment attribute is
+// where the effect is, and the only place it can be observed.
+func checkDagManagerAttributes(t *testing.T, ctx context.Context, schedd *htcondor.Schedd, cluster int) {
+	t.Helper()
+	ads, err := schedd.Query(ctx, fmt.Sprintf("ClusterId == %d", cluster),
+		[]string{"ClusterId", "DagTestMarker", "Environment", "Env"})
+	if err != nil {
+		t.Fatalf("querying the DAGMan job for its attributes: %v", err)
+	}
+	if len(ads) == 0 {
+		t.Fatalf("the DAGMan job %d.0 is not in the queue", cluster)
+	}
+	ad := ads[0]
+
+	if marker, ok := ad.EvaluateAttrString("DagTestMarker"); !ok || marker != "set-from-dag" {
+		expr, _ := ad.Lookup("DagTestMarker")
+		t.Errorf("DagTestMarker = %v (string=%v), want \"set-from-dag\": SET_JOB_ATTR did not reach "+
+			"the manager job's ad", expr, ok)
+	}
+
+	env, ok := ad.EvaluateAttrString("Environment")
+	if !ok {
+		env, ok = ad.EvaluateAttrString("Env")
+	}
+	if !ok {
+		e, _ := ad.Lookup("Environment")
+		t.Fatalf("the DAGMan job has no Environment string: %v", e)
+	}
+	if !strings.Contains(env, "DAG_TEST_VAR=hello") {
+		t.Errorf("Environment = %q, missing DAG_TEST_VAR=hello: ENV SET did not reach the manager job", env)
+	}
+	// The generated environment is still intact: ENV SET adds to it.
+	if !strings.Contains(env, "_CONDOR_DAGMAN_LOG=") {
+		t.Errorf("Environment = %q lost _CONDOR_DAGMAN_LOG; ENV SET replaced it instead of merging", env)
+	}
 }

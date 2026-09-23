@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PelicanPlatform/classad/classad"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
@@ -197,9 +200,9 @@ func TestSubmitDagDescriptionReachesTheModelAsLines(t *testing.T) {
 // TestAnnotationsAgreeWithReadOnlyClassification. The two lists are read
 // by different consumers -- annotations by the client and the broker,
 // readOnlyMCPTools by this server's own OAuth scope gate -- and nothing
-// compared them. dag_status was declared readOnly to clients and
-// classified write-only by the gate, so a read-scoped token was shown a
-// tool it was then refused.
+// compared them. get_job_stdout and its siblings were declared readOnly
+// to clients and classified write-only by the gate, so a read-scoped
+// token was shown tools it was then refused.
 func TestAnnotationsAgreeWithReadOnlyClassification(t *testing.T) {
 	s := &Server{}
 	res, _ := s.handleListTools(context.Background(), nil).(map[string]interface{})
@@ -528,15 +531,15 @@ func TestStagedModeFollowsTheParseNotTheExtension(t *testing.T) {
 
 // TestDagFollowUpAdviceNamesToolsThatExist. watch_jobs has no job_id
 // parameter, so "watch_jobs on cluster N" was an instruction a model
-// could not carry out; what it did instead was loop on dag_status.
+// could not carry out; what it did instead was poll in a loop.
 func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 	report := &dagman.Report{Required: []string{"workflow.dag"}}
 	res := dagSubmitResult(42, "workflow.dag", report, nil)
 	text := res["content"].([]map[string]interface{})[0]["text"].(string)
 
 	want := `To wait for the whole workflow, register watch_jobs(constraint="ClusterId == 42", event="done") ` +
-		`and collect it with check_watches -- do not call dag_status in a loop. ` +
-		`Use dag_status for a one-off "how far along is it".`
+		`and collect it with check_watches -- do not call get_job in a loop. ` +
+		`Use get_job(job_id="42.0") for a one-off "how far along is it".`
 	if !strings.Contains(text, want) {
 		t.Errorf("the follow-up advice is not the one that works:\n%s", text)
 	}
@@ -545,10 +548,10 @@ func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 	}
 }
 
-// TestDagStatusTellsAFinishedWorkflowWhereItsOutputIs: the node jobs'
+// TestDagSectionTellsAFinishedWorkflowWhereItsOutputIs: the node jobs'
 // sandboxes are gone by then and their output came back to the manager
 // job's spool, which is the one place a caller does not think to look.
-func TestDagStatusTellsAFinishedWorkflowWhereItsOutputIs(t *testing.T) {
+func TestDagSectionTellsAFinishedWorkflowWhereItsOutputIs(t *testing.T) {
 	done := dagStatusText(t, map[string]interface{}{"JobStatus": 4, "DAG_NodesTotal": 3, "DAG_NodesDone": 3})
 	if !strings.Contains(done, `get_job_output(job_id="7.0")`) {
 		t.Errorf("a completed workflow does not say how to collect its output:\n%s", done)
@@ -559,10 +562,10 @@ func TestDagStatusTellsAFinishedWorkflowWhereItsOutputIs(t *testing.T) {
 	}
 }
 
-// TestDagStatusPointsAtTheRescueDag: a failed workflow is resumable, and
+// TestDagSectionPointsAtTheRescueDag: a failed workflow is resumable, and
 // the rescue DAG is how. Without saying so, the only visible option is
 // to build the remaining graph by hand.
-func TestDagStatusPointsAtTheRescueDag(t *testing.T) {
+func TestDagSectionPointsAtTheRescueDag(t *testing.T) {
 	got := dagStatusText(t, map[string]interface{}{
 		"JobStatus": 2, "DAG_NodesTotal": 3, "DAG_NodesFailed": 1,
 	})
@@ -591,40 +594,6 @@ func TestSpoolFailureAlwaysNamesTheCluster(t *testing.T) {
 	}
 	if !strings.Contains(stranded, "remove_job") {
 		t.Errorf("the caller is not told how to clean up: %s", stranded)
-	}
-}
-
-// TestDagStatusAcceptsANumericJobId: submit_dag returns cluster_id as an
-// integer, so handing one tool's own output to the other is the obvious
-// thing to do -- and it used to produce "job_id is required".
-func TestDagStatusAcceptsANumericJobId(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		arg  interface{}
-		want int
-	}{
-		{"json number", float64(1234), 1234},
-		{"string", "1234", 1234},
-		{"job id", "1234.0", 1234},
-		{"int", 1234, 1234},
-		{"json.Number", json.Number("1234"), 1234},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := dagClusterArg(map[string]interface{}{"job_id": tc.arg})
-			if err != nil {
-				t.Fatalf("job_id %v (%T) was refused: %v", tc.arg, tc.arg, err)
-			}
-			if got != tc.want {
-				t.Errorf("cluster = %d, want %d", got, tc.want)
-			}
-		})
-	}
-	// And a cluster id is a number, not a fragment of a constraint.
-	if _, err := dagClusterArg(map[string]interface{}{"job_id": "1 || true"}); err == nil {
-		t.Error("a constraint fragment was accepted as a cluster id")
-	}
-	if _, err := dagClusterArg(map[string]interface{}{}); err == nil {
-		t.Error("a missing job_id was accepted")
 	}
 }
 
@@ -724,4 +693,36 @@ func TestSubmitDagOmitsCsdVersion(t *testing.T) {
 	if sub, _ := structured["submit_file"].(string); strings.Contains(sub, "-CsdVersion") {
 		t.Errorf("the manager job still claims a submit version:\n%s", sub)
 	}
+}
+
+// dagmanManagerJobAd is the job ad the schedd would receive for a
+// workflow this server submits: the generated submit file, run through
+// the same parser and submit path the real submission takes.
+//
+// Hand-writing the Arguments string would test this package's idea of
+// what it generates rather than what it generates, and the two have
+// differed before -- argument quoting is applied by the submit library,
+// not by the generator.
+func dagmanManagerJobAd(t *testing.T, dagName string) *classad.ClassAd {
+	t.Helper()
+	text, err := dagman.SubmitFile(dagman.SubmitOptions{
+		DagName:    dagName,
+		InputFiles: []string{dagName},
+		MaxIdle:    5,
+	})
+	if err != nil {
+		t.Fatalf("SubmitFile: %v", err)
+	}
+	sf, err := htcondor.ParseSubmitFile(strings.NewReader(text))
+	if err != nil {
+		t.Fatalf("the generated submit file does not parse: %v\n%s", err, text)
+	}
+	res, err := sf.Submit(42)
+	if err != nil {
+		t.Fatalf("Submit: %v\n%s", err, text)
+	}
+	if len(res.ProcAds) != 1 {
+		t.Fatalf("got %d procs, want 1", len(res.ProcAds))
+	}
+	return res.ProcAds[0]
 }

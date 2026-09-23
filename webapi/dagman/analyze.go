@@ -63,6 +63,15 @@ type Report struct {
 	// sub-DAG description, or a node's submit file -- that are not staged
 	// now. These are expected to be produced during the run.
 	Deferred []string
+	// JobAttrs are the DAG's SET_JOB_ATTR commands, in order, with the
+	// ones this tool must own already removed (see ReservedJobAttr): a
+	// caller hands these straight to SubmitOptions rather than parsing
+	// the DAG a second time.
+	JobAttrs []JobAttr
+	// EnvSet is the DAG's ENV SET pairs, flattened. Later assignments of
+	// the same variable win, as they do in the environment string
+	// condor_submit_dag builds.
+	EnvSet map[string]string
 }
 
 // Fatal reports whether anything makes the workflow unstartable.
@@ -229,6 +238,8 @@ func Analyze(in Input) *Report {
 			`one line, note that DAG syntax is line-oriented: use real newlines, not \n.`)
 	}
 
+	collectJobAttrs(r, d)
+	collectEnv(r, d)
 	checkDuplicateNodes(r, d)
 	checkGraph(r, d)
 	checkCollisions(r, d, in)
@@ -430,6 +441,56 @@ func (a *analysis) analyzeJobNode(n *Node, need func(string, Severity, string, i
 	}
 	for _, f := range submitInputFiles(body) {
 		need(f, Warning, fmt.Sprintf("node %s transfers it as input", n.Name), n.Line, n.Source)
+	}
+}
+
+// collectJobAttrs carries the DAG's SET_JOB_ATTR commands onto the
+// report, refusing the handful this tool must own.
+//
+// The guard exists because the manager job's submit file is not the
+// caller's to write: OtherJobRemoveRequirements is what makes removing
+// the workflow remove its node jobs, and IsDaemonCore is what gets
+// DAGMan a command socket the schedd agrees it has. A DAG that
+// overwrites either produces a workflow that looks submitted and
+// misbehaves much later, so those are reported and dropped rather than
+// emitted. JobBatchName is deliberately NOT reserved: condor_submit_dag
+// lets a user set it (-batch-name), and a batch name that the DAG and
+// the tool disagree about costs nothing but a label.
+func collectJobAttrs(r *Report, d *DAG) {
+	for _, a := range d.JobAttrs {
+		if ReservedJobAttr(a.Name) {
+			r.add(Warning, a.Line, a.Source, fmt.Sprintf(
+				"SET_JOB_ATTR %s is ignored: %s is set by this server on the DAGMan manager job, and "+
+					"overriding it would break %s. Everything else SET_JOB_ATTR sets is honoured.",
+				a.Name, a.Name, reservedJobAttrReason(a.Name)))
+			continue
+		}
+		r.JobAttrs = append(r.JobAttrs, a)
+	}
+}
+
+// collectEnv flattens ENV SET and reports ENV GET.
+//
+// ENV GET is the one DAG command this path cannot honour at all. It
+// copies named variables out of the environment of the process that
+// submits the DAG -- condor_submit_dag, running as the user on the
+// access point. Here that process is this server, in a container
+// somewhere else, whose environment has nothing to do with the user's.
+// Silently dropping it would give DAGMan a manager job missing exactly
+// the variables the workflow was written to depend on.
+func collectEnv(r *Report, d *DAG) {
+	for _, g := range d.EnvGet {
+		r.add(Warning, g.Line, g.Source, fmt.Sprintf(
+			"ENV GET %s cannot be honoured: it copies variables from the environment of the process "+
+				"that submits the DAG, and this server's environment is not the access point's. "+
+				"Set them with ENV SET instead.", strings.Join(g.Names, " ")))
+	}
+	if len(d.EnvSet) == 0 {
+		return
+	}
+	r.EnvSet = make(map[string]string, len(d.EnvSet))
+	for _, e := range d.EnvSet {
+		r.EnvSet[e.Name] = e.Value
 	}
 }
 

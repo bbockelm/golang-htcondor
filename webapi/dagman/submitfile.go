@@ -103,6 +103,18 @@ type SubmitOptions struct {
 	// workflow whose CONFIG file is merely transferred is silently
 	// ignored.
 	ConfigFile string
+	// JobAttrs are the DAG's SET_JOB_ATTR commands, emitted as `My.<Name>
+	// = <Value>` on the manager job exactly as condor_submit_dag does
+	// (dagman_utils.cpp). The value is written VERBATIM: it is a ClassAd
+	// expression, and quoting it again would turn a number into a string.
+	// Names this tool owns are refused -- see ReservedJobAttr.
+	JobAttrs []JobAttr
+	// EnvSet is the DAG's ENV SET pairs. They merge into the manager
+	// job's environment BEFORE ExtraEnv, so an operator's
+	// HTTP_API_DAGMAN_ENVIRONMENT still wins: a workflow must not be able
+	// to redirect CONDOR_CONFIG or BEARER_TOKEN_FILE by writing one line
+	// of DAG.
+	EnvSet map[string]string
 	// ExtraEnv is additional environment for DAGMan itself, merged into
 	// the environment line (HTTP_API_DAGMAN_ENVIRONMENT). An access point
 	// whose configuration is not in the default place needs CONDOR_CONFIG
@@ -111,6 +123,31 @@ type SubmitOptions struct {
 	ExtraEnv map[string]string
 	// Append is extra submit-file text, inserted before queue.
 	Append string
+}
+
+// reservedJobAttrs are the manager-job attributes this tool owns, mapped
+// to what breaks when a DAG overwrites one.
+//
+// JobBatchName is deliberately absent: condor_submit_dag exposes it as
+// -batch-name, so a DAG setting it is a user doing something supported,
+// and the worst case is a label nobody expected.
+var reservedJobAttrs = map[string]string{
+	"otherjobremoverequirements": "removing the workflow, which is what removes its node jobs",
+	"isdaemoncore": "DAGMan's command socket, which the schedd sets up from this attribute " +
+		"and cannot be told about afterwards",
+}
+
+// ReservedJobAttr reports whether an attribute name is one a DAG may not
+// set on the manager job. ClassAd attribute names are case-insensitive,
+// so the comparison is too.
+func ReservedJobAttr(name string) bool {
+	_, ok := reservedJobAttrs[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+// reservedJobAttrReason is what a caller is told when one is refused.
+func reservedJobAttrReason(name string) string {
+	return reservedJobAttrs[strings.ToLower(strings.TrimSpace(name))]
 }
 
 // SubmitFile builds the scheduler-universe submit file that runs one
@@ -188,6 +225,18 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 		p(`My.JobBatchName = %s`, quote(opt.BatchName))
 	}
 
+	// The DAG's own SET_JOB_ATTR lines, last: submit takes the last
+	// assignment of a macro, so a DAG that sets JobBatchName overrides
+	// the batch_name argument rather than being overridden by it -- the
+	// same precedence condor_submit_dag gives them, which writes these
+	// after the attributes it generates itself.
+	for _, a := range opt.JobAttrs {
+		if ReservedJobAttr(a.Name) {
+			continue
+		}
+		p("My.%s = %s", a.Name, a.Value)
+	}
+
 	// -p 0 runs DAGMan without a command socket, and has to come before
 	// the other DaemonCore arguments, as condor_submit_dag writes it.
 	var args []string
@@ -221,6 +270,12 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 	}
 	if opt.ConfigFile != "" {
 		env["_CONDOR_DAGMAN_CONFIG_FILE"] = opt.ConfigFile
+	}
+	// The DAG's ENV SET first, the operator's configuration second: a
+	// workflow may add to DAGMan's environment, never redirect what the
+	// site set for it.
+	for k, v := range opt.EnvSet {
+		env[k] = v
 	}
 	for k, v := range opt.ExtraEnv {
 		env[k] = v

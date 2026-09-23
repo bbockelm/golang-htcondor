@@ -73,11 +73,12 @@ func defaultInstructions(scheddName string) string {
 		"by file name goes in the same call's `files`, and there is no second chance — a workflow's spool is " +
 		"written once, so bulk data has to reach the node jobs as HTTP/HTTPS/OSDF URLs in their own " +
 		"transfer_input_files instead. Pass dry_run to check a workflow without submitting it.\n")
-	b.WriteString("2. To wait for the whole workflow, register watch_jobs(constraint=\"ClusterId == N\", " +
+	b.WriteString("2. get_job on the DAGMan job (job_id=\"N.0\") — progress by node and by node job, for a " +
+		"one-off \"how far along is it\". DAGMan publishes this into its own job ad, so it is the same cheap " +
+		"query as any other get_job; there is no separate workflow-status tool.\n")
+	b.WriteString("3. To wait for the whole workflow, register watch_jobs(constraint=\"ClusterId == N\", " +
 		"event=\"done\") for the cluster submit_dag returned and collect it with check_watches — do not call " +
-		"dag_status in a loop.\n")
-	b.WriteString("3. dag_status — progress by node and by node job, for a one-off \"how far along is it\". " +
-		"DAGMan publishes this into its own job ad, so it is a cheap query.\n")
+		"get_job in a loop.\n")
 	b.WriteString("4. get_job_output on the DAGMan job (job_id=\"N.0\") — the node jobs' outputs come back " +
 		"into the workflow's own spool directory, not to anywhere else, and this returns the whole spool, " +
 		"DAGMan's own <dag>.dagman.out log included.\n\n")

@@ -66,6 +66,28 @@ var (
 	anySchema = map[string]interface{}{}
 )
 
+// dagSchema is the workflow progress get_job files under "dag" when the
+// job is a DAGMan manager. Nothing is required: DAGMan publishes these
+// only once it has parsed the DAG, so the first call after a submit
+// legitimately carries only the manager job's own status.
+var dagSchema = obj(map[string]interface{}{
+	"job_status":        intSchema,
+	"hold_reason_code":  intSchema,
+	"dag_status":        intSchema,
+	"dag_nodestotal":    intSchema,
+	"dag_nodesdone":     intSchema,
+	"dag_nodesready":    intSchema,
+	"dag_nodesqueued":   intSchema,
+	"dag_nodesfailed":   intSchema,
+	"dag_nodesunready":  intSchema,
+	"dag_nodesfutile":   intSchema,
+	"dag_jobsidle":      intSchema,
+	"dag_jobsrunning":   intSchema,
+	"dag_jobsheld":      intSchema,
+	"dag_jobscompleted": intSchema,
+	"dag_file":          strSchema,
+})
+
 // jobListSchema is the shape shared by every tool that returns a set of job
 // or history ads: the ads plus provenance and a truncation flag.
 func jobListSchema(itemsKey string) map[string]interface{} {
@@ -93,6 +115,12 @@ var outputSchemas = map[string]map[string]interface{}{
 	"get_job": obj(map[string]interface{}{
 		"job":    adSchema,
 		"job_id": strSchema,
+		// Present only on a DAGMan manager job, which is why it is not
+		// required. Open for the same reason the ad itself is: DAGMan
+		// publishes a set of progress attributes that grows between
+		// releases, and a client that rejected a result carrying a new
+		// one would break on a pool upgrade.
+		"dag": dagSchema,
 	}, "job_id"),
 
 	// --- aggregate ----------------------------------------------------
@@ -116,28 +144,6 @@ var outputSchemas = map[string]map[string]interface{}{
 	}, "job_id"),
 
 	// --- submit / mutate ---------------------------------------------
-	// dag_status is open: DAGMan publishes a set of progress attributes
-	// that grows between releases, and a client that rejected a result
-	// carrying a new one would break on a pool upgrade.
-	"dag_status": obj(map[string]interface{}{
-		// An integer, the same type submit_dag returns, so a caller can
-		// hand one tool's answer straight to the other.
-		"cluster_id":        intSchema,
-		"job_status":        intSchema,
-		"hold_reason_code":  intSchema,
-		"dag_status":        intSchema,
-		"dag_nodestotal":    intSchema,
-		"dag_nodesdone":     intSchema,
-		"dag_nodesready":    intSchema,
-		"dag_nodesqueued":   intSchema,
-		"dag_nodesfailed":   intSchema,
-		"dag_nodesunready":  intSchema,
-		"dag_nodesfutile":   intSchema,
-		"dag_jobsidle":      intSchema,
-		"dag_jobsrunning":   intSchema,
-		"dag_jobsheld":      intSchema,
-		"dag_jobscompleted": intSchema,
-	}, "cluster_id"),
 	// submit_dag reports what it staged and what the caller still owes,
 	// so an agent can act on the outstanding work without re-reading prose.
 	"submit_dag": obj(map[string]interface{}{

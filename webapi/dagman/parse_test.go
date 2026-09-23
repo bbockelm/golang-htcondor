@@ -295,3 +295,124 @@ func TestParseDotIncludeHeaderIsCollected(t *testing.T) {
 		t.Errorf("outputs = %+v, want the dot file itself", d.Outputs)
 	}
 }
+
+// TestParseSetJobAttr: the value is whatever follows the first '=',
+// verbatim. DAGMan keeps the whole line and condor_submit_dag writes
+// `My.<line>` into the manager's submit file, so a parser that stripped
+// quotes or normalized the expression would change what the attribute
+// means -- "17" is a string and 17 is a number.
+func TestParseSetJobAttr(t *testing.T) {
+	d := Parse(`
+SET_JOB_ATTR TestNumber = 17
+SET_JOB_ATTR Label = "a phrase with spaces"
+SET_JOB_ATTR Derived = (TestNumber + 1) * 2
+SET-JOB-ATTR Dashed = True
+`)
+	if len(d.Errors) != 0 {
+		t.Fatalf("unexpected parse errors: %+v", d.Errors)
+	}
+	want := []JobAttr{
+		{Name: "TestNumber", Value: "17", Line: 2},
+		{Name: "Label", Value: `"a phrase with spaces"`, Line: 3},
+		{Name: "Derived", Value: "(TestNumber + 1) * 2", Line: 4},
+		{Name: "Dashed", Value: "True", Line: 5},
+	}
+	if len(d.JobAttrs) != len(want) {
+		t.Fatalf("JobAttrs = %+v, want %d", d.JobAttrs, len(want))
+	}
+	for i, w := range want {
+		if d.JobAttrs[i] != w {
+			t.Errorf("JobAttrs[%d] = %+v, want %+v", i, d.JobAttrs[i], w)
+		}
+	}
+}
+
+// TestParseSetJobAttrMalformed: a SET_JOB_ATTR that is not an assignment
+// is reported rather than silently producing a submit-file line that
+// makes the whole manager job unparseable.
+func TestParseSetJobAttrMalformed(t *testing.T) {
+	for _, line := range []string{
+		"SET_JOB_ATTR",
+		"SET_JOB_ATTR JustAName",
+		"SET_JOB_ATTR = 17",
+		"SET_JOB_ATTR Empty =",
+	} {
+		d := Parse(line + "\n")
+		if len(d.JobAttrs) != 0 {
+			t.Errorf("%q produced %+v, want nothing", line, d.JobAttrs)
+		}
+		if len(d.Errors) == 0 {
+			t.Errorf("%q was accepted without complaint", line)
+		}
+	}
+}
+
+// TestParseEnvSetAndGet exercises the delimiters, which DIFFER between
+// the two sub-commands: GET takes whitespace-separated names and SET
+// takes a semicolon-delimited environment string (env.cpp's
+// env_delimiter), or the whole thing double-quoted and space-separated.
+// Reading SET as whitespace-separated turns `A=one two;B=3` into three
+// variables, two of them nonsense.
+func TestParseEnvSetAndGet(t *testing.T) {
+	d := Parse(`
+ENV GET PATH HOME TZ
+ENV SET FOO=bar;BAZ=a value;
+ENV SET "ONE=1 TWO=2"
+`)
+	if len(d.Errors) != 0 {
+		t.Fatalf("unexpected parse errors: %+v", d.Errors)
+	}
+	if len(d.EnvGet) != 1 {
+		t.Fatalf("EnvGet = %+v, want one command", d.EnvGet)
+	}
+	if got := strings.Join(d.EnvGet[0].Names, ","); got != "PATH,HOME,TZ" {
+		t.Errorf("ENV GET names = %q, want PATH,HOME,TZ", got)
+	}
+	want := []EnvVar{
+		{Name: "FOO", Value: "bar", Line: 3},
+		{Name: "BAZ", Value: "a value", Line: 3},
+		{Name: "ONE", Value: "1", Line: 4},
+		{Name: "TWO", Value: "2", Line: 4},
+	}
+	if len(d.EnvSet) != len(want) {
+		t.Fatalf("EnvSet = %+v, want %d pairs", d.EnvSet, len(want))
+	}
+	for i, w := range want {
+		if d.EnvSet[i] != w {
+			t.Errorf("EnvSet[%d] = %+v, want %+v", i, d.EnvSet[i], w)
+		}
+	}
+}
+
+// TestParseEnvMalformed: ENV without SET or GET, and a SET whose
+// argument is not a pair, are the two shapes DagParser::ParseEnv
+// refuses.
+func TestParseEnvMalformed(t *testing.T) {
+	for _, line := range []string{
+		"ENV",
+		"ENV PATH",
+		"ENV SET",
+		"ENV SET notapair",
+		"ENV GET",
+	} {
+		d := Parse(line + "\n")
+		if len(d.EnvSet) != 0 || len(d.EnvGet) != 0 {
+			t.Errorf("%q produced EnvSet=%+v EnvGet=%+v, want nothing", line, d.EnvSet, d.EnvGet)
+		}
+		if len(d.Errors) == 0 {
+			t.Errorf("%q was accepted without complaint", line)
+		}
+	}
+}
+
+// TestParseEnvAndSetJobAttrAreNotUnrecognized guards the move out of the
+// "known, referencing no file" list: an unrecognized command is passed
+// through to DAGMan untouched, which is exactly what must NOT happen to
+// these two -- their whole effect is on the manager job's submit file,
+// which DAGMan never sees.
+func TestParseEnvAndSetJobAttrAreNotUnrecognized(t *testing.T) {
+	d := Parse("SET_JOB_ATTR X = 1\nENV SET A=b\nENV GET PATH\n")
+	if len(d.Unrecognized) != 0 {
+		t.Errorf("Unrecognized = %+v, want none", d.Unrecognized)
+	}
+}

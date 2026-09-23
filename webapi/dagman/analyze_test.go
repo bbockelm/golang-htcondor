@@ -842,3 +842,85 @@ func TestAnalyzeDeferredIsDeduplicated(t *testing.T) {
 		t.Errorf("Deferred = %v, want [stage2.dag] once", r.Deferred)
 	}
 }
+
+// TestAnalyzeReportsEnvGetAndCarriesEnvSet. ENV GET is the one DAG
+// command this path cannot honour: it copies variables out of the
+// SUBMITTING process's environment, which for a remote submission is
+// this server's container, not the access point. Dropping it silently
+// gives DAGMan a manager job missing exactly the variables the workflow
+// was written to depend on.
+func TestAnalyzeReportsEnvGetAndCarriesEnvSet(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+ENV GET PATH BEARER_TOKEN_FILE
+ENV SET FOO=bar;BAZ=qux
+SET_JOB_ATTR TestNumber = 17
+JOB A { executable = /bin/true
+transfer_executable = false
+}
+`,
+	})
+	f := findingAbout(r, "ENV GET", "cannot be honoured")
+	if f == nil {
+		t.Fatalf("ENV GET was accepted silently: %+v", r.Findings)
+	}
+	if f.Severity != Warning {
+		t.Errorf("ENV GET finding severity = %v, want Warning", f.Severity)
+	}
+	if !strings.Contains(f.Message, "PATH BEARER_TOKEN_FILE") {
+		t.Errorf("the finding does not name the variables: %s", f.Message)
+	}
+	if !strings.Contains(f.Message, "ENV SET") {
+		t.Errorf("the finding does not say what to do instead: %s", f.Message)
+	}
+
+	// ENV SET and SET_JOB_ATTR are honoured, so neither produces a
+	// finding -- and both reach the report, so the handler does not have
+	// to parse the DAG a second time.
+	if f := findingAbout(r, "ENV SET FOO"); f != nil {
+		t.Errorf("ENV SET produced a finding: %s", f.Message)
+	}
+	if f := findingAbout(r, "SET_JOB_ATTR TestNumber"); f != nil {
+		t.Errorf("SET_JOB_ATTR produced a finding: %s", f.Message)
+	}
+	if got := r.EnvSet; len(got) != 2 || got["FOO"] != "bar" || got["BAZ"] != "qux" {
+		t.Errorf("Report.EnvSet = %+v, want FOO=bar BAZ=qux", got)
+	}
+	if len(r.JobAttrs) != 1 || r.JobAttrs[0].Name != "TestNumber" || r.JobAttrs[0].Value != "17" {
+		t.Errorf("Report.JobAttrs = %+v, want TestNumber = 17", r.JobAttrs)
+	}
+}
+
+// TestAnalyzeRefusesReservedJobAttrs. The manager job's submit file is
+// not the DAG's to rewrite: OtherJobRemoveRequirements is what makes
+// removing the workflow remove its node jobs, and IsDaemonCore is what
+// gets DAGMan a command socket the schedd agrees it has. Both failures
+// are invisible at submit time.
+func TestAnalyzeRefusesReservedJobAttrs(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+SET_JOB_ATTR OtherJobRemoveRequirements = "False"
+SET_JOB_ATTR isdaemoncore = False
+SET_JOB_ATTR JobBatchName = "mine"
+JOB A { executable = /bin/true
+transfer_executable = false
+}
+`,
+	})
+	for _, name := range []string{"OtherJobRemoveRequirements", "isdaemoncore"} {
+		f := findingAbout(r, "SET_JOB_ATTR "+name, "is ignored")
+		if f == nil {
+			t.Fatalf("%s was accepted: %+v", name, r.Findings)
+		}
+		if f.Severity != Warning {
+			t.Errorf("%s finding severity = %v, want Warning", name, f.Severity)
+		}
+	}
+	// JobBatchName is a user's to set: condor_submit_dag exposes it as
+	// -batch-name, so a DAG setting it is supported.
+	if len(r.JobAttrs) != 1 || r.JobAttrs[0].Name != "JobBatchName" {
+		t.Errorf("JobAttrs = %+v, want only JobBatchName to survive", r.JobAttrs)
+	}
+}
