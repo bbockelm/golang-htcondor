@@ -8,10 +8,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"os/user"
 	"path"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +55,22 @@ func TestMCPSubmitDagIntegration(t *testing.T) {
 		t.Skip("condor_dagman not found in PATH")
 	}
 
-	harness := htcondor.SetupCondorHarness(t)
+	// DAGMAN_AVOID_SLASH_TMP is HTCondor's own testing-only knob for
+	// exactly this situation (dagman_main.cpp: "DO NOT DOCUMENT this
+	// testing-only knob"). DAGMan refuses to put its default node log
+	// under /tmp -- the log has to be durable and visible to the schedd,
+	// and /tmp is often neither -- and DAGMAN_USE_STRICT makes that
+	// warning fatal. This harness puts its SPOOL in the system temp
+	// directory, which on Linux is /tmp, so the workflow aborts before
+	// parsing.
+	//
+	// This does not paper over a production problem: a real access point
+	// keeps SPOOL somewhere like /var/lib/condor/spool, where the node
+	// log belongs and the check never fires. It is the harness's choice
+	// of directory, not anything this tool does, that trips it -- which
+	// is why the workflow runs unchanged on macOS, where the temp
+	// directory is under /var/folders.
+	harness := htcondor.SetupCondorHarnessWithConfig(t, "DAGMAN_AVOID_SLASH_TMP = False\n")
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
 	}
@@ -191,6 +209,36 @@ queue
 			t.Errorf("input_files = %v, missing %s", got, want)
 		}
 	}
+
+	// DAGMan writes its own diagnosis into the spool. Without this, a
+	// failure here reports only that nothing happened, and the one file
+	// that says why is discarded with the harness -- which cost a full
+	// CI round trip the first time this went red.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		dumpCtx, dumpCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer dumpCancel()
+		files := readSpoolDir(harness.GetSpoolDir(), cluster)
+		if len(files) == 0 {
+			// Falling back to the transfer covers the case where the
+			// harness laid the spool out differently; reading the disk
+			// is preferred because it works for a job that has already
+			// finished, which a sandbox transfer may not.
+			files = tryFetchSandbox(dumpCtx, schedd, cluster)
+		}
+		if len(files) == 0 {
+			t.Logf("the workflow's spool could not be read, so DAGMan's own logs are unavailable")
+			return
+		}
+		t.Logf("workflow spool contains: %v", keysOf(files))
+		for _, name := range []string{"diamond.dagman.out", "diamond.lib.err", "diamond.lib.out"} {
+			if body, ok := files[name]; ok && strings.TrimSpace(body) != "" {
+				t.Logf("--- %s ---\n%s", name, tailLines(body, 40))
+			}
+		}
+	})
 
 	// DAGMan has to actually start. Until it does, the job is either held
 	// for spooling or idle, and nothing distinguishes "about to run" from
@@ -416,6 +464,69 @@ func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
+	}
+	return out
+}
+
+// tryFetchSandbox retrieves a job's spool without failing the test. It is
+// for diagnosing a failure that has already happened, where a second
+// error would only hide the first.
+func tryFetchSandbox(ctx context.Context, schedd *htcondor.Schedd, cluster int) map[string]string {
+	var buf bytes.Buffer
+	if err := <-schedd.ReceiveJobSandbox(ctx, fmt.Sprintf("ClusterId == %d", cluster), &buf); err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	tr := tar.NewReader(&buf)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			return out
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			return out
+		}
+		out[path.Base(hdr.Name)] = string(body)
+	}
+}
+
+// tailLines returns the last n lines, so a long log does not bury the
+// error that ended it.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// readSpoolDir reads a job's spool directory straight off disk.
+//
+// The harness runs the access point in this process's own filesystem, so
+// the files DAGMan wrote are right there -- no transfer, and it works for
+// a job that has already left the queue, which is exactly the case worth
+// diagnosing.
+func readSpoolDir(spool string, cluster int) map[string]string {
+	dir := filepath.Join(spool, strconv.Itoa(cluster), "0",
+		fmt.Sprintf("cluster%d.proc0.subproc0", cluster))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		out[e.Name()] = string(body)
 	}
 	return out
 }
