@@ -62,7 +62,7 @@ func clusterAll(t *testing.T, granularity float64, groups ...[]Record) []Cluster
 			c.Add(r)
 		}
 	}
-	return c.Clusters(granularity, nil)
+	return c.Clusters(RenderOptions{Granularity: granularity})
 }
 
 func find(clusters []Cluster, substr string) *Cluster {
@@ -416,5 +416,102 @@ func TestFacetKeyDoesNotDependOnMapOrder(t *testing.T) {
 		if got := facetKey(a); got != first {
 			t.Fatalf("facetKey varied between calls: %q vs %q", first, got)
 		}
+	}
+}
+
+// --- timeline -------------------------------------------------------
+
+func timelineOf(t *testing.T, recs []Record, opts RenderOptions) []int {
+	t.Helper()
+	c := NewClusterer()
+	for _, r := range recs {
+		c.Add(r)
+	}
+	got := c.Clusters(opts)
+	if len(got) != 1 {
+		t.Fatalf("clusters = %d, want 1", len(got))
+	}
+	return got[0].Timeline
+}
+
+func at(times ...int64) []Record {
+	out := make([]Record, 0, len(times))
+	for i, ts := range times {
+		out = append(out, Record{
+			Kind: "hold", Owner: "alice", Cluster: int64(i), At: ts,
+			Message: "Error from slot1_1@a.b.example.edu: memory usage exceeded request_memory",
+		})
+	}
+	return out
+}
+
+func TestTimelineBucketsAcrossTheCallersWindow(t *testing.T) {
+	// 4 buckets over [100, 140): each covers 10 seconds.
+	got := timelineOf(t, at(100, 105, 112, 131, 139),
+		RenderOptions{Granularity: 1, Start: 100, End: 140, Buckets: 4})
+	want := []int{2, 1, 0, 2}
+	if len(got) != len(want) {
+		t.Fatalf("timeline = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("timeline = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestTimelineUsesTheWindowNotTheData(t *testing.T) {
+	// Every occurrence in one corner of the window. The shape has to
+	// show that -- an extent taken from the records would stretch these
+	// five seconds across the whole axis and draw a busy, even problem
+	// that never happened. It would also make two rows on a page
+	// incomparable, since each would have its own axis.
+	got := timelineOf(t, at(100, 101, 102, 103),
+		RenderOptions{Granularity: 1, Start: 100, End: 200, Buckets: 10})
+	if got[0] != 4 {
+		t.Errorf("timeline = %v, want everything in the first bucket", got)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] != 0 {
+			t.Errorf("timeline = %v, want the rest empty", got)
+			break
+		}
+	}
+}
+
+func TestTimelineIsOmittedWhenNotAsked(t *testing.T) {
+	// The default render -- what the tests above and the merge pass use
+	// -- should not invent a window.
+	if got := timelineOf(t, at(100, 200), RenderOptions{Granularity: 1}); got != nil {
+		t.Errorf("timeline = %v, want none without a window", got)
+	}
+}
+
+func TestTimelineDropsUntimedRecordsRatherThanPilingThemUp(t *testing.T) {
+	// A record with no usable timestamp counted as bucket zero draws a
+	// spike at the left edge that never happened.
+	got := timelineOf(t, at(0, 0, 150),
+		RenderOptions{Granularity: 1, Start: 100, End: 200, Buckets: 4})
+	total := 0
+	for _, n := range got {
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("timeline = %v, want only the timestamped record", got)
+	}
+	if got[0] != 0 {
+		t.Errorf("timeline = %v, want nothing at the left edge", got)
+	}
+}
+
+func TestTimelineKeepsAnOccurrenceAtTheClosingEdge(t *testing.T) {
+	// The window closes at "now", and a hold entered during the read
+	// itself is the newest thing there is. Dropping it -- or letting the
+	// index run off the end -- would lose exactly the occurrence that
+	// says the problem is still going.
+	got := timelineOf(t, at(200, 205),
+		RenderOptions{Granularity: 1, Start: 100, End: 200, Buckets: 4})
+	if got[len(got)-1] != 2 {
+		t.Errorf("timeline = %v, want both in the last bucket", got)
 	}
 }

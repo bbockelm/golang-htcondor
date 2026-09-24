@@ -14,12 +14,20 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import type { IssueCluster, IssueFacetSpread, IssueSection } from '@/lib/api';
+import { Sparkline, sparklineLabel } from '@/components/Sparkline';
 
-export function IssueSectionPanel({ section }: { section: IssueSection }) {
+export function IssueSectionPanel({
+  section,
+  bucketSeconds,
+  endsAt,
+}: {
+  section: IssueSection;
+  // The window's shape, passed to every row so the sparklines share one
+  // axis.
+  bucketSeconds?: number;
+  endsAt?: number;
+}) {
   if (section.clusters.length === 0) return null;
-  // Bars are relative to the biggest problem in this section, so the
-  // shape of the section is readable whatever the absolute numbers.
-  const largest = Math.max(...section.clusters.map((c) => c.count));
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-3">
@@ -35,7 +43,8 @@ export function IssueSectionPanel({ section }: { section: IssueSection }) {
           <ClusterRow
             key={`${cluster.template}-${i}`}
             cluster={cluster}
-            largest={largest}
+            bucketSeconds={bucketSeconds}
+            endsAt={endsAt}
           />
         ))}
       </div>
@@ -45,10 +54,12 @@ export function IssueSectionPanel({ section }: { section: IssueSection }) {
 
 export function ClusterRow({
   cluster,
-  largest,
+  bucketSeconds,
+  endsAt,
 }: {
   cluster: IssueCluster;
-  largest: number;
+  bucketSeconds?: number;
+  endsAt?: number;
 }) {
   const [open, setOpen] = useState(false);
   const examples = cluster.examples ?? [];
@@ -56,13 +67,12 @@ export function ClusterRow({
   // this is mostly happening to. Shown unexpanded, because a template
   // with the detail masked out is not something you can act on.
   const lead = examples[0];
-  const share = largest > 0 ? Math.max(2, (cluster.count / largest) * 100) : 0;
-
   const more = Math.max(0, examples.length - 1);
+  const timeline = cluster.timeline ?? [];
 
   return (
     <div className="px-3 py-3">
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="text-base font-semibold tabular-nums text-gray-900">
@@ -72,7 +82,7 @@ export function ClusterRow({
               job{cluster.count === 1 ? '' : 's'}
             </span>
             <UsersBadge users={cluster.users} topUsers={cluster.top_users} />
-            {cluster.facets?.map((f) => (
+            {visibleFacets(cluster.facets).map((f) => (
               <FacetBadge key={f.name} facet={f} />
             ))}
             {cluster.codes?.slice(0, 2).map((c) => (
@@ -91,18 +101,8 @@ export function ClusterRow({
             ) : null}
           </div>
 
-          {/* Relative size. A bar rather than a percentage because the
-              question it answers is "is this the problem, or one of
-              five", which is a shape not a number. */}
-          <div className="mt-1.5 h-1.5 w-full max-w-md overflow-hidden rounded-full bg-gray-100">
-            <div
-              className="h-full rounded-full bg-brand-500"
-              style={{ width: `${share}%` }}
-            />
-          </div>
-
           {lead ? (
-            <p className="mt-2 break-words font-mono text-xs leading-relaxed text-gray-800">
+            <p className="mt-1.5 break-words font-mono text-xs leading-relaxed text-gray-800">
               {lead.message}
             </p>
           ) : (
@@ -144,9 +144,67 @@ export function ClusterRow({
 
           {open && <ClusterDetail cluster={cluster} examples={examples} />}
         </div>
+
+        {/* Right of the text rather than under it: down a list of rows
+            it becomes a column, which is what makes one problem's shape
+            comparable with the next one's. */}
+        {timeline.length > 0 && (
+          <div className="hidden shrink-0 pt-1 sm:block">
+            <Sparkline
+              counts={timeline}
+              bucketSeconds={bucketSeconds}
+              endsAt={endsAt}
+              label={sparklineLabel(timeline, bucketSeconds, endsAt)}
+            />
+            <div className="mt-0.5 flex justify-between text-[10px] text-gray-400">
+              <span>{spanLabel(timeline.length, bucketSeconds)}</span>
+              <span>now</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+// spanLabel is the left end of the sparkline's axis -- the only chrome
+// it gets. Without it the shape is legible but its extent is not, and
+// "a burst at the left edge" means something different over an hour
+// than over a week.
+function spanLabel(buckets: number, bucketSeconds?: number): string {
+  if (!bucketSeconds) return '';
+  const seconds = buckets * bucketSeconds;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 48 * 3600) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+// visibleFacets drops a location whose name is already contained in a
+// more specific one beside it.
+//
+// OSPool names a resource after its site most of the time, so a row
+// reporting both reads "MTState-Tempest-CE1  MTState-Tempest" -- the
+// same place twice, the second time less precisely. Where the names are
+// genuinely different (IU-Jetstream2-Backfill at Pervasive Technology
+// Institute) both are kept, because then the second one is telling you
+// something.
+//
+// Only applied between concentrated facets: "9 sites" and "14
+// resources" are two different counts and neither contains the other.
+export function visibleFacets(
+  facets: IssueFacetSpread[] | undefined,
+): IssueFacetSpread[] {
+  if (!facets?.length) return [];
+  const valueOf = (f: IssueFacetSpread) =>
+    f.distinct === 1 && f.top?.length ? f.top[0].value : '';
+  return facets.filter((f) => {
+    const mine = valueOf(f);
+    if (!mine) return true;
+    return !facets.some((other) => {
+      const theirs = valueOf(other);
+      return theirs !== '' && theirs !== mine && theirs.includes(mine);
+    });
+  });
 }
 
 // FacetBadge says where a problem is happening.
@@ -154,25 +212,32 @@ export function ClusterRow({
 // A cluster confined to one resource is that resource's problem however
 // many users it reaches, and one spread over thirty is the pool's. That
 // distinction is invisible in a job count and is the reason the page
-// reads the structured attributes at all, so it gets the same treatment
-// as the user count: called out when it is concentrated, stated plainly
-// when it is not.
+// reads the structured attributes at all.
+//
+// The colour carries "this is a place" so the words do not have to. An
+// earlier version wrote "all at MTState-Tempest", which spends four
+// words on what the badge's presence already says and reads as a
+// sentence fragment next to the pills around it; the name alone is how
+// a place is normally written down. Both states wear the same hue for
+// the same reason -- a reader scanning the column should not have to
+// re-read to tell a location from a status.
 export function FacetBadge({ facet }: { facet: IssueFacetSpread }) {
   const concentrated = facet.distinct === 1 && !!facet.top?.length;
-  const title = facet.top?.length
+  // The facet's name is in the tooltip rather than on the chip: "site"
+  // and "resource" are the page's words, not the reader's, and the
+  // values are self-describing.
+  const detail = facet.top?.length
     ? facet.top.map((v) => `${v.value}: ${v.count}`).join('\n')
-    : undefined;
+    : '';
   return (
     <span
-      title={title}
+      title={`${facet.name}\n${detail}`}
       className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-        concentrated
-          ? 'bg-sky-100 text-sky-900'
-          : 'bg-gray-100 text-gray-600'
+        concentrated ? 'bg-sky-100 text-sky-900' : 'bg-sky-50 text-sky-800'
       }`}
     >
       {concentrated
-        ? `all at ${facet.top![0].value}`
+        ? facet.top![0].value
         : `${facet.distinct.toLocaleString()} ${facet.name}s`}
     </span>
   );
