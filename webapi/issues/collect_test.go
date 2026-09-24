@@ -159,3 +159,54 @@ func TestCollectFlagsTruncation(t *testing.T) {
 		t.Error("a full page of records was not reported as truncated")
 	}
 }
+
+func TestLocalPoolIsNotAPlaceName(t *testing.T) {
+	// A CHTC access point's own jobs: the machine advertises no glidein
+	// attributes, so the submit-side match expression falls through to
+	// its literal, which on those pools is "Local Job". Reported as-is,
+	// every hold on a local pool claims to have happened somewhere
+	// called "Local Job".
+	local := ad(t, `[ ClusterId = 1; ProcId = 0; Owner = "alice"; HoldReason = "x"; HoldReasonCode = 21; MATCH_EXP_JOBGLIDEIN_ResourceName = "Local Job" ]`)
+	got := holdRecord(local).Facets
+	if got["resource"] != LocalPoolLabel {
+		t.Errorf("resource = %q, want %q", got["resource"], LocalPoolLabel)
+	}
+	// And no site: there is no pilot, so there is no site, and inventing
+	// one would be two badges saying the same thing.
+	if _, ok := got["site"]; ok {
+		t.Errorf("facets = %v, want no site for a local job", got)
+	}
+}
+
+func TestSentinelsAreMatchedLoosely(t *testing.T) {
+	// The fallback string lives in site configuration rather than in
+	// HTCondor, so it is whatever somebody typed.
+	for _, raw := range []string{"Local Job", "local job", "  Local Job  ", "Unknown", "undefined"} {
+		a := ad(t, `[ ClusterId = 1; ProcId = 0; MATCH_EXP_JOBGLIDEIN_ResourceName = "`+raw+`" ]`)
+		if got := holdRecord(a).Facets["resource"]; got != LocalPoolLabel {
+			t.Errorf("%q -> %q, want %q", raw, got, LocalPoolLabel)
+		}
+	}
+}
+
+func TestTheMachinesOwnWordWinsOverTheMatchExpression(t *testing.T) {
+	// Where a pilot did run, the startd's advertised name is the one to
+	// use: the match expression is a submit-side reconstruction of it.
+	a := ad(t, `[ ClusterId = 1; ProcId = 0; MachineAttrGLIDEIN_ResourceName0 = "Purdue-Anvil-CE1"; MATCH_EXP_JOBGLIDEIN_ResourceName = "Local Job"; MachineAttrGLIDEIN_Site0 = "Purdue-Anvil" ]`)
+	facets := holdRecord(a).Facets
+	if facets["resource"] != "Purdue-Anvil-CE1" {
+		t.Errorf("resource = %q, want the startd's own name", facets["resource"])
+	}
+	if facets["site"] != "Purdue-Anvil" {
+		t.Errorf("site = %q", facets["site"])
+	}
+}
+
+func TestNoGlideinAttributesAtAllMeansNoFacets(t *testing.T) {
+	// An access point whose ads carry none of these has no location to
+	// report, and should not acquire one.
+	a := ad(t, `[ ClusterId = 1; ProcId = 0; Owner = "alice" ]`)
+	if got := holdRecord(a).Facets; got != nil {
+		t.Errorf("facets = %v, want none", got)
+	}
+}

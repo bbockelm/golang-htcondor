@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { FacetBadge, IssueSectionPanel, UsersBadge } from './IssueSection';
+import { FacetBadge, IssueSectionPanel, UsersBadge, visibleFacets } from './IssueSection';
 import type { IssueCluster, IssueSection } from '@/lib/api';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -177,7 +177,23 @@ describe('FacetBadge', () => {
     render(
       <FacetBadge facet={{ name: 'resource', distinct: 1, top: [{ value: 'Purdue-Anvil-CE1', count: 205 }] }} />,
     );
-    expect(screen.getByText('all at Purdue-Anvil-CE1')).toBeInTheDocument();
+    // The name on its own. The badge's colour says it is a place, which
+    // is what "all at ..." used to spend four words on.
+    expect(screen.getByText('Purdue-Anvil-CE1')).toBeInTheDocument();
+    expect(screen.queryByText(/all at/)).toBeNull();
+  });
+
+  it('wears the same hue whether or not it is concentrated', () => {
+    // Colour is what tells a location from a status at a glance; a
+    // spread that fell back to grey would read as a different kind of
+    // fact from the concentrated one beside it.
+    const one = render(
+      <FacetBadge facet={{ name: 'site', distinct: 1, top: [{ value: 'Nebraska', count: 9 }] }} />,
+    );
+    expect(one.container.firstElementChild!.className).toContain('sky');
+    one.unmount();
+    const many = render(<FacetBadge facet={{ name: 'site', distinct: 9, top: [] }} />);
+    expect(many.container.firstElementChild!.className).toContain('sky');
   });
 
   it('reports the spread when it is everywhere', () => {
@@ -185,5 +201,36 @@ describe('FacetBadge', () => {
     // "43 resources" is the other half of the same answer: this one is
     // the pool's problem, not a site's.
     expect(screen.getByText('43 resources')).toBeInTheDocument();
+  });
+});
+
+describe('visibleFacets', () => {
+  const site = (v: string) => ({ name: 'site', distinct: 1, top: [{ value: v, count: 5 }] });
+  const resource = (v: string) => ({ name: 'resource', distinct: 1, top: [{ value: v, count: 5 }] });
+
+  it('drops the site when the resource name already contains it', () => {
+    // "MTState-Tempest-CE1  MTState-Tempest" is the same place twice,
+    // the second time less precisely.
+    const got = visibleFacets([resource('MTState-Tempest-CE1'), site('MTState-Tempest')]);
+    expect(got.map((f) => f.name)).toEqual(['resource']);
+  });
+
+  it('keeps both when the names are genuinely different', () => {
+    // A resource whose site is not in its name is telling you something.
+    const got = visibleFacets([
+      resource('IU-Jetstream2-Backfill'),
+      site('Pervasive Technology Institute'),
+    ]);
+    expect(got).toHaveLength(2);
+  });
+
+  it('never folds two counts together', () => {
+    // "9 sites" and "14 resources" are different measurements; neither
+    // contains the other and both belong on the row.
+    const got = visibleFacets([
+      { name: 'site', distinct: 9, top: [] },
+      { name: 'resource', distinct: 14, top: [] },
+    ]);
+    expect(got).toHaveLength(2);
   });
 });

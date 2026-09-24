@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -90,21 +91,62 @@ var facetAttrs = []string{
 	"MachineAttrGLIDEIN_Site0",
 }
 
+// LocalPoolLabel is what a job that did not run on a pilot is said to
+// have run on.
+//
+// The submit-side configuration that populates JOBGLIDEIN_ResourceName
+// is a match expression over the machine's glidein attributes, with a
+// literal fallback for when the machine has none. On CHTC's access
+// points that fallback is the string "Local Job", so a local pool's
+// every hold reports having happened at a place called "Local Job" --
+// which is not a place, and reads as a bug because it is describing the
+// absence of a pilot as though it were a site.
+const LocalPoolLabel = "Local Pool"
+
+// notAPlace are the values of the resource attribute that mean "this did
+// not run on a pilot" rather than naming somewhere.
+//
+// Matched on the value because the fallback lives in site configuration
+// rather than in HTCondor, so there is no attribute to test instead.
+// Compared case-insensitively and after trimming, since it is a string
+// somebody typed into a config file.
+var notAPlace = map[string]bool{
+	"local job": true,
+	"unknown":   true,
+	"undefined": true,
+}
+
 // facetsOf reads the where-it-ran attributes off an ad.
 //
 // Resource has two spellings: MachineAttrGLIDEIN_ResourceName0 is what
 // the startd advertised and MATCH_EXP_JOBGLIDEIN_ResourceName is what the
-// match expression evaluated to. They agree where both are present; the
-// second is the fallback because some pilots set only it.
+// match expression evaluated to. The first is preferred because it is
+// the machine's own word for itself; the second is a fallback, and the
+// one that carries the sentinel.
 func facetsOf(ad *classad.ClassAd) map[string]string {
 	facets := map[string]string{}
-	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_ResourceName0"); ok && v != "" {
-		facets["resource"] = v
-	} else if v, ok := ad.EvaluateAttrString("MATCH_EXP_JOBGLIDEIN_ResourceName"); ok && v != "" {
-		facets["resource"] = v
+	resource := ""
+	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_ResourceName0"); ok {
+		resource = strings.TrimSpace(v)
 	}
-	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_Site0"); ok && v != "" {
-		facets["site"] = v
+	if resource == "" {
+		if v, ok := ad.EvaluateAttrString("MATCH_EXP_JOBGLIDEIN_ResourceName"); ok {
+			resource = strings.TrimSpace(v)
+		}
+	}
+	if notAPlace[strings.ToLower(resource)] {
+		resource = LocalPoolLabel
+	}
+	if resource != "" {
+		facets["resource"] = resource
+	}
+	// No site for a local job: there is no pilot and therefore no site,
+	// and repeating the resource under a second name would be two chips
+	// saying one thing.
+	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_Site0"); ok {
+		if site := strings.TrimSpace(v); site != "" && !notAPlace[strings.ToLower(site)] {
+			facets["site"] = site
+		}
 	}
 	if len(facets) == 0 {
 		return nil

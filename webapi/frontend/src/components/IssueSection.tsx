@@ -82,7 +82,7 @@ export function ClusterRow({
               job{cluster.count === 1 ? '' : 's'}
             </span>
             <UsersBadge users={cluster.users} topUsers={cluster.top_users} />
-            {cluster.facets?.map((f) => (
+            {visibleFacets(cluster.facets).map((f) => (
               <FacetBadge key={f.name} facet={f} />
             ))}
             {cluster.codes?.slice(0, 2).map((c) => (
@@ -179,30 +179,65 @@ function spanLabel(buckets: number, bucketSeconds?: number): string {
   return `${Math.round(seconds / 86400)}d ago`;
 }
 
+// visibleFacets drops a location whose name is already contained in a
+// more specific one beside it.
+//
+// OSPool names a resource after its site most of the time, so a row
+// reporting both reads "MTState-Tempest-CE1  MTState-Tempest" -- the
+// same place twice, the second time less precisely. Where the names are
+// genuinely different (IU-Jetstream2-Backfill at Pervasive Technology
+// Institute) both are kept, because then the second one is telling you
+// something.
+//
+// Only applied between concentrated facets: "9 sites" and "14
+// resources" are two different counts and neither contains the other.
+export function visibleFacets(
+  facets: IssueFacetSpread[] | undefined,
+): IssueFacetSpread[] {
+  if (!facets?.length) return [];
+  const valueOf = (f: IssueFacetSpread) =>
+    f.distinct === 1 && f.top?.length ? f.top[0].value : '';
+  return facets.filter((f) => {
+    const mine = valueOf(f);
+    if (!mine) return true;
+    return !facets.some((other) => {
+      const theirs = valueOf(other);
+      return theirs !== '' && theirs !== mine && theirs.includes(mine);
+    });
+  });
+}
+
 // FacetBadge says where a problem is happening.
 //
 // A cluster confined to one resource is that resource's problem however
 // many users it reaches, and one spread over thirty is the pool's. That
 // distinction is invisible in a job count and is the reason the page
-// reads the structured attributes at all, so it gets the same treatment
-// as the user count: called out when it is concentrated, stated plainly
-// when it is not.
+// reads the structured attributes at all.
+//
+// The colour carries "this is a place" so the words do not have to. An
+// earlier version wrote "all at MTState-Tempest", which spends four
+// words on what the badge's presence already says and reads as a
+// sentence fragment next to the pills around it; the name alone is how
+// a place is normally written down. Both states wear the same hue for
+// the same reason -- a reader scanning the column should not have to
+// re-read to tell a location from a status.
 export function FacetBadge({ facet }: { facet: IssueFacetSpread }) {
   const concentrated = facet.distinct === 1 && !!facet.top?.length;
-  const title = facet.top?.length
+  // The facet's name is in the tooltip rather than on the chip: "site"
+  // and "resource" are the page's words, not the reader's, and the
+  // values are self-describing.
+  const detail = facet.top?.length
     ? facet.top.map((v) => `${v.value}: ${v.count}`).join('\n')
-    : undefined;
+    : '';
   return (
     <span
-      title={title}
+      title={`${facet.name}\n${detail}`}
       className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-        concentrated
-          ? 'bg-sky-100 text-sky-900'
-          : 'bg-gray-100 text-gray-600'
+        concentrated ? 'bg-sky-100 text-sky-900' : 'bg-sky-50 text-sky-800'
       }`}
     >
       {concentrated
-        ? `all at ${facet.top![0].value}`
+        ? facet.top![0].value
         : `${facet.distinct.toLocaleString()} ${facet.name}s`}
     </span>
   );
