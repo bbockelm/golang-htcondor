@@ -144,6 +144,7 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 type mcpConfig struct {
 	enabled                bool
 	skillsDir              string
+	skillsReloadInterval   time.Duration
 	disabledTools          string
 	oauth2DBPath           string
 	oauth2Issuer           string
@@ -1012,6 +1013,67 @@ func loadRevocationOracles(cfg *config.Config, logger *logging.Logger) []string 
 	return names
 }
 
+// defaultSkillsReloadInterval is how often the skill library is re-read
+// when the operator has not said otherwise.
+//
+// Chosen to be short enough that "I pushed a documentation fix" and "agents
+// see it" are the same afternoon, and long enough to be invisible: the
+// check is one stat per Markdown file and stops there unless something
+// changed.
+const defaultSkillsReloadInterval = 5 * time.Minute
+
+// loadSkillsReloadInterval reads HTTP_API_MCP_SKILLS_RELOAD_INTERVAL.
+//
+// Unset means the default. "0" (with or without a unit) means never poll,
+// which is an operator saying they will drive reloads themselves with
+// condor_reconfig -- the behaviour before this knob existed.
+//
+// A malformed value is logged and the default used, rather than being
+// fatal. This governs how promptly documentation refreshes; refusing to
+// start an access point's API over it would be wildly out of proportion.
+func loadSkillsReloadInterval(cfg *config.Config, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get("HTTP_API_MCP_SKILLS_RELOAD_INTERVAL")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return defaultSkillsReloadInterval
+	}
+	raw = strings.TrimSpace(raw)
+
+	// "0" is the one value allowed to skip the unit requirement: it means
+	// the same thing whatever unit it carries, and making an operator
+	// write "0s" to turn something off is a small hostility.
+	if raw == "0" {
+		logger.Info(logging.DestinationHTTP, "MCP site skills polling disabled; reloads require condor_reconfig")
+		return 0
+	}
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP,
+			"Invalid HTTP_API_MCP_SKILLS_RELOAD_INTERVAL; using the default",
+			"value", raw, "error", err, "default", defaultSkillsReloadInterval.String())
+		return defaultSkillsReloadInterval
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP,
+			"Could not parse HTTP_API_MCP_SKILLS_RELOAD_INTERVAL; using the default",
+			"value", raw, "error", err, "default", defaultSkillsReloadInterval.String())
+		return defaultSkillsReloadInterval
+	}
+	if d <= 0 {
+		logger.Info(logging.DestinationHTTP, "MCP site skills polling disabled; reloads require condor_reconfig")
+		return 0
+	}
+	// A sub-second poll is a typo, not a preference: it would stat the
+	// tree hundreds of times a minute to learn nothing. Raise it rather
+	// than honour it, and say so.
+	if d < time.Second {
+		logger.Warn(logging.DestinationHTTP,
+			"HTTP_API_MCP_SKILLS_RELOAD_INTERVAL is below one second; using one second",
+			"value", raw)
+		d = time.Second
+	}
+	return d
+}
+
 func loadTokenLifespan(cfg *config.Config, key string, logger *logging.Logger) time.Duration {
 	raw, ok := cfg.Get(key)
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -1248,6 +1310,13 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		logger.Info(logging.DestinationHTTP, "MCP site skills directory configured",
 			"dir", config.skillsDir)
 	}
+
+	// How often that directory is re-read. The usual way a library is kept
+	// current is something outside this process updating a checkout -- a
+	// git-sync sidecar, a cron pull -- and none of those can signal the
+	// daemon, so the daemon looks. Polling is stat-only until something
+	// changes, which is what makes the default affordable.
+	config.skillsReloadInterval = loadSkillsReloadInterval(cfg, logger)
 
 	if disabled, ok := cfg.Get("HTTP_API_MCP_DISABLED_TOOLS"); ok && strings.TrimSpace(disabled) != "" {
 		config.disabledTools = disabled
@@ -1809,6 +1878,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPInstructions:            mcpCfg.instructions,
 		MCPDisabledTools:           mcpCfg.disabledTools,
 		MCPSkillsDir:               mcpCfg.skillsDir,
+		MCPSkillsReloadInterval:    mcpCfg.skillsReloadInterval,
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,

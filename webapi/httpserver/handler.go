@@ -289,10 +289,12 @@ type Handler struct {
 	// whether the user is still entitled to what they hold. They fail
 	// open by contract; see RevocationOracle.
 	revocationOracles []RevocationOracle
-	mcpInstructions   string   // Server-level instructions provided to agents via MCP initialize
-	mcpDisabledTools  string   // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
-	mcpSkillsDir      string   // Directory of site-authored Markdown skills (empty disables)
-	mcpAdminUsers     []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	mcpInstructions   string // Server-level instructions provided to agents via MCP initialize
+	mcpDisabledTools  string // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
+	mcpSkillsDir      string // Directory of site-authored Markdown skills (empty disables)
+	// How often that directory is re-read; zero leaves reloads to reconfigure.
+	mcpSkillsReloadInterval time.Duration
+	mcpAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// mcpServer handles /mcp/message. One long-lived instance: it holds
 	// the validated-token cache and the collector-backed metrics/DB
 	// wiring, all of which a per-request server would throw away. Every
@@ -710,6 +712,8 @@ type HandlerConfig struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPSkillsReloadInterval is how often to re-read MCPSkillsDir.
+	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir is a directory of site-authored Markdown skills to
 	// publish to agents. Empty disables the feature.
 	MCPSkillsDir string
@@ -1506,6 +1510,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpDisabledTools = cfg.MCPDisabledTools
 		h.mcpSkillsDir = cfg.MCPSkillsDir
+		h.mcpSkillsReloadInterval = cfg.MCPSkillsReloadInterval
 		h.mcpAdminUsers = cfg.MCPAdminUsers
 
 		if h.mcpAccessGroups.configured() {
@@ -1707,7 +1712,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
-		SkillsDir: h.mcpSkillsDir,
+		SkillsDir:            h.mcpSkillsDir,
+		SkillsReloadInterval: h.mcpSkillsReloadInterval,
 		// A getter, not the handle: this server replaces its schedd when
 		// the collector reports a new address, and MCP holding the old
 		// pointer is how it kept dialling a socket that no longer existed.

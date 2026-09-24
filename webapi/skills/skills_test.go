@@ -286,3 +286,160 @@ func TestOversizedSkillIsSkipped(t *testing.T) {
 		t.Error("the oversized file cost us the rest of the library")
 	}
 }
+
+// Stamp is the cheap half of the reload poll: it has to answer "did
+// anything change" without reading the files. If it ever says "no" when
+// the answer is yes, a site's skills silently freeze at whatever was
+// loaded first -- so these tests are about the false negative.
+
+func TestStampIsStableForAnUnchangedTree(t *testing.T) {
+	root := writeSkills(t, map[string]string{
+		"a.md":       "---\nname: A\n---\nbody a\n",
+		"sub/b.md":   "---\nname: B\n---\nbody b\n",
+		"notes.txt":  "ignored",
+		".hidden.md": "ignored",
+	})
+
+	first, err := Stamp(root)
+	if err != nil {
+		t.Fatalf("Stamp: %v", err)
+	}
+	second, err := Stamp(root)
+	if err != nil {
+		t.Fatalf("Stamp: %v", err)
+	}
+	if first != second {
+		t.Errorf("Stamp is not stable across calls: %q then %q", first, second)
+	}
+	if first == "" {
+		t.Error("Stamp returned an empty fingerprint for a non-empty tree")
+	}
+}
+
+// A Library must carry the stamp of what it read, or the caller has
+// nothing to compare a fresh Stamp against.
+func TestLoadRecordsTheStampOfWhatItRead(t *testing.T) {
+	root := writeSkills(t, map[string]string{"a.md": "---\nname: A\n---\nbody\n"})
+
+	lib, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	fresh, err := Stamp(root)
+	if err != nil {
+		t.Fatalf("Stamp: %v", err)
+	}
+	if lib.Stamp() != fresh {
+		t.Errorf("Library.Stamp() = %q, want the same as a fresh Stamp %q", lib.Stamp(), fresh)
+	}
+}
+
+func TestStampChangesWhenTheTreeChanges(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, root string)
+	}{
+		{
+			name: "content edited",
+			mutate: func(t *testing.T, root string) {
+				write(t, root, "a.md", "---\nname: A\n---\na much longer body than before\n")
+			},
+		},
+		{
+			name: "file added",
+			mutate: func(t *testing.T, root string) {
+				write(t, root, "c.md", "---\nname: C\n---\nnew\n")
+			},
+		},
+		{
+			name: "file removed",
+			mutate: func(t *testing.T, root string) {
+				if err := os.Remove(filepath.Join(root, "sub", "b.md")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "file renamed",
+			mutate: func(t *testing.T, root string) {
+				if err := os.Rename(filepath.Join(root, "a.md"), filepath.Join(root, "renamed.md")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			// The whole tree replaced, which is what a git-sync style
+			// symlink swap looks like from in here.
+			name: "directory replaced wholesale",
+			mutate: func(t *testing.T, root string) {
+				if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
+					t.Fatal(err)
+				}
+				write(t, root, "sub/b.md", "---\nname: B\n---\nrewritten\n")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeSkills(t, map[string]string{
+				"a.md":     "---\nname: A\n---\nbody a\n",
+				"sub/b.md": "---\nname: B\n---\nbody b\n",
+			})
+			before, err := Stamp(root)
+			if err != nil {
+				t.Fatalf("Stamp: %v", err)
+			}
+
+			tc.mutate(t, root)
+
+			after, err := Stamp(root)
+			if err != nil {
+				t.Fatalf("Stamp: %v", err)
+			}
+			if before == after {
+				t.Errorf("Stamp did not change after %s; a poll would never reload", tc.name)
+			}
+		})
+	}
+}
+
+// Files Load ignores must not move the stamp, or every poll reloads.
+func TestStampIgnoresWhatLoadIgnores(t *testing.T) {
+	root := writeSkills(t, map[string]string{"a.md": "---\nname: A\n---\nbody\n"})
+	before, err := Stamp(root)
+	if err != nil {
+		t.Fatalf("Stamp: %v", err)
+	}
+
+	write(t, root, "README.txt", "not markdown")
+	write(t, root, ".git/objects/deadbeef.md", "not documentation")
+	write(t, root, ".hidden.md", "hidden")
+
+	after, err := Stamp(root)
+	if err != nil {
+		t.Fatalf("Stamp: %v", err)
+	}
+	if before != after {
+		t.Errorf("Stamp moved for files Load does not read: %q -> %q", before, after)
+	}
+}
+
+func TestStampRejectsABadRoot(t *testing.T) {
+	if _, err := Stamp(""); err == nil {
+		t.Error("Stamp accepted an empty root")
+	}
+	if _, err := Stamp(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Error("Stamp accepted a missing directory")
+	}
+}
+
+// writeSkills builds a tree and returns its root.
+func writeSkills(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, body := range files {
+		write(t, root, rel, body)
+	}
+	return root
+}
