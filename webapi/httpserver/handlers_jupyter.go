@@ -647,9 +647,18 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		// jupyter-lab inside the sandbox failed at startup (e.g.
 		// AF_UNIX path too long) but kept the slot held — without
 		// this, the job would sit there until condor's own walltime
-		// limit. 30 min is generous enough that an active iframe
-		// (which heartbeats kernels every ~30 s) is never reaped.
+		// limit.
+		//
+		// This catches a CLOSED tab and nothing else. An open one
+		// heartbeats its kernels every ~30s whether or not a human is
+		// there, so traffic never stops and this timer never fires --
+		// which is why an abandoned session could sit for hours. The
+		// kernel-idle and lifetime limits below are what cover that.
 		HelperIdleTimeoutSec: 30 * 60,
+		// JupyterLab's own idleness, which it measures from kernel
+		// execution rather than from HTTP traffic, so a tab polling in
+		// the background does not look busy.
+		KernelIdleTimeoutSec: s.jupyterKernelIdleSec,
 	}
 	if len(caCertBytes) > 0 {
 		// The launcher passes this path (relative to the sandbox cwd)
@@ -670,6 +679,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	submitFile := buildJupyterSubmitFile(jupyterSubmitArgs{
 		InstanceID:            instID,
+		MaxLifetimeSec:        s.jupyterMaxLifetimeSec,
 		Image:                 req.Image,
 		Cpus:                  req.Cpus,
 		MemoryMB:              req.MemoryMB,
@@ -895,6 +905,11 @@ type jupyterSubmitArgs struct {
 	// FS makes the spool fail; staging a file in the FS that's not
 	// here means it never reaches the worker.
 	TransferInputFiles []string
+
+	// MaxLifetimeSec, when > 0, is the wall-clock ceiling on the
+	// session, enforced by the schedd rather than by anything inside
+	// the sandbox. See jupyterPeriodicRemove.
+	MaxLifetimeSec int
 }
 
 // buildJupyterSubmitFile produces the HTCondor submit file for a Jupyter
@@ -954,6 +969,27 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 	}
 	fmt.Fprintf(&sb, "requirements = %s\n\n", req)
 
+	// Name the batch so the jobs page and condor_q -batch say what this
+	// job is. Without it a JupyterLab session shows up as a bare
+	// jupyter-launch.sh among the user's real work, which is what made
+	// them look strange.
+	fmt.Fprintf(&sb, "batch_name = %s\n", jupyterBatchName(a.InstanceID))
+
+	// A ceiling the sandbox cannot talk its way out of.
+	//
+	// The helper's idle timer measures traffic through the tunnel, and a
+	// JupyterLab tab left open in a browser generates traffic forever --
+	// it heartbeats its kernels every ~30s whether or not a human is
+	// there. So the idle timer reaps a closed tab and never reaps an
+	// abandoned one, which is how a session survives for hours with
+	// nobody at it.
+	//
+	// periodic_remove is evaluated by the schedd, so it holds whatever
+	// the sandbox, the helper or the browser are doing.
+	if expr := jupyterPeriodicRemove(a.MaxLifetimeSec); expr != "" {
+		fmt.Fprintf(&sb, "%s\n", expr)
+	}
+
 	fmt.Fprintf(&sb, "log    = jupyter.log\n")
 	fmt.Fprintf(&sb, "output = jupyter.out\n")
 	fmt.Fprintf(&sb, "error  = jupyter.err\n")
@@ -999,6 +1035,72 @@ func jupyterRequirementsExpr(goos, goarch string) string {
 	return fmt.Sprintf(`(%s)`, arch)
 }
 
+// jupyterBatchPrefix marks a job as a JupyterLab session by
+// JobBatchName. Also the beginning of putting the session's identity
+// where it survives this process: the queue, rather than only the
+// in-memory tunnel registry.
+const jupyterBatchPrefix = "htcondor-api-jupyter-"
+
+// jupyterBatchName names the batch after the instance it serves. The id
+// is trimmed because a batch name is read at a glance in a queue
+// listing, and the full hex is not.
+func jupyterBatchName(instanceID string) string {
+	short := instanceID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	if short == "" {
+		return strings.TrimSuffix(jupyterBatchPrefix, "-")
+	}
+	return jupyterBatchPrefix + short
+}
+
+// jupyterPeriodicRemove is the schedd-side ceiling on a session.
+//
+// Measured from JobStartDate rather than QDate: the ceiling is on how
+// long a session runs, and time spent idle in the queue waiting for a
+// slot is not the user's session. Guarded on JobStartDate being set,
+// because the expression is evaluated for a job that has not started
+// and "time() - undefined" is undefined, not false.
+//
+// Returns "" for a non-positive limit, which is how an operator turns
+// the ceiling off.
+func jupyterPeriodicRemove(maxLifetimeSec int) string {
+	if maxLifetimeSec <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"periodic_remove = (JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d)",
+		maxLifetimeSec)
+}
+
+// jupyterIdleFlags are the JupyterLab options that make an abandoned
+// session shut itself down.
+//
+// cull_connected is the load-bearing one. A tab left open holds a
+// connection to its kernel, and culling skips connected kernels by
+// default -- so without it the one case this is meant to catch, a
+// browser nobody is sitting at, is exactly the case that survives.
+//
+// Culling turns on kernel idleness, which JupyterLab measures from
+// execution state rather than from HTTP traffic, so the tab's own
+// polling does not keep it alive. shutdown_no_activity_timeout then
+// ends the server once the last kernel has gone.
+func jupyterIdleFlags(idleSec int) string {
+	if idleSec <= 0 {
+		return ""
+	}
+	interval := idleSec / 4
+	if interval < 60 {
+		interval = 60
+	}
+	return fmt.Sprintf(` \
+    --MappingKernelManager.cull_idle_timeout=%d \
+    --MappingKernelManager.cull_interval=%d \
+    --MappingKernelManager.cull_connected=True \
+    --ServerApp.shutdown_no_activity_timeout=%d`, idleSec, interval, idleSec)
+}
+
 // runtimeGOARCH / runtimeGOOS are broken out so a test can override
 // them. We use atomic.Value rather than reading runtime.* directly so
 // the override path is race-safe.
@@ -1034,6 +1136,11 @@ type jupyterLaunchScriptArgs struct {
 	// API server is configured with TLSCACertFile (e.g. the demo's
 	// auto-generated CA). Empty = rely on the sandbox's system CAs.
 	CAFile string
+	// KernelIdleTimeoutSec, when > 0, culls a kernel that has not
+	// executed anything for that long and shuts the server down once no
+	// kernels remain. See jupyterIdleFlags.
+	KernelIdleTimeoutSec int
+
 	// HelperIdleTimeoutSec, when > 0, makes the helper close the
 	// tunnel (and exit) when no yamux stream has been accepted from
 	// the API server within that many seconds. Used as an
@@ -1210,8 +1317,9 @@ exec "$@" \
     --ServerApp.base_url=%q \
     --ServerApp.allow_origin=%q \
     --ServerApp.disable_check_xsrf=True \
-    --ServerApp.allow_remote_access=True
-`, setup, a.UpstreamURL, caFlag, idleFlag, a.BaseURL, a.AllowOrigin)
+    --ServerApp.allow_remote_access=True%s
+`, setup, a.UpstreamURL, caFlag, idleFlag, a.BaseURL, a.AllowOrigin,
+		jupyterIdleFlags(a.KernelIdleTimeoutSec))
 }
 
 // buildJupyterTunnelURL derives the wss://.../tunnel URL the helper should

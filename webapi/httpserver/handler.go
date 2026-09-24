@@ -373,6 +373,13 @@ type Handler struct {
 	// <TempDir>/htcondor-api-jupyter when not configured.
 	jupyterWorkDir string
 
+	// jupyterMaxLifetimeSec is the schedd-enforced ceiling on a
+	// JupyterLab session, and jupyterKernelIdleSec how long a kernel may
+	// sit without executing before JupyterLab culls it and shuts down.
+	// Both zero mean the operator turned that limit off.
+	jupyterMaxLifetimeSec int
+	jupyterKernelIdleSec  int
+
 	// templateLibrary serves the batch-submission template catalog
 	// (built-in + global YAML + user-saved JSON). nil = the
 	// /api/v1/templates endpoint returns 503.
@@ -836,6 +843,10 @@ type HandlerConfig struct {
 	// job since HTCondor reads transfer_input_files at job-startup time.
 	// Defaults to <os.TempDir>/htcondor-api-jupyter.
 	JupyterWorkDir string
+	// JupyterMaxLifetimeSec / JupyterKernelIdleSec bound a JupyterLab
+	// session; see handlers_jupyter.go. Zero disables that limit.
+	JupyterMaxLifetimeSec int
+	JupyterKernelIdleSec  int
 
 	// TemplateGlobalPath is an optional YAML file with operator-curated
 	// batch-submission templates. Empty disables. Built-in templates
@@ -943,6 +954,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
 		jupyterWorkDir:            cfg.JupyterWorkDir,
+		jupyterMaxLifetimeSec:     cfg.JupyterMaxLifetimeSec,
+		jupyterKernelIdleSec:      cfg.JupyterKernelIdleSec,
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the
 		// catalog isn't available until the post-DB path runs.
