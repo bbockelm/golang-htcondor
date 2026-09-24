@@ -325,6 +325,22 @@ var outputSchemas = map[string]map[string]interface{}{
 		"note":            strSchema,
 	}, "cluster_id", "count", "uploads"),
 
+	"create_output_download_url": obj(map[string]interface{}{
+		"cluster_id":  intSchema,
+		"owner":       strSchema,
+		"expires_at":  strSchema,
+		"ttl_seconds": intSchema,
+		"count":       intSchema,
+		// One entry per proc: a sandbox is per proc, so there is no
+		// single URL that returns a whole cluster's output.
+		"downloads": arr(obj(map[string]interface{}{
+			"job_id": strSchema,
+			"url":    strSchema,
+		})),
+		"procs_remaining": intSchema,
+		"note":            strSchema,
+	}, "cluster_id", "count", "downloads"),
+
 	// --- credentials --------------------------------------------------
 	"list_service_credentials": obj(map[string]interface{}{
 		"credentials": arr(obj(map[string]interface{}{
