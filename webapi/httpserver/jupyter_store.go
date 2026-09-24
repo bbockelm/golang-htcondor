@@ -102,8 +102,11 @@ type jupyterSessionRow struct {
 	ClusterID  int
 	ProcID     int
 	NextNonce  []byte
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
+	// PrevNonce is the nonce the session moved away from, acceptable for
+	// one more dial. Nil once that grace has been used or never needed.
+	PrevNonce []byte
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // Put records a session, replacing any row with the same id.
@@ -128,16 +131,35 @@ func (s *jupyterStore) Put(ctx context.Context, row jupyterSessionRow) error {
 
 // RollNonce records the token a session will accept next.
 //
-// The write is conditional on the nonce being rolled from: two helpers
-// racing a redial, or a replay of the token just spent, must not both
-// succeed. The caller treats "no rows" as a rejected connection.
+// Conditional on the nonce being rolled from: two helpers racing a redial,
+// or a replay of a token already spent, must not both succeed. The caller
+// treats false as a rejected connection.
+//
+// The previous nonce is accepted too, once. Rolling and delivering the
+// replacement are two steps and cannot be made one -- the roll commits, then
+// the token goes down the control stream -- so a helper that dies in between
+// holds a token the session has moved past, and without grace that session
+// can never be reconnected. One step of grace is all a lost delivery needs.
+//
+// Spending the grace clears it: the CASE sets prev_nonce only when the roll
+// came from next_nonce, so arriving on the previous nonce leaves none behind.
+// A second consecutive miss is therefore refused, which is the right
+// outcome -- delivery failing twice running is not a blip, and the helper
+// ends the session instead of limping on one token forever.
+//
+// Every SET expression reads the pre-update row, so the CASE sees the
+// next_nonce being replaced rather than its replacement.
 func (s *jupyterStore) RollNonce(ctx context.Context, instanceID string, from, to []byte) (bool, error) {
 	if s == nil {
 		return false, errors.New("jupyter: no application database configured")
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE jupyter_sessions SET next_nonce = ? WHERE instance_id = ? AND next_nonce = ?`,
-		to, instanceID, from)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE jupyter_sessions
+		   SET prev_nonce = CASE WHEN next_nonce = ? THEN next_nonce ELSE NULL END,
+		       next_nonce = ?
+		 WHERE instance_id = ?
+		   AND (next_nonce = ? OR (prev_nonce IS NOT NULL AND prev_nonce = ?))`,
+		from, to, instanceID, from, from)
 	if err != nil {
 		return false, err
 	}
@@ -152,10 +174,10 @@ func (s *jupyterStore) Get(ctx context.Context, instanceID string) (jupyterSessi
 		return row, sql.ErrNoRows
 	}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, next_nonce, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, next_nonce, prev_nonce, created_at, expires_at
 		  FROM jupyter_sessions WHERE instance_id = ?`, instanceID).
 		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID,
-			&row.NextNonce, &row.CreatedAt, &row.ExpiresAt)
+			&row.NextNonce, &row.PrevNonce, &row.CreatedAt, &row.ExpiresAt)
 	return row, err
 }
 

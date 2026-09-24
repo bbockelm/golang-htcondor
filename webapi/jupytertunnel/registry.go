@@ -91,7 +91,10 @@ type Instance struct {
 	// tunnel it just opened, so a helper that has connected once always
 	// holds exactly one unspent token and can come back after a restart.
 	nextToken string
-	closed    bool
+	// connecting marks a dial in flight, so two helpers arriving together
+	// do not both get as far as spending a token.
+	connecting bool
+	closed     bool
 
 	// Event subscribers receive lifecycle events as they happen. Each
 	// subscriber gets a buffered channel; if it falls behind we drop
@@ -245,6 +248,51 @@ func newRegistry(secret []byte) *Registry {
 		instances: make(map[string]*Instance),
 		burned:    make(map[[tokenNonceLen]byte]struct{}),
 	}
+}
+
+// reserve claims the session's single connection slot for this dial.
+//
+// The claim is what serialises two helpers arriving at once, and what keeps
+// a dial that will be refused from having any effect on the session's state.
+// It is held only for the length of the dial.
+func (r *Registry) reserve(instanceID string, parsed signedToken) (*Instance, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, burned := r.burned[parsed.Nonce]; burned {
+		return nil, ErrTokenInvalid
+	}
+	inst, ok := r.instances[instanceID]
+	if !ok || inst.isClosed() {
+		return nil, ErrTokenInvalid
+	}
+
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	if inst.connecting {
+		return nil, errors.New("jupytertunnel: another helper is already connecting to this instance")
+	}
+	if inst.tunnel != nil && !tunnelDead(inst.tunnel) {
+		// Already connected and still carrying traffic. Refuse so a
+		// helper-restart inside the job doesn't blow up an active session.
+		return nil, errors.New("jupytertunnel: instance already has an active tunnel")
+	}
+	if inst.tunnel != nil {
+		// The old tunnel is gone -- this server restarted, or the socket
+		// broke -- and the helper is dialing back. Replacing it is the
+		// whole point of the redial: refusing here would leave a live
+		// JupyterLab permanently unreachable behind a dead session.
+		_ = inst.tunnel.Close()
+		inst.tunnel = nil
+	}
+	inst.connecting = true
+	return inst, nil
+}
+
+func (i *Instance) releaseConnecting() {
+	i.mu.Lock()
+	i.connecting = false
+	i.mu.Unlock()
 }
 
 // rollToken spends the presented token and mints the one that replaces it.
@@ -454,18 +502,27 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 		return nil, ErrTokenInvalid
 	}
 
-	// Spend the token before anything else, and durably where a roller is
-	// configured. The swap is conditional on this being the nonce the
-	// session was waiting for, so a replay and the loser of two racing
-	// redials are both refused here rather than after a tunnel is built.
+	// Claim the session's one connection slot BEFORE spending the token.
 	//
-	// Outside the registry lock: it is a database write, and holding the
-	// lock across it would stall every proxied request behind one dial.
-	// The conditional update is what makes that safe -- only one caller
-	// can roll a given nonce, whatever the interleaving.
+	// Order matters since the roll gained a grace step. Rolling first
+	// meant a dial that was going to be refused anyway -- a replay while
+	// a healthy helper is connected -- still moved the nonce on, and the
+	// connected helper's next token stopped being the one expected. A
+	// replay could end a working session that way. Nothing is spent now
+	// until the caller is the one that will get the tunnel.
+	inst, err := r.reserve(instanceID, parsed)
+	if err != nil {
+		return nil, err
+	}
+	// Released on every path: a claim left behind would lock the session
+	// out of reconnecting for the rest of the job.
+	defer inst.releaseConnecting()
+
 	var nextToken string
 	if r.roller != nil {
-		var err error
+		// Outside the registry lock: it is a database write, and holding
+		// the lock across it would stall every proxied request behind one
+		// dial. The claim above is what makes that safe.
 		if nextToken, err = r.rollToken(instanceID, parsed); err != nil {
 			return nil, err
 		}
@@ -473,29 +530,6 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if _, burned := r.burned[parsed.Nonce]; burned {
-		return nil, ErrTokenInvalid
-	}
-	inst, ok := r.instances[instanceID]
-	if !ok || inst.isClosed() {
-		return nil, ErrTokenInvalid
-	}
-	if inst.tunnel != nil && !tunnelDead(inst.tunnel) {
-		// Already connected and still carrying traffic. Refuse so a
-		// helper-restart inside the job doesn't blow up an active session.
-		return nil, errors.New("jupytertunnel: instance already has an active tunnel")
-	}
-	if inst.tunnel != nil {
-		// The old tunnel is gone -- this server restarted, or the socket
-		// broke -- and the helper is dialing back. Replacing it is the
-		// whole point of the redial: refusing here would leave a live
-		// JupyterLab permanently unreachable behind a dead session.
-		_ = inst.tunnel.Close()
-		inst.mu.Lock()
-		inst.tunnel = nil
-		inst.mu.Unlock()
-	}
 
 	// Wrap the websocket and start yamux as the *client* side: the web app
 	// is the side that opens streams (one per browser request). The helper

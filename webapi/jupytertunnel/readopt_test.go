@@ -2,6 +2,7 @@ package jupytertunnel
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,12 @@ func (m *memRoller) set(id string, nonce []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nonces[id] = append([]byte(nil), nonce...)
+}
+
+func (m *memRoller) current(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return string(m.nonces[id])
 }
 
 func (m *memRoller) RollNonce(_ context.Context, id string, from, to []byte) (bool, error) {
@@ -111,5 +118,81 @@ func TestAdoptionIsIdempotent(t *testing.T) {
 	b, _ := reg.AdoptInstance("id1", "alice", time.Now(), nil)
 	if a != b {
 		t.Error("a second adoption replaced the instance, discarding any attached tunnel")
+	}
+}
+
+// A replay must not disturb a healthy session.
+//
+// The grace step made ordering load-bearing. Spending the token before
+// checking whether the session even has a free connection slot meant a
+// replayed token -- refused a moment later because a helper is already
+// connected -- had still rolled the nonce on, and the connected helper's
+// token stopped being the one expected. A replay could end a working
+// session that way, without ever authenticating as anything.
+//
+// The token here is the real one, which matters: a garbage token is
+// rejected by verification before it reaches either the claim or the
+// roll, so it exercises none of this.
+func TestReplayDoesNotSpendATokenWhenTheSlotIsTaken(t *testing.T) {
+	roller := newMemRoller()
+	reg, err := NewRegistryWithSecret(make([]byte, 32), roller)
+	if err != nil {
+		t.Fatalf("NewRegistryWithSecret: %v", err)
+	}
+	id, token, err := reg.CreateInstance(CreateInstanceOptions{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	nonce, _ := reg.PendingNonce(id)
+	roller.set(id, nonce)
+
+	// Stand in for a healthy helper holding the slot.
+	inst, _ := reg.Lookup(id)
+	inst.mu.Lock()
+	inst.connecting = true
+	inst.mu.Unlock()
+
+	before := roller.current(id)
+	if _, err := reg.AcceptTunnel(id, token, nil); err == nil {
+		t.Error("a dial was accepted while the slot was taken")
+	}
+	if after := roller.current(id); after != before {
+		t.Errorf("the refused dial moved the nonce from %q to %q; the live helper's token is now stale", before, after)
+	}
+}
+
+// errRoller fails the roll, so a dial gets past the claim and then dies.
+type errRoller struct{}
+
+func (e *errRoller) RollNonce(context.Context, string, []byte, []byte) (bool, error) {
+	return false, errors.New("storage is down")
+}
+
+// The claim has to be released on every path, or one failed dial locks
+// the session out of reconnecting for the rest of the job.
+//
+// Driven with a valid token and a failing roll: that is a dial that gets
+// past the claim and then returns, which is the path where a missing
+// release actually strands the session.
+func TestConnectingClaimIsReleased(t *testing.T) {
+	reg, err := NewRegistryWithSecret(make([]byte, 32), &errRoller{})
+	if err != nil {
+		t.Fatalf("NewRegistryWithSecret: %v", err)
+	}
+	id, token, err := reg.CreateInstance(CreateInstanceOptions{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+
+	if _, err := reg.AcceptTunnel(id, token, nil); err == nil {
+		t.Fatal("the dial should have failed on the roll")
+	}
+
+	inst, _ := reg.Lookup(id)
+	inst.mu.Lock()
+	stuck := inst.connecting
+	inst.mu.Unlock()
+	if stuck {
+		t.Error("the connection claim was not released; no helper can ever reconnect")
 	}
 }

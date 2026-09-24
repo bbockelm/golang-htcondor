@@ -47,9 +47,10 @@ func TestSigningSecretIsStableAcrossCalls(t *testing.T) {
 	}
 }
 
-// Single-use, and durable: the swap only applies for the nonce the session
-// is actually waiting for, so a replay of a spent token loses.
-func TestRollNonceRefusesAReplay(t *testing.T) {
+// A lost delivery heals. The roll commits before the new token is handed
+// over, so a helper can be left holding the one the session moved away
+// from -- and without grace that session could never reconnect.
+func TestPreviousNonceIsAcceptedOnce(t *testing.T) {
 	s := newJupyterTestStore(t)
 	ctx := context.Background()
 	if err := s.Put(ctx, jupyterSessionRow{
@@ -59,31 +60,64 @@ func TestRollNonceRefusesAReplay(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
+	// The server rolls one -> two, and the helper never receives "two".
 	ok, err := s.RollNonce(ctx, "abc", []byte("one"), []byte("two"))
 	if err != nil || !ok {
 		t.Fatalf("first roll: ok=%v err=%v", ok, err)
 	}
-	// The same token again. This is the replay the in-memory burned set
-	// could not catch after a restart, because it came back empty.
+
+	// It redials with the token it still has.
 	ok, err = s.RollNonce(ctx, "abc", []byte("one"), []byte("three"))
 	if err != nil {
-		t.Fatalf("replay roll: %v", err)
+		t.Fatalf("grace roll: %v", err)
 	}
-	if ok {
-		t.Error("a spent nonce was accepted a second time")
+	if !ok {
+		t.Fatal("the previous nonce was refused; a lost delivery would end the session")
 	}
 
-	row, err := s.Get(ctx, "abc")
+	// And the grace is spent: a second consecutive miss is not tolerated,
+	// because delivery failing twice running is not a blip.
+	ok, err = s.RollNonce(ctx, "abc", []byte("one"), []byte("four"))
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("second grace roll: %v", err)
 	}
-	if string(row.NextNonce) != "two" {
-		t.Errorf("next nonce = %q, want the one from the winning roll", row.NextNonce)
+	if ok {
+		t.Error("the same nonce was accepted twice on the grace path")
+	}
+}
+
+// A successful round trip leaves no grace outstanding, so a token two
+// generations old is refused.
+func TestGraceIsClearedByASuccessfulRoll(t *testing.T) {
+	s := newJupyterTestStore(t)
+	ctx := context.Background()
+	_ = s.Put(ctx, jupyterSessionRow{
+		InstanceID: "abc", Owner: "alice", NextNonce: []byte("one"),
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	// one -> two (prev = one), then two -> three (prev = two).
+	if ok, _ := s.RollNonce(ctx, "abc", []byte("one"), []byte("two")); !ok {
+		t.Fatal("first roll refused")
+	}
+	if ok, _ := s.RollNonce(ctx, "abc", []byte("two"), []byte("three")); !ok {
+		t.Fatal("second roll refused")
+	}
+	// "one" is now two generations back and must be dead.
+	if ok, _ := s.RollNonce(ctx, "abc", []byte("one"), []byte("four")); ok {
+		t.Error("a nonce two generations old was accepted")
 	}
 }
 
 // Two helpers redialing at once must not both win, or two tunnels attach
 // to one session.
+//
+// The grace makes this subtler than it looks: both present the same
+// nonce, so the second matches prev_nonce and the store alone would let
+// it through. The registry is what serialises them -- it claims the
+// session's one connection slot before any token is spent -- and this
+// pins the store's half: the winner's roll must retire the nonce rather
+// than leave it live.
 func TestRollNonceHasOneWinner(t *testing.T) {
 	s := newJupyterTestStore(t)
 	ctx := context.Background()
@@ -92,10 +126,18 @@ func TestRollNonceHasOneWinner(t *testing.T) {
 		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	first, _ := s.RollNonce(ctx, "abc", []byte("start"), []byte("a"))
-	second, _ := s.RollNonce(ctx, "abc", []byte("start"), []byte("b"))
-	if first == second {
-		t.Errorf("both rolls returned %v; exactly one must win", first)
+	if ok, _ := s.RollNonce(ctx, "abc", []byte("start"), []byte("a")); !ok {
+		t.Fatal("the first roll was refused")
+	}
+	row, err := s.Get(ctx, "abc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(row.NextNonce) != "a" {
+		t.Errorf("next nonce = %q, want the winner's", row.NextNonce)
+	}
+	if string(row.PrevNonce) != "start" {
+		t.Errorf("prev nonce = %q, want the retired one", row.PrevNonce)
 	}
 }
 
