@@ -163,6 +163,11 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	// minutes, not 60.
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
+	// Set when the watcher below gave up, so the caller can tell an idle
+	// session from a lost one. They look identical at the accept loop --
+	// both are a closed session -- and a reconnect loop that cannot tell
+	// them apart dials straight back in and defeats the timeout.
+	var idledOut atomic.Bool
 	if cfg.IdleTimeout > 0 {
 		go func() {
 			tickEvery := cfg.IdleTimeout / 4
@@ -180,6 +185,7 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 					if time.Since(last) > cfg.IdleTimeout {
 						logf("helper: idle timeout (%s with no streams); closing session",
 							cfg.IdleTimeout)
+						idledOut.Store(true)
 						_ = session.Close()
 						return
 					}
@@ -191,6 +197,9 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	for {
 		stream, err := session.Accept()
 		if err != nil {
+			if idledOut.Load() {
+				return ErrIdleTimeout
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logf("helper: session closed")
 				return nil

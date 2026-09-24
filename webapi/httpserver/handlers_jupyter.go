@@ -1245,8 +1245,13 @@ type jupyterLaunchScriptArgs struct {
 	// the API server within that many seconds. Used as an
 	// auto-shutdown for jupyter-lab failures: if the user never opens
 	// the iframe — or the iframe loads against a broken jupyter and
-	// stops retrying — the helper times out and the job ends instead
+	// stops retrying — the helper times out and ends the job instead
 	// of holding the slot indefinitely.
+	//
+	// "Ends the job" is now true. The helper is setsid'd and JupyterLab
+	// is the exec'd main process, so the helper exiting used to free
+	// nothing: the tunnel went and the slot stayed. It now signals the
+	// job's process group. See endsession.go in the helper.
 	HelperIdleTimeoutSec int
 }
 

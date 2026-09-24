@@ -27,6 +27,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -35,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -227,6 +229,14 @@ func runStage1(upstream, tokenFile, socketPath, logFile string, insecure bool, c
 		envDaemonStage2+"=1",
 		envDaemonToken+"="+token,
 	)
+	// Record the group we are in before the setsid below puts the daemon
+	// in a new one. This group is the job's -- stage 1 is a child of the
+	// launch script, which becomes JupyterLab -- and it is the only
+	// handle the detached daemon will have on the process that IS the
+	// job. See endsession.go.
+	if pgid := currentPGID(); pgid > 1 {
+		env = append(env, jobPGIDEnv+"="+strconv.Itoa(pgid))
+	}
 	if len(caBytes) > 0 {
 		env = append(env, envDaemonCABundle+"="+base64.StdEncoding.EncodeToString(caBytes))
 	}
@@ -375,6 +385,24 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 		err := jupytertunnel.RunHelperTunnel(ctx, cfg)
 		if ctx.Err() != nil {
 			// Asked to stop. Not a failure.
+			return
+		}
+		if errors.Is(err, jupytertunnel.ErrIdleTimeout) {
+			// The session went idle. Reconnecting would dial straight
+			// back in and make the timeout a no-op, and exiting alone
+			// would leave JupyterLab holding the slot -- which is what
+			// the idle timeout was always documented to prevent and
+			// never did, because the helper is not the job.
+			endSession("the session went idle")
+			return
+		}
+		if jupytertunnel.IsRejection(err) {
+			// The server is up and has refused this helper. No amount of
+			// retrying changes that -- re-issuing a token needs the
+			// authentication that just failed -- so the slot is freed now
+			// rather than held to the job's ceiling behind a JupyterLab
+			// nobody can reach.
+			endSession("the server rejected this helper's token, which cannot be retried past")
 			return
 		}
 		if err != nil {
