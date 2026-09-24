@@ -68,12 +68,80 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 	if s.jupyterRegistry != nil {
 		return s.jupyterRegistry, nil
 	}
+	// A durable secret where there is a database to keep it in. Without
+	// one every token stops verifying when this process ends, which is
+	// what made a restart destroy every session: the job was still there,
+	// the helper still held its token, and nothing left could check it.
+	//
+	// Falling back to a per-process secret rather than failing: a
+	// deployment with no application database still gets working
+	// JupyterLab, just not one that survives a restart, and that is the
+	// behaviour it had before any of this.
+	store := s.jupyterSessionStore()
+	if store != nil {
+		secret, err := store.SigningSecret(context.Background())
+		if err == nil {
+			reg, rerr := jupytertunnel.NewRegistryWithSecret(secret, store)
+			if rerr == nil {
+				s.jupyterRegistry = reg
+				s.adoptJupyterSessions(context.Background(), reg, store)
+				return reg, nil
+			}
+			err = rerr
+		}
+		s.logger.Warn(logging.DestinationHTTP,
+			"jupyter: no durable signing secret; sessions will not survive a restart",
+			"error", err)
+	}
+
 	reg, err := jupytertunnel.NewRegistry()
 	if err != nil {
 		return nil, err
 	}
 	s.jupyterRegistry = reg
 	return reg, nil
+}
+
+// jupyterSessionStore is the durable session store, or nil when this
+// deployment has no application database.
+func (s *Handler) jupyterSessionStore() *jupyterStore {
+	if s.db == nil {
+		return nil
+	}
+	return newJupyterStore(s.db, s.sealer)
+}
+
+// adoptJupyterSessions puts back the sessions this process did not create.
+//
+// Their jobs are still running and their helpers are dialing back; without
+// this the dial lands on a registry that has never heard of the instance and
+// is refused, leaving a live JupyterLab unreachable until the job's ceiling
+// reaps it.
+//
+// Best-effort and non-fatal: a session that cannot be adopted is one the user
+// has to restart, which is where they already were.
+func (s *Handler) adoptJupyterSessions(ctx context.Context, reg *jupytertunnel.Registry, store *jupyterStore) {
+	rows, err := store.Live(ctx, time.Now())
+	if err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "jupyter: could not read stored sessions", "error", err)
+		return
+	}
+	var adopted int
+	for _, row := range rows {
+		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, map[string]string{
+			"cluster_id": strconv.Itoa(row.ClusterID),
+			"proc_id":    strconv.Itoa(row.ProcID),
+		}); err != nil {
+			s.logger.Warn(logging.DestinationHTTP, "jupyter: could not adopt a stored session",
+				"instance", row.InstanceID, "error", err)
+			continue
+		}
+		adopted++
+	}
+	if adopted > 0 {
+		s.logger.Info(logging.DestinationHTTP,
+			"Adopted JupyterLab sessions that outlived the last process", "count", adopted)
+	}
 }
 
 // handleJupyterPath dispatches /api/v1/jupyter/* paths. We register a single
@@ -612,6 +680,31 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Record the session before the job exists. A row with no job is
+	// swept; a job with no row is a session nobody can ever re-adopt,
+	// because the nonce it will present is only known here.
+	if store := s.jupyterSessionStore(); store != nil {
+		if nonce, ok := reg.PendingNonce(instID); ok {
+			ttl := time.Duration(s.jupyterMaxLifetimeSec) * time.Second
+			if ttl <= 0 {
+				ttl = time.Duration(defaultJupyterSessionTTLSec) * time.Second
+			}
+			if err := store.Put(r.Context(), jupyterSessionRow{
+				InstanceID: instID,
+				Owner:      username,
+				CreatedAt:  time.Now(),
+				ExpiresAt:  time.Now().Add(ttl),
+				NextNonce:  nonce,
+			}); err != nil {
+				// Not fatal: the session works, it just will not come
+				// back after a restart. Better than refusing to start it.
+				s.logger.Warn(logging.DestinationHTTP,
+					"jupyter: could not record the session; it will not survive a restart",
+					"instance", instID, "error", err)
+			}
+		}
+	}
+
 	// Resolve the upstream tunnel URL using the request's host. Production
 	// deployments behind a reverse proxy should set X-Forwarded-Proto/Host
 	// or rely on httpBaseURL (TODO: prefer httpBaseURL when set).
@@ -1035,6 +1128,12 @@ func jupyterRequirementsExpr(goos, goarch string) string {
 	return fmt.Sprintf(`(%s)`, arch)
 }
 
+// defaultJupyterSessionTTLSec bounds a stored session where the operator
+// turned the job ceiling off. The row still has to expire: it is what the
+// sweeper deletes on, and without a horizon the credential store grows for
+// the life of the deployment.
+const defaultJupyterSessionTTLSec = 24 * 60 * 60
+
 // jupyterBatchPrefix marks a job as a JupyterLab session by
 // JobBatchName. Also the beginning of putting the session's identity
 // where it survives this process: the queue, rather than only the
@@ -1400,6 +1499,19 @@ func (s *Handler) handleJupyterTunnel(w http.ResponseWriter, r *http.Request, id
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "jupyter tunnel up", "instance", id, "owner", inst.Owner)
+
+	// Hand the helper the token for its next dial. Best-effort: this
+	// session is up and refusing it over a token the helper will not need
+	// until the next reconnect would turn a future inconvenience into a
+	// present outage. It is logged because a session that cannot come
+	// back is worth knowing about before the restart that proves it.
+	if next := inst.NextToken(); next != "" {
+		if err := jupytertunnel.SendNextToken(inst, next); err != nil {
+			s.logger.Warn(logging.DestinationHTTP,
+				"jupyter: could not hand the helper its next token; this session will not survive a restart",
+				"instance", id, "error", err)
+		}
+	}
 	// Hold the upgraded request open until the tunnel closes; otherwise
 	// the http server tears down the underlying TCP and yamux dies.
 	inst.Wait()

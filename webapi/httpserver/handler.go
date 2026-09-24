@@ -2214,6 +2214,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startJobWatchEvaluator(ctx)
 	h.startJobWatchFeed(ctx)
 	h.startJobWatchNudge(ctx)
+	h.startJupyterSweeper(ctx)
 
 	return nil
 }
@@ -2243,6 +2244,54 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
 	}()
 }
+
+// startJupyterSweeper deletes stored JupyterLab sessions past their
+// horizon.
+//
+// The table holds one credential per session and nothing else deletes a
+// row: a session whose job ended, or whose user never came back, leaves
+// its row behind. Without this the credential store only grows, and it
+// grows with exactly the material worth not keeping.
+//
+// Expiry rather than liveness. Asking the schedd whether each job still
+// exists would be a truer test and a worse one to depend on: a collector
+// or schedd outage would make every session look dead and sweep the lot.
+// The horizon is already the session's ceiling, so a row past it is
+// useless whatever the queue says.
+func (h *Handler) startJupyterSweeper(ctx context.Context) {
+	store := h.jupyterSessionStore()
+	if store == nil {
+		return
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		t := time.NewTicker(jupyterSweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				n, err := store.DeleteExpired(ctx, time.Now())
+				if err != nil {
+					h.logger.Warn(logging.DestinationHTTP,
+						"jupyter: sweeping expired sessions failed", "error", err)
+					continue
+				}
+				if n > 0 {
+					h.logger.Info(logging.DestinationHTTP,
+						"Swept expired JupyterLab sessions", "count", n)
+				}
+			}
+		}
+	}()
+}
+
+// jupyterSweepInterval is how often expired sessions are deleted. Rows
+// are small and expiry is a horizon rather than a deadline anyone waits
+// on, so this is deliberately unhurried.
+const jupyterSweepInterval = 15 * time.Minute
 
 // startJobWatchNudge re-evaluates an owner's watches as soon as the
 // change stream says something happened to their jobs, rather than at

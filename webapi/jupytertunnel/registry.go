@@ -51,6 +51,10 @@ func defaultYamuxConfig() *yamux.Config {
 // All Registry methods are safe to call from multiple goroutines.
 type Registry struct {
 	secret []byte
+	// roller, when set, is where spent nonces are recorded so single-use
+	// survives a restart. Nil keeps the in-memory burned set alone, which
+	// is right for a registry whose secret is per-process anyway.
+	roller NonceRoller
 
 	// tokenTTL bounds how long a minted token stays usable. After expiry
 	// the helper must request a new instance. Default 30 minutes.
@@ -82,7 +86,12 @@ type Instance struct {
 	mu      sync.Mutex
 	tunnel  *yamux.Session // nil until helper connects back
 	pending *signedToken   // bookkeeping copy for token expiry
-	closed  bool
+	// nextToken is the token this session will accept on its next dial,
+	// minted when the current one was spent. Handed to the helper over the
+	// tunnel it just opened, so a helper that has connected once always
+	// holds exactly one unspent token and can come back after a restart.
+	nextToken string
+	closed    bool
 
 	// Event subscribers receive lifecycle events as they happen. Each
 	// subscriber gets a buffered channel; if it falls behind we drop
@@ -185,21 +194,129 @@ func (i *Instance) publish(kind EventKind) {
 	i.subscribersMu.Unlock()
 }
 
+// NonceRoller persists which token a session will accept next.
+//
+// Single-use tokens were enforced by an in-memory set of spent nonces, which
+// a restart emptied: every token ever issued became live again, at the same
+// moment the server lost the ability to tell which sessions were its own. A
+// roller moves that record somewhere that survives, and makes the swap
+// conditional so two helpers racing a redial cannot both win.
+//
+// RollNonce reports false when the from-nonce is not the one the session is
+// waiting for, which is a replay or a loser of that race, and the caller
+// refuses the connection.
+type NonceRoller interface {
+	RollNonce(ctx context.Context, instanceID string, from, to []byte) (bool, error)
+}
+
 // NewRegistry creates a registry with a random 32-byte signing secret and
-// default TTLs. The secret lives in process memory only — restarts kill all
-// pending tokens.
+// default TTLs. The secret lives in process memory only, so tokens minted by
+// this registry stop verifying when the process ends. Callers that want
+// sessions to outlive a restart pass a durable secret to NewRegistryWithSecret.
 func NewRegistry() (*Registry, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, fmt.Errorf("jupytertunnel: gen secret: %w", err)
 	}
+	return newRegistry(secret), nil
+}
+
+// NewRegistryWithSecret creates a registry over a caller-supplied signing
+// secret and nonce store.
+//
+// Both are needed for a session to survive a restart, and for opposite
+// reasons: without the secret the helper's token no longer verifies, and
+// without the store the token verifies too well -- every spent one is live
+// again, because the record of what was spent went with the process.
+func NewRegistryWithSecret(secret []byte, roller NonceRoller) (*Registry, error) {
+	if len(secret) < 32 {
+		return nil, errors.New("jupytertunnel: signing secret must be at least 32 bytes")
+	}
+	r := newRegistry(secret)
+	r.roller = roller
+	return r, nil
+}
+
+func newRegistry(secret []byte) *Registry {
 	return &Registry{
 		secret:    secret,
 		tokenTTL:  30 * time.Minute,
 		idleTTL:   15 * time.Minute,
 		instances: make(map[string]*Instance),
 		burned:    make(map[[tokenNonceLen]byte]struct{}),
-	}, nil
+	}
+}
+
+// rollToken spends the presented token and mints the one that replaces it.
+//
+// Returns the new token for the caller to hand to the helper. A roller that
+// reports the swap did not apply means this nonce was not the one the session
+// was waiting for -- a replay, or a second helper that lost the race -- and
+// the connection is refused.
+func (r *Registry) rollToken(instanceID string, spent signedToken) (string, error) {
+	next, nextParsed, err := mintToken(r.secret, spent.ID, r.tokenTTL)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rollTimeout)
+	defer cancel()
+	ok, err := r.roller.RollNonce(ctx, instanceID, spent.Nonce[:], nextParsed.Nonce[:])
+	if err != nil {
+		// A storage failure is not an authentication failure, and saying
+		// so matters: "invalid token" would send an operator hunting a
+		// credential problem that is really a database one.
+		return "", fmt.Errorf("jupytertunnel: recording the spent token: %w", err)
+	}
+	if !ok {
+		return "", ErrTokenInvalid
+	}
+	return next, nil
+}
+
+// rollTimeout bounds the nonce swap. Short: it is one indexed UPDATE, and a
+// helper waiting on a wedged database should be told rather than hung.
+const rollTimeout = 5 * time.Second
+
+// PendingNonce is the nonce of the token this instance is waiting for,
+// which a caller persists so the session can be re-adopted after a restart.
+//
+// The nonce rather than the token: it is what identifies which token is
+// live, and unlike the token it is useless to anyone without the signing
+// secret, so a caller writing it down is not writing down a credential.
+func (r *Registry) PendingNonce(instanceID string) ([]byte, bool) {
+	r.mu.Lock()
+	inst, ok := r.instances[instanceID]
+	r.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	if inst.pending == nil {
+		return nil, false
+	}
+	nonce := make([]byte, len(inst.pending.Nonce))
+	copy(nonce, inst.pending.Nonce[:])
+	return nonce, true
+}
+
+// NextToken is the token this instance will accept on its next dial, or "".
+func (i *Instance) NextToken() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.nextToken
+}
+
+// tunnelDead reports whether a yamux session has gone.
+//
+// A tunnel whose far side vanished is indistinguishable from a live one by
+// inspection alone -- the struct is still there -- so this asks yamux, whose
+// IsClosed flips when the underlying connection breaks or the keepalive
+// fails. Getting this wrong in the safe direction (reporting a live tunnel
+// dead) would let one helper displace another's working session, which is
+// why it is a positive check rather than a timeout.
+func tunnelDead(s *yamux.Session) bool {
+	return s == nil || s.IsClosed()
 }
 
 // CreateInstanceOptions configures a new instance.
@@ -240,6 +357,40 @@ func (r *Registry) CreateInstance(opts CreateInstanceOptions) (id string, token 
 
 	inst.publish(EventCreated)
 	return inst.ID, tokenStr, nil
+}
+
+// AdoptInstance re-registers a session this process did not create.
+//
+// A restarted server has the job still running, JupyterLab still up inside
+// it, and a helper about to dial back -- and no memory of any of it. Adoption
+// puts the instance back in the map, with no tunnel, so that dial has
+// something to attach to. Everything else about the session is already
+// durable: the identity came off the job ad and the credential out of the
+// store.
+//
+// Deliberately not minting a token. The helper already holds the only one
+// that will be accepted, and issuing another here would put a second live
+// credential into a session whose whole design is that exactly one exists.
+func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[string]string) (*Instance, error) {
+	if id == "" || owner == "" {
+		return nil, errors.New("jupytertunnel: adopting an instance needs an id and an owner")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.instances[id]; ok {
+		// Already known -- a second sweep, or a client that named it
+		// before the sweep ran. Keeping the existing one preserves any
+		// tunnel that has attached in the meantime.
+		return existing, nil
+	}
+	inst := &Instance{
+		ID:      id,
+		Created: created,
+		Owner:   owner,
+		Meta:    copyMeta(meta),
+	}
+	r.instances[id] = inst
+	return inst, nil
 }
 
 // Lookup returns the instance for this id, or false.
@@ -303,6 +454,23 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 		return nil, ErrTokenInvalid
 	}
 
+	// Spend the token before anything else, and durably where a roller is
+	// configured. The swap is conditional on this being the nonce the
+	// session was waiting for, so a replay and the loser of two racing
+	// redials are both refused here rather than after a tunnel is built.
+	//
+	// Outside the registry lock: it is a database write, and holding the
+	// lock across it would stall every proxied request behind one dial.
+	// The conditional update is what makes that safe -- only one caller
+	// can roll a given nonce, whatever the interleaving.
+	var nextToken string
+	if r.roller != nil {
+		var err error
+		if nextToken, err = r.rollToken(instanceID, parsed); err != nil {
+			return nil, err
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -313,10 +481,20 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	if !ok || inst.isClosed() {
 		return nil, ErrTokenInvalid
 	}
-	if inst.tunnel != nil {
-		// Already connected once. Refuse a second connection so a
+	if inst.tunnel != nil && !tunnelDead(inst.tunnel) {
+		// Already connected and still carrying traffic. Refuse so a
 		// helper-restart inside the job doesn't blow up an active session.
 		return nil, errors.New("jupytertunnel: instance already has an active tunnel")
+	}
+	if inst.tunnel != nil {
+		// The old tunnel is gone -- this server restarted, or the socket
+		// broke -- and the helper is dialing back. Replacing it is the
+		// whole point of the redial: refusing here would leave a live
+		// JupyterLab permanently unreachable behind a dead session.
+		_ = inst.tunnel.Close()
+		inst.mu.Lock()
+		inst.tunnel = nil
+		inst.mu.Unlock()
 	}
 
 	// Wrap the websocket and start yamux as the *client* side: the web app
@@ -330,6 +508,7 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	inst.mu.Lock()
 	inst.tunnel = session
 	inst.pending = nil
+	inst.nextToken = nextToken
 	inst.mu.Unlock()
 
 	r.burned[parsed.Nonce] = struct{}{}

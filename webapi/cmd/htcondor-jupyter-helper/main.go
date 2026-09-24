@@ -123,7 +123,7 @@ func main() {
 		}
 	}
 
-	runTunnel(token, *upstream, *socketPath, *insecure, caBytes, *idleTimeout)
+	runTunnel(token, *upstream, *socketPath, *insecure, caBytes, *idleTimeout, *tokenFile)
 }
 
 // runStage1 does all the work that can fail loudly — reading the token
@@ -317,7 +317,7 @@ func readAndUnlinkTokenFile(path string) (string, error) {
 	return tok, nil
 }
 
-func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte, idleTimeout time.Duration) {
+func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte, idleTimeout time.Duration, tokenPath string) {
 	if upstream == "" || socketPath == "" {
 		fmt.Fprintln(os.Stderr, "missing required flags")
 		os.Exit(2)
@@ -355,8 +355,57 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 		},
 	}
 
-	if err := jupytertunnel.RunHelperTunnel(ctx, cfg); err != nil {
-		log.Printf("tunnel exited: %v", err)
-		os.Exit(1)
+	cfg.TokenPath = tokenPath
+
+	// Reconnect rather than exit.
+	//
+	// The helper used to dial once and return, so an API server restart
+	// ended the session: the job kept running with JupyterLab up inside
+	// it and nothing left to reach it through, which is why sessions
+	// vanished across a restart while SSH ones did not. The server is
+	// reachable again within seconds of coming back, and the token handed
+	// over on the last connection is what authenticates the next one.
+	//
+	// Bounded by the job, not by this loop. The schedd's ceiling
+	// (periodic_remove) and JupyterLab's own idle shutdown both still
+	// apply, so a helper retrying into a server that never returns is
+	// reaped with the job rather than spinning forever.
+	backoff := reconnectMinBackoff
+	for {
+		err := jupytertunnel.RunHelperTunnel(ctx, cfg)
+		if ctx.Err() != nil {
+			// Asked to stop. Not a failure.
+			return
+		}
+		if err != nil {
+			log.Printf("tunnel exited: %v; reconnecting in %s", err, backoff)
+		} else {
+			log.Printf("tunnel closed; reconnecting in %s", backoff)
+		}
+		// Re-read the token: the server hands over a fresh one on every
+		// connection and the old one is spent, so retrying with the
+		// token this process started with would be refused forever.
+		if tokenPath != "" {
+			//nolint:gosec // tokenPath is this helper's own --token-file argument
+			if b, rerr := os.ReadFile(tokenPath); rerr == nil && len(b) > 0 {
+				cfg.Token = strings.TrimSpace(string(b))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > reconnectMaxBackoff {
+			backoff = reconnectMaxBackoff
+		}
 	}
 }
+
+// Reconnect pacing. The floor is short because the common case is a
+// server that is already back; the ceiling keeps a helper whose server is
+// gone for good from dialing in a tight loop for the rest of the job.
+const (
+	reconnectMinBackoff = 2 * time.Second
+	reconnectMaxBackoff = 60 * time.Second
+)
