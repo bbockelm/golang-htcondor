@@ -57,18 +57,59 @@ type Options struct {
 	Now func() time.Time
 }
 
-// Attributes read per held job. Lean on purpose: this can be tens of
-// thousands of rows, and HoldReason is already the long one.
-var HoldProjection = []string{
+// HoldProjection is the attributes read per held job. Lean on purpose:
+// this can be tens of thousands of rows, and HoldReason is already the
+// long one.
+var HoldProjection = append([]string{
 	"ClusterId", "ProcId", "Owner", "JobBatchName",
 	"HoldReason", "HoldReasonCode", "HoldReasonSubCode", "EnteredCurrentStatus",
-}
+}, facetAttrs...)
 
-// Attributes read per run attempt.
-var EpochProjection = []string{
+// EpochProjection is the attributes read per run attempt.
+var EpochProjection = append([]string{
 	"ClusterId", "ProcId", "Owner", "JobBatchName",
 	"VacateReason", "VacateReasonCode", "VacateReasonSubCode",
 	"JobCurrentStartDate", "NumShadowExceptions",
+}, facetAttrs...)
+
+// Where a job ran, as the attributes that carry it.
+//
+// These are glidein attributes: on OSPool every execute slot is a pilot,
+// and the resource (the CE the pilot came from) and the site are recorded
+// on the job when it matches. They correlate strongly with what goes
+// wrong -- a CE with a broken CVMFS or a full scratch disk produces hold
+// reasons that read exactly like everyone else's until you notice they
+// are all from one place.
+//
+// An access point whose jobs do not carry them (a local CHTC pool, say)
+// simply has no facets, and everything below degrades to grouping on the
+// message alone.
+var facetAttrs = []string{
+	"MachineAttrGLIDEIN_ResourceName0",
+	"MATCH_EXP_JOBGLIDEIN_ResourceName",
+	"MachineAttrGLIDEIN_Site0",
+}
+
+// facetsOf reads the where-it-ran attributes off an ad.
+//
+// Resource has two spellings: MachineAttrGLIDEIN_ResourceName0 is what
+// the startd advertised and MATCH_EXP_JOBGLIDEIN_ResourceName is what the
+// match expression evaluated to. They agree where both are present; the
+// second is the fallback because some pilots set only it.
+func facetsOf(ad *classad.ClassAd) map[string]string {
+	facets := map[string]string{}
+	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_ResourceName0"); ok && v != "" {
+		facets["resource"] = v
+	} else if v, ok := ad.EvaluateAttrString("MATCH_EXP_JOBGLIDEIN_ResourceName"); ok && v != "" {
+		facets["resource"] = v
+	}
+	if v, ok := ad.EvaluateAttrString("MachineAttrGLIDEIN_Site0"); ok && v != "" {
+		facets["site"] = v
+	}
+	if len(facets) == 0 {
+		return nil
+	}
+	return facets
 }
 
 // MaxRecords bounds each source. Past it the view reports what it read
@@ -182,7 +223,7 @@ func holdRecord(ad *classad.ClassAd) Record {
 	return Record{
 		Kind: KindHold, Message: reason, Owner: owner,
 		Cluster: cluster, Proc: proc, Batch: batch, At: at,
-		Code: code, SubCode: sub,
+		Code: code, SubCode: sub, Facets: facetsOf(ad),
 	}
 }
 
@@ -208,6 +249,6 @@ func vacateRecord(ad *classad.ClassAd) (Record, bool) {
 	return Record{
 		Kind: kind, Message: reason, Owner: owner,
 		Cluster: cluster, Proc: proc, Batch: batch, At: at,
-		Code: code, SubCode: sub,
+		Code: code, SubCode: sub, Facets: facetsOf(ad),
 	}, true
 }

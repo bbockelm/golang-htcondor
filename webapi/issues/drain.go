@@ -39,6 +39,31 @@ type Record struct {
 	// cluster can still report it even though it did not group on it.
 	Code    int64
 	SubCode int64
+	// Facets are the structured attributes that say WHERE this happened
+	// -- on OSPool, the site and the resource. They are not in the
+	// message, and they correlate strongly with the cause: a hold that
+	// reads identically everywhere can still be one CE's problem.
+	//
+	// They take part in the grouping rather than only being reported.
+	// See leafFor, which splits on them, and vocabulary, which is what
+	// merges them back as the granularity coarsens.
+	Facets map[string]string
+}
+
+// FacetValue is one value of a structured attribute inside a cluster.
+type FacetValue struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+// FacetSpread is how one structured attribute is distributed across a
+// cluster. Distinct == 1 is the case worth spotting: a problem that
+// happens at exactly one resource is that resource's problem, however
+// many users it reaches.
+type FacetSpread struct {
+	Name     string       `json:"name"`
+	Distinct int          `json:"distinct"`
+	Top      []FacetValue `json:"top,omitempty"`
 }
 
 // Example is one occurrence shown under a cluster.
@@ -84,6 +109,9 @@ type Cluster struct {
 	FirstSeen int64        `json:"first_seen,omitempty"`
 	LastSeen  int64        `json:"last_seen,omitempty"`
 	Examples  []Example    `json:"examples,omitempty"`
+	// Facets are the structured attributes this cluster spans, most
+	// concentrated first.
+	Facets []FacetSpread `json:"facets,omitempty"`
 	// Variants are the distinct templates a coarse granularity folded
 	// together, largest first. Present only when more than one was
 	// merged, and shown in the expanded card: a cluster that quietly
@@ -138,7 +166,10 @@ type node struct {
 type group struct {
 	kind     string
 	template []string
-	records  []Record
+	// facets is the attribute combination every record in this group
+	// shares, since the tree splits on it.
+	facets  map[string]string
+	records []Record
 }
 
 // drainThreshold is Drain's similarity threshold for the first pass.
@@ -185,7 +216,7 @@ func (c *Clusterer) Add(rec Record) {
 		return
 	}
 
-	leaf := c.leafFor(rec.Kind, tokens)
+	leaf := c.leafFor(rec.Kind, facetKey(rec.Facets), tokens)
 	best, bestSim := (*group)(nil), 0.0
 	for _, g := range leaf.clusters {
 		if g.kind != rec.Kind {
@@ -211,7 +242,12 @@ func (c *Clusterer) Add(rec Record) {
 		c.addToOverflow(rec, "(other)")
 		return
 	}
-	g := &group{kind: rec.Kind, template: append([]string(nil), tokens...), records: []Record{rec}}
+	g := &group{
+		kind:     rec.Kind,
+		template: append([]string(nil), tokens...),
+		facets:   rec.Facets,
+		records:  []Record{rec},
+	}
 	leaf.clusters = append(leaf.clusters, g)
 	c.groups = append(c.groups, g)
 }
@@ -220,7 +256,7 @@ func (c *Clusterer) addToOverflow(rec Record, template string) {
 	key := rec.Kind + "\x00" + template
 	g := c.overflow[key]
 	if g == nil {
-		g = &group{kind: rec.Kind, template: []string{template}}
+		g = &group{kind: rec.Kind, template: []string{template}, facets: rec.Facets}
 		c.overflow[key] = g
 		c.groups = append(c.groups, g)
 	}
@@ -233,7 +269,7 @@ func (c *Clusterer) addToOverflow(rec Record, template string) {
 // Bucketing by token count is Drain's, and masking is what makes it
 // work: the raw messages of one issue differ in length constantly, and
 // their masked forms almost never do.
-func (c *Clusterer) leafFor(kind string, tokens []string) *node {
+func (c *Clusterer) leafFor(kind, facets string, tokens []string) *node {
 	cur := c.root
 	step := func(key string) {
 		next := cur.children[key]
@@ -244,6 +280,13 @@ func (c *Clusterer) leafFor(kind string, tokens []string) *node {
 		cur = next
 	}
 	step(kind)
+	// Where it happened is part of what a problem IS, not a detail of one
+	// occurrence of it. Putting it in the tree path is what lets "memory
+	// exceeded" at one CE be a different row from the same sentence
+	// everywhere else. Appending it to the message instead would not
+	// work: Drain would widen it to a wildcard on the second occurrence
+	// and the distinction would be gone by the third.
+	step(facets)
 	step(itoa(len(tokens)))
 	for i := 0; i < treeDepth && i < len(tokens); i++ {
 		tok := tokens[i]
@@ -256,6 +299,30 @@ func (c *Clusterer) leafFor(kind string, tokens []string) *node {
 		step(tok)
 	}
 	return cur
+}
+
+// facetKey renders a facet map as a stable string. Sorted, because Go's
+// map iteration is not, and a bucket key that varied between records
+// would scatter one problem across several groups at random.
+func facetKey(facets map[string]string) string {
+	if len(facets) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(facets))
+	for k := range facets {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for i, n := range names {
+		if i > 0 {
+			b.WriteByte('\x00')
+		}
+		b.WriteString(n)
+		b.WriteByte('=')
+		b.WriteString(facets[n])
+	}
+	return b.String()
 }
 
 // Clusters renders the result at the requested granularity, largest
@@ -324,7 +391,7 @@ func mergeGroups(groups []*group, granularity float64) [][]*group {
 	var buckets [][]*group
 	var vocabs []map[string]bool
 	for _, g := range ordered {
-		v := vocabulary(g.template)
+		v := vocabulary(g.template, g.facets)
 		placed := false
 		for i := range buckets {
 			// Compared against the bucket's accumulated vocabulary, so
@@ -347,16 +414,28 @@ func mergeGroups(groups []*group, granularity float64) [][]*group {
 	return buckets
 }
 
-// vocabulary is a template's set of real words: placeholders carry no
-// meaning to compare, and a template that is mostly placeholders should
-// not look similar to every other template that is.
-func vocabulary(template []string) map[string]bool {
+// vocabulary is a template's set of real words, plus where it happened:
+// placeholders carry no meaning to compare, and a template that is mostly
+// placeholders should not look similar to every other template that is.
+//
+// Including the facet values is what makes the granularity control reach
+// the structured attributes. Two groups with the same message from two
+// resources share every word and differ in one term, so they merge at
+// most settings and separate at the fine end -- which is the behaviour
+// the slider promises, applied to "where" as well as to "what".
+func vocabulary(template []string, facets map[string]string) map[string]bool {
 	v := map[string]bool{}
 	for _, t := range template {
 		if strings.HasPrefix(t, "<") && strings.HasSuffix(t, ">") {
 			continue
 		}
 		v[strings.ToLower(t)] = true
+	}
+	for name, value := range facets {
+		if value == "" {
+			continue
+		}
+		v[strings.ToLower(name+"="+value)] = true
 	}
 	return v
 }
@@ -399,7 +478,17 @@ func summarize(bucket []*group, labelCode func(int64) string) Cluster {
 
 	byOwner := map[string]int{}
 	byCode := map[[2]int64]int{}
+	byFacet := map[string]map[string]int{}
 	for _, r := range records {
+		for name, value := range r.Facets {
+			if value == "" {
+				continue
+			}
+			if byFacet[name] == nil {
+				byFacet[name] = map[string]int{}
+			}
+			byFacet[name][value]++
+		}
 		if r.Owner != "" {
 			byOwner[r.Owner]++
 		}
@@ -443,8 +532,43 @@ func summarize(bucket []*group, labelCode func(int64) string) Cluster {
 		return cl.Codes[i].SubCode < cl.Codes[j].SubCode
 	})
 
+	cl.Facets = facetSpreads(byFacet)
 	cl.Examples = pickExamples(records)
 	return cl
+}
+
+// maxFacetValues bounds the per-attribute list. A problem spanning forty
+// resources is telling you "everywhere"; naming all forty is not more
+// information than naming the worst few and the count.
+const maxFacetValues = 5
+
+func facetSpreads(byFacet map[string]map[string]int) []FacetSpread {
+	out := make([]FacetSpread, 0, len(byFacet))
+	for name, values := range byFacet {
+		spread := FacetSpread{Name: name, Distinct: len(values)}
+		for value, n := range values {
+			spread.Top = append(spread.Top, FacetValue{Value: value, Count: n})
+		}
+		sort.Slice(spread.Top, func(i, j int) bool {
+			if spread.Top[i].Count != spread.Top[j].Count {
+				return spread.Top[i].Count > spread.Top[j].Count
+			}
+			return spread.Top[i].Value < spread.Top[j].Value
+		})
+		if len(spread.Top) > maxFacetValues {
+			spread.Top = spread.Top[:maxFacetValues]
+		}
+		out = append(out, spread)
+	}
+	// Most concentrated first: a problem at one resource is the one worth
+	// reading before a problem spread over thirty.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Distinct != out[j].Distinct {
+			return out[i].Distinct < out[j].Distinct
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 // pickExamples takes the newest occurrence per user before taking a

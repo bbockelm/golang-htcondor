@@ -62,6 +62,9 @@ test('issues page ranks the problems it was given', async ({ page }) => {
   // Exact, because the section header also says "2 users": the badge on
   // the row is the one being asserted.
   await expect(page.getByText('2 users', { exact: true })).toBeVisible();
+  // Where it happened, which is the other half of the ranking: a
+  // problem at one resource is that resource's problem.
+  await expect(page.getByText('all at SMOKE-CE1')).toBeVisible();
   // Both sections bind, not just the first.
   await expect(page.getByText(/could not keep running/i)).toBeVisible();
 });

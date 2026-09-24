@@ -1538,6 +1538,19 @@ export interface IssueCodeCount {
   count: number;
 }
 
+export interface IssueFacetValue {
+  value: string;
+  count: number;
+}
+
+// How one structured attribute -- on OSPool, the site or the resource --
+// is distributed across a cluster. distinct === 1 is the actionable case.
+export interface IssueFacetSpread {
+  name: string;
+  distinct: number;
+  top?: IssueFacetValue[];
+}
+
 export interface IssueVariant {
   template: string;
   count: number;
@@ -1553,6 +1566,8 @@ export interface IssueCluster {
   users: number;
   top_users?: IssueOwnerCount[];
   codes?: IssueCodeCount[];
+  // Where it happened, most concentrated attribute first.
+  facets?: IssueFacetSpread[];
   first_seen?: number;
   last_seen?: number;
   examples?: IssueExample[];

@@ -13,7 +13,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import type { IssueCluster, IssueSection } from '@/lib/api';
+import type { IssueCluster, IssueFacetSpread, IssueSection } from '@/lib/api';
 
 export function IssueSectionPanel({ section }: { section: IssueSection }) {
   if (section.clusters.length === 0) return null;
@@ -72,6 +72,9 @@ export function ClusterRow({
               job{cluster.count === 1 ? '' : 's'}
             </span>
             <UsersBadge users={cluster.users} topUsers={cluster.top_users} />
+            {cluster.facets?.map((f) => (
+              <FacetBadge key={f.name} facet={f} />
+            ))}
             {cluster.codes?.slice(0, 2).map((c) => (
               <span
                 key={`${c.code}.${c.subcode}`}
@@ -146,6 +149,35 @@ export function ClusterRow({
   );
 }
 
+// FacetBadge says where a problem is happening.
+//
+// A cluster confined to one resource is that resource's problem however
+// many users it reaches, and one spread over thirty is the pool's. That
+// distinction is invisible in a job count and is the reason the page
+// reads the structured attributes at all, so it gets the same treatment
+// as the user count: called out when it is concentrated, stated plainly
+// when it is not.
+export function FacetBadge({ facet }: { facet: IssueFacetSpread }) {
+  const concentrated = facet.distinct === 1 && !!facet.top?.length;
+  const title = facet.top?.length
+    ? facet.top.map((v) => `${v.value}: ${v.count}`).join('\n')
+    : undefined;
+  return (
+    <span
+      title={title}
+      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+        concentrated
+          ? 'bg-sky-100 text-sky-900'
+          : 'bg-gray-100 text-gray-600'
+      }`}
+    >
+      {concentrated
+        ? `all at ${facet.top![0].value}`
+        : `${facet.distinct.toLocaleString()} ${facet.name}s`}
+    </span>
+  );
+}
+
 // UsersBadge is the number the page exists to put beside the count.
 export function UsersBadge({
   users,
@@ -193,6 +225,27 @@ function ClusterDetail({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {(cluster.facets?.length ?? 0) > 0 && (
+        <div className="space-y-1">
+          {cluster.facets!.map((f) => (
+            <div key={f.name} className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                {f.name}
+                {f.distinct > (f.top?.length ?? 0) ? ` (${f.distinct})` : ''}
+              </span>
+              {f.top?.map((v) => (
+                <span
+                  key={v.value}
+                  className="rounded-full bg-sky-50 px-2 py-0.5 text-xs text-sky-900"
+                >
+                  {v.value} <span className="tabular-nums">{v.count}</span>
+                </span>
+              ))}
+            </div>
+          ))}
         </div>
       )}
 

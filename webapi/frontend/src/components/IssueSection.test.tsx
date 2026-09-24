@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { IssueSectionPanel, UsersBadge } from './IssueSection';
+import { FacetBadge, IssueSectionPanel, UsersBadge } from './IssueSection';
 import type { IssueCluster, IssueSection } from '@/lib/api';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -124,5 +124,23 @@ describe('UsersBadge', () => {
     const many = render(<UsersBadge users={7} />);
     const badge = within(many.container).getByText('7 users');
     expect(badge.className).toContain('amber');
+  });
+});
+
+describe('FacetBadge', () => {
+  it('names the resource when a problem is confined to one', () => {
+    // The actionable case: the message reads the same everywhere and the
+    // whole problem is at one CE. A count alone cannot say that.
+    render(
+      <FacetBadge facet={{ name: 'resource', distinct: 1, top: [{ value: 'Purdue-Anvil-CE1', count: 205 }] }} />,
+    );
+    expect(screen.getByText('all at Purdue-Anvil-CE1')).toBeInTheDocument();
+  });
+
+  it('reports the spread when it is everywhere', () => {
+    render(<FacetBadge facet={{ name: 'resource', distinct: 43, top: [] }} />);
+    // "43 resources" is the other half of the same answer: this one is
+    // the pool's problem, not a site's.
+    expect(screen.getByText('43 resources')).toBeInTheDocument();
   });
 });

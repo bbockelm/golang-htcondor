@@ -292,3 +292,129 @@ func TestTemplateWidensOverAnUnmaskedDifference(t *testing.T) {
 		t.Errorf("template lost the words that identify the problem: %q", got[0].Template)
 	}
 }
+
+// --- structured attributes ------------------------------------------
+
+func atResource(recs []Record, resource, site string) []Record {
+	out := make([]Record, 0, len(recs))
+	for _, r := range recs {
+		r.Facets = map[string]string{"resource": resource, "site": site}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestOneResourcesProblemIsVisibleAsOne(t *testing.T) {
+	// The case the structured attributes exist for: the message reads
+	// the same everywhere, and the whole problem is at one CE. Reporting
+	// the spread is what turns "205 jobs, 6 users" -- which looks like a
+	// pool-wide problem -- into "all of them at one resource".
+	recs := atResource(memoryHolds(30), "Purdue-Anvil-CE1", "Purdue-Anvil")
+	got := clusterAll(t, 1.0, recs)
+	if len(got) != 1 {
+		t.Fatalf("clusters = %d, want 1", len(got))
+	}
+	byName := map[string]FacetSpread{}
+	for _, f := range got[0].Facets {
+		byName[f.Name] = f
+	}
+	if byName["resource"].Distinct != 1 {
+		t.Errorf("resource spread = %+v, want a single resource", byName["resource"])
+	}
+	if len(byName["resource"].Top) == 0 || byName["resource"].Top[0].Value != "Purdue-Anvil-CE1" {
+		t.Errorf("resource not named: %+v", byName["resource"])
+	}
+	if byName["site"].Distinct != 1 {
+		t.Errorf("site spread = %+v", byName["site"])
+	}
+}
+
+func TestSpreadDistinguishesEverywhereFromOnePlace(t *testing.T) {
+	// Same message, same count, different answer: a facilitator reading
+	// these two rows has a different next action for each.
+	var everywhere []Record
+	for i, res := range []string{"A-CE1", "B-CE1", "C-CE1", "D-CE1", "E-CE1"} {
+		everywhere = append(everywhere, atResource(memoryHolds(6), res, fmt.Sprintf("site%d", i))...)
+	}
+	got := clusterAll(t, 0.0, everywhere)
+	if len(got) != 1 {
+		t.Fatalf("clusters = %d, want the coarse setting to give one row", len(got))
+	}
+	for _, f := range got[0].Facets {
+		if f.Name == "resource" && f.Distinct != 5 {
+			t.Errorf("resource spread = %d, want 5", f.Distinct)
+		}
+	}
+	// Most concentrated first, so the reader meets the actionable
+	// attribute before the diffuse one.
+	if got[0].Facets[0].Distinct > got[0].Facets[len(got[0].Facets)-1].Distinct {
+		t.Errorf("facets are not ordered by concentration: %+v", got[0].Facets)
+	}
+}
+
+func TestGranularityReachesTheStructuredAttributes(t *testing.T) {
+	// The message is identical at both resources, so nothing in the text
+	// can separate them. The slider still can, which is the point of
+	// putting the facets in the tree rather than in the message: at the
+	// fine end they are two problems (one per CE), at the coarse end one.
+	recs := append(
+		atResource(memoryHolds(12), "Purdue-Anvil-CE1", "Purdue-Anvil"),
+		atResource(memoryHolds(12), "IU-Jetstream2", "Pervasive")...,
+	)
+
+	fine := clusterAll(t, 1.0, recs)
+	if len(fine) != 2 {
+		for _, g := range fine {
+			t.Logf("  %d: %s %+v", g.Count, g.Template, g.Facets)
+		}
+		t.Fatalf("fine clusters = %d, want one per resource", len(fine))
+	}
+
+	// And not only at the very end of the slider: the facets are part of
+	// the merge similarity, not just of the split, so "fairly fine" still
+	// keeps two resources apart. Without that the control would be a
+	// cliff at 1.0 rather than a dial.
+	if nearlyFine := clusterAll(t, 0.9, recs); len(nearlyFine) != 2 {
+		t.Errorf("clusters at 0.9 = %d, want the resources still apart", len(nearlyFine))
+	}
+
+	coarse := clusterAll(t, 0.0, recs)
+	if len(coarse) != 1 {
+		t.Fatalf("coarse clusters = %d, want them folded back together", len(coarse))
+	}
+	if coarse[0].Count != 24 {
+		t.Errorf("merged count = %d, want 24", coarse[0].Count)
+	}
+	// And the merged row still says where it happened, so folding them
+	// together does not lose the correlation that justified splitting.
+	for _, f := range coarse[0].Facets {
+		if f.Name == "resource" && f.Distinct != 2 {
+			t.Errorf("merged resource spread = %+v, want both", f)
+		}
+	}
+}
+
+func TestFacetsAreOptional(t *testing.T) {
+	// An access point whose jobs carry no glidein attributes -- a local
+	// pool -- must cluster on the message exactly as before.
+	got := clusterAll(t, 1.0, memoryHolds(10))
+	if len(got) != 1 {
+		t.Fatalf("clusters = %d, want 1", len(got))
+	}
+	if len(got[0].Facets) != 0 {
+		t.Errorf("facets = %+v, want none", got[0].Facets)
+	}
+}
+
+func TestFacetKeyDoesNotDependOnMapOrder(t *testing.T) {
+	// Go's map iteration is randomised per range. A bucket key built
+	// from it would scatter one problem across several groups, and the
+	// page would look different on every refresh.
+	a := map[string]string{"resource": "X", "site": "Y", "extra": "Z"}
+	first := facetKey(a)
+	for i := 0; i < 20; i++ {
+		if got := facetKey(a); got != first {
+			t.Fatalf("facetKey varied between calls: %q vs %q", first, got)
+		}
+	}
+}

@@ -133,6 +133,10 @@ export const issuesFixture: IssuesResponse = {
           count: 12,
           users: 2,
           top_users: [{ owner: 'e2e', count: 10 }],
+          facets: [
+            { name: 'resource', distinct: 1, top: [{ value: 'SMOKE-CE1', count: 12 }] },
+            { name: 'site', distinct: 2, top: [{ value: 'Smoke-Site', count: 8 }] },
+          ],
           codes: [{ code: 21, subcode: 102, label: 'memory usage exceeded the request', count: 12 }],
           last_seen: Math.floor(Date.now() / 1000) - 300,
           examples: [

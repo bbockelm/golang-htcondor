@@ -190,7 +190,7 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 			clusters = clusters[:issuesMaxClusters]
 		}
 		for _, c := range clusters {
-			fmt.Fprintf(&b, "  %d job(s), %d user(s): %s\n", c.Count, c.Users, c.Template)
+			fmt.Fprintf(&b, "  %d job(s), %d user(s)%s: %s\n", c.Count, c.Users, facetNote(c), c.Template)
 			for i, ex := range c.Examples {
 				if i >= issuesMaxExamples {
 					break
@@ -271,6 +271,29 @@ func trimExamples(clusters []issues.Cluster) []issues.Cluster {
 		out = append(out, c)
 	}
 	return out
+}
+
+// facetNote says where a problem is happening when that is the answer.
+//
+// A cluster confined to one resource is that resource's problem however
+// many users it reaches, and a cluster spread over thirty is the pool's
+// -- and neither is visible in a job count. Rendered inline because a
+// model reading this is deciding whether to tell one user or raise a
+// ticket with a site.
+func facetNote(c issues.Cluster) string {
+	var parts []string
+	for _, f := range c.Facets {
+		switch {
+		case f.Distinct == 1 && len(f.Top) > 0:
+			parts = append(parts, fmt.Sprintf("all at %s %s", f.Name, f.Top[0].Value))
+		case f.Distinct > 1:
+			parts = append(parts, fmt.Sprintf("%d %ss", f.Distinct, f.Name))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, ", ")
 }
 
 func oneLine(s string) string {

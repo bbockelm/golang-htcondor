@@ -166,6 +166,14 @@ var outputSchemas = map[string]map[string]interface{}{
 					"label":   strSchema,
 					"count":   intSchema,
 				})),
+				"facets": arr(obj(map[string]interface{}{
+					"name":     strSchema,
+					"distinct": intSchema,
+					"top": arr(obj(map[string]interface{}{
+						"value": strSchema,
+						"count": intSchema,
+					})),
+				})),
 				"first_seen": intSchema,
 				"last_seen":  intSchema,
 				"examples": arr(obj(map[string]interface{}{
