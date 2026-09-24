@@ -338,8 +338,11 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe bool,
 	opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
 	key := dashboardCacheKey(owner, ownedByMe)
-	return s.dashboards().get(key, func() (*dashboardSnapshot, error) {
-		return s.walkQueueForDashboard(ctx, opts, owner, ownedByMe)
+	// walkCtx is the cache's, not this request's: the snapshot is shared,
+	// and the walk it protects is the expensive one. See
+	// sharedComputeContext.
+	return s.dashboards().get(ctx, key, func(walkCtx context.Context) (*dashboardSnapshot, error) {
+		return s.walkQueueForDashboard(walkCtx, opts, owner, ownedByMe)
 	})
 }
 

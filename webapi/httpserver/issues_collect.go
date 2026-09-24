@@ -104,25 +104,6 @@ func (s *Handler) mirrorRows(ctx context.Context, table, constraint string, proj
 	return out, nil
 }
 
-// issueCollectContext is the context a collection runs on.
-//
-// Not the request's. What a collection produces is shared -- cached for
-// a minute and served to every other viewer in this scope -- so running
-// it on the request's own context made its lifetime an accident of
-// whoever happened to trigger the refresh. A reload, or the SPA changing
-// a query key, cancels that request, and the read died halfway through
-// with "context canceled". The held-jobs read had usually finished by
-// then and the run-attempt read had not, so the page kept the holds,
-// recorded a note blaming the epoch history, and cached that: one
-// navigation put a banner in front of everybody for the next minute.
-//
-// WithoutCancel keeps the request's values -- the identity and token the
-// schedd handshake needs -- and drops only its cancellation. The timeout
-// is what bounds the work instead, since nothing else now will.
-func issueCollectContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), issueCollectTimeout)
-}
-
 // issueCache serializes collection per scope, so a room full of
 // facilitators with the page open costs one read rather than one each --
 // and so that moving the granularity slider re-clusters a set that is
@@ -165,7 +146,7 @@ func (c *issueCache) ttl(set *issues.Set) time.Duration {
 // context (see the caller); a waiter that loses its own caller stops
 // waiting, and the collection carries on into the cache for whoever asks
 // next.
-func (c *issueCache) get(ctx context.Context, key string, compute func() (*issues.Set, error)) (*issues.Set, bool, error) {
+func (c *issueCache) get(ctx context.Context, key string, compute func(context.Context) (*issues.Set, error)) (*issues.Set, bool, error) {
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
@@ -184,7 +165,10 @@ func (c *issueCache) get(ctx context.Context, key string, compute func() (*issue
 	if entry.set != nil && c.now().Sub(entry.at) < c.ttl(entry.set) {
 		return entry.set, true, nil
 	}
-	set, err := compute()
+	// Detached here rather than by the caller: see sharedComputeContext.
+	computeCtx, cancel := sharedComputeContext(ctx, issueCollectTimeout)
+	defer cancel()
+	set, err := compute(computeCtx)
 	if err != nil {
 		// Serving the last good answer beats blanking the page when the
 		// schedd hiccups, the same trade the dashboard makes.

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -35,6 +36,12 @@ import (
 // shares one snapshot, so this bounds the cost at one queue scan per
 // interval for the whole deployment rather than per page load.
 const dashboardRefresh = 3 * time.Minute
+
+// dashboardWalkTimeout bounds a queue walk that no longer has a viewer
+// waiting on it. Longer than the refresh interval, because the walk is
+// worth finishing into the cache even when the person who triggered it
+// has gone -- the next viewer is served instead of starting it again.
+const dashboardWalkTimeout = 5 * time.Minute
 
 // recentPerList is how many entries each recent-activity list keeps.
 // Enough to see the shape of a burst, few enough to read at a glance.
@@ -128,7 +135,10 @@ type dashboardCache struct {
 }
 
 type cachedDashboard struct {
-	mu       sync.Mutex // held across a recompute, so viewers queue rather than pile on
+	// A channel rather than a sync.Mutex, so a viewer queued behind a
+	// recompute can give up when its own caller goes away instead of
+	// holding a connection open for a page nobody is looking at.
+	lock     chan struct{}
 	snapshot *dashboardSnapshot
 	at       time.Time
 }
@@ -143,21 +153,35 @@ func newDashboardCache() *dashboardCache {
 // The per-key lock is held across the computation on purpose: ten people
 // opening the dashboard at once should cost one queue walk, not ten.
 // The tenth waits for the first rather than starting its own.
-func (c *dashboardCache) get(key string, compute func() (*dashboardSnapshot, error)) (*dashboardSnapshot, error) {
+//
+// ctx bounds the WAIT, not the walk. The two are different lifetimes:
+// the snapshot is shared, so the walk runs on a context of its own (see
+// sharedComputeContext) and a viewer that loses its own caller stops
+// waiting while the walk carries on into the cache for whoever asks
+// next.
+func (c *dashboardCache) get(ctx context.Context, key string, compute func(context.Context) (*dashboardSnapshot, error)) (*dashboardSnapshot, error) {
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
-		entry = &cachedDashboard{}
+		entry = &cachedDashboard{lock: make(chan struct{}, 1)}
 		c.byKey[key] = entry
 	}
 	c.mu.Unlock()
 
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	select {
+	case entry.lock <- struct{}{}:
+		defer func() { <-entry.lock }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	if entry.snapshot != nil && c.now().Sub(entry.at) < dashboardRefresh {
 		return entry.snapshot, nil
 	}
-	snap, err := compute()
+	// Detached here rather than by the caller: see sharedComputeContext.
+	walkCtx, cancel := sharedComputeContext(ctx, dashboardWalkTimeout)
+	defer cancel()
+	snap, err := compute(walkCtx)
 	if err != nil {
 		// A failed refresh falls back to the last good answer rather
 		// than blanking the page: a dashboard that goes empty when the
