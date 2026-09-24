@@ -30,21 +30,56 @@ const gpuNode: ClassAd[] = [
   },
 ];
 
-// A backfill slot on the same machine re-advertising the same cores/GPUs.
+// The backfill partition on the SAME machine, as CHTC advertises it: a
+// second partitionable slot flagged BackfillSlot that re-advertises the
+// machine's Total* and reports its own (residual) free. Here it has carved
+// out most of the machine to 20 backfill jobs: 16 cpu / 1 GPU left free.
 const backfillSlot: ClassAd = {
-  Name: 'slot1_backfill@gpu1',
+  Name: 'backfill1@gpu1',
   Machine: 'gpu1',
-  SlotType: 'Backfill',
+  SlotType: 'Partitionable',
+  PartitionableSlot: true,
   BackfillSlot: true,
-  Cpus: 96,
-  Memory: 393216,
-  GPUs: 6,
+  Cpus: 16,
+  Memory: 24576,
+  GPUs: 1,
   TotalCpus: 128,
   TotalMemory: 524288,
   TotalGPUs: 8,
-  State: 'Claimed',
-  Activity: 'Busy',
+  NumDynamicSlots: 20,
+  State: 'Unclaimed',
+  Activity: 'Idle',
 };
+
+// A machine whose primary partition is idle (all free) but whose backfill
+// partition is nearly full -- the case that used to report 0 used.
+const idlePrimaryBackfillNode: ClassAd[] = [
+  {
+    Name: 'slot1@e1',
+    Machine: 'e1',
+    SlotType: 'Partitionable',
+    PartitionableSlot: true,
+    Cpus: 128,
+    GPUs: 8,
+    TotalCpus: 128,
+    TotalGPUs: 8,
+    NumDynamicSlots: 0,
+    State: 'Unclaimed',
+  },
+  {
+    Name: 'backfill1@e1',
+    Machine: 'e1',
+    SlotType: 'Partitionable',
+    PartitionableSlot: true,
+    BackfillSlot: true,
+    Cpus: 4,
+    GPUs: 1,
+    TotalCpus: 128,
+    TotalGPUs: 8,
+    NumDynamicSlots: 80,
+    State: 'Unclaimed',
+  },
+];
 
 describe('usageFor', () => {
   it('reads the capital-GPU total and derives GPU usage from the leftover', () => {
@@ -55,14 +90,24 @@ describe('usageFor', () => {
     expect(u.usedCpus).toBe(96); // 128 - 32
   });
 
-  it('excludes backfill slots from capacity and usage (they overlap primary cores)', () => {
+  it('counts backfill usage without double-counting machine capacity', () => {
     const withBackfill = [...gpuNode, backfillSlot].map(parseSlot);
     const u = usageFor(withBackfill);
-    // Totals and usage are unchanged by the backfill slot: no double count.
+    // Capacity is the machine's, counted once (not 256/16).
     expect(u.totalCpus).toBe(128);
-    expect(u.usedCpus).toBe(96);
     expect(u.totalGpus).toBe(8);
-    expect(u.usedGpus).toBe(6);
+    // Used is driven by the residual free = min across the two partitions:
+    // cpu min(32,16)=16 -> 112 used; gpu min(2,1)=1 -> 7 used.
+    expect(u.usedCpus).toBe(112);
+    expect(u.usedGpus).toBe(7);
+  });
+
+  it('shows a node as used when only its backfill partition is busy', () => {
+    const u = usageFor(idlePrimaryBackfillNode.map(parseSlot));
+    expect(u.totalCpus).toBe(128);
+    expect(u.usedCpus).toBe(124); // 128 - min(128, 4)
+    expect(u.totalGpus).toBe(8);
+    expect(u.usedGpus).toBe(7); // 8 - min(8, 1)
   });
 
   it('is case-insensitive about attribute names (ClassAds are)', () => {
@@ -86,8 +131,9 @@ describe('usageFor', () => {
 });
 
 describe('runningJobsFor', () => {
-  it('uses NumDynamicSlots on a partitionable slot and skips backfill', () => {
-    expect(runningJobsFor([...gpuNode, backfillSlot].map(parseSlot))).toBe(6);
+  it('uses NumDynamicSlots and includes backfill jobs', () => {
+    // primary 6 + backfill 20 = 26 real running jobs on the node.
+    expect(runningJobsFor([...gpuNode, backfillSlot].map(parseSlot))).toBe(26);
   });
   it('counts a claimed static slot as one job', () => {
     const staticSlots: ClassAd[] = [
@@ -112,9 +158,9 @@ describe('summarize', () => {
     };
     const s = summarize([...gpuNode, backfillSlot, ownerNode].map(parseSlot));
     expect(s.machines).toBe(2); // gpu1, ep2 (backfill is on gpu1, not a new machine)
-    expect(s.runningJobs).toBe(6);
+    expect(s.runningJobs).toBe(26); // primary 6 + backfill 20
     expect(s.ownerNodes).toBe(1); // ep2
-    expect(s.backfillCpus).toBe(96); // the claimed backfill slot
+    expect(s.backfillCpus).toBe(112); // backfill partition: 128 total - 16 free
   });
 });
 

@@ -24,6 +24,7 @@ package httpserver
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -151,28 +152,94 @@ func parsePoolSlot(ad *classad.ClassAd) poolSlot {
 	}
 }
 
-// accumulateUsage folds one slot into the running usage totals, deduping
-// the machine capacity via seen. Backfill slots are skipped.
-func accumulateUsage(u *resourceUsage, s poolSlot, seen map[string]bool) {
-	if s.backfill {
-		return
+// computeUsage totals used-vs-total over one machine's slots, accounting
+// for backfill. A backfill slot re-advertises the SAME machine as the
+// primary slot and runs on the cores the primary partition leaves idle, so
+// it must not add to the total -- but the resources it consumes ARE in use.
+// The residual truly-free amount is the MINIMUM free reported across the
+// machine's partitionable slots (primary + backfill), since a backfill
+// slot's free is what neither partition has taken; used = total - that.
+func computeUsage(slots []poolSlot) resourceUsage {
+	var totalCpus, totalMem, totalGpus float64
+	for _, s := range slots {
+		totalCpus = math.Max(totalCpus, s.totalCpus)
+		totalMem = math.Max(totalMem, s.totalMemoryMB)
+		totalGpus = math.Max(totalGpus, s.totalGpus)
 	}
-	if !seen[s.machine] {
-		seen[s.machine] = true
-		u.TotalCpus += s.totalCpus
-		u.TotalMemoryMB += s.totalMemoryMB
-		u.TotalGpus += s.totalGpus
+
+	var parts []poolSlot
+	for _, s := range slots {
+		if s.partitionable {
+			parts = append(parts, s)
+		}
 	}
-	switch {
-	case s.partitionable:
-		u.UsedCpus += max0(s.totalCpus - s.cpus)
-		u.UsedMemoryMB += max0(s.totalMemoryMB - s.memoryMB)
-		u.UsedGpus += max0(s.totalGpus - s.gpus)
-	case !s.dynamic && s.state == "Claimed":
-		u.UsedCpus += s.cpus
-		u.UsedMemoryMB += s.memoryMB
-		u.UsedGpus += s.gpus
+
+	var usedCpus, usedMem, usedGpus float64
+	if len(parts) > 0 {
+		freeCpus, freeMem, freeGpus := parts[0].cpus, parts[0].memoryMB, parts[0].gpus
+		for _, s := range parts[1:] {
+			freeCpus = math.Min(freeCpus, s.cpus)
+			freeMem = math.Min(freeMem, s.memoryMB)
+			freeGpus = math.Min(freeGpus, s.gpus)
+		}
+		usedCpus = totalCpus - freeCpus
+		usedMem = totalMem - freeMem
+		usedGpus = totalGpus - freeGpus
+	} else {
+		// Static-slot machine: capacity and usage are the sum of the slots;
+		// a Claimed static slot is in use.
+		var tc, tm, tg float64
+		for _, s := range slots {
+			if s.dynamic {
+				continue
+			}
+			tc += s.cpus
+			tm += s.memoryMB
+			tg += s.gpus
+			if s.state == "Claimed" {
+				usedCpus += s.cpus
+				usedMem += s.memoryMB
+				usedGpus += s.gpus
+			}
+		}
+		if tc > 0 {
+			totalCpus = tc
+		}
+		if tm > 0 {
+			totalMem = tm
+		}
+		if tg > 0 {
+			totalGpus = tg
+		}
 	}
+
+	return resourceUsage{
+		UsedCpus:      clampF(usedCpus, totalCpus),
+		TotalCpus:     totalCpus,
+		UsedMemoryMB:  clampF(usedMem, totalMem),
+		TotalMemoryMB: totalMem,
+		UsedGpus:      clampF(usedGpus, totalGpus),
+		TotalGpus:     totalGpus,
+	}
+}
+
+func addUsage(into *resourceUsage, u resourceUsage) {
+	into.UsedCpus += u.UsedCpus
+	into.TotalCpus += u.TotalCpus
+	into.UsedMemoryMB += u.UsedMemoryMB
+	into.TotalMemoryMB += u.TotalMemoryMB
+	into.UsedGpus += u.UsedGpus
+	into.TotalGpus += u.TotalGpus
+}
+
+func clampF(used, total float64) float64 {
+	if used < 0 {
+		return 0
+	}
+	if used > total {
+		return total
+	}
+	return used
 }
 
 func max0(v float64) float64 {
@@ -182,15 +249,30 @@ func max0(v float64) float64 {
 	return v
 }
 
+// runningJobs counts jobs running on a slot, including backfill jobs (a
+// backfill partitionable slot's NumDynamicSlots are real running jobs).
 func runningJobs(s poolSlot) int64 {
-	if s.backfill {
-		return 0
-	}
 	if s.partitionable {
 		return s.numDynamicSlots
 	}
 	if !s.dynamic && s.state == "Claimed" {
 		return 1
+	}
+	return 0
+}
+
+// backfillCpusUsed is the CPU count a backfill partition has carved out
+// (total - free on its partitionable slot), plus any claimed backfill
+// static slot.
+func backfillCpusUsed(s poolSlot) float64 {
+	if !s.backfill {
+		return 0
+	}
+	if s.partitionable {
+		return max0(s.totalCpus - s.cpus)
+	}
+	if !s.dynamic && s.state == "Claimed" {
+		return s.cpus
 	}
 	return 0
 }
@@ -203,67 +285,59 @@ func aggregatePoolSummary(ads []*classad.ClassAd) poolSummaryResponse {
 		slots = append(slots, parsePoolSlot(ad))
 	}
 
-	byMachine := map[string]*nodeSummary{}
+	// Group the raw slots per machine first, so usage can be computed with
+	// the whole machine (primary + backfill partitions) in view.
+	machineSlots := map[string][]poolSlot{}
 	order := []string{}
-	nodeSeen := map[string]map[string]bool{} // per-node machine-dedup for usage
+	for _, s := range slots {
+		if _, ok := machineSlots[s.machine]; !ok {
+			order = append(order, s.machine)
+		}
+		machineSlots[s.machine] = append(machineSlots[s.machine], s)
+	}
+	sort.Strings(order)
 
 	total := resourceUsage{}
-	totalSeen := map[string]bool{}
 	var totalRunning int64
 	var backfillCpus float64
-
-	for _, s := range slots {
-		n := byMachine[s.machine]
-		if n == nil {
-			n = &nodeSummary{Machine: s.machine}
-			byMachine[s.machine] = n
-			order = append(order, s.machine)
-			nodeSeen[s.machine] = map[string]bool{}
-		}
-		n.Slots = append(n.Slots, slotSummary{
-			Name:        s.name,
-			SlotType:    s.slotType,
-			Backfill:    s.backfill,
-			State:       s.state,
-			Activity:    s.activity,
-			Cpus:        s.cpus,
-			MemoryMB:    s.memoryMB,
-			Gpus:        s.gpus,
-			RemoteOwner: s.remoteOwner,
-		})
-		accumulateUsage(&n.Usage, s, nodeSeen[s.machine])
-		accumulateUsage(&total, s, totalSeen)
-
-		rj := runningJobs(s)
-		n.RunningJobs += rj
-		totalRunning += rj
-
-		// A machine is "Owner" when its primary (non-backfill) slot is in
-		// Owner state.
-		if !s.backfill && (s.partitionable || !s.dynamic) && s.state == "Owner" {
-			n.Owner = true
-		}
-		if s.backfill && s.state == "Claimed" {
-			backfillCpus += s.cpus
-		}
-	}
-
-	sort.Strings(order)
-	nodes := make([]nodeSummary, 0, len(order))
 	ownerNodes := 0
 	primaryMachines := map[string]bool{}
-	for _, s := range slots {
-		if !s.backfill {
-			primaryMachines[s.machine] = true
-		}
-	}
+	nodes := make([]nodeSummary, 0, len(order))
+
 	for _, m := range order {
-		n := byMachine[m]
+		ms := machineSlots[m]
+		n := nodeSummary{Machine: m, Usage: computeUsage(ms)}
+		for _, s := range ms {
+			n.Slots = append(n.Slots, slotSummary{
+				Name:        s.name,
+				SlotType:    s.slotType,
+				Backfill:    s.backfill,
+				State:       s.state,
+				Activity:    s.activity,
+				Cpus:        s.cpus,
+				MemoryMB:    s.memoryMB,
+				Gpus:        s.gpus,
+				RemoteOwner: s.remoteOwner,
+			})
+			n.RunningJobs += runningJobs(s)
+			backfillCpus += backfillCpusUsed(s)
+			// A machine is "Owner" when its primary (non-backfill) slot is
+			// in Owner state.
+			if !s.backfill && (s.partitionable || !s.dynamic) && s.state == "Owner" {
+				n.Owner = true
+			}
+			if !s.backfill {
+				primaryMachines[m] = true
+			}
+		}
 		sort.Slice(n.Slots, func(i, j int) bool { return n.Slots[i].Name < n.Slots[j].Name })
+
+		addUsage(&total, n.Usage)
+		totalRunning += n.RunningJobs
 		if n.Owner {
 			ownerNodes++
 		}
-		nodes = append(nodes, *n)
+		nodes = append(nodes, n)
 	}
 
 	return poolSummaryResponse{
