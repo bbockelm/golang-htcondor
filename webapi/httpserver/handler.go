@@ -355,10 +355,14 @@ type Handler struct {
 	// full constructor still works.
 	dashboardCacheOnce sync.Once
 	dashboardCacheVal  *dashboardCache
-	token              string             // Token for daemon authentication
-	mux                *http.ServeMux     // HTTP request multiplexer
-	ctx                context.Context    // Context for background goroutines
-	cancelFunc         context.CancelFunc // Function to cancel background goroutines
+	// issueCache holds the issues page's collected records, shared
+	// across viewers and reused while the granularity slider moves.
+	issueCacheOnce sync.Once
+	issueCacheVal  *issueCache
+	token          string             // Token for daemon authentication
+	mux            *http.ServeMux     // HTTP request multiplexer
+	ctx            context.Context    // Context for background goroutines
+	cancelFunc     context.CancelFunc // Function to cancel background goroutines
 
 	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
 	// Created lazily on first /api/v1/jupyter use so older deployments that

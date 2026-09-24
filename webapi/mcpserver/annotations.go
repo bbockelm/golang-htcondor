@@ -96,7 +96,12 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"get_version":                   readOnlyAnn(false),
 	"whoami":                        readOnlyAnn(false),
 	"check_watches":                 readOnlyAnn(false),
-	"cancel_watch":                  readOnlyAnn(false),
+	// analyze_issues reads the queue and run-attempt history and groups
+	// what it finds. Open-world: what it reports depends on what the
+	// access point is doing, so two calls a minute apart legitimately
+	// differ.
+	"analyze_issues": readOnlyAnn(true),
+	"cancel_watch":   readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;

@@ -516,3 +516,18 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// The kinds of record the page separates. Records of different kinds
+// never share a cluster: they are different sections, and a row that
+// meant both would belong to neither.
+const (
+	// KindHold is a job that was put on hold -- something about the job
+	// or its files stopped it.
+	KindHold = "hold"
+	// KindRunFailure is a run attempt that ended without the job
+	// finishing: the shadow threw an exception, the lease expired, the
+	// execute point went away. The job is usually running again minutes
+	// later, which is why nobody notices until it has happened a
+	// thousand times.
+	KindRunFailure = "run_failure"
+)

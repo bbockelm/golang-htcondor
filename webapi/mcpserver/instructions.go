@@ -62,6 +62,16 @@ func defaultInstructions(scheddName string) string {
 		"wrong ones while it runs; tail_job_output is the reverse.\n")
 	b.WriteString("6. get_job_output — retrieve any other output files.\n\n")
 
+	// Diagnosis
+	b.WriteString("## When things go wrong\n\n")
+	b.WriteString("analyze_issues — what is going wrong on this access point, grouped into problems. " +
+		"Reach for it before listing held jobs and reading their reasons yourself: one root cause appears " +
+		"as thousands of distinct hold reasons, because the execute node, sandbox path and output filename " +
+		"vary per occurrence, so a listing makes one problem look like a thousand. It also covers jobs that " +
+		"could not keep running (the shadow lost contact, the lease expired), which the queue forgets within " +
+		"minutes because the job is simply retried. Each cluster says how many DISTINCT USERS it spans, " +
+		"which is the difference between one person's broken submit file and a site problem.\n\n")
+
 	// Workflows
 	b.WriteString("## Workflows with dependencies\n\n")
 	b.WriteString("When the work is a graph rather than a job — step B needs step A's output, a step should be " +

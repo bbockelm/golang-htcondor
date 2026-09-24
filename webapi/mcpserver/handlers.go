@@ -144,6 +144,9 @@ var readOnlyMCPTools = map[string]bool{
 	"query_history_db":              true,
 	"query_jobs_as_of":              true,
 	"aggregate_jobs":                true,
+	// analyze_issues reads held jobs and run-attempt history and groups
+	// them; it changes nothing.
+	"analyze_issues": true,
 	// The watch tools change only this server's own bookkeeping; they
 	// neither read nor alter a job, so an agent restricted to read-only
 	// tools can still ask to be told when something happens.
@@ -802,6 +805,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// The two tools that reach into a live job.
 	tools = append(tools, tailTool(), execInJobTool())
 
+	// "Why are my jobs failing" as one call, grouped, rather than a
+	// listing the caller has to read and summarize itself.
+	tools = append(tools, analyzeIssuesTool())
+
 	// Workflows. A DAG is submitted and tracked differently enough from
 	// a job that it gets its own pair rather than more arguments on
 	// submit_job.
@@ -943,6 +950,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolQueryJobsAsOf(ctx, request.Arguments)
 	case "aggregate_jobs":
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
+	case "analyze_issues":
+		result, err = s.toolAnalyzeIssues(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
 	case "whoami":
