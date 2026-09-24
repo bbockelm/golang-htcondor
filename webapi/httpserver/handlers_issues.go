@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -169,8 +170,10 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
 	}
 	key := fmt.Sprintf("%s|%t|%d|%t", owner, ownedByMe, int64(window/time.Second), includeEnded)
-	set, cached, err := s.issueSets().get(key, func() (*issues.Set, error) {
-		return issues.Collect(ctx, handlerIssueSource{s}, issues.Options{
+	// collectCtx is the cache's, not this request's: see
+	// sharedComputeContext.
+	set, cached, err := s.issueSets().get(ctx, key, func(collectCtx context.Context) (*issues.Set, error) {
+		return issues.Collect(collectCtx, handlerIssueSource{s}, issues.Options{
 			Scope:        scope,
 			Window:       window,
 			IncludeEnded: includeEnded,

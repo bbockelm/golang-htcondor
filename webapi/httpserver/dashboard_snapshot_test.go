@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -216,7 +217,7 @@ func TestSnapshotsAreNeverSharedAcrossOwners(t *testing.T) {
 
 	snapshotFor := func(owner string) *dashboardSnapshot {
 		t.Helper()
-		got, err := c.get("mine:"+owner, func() (*dashboardSnapshot, error) {
+		got, err := c.get(context.Background(), "mine:"+owner, func(context.Context) (*dashboardSnapshot, error) {
 			return &dashboardSnapshot{
 				Counts: map[string]int{"idle": 1},
 				Total:  len(owner), // a value only this owner's walk produces
@@ -276,12 +277,12 @@ func TestRepeatedLoadsShareOneWalk(t *testing.T) {
 	c.now = func() time.Time { return now }
 
 	walks := 0
-	compute := func() (*dashboardSnapshot, error) {
+	compute := func(context.Context) (*dashboardSnapshot, error) {
 		walks++
 		return &dashboardSnapshot{Total: walks}, nil
 	}
 	for i := 0; i < 25; i++ {
-		if _, err := c.get("mine:alice", compute); err != nil {
+		if _, err := c.get(context.Background(), "mine:alice", compute); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -292,7 +293,7 @@ func TestRepeatedLoadsShareOneWalk(t *testing.T) {
 	// A second owner is a second walk, by design -- see
 	// TestSnapshotsAreNeverSharedAcrossOwners. That walk is bounded by
 	// that owner's own jobs, because the query carries FetchMyJobs.
-	if _, err := c.get("mine:bob", compute); err != nil {
+	if _, err := c.get(context.Background(), "mine:bob", compute); err != nil {
 		t.Fatal(err)
 	}
 	if walks != 2 {
@@ -301,7 +302,7 @@ func TestRepeatedLoadsShareOneWalk(t *testing.T) {
 
 	// The admin pool-wide scope is the one many viewers genuinely share.
 	for i := 0; i < 10; i++ {
-		if _, err := c.get("all", compute); err != nil {
+		if _, err := c.get(context.Background(), "all", compute); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -310,7 +311,7 @@ func TestRepeatedLoadsShareOneWalk(t *testing.T) {
 	}
 
 	now = now.Add(dashboardRefresh + time.Second)
-	if _, err := c.get("mine:alice", compute); err != nil {
+	if _, err := c.get(context.Background(), "mine:alice", compute); err != nil {
 		t.Fatal(err)
 	}
 	if walks != 4 {
@@ -325,14 +326,14 @@ func TestFailedRefreshKeepsTheLastGoodAnswer(t *testing.T) {
 	now := time.Now()
 	c.now = func() time.Time { return now }
 
-	if _, err := c.get("k", func() (*dashboardSnapshot, error) {
+	if _, err := c.get(context.Background(), "k", func(context.Context) (*dashboardSnapshot, error) {
 		return &dashboardSnapshot{Total: 7}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	now = now.Add(dashboardRefresh + time.Second)
-	got, err := c.get("k", func() (*dashboardSnapshot, error) {
+	got, err := c.get(context.Background(), "k", func(context.Context) (*dashboardSnapshot, error) {
 		return nil, errors.New("schedd unreachable")
 	})
 	if err != nil {
@@ -343,7 +344,7 @@ func TestFailedRefreshKeepsTheLastGoodAnswer(t *testing.T) {
 	}
 
 	// With nothing cached at all, the error is the honest answer.
-	if _, err := c.get("fresh", func() (*dashboardSnapshot, error) {
+	if _, err := c.get(context.Background(), "fresh", func(context.Context) (*dashboardSnapshot, error) {
 		return nil, errors.New("schedd unreachable")
 	}); err == nil {
 		t.Error("with no prior snapshot the failure must surface")

@@ -27,6 +27,18 @@ const issueScanLimit = 200000
 // re-reading it, which is what makes them feel immediate.
 const issueRefresh = 60 * time.Second
 
+// issueRefreshIncomplete is how long a set that is missing a section is
+// reused. Short, because it is a failure: at the full lifetime, one
+// read that did not finish put a banner on the page for a minute, for
+// everyone in that scope, with no way to ask again.
+const issueRefreshIncomplete = 5 * time.Second
+
+// issueCollectTimeout bounds a collection that no longer has a requester
+// waiting on it. Generous, because it is a bound on runaway work rather
+// than a service level -- the reads are big and the answer is worth
+// having in the cache even if the person who triggered it has gone.
+const issueCollectTimeout = 2 * time.Minute
+
 // handlerIssueSource reads through the mirror when it can and the schedd
 // otherwise, which is the same preference every other listing has.
 type handlerIssueSource struct{ s *Handler }
@@ -103,31 +115,60 @@ type issueCache struct {
 }
 
 type cachedIssues struct {
-	mu  sync.Mutex // held across a read, so viewers queue rather than pile on
-	set *issues.Set
-	at  time.Time
+	// A channel rather than a sync.Mutex, so a waiter can give up when
+	// its own caller goes away instead of blocking on a collection it
+	// no longer needs.
+	lock chan struct{}
+	set  *issues.Set
+	at   time.Time
 }
 
 func newIssueCache() *issueCache {
 	return &issueCache{byKey: make(map[string]*cachedIssues), now: time.Now}
 }
 
+// ttl is how long a set may be reused, which depends on whether it is a
+// whole answer.
+func (c *issueCache) ttl(set *issues.Set) time.Duration {
+	if set.Incomplete {
+		return issueRefreshIncomplete
+	}
+	return issueRefresh
+}
+
 // get returns a set and whether it came from the cache.
-func (c *issueCache) get(key string, compute func() (*issues.Set, error)) (*issues.Set, bool, error) {
+//
+// ctx bounds the WAIT, not the collection. The two are deliberately
+// different lifetimes: the set is shared -- cached, and served to every
+// other viewer in this scope -- so tying its production to whichever
+// request happened to trigger it means one person navigating away kills
+// a read that everybody else is waiting for. The collection gets its own
+// context (see the caller); a waiter that loses its own caller stops
+// waiting, and the collection carries on into the cache for whoever asks
+// next.
+func (c *issueCache) get(ctx context.Context, key string, compute func(context.Context) (*issues.Set, error)) (*issues.Set, bool, error) {
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
-		entry = &cachedIssues{}
+		entry = &cachedIssues{lock: make(chan struct{}, 1)}
 		c.byKey[key] = entry
 	}
 	c.mu.Unlock()
 
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.set != nil && c.now().Sub(entry.at) < issueRefresh {
+	select {
+	case entry.lock <- struct{}{}:
+		defer func() { <-entry.lock }()
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+
+	if entry.set != nil && c.now().Sub(entry.at) < c.ttl(entry.set) {
 		return entry.set, true, nil
 	}
-	set, err := compute()
+	// Detached here rather than by the caller: see sharedComputeContext.
+	computeCtx, cancel := sharedComputeContext(ctx, issueCollectTimeout)
+	defer cancel()
+	set, err := compute(computeCtx)
 	if err != nil {
 		// Serving the last good answer beats blanking the page when the
 		// schedd hiccups, the same trade the dashboard makes.
