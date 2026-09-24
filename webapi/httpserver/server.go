@@ -129,6 +129,11 @@ type Config struct {
 	DBMirrorRequired bool            // HTTP_API_DBMIRROR_REQUIRED
 	Logger           *logging.Logger // Logger instance (optional, creates default if nil)
 	JupyterWorkDir   string          // Per-instance scratch dir for JupyterLab submission artifacts; default <TempDir>/htcondor-api-jupyter
+	// JupyterMaxLifetimeSec is the wall-clock ceiling on a JupyterLab
+	// session, and JupyterKernelIdleSec the kernel-idle limit after
+	// which JupyterLab culls and shuts down. Zero disables either.
+	JupyterMaxLifetimeSec int
+	JupyterKernelIdleSec  int
 
 	// InteractiveExtraSubmit is an optional verbatim block of extra
 	// HTCondor submit-file directives merged into every
@@ -393,6 +398,8 @@ func NewServer(cfg Config) (*Server, error) {
 		KEKFilePath:                 cfg.KEKFilePath,
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
+		JupyterMaxLifetimeSec:       cfg.JupyterMaxLifetimeSec,
+		JupyterKernelIdleSec:        cfg.JupyterKernelIdleSec,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,

@@ -583,6 +583,37 @@ func loadJupyterWorkDir(cfg *config.Config) string {
 	return ""
 }
 
+// Defaults for the two JupyterLab session limits.
+//
+// The lifetime ceiling matches the interactive terminal's DefaultMaxLease:
+// both are "how long may one interactive slot be held", and a site that
+// wants them to differ can say so.
+const (
+	defaultJupyterMaxLifetimeSec = 8 * 60 * 60
+	defaultJupyterKernelIdleSec  = 60 * 60
+)
+
+// loadJupyterLimitSec reads one of the JupyterLab session limits, in
+// seconds. An explicit 0 turns the limit off, which is why this
+// distinguishes "unset" from "set to zero" rather than treating both as
+// "use the default".
+func loadJupyterLimitSec(cfg *config.Config, logger *logging.Logger, name string, def int) int {
+	v, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring an unreadable JupyterLab limit; using the default",
+				"parameter", name, "value", v, "default_seconds", def)
+		}
+		return def
+	}
+	return n
+}
+
 // loadTemplateGlobalPath resolves the YAML file (if any) the operator
 // has populated with shared batch-submission templates. Empty disables.
 func loadTemplateGlobalPath(cfg *config.Config) string {
@@ -1889,6 +1920,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IDPAccessTokenLifespan:     idpAccessLifespan,
 		IDPRefreshTokenLifespan:    idpRefreshLifespan,
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
+		JupyterMaxLifetimeSec:      loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
+		JupyterKernelIdleSec:       loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
 		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
 		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
@@ -2262,6 +2295,8 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		SeedDemoUser:           true,
 		IDPIssuer:              httpBaseURL,
 		JupyterWorkDir:         loadJupyterWorkDir(cfg),
+		JupyterMaxLifetimeSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
+		JupyterKernelIdleSec:   loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
 		HTCondorConfig:         cfg,

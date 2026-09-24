@@ -1,6 +1,7 @@
 package jupytertunnel
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +61,17 @@ type HelperConfig struct {
 	//
 	// Each successful Accept resets the deadline. Zero = no timeout.
 	IdleTimeout time.Duration
+
+	// TokenPath is where the helper writes a token the server hands it
+	// over the control channel. Empty means a received token is kept in
+	// memory only, which still survives a reconnect but not a restart of
+	// the helper itself.
+	TokenPath string
+
+	// OnNextToken, when set, is called with each token the server issues,
+	// after it has been persisted. A seam for tests, which have no
+	// business reading the helper's token file.
+	OnNextToken func(token string)
 }
 
 // RunHelperTunnel dials the upstream websocket, wraps it with yamux as the
@@ -150,6 +163,11 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	// minutes, not 60.
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
+	// Set when the watcher below gave up, so the caller can tell an idle
+	// session from a lost one. They look identical at the accept loop --
+	// both are a closed session -- and a reconnect loop that cannot tell
+	// them apart dials straight back in and defeats the timeout.
+	var idledOut atomic.Bool
 	if cfg.IdleTimeout > 0 {
 		go func() {
 			tickEvery := cfg.IdleTimeout / 4
@@ -167,6 +185,7 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 					if time.Since(last) > cfg.IdleTimeout {
 						logf("helper: idle timeout (%s with no streams); closing session",
 							cfg.IdleTimeout)
+						idledOut.Store(true)
 						_ = session.Close()
 						return
 					}
@@ -178,6 +197,9 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	for {
 		stream, err := session.Accept()
 		if err != nil {
+			if idledOut.Load() {
+				return ErrIdleTimeout
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logf("helper: session closed")
 				return nil
@@ -189,11 +211,59 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 		// helper's lifetime (gosec G118): cancelling ctx — which
 		// happens when the parent stops the tunnel — must also abort
 		// in-flight stream-handler dials.
-		go handleStream(ctx, stream, cfg.SocketPath, logf)
+		go handleOrControl(ctx, stream, cfg, logf)
 	}
 }
 
-func handleStream(ctx context.Context, stream net.Conn, socketPath string, logf func(string, ...any)) {
+// handleOrControl splits the control channel off from the proxy path.
+//
+// A control stream must never reach JupyterLab: it carries the token for the
+// next dial, and forwarding it would hand a live credential to the notebook
+// server (and, through it, to anything the notebook can reach).
+func handleOrControl(ctx context.Context, stream net.Conn, cfg HelperConfig, logf func(string, ...any)) {
+	br, isControl := peekControl(stream)
+	if !isControl {
+		handleBufferedStream(ctx, stream, br, cfg.SocketPath, logf)
+		return
+	}
+	defer func() { _ = stream.Close() }()
+	verb, arg, err := readControl(br)
+	if err != nil {
+		logf("helper: control stream unreadable: %v", err)
+		return
+	}
+	if verb != "next-token" || arg == "" {
+		logf("helper: ignoring unknown control verb %q", verb)
+		return
+	}
+	if err := persistToken(cfg.TokenPath, arg); err != nil {
+		// Not fatal to this session, which is already up. It costs the
+		// NEXT dial, so say so plainly rather than failing silently and
+		// leaving a session that cannot come back.
+		logf("helper: could not persist the next token; a reconnect will not authenticate: %v", err)
+	}
+	if cfg.OnNextToken != nil {
+		cfg.OnNextToken(arg)
+	}
+}
+
+// persistToken replaces the token file atomically.
+//
+// Atomically because the helper may be killed at any moment: a partially
+// written token is not merely stale, it is unusable, and the session it
+// belonged to could never reconnect.
+func persistToken(path, token string) error {
+	if path == "" {
+		return nil
+	}
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, []byte(token), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func handleBufferedStream(ctx context.Context, stream net.Conn, br *bufio.Reader, socketPath string, logf func(string, ...any)) {
 	defer func() { _ = stream.Close() }()
 	// Local UDS dial — no useful context lifetime to enforce, but the
 	// linter prefers DialContext. We thread the parent's ctx through
@@ -213,7 +283,11 @@ func handleStream(ctx context.Context, stream net.Conn, socketPath string, logf 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstream, stream)
+		// From br, not stream. Deciding whether this was a control
+		// stream meant peeking at its first bytes, and those now sit in
+		// br's buffer -- reading the raw stream here would skip them and
+		// hand JupyterLab a request with its method line chewed off.
+		_, _ = io.Copy(upstream, br)
 		// Stream EOF means the web-app peer closed the request body; we
 		// can shut down the write half of the UDS to let the upstream
 		// finish responding before we close.

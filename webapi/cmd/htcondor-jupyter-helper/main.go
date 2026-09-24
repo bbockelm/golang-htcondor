@@ -27,6 +27,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -35,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -123,7 +125,7 @@ func main() {
 		}
 	}
 
-	runTunnel(token, *upstream, *socketPath, *insecure, caBytes, *idleTimeout)
+	runTunnel(token, *upstream, *socketPath, *insecure, caBytes, *idleTimeout, *tokenFile)
 }
 
 // runStage1 does all the work that can fail loudly — reading the token
@@ -227,6 +229,14 @@ func runStage1(upstream, tokenFile, socketPath, logFile string, insecure bool, c
 		envDaemonStage2+"=1",
 		envDaemonToken+"="+token,
 	)
+	// Record the group we are in before the setsid below puts the daemon
+	// in a new one. This group is the job's -- stage 1 is a child of the
+	// launch script, which becomes JupyterLab -- and it is the only
+	// handle the detached daemon will have on the process that IS the
+	// job. See endsession.go.
+	if pgid := currentPGID(); pgid > 1 {
+		env = append(env, jobPGIDEnv+"="+strconv.Itoa(pgid))
+	}
 	if len(caBytes) > 0 {
 		env = append(env, envDaemonCABundle+"="+base64.StdEncoding.EncodeToString(caBytes))
 	}
@@ -317,7 +327,7 @@ func readAndUnlinkTokenFile(path string) (string, error) {
 	return tok, nil
 }
 
-func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte, idleTimeout time.Duration) {
+func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte, idleTimeout time.Duration, tokenPath string) {
 	if upstream == "" || socketPath == "" {
 		fmt.Fprintln(os.Stderr, "missing required flags")
 		os.Exit(2)
@@ -355,8 +365,75 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 		},
 	}
 
-	if err := jupytertunnel.RunHelperTunnel(ctx, cfg); err != nil {
-		log.Printf("tunnel exited: %v", err)
-		os.Exit(1)
+	cfg.TokenPath = tokenPath
+
+	// Reconnect rather than exit.
+	//
+	// The helper used to dial once and return, so an API server restart
+	// ended the session: the job kept running with JupyterLab up inside
+	// it and nothing left to reach it through, which is why sessions
+	// vanished across a restart while SSH ones did not. The server is
+	// reachable again within seconds of coming back, and the token handed
+	// over on the last connection is what authenticates the next one.
+	//
+	// Bounded by the job, not by this loop. The schedd's ceiling
+	// (periodic_remove) and JupyterLab's own idle shutdown both still
+	// apply, so a helper retrying into a server that never returns is
+	// reaped with the job rather than spinning forever.
+	backoff := reconnectMinBackoff
+	for {
+		err := jupytertunnel.RunHelperTunnel(ctx, cfg)
+		if ctx.Err() != nil {
+			// Asked to stop. Not a failure.
+			return
+		}
+		if errors.Is(err, jupytertunnel.ErrIdleTimeout) {
+			// The session went idle. Reconnecting would dial straight
+			// back in and make the timeout a no-op, and exiting alone
+			// would leave JupyterLab holding the slot -- which is what
+			// the idle timeout was always documented to prevent and
+			// never did, because the helper is not the job.
+			endSession("the session went idle")
+			return
+		}
+		if jupytertunnel.IsRejection(err) {
+			// The server is up and has refused this helper. No amount of
+			// retrying changes that -- re-issuing a token needs the
+			// authentication that just failed -- so the slot is freed now
+			// rather than held to the job's ceiling behind a JupyterLab
+			// nobody can reach.
+			endSession("the server rejected this helper's token, which cannot be retried past")
+			return
+		}
+		if err != nil {
+			log.Printf("tunnel exited: %v; reconnecting in %s", err, backoff)
+		} else {
+			log.Printf("tunnel closed; reconnecting in %s", backoff)
+		}
+		// Re-read the token: the server hands over a fresh one on every
+		// connection and the old one is spent, so retrying with the
+		// token this process started with would be refused forever.
+		if tokenPath != "" {
+			//nolint:gosec // tokenPath is this helper's own --token-file argument
+			if b, rerr := os.ReadFile(tokenPath); rerr == nil && len(b) > 0 {
+				cfg.Token = strings.TrimSpace(string(b))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > reconnectMaxBackoff {
+			backoff = reconnectMaxBackoff
+		}
 	}
 }
+
+// Reconnect pacing. The floor is short because the common case is a
+// server that is already back; the ceiling keeps a helper whose server is
+// gone for good from dialing in a tight loop for the rest of the job.
+const (
+	reconnectMinBackoff = 2 * time.Second
+	reconnectMaxBackoff = 60 * time.Second
+)

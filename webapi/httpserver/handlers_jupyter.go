@@ -68,12 +68,80 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 	if s.jupyterRegistry != nil {
 		return s.jupyterRegistry, nil
 	}
+	// A durable secret where there is a database to keep it in. Without
+	// one every token stops verifying when this process ends, which is
+	// what made a restart destroy every session: the job was still there,
+	// the helper still held its token, and nothing left could check it.
+	//
+	// Falling back to a per-process secret rather than failing: a
+	// deployment with no application database still gets working
+	// JupyterLab, just not one that survives a restart, and that is the
+	// behaviour it had before any of this.
+	store := s.jupyterSessionStore()
+	if store != nil {
+		secret, err := store.SigningSecret(context.Background())
+		if err == nil {
+			reg, rerr := jupytertunnel.NewRegistryWithSecret(secret, store)
+			if rerr == nil {
+				s.jupyterRegistry = reg
+				s.adoptJupyterSessions(context.Background(), reg, store)
+				return reg, nil
+			}
+			err = rerr
+		}
+		s.logger.Warn(logging.DestinationHTTP,
+			"jupyter: no durable signing secret; sessions will not survive a restart",
+			"error", err)
+	}
+
 	reg, err := jupytertunnel.NewRegistry()
 	if err != nil {
 		return nil, err
 	}
 	s.jupyterRegistry = reg
 	return reg, nil
+}
+
+// jupyterSessionStore is the durable session store, or nil when this
+// deployment has no application database.
+func (s *Handler) jupyterSessionStore() *jupyterStore {
+	if s.db == nil {
+		return nil
+	}
+	return newJupyterStore(s.db, s.sealer)
+}
+
+// adoptJupyterSessions puts back the sessions this process did not create.
+//
+// Their jobs are still running and their helpers are dialing back; without
+// this the dial lands on a registry that has never heard of the instance and
+// is refused, leaving a live JupyterLab unreachable until the job's ceiling
+// reaps it.
+//
+// Best-effort and non-fatal: a session that cannot be adopted is one the user
+// has to restart, which is where they already were.
+func (s *Handler) adoptJupyterSessions(ctx context.Context, reg *jupytertunnel.Registry, store *jupyterStore) {
+	rows, err := store.Live(ctx, time.Now())
+	if err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "jupyter: could not read stored sessions", "error", err)
+		return
+	}
+	var adopted int
+	for _, row := range rows {
+		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, map[string]string{
+			"cluster_id": strconv.Itoa(row.ClusterID),
+			"proc_id":    strconv.Itoa(row.ProcID),
+		}); err != nil {
+			s.logger.Warn(logging.DestinationHTTP, "jupyter: could not adopt a stored session",
+				"instance", row.InstanceID, "error", err)
+			continue
+		}
+		adopted++
+	}
+	if adopted > 0 {
+		s.logger.Info(logging.DestinationHTTP,
+			"Adopted JupyterLab sessions that outlived the last process", "count", adopted)
+	}
 }
 
 // handleJupyterPath dispatches /api/v1/jupyter/* paths. We register a single
@@ -612,6 +680,31 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Record the session before the job exists. A row with no job is
+	// swept; a job with no row is a session nobody can ever re-adopt,
+	// because the nonce it will present is only known here.
+	if store := s.jupyterSessionStore(); store != nil {
+		if nonce, ok := reg.PendingNonce(instID); ok {
+			ttl := time.Duration(s.jupyterMaxLifetimeSec) * time.Second
+			if ttl <= 0 {
+				ttl = time.Duration(defaultJupyterSessionTTLSec) * time.Second
+			}
+			if err := store.Put(r.Context(), jupyterSessionRow{
+				InstanceID: instID,
+				Owner:      username,
+				CreatedAt:  time.Now(),
+				ExpiresAt:  time.Now().Add(ttl),
+				NextNonce:  nonce,
+			}); err != nil {
+				// Not fatal: the session works, it just will not come
+				// back after a restart. Better than refusing to start it.
+				s.logger.Warn(logging.DestinationHTTP,
+					"jupyter: could not record the session; it will not survive a restart",
+					"instance", instID, "error", err)
+			}
+		}
+	}
+
 	// Resolve the upstream tunnel URL using the request's host. Production
 	// deployments behind a reverse proxy should set X-Forwarded-Proto/Host
 	// or rely on httpBaseURL (TODO: prefer httpBaseURL when set).
@@ -647,9 +740,18 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		// jupyter-lab inside the sandbox failed at startup (e.g.
 		// AF_UNIX path too long) but kept the slot held — without
 		// this, the job would sit there until condor's own walltime
-		// limit. 30 min is generous enough that an active iframe
-		// (which heartbeats kernels every ~30 s) is never reaped.
+		// limit.
+		//
+		// This catches a CLOSED tab and nothing else. An open one
+		// heartbeats its kernels every ~30s whether or not a human is
+		// there, so traffic never stops and this timer never fires --
+		// which is why an abandoned session could sit for hours. The
+		// kernel-idle and lifetime limits below are what cover that.
 		HelperIdleTimeoutSec: 30 * 60,
+		// JupyterLab's own idleness, which it measures from kernel
+		// execution rather than from HTTP traffic, so a tab polling in
+		// the background does not look busy.
+		KernelIdleTimeoutSec: s.jupyterKernelIdleSec,
 	}
 	if len(caCertBytes) > 0 {
 		// The launcher passes this path (relative to the sandbox cwd)
@@ -670,6 +772,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	submitFile := buildJupyterSubmitFile(jupyterSubmitArgs{
 		InstanceID:            instID,
+		MaxLifetimeSec:        s.jupyterMaxLifetimeSec,
 		Image:                 req.Image,
 		Cpus:                  req.Cpus,
 		MemoryMB:              req.MemoryMB,
@@ -895,6 +998,11 @@ type jupyterSubmitArgs struct {
 	// FS makes the spool fail; staging a file in the FS that's not
 	// here means it never reaches the worker.
 	TransferInputFiles []string
+
+	// MaxLifetimeSec, when > 0, is the wall-clock ceiling on the
+	// session, enforced by the schedd rather than by anything inside
+	// the sandbox. See jupyterPeriodicRemove.
+	MaxLifetimeSec int
 }
 
 // buildJupyterSubmitFile produces the HTCondor submit file for a Jupyter
@@ -954,6 +1062,27 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 	}
 	fmt.Fprintf(&sb, "requirements = %s\n\n", req)
 
+	// Name the batch so the jobs page and condor_q -batch say what this
+	// job is. Without it a JupyterLab session shows up as a bare
+	// jupyter-launch.sh among the user's real work, which is what made
+	// them look strange.
+	fmt.Fprintf(&sb, "batch_name = %s\n", jupyterBatchName(a.InstanceID))
+
+	// A ceiling the sandbox cannot talk its way out of.
+	//
+	// The helper's idle timer measures traffic through the tunnel, and a
+	// JupyterLab tab left open in a browser generates traffic forever --
+	// it heartbeats its kernels every ~30s whether or not a human is
+	// there. So the idle timer reaps a closed tab and never reaps an
+	// abandoned one, which is how a session survives for hours with
+	// nobody at it.
+	//
+	// periodic_remove is evaluated by the schedd, so it holds whatever
+	// the sandbox, the helper or the browser are doing.
+	if expr := jupyterPeriodicRemove(a.MaxLifetimeSec); expr != "" {
+		fmt.Fprintf(&sb, "%s\n", expr)
+	}
+
 	fmt.Fprintf(&sb, "log    = jupyter.log\n")
 	fmt.Fprintf(&sb, "output = jupyter.out\n")
 	fmt.Fprintf(&sb, "error  = jupyter.err\n")
@@ -999,6 +1128,78 @@ func jupyterRequirementsExpr(goos, goarch string) string {
 	return fmt.Sprintf(`(%s)`, arch)
 }
 
+// defaultJupyterSessionTTLSec bounds a stored session where the operator
+// turned the job ceiling off. The row still has to expire: it is what the
+// sweeper deletes on, and without a horizon the credential store grows for
+// the life of the deployment.
+const defaultJupyterSessionTTLSec = 24 * 60 * 60
+
+// jupyterBatchPrefix marks a job as a JupyterLab session by
+// JobBatchName. Also the beginning of putting the session's identity
+// where it survives this process: the queue, rather than only the
+// in-memory tunnel registry.
+const jupyterBatchPrefix = "htcondor-api-jupyter-"
+
+// jupyterBatchName names the batch after the instance it serves. The id
+// is trimmed because a batch name is read at a glance in a queue
+// listing, and the full hex is not.
+func jupyterBatchName(instanceID string) string {
+	short := instanceID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	if short == "" {
+		return strings.TrimSuffix(jupyterBatchPrefix, "-")
+	}
+	return jupyterBatchPrefix + short
+}
+
+// jupyterPeriodicRemove is the schedd-side ceiling on a session.
+//
+// Measured from JobStartDate rather than QDate: the ceiling is on how
+// long a session runs, and time spent idle in the queue waiting for a
+// slot is not the user's session. Guarded on JobStartDate being set,
+// because the expression is evaluated for a job that has not started
+// and "time() - undefined" is undefined, not false.
+//
+// Returns "" for a non-positive limit, which is how an operator turns
+// the ceiling off.
+func jupyterPeriodicRemove(maxLifetimeSec int) string {
+	if maxLifetimeSec <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"periodic_remove = (JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d)",
+		maxLifetimeSec)
+}
+
+// jupyterIdleFlags are the JupyterLab options that make an abandoned
+// session shut itself down.
+//
+// cull_connected is the load-bearing one. A tab left open holds a
+// connection to its kernel, and culling skips connected kernels by
+// default -- so without it the one case this is meant to catch, a
+// browser nobody is sitting at, is exactly the case that survives.
+//
+// Culling turns on kernel idleness, which JupyterLab measures from
+// execution state rather than from HTTP traffic, so the tab's own
+// polling does not keep it alive. shutdown_no_activity_timeout then
+// ends the server once the last kernel has gone.
+func jupyterIdleFlags(idleSec int) string {
+	if idleSec <= 0 {
+		return ""
+	}
+	interval := idleSec / 4
+	if interval < 60 {
+		interval = 60
+	}
+	return fmt.Sprintf(` \
+    --MappingKernelManager.cull_idle_timeout=%d \
+    --MappingKernelManager.cull_interval=%d \
+    --MappingKernelManager.cull_connected=True \
+    --ServerApp.shutdown_no_activity_timeout=%d`, idleSec, interval, idleSec)
+}
+
 // runtimeGOARCH / runtimeGOOS are broken out so a test can override
 // them. We use atomic.Value rather than reading runtime.* directly so
 // the override path is race-safe.
@@ -1034,13 +1235,23 @@ type jupyterLaunchScriptArgs struct {
 	// API server is configured with TLSCACertFile (e.g. the demo's
 	// auto-generated CA). Empty = rely on the sandbox's system CAs.
 	CAFile string
+	// KernelIdleTimeoutSec, when > 0, culls a kernel that has not
+	// executed anything for that long and shuts the server down once no
+	// kernels remain. See jupyterIdleFlags.
+	KernelIdleTimeoutSec int
+
 	// HelperIdleTimeoutSec, when > 0, makes the helper close the
 	// tunnel (and exit) when no yamux stream has been accepted from
 	// the API server within that many seconds. Used as an
 	// auto-shutdown for jupyter-lab failures: if the user never opens
 	// the iframe — or the iframe loads against a broken jupyter and
-	// stops retrying — the helper times out and the job ends instead
+	// stops retrying — the helper times out and ends the job instead
 	// of holding the slot indefinitely.
+	//
+	// "Ends the job" is now true. The helper is setsid'd and JupyterLab
+	// is the exec'd main process, so the helper exiting used to free
+	// nothing: the tunnel went and the slot stayed. It now signals the
+	// job's process group. See endsession.go in the helper.
 	HelperIdleTimeoutSec int
 }
 
@@ -1210,8 +1421,9 @@ exec "$@" \
     --ServerApp.base_url=%q \
     --ServerApp.allow_origin=%q \
     --ServerApp.disable_check_xsrf=True \
-    --ServerApp.allow_remote_access=True
-`, setup, a.UpstreamURL, caFlag, idleFlag, a.BaseURL, a.AllowOrigin)
+    --ServerApp.allow_remote_access=True%s
+`, setup, a.UpstreamURL, caFlag, idleFlag, a.BaseURL, a.AllowOrigin,
+		jupyterIdleFlags(a.KernelIdleTimeoutSec))
 }
 
 // buildJupyterTunnelURL derives the wss://.../tunnel URL the helper should
@@ -1292,6 +1504,19 @@ func (s *Handler) handleJupyterTunnel(w http.ResponseWriter, r *http.Request, id
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "jupyter tunnel up", "instance", id, "owner", inst.Owner)
+
+	// Hand the helper the token for its next dial. Best-effort: this
+	// session is up and refusing it over a token the helper will not need
+	// until the next reconnect would turn a future inconvenience into a
+	// present outage. It is logged because a session that cannot come
+	// back is worth knowing about before the restart that proves it.
+	if next := inst.NextToken(); next != "" {
+		if err := jupytertunnel.SendNextToken(inst, next); err != nil {
+			s.logger.Warn(logging.DestinationHTTP,
+				"jupyter: could not hand the helper its next token; this session will not survive a restart",
+				"instance", id, "error", err)
+		}
+	}
 	// Hold the upgraded request open until the tunnel closes; otherwise
 	// the http server tears down the underlying TCP and yamux dies.
 	inst.Wait()
