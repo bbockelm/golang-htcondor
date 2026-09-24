@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import path from 'node:path';
+
 import { installApiFixtures } from './fixtures/api';
 
 // Fail-fast suite: does each page render against known-good data?
@@ -197,4 +199,143 @@ test('a goodput failure drills into the archive, not the queue', async ({ page }
   await expect(page).toHaveURL(/\/archive\?constraint=/);
   await expect(page.getByText(/Showing jobs that exited 127/)).toBeVisible();
   await expect(page.getByRole('link', { name: 'show all history' })).toBeVisible();
+});
+
+// --- Job detail: the panels that depend on the job's universe -------
+//
+// The static export has one page per route, so /jobs/12.0 is not a file
+// on disk -- the placeholder /jobs/_ is, and in production the Go SPA
+// handler answers every /jobs/<id> with it (webui/handler.go,
+// resolveDynamicRoute). `serve out` does not, so these tests do the
+// same substitution at the network layer. The page reads the real id
+// off the URL (useResolvedParams), which is exactly what is being
+// relied on here.
+async function openJobPage(
+  page: import('@playwright/test').Page,
+  id: string,
+  ad: Record<string, unknown>,
+) {
+  const placeholder = path.join(__dirname, '..', 'out', 'jobs', '_.html');
+  await page.route(`**/jobs/${id}`, async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.route(`**/api/v1/jobs/${id}`, (route) => route.fulfill({ json: ad }));
+  await page.goto(`/jobs/${id}`);
+}
+
+const startedRecently = Math.floor(Date.now() / 1000) - 300;
+
+// A running DAGMan manager: scheduler universe, so the schedd refuses
+// GET_JOB_CONNECT_INFO for it (schedd.cpp:18673) and neither tail nor
+// ssh can ever work. Its output is not lost -- it is written in place
+// in the spool as it runs, which is what makes the download meaningful
+// while the job is still going.
+const dagmanManagerAd = {
+  ClusterId: 77,
+  ProcId: 0,
+  JobStatus: 2,
+  JobUniverse: 7,
+  Owner: 'e2e',
+  Cmd: '/usr/bin/condor_dagman',
+  Arguments: '-p 0 -f -l . -Lockfile diamond.dag.lock -Dag diamond.dag',
+  Environment: '_CONDOR_DAGMAN_LOG=diamond.dagman.out _CONDOR_MAX_DAGMAN_LOG=0',
+  // Spooled: the schedd rewrote Iwd to the spool and kept the
+  // submit-time one in SUBMIT_Iwd. That is what puts the workflow's
+  // files somewhere this server can read them.
+  Iwd: '/var/lib/condor/spool/77/0/cluster77.proc0.subproc0',
+  SUBMIT_Iwd: '/home/e2e/dags',
+  QDate: startedRecently - 60,
+  JobStartDate: startedRecently,
+};
+
+test('a scheduler-universe job page offers no tail or terminal', async ({ page }) => {
+  await openJobPage(page, '77.0', dagmanManagerAd);
+
+  // The job is running, so both panels used to render: Live Tail with
+  // its button, Terminal with "Available while the job is running".
+  // Both are permanently impossible here.
+  await expect(page.getByRole('heading', { name: 'Output Files' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Live Tail' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Terminal', exact: true })).toHaveCount(0);
+
+  // And the download that replaces them is offered -- as a link, not
+  // the disabled button -- and says what it is.
+  await expect(page.getByRole('link', { name: 'Download as tar' })).toBeVisible();
+  await expect(page.getByText(/live snapshot/i)).toBeVisible();
+});
+
+test('a vanilla-universe job keeps the tail and waits for its output', async ({ page }) => {
+  await openJobPage(page, '78.0', {
+    ...dagmanManagerAd,
+    ClusterId: 78,
+    JobUniverse: 5,
+    Cmd: '/bin/sleep',
+    Arguments: '600',
+    Environment: '',
+  });
+
+  // First run, still going: nothing has transferred back, so the
+  // download is the disabled button rather than a link.
+  await expect(page.getByRole('link', { name: 'Download as tar' })).toHaveCount(0);
+  await expect(page.getByText(/output files appear once it completes/i)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Live Tail' })).toBeVisible();
+});
+
+test('a running DAGMan manager surfaces its workflow log', async ({ page }) => {
+  await page.route('**/api/v1/jobs/*/files/diamond.dagman.out', (route) =>
+    route.fulfill({
+      contentType: 'text/plain',
+      body: '09/23/26 12:00:00 Submitting HTCondor Node A job(s)...\n',
+    }),
+  );
+  await openJobPage(page, '77.0', dagmanManagerAd);
+
+  // The name comes from _CONDOR_DAGMAN_LOG in the environment, not
+  // from the -Dag argument: the two producers disagree about it, and
+  // deriving diamond.dag.dagman.out here would fetch a file that this
+  // submitter never wrote.
+  await expect(page.getByRole('heading', { name: 'Workflow log' })).toBeVisible();
+  const summary = page.getByText('diamond.dagman.out', { exact: false }).first();
+  await expect(summary).toBeVisible();
+
+  // Explicit load: nothing is fetched until the user opens it, because
+  // every fetch re-transfers the workflow's whole spool.
+  await summary.click();
+  await expect(page.getByText(/Submitting HTCondor Node A/)).toBeVisible();
+  await expect(page.getByText(/re-fetches the workflow's spool/)).toBeVisible();
+});
+
+// The same manager submitted the ordinary way: `condor_submit_dag` from
+// a shell on the access point, no spooling. Iwd is the user's own
+// directory, the schedd's spool for the job is empty, and every fetch
+// through this server 404s -- so the panel has to say where the log is
+// instead of offering to load it.
+test('a shell-submitted workflow says where its log is', async ({ page }) => {
+  const { SUBMIT_Iwd: _spooled, ...notSpooled } = dagmanManagerAd;
+  await openJobPage(page, '79.0', {
+    ...notSpooled,
+    ClusterId: 79,
+    Iwd: '/home/e2e/dags',
+  });
+
+  await expect(page.getByRole('heading', { name: 'Workflow log' })).toBeVisible();
+  // Scoped to the explanation itself: the Iwd also shows up in the
+  // execution table and the raw ClassAd, so a page-wide text match
+  // would pass with the sentence missing entirely.
+  const explanation = page.getByText(/submitted from a shell on the access point/);
+  await expect(explanation).toBeVisible();
+  await expect(explanation).toContainText('diamond.dagman.out');
+  await expect(explanation).toContainText('/home/e2e/dags');
+  await expect(explanation).toContainText('condor_q -better-analyze');
+  // No viewer, so no way to ask for a fetch that cannot work.
+  await expect(page.getByRole('button', { name: 'Refresh' })).toHaveCount(0);
+  await expect(page.getByText(/re-fetches the workflow's spool/)).toHaveCount(0);
+
+  // And the download the scheduler-universe branch offers is gone too:
+  // there is nothing in the spool to download.
+  await expect(page.getByRole('link', { name: 'Download as tar' })).toHaveCount(0);
 });

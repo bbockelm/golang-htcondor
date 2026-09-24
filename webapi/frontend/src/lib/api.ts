@@ -1096,6 +1096,19 @@ export const api = {
     stderrText: (id: string, cap = 1 << 20) =>
       fetchTextWithCap(`${BASE}/jobs/${encodeURIComponent(id)}/stderr`, cap),
 
+    // One named file out of the job's sandbox / spool. The server has
+    // no single-file protocol to the schedd: every one of these
+    // re-fetches the job's whole changed-file set and streams the one
+    // entry out of it, so callers should fetch on demand rather than
+    // on a timer.
+    fileUrl: (id: string, name: string): string =>
+      `${BASE}/jobs/${encodeURIComponent(id)}/files/${encodeURIComponent(name)}`,
+    fileText: (id: string, name: string, cap = 1 << 20) =>
+      fetchTextWithCap(
+        `${BASE}/jobs/${encodeURIComponent(id)}/files/${encodeURIComponent(name)}`,
+        cap,
+      ),
+
     // Live-tail stdout / stderr from the running job's sandbox via
     // the schedd's STARTER_PEEK protocol — the same protocol
     // condor_tail uses. Pass back the previous response's offsets to

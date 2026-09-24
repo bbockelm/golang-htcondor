@@ -268,9 +268,11 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
       <OutputFilesPanel jobID={jobID} status={status} job={job} />
 
-      <LiveTailPanel jobID={jobID} status={status} />
+      <WorkflowLogPanel jobID={jobID} job={job} />
 
-      <TerminalPanel jobID={jobID} status={status} />
+      <LiveTailPanel jobID={jobID} status={status} job={job} />
+
+      <TerminalPanel jobID={jobID} status={status} job={job} />
 
       <LogViewerPanel jobID={jobID} />
 
@@ -374,6 +376,19 @@ function buildJobChatContext(jobID: string, job: ClassAd): string {
         | undefined,
     });
     parts.push(`status=${display.label} (JobStatus=${status})`);
+  }
+  // Universe, because it decides which of the tools the model has are
+  // even possible: run_in_job and ssh-to-job need a starter, and
+  // scheduler / grid universe never have one. Without this the model
+  // proposed run_in_job for a running DAGMan manager on every turn.
+  const universe = num(job.JobUniverse);
+  if (universe !== undefined) {
+    parts.push(
+      `universe=${universeLabel(universe)} (JobUniverse=${universe})` +
+        (supportsRemoteAccess(job)
+          ? ''
+          : ' — no starter: run_in_job and ssh-to-job are unavailable for this universe'),
+    );
   }
   const owner = str(job.Owner);
   if (owner) parts.push(`owner=${owner}`);
@@ -697,16 +712,24 @@ function clampInt(
 function TerminalPanel({
   jobID,
   status,
+  job,
 }: {
   jobID: string;
   status: number | undefined;
+  job: ClassAd;
 }) {
   const [open, setOpen] = useState(false);
 
   // condor_ssh_to_job only works while the job is Running (2) or
   // Transferring Output (6). Anything else, surface a hint and don't even
   // mount the WebSocket.
-  const canSSH = status === 2 || status === 6;
+  const canSSH = (status === 2 || status === 6) && supportsRemoteAccess(job);
+
+  // Scheduler and grid universe have no starter to ssh into, ever. The
+  // card used to render anyway with "Available while the job is
+  // running" -- which for a scheduler-universe job that IS running
+  // reads as a bug in the page rather than as a property of the job.
+  if (!supportsRemoteAccess(job)) return null;
 
   return (
     <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
@@ -757,13 +780,13 @@ function TerminalPanel({
 // the download for exactly the case where somebody is trying to find
 // out what the failed attempt produced.
 //
-// So the gate is "has this job ever run", which the ad answers durably:
-// the schedd writes JobStartDate into the queue when it spawns the
-// shadow. What that cannot promise is that files are actually there --
-// nothing transfers back from an attempt still running, and a job held
-// before it started has nothing -- so the hint says "may" and the
-// download is allowed to come back empty rather than being refused
-// here on a guess.
+// So the gate is "has this job ever run, in an attempt that is over" --
+// plus scheduler universe, which writes into its spool as it goes and
+// so has files to serve while it is still running. outputReadiness()
+// below everRan() is where that lives, along with the wording; what it
+// cannot promise is that files are actually there, so the hint says
+// "may" and the download is allowed to come back empty rather than
+// being refused here on a guess.
 function OutputFilesPanel({
   jobID,
   status,
@@ -785,22 +808,7 @@ function OutputFilesPanel({
       setShare({ url: resp.url, expires: new Date(resp.expires_at) }),
   });
 
-  // 3 = Removed, 4 = Completed. Both terminal; both have had their
-  // chance to leave files behind.
-  const finished = status === 3 || status === 4;
-  const ran = job ? everRan(job) : false;
-  const ready = finished || ran;
-  const hint = finished
-    ? null
-    : ran
-      ? 'From an earlier run attempt; may be empty or partial.'
-      : status === 1
-        ? 'Job is idle and has not run yet; output files appear once it runs.'
-        : status === 2
-          ? 'Job is running; output files appear once it completes.'
-          : status === 5
-            ? 'Job is held and has not run yet; output files appear once it runs.'
-            : 'Output files appear once the job runs.';
+  const { ready, hint } = outputReadiness(job, status);
 
   const handleCopy = () => {
     if (!share) return;
@@ -910,9 +918,11 @@ function OutputFilesPanel({
 function LiveTailPanel({
   jobID,
   status,
+  job,
 }: {
   jobID: string;
   status: number | undefined;
+  job: ClassAd;
 }) {
   const isRunning = status === 2;
 
@@ -1030,10 +1040,14 @@ function LiveTailPanel({
     setError(null);
   };
 
-  // Hide entirely until the job is running. Live tail only works
-  // against a live starter, and showing a permanently-disabled
-  // panel for idle / completed jobs is just visual noise.
-  if (!isRunning) return null;
+  // Hide entirely until the job is running, and for the universes with
+  // no starter behind them. Live tail only works against a live
+  // starter: the schedd refuses GET_JOB_CONNECT_INFO for scheduler and
+  // grid universe outright, so offering the button there buys the user
+  // a 409 and nothing else. (A scheduler-universe job's output is not
+  // lost -- it is in the spool, and the Output Files panel above
+  // serves it live.)
+  if (!isRunning || !supportsRemoteAccess(job)) return null;
 
   // Job is running but the user hasn't engaged yet: show a single
   // affordance, no expansion. Clicking the button engages and starts
@@ -1163,26 +1177,38 @@ function LiveTailPanel({
 // stderr file and renders it inside a collapsible <details>. We
 // trigger the fetch on first open so unrelated detail-page traffic
 // doesn't churn the schedd retrieving big files nobody asked for.
+// `caption` is a one-line note rendered under the content -- used to
+// say what a fetch costs where that isn't obvious. `refreshable` adds a
+// Refresh button for content that changes under a job that is still
+// running; deliberately opt-in and deliberately not a timer.
 function OutputStreamPreview({
   label,
   fetcher,
+  caption,
+  refreshable = false,
 }: {
-  label: 'stdout' | 'stderr';
+  label: string;
   fetcher: () => Promise<{ text: string; truncated: boolean }>;
+  caption?: string;
+  refreshable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<{ text: string; truncated: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const load = () => {
-    if (data || loading) return;
+  const fetchNow = () => {
     setLoading(true);
     setError(null);
     fetcher()
       .then((res) => setData(res))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
+  };
+
+  const load = () => {
+    if (data || loading) return;
+    fetchNow();
   };
 
   return (
@@ -1222,8 +1248,71 @@ function OutputStreamPreview({
           // contract.
           <p className="text-xs text-gray-500">Click to load.</p>
         )}
+        {open && (refreshable || caption) && (
+          <div className="mt-2 flex items-center gap-3">
+            {refreshable && (
+              <button
+                type="button"
+                onClick={fetchNow}
+                disabled={loading}
+                className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {loading ? 'Loading…' : 'Refresh'}
+              </button>
+            )}
+            {caption && <span className="text-[11px] text-gray-500">{caption}</span>}
+          </div>
+        )}
       </div>
     </details>
+  );
+}
+
+// WorkflowLogPanel surfaces a DAGMan manager's own log -- the
+// *.dagman.out that says which nodes were submitted, which failed and
+// what the manager is waiting on. Nothing else on the page answers
+// "what is this workflow doing right now": the manager is a
+// scheduler-universe job, so there is no starter, no tail and no
+// terminal, and the useful file is simply sitting in the spool.
+//
+// Fetched only when the user opens it and only again when they ask.
+// There is no single-file protocol between this server and the schedd:
+// each of these re-transfers the whole set of files the job has changed
+// since it started, so a poll loop here would be a poll loop over the
+// entire workflow's spool. The caption says as much rather than leaving
+// the cost invisible.
+function WorkflowLogPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
+  // Scheduler universe is the manager; a DAGMan *node* job carries none
+  // of these attributes and gets nothing here.
+  if (num(job.JobUniverse) !== 7) return null;
+  const { available, name, reason } = workflowLogAvailability(job);
+  if (!name) return null;
+
+  return (
+    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-gray-900">Workflow log</h2>
+        {available && (
+          <span className="text-xs text-gray-400">
+            DAGMan manager output, from the job&apos;s spool.
+          </span>
+        )}
+      </div>
+      {available ? (
+        <OutputStreamPreview
+          label={name}
+          refreshable
+          caption="Each load re-fetches the workflow's spool from the access point."
+          fetcher={() => api.jobs.fileText(jobID, name)}
+        />
+      ) : (
+        // Not hidden: the panel's job is to answer "where is my DAG's
+        // log", and for a shell-submitted workflow the answer is a
+        // path, not a viewer. Offering a load button here would just
+        // buy the user a 404 from the schedd's empty spool.
+        <p className="text-xs text-gray-600">{reason}</p>
+      )}
+    </div>
   );
 }
 
@@ -1957,6 +2046,162 @@ export function everRan(job: ClassAd): boolean {
     if (n !== undefined && n > 0) return true;
   }
   return false;
+}
+
+// outputReadiness decides whether the Output Files panel may offer the
+// download, and what it should say about what the user will get.
+//
+// It exists because everRan() alone is not that answer. everRan is true
+// for the run happening RIGHT NOW -- the schedd writes JobStartDate
+// when it spawns the shadow, not when the job ends -- so a job on its
+// first attempt satisfied the old gate and got a live download button
+// labelled "From an earlier run attempt", which is both wrong and, for
+// most universes, empty: nothing transfers back until the job finishes.
+//
+// Two states earn the download before the job is over:
+//
+//   - a PRIOR attempt: the job ran and is back in the queue (idle,
+//     held, whatever). There may be a sandbox from the attempt that
+//     ended, and greying the button out here hides exactly what
+//     somebody investigating a failed attempt came for.
+//   - a SPOOLED SCHEDULER-universe job: it runs on the access point
+//     under the schedd with Iwd rewritten to its spool directory, so
+//     its files are written in place as it runs (schedd.cpp:12601) and
+//     the schedd serves them for a running job with no status check
+//     (schedd.cpp:6825). There is no transfer to wait for; the
+//     download is a live snapshot and must stay offered.
+//
+//     Spooled is the load-bearing word. A scheduler-universe job
+//     submitted from a shell on the access point (plain
+//     condor_submit_dag) keeps the user's directory as its Iwd and
+//     writes there, where nothing reachable from here can read it --
+//     so it gets the ordinary "wait for it to finish" treatment
+//     rather than a download that would come back empty.
+export function outputReadiness(
+  job: ClassAd | undefined,
+  status: number | undefined,
+): { ready: boolean; hint: string | null } {
+  // 3 = Removed, 4 = Completed. Both terminal; both have had their
+  // chance to leave files behind.
+  const finished = status === 3 || status === 4;
+  // 2 = Running, 6 = Transferring Output, 7 = Suspended. In all three
+  // the job is inside an attempt, so everRan is describing that
+  // attempt rather than an earlier one.
+  const running = status === 2 || status === 6 || status === 7;
+  const priorAttempt = !running && !!job && everRan(job);
+  const spoolLive = !!job && num(job.JobUniverse) === 7 && isSpooledJob(job);
+  const ready = finished || priorAttempt || spoolLive;
+
+  const hint = finished
+    ? null
+    : spoolLive && running
+      ? 'Scheduler-universe job: its files are written in the spool while it runs, so this is a live snapshot.'
+      : running
+        ? 'Job is running; output files appear once it completes.'
+        : priorAttempt
+          ? 'From an earlier run attempt; may be empty or partial.'
+          : status === 1
+            ? 'Job is idle and has not run yet; output files appear once it runs.'
+            : status === 5
+              ? // Not "has not run yet": a job held after an attempt
+                // reaches priorAttempt above, so this branch is only
+                // for one held before it ever started -- but saying so
+                // was wrong for every held job the old wording covered.
+                'Job is held; output files appear once it runs.'
+              : 'Output files appear once the job runs.';
+
+  return { ready, hint };
+}
+
+// supportsRemoteAccess reports whether condor_tail / condor_ssh_to_job
+// can reach this job at all.
+//
+// Both go through the schedd's GET_JOB_CONNECT_INFO, whose universe
+// switch (condor_schedd.V6/schedd.cpp:18673) answers "Job N.M does not
+// support remote access." for SCHEDULER (7) and GRID (9): the first
+// runs on the access point as a child of the schedd, the second on
+// somebody else's batch system, and neither has a starter to connect
+// to. Every other universe it handles is reachable -- LOCAL (12)
+// included, which does run under a starter even though it runs on the
+// access point, so it must not be swept in with scheduler universe.
+//
+// An ad without JobUniverse reads as supported: the panels below gate
+// on the job also being in a running state, and guessing "unsupported"
+// from a missing attribute would hide a working terminal.
+export function supportsRemoteAccess(job: ClassAd): boolean {
+  const u = num(job.JobUniverse);
+  return u !== 7 && u !== 9;
+}
+
+// dagmanLogName returns the name of the DAGMan workflow log for a
+// DAGMan manager job, or undefined when the job is not one.
+//
+// The name is not derivable from the DAG file alone, because the two
+// things that submit a manager here disagree about it: condor_submit_dag
+// writes <dagfile>.dagman.out (diamond.dag.dagman.out), while this
+// project's submit_dag writes <base>.dagman.out (diamond.dagman.out).
+// Both, however, set _CONDOR_DAGMAN_LOG in the job's environment to the
+// name they actually used, so that is the authoritative source and the
+// -Dag argument is only the fallback.
+export function dagmanLogName(job: ClassAd): string | undefined {
+  const cmd = str(job.Cmd) ?? '';
+  const args = str(job.Arguments) ?? str(job.Args) ?? '';
+  const isManager = /(^|\/)condor_dagman$/.test(cmd) || /(^|\s)-[Dd]ag(\s|$)/.test(args);
+  if (!isManager) return undefined;
+
+  // Environment is HTCondor's space-separated name=value form; values
+  // containing spaces are single-quoted. A log file name with a space
+  // in it is not worth the parser, so stop at whitespace or a quote.
+  const env = str(job.Environment) ?? str(job.Env) ?? '';
+  const fromEnv = env.match(/_CONDOR_DAGMAN_LOG=([^\s'"]+)/);
+  if (fromEnv) return fromEnv[1];
+
+  const dagFile = args.match(/-[Dd]ag\s+(\S+)/);
+  if (dagFile) {
+    // condor_submit_dag's convention: append, don't replace.
+    const base = dagFile[1].split('/').pop();
+    if (base) return `${base}.dagman.out`;
+  }
+  return undefined;
+}
+
+// isSpooledJob reports whether the schedd moved this job's files into
+// its spool directory at submit time (condor_submit -spool, and
+// anything built on it).
+//
+// SUBMIT_Iwd is the signal, and it is an exact one: the schedd's
+// rewriteSpooledJobAd (qmgmt.cpp ~8788) backs the submit-time Iwd up
+// into SUBMIT_Iwd precisely when it rewrites Iwd to point at the
+// spool. Its presence therefore means "Iwd IS the spool directory",
+// which is the whole reason this server can read the job's files at
+// all; its absence means the files are in a directory on the access
+// point that nothing here can reach.
+export function isSpooledJob(job: ClassAd): boolean {
+  return typeof job.SUBMIT_Iwd === 'string' && job.SUBMIT_Iwd !== '';
+}
+
+// workflowLogAvailability answers whether the Workflow log panel can
+// actually show a DAGMan manager's log, and if not, what to tell the
+// user instead. Returning the reason rather than hiding the panel is
+// deliberate: "where is my DAG's log" is the question the panel exists
+// to answer, and going silent answers it worse than a sentence naming
+// the directory the log is in.
+export function workflowLogAvailability(job: ClassAd): {
+  available: boolean;
+  name?: string;
+  reason?: string;
+} {
+  const name = dagmanLogName(job);
+  if (!name) return { available: false };
+  if (isSpooledJob(job)) return { available: true, name };
+  return {
+    available: false,
+    name,
+    reason:
+      `This workflow was submitted from a shell on the access point, so its log (${name}) is in ` +
+      `${str(job.Iwd) ?? 'the submit directory'} and is not readable through this server. ` +
+      `Use condor_q -better-analyze / the access point directly.`,
+  };
 }
 
 function fmtRequested(v: unknown): string {
