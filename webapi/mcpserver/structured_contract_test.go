@@ -471,7 +471,8 @@ func emptyCases(t *testing.T) []emptyCase {
 		// what the analysis returns when it found nothing.
 		{"submit_dag", map[string]interface{}{
 			"cluster_id": 0, "job_id": "0.0", "dag_name": "workflow.dag",
-			"input_files": []string(nil), "notes": []string(nil), "deferred": []string(nil)}},
+			"input_files": []string(nil), "notes": []string(nil), "deferred": []string(nil),
+			"node_constraint": "DAGManJobId == 0"}},
 		{"build_container", structuredOf(buildContainerResult(0, "", "", "", 0, 0, 0))},
 		{"remove_job", map[string]interface{}{"job_id": "1.0", "action": "remove", "success": true}},
 		{"hold_job", map[string]interface{}{"job_id": "1.0", "action": "hold", "success": true}},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -189,8 +190,29 @@ func TestSubmitDagDescriptionReachesTheModelAsLines(t *testing.T) {
 		if !strings.Contains(desc, "\n  SUBMIT-DESCRIPTION work {\n") {
 			t.Errorf("the example is not laid out as lines:\n%s", desc)
 		}
-		if !strings.Contains(desc, `arguments = "-c 'echo hi'"`) {
+		if !strings.Contains(desc, `arguments = "-c 'echo hi > out_$(sample).txt'"`) {
 			t.Errorf("the example's quoting did not survive encoding:\n%s", desc)
+		}
+		// The example is a fan-out/gather, which is the shape nearly every
+		// real workflow has: one description per stage, VARS per node, and
+		// a gather node reading what they produced. An example without it
+		// teaches the one shape that needs no thought.
+		for _, want := range []string{"\n  VARS A sample=\"1\"\n", "transfer_output_files = out_$(sample).txt",
+			"transfer_input_files = out_1.txt, out_2.txt", "PARENT A B CHILD GATHER"} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("the example does not show %q:\n%s", want, desc)
+			}
+		}
+		// And it says how the files actually move between stages, and
+		// which of them arrive runnable.
+		for _, want := range []string{
+			"Node outputs land in the workflow's directory.",
+			"declare it in the producer's transfer_output_files",
+			"Files named in a SCRIPT line or as a node's executable are staged executable",
+		} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("the description never says %q:\n%s", want, desc)
+			}
 		}
 		return
 	}
@@ -545,6 +567,45 @@ func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 	}
 	if !strings.Contains(text, `get_job_output(job_id="42.0")`) {
 		t.Errorf("the result never says where the node outputs end up:\n%s", text)
+	}
+}
+
+// TestSubmitDagResultHandsOverTheNodeConstraint: the workflow's node
+// jobs are not in the manager's cluster -- DAGMan submits each as its own
+// -- so a caller holding the returned cluster id has nothing that matches
+// them. The link is DAGManJobId, and handing the constraint over
+// ready-made is the difference between querying the nodes and querying
+// the manager job again and concluding the workflow has no jobs.
+func TestSubmitDagResultHandsOverTheNodeConstraint(t *testing.T) {
+	res := dagSubmitResult(42, "workflow.dag", &dagman.Report{Required: []string{"workflow.dag"}}, nil)
+	structured, _ := res["structuredContent"].(map[string]interface{})
+	got, _ := structured["node_constraint"].(string)
+	if got != "DAGManJobId == 42" {
+		t.Errorf("node_constraint = %q, want %q", got, "DAGManJobId == 42")
+	}
+	// Well-formed in the sense that matters: it is a constraint the query
+	// tools accept -- it parses, and it evaluates true against a node job
+	// of this workflow and false against anything else.
+	ad, err := classad.Parse(fmt.Sprintf("[ constraint = %s ]", got))
+	if err != nil {
+		t.Fatalf("node_constraint is not a valid ClassAd expression: %v", err)
+	}
+	for _, tc := range []struct {
+		dagManJobID int
+		want        bool
+	}{{42, true}, {43, false}} {
+		ad.InsertAttr("DAGManJobId", int64(tc.dagManJobID))
+		if v, ok := ad.EvaluateAttrBool("constraint"); !ok || v != tc.want {
+			t.Errorf("%s against DAGManJobId == %d evaluated %v,%v; want %v",
+				got, tc.dagManJobID, v, ok, tc.want)
+		}
+	}
+	text := res["content"].([]map[string]interface{})[0]["text"].(string)
+	want := `Node jobs carry DAGManJobId == 42 and DAGNodeName. ` +
+		`List them with query_jobs(constraint="DAGManJobId == 42"); ` +
+		`finished ones with query_job_archive on the same constraint.`
+	if !strings.Contains(text, want) {
+		t.Errorf("the result never says how to find the node jobs:\n%s", text)
 	}
 }
 

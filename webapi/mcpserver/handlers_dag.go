@@ -54,17 +54,32 @@ import (
 // literal backslash-n.
 const submitDagDescription = `Submit a DAGMan workflow: a graph of jobs with dependencies, retries and pre/post scripts.
 Write the workflow in ordinary DAG syntax and pass it as "dag". Prefer inline SUBMIT-DESCRIPTION blocks,
-so the whole workflow is one self-contained file with nothing else to stage:
+so the whole workflow is one self-contained file with nothing else to stage. One description serves every
+node of a stage; VARS gives each node its own values:
 
   SUBMIT-DESCRIPTION work {
     executable = /bin/sh
     transfer_executable = false
-    arguments = "-c 'echo hi'"
+    arguments = "-c 'echo hi > out_$(sample).txt'"
+    transfer_output_files = out_$(sample).txt
   }
   JOB A work
   JOB B work
-  PARENT A CHILD B
+  VARS A sample="1"
+  VARS B sample="2"
+  JOB GATHER {
+    executable = /bin/sh
+    transfer_executable = false
+    arguments = "-c 'cat out_1.txt out_2.txt > all.txt'"
+    transfer_input_files = out_1.txt, out_2.txt
+    transfer_output_files = all.txt
+  }
+  PARENT A B CHILD GATHER
 
+Node outputs land in the workflow's directory. A downstream node picks one up by name in
+transfer_input_files; declare it in the producer's transfer_output_files so the pre-submit check can see
+who produces it.
+Files named in a SCRIPT line or as a node's executable are staged executable; other files are not.
 Anything the DAG references by file name -- separate .sub files, PRE/POST scripts, small inputs -- goes in
 "files" as name -> contents, IN THIS SAME CALL. There is no second chance: a workflow's sandbox is spooled
 once, at submit time, and a name that was not sent then can never be added to it afterwards.
@@ -673,6 +688,7 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 	writeDagNotes(&sb, report, notes)
 	fmt.Fprintf(&sb, "\n%s\n", dagWaitAdvice(clusterID))
 	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, dagName))
+	fmt.Fprintf(&sb, "%s\n", dagNodeJobAdvice(clusterID))
 	fmt.Fprintf(&sb, "Removing job %d.0 removes the whole workflow, including node jobs already running.\n", clusterID)
 
 	structured := map[string]interface{}{
@@ -682,6 +698,13 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 		"input_files": report.Required,
 		"notes":       notes,
 		"deferred":    report.Deferred,
+		// The workflow's node jobs are not in its cluster: DAGMan submits
+		// them itself, each as its own cluster, and the only thing tying
+		// them to the manager is this attribute. Handing the constraint
+		// over ready-made is the difference between a caller querying the
+		// nodes and a caller querying the manager job again and
+		// concluding the workflow has no jobs.
+		"node_constraint": dagNodeConstraint(clusterID),
 	}
 	return withStructured(map[string]interface{}{
 		"content":  []map[string]interface{}{{"type": "text", "text": sb.String()}},
@@ -700,6 +723,25 @@ func dagWaitAdvice(clusterID int) string {
 	return fmt.Sprintf(`To wait for the whole workflow, register watch_jobs(constraint="ClusterId == %d", `+
 		`event="done") and collect it with check_watches -- do not call get_job in a loop. `+
 		`Use get_job(job_id="%d.0") for a one-off "how far along is it".`, clusterID, clusterID)
+}
+
+// dagNodeConstraint matches the workflow's node jobs.
+//
+// DAGMan submits each node as its own cluster, so a caller holding the
+// manager's cluster id has nothing that matches them: DAGManJobId is the
+// only link, and it carries the manager's CLUSTER, not its job id.
+func dagNodeConstraint(cluster int) string {
+	return fmt.Sprintf("DAGManJobId == %d", cluster)
+}
+
+// dagNodeJobAdvice is how to look at the work itself rather than at the
+// manager. Said at submit time because that is when a caller has the
+// cluster id in hand and is about to go looking for jobs that are not in
+// it.
+func dagNodeJobAdvice(cluster int) string {
+	return fmt.Sprintf(`Node jobs carry %s and DAGNodeName. List them with query_jobs(constraint=%q); `+
+		`finished ones with query_job_archive on the same constraint.`,
+		dagNodeConstraint(cluster), dagNodeConstraint(cluster))
 }
 
 // dagOutputAdvice is where a finished workflow's results are. Node
@@ -897,9 +939,9 @@ func renderDagSection(cluster int, ad *classad.ClassAd) string {
 	// which is the one place a caller does not think to look: the node
 	// jobs' own sandboxes are long gone, and their output came back here.
 	finish := func() string {
-		fmt.Fprintf(&sb, "\nNode jobs still in the queue: query_jobs(constraint=\"DAGManJobId == %d\"). "+
+		fmt.Fprintf(&sb, "\nNode jobs still in the queue: query_jobs(constraint=%q). "+
 			"Finished ones: query_job_archive with the same constraint; a failed node's job carries "+
-			"DAGNodeName and its exit code / HoldReason.\n", cluster)
+			"DAGNodeName and its exit code / HoldReason.\n", dagNodeConstraint(cluster))
 		if status == 4 {
 			fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(cluster, dagFile))
 		}

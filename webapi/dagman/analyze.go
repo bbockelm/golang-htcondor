@@ -60,8 +60,9 @@ type Report struct {
 	// not rejected, so a list the caller writes by hand fails invisibly.
 	Required []string
 	// Deferred are files the DAG reads only once it is running -- a
-	// sub-DAG description, or a node's submit file -- that are not staged
-	// now. These are expected to be produced during the run.
+	// sub-DAG description, a node's submit file, or one node's input that
+	// an earlier node produces -- that are not staged now. These are
+	// expected to appear during the run.
 	Deferred []string
 	// JobAttrs are the DAG's SET_JOB_ATTR commands, in order, with the
 	// ones this tool must own already removed (see ReservedJobAttr): a
@@ -223,7 +224,7 @@ func Analyze(in Input) *Report {
 				a.deferredDags++
 			}
 		default:
-			a.analyzeJobNode(n, need)
+			a.analyzeJobNode(n)
 		}
 		if n.Dir != "" {
 			r.add(Fatal, n.Line, n.Source,
@@ -394,7 +395,7 @@ func bodyFor(d *DAG, n *Node, in Input) (body string, resolved bool) {
 // spool directory, so THEIR inputs have to be staged with the DAG -- the
 // step most easily forgotten, and the one that fails at run time rather
 // than at submit time.
-func (a *analysis) analyzeJobNode(n *Node, need func(string, Severity, string, int, string)) {
+func (a *analysis) analyzeJobNode(n *Node) {
 	body, resolved := bodyFor(a.d, n, a.in)
 	if !resolved {
 		if a.have[n.Descriptor] {
@@ -423,24 +424,76 @@ func (a *analysis) analyzeJobNode(n *Node, need func(string, Severity, string, i
 	if strings.TrimSpace(body) == "" {
 		return
 	}
-	if submitHasMacroInput(body) {
+	expand := nodeExpander(a.d, n)
+	if submitHasMacroInput(body, expand) {
 		a.macroRefs = true
 	}
-	if dir := submitString(body, "initialdir"); dir != "" && !strings.Contains(dir, "$(") {
+	if dir := submitString(body, "initialdir", expand); dir != "" && !strings.Contains(dir, "$(") {
 		a.r.add(Fatal, n.Line, n.Source, fmt.Sprintf(
 			"node %s sets initialdir %q, which a spooled workflow cannot honor: the schedd flattens a "+
 				"spooled sandbox to basenames in one directory, so a relative initialdir names a "+
 				"subdirectory that does not exist. Remove the initialdir and give the files distinct names.",
 			n.Name, dir))
 	}
-	for _, dir := range submitDirTransfers(body) {
+	for _, dir := range submitDirTransfers(body, expand) {
 		a.r.add(Warning, n.Line, n.Source, fmt.Sprintf(
 			"node %s transfers %q, which asks for a directory's contents: the schedd flattens a "+
 				"spooled sandbox to basenames in one directory, so a directory transfer cannot "+
 				"survive the rewrite. Name the files individually.", n.Name, dir))
 	}
-	for _, f := range submitInputFiles(body) {
-		need(f, Warning, fmt.Sprintf("node %s transfers it as input", n.Name), n.Line, n.Source)
+	for _, f := range submitInputFiles(body, expand) {
+		a.needInput(n, f)
+	}
+}
+
+// needInput cross-checks one file a node transfers in.
+//
+// A file that was not supplied is not necessarily missing. The commonest
+// workflow shape there is -- fan out, then gather -- has each producer
+// write a file that a later node reads, and NONE of those exist at submit
+// time. So the question is the same one analyzeDeferredFile asks of a
+// generated submit file: does something produce it, and does that happen
+// first. Only when nothing produces it is "you did not supply this" the
+// right answer.
+func (a *analysis) needInput(n *Node, p string) {
+	if p == "" || isURL(p) || strings.HasPrefix(p, "/") {
+		return
+	}
+	a.referenced[p] = true
+	if a.have[p] {
+		return
+	}
+	var producers []string
+	for _, prod := range producersOf(a.d, a.in, p) {
+		if !strings.EqualFold(prod, n.Name) {
+			producers = append(producers, prod)
+		}
+	}
+	if len(producers) == 0 {
+		a.r.add(Warning, n.Line, n.Source, fmt.Sprintf(
+			"%s is not among the supplied files (node %s transfers it as input)", p, n.Name))
+		return
+	}
+	a.r.deferFile(p)
+	for _, prod := range producers {
+		if reachable(a.d, prod, n.Name) {
+			return
+		}
+	}
+	list := strings.Join(producers, ", ")
+	a.r.add(Warning, n.Line, n.Source, fmt.Sprintf(
+		"node %s transfers %s as input, which node %s produces, but %s is not an ancestor of %s. "+
+			"Nothing orders them, so %s may become ready before the file exists. Add PARENT %s CHILD %s.",
+		n.Name, p, list, list, n.Name, n.Name, producers[0], n.Name))
+}
+
+// nodeExpander resolves a submit value the way DAGMan will for one node:
+// its VARS and $(JOB) substituted, everything else left standing for the
+// reader to skip.
+func nodeExpander(d *DAG, n *Node) macroExpander {
+	return func(v string) string {
+		out, _ := expandNodeMacros(v, n, d)
+		return out
 	}
 }
 
@@ -590,7 +643,7 @@ func checkCollisions(r *Report, d *DAG, in Input) {
 		if !ok {
 			continue
 		}
-		for _, f := range submitInputFiles(body) {
+		for _, f := range submitInputFiles(body, nodeExpander(d, &d.Nodes[i])) {
 			note(f)
 		}
 	}
@@ -651,7 +704,7 @@ func producersOf(d *DAG, in Input, p string) []string {
 		if !ok {
 			continue
 		}
-		for _, f := range submitValues(body, "transfer_output_files") {
+		for _, f := range submitValues(body, "transfer_output_files", nodeExpander(d, &d.Nodes[i])) {
 			if f == p {
 				out = append(out, d.Nodes[i].Name)
 				break
@@ -687,6 +740,28 @@ func reachable(d *DAG, from, to string) bool {
 		return false
 	}
 	return walk(strings.ToLower(from))
+}
+
+// declaredNames maps a folded node name back to the spelling the DAG
+// used. The graph is walked folded, because DAGMan matches node names
+// case-insensitively; a message built from the folded form tells an
+// author about nodes "a -> b -> c" they never wrote. Edges are a fallback
+// for a name that appears only in a PARENT/CHILD line.
+func declaredNames(d *DAG) map[string]string {
+	out := make(map[string]string, len(d.Nodes))
+	keep := func(name string) {
+		if key := strings.ToLower(name); out[key] == "" {
+			out[key] = name
+		}
+	}
+	for i := range d.Nodes {
+		keep(d.Nodes[i].Name)
+	}
+	for _, e := range d.Edges {
+		keep(e.Parent)
+		keep(e.Child)
+	}
+	return out
 }
 
 // findCycle returns one cycle, as node names, or nil.
@@ -733,11 +808,25 @@ func findCycle(d *DAG) []string {
 		if color[n] == white {
 			stack = stack[:0]
 			if walk(n) {
-				return cycle
+				return asDeclared(d, cycle)
 			}
 		}
 	}
 	return nil
+}
+
+// asDeclared respells a walked path with the names the DAG used.
+func asDeclared(d *DAG, path []string) []string {
+	names := declaredNames(d)
+	out := make([]string, 0, len(path))
+	for _, p := range path {
+		if name := names[p]; name != "" {
+			out = append(out, name)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func isURL(p string) bool {
