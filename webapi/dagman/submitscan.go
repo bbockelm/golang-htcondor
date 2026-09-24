@@ -9,15 +9,30 @@ import (
 // to answer one question -- which files does this node need staged with
 // the DAG -- and it is wrong to grow it into a second condor_submit.
 //
-// It reads literal values only. A value containing a macro reference is
-// reported as unresolvable rather than guessed at: VARS can supply a
-// different value per node, and a wrong guess here would either demand a
-// file that is never used or, worse, quietly approve a workflow that is
+// It reads literal values only -- but "literal" is decided AFTER the
+// node's own macros are substituted. VARS give each node a different
+// value, which is what the expander supplies; a value that still depends
+// on a macro once that is done ($(RETRY), $(DAGManJobId)) is dropped
+// rather than guessed at, because a wrong guess here would either demand
+// a file that is never used or, worse, quietly approve a workflow that is
 // missing one.
 
+// macroExpander substitutes the macros a node supplies into a submit
+// value. A nil expander substitutes nothing, which is what a caller with
+// no node in hand passes.
+type macroExpander func(string) string
+
+func (e macroExpander) apply(v string) string {
+	if e == nil {
+		return v
+	}
+	return e(v)
+}
+
 // submitValues returns the values assigned to key, split as a submit file
-// splits a file list. A value that depends on a macro is dropped.
-func submitValues(body, key string) []string {
+// splits a file list. A value that still depends on a macro after
+// expansion is dropped.
+func submitValues(body, key string, expand macroExpander) []string {
 	var out []string
 	sc := bufio.NewScanner(strings.NewReader(body))
 	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
@@ -26,7 +41,7 @@ func submitValues(body, key string) []string {
 		if !ok || !strings.EqualFold(k, key) {
 			continue
 		}
-		for _, f := range splitFileList(v) {
+		for _, f := range splitFileList(expand.apply(v)) {
 			f = strings.TrimSpace(f)
 			f = strings.Trim(f, `"`)
 			if f == "" || strings.Contains(f, "$(") {
@@ -38,10 +53,10 @@ func submitValues(body, key string) []string {
 	return out
 }
 
-// submitString returns the last literal value assigned to key, or "".
+// submitString returns the last value assigned to key, expanded, or "".
 // Last wins, because a submit file is a sequence of macro assignments and
 // the one in force at `queue` is the last one written.
-func submitString(body, key string) string {
+func submitString(body, key string, expand macroExpander) string {
 	out := ""
 	sc := bufio.NewScanner(strings.NewReader(body))
 	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
@@ -50,7 +65,7 @@ func submitString(body, key string) string {
 		if !ok || !strings.EqualFold(k, key) {
 			continue
 		}
-		out = strings.Trim(strings.TrimSpace(v), `"`)
+		out = strings.Trim(strings.TrimSpace(expand.apply(v)), `"`)
 	}
 	return out
 }
@@ -58,7 +73,7 @@ func submitString(body, key string) string {
 // submitBool reads a submit-file boolean, returning def when the key is
 // absent or not a recognizable boolean.
 func submitBool(body, key string, def bool) bool {
-	v := submitString(body, key)
+	v := submitString(body, key, nil)
 	switch strings.ToLower(v) {
 	case "true", "yes", "t", "1":
 		return true
@@ -76,7 +91,7 @@ func submitBool(body, key string, def bool) bool {
 // have to be in the DAG's spool -- not the node's, which does not exist
 // as a separate thing. Missing this is the classic way a DAG that submits
 // cleanly fails on its first node.
-func submitInputFiles(body string) []string {
+func submitInputFiles(body string, expand macroExpander) []string {
 	if strings.TrimSpace(body) == "" {
 		return nil
 	}
@@ -95,7 +110,7 @@ func submitInputFiles(body string) []string {
 	if !transfersFiles(body) {
 		return nil
 	}
-	for _, f := range submitValues(body, "transfer_input_files") {
+	for _, f := range submitValues(body, "transfer_input_files", expand) {
 		// A trailing slash asks for a directory's CONTENTS. That cannot
 		// survive the flat spool rewrite, and the name is not a file to
 		// look for; analyzeJobNode reports it separately.
@@ -104,13 +119,13 @@ func submitInputFiles(body string) []string {
 		}
 		add(f)
 	}
-	if in := submitString(body, "input"); in != "" && !strings.Contains(in, "$(") {
+	if in := submitString(body, "input", expand); in != "" && !strings.Contains(in, "$(") {
 		add(in)
 	}
 	// The executable is transferred by default, but only a relative path
 	// is ours to stage: an absolute one names a binary on the machine that
 	// runs the job.
-	if exe := submitString(body, "executable"); exe != "" &&
+	if exe := submitString(body, "executable", expand); exe != "" &&
 		!strings.Contains(exe, "$(") &&
 		!strings.HasPrefix(exe, "/") &&
 		submitBool(body, "transfer_executable", true) {
@@ -173,7 +188,7 @@ func splitFileList(v string) []string {
 
 // transfersFiles reports whether the node transfers files at all.
 func transfersFiles(body string) bool {
-	switch strings.ToLower(submitString(body, "should_transfer_files")) {
+	switch strings.ToLower(submitString(body, "should_transfer_files", nil)) {
 	case "no", "never", "false":
 		return false
 	}
@@ -182,9 +197,9 @@ func transfersFiles(body string) bool {
 
 // submitDirTransfers returns the transfer_input_files entries that name a
 // directory's contents with a trailing slash.
-func submitDirTransfers(body string) []string {
+func submitDirTransfers(body string, expand macroExpander) []string {
 	var out []string
-	for _, f := range submitValues(body, "transfer_input_files") {
+	for _, f := range submitValues(body, "transfer_input_files", expand) {
 		if strings.HasSuffix(f, "/") {
 			out = append(out, f)
 		}
@@ -193,15 +208,17 @@ func submitDirTransfers(body string) []string {
 }
 
 // submitHasMacroInput reports whether any file-naming key in the body has
-// a value this reader deliberately drops because it depends on a macro.
-// Those files exist but cannot be checked, which is what stops the
-// analysis calling a supplied file unreferenced.
-func submitHasMacroInput(body string) bool {
+// a value this reader deliberately drops because it STILL depends on a
+// macro once the node's own VARS have been substituted. Those files exist
+// but cannot be checked, which is what stops the analysis calling a
+// supplied file unreferenced. A value the expander resolved is not a
+// blind spot any more, so it does not count here.
+func submitHasMacroInput(body string, expand macroExpander) bool {
 	sc := bufio.NewScanner(strings.NewReader(body))
 	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
 	for sc.Scan() {
 		k, v, ok := submitAssignment(sc.Text())
-		if !ok || !strings.Contains(v, "$(") {
+		if !ok || !strings.Contains(expand.apply(v), "$(") {
 			continue
 		}
 		switch strings.ToLower(k) {

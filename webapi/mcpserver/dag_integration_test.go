@@ -115,20 +115,27 @@ func TestMCPSubmitDagIntegration(t *testing.T) {
 		10*time.Minute)
 	defer cancel()
 
-	// A chain, with the node descriptions inline so the workflow is one
-	// self-contained file -- the shape the tool steers callers toward --
-	// plus one separate .sub file, so the staging of a referenced file is
-	// covered too.
+	// Fan out, then gather: the shape nearly every real workflow has, and
+	// the one this tool's own description now teaches. Two producer nodes
+	// share ONE inline submit description and are told apart only by VARS,
+	// so the files they declare are macro-valued (`result_$(sample).txt`)
+	// while the gather node names the literals it reads. The pre-submit
+	// check has to see those as the same files -- it did not, and answered
+	// a perfectly good workflow with three warnings that the files it
+	// produces were missing.
 	//
-	// Each node writes its own marker rather than appending to a shared
-	// file. An earlier version of this test had them append, and it passed
-	// for the wrong reason: the harness runs its execute node on this
-	// machine, so HTCondor skipped file transfer and every node appended to
-	// the real spool directory. On any pool where the nodes actually
-	// transfer, each would have started with an empty sandbox and clobbered
-	// the file. should_transfer_files is now explicit for the same reason --
-	// the test should exercise output coming BACK to the DAG's Iwd, which
-	// is the mechanism in question, not a same-machine shortcut.
+	// The gather node's description is a separately staged .sub file, so
+	// the staging of a referenced file is covered too.
+	//
+	// Each node writes its own file rather than appending to a shared one.
+	// An earlier version of this test had them append, and it passed for
+	// the wrong reason: the harness runs its execute node on this machine,
+	// so HTCondor skipped file transfer and every node appended to the real
+	// spool directory. On any pool where the nodes actually transfer, each
+	// would have started with an empty sandbox and clobbered the file.
+	// should_transfer_files is explicit for the same reason -- the test
+	// should exercise output coming BACK to the DAG's Iwd, which is the
+	// mechanism in question, not a same-machine shortcut.
 	//
 	// Ordering is not asserted from file contents. DAGMan enforces the
 	// graph, and it reports having done so: a non-zero exit means some node
@@ -140,23 +147,22 @@ SUBMIT-DESCRIPTION step {
     transfer_executable = false
     should_transfer_files = YES
     when_to_transfer_output = ON_EXIT
-    arguments = "-c 'echo ran > $(NodeName).done'"
-    transfer_output_files = $(NodeName).done
-    output = $(NodeName).out
-    error  = $(NodeName).err
+    arguments = "-c 'echo result-$(sample) > result_$(sample).txt'"
+    transfer_output_files = result_$(sample).txt
+    output = produce_$(sample).out
+    error  = produce_$(sample).err
     log    = nodes.log
     request_cpus = 1
     request_memory = 64
     request_disk = 64
 }
-JOB A step
-JOB B step
-JOB C final.sub
-SCRIPT PRE A setup
-VARS A NodeName="A"
-VARS B NodeName="B"
-PARENT A CHILD B
-PARENT B CHILD C
+JOB produce_1 step
+JOB produce_2 step
+JOB COMBINE combine.sub
+SCRIPT PRE produce_1 setup
+VARS produce_1 sample="1"
+VARS produce_2 sample="2"
+PARENT produce_1 produce_2 CHILD COMBINE
 SET_JOB_ATTR DagTestMarker = "set-from-dag"
 ENV SET DAG_TEST_VAR=hello
 `
@@ -167,15 +173,20 @@ ENV SET DAG_TEST_VAR=hello
 	// EACCES, reported as a node failure with no stated cause.
 	preScript := "#!/bin/sh\nexit 0\n"
 
-	finalSub := `
+	// The gather node reads what the producers made, by name. Nothing
+	// stages result_1.txt or result_2.txt: they exist only because the
+	// workflow ran, and they reach this node because a node job's Iwd IS
+	// the DAG's spool directory.
+	combineSub := `
 executable = /bin/sh
 transfer_executable = false
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
-arguments = "-c 'echo ran > C.done'"
-transfer_output_files = C.done
-output = C.out
-error  = C.err
+arguments = "-c 'cat result_1.txt result_2.txt > combined.txt'"
+transfer_input_files = result_1.txt, result_2.txt
+transfer_output_files = combined.txt
+output = combine.out
+error  = combine.err
 log    = nodes.log
 request_cpus = 1
 request_memory = 64
@@ -185,14 +196,27 @@ queue
 
 	text, meta, isErr := callToolOverMCP(t, server, ctx, "submit_dag", map[string]interface{}{
 		"dag":        dag,
-		"dag_name":   "diamond.dag",
+		"dag_name":   "fanout.dag",
 		"batch_name": "mcp-dag-itest",
-		"files":      map[string]interface{}{"final.sub": finalSub, "setup": preScript},
+		"files":      map[string]interface{}{"combine.sub": combineSub, "setup": preScript},
 	})
 	if isErr {
 		t.Fatalf("submit_dag failed: %s", text)
 	}
 	t.Logf("submit_dag said:\n%s", text)
+
+	// The live regression: the producers declare `result_$(sample).txt`
+	// and the gather node names `result_1.txt`. Comparing those without
+	// expanding the node's VARS reported each produced file as missing --
+	// three warnings on a correct workflow, which is how a caller learns
+	// to ignore the notes altogether.
+	notes, _ := meta["notes"].([]interface{})
+	for _, n := range notes {
+		note := fmt.Sprint(n)
+		if strings.Contains(note, "result_1.txt") || strings.Contains(note, "result_2.txt") {
+			t.Errorf("the pre-submit check reported a file an ancestor produces: %s", note)
+		}
+	}
 
 	clusterFloat, ok := meta["cluster_id"].(float64)
 	if !ok {
@@ -214,7 +238,7 @@ queue
 	for _, f := range files {
 		got = append(got, fmt.Sprint(f))
 	}
-	for _, want := range []string{"diamond.dag", "final.sub", "setup"} {
+	for _, want := range []string{"fanout.dag", "combine.sub", "setup"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("input_files = %v, missing %s", got, want)
 		}
@@ -243,7 +267,7 @@ queue
 			return
 		}
 		t.Logf("workflow spool contains: %v", keysOf(files))
-		for _, name := range []string{"diamond.dagman.out", "diamond.lib.err", "diamond.lib.out"} {
+		for _, name := range []string{"fanout.dagman.out", "fanout.lib.err", "fanout.lib.out"} {
 			if body, ok := files[name]; ok && strings.TrimSpace(body) != "" {
 				t.Logf("--- %s ---\n%s", name, tailLines(body, 40))
 			}
@@ -294,16 +318,26 @@ queue
 	// each node's output came back there. If DAGMan had started in the
 	// wrong directory, or the node jobs' outputs had not returned to the
 	// DAG's Iwd, none of these would be here.
-	//
-	// C is the one that matters most: its submit description was a
-	// separately staged file rather than an inline block, so its presence
-	// is what proves a referenced file reached the spool and DAGMan found
-	// it there.
 	sandbox := fetchSandbox(t, ctx, schedd, cluster)
-	for _, node := range []string{"A", "B", "C"} {
-		if _, ok := sandbox[node+".done"]; !ok {
-			t.Errorf("node %s produced no output in the workflow's spool; files present: %v",
-				node, keysOf(sandbox))
+	for _, name := range []string{"result_1.txt", "result_2.txt", "combined.txt"} {
+		if _, ok := sandbox[name]; !ok {
+			t.Errorf("%s is not in the workflow's spool; files present: %v", name, keysOf(sandbox))
+		}
+	}
+	// combined.txt is the whole inter-stage flow in one file, and the
+	// thing the tool's description now promises: two nodes wrote files
+	// that came back to the DAG's directory, and a third read them from
+	// there by name. Its CONTENTS are what proves it -- an empty
+	// combined.txt would mean the gather node ran with neither input.
+	//
+	// COMBINE's submit description was a separately staged .sub file
+	// rather than an inline block, so this also proves a referenced file
+	// reached the spool and DAGMan found it there.
+	combined := sandbox["combined.txt"]
+	for _, marker := range []string{"result-1", "result-2"} {
+		if !strings.Contains(combined, marker) {
+			t.Errorf("combined.txt = %q, missing %q: the gather node did not get what the producers made",
+				combined, marker)
 		}
 	}
 
