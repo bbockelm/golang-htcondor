@@ -101,9 +101,12 @@ export function BatchTable({
       return next;
     });
 
+  // Remove targets the batch's own constraint, not just its ClusterId: a
+  // DAG batch spans many clusters, so removing it means matching the shared
+  // JobBatchName (see groupIntoBatches). We key the mutation by the whole
+  // Batch so the per-row pending state can compare on batchID.
   const removeBatchMut = useMutation({
-    mutationFn: (batchID: number) =>
-      api.jobs.removeByConstraint(`ClusterId == ${batchID}`),
+    mutationFn: (b: Batch) => api.jobs.removeByConstraint(b.removeConstraint),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       onChange();
@@ -172,11 +175,12 @@ export function BatchTable({
                 expanded={expanded.has(b.batchID)}
                 highlighted={highlighted}
                 onToggle={() => toggle(b.batchID)}
-                onRemoveBatch={() => removeBatchMut.mutate(b.batchID)}
+                onRemoveBatch={() => removeBatchMut.mutate(b)}
                 onRemoveJob={(jobID) => removeJobMut.mutate(jobID)}
                 onReleaseJob={(jobID) => releaseJobMut.mutate(jobID)}
                 pendingBatch={
-                  removeBatchMut.isPending && removeBatchMut.variables === b.batchID
+                  removeBatchMut.isPending &&
+                  removeBatchMut.variables?.batchID === b.batchID
                 }
                 pendingJob={removeJobMut.variables}
                 pendingJobActive={removeJobMut.isPending}
@@ -298,6 +302,14 @@ function BatchRow({
         </td>
         <td className="px-3 py-2 font-mono text-xs">
           <span className="text-gray-900">{batch.name}</span>
+          {batch.isDag && (
+            <span
+              className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
+              title="A DAG workflow — every node job and nested sub-DAG is folded into this one batch"
+            >
+              DAG
+            </span>
+          )}
           {batch.name !== String(batch.batchID) && (
             <span className="ml-2 text-gray-400">#{batch.batchID}</span>
           )}
@@ -346,7 +358,7 @@ function BatchRow({
         <tr>
           <td className="px-3 py-2 bg-gray-50" />
           <td colSpan={showOwner ? 7 : 6} className="bg-gray-50 p-0">
-            <BatchUsage batchID={batch.batchID} />
+            <BatchUsage batchID={batch.batchID} constraint={batch.removeConstraint} />
             <JobsSubTable
               jobs={batch.jobs}
               highlighted={highlighted}
@@ -370,15 +382,17 @@ function BatchRow({
 // usage attributes are worth real bytes per job on a 30k queue, and they
 // are only ever read for the one batch somebody opened. Same shape as
 // the pool page's per-node slot query.
-function BatchUsage({ batchID }: { batchID: number }) {
+function BatchUsage({ batchID, constraint }: { batchID: number; constraint: string }) {
   const { data, isFetching, error } = useQuery({
-    queryKey: ['batch-usage', batchID],
+    queryKey: ['batch-usage', batchID, constraint],
     queryFn: () =>
       api.jobs.list({
-        constraint: `ClusterId == ${batchID}`,
+        // The batch's own constraint, so a DAG's usage covers every node
+        // and sub-DAG, not just the representative (root DAGMan) cluster.
+        constraint,
         projection: BATCH_USAGE_PROJECTION,
         limit: '*',
-        // The constraint already names one cluster, and the server
+        // The constraint already names this batch's jobs, and the server
         // confines a session that may not see other people's jobs
         // whatever we ask for -- so this works for an admin looking at
         // somebody else's batch and for a user looking at their own.
@@ -482,6 +496,14 @@ function JobsSubTable({
                 >
                   {j.id}
                 </Link>
+                {j.nodeName && (
+                  <span
+                    className="ml-2 text-gray-500"
+                    title="DAG node name"
+                  >
+                    {j.nodeName}
+                  </span>
+                )}
               </td>
               <td className="px-3 py-1.5">
                 <JobStatusPill display={j.display} />

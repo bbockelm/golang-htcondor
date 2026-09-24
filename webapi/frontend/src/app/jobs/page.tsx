@@ -206,7 +206,10 @@ export default function JobsPage() {
   // cluster survived it.
   const summary = useMemo(() => {
     if (!textFilter) return summarizeJobs(statusFiltered);
-    const clusters = new Set(batches.map((b) => b.batchID));
+    // A batch can span many clusters (a DAG folds a whole tree into one
+    // row), so keep every cluster the surviving batches cover, not just
+    // their representative id.
+    const clusters = new Set(batches.flatMap((b) => b.clusterIds));
     return summarizeJobs(
       statusFiltered.filter((j) => {
         const c = num(j.ClusterId);
