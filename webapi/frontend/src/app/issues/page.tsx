@@ -16,7 +16,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { api, ApiError, type IssuesResponse } from '@/lib/api';
+import { api, ApiError, type IssueTimings, type IssuesResponse } from '@/lib/api';
 import { IssueSectionPanel } from '@/components/IssueSection';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import {
@@ -128,6 +128,8 @@ export default function IssuesPage() {
         />
       ))}
 
+      {data?.timings && <TimingLine timings={data.timings} />}
+
       {data && (
         <p className="text-xs text-gray-400">
           {data.source ? `Read from the ${data.source}. ` : ''}
@@ -138,6 +140,37 @@ export default function IssuesPage() {
       )}
     </div>
   );
+}
+
+// TimingLine says what the answer cost.
+//
+// On a page that reads the whole queue and an append-only archive, "why
+// is this slow" is a question somebody will ask, and the person who can
+// see the slowness is usually not the person who can read the server's
+// log. Splitting it into the two reads and the grouping is what makes
+// the answer actionable rather than a shrug.
+function TimingLine({ timings }: { timings: IssueTimings }) {
+  const parts = [
+    `${timings.holds.toLocaleString()} held job${timings.holds === 1 ? '' : 's'} in ${secs(timings.holds_query_ms)}`,
+  ];
+  if (timings.run_attempts > 0 || timings.run_attempts_query_ms > 0) {
+    parts.push(
+      `${timings.run_attempts.toLocaleString()} run attempt${timings.run_attempts === 1 ? '' : 's'} in ${secs(timings.run_attempts_query_ms)}`,
+    );
+  }
+  return (
+    <p className="text-xs text-gray-400">
+      Read {parts.join(' and ')}; grouped in {secs(timings.cluster_ms)}.
+      {timings.cached
+        ? ` Reads are reused for a minute — these are from ${secs((timings.age_seconds ?? 0) * 1000)} ago.`
+        : ''}
+    </p>
+  );
+}
+
+function secs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function Controls({

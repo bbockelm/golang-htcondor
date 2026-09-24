@@ -212,7 +212,7 @@ func NewClusterer() *Clusterer {
 
 // Add files one record.
 func (c *Clusterer) Add(rec Record) {
-	tokens := tokenize(Mask(rec.Message))
+	tokens := MaskedTokens(rec.Message)
 	if len(tokens) == 0 {
 		// Nothing to cluster on. Kept rather than dropped -- a hold with
 		// an empty reason is itself worth seeing -- under a template

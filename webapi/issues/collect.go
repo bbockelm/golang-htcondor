@@ -70,8 +70,23 @@ var HoldProjection = append([]string{
 var EpochProjection = append([]string{
 	"ClusterId", "ProcId", "Owner", "JobBatchName",
 	"VacateReason", "VacateReasonCode", "VacateReasonSubCode",
-	"JobCurrentStartDate", "NumShadowExceptions",
+	"EpochWriteDate", "JobCurrentStartDate", "NumShadowExceptions",
 }, facetAttrs...)
+
+// EpochTimeAttr is the attribute the epoch window is expressed in.
+//
+// It has to be this one. htcondordb zone-maps an epoch archive on
+// EpochWriteDate and EnteredHistoryTime and on nothing else, so a range
+// predicate over any other attribute prunes no segments at all and the
+// read walks every run attempt the access point has ever made rather
+// than the window's. The page was asking about JobCurrentStartDate,
+// which is not zone-mapped -- correct, and answered by reading months of
+// history to produce a day of it.
+//
+// It is also the better timestamp on its own terms: the schedd writes it
+// when the run instance ends, so it is when the failure happened, where
+// JobCurrentStartDate is when the attempt that failed began.
+const EpochTimeAttr = "EpochWriteDate"
 
 // Where a job ran, as the attributes that carry it.
 //
@@ -190,6 +205,16 @@ type Set struct {
 	// rather than a total.
 	Truncated  bool
 	ComputedAt time.Time
+
+	// What each read cost and returned. This page reads two large
+	// tables, so "it is slow" has at least three possible answers and
+	// no way to tell them apart from the outside -- these are what make
+	// the question answerable without attaching a profiler to a
+	// production access point.
+	HoldCount     int
+	HoldDuration  time.Duration
+	EpochCount    int
+	EpochDuration time.Duration
 }
 
 // Collect reads both sources for one scope and window.
@@ -207,8 +232,11 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 
 	// Currently held. The window is when the job entered the held state,
 	// so a backlog held last Tuesday does not drown out this morning.
-	holdConstraint := fmt.Sprintf("(%s) && JobStatus == 5 && EnteredCurrentStatus >= %d", scope, since)
+	holdConstraint := fmt.Sprintf("(%s) && EnteredCurrentStatus >= %d && JobStatus == 5", scope, since)
+	holdStart := now()
 	held, heldSource, err := src.JobAds(ctx, holdConstraint, HoldProjection, MaxRecords)
+	set.HoldDuration = now().Sub(holdStart)
+	set.HoldCount = len(held)
 	if err != nil {
 		return nil, fmt.Errorf("reading held jobs: %w", err)
 	}
@@ -227,9 +255,21 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 	// Run attempts that ended badly. This is both "jobs failing to
 	// start" and the holds that have since been released or removed --
 	// one read, because they are the same record with different codes.
+	// The zone-mapped time bound goes first, ahead of the existence test.
+	//
+	// Epoch history is append-only and unbounded -- it holds every run
+	// attempt this access point has ever made, not just this window's --
+	// so which predicate the storage can prune on is the difference
+	// between reading a day and reading a year. See EpochTimeAttr.
+	// "VacateReasonCode isnt undefined" can prune nothing on its own: it
+	// is an existence test, true of no rows or many, with no range for a
+	// zone map to skip on.
 	epochConstraint := fmt.Sprintf(
-		"(%s) && VacateReasonCode isnt undefined && JobCurrentStartDate >= %d", scope, since)
+		"(%s) && %s >= %d && VacateReasonCode isnt undefined", scope, EpochTimeAttr, since)
+	epochStart := now()
 	attempts, epochSource, eerr := src.EpochAds(ctx, epochConstraint, EpochProjection, MaxRecords)
+	set.EpochDuration = now().Sub(epochStart)
+	set.EpochCount = len(attempts)
 	if eerr != nil {
 		// A missing epoch history is a configuration fact, not an error:
 		// JOB_EPOCH_HISTORY is off by default. Say so and show the rest
@@ -282,7 +322,13 @@ func vacateRecord(ad *classad.ClassAd) (Record, bool) {
 	batch, _ := ad.EvaluateAttrString("JobBatchName")
 	reason, _ := ad.EvaluateAttrString("VacateReason")
 	sub, _ := ad.EvaluateAttrInt("VacateReasonSubCode")
-	at, _ := ad.EvaluateAttrInt("JobCurrentStartDate")
+	// When the attempt ended, falling back to when it started for a
+	// record from a schedd too old to write the one we ask the window
+	// in.
+	at, ok := ad.EvaluateAttrInt(EpochTimeAttr)
+	if !ok || at <= 0 {
+		at, _ = ad.EvaluateAttrInt("JobCurrentStartDate")
+	}
 
 	kind := KindHold
 	if code >= shadowSideCodeFloor {

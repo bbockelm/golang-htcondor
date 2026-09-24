@@ -1599,6 +1599,21 @@ export interface IssueSection {
   clusters: IssueCluster[];
 }
 
+// What one answer cost to produce. The page reads two large tables and
+// then groups what comes back, so "it is slow" has three possible
+// answers and this is what tells them apart.
+export interface IssueTimings {
+  holds_query_ms: number;
+  holds: number;
+  run_attempts_query_ms: number;
+  run_attempts: number;
+  cluster_ms: number;
+  // The reads were not done for this request, so the milliseconds above
+  // are what they cost when they last ran.
+  cached: boolean;
+  age_seconds?: number;
+}
+
 export interface IssuesResponse {
   window_seconds: number;
   computed_at: number;
@@ -1611,6 +1626,7 @@ export interface IssuesResponse {
   truncated?: boolean;
   notes?: string[];
   sections: IssueSection[];
+  timings?: IssueTimings;
 }
 
 // DisplayStatus is a UI-flavored job status: the seven stock
