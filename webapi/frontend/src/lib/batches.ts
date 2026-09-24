@@ -11,14 +11,21 @@ import { displayJobStatus, type ClassAd, type DisplayStatus, type DisplayStatusI
 // Attributes every batch listing needs. QDate has to be asked for
 // explicitly: the schedd does not backfill it, and the submit path sets it
 // at submit time (see submit.go). The Request* attributes drive the
-// resource totals in the summary panel.
+// resource totals in the summary panel. DAGManJobId/DAGNodeName mark a job
+// as a DAG node so a whole workflow folds into one batch (see
+// groupIntoBatches).
 export const BATCH_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,Iwd,RequestCpus,RequestMemory,RequestGpus';
+  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus';
 
 // Batch is what we render: one batch's worth of jobs aggregated.
 export interface Batch {
-  batchID: number; // HTCondor's ClusterId — internal name only
-  // Display name: BatchName if set, else batch id, else "?".
+  // Representative cluster used for the row's identity, its URL, the
+  // expanded-set and the "#id" badge. For a DAG this is the ROOT DAGMan
+  // cluster (the `+N` in JobBatchName), which is stable across the whole
+  // workflow; for anything else it is the group's (smallest) ClusterId.
+  batchID: number;
+  // Display name: for a DAG the dag file name with the `+<root>` suffix
+  // stripped, else JobBatchName if set, else the batch id.
   name: string;
   // Submitting user. Only shown in the pool-wide ("Everyone") view — in
   // the "Mine" view every row would carry the same value.
@@ -36,77 +43,178 @@ export interface Batch {
   jobCount: number;
   // The individual jobs, kept around so the row can expand inline.
   jobs: BatchJob[];
+  // True when this batch is a DAG workflow (JobBatchName ends in `+N`).
+  isDag: boolean;
+  // Every ClusterId represented in this batch. A DAG spans many clusters
+  // (one per node job, plus nested sub-DAGMan jobs); the consumers that
+  // re-filter ads by "does this ad belong to a surviving batch" key on
+  // this rather than on batchID alone.
+  clusterIds: number[];
+  // ClassAd constraint that selects exactly this batch's jobs, used by
+  // the "Remove batch" action (and to fetch the expanded row's usage).
+  // For a DAG this matches the shared JobBatchName so removing the row
+  // takes down every node and sub-DAG, not just the representative
+  // cluster.
+  removeConstraint: string;
 }
 
 export interface BatchJob {
   // Display id used in URLs ("3.0").
   id: string;
+  cluster: number; // ClusterId
   jobIdx: number; // ProcId
   display: DisplayStatusInfo;
   cmd?: string;
   args?: string;
   submittedUnix?: number;
+  // DAG node name, when this job is a node of a DAG workflow.
+  nodeName?: string;
+}
+
+// The trailing `+<rootDagmanCluster>` HTCondor appends to a DAG's
+// JobBatchName. Its presence is what marks a batch as a DAG, and the
+// captured number is the root DAGMan cluster — constant across the whole
+// tree even when nested sub-DAGs carry different DAGManJobId values.
+const DAG_SUFFIX = /\+(\d+)\s*$/;
+
+// Escape a string for use as a ClassAd string literal inside a constraint.
+function escapeClassAdString(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// One group's running accumulator before we finalize it into a Batch.
+interface BatchAcc {
+  batchName?: string;
+  owner?: string;
+  cmd?: string;
+  args?: string;
+  submittedUnix?: number;
+  statusCounts: Record<DisplayStatus, number>;
+  jobCount: number;
+  jobs: BatchJob[];
+  clusters: Set<number>;
+  minCluster: number;
 }
 
 export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
-  const map = new Map<number, Batch>();
+  // Grouping key: a named submission (JobBatchName set) folds together by
+  // `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
+  // job and every nested sub-DAG — shares ONE JobBatchName, this collapses
+  // an entire workflow into a single batch, matching `condor_q -batch`.
+  // Scoping by Owner keeps two users who reused a batch name apart in the
+  // pool-wide view. Unnamed submissions fall back to per-cluster grouping,
+  // unchanged.
+  const map = new Map<string, BatchAcc>();
   for (const j of jobs) {
     const cluster = num(j.ClusterId);
     const proc = num(j.ProcId);
     if (cluster === undefined) continue;
+    const owner = str(j.Owner);
+    const batchName = str(j.JobBatchName);
+    const key = batchName
+      ? `${owner ?? ''}\u0000${batchName}`
+      : `cluster\u0000${cluster}`;
 
-    let b = map.get(cluster);
-    if (!b) {
-      b = {
-        batchID: cluster,
-        name: str(j.JobBatchName) ?? String(cluster),
-        owner: str(j.Owner),
+    let a = map.get(key);
+    if (!a) {
+      a = {
+        batchName,
+        owner,
         cmd: str(j.Cmd),
         args: str(j.Args),
         submittedUnix: num(j.QDate),
         statusCounts: {} as Record<DisplayStatus, number>,
         jobCount: 0,
         jobs: [],
+        clusters: new Set<number>(),
+        minCluster: cluster,
       };
-      map.set(cluster, b);
+      map.set(key, a);
     }
 
-    b.jobCount++;
+    a.jobCount++;
+    a.clusters.add(cluster);
+    if (cluster < a.minCluster) a.minCluster = cluster;
     const display = displayJobStatus({
       status: j.JobStatus as number | string | null | undefined,
       holdReasonCode: j.HoldReasonCode as number | string | null | undefined,
     });
-    b.statusCounts[display.key] = (b.statusCounts[display.key] ?? 0) + 1;
+    a.statusCounts[display.key] = (a.statusCounts[display.key] ?? 0) + 1;
     const q = num(j.QDate);
-    if (q !== undefined && (b.submittedUnix === undefined || q < b.submittedUnix)) {
-      b.submittedUnix = q;
+    if (q !== undefined && (a.submittedUnix === undefined || q < a.submittedUnix)) {
+      a.submittedUnix = q;
     }
-    if (!b.owner) b.owner = str(j.Owner);
-    if (!b.cmd) b.cmd = str(j.Cmd);
-    if (!b.args) b.args = str(j.Args);
-    const bn = str(j.JobBatchName);
-    if (bn && b.name === String(b.batchID)) {
-      b.name = bn;
-    }
+    if (!a.owner) a.owner = owner;
+    if (!a.cmd) a.cmd = str(j.Cmd);
+    if (!a.args) a.args = str(j.Args);
 
-    b.jobs.push({
+    a.jobs.push({
       id: `${cluster}.${proc ?? 0}`,
+      cluster,
       jobIdx: proc ?? 0,
       display,
       cmd: str(j.Cmd),
       args: str(j.Args),
       submittedUnix: q,
+      nodeName: str(j.DAGNodeName),
     });
   }
 
-  // Sort jobs within each batch by job index for stable display.
-  for (const b of map.values()) {
-    b.jobs.sort((a, b) => a.jobIdx - b.jobIdx);
+  const batches: Batch[] = [];
+  for (const a of map.values()) {
+    // Stable order within the batch: by cluster, then proc. A DAG spans
+    // many clusters, so job index alone is not enough.
+    a.jobs.sort((x, y) => x.cluster - y.cluster || x.jobIdx - y.jobIdx);
+
+    let batchID: number;
+    let name: string;
+    let isDag = false;
+    let removeConstraint: string;
+
+    const dag = a.batchName ? DAG_SUFFIX.exec(a.batchName) : null;
+    if (a.batchName && dag) {
+      // DAG: the `+N` is the root DAGMan cluster. Use it as the row id and
+      // strip it from the display name. Remove by the shared batch name so
+      // the whole tree (nodes + nested sub-DAGs) goes, plus the root
+      // cluster for good measure.
+      isDag = true;
+      batchID = Number(dag[1]);
+      name = a.batchName.replace(DAG_SUFFIX, '');
+      removeConstraint = `JobBatchName == "${escapeClassAdString(a.batchName)}" || ClusterId == ${batchID}`;
+    } else if (a.batchName) {
+      // Plain named batch (not a DAG): may span several clusters under one
+      // name, so remove by name + owner rather than by a single cluster.
+      batchID = a.minCluster;
+      name = a.batchName;
+      removeConstraint = a.owner
+        ? `JobBatchName == "${escapeClassAdString(a.batchName)}" && Owner == "${escapeClassAdString(a.owner)}"`
+        : `JobBatchName == "${escapeClassAdString(a.batchName)}"`;
+    } else {
+      // Unnamed submission: one cluster, one batch, as before.
+      batchID = a.minCluster;
+      name = String(batchID);
+      removeConstraint = `ClusterId == ${batchID}`;
+    }
+
+    batches.push({
+      batchID,
+      name,
+      owner: a.owner,
+      cmd: a.cmd,
+      args: a.args,
+      submittedUnix: a.submittedUnix,
+      statusCounts: a.statusCounts,
+      jobCount: a.jobCount,
+      jobs: a.jobs,
+      isDag,
+      clusterIds: Array.from(a.clusters),
+      removeConstraint,
+    });
   }
 
   // Newest batch first. The table's own sort takes over from here; this
   // only fixes the order the sort starts from.
-  return Array.from(map.values()).sort((a, b) => b.batchID - a.batchID);
+  return batches.sort((a, b) => b.batchID - a.batchID);
 }
 
 // applyBatchFilter does the user-facing substring filter. Both the

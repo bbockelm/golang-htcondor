@@ -62,6 +62,36 @@ function queue(): ClassAd[] {
   ];
 }
 
+// A whole DAG workflow as it appears in the queue: the root DAGMan job
+// (ClusterId 100, Cmd condor_dagman) plus three node jobs spread across
+// three clusters. Two of the nodes sit under nested sub-DAGs, so their
+// DAGManJobId differs (250, 251) from the root's cluster — but every job
+// shares ONE JobBatchName, "foo.dag+100", whose trailing +100 is the root
+// DAGMan cluster.
+function nestedDag(): ClassAd[] {
+  return [
+    {
+      ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'carol',
+      Cmd: 'condor_dagman', QDate: 500, JobBatchName: 'foo.dag+100',
+    },
+    {
+      ClusterId: 201, ProcId: 0, JobStatus: 2, Owner: 'carol',
+      Cmd: '/bin/node', QDate: 600, JobBatchName: 'foo.dag+100',
+      DAGManJobId: 100, DAGNodeName: 'A',
+    },
+    {
+      ClusterId: 305, ProcId: 0, JobStatus: 1, Owner: 'carol',
+      Cmd: '/bin/node', QDate: 700, JobBatchName: 'foo.dag+100',
+      DAGManJobId: 250, DAGNodeName: 'B',
+    },
+    {
+      ClusterId: 402, ProcId: 0, JobStatus: 1, Owner: 'carol',
+      Cmd: '/bin/node', QDate: 800, JobBatchName: 'foo.dag+100',
+      DAGManJobId: 251, DAGNodeName: 'C',
+    },
+  ];
+}
+
 describe('groupIntoBatches', () => {
   it('carries the submitting user onto the batch', () => {
     const [newest] = groupIntoBatches(queue());
@@ -77,6 +107,114 @@ describe('groupIntoBatches', () => {
     expect(training.submittedUnix).toBe(900);
     expect(training.jobCount).toBe(2);
     expect(training.statusCounts.running).toBe(2);
+  });
+
+  it('folds an entire DAG tree (nodes + nested sub-DAGs) into one batch', () => {
+    const batches = groupIntoBatches(nestedDag());
+    // All four jobs, despite three different clusters and differing
+    // DAGManJobId, collapse to a single row.
+    expect(batches).toHaveLength(1);
+    const [dag] = batches;
+    // Representative id is the root DAGMan cluster from the +N suffix.
+    expect(dag.batchID).toBe(100);
+    // Display name has the +<root> stripped.
+    expect(dag.name).toBe('foo.dag');
+    expect(dag.isDag).toBe(true);
+    expect(dag.jobCount).toBe(4);
+    expect(dag.statusCounts.running).toBe(2);
+    expect(dag.statusCounts.idle).toBe(2);
+    // Every member cluster is tracked so the summary panel can total the
+    // batch's jobs even when a text filter is active.
+    expect([...dag.clusterIds].sort((a, b) => a - b)).toEqual([100, 201, 305, 402]);
+    // Jobs keep their real cluster.proc ids, sorted by cluster then proc.
+    expect(dag.jobs.map((j) => j.id)).toEqual(['100.0', '201.0', '305.0', '402.0']);
+  });
+
+  it('removes a whole DAG by its shared batch name, not one cluster', () => {
+    const [dag] = groupIntoBatches(nestedDag());
+    // Matching the shared JobBatchName takes down every node and every
+    // nested sub-DAG; ClusterId == 100 is a belt-and-suspenders for the
+    // root DAGMan job.
+    expect(dag.removeConstraint).toBe(
+      'JobBatchName == "foo.dag+100" || ClusterId == 100',
+    );
+  });
+
+  it('groups a simple (non-nested) DAG by its root DAGMan cluster', () => {
+    // bar.dag+55 with DAGManJobId 55 == the dagman cluster == the +N.
+    const jobs: ClassAd[] = [
+      {
+        ClusterId: 55, ProcId: 0, JobStatus: 2, Owner: 'dan',
+        Cmd: 'condor_dagman', QDate: 10, JobBatchName: 'bar.dag+55',
+      },
+      {
+        ClusterId: 56, ProcId: 0, JobStatus: 1, Owner: 'dan',
+        Cmd: '/bin/x', QDate: 20, JobBatchName: 'bar.dag+55',
+        DAGManJobId: 55, DAGNodeName: 'only',
+      },
+    ];
+    const batches = groupIntoBatches(jobs);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].batchID).toBe(55);
+    expect(batches[0].name).toBe('bar.dag');
+    expect(batches[0].isDag).toBe(true);
+    expect(batches[0].jobCount).toBe(2);
+  });
+
+  it('keeps two unnamed clusters as two separate batches', () => {
+    const jobs: ClassAd[] = [
+      { ClusterId: 1, ProcId: 0, JobStatus: 1, Owner: 'e' },
+      { ClusterId: 2, ProcId: 0, JobStatus: 1, Owner: 'e' },
+    ];
+    const batches = groupIntoBatches(jobs);
+    expect(batches.map((b) => b.batchID).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(batches.every((b) => !b.isDag)).toBe(true);
+    // Unnamed removal stays cluster-scoped, exactly as before.
+    expect(batches.find((b) => b.batchID === 1)!.removeConstraint).toBe(
+      'ClusterId == 1',
+    );
+  });
+
+  it('removes a plain named (non-DAG) batch by name and owner', () => {
+    // One batch name spanning two clusters, no DAG suffix.
+    const jobs: ClassAd[] = [
+      {
+        ClusterId: 31, ProcId: 0, JobStatus: 1, Owner: 'fred',
+        JobBatchName: 'nightly', Cmd: '/bin/r',
+      },
+      {
+        ClusterId: 30, ProcId: 0, JobStatus: 1, Owner: 'fred',
+        JobBatchName: 'nightly', Cmd: '/bin/r',
+      },
+    ];
+    const batches = groupIntoBatches(jobs);
+    expect(batches).toHaveLength(1);
+    // Representative id is the smallest cluster in the group.
+    expect(batches[0].batchID).toBe(30);
+    expect(batches[0].isDag).toBe(false);
+    expect(batches[0].name).toBe('nightly');
+    expect(batches[0].removeConstraint).toBe(
+      'JobBatchName == "nightly" && Owner == "fred"',
+    );
+  });
+
+  it('scopes a shared batch name per owner so users are not merged', () => {
+    const jobs: ClassAd[] = [
+      { ClusterId: 40, ProcId: 0, JobStatus: 1, Owner: 'g', JobBatchName: 'run' },
+      { ClusterId: 41, ProcId: 0, JobStatus: 1, Owner: 'h', JobBatchName: 'run' },
+    ];
+    expect(groupIntoBatches(jobs)).toHaveLength(2);
+  });
+
+  it('escapes quotes in the batch name for the remove constraint', () => {
+    const jobs: ClassAd[] = [
+      {
+        ClusterId: 60, ProcId: 0, JobStatus: 1, Owner: 'i',
+        JobBatchName: 'weird"name',
+      },
+    ];
+    const [b] = groupIntoBatches(jobs);
+    expect(b.removeConstraint).toBe('JobBatchName == "weird\\"name" && Owner == "i"');
   });
 });
 
