@@ -719,13 +719,14 @@ func TestAnalyzeAttrDistributionExampleSlots(t *testing.T) {
 // (which most operators don't know what to do with) with a phrase like
 // "lowering RequestMemory to 4096 would unlock 3 more slots".
 func TestAnalyzeResourceSuggestionLowerRequest(t *testing.T) {
+	// No slot has 8192 -- the job cannot run anywhere, which is the only
+	// situation a "ask for less" suggestion belongs in. A fixture with a
+	// matching slot would (correctly) get no suggestion at all.
 	slots := []*classad.ClassAd{
 		makeSlotAd(t, `[ Name = "tiny";   Memory = 1024 ]`),
 		makeSlotAd(t, `[ Name = "small1"; Memory = 4096 ]`),
 		makeSlotAd(t, `[ Name = "small2"; Memory = 4096 ]`),
 		makeSlotAd(t, `[ Name = "small3"; Memory = 4096 ]`),
-		makeSlotAd(t, `[ Name = "big1";   Memory = 16384 ]`),
-		makeSlotAd(t, `[ Name = "big2";   Memory = 16384 ]`),
 	}
 	job := makeJobAd(t, `(TARGET.Memory >= RequestMemory)`)
 	if err := job.Set("RequestMemory", int64(8192)); err != nil {
@@ -789,9 +790,9 @@ func TestAnalyzeResourceSuggestionLowerRequest(t *testing.T) {
 // either order; pinning both ensures we don't show an unhelpful
 // "raise the request" implication for what's really a >= relation.
 func TestAnalyzeResourceSuggestionFlippedOperands(t *testing.T) {
+	// Nothing here satisfies 8192; see the note in the test above.
 	slots := []*classad.ClassAd{
 		makeSlotAd(t, `[ Name = "small"; Memory = 4096 ]`),
-		makeSlotAd(t, `[ Name = "big";   Memory = 16384 ]`),
 	}
 	job := makeJobAd(t, `(RequestMemory <= TARGET.Memory)`)
 	if err := job.Set("RequestMemory", int64(8192)); err != nil {
@@ -875,4 +876,72 @@ func TestNewPanicsOnNilSlotProvider(t *testing.T) {
 		}
 	}()
 	_ = New(nil)
+}
+
+// A partitionable slot with its CPUs fully handed out advertises
+// Cpus = 0. Those zeros are legitimate slot values and they flow into
+// the suggestion candidates, which is how "lower RequestCpus to 0"
+// reached a user. A request of zero is not a request.
+func TestAnalyzeResourceSuggestionNeverSuggestsZero(t *testing.T) {
+	slots := []*classad.ClassAd{
+		makeSlotAd(t, `[ Name = "exhausted1"; Cpus = 0 ]`),
+		makeSlotAd(t, `[ Name = "exhausted2"; Cpus = 0 ]`),
+		makeSlotAd(t, `[ Name = "one";        Cpus = 1 ]`),
+		makeSlotAd(t, `[ Name = "two";        Cpus = 2 ]`),
+	}
+	job := makeJobAd(t, `(TARGET.Cpus >= RequestCpus)`)
+	if err := job.Set("RequestCpus", int64(8)); err != nil {
+		t.Fatalf("Set RequestCpus: %v", err)
+	}
+
+	res, err := New(&StaticSlotProvider{Ads: slots}).Analyze(context.Background(), job)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	s := res.Predicates[0].ResourceSuggestion
+	if s == nil {
+		t.Fatal("expected a suggestion for a job that matches nothing")
+	}
+	for _, opt := range s.Options {
+		if opt.NewValue == "0" {
+			t.Errorf("suggested RequestCpus = 0; options were %+v", s.Options)
+		}
+	}
+	// The real advice is still there.
+	found := false
+	for _, opt := range s.Options {
+		if opt.NewValue == "2" || opt.NewValue == "1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dropping zero also dropped the usable suggestions: %+v", s.Options)
+	}
+}
+
+// A job that already matches most of the pool does not need to be told
+// to ask for less. Suggesting it was the loudest thing in the response
+// for a job with no problem at all.
+func TestAnalyzeNoSuggestionWhenTheJobAlreadyMatches(t *testing.T) {
+	slots := []*classad.ClassAd{
+		makeSlotAd(t, `[ Name = "small";  Memory = 512 ]`),
+		makeSlotAd(t, `[ Name = "plenty1"; Memory = 16384 ]`),
+		makeSlotAd(t, `[ Name = "plenty2"; Memory = 16384 ]`),
+	}
+	job := makeJobAd(t, `(TARGET.Memory >= RequestMemory)`)
+	if err := job.Set("RequestMemory", int64(4096)); err != nil {
+		t.Fatalf("Set RequestMemory: %v", err)
+	}
+
+	res, err := New(&StaticSlotProvider{Ads: slots}).Analyze(context.Background(), job)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if res.FullMatches == 0 {
+		t.Fatal("precondition: this job is supposed to match somewhere")
+	}
+	if got := res.Predicates[0].ResourceSuggestion; got != nil {
+		t.Errorf("suggested relaxing a request for a job with %d matching slots: %+v",
+			res.FullMatches, got)
+	}
 }

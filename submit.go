@@ -1204,15 +1204,45 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 // Split out so the universes that take none of the machine-oriented
 // clauses share the one place that writes the attribute.
 func (sf *SubmitFile) finishRequirements(ad *classad.ClassAd, reqParts []string) error {
-	if len(reqParts) > 0 {
-		requirements := strings.Join(reqParts, " && ")
-		// Requirements is an expression, not a string - parse it
-		reqExpr, err := classad.ParseExpr(requirements)
+	if len(reqParts) == 0 {
+		// Nothing to require -- a scheduler- or local-universe job that
+		// named no requirements of its own. Set TRUE rather than leaving
+		// the attribute off.
+		//
+		// The distinction matters outside matchmaking. A schedd can carry
+		// SUBMIT_REQUIREMENT_<name> expressions that reference the job's
+		// Requirements, and an absent attribute makes those evaluate to
+		// undefined rather than false. The OSPool access point has one:
+		//
+		//     SUBMIT_REQUIREMENT_ModulesWarning = ! unresolved(Requirements, "HAS_MODULES")
+		//
+		// With no Requirements attribute that is `! undefined`, which is
+		// not a boolean, and the schedd refuses the whole transaction --
+		// "CommitTransaction failed: Submit requirement ModulesWarning
+		// evaluated to non-boolean". Every DAGMan submission to such an
+		// access point failed, because the manager job is exactly the
+		// case that reaches here with nothing to require.
+		//
+		// condor_submit never produces a job without Requirements; its
+		// SetRequirements always assigns the attribute. Writing TRUE is
+		// the honest equivalent for a universe that is never matched to a
+		// machine, and it cannot change what the job matches: the schedd
+		// skips the check when it is absent and passes it when it is TRUE.
+		trueExpr, err := classad.ParseExpr("true")
 		if err != nil {
-			return fmt.Errorf("failed to parse requirements expression: %w", err)
+			return fmt.Errorf("failed to parse the default requirements expression: %w", err)
 		}
-		_ = ad.Set("Requirements", reqExpr)
+		_ = ad.Set("Requirements", trueExpr)
+		return nil
 	}
+
+	requirements := strings.Join(reqParts, " && ")
+	// Requirements is an expression, not a string - parse it
+	reqExpr, err := classad.ParseExpr(requirements)
+	if err != nil {
+		return fmt.Errorf("failed to parse requirements expression: %w", err)
+	}
+	_ = ad.Set("Requirements", reqExpr)
 
 	return nil
 }

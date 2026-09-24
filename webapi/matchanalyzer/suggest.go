@@ -255,6 +255,16 @@ func suggestRelaxationOptions(failing *failingValues, current float64, relaxLowe
 		if V >= current {
 			continue
 		}
+		// Never suggest asking for nothing. The failing slots include
+		// ones with the resource exhausted -- a partitionable slot with
+		// Cpus == 0 is normal and common -- and their values flow
+		// straight into these candidates. Taken literally that produced
+		// "lower RequestCpus to 0", which is not a request anybody can
+		// make: a job needs at least one of whatever it is asking for,
+		// and a slot advertising zero of it has none to give.
+		if V < 1 {
+			continue
+		}
 		out = append(out, ResourceSuggestionOption{
 			NewValue:          formatNumber(V),
 			AdditionalMatches: gainsAt[V],
