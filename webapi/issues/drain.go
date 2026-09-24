@@ -108,7 +108,12 @@ type Cluster struct {
 	Codes     []CodeCount  `json:"codes,omitempty"`
 	FirstSeen int64        `json:"first_seen,omitempty"`
 	LastSeen  int64        `json:"last_seen,omitempty"`
-	Examples  []Example    `json:"examples,omitempty"`
+	// Timeline is how many occurrences fell in each equal slice of the
+	// window, oldest first. It answers the question a count cannot: a
+	// problem that stopped an hour ago and one that is still going look
+	// identical at 2,536 jobs.
+	Timeline []int     `json:"timeline,omitempty"`
+	Examples []Example `json:"examples,omitempty"`
 	// Facets are the structured attributes this cluster spans, most
 	// concentrated first.
 	Facets []FacetSpread `json:"facets,omitempty"`
@@ -325,22 +330,39 @@ func facetKey(facets map[string]string) string {
 	return b.String()
 }
 
-// Clusters renders the result at the requested granularity, largest
-// first.
+// RenderOptions is how a collected set is turned into rows.
 //
-// granularity runs 0 (coarsest) to 1 (finest). At 1 the Drain templates
-// are returned as they are; below it, templates that share enough of
-// their vocabulary are merged, so "Transfer output files failure ..." and
-// "Transfer input files failure ..." become one row about file transfer
-// while "memory usage exceeded request_memory" stays its own.
-func (c *Clusterer) Clusters(granularity float64, labelCode func(code int64) string) []Cluster {
-	merged := mergeGroups(c.groups, granularity)
+// Separate from the records so the same parse can be rendered again at a
+// different granularity without re-reading anything -- which is what
+// happens every time somebody moves the slider.
+type RenderOptions struct {
+	// Granularity runs 0 (coarsest) to 1 (finest). At 1 the Drain
+	// templates are returned as they are; below it, templates that share
+	// enough of their vocabulary are merged, so "Transfer output files
+	// failure ..." and "Transfer input files failure ..." become one row
+	// about file transfer while "memory usage exceeded request_memory"
+	// stays its own.
+	Granularity float64
+	// LabelCode names a hold code. Optional.
+	LabelCode func(code int64) string
+	// Start and End bound the timeline, in Unix seconds, and Buckets is
+	// how many slices to cut it into. Leaving them zero omits the
+	// timeline rather than inventing a window from the records: a
+	// timeline whose extent came from the data would rescale itself
+	// whenever the data changed, and two rows would not be comparable.
+	Start, End int64
+	Buckets    int
+}
+
+// Clusters renders the result, largest first.
+func (c *Clusterer) Clusters(opts RenderOptions) []Cluster {
+	merged := mergeGroups(c.groups, opts.Granularity)
 	out := make([]Cluster, 0, len(merged))
 	for _, m := range merged {
 		if len(m) == 0 {
 			continue
 		}
-		out = append(out, summarize(m, labelCode))
+		out = append(out, summarize(m, opts))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count != out[j].Count {
@@ -457,7 +479,7 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(inter) / float64(union)
 }
 
-func summarize(bucket []*group, labelCode func(int64) string) Cluster {
+func summarize(bucket []*group, opts RenderOptions) Cluster {
 	// Named after its dominant template: the bucket was ordered largest
 	// first, so bucket[0] is the problem most of these records are.
 	records := make([]Record, 0, len(bucket[0].records))
@@ -517,8 +539,8 @@ func summarize(bucket []*group, labelCode func(int64) string) Cluster {
 
 	for key, n := range byCode {
 		cc := CodeCount{Code: key[0], SubCode: key[1], Count: n}
-		if labelCode != nil {
-			cc.Label = labelCode(key[0])
+		if opts.LabelCode != nil {
+			cc.Label = opts.LabelCode(key[0])
 		}
 		cl.Codes = append(cl.Codes, cc)
 	}
@@ -533,8 +555,46 @@ func summarize(bucket []*group, labelCode func(int64) string) Cluster {
 	})
 
 	cl.Facets = facetSpreads(byFacet)
+	cl.Timeline = timeline(records, opts)
 	cl.Examples = pickExamples(records)
 	return cl
+}
+
+// timeline buckets a cluster's occurrences across the window.
+//
+// The window comes from the caller, not from the records: every row on a
+// page has to share one time axis or the rows cannot be compared, and a
+// per-row extent would also make a single row rescale itself between two
+// refreshes of the same data.
+//
+// Records with no timestamp are left out rather than piled into the
+// first bucket, which would draw a spike at the left edge that never
+// happened.
+func timeline(records []Record, opts RenderOptions) []int {
+	if opts.Buckets <= 0 || opts.End <= opts.Start {
+		return nil
+	}
+	span := opts.End - opts.Start
+	counts := make([]int, opts.Buckets)
+	counted := false
+	for _, r := range records {
+		if r.At <= 0 || r.At < opts.Start {
+			continue
+		}
+		i := int((r.At - opts.Start) * int64(opts.Buckets) / span)
+		// A record timestamped at or after the end lands in the last
+		// bucket: the window closes at "now", and a hold entered during
+		// the read itself is the newest thing there is, not an error.
+		if i >= opts.Buckets {
+			i = opts.Buckets - 1
+		}
+		counts[i]++
+		counted = true
+	}
+	if !counted {
+		return nil
+	}
+	return counts
 }
 
 // maxFacetValues bounds the per-attribute list. A problem spanning forty

@@ -141,6 +141,7 @@ var outputSchemas = map[string]map[string]interface{}{
 	// sentence they were rendered into.
 	"analyze_issues": obj(map[string]interface{}{
 		"window_seconds": intSchema,
+		"bucket_seconds": intSchema,
 		"granularity":    anySchema,
 		"include_ended":  boolSchema,
 		"source":         strSchema,
@@ -176,6 +177,7 @@ var outputSchemas = map[string]map[string]interface{}{
 				})),
 				"first_seen": intSchema,
 				"last_seen":  intSchema,
+				"timeline":   arr(intSchema),
 				"examples": arr(obj(map[string]interface{}{
 					"cluster_id": intSchema,
 					"proc_id":    intSchema,

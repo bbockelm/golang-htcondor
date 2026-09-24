@@ -119,6 +119,7 @@ export const issuesFixture: IssuesResponse = {
   computed_at: Math.floor(Date.now() / 1000),
   granularity: 0.5,
   include_ended: true,
+  bucket_seconds: 3600,
   source: 'smoke fixture',
   sections: [
     {
@@ -139,6 +140,7 @@ export const issuesFixture: IssuesResponse = {
           ],
           codes: [{ code: 21, subcode: 102, label: 'memory usage exceeded the request', count: 12 }],
           last_seen: Math.floor(Date.now() / 1000) - 300,
+          timeline: [0, 0, 1, 3, 2, 0, 0, 0, 1, 4, 6, 2, 0, 0, 0, 0, 1, 1, 0, 0, 2, 3, 5, 1],
           examples: [
             {
               cluster_id: 12,

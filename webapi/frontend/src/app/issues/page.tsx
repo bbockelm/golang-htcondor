@@ -120,7 +120,12 @@ export default function IssuesPage() {
       )}
 
       {data?.sections.map((section) => (
-        <IssueSectionPanel key={section.kind} section={section} />
+        <IssueSectionPanel
+          key={section.kind}
+          section={section}
+          bucketSeconds={data.bucket_seconds}
+          endsAt={data.computed_at}
+        />
       ))}
 
       {data && (

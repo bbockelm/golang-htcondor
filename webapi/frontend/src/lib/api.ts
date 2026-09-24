@@ -1583,6 +1583,9 @@ export interface IssueCluster {
   facets?: IssueFacetSpread[];
   first_seen?: number;
   last_seen?: number;
+  // Occurrences per equal slice of the window, oldest first. One shared
+  // axis across every cluster, so the rows are comparable.
+  timeline?: number[];
   examples?: IssueExample[];
   // The distinct templates a coarse granularity folded together.
   variants?: IssueVariant[];
@@ -1601,6 +1604,8 @@ export interface IssuesResponse {
   computed_at: number;
   granularity: number;
   include_ended: boolean;
+  // How much time one slice of a cluster's timeline covers.
+  bucket_seconds?: number;
   source?: string;
   // A read hit its bound, so the counts are a floor rather than a total.
   truncated?: boolean;

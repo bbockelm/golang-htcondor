@@ -50,32 +50,75 @@ describe('IssueSectionPanel', () => {
     expect(screen.getByText(/memory usage exceeded request_memory/)).toBeInTheDocument();
   });
 
-  it('sizes the bars against the biggest problem in the section', () => {
+  it('draws a bar per slice of the window, and nothing where nothing happened', () => {
     const { container } = render(
       <IssueSectionPanel
-        section={section([cluster({ count: 200 }), cluster({ count: 50 })])}
+        section={section([cluster({ timeline: [3, 0, 0, 5] })])}
+        bucketSeconds={3600}
+        endsAt={1790250000}
       />,
     );
-    const bars = Array.from(container.querySelectorAll('div[style*="width"]'));
-    expect(bars).toHaveLength(2);
-    // Relative, not absolute: the section's shape has to be readable
-    // whether the counts are in the tens or the tens of thousands.
-    expect((bars[0] as HTMLElement).style.width).toBe('100%');
-    expect((bars[1] as HTMLElement).style.width).toBe('25%');
+    // An empty slice draws no bar: the gap is how "it stopped" looks,
+    // and a zero-height rect would be indistinguishable from a small one.
+    expect(container.querySelectorAll('svg rect')).toHaveLength(2);
   });
 
-  it('keeps a tiny problem visible rather than drawing a zero-width bar', () => {
+  it('accents the most recent slice that has anything in it', () => {
     const { container } = render(
       <IssueSectionPanel
-        section={section([cluster({ count: 10000 }), cluster({ count: 1 })])}
+        section={section([cluster({ timeline: [4, 9, 0, 0] })])}
+        bucketSeconds={3600}
+        endsAt={1790250000}
       />,
     );
-    const bars = Array.from(container.querySelectorAll('div[style*="width"]'));
-    // 1 of 10,000 is 0.01%, which renders as nothing at all. The bar has
-    // a floor so a small problem still reads as a problem rather than as
-    // a rendering failure.
-    const width = parseFloat((bars[1] as HTMLElement).style.width);
-    expect(width).toBeGreaterThanOrEqual(2);
+    const rects = Array.from(container.querySelectorAll('svg rect'));
+    // "Is this still happening" is the question the row cannot answer
+    // from its count, so the newest occurrence is the one thing in the
+    // row drawn in a colour -- here the second bar, not the last slice.
+    expect(rects[0].getAttribute('class')).toContain('fill-gray-400');
+    expect(rects[1].getAttribute('class')).toContain('fill-brand-500');
+  });
+
+  it('keeps a single occurrence visible against a huge peak', () => {
+    const { container } = render(
+      <IssueSectionPanel section={section([cluster({ timeline: [4000, 1] })])} />,
+    );
+    const rects = Array.from(container.querySelectorAll('svg rect'));
+    // 1/4000 of 22px rounds to nothing. A floor is what makes the tail
+    // of a burst hoverable rather than invisible.
+    expect(parseFloat(rects[1].getAttribute('height')!)).toBeGreaterThanOrEqual(2);
+  });
+
+  it('says in words whether it is still arriving', () => {
+    const still = render(
+      <IssueSectionPanel
+        section={section([cluster({ timeline: [1, 1, 1, 2] })])}
+        bucketSeconds={3600}
+        endsAt={1790250000}
+      />,
+    );
+    expect(still.container.querySelector('svg')!.getAttribute('aria-label')).toContain(
+      'still arriving',
+    );
+    still.unmount();
+
+    const stopped = render(
+      <IssueSectionPanel
+        section={section([cluster({ timeline: [5, 0, 0, 0] })])}
+        bucketSeconds={3600}
+        endsAt={1790250000}
+      />,
+    );
+    // The shape is not available to a screen reader, so the label has to
+    // carry the same finding the picture does.
+    expect(stopped.container.querySelector('svg')!.getAttribute('aria-label')).toContain(
+      'nothing in the last 3 hours',
+    );
+  });
+
+  it('renders no sparkline at all when the server sent no timeline', () => {
+    const { container } = render(<IssueSectionPanel section={section([cluster()])} />);
+    expect(container.querySelector('svg')).toBeNull();
   });
 
   it('offers the extra examples only when there are extra examples', () => {

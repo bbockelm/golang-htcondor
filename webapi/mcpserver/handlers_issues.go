@@ -34,6 +34,10 @@ const (
 	// ordered by size, so the tail is the part nobody reads.
 	issuesMaxClusters = 12
 	issuesMaxExamples = 3
+	// Coarser than the page's, because a model reads the shape from the
+	// numbers rather than from pixels and a 24-element array per cluster
+	// is mostly noise in a text answer.
+	issuesTimelineBuckets = 12
 )
 
 func analyzeIssuesTool() Tool {
@@ -178,7 +182,8 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		fmt.Fprintf(&b, "  note: %s\n", note)
 	}
 
-	sections := issueSections(set, granularity)
+	end := set.ComputedAt.Unix()
+	sections := issueSections(set, granularity, end-int64(window/time.Second), end)
 	if len(sections) == 0 {
 		b.WriteString("  nothing held and no failed run attempts in this window.\n")
 	}
@@ -190,7 +195,8 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 			clusters = clusters[:issuesMaxClusters]
 		}
 		for _, c := range clusters {
-			fmt.Fprintf(&b, "  %d job(s), %d user(s)%s: %s\n", c.Count, c.Users, facetNote(c), c.Template)
+			fmt.Fprintf(&b, "  %d job(s), %d user(s)%s%s: %s\n",
+				c.Count, c.Users, facetNote(c), recencyNote(c, set.ComputedAt.Unix()), c.Template)
 			for i, ex := range c.Examples {
 				if i >= issuesMaxExamples {
 					break
@@ -208,6 +214,7 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 
 	return structuredTextResult(b.String(), map[string]interface{}{
 		"window_seconds": int64(window / time.Second),
+		"bucket_seconds": int64(window/time.Second) / issuesTimelineBuckets,
 		"granularity":    granularity,
 		"include_ended":  includeEnded,
 		"source":         set.Source,
@@ -228,7 +235,7 @@ type issueSectionView struct {
 // issueSections clusters each kind separately: they are different
 // questions, and a section's totals should not depend on what the other
 // section contains.
-func issueSections(set *issues.Set, granularity float64) []issueSectionView {
+func issueSections(set *issues.Set, granularity float64, start, end int64) []issueSectionView {
 	var out []issueSectionView
 	for _, section := range []struct{ kind, title string }{
 		{issues.KindHold, "Holds"},
@@ -253,7 +260,13 @@ func issueSections(set *issues.Set, granularity float64) []issueSectionView {
 		out = append(out, issueSectionView{
 			kind: section.kind, title: section.title,
 			total: total, users: len(users),
-			clusters: c.Clusters(granularity, issues.HoldReasonLabel),
+			clusters: c.Clusters(issues.RenderOptions{
+				Granularity: granularity,
+				LabelCode:   issues.HoldReasonLabel,
+				Start:       start,
+				End:         end,
+				Buckets:     issuesTimelineBuckets,
+			}),
 		})
 	}
 	return out
@@ -271,6 +284,32 @@ func trimExamples(clusters []issues.Cluster) []issues.Cluster {
 		out = append(out, c)
 	}
 	return out
+}
+
+// recencyNote says whether a problem is still happening.
+//
+// The single most useful thing a count cannot tell you: 2,536 jobs held
+// in a burst that ended three hours ago and 2,536 still arriving are the
+// same number and different situations. The page draws this as a
+// timeline; in text it is one clause.
+func recencyNote(c issues.Cluster, now int64) string {
+	if c.LastSeen <= 0 || now <= c.LastSeen {
+		return ""
+	}
+	return ", last " + humanAgo(now-c.LastSeen) + " ago"
+}
+
+func humanAgo(secs int64) string {
+	switch {
+	case secs < 90:
+		return fmt.Sprintf("%ds", secs)
+	case secs < 90*60:
+		return fmt.Sprintf("%dm", secs/60)
+	case secs < 48*3600:
+		return fmt.Sprintf("%dh", secs/3600)
+	default:
+		return fmt.Sprintf("%dd", secs/86400)
+	}
 }
 
 // facetNote says where a problem is happening when that is the answer.

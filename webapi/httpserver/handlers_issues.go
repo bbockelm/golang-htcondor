@@ -28,11 +28,14 @@ type IssuesResponse struct {
 	// IncludeEnded says whether run-attempt history was read: without
 	// it the page describes what is stuck now, with it what has gone
 	// wrong over the window.
-	IncludeEnded bool           `json:"include_ended"`
-	Source       string         `json:"source,omitempty"`
-	Truncated    bool           `json:"truncated,omitempty"`
-	Notes        []string       `json:"notes,omitempty"`
-	Sections     []IssueSection `json:"sections"`
+	IncludeEnded bool `json:"include_ended"`
+	// BucketSeconds is how much time one slice of a cluster's timeline
+	// covers, so a caller can label it without re-deriving the window.
+	BucketSeconds int64          `json:"bucket_seconds,omitempty"`
+	Source        string         `json:"source,omitempty"`
+	Truncated     bool           `json:"truncated,omitempty"`
+	Notes         []string       `json:"notes,omitempty"`
+	Sections      []IssueSection `json:"sections"`
 }
 
 // IssueSection is one kind of problem: holds, or run attempts that
@@ -56,6 +59,13 @@ const (
 	maxIssueWindow     = 7 * 24 * time.Hour
 	defaultIssueWindow = 24 * time.Hour
 )
+
+// issueBuckets is how many slices a cluster's timeline is cut into.
+//
+// Enough that a burst is distinguishable from a steady drip, few enough
+// that each slice is a few pixels wide in a row of a list rather than a
+// chart in its own right.
+const issueBuckets = 24
 
 // handleIssues handles GET /api/v1/issues.
 func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
@@ -153,11 +163,14 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 // Separate from the collection so it can be tested without a schedd, and
 // because it is the half that runs again when somebody moves the slider.
 func buildIssuesResponse(set *issues.Set, window time.Duration, granularity float64, includeEnded bool) IssuesResponse {
+	end := set.ComputedAt.Unix()
+	start := end - int64(window/time.Second)
 	resp := IssuesResponse{
 		WindowSeconds: int64(window / time.Second),
-		ComputedAt:    set.ComputedAt.Unix(),
+		ComputedAt:    end,
 		Granularity:   granularity,
 		IncludeEnded:  includeEnded,
+		BucketSeconds: int64(window/time.Second) / issueBuckets,
 		Source:        set.Source,
 		Truncated:     set.Truncated,
 		Notes:         set.Notes,
@@ -187,11 +200,17 @@ func buildIssuesResponse(set *issues.Set, window time.Duration, granularity floa
 			continue
 		}
 		resp.Sections = append(resp.Sections, IssueSection{
-			Kind:     section.kind,
-			Title:    section.title,
-			Total:    total,
-			Users:    len(users),
-			Clusters: c.Clusters(granularity, holdReasonLabel),
+			Kind:  section.kind,
+			Title: section.title,
+			Total: total,
+			Users: len(users),
+			Clusters: c.Clusters(issues.RenderOptions{
+				Granularity: granularity,
+				LabelCode:   holdReasonLabel,
+				Start:       start,
+				End:         end,
+				Buckets:     issueBuckets,
+			}),
 		})
 	}
 	if resp.Sections == nil {
