@@ -3,6 +3,7 @@ import type {
   AdminLogsResponse,
   DashboardActivityResponse,
   DashboardStats,
+  IssuesResponse,
   JobListResponse,
   Session,
 } from '../../src/lib/api';
@@ -109,6 +110,75 @@ export const jobsFixture: JobListResponse = {
   has_more: false,
 };
 
+// The issues page's answer. Two sections with one cluster each, which is
+// enough to prove the page binds: a fixture with no clusters renders the
+// "nothing wrong" state, which would pass a render check while testing
+// none of the row rendering.
+export const issuesFixture: IssuesResponse = {
+  window_seconds: 86400,
+  computed_at: Math.floor(Date.now() / 1000),
+  granularity: 0.5,
+  include_ended: true,
+  source: 'smoke fixture',
+  sections: [
+    {
+      kind: 'hold',
+      title: 'Holds',
+      total: 12,
+      users: 2,
+      clusters: [
+        {
+          kind: 'hold',
+          template: 'Error from <slot> memory usage exceeded request_memory',
+          count: 12,
+          users: 2,
+          top_users: [{ owner: 'e2e', count: 10 }],
+          codes: [{ code: 21, subcode: 102, label: 'memory usage exceeded the request', count: 12 }],
+          last_seen: Math.floor(Date.now() / 1000) - 300,
+          examples: [
+            {
+              cluster_id: 12,
+              proc_id: 0,
+              owner: 'e2e',
+              at: Math.floor(Date.now() / 1000) - 300,
+              message: 'Error from slot1_4@smoke-host.example.edu: memory usage exceeded request_memory',
+            },
+            {
+              cluster_id: 12,
+              proc_id: 1,
+              owner: 'e2e',
+              at: Math.floor(Date.now() / 1000) - 600,
+              message: 'Error from slot1_9@smoke-other.example.edu: memory usage exceeded request_memory',
+            },
+          ],
+        },
+      ],
+    },
+    {
+      kind: 'run_failure',
+      title: 'Jobs that could not keep running',
+      total: 3,
+      users: 1,
+      clusters: [
+        {
+          kind: 'run_failure',
+          template: 'Job disconnected too long JobLeaseDuration <num> seconds expired',
+          count: 3,
+          users: 1,
+          examples: [
+            {
+              cluster_id: 13,
+              proc_id: 0,
+              owner: 'e2e',
+              message: 'Job disconnected too long: JobLeaseDuration (2400 seconds) expired',
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
 export const sessionFixture: Session = {
   authenticated: true,
   username: 'e2e',
@@ -155,6 +225,7 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
     '/api/v1/jobs': jobsFixture,
+    '/api/v1/issues': issuesFixture,
     '/api/v1/dashboard': dashboardFixture,
     '/api/v1/dashboard/activity': dashboardActivityFixture,
     // The archive is where every drill-down into finished work lands.

@@ -18,7 +18,7 @@
 'use client';
 
 import { useEffect } from 'react';
-import { createBoolPreference, useBoolPreference } from '@/lib/boolPreference';
+import { createBoolPreference, useBoolPreference } from '@/lib/preference';
 
 const loadAllPref = createBoolPreference('htcondor.loadAllJobs', false);
 
