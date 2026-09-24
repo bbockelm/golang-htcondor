@@ -56,7 +56,9 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("4. tail_job_output — while it RUNS, read the end of its stdout/stderr straight from " +
 		"the execute node. This is how you watch progress or find out why a job is stuck, instead of " +
 		"waiting for it to finish. Pass the offsets it returns back on the next call to get only what " +
-		"is new, and poll no more than every 5 seconds.\n")
+		"is new, and poll no more than every 5 seconds. Not for a scheduler-universe job (a DAGMan " +
+		"manager): it runs on the access point with no starter to tail, so read its spool with " +
+		"get_job_stdout / get_job_output instead — those work while it runs.\n")
 	b.WriteString("5. get_job_stdout / get_job_stderr — retrieve output after the job FINISHES. " +
 		"These read the transferred files, so they are the right tools once a job is done and the " +
 		"wrong ones while it runs; tail_job_output is the reverse.\n")
@@ -85,7 +87,10 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("4. get_job_output on the DAGMan job (job_id=\"N.0\") — the node jobs' outputs come back " +
 		"into the workflow's own spool directory, not to anywhere else, and this returns the whole spool, " +
 		"DAGMan's own <dag>.dagman.out log included.\n")
-	b.WriteString("5. The node jobs are not in the manager's cluster: they carry DAGManJobId == N and " +
+	b.WriteString("5. To read a running workflow's DAGMan log, get_job_output on the manager cluster — its " +
+		"spool is readable while it runs (each call fetches the whole spool, so do it when you need it, " +
+		"not on a timer).\n")
+	b.WriteString("6. The node jobs are not in the manager's cluster: they carry DAGManJobId == N and " +
 		"DAGNodeName. List the running ones with query_jobs(constraint=\"DAGManJobId == N\") and the " +
 		"finished ones with query_job_archive on the same constraint.\n\n")
 	b.WriteString("Removing the DAGMan job removes the workflow, including node jobs already running. " +

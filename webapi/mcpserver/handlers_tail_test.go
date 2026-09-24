@@ -129,3 +129,62 @@ func TestTailRequiresAuthentication(t *testing.T) {
 		t.Errorf("a stdio caller was refused instead of acting as the local user: %v", err)
 	}
 }
+
+// What the model reads before it picks a tool. A DAGMan manager is the
+// case it gets wrong -- the job is running, so tail looks right -- and
+// the descriptions are the only place it can learn otherwise before
+// spending a call.
+func TestSchedulerUniverseIsInTheToolDescriptions(t *testing.T) {
+	s := newTailTestServer(t)
+	body, err := json.Marshal(s.handleListTools(context.Background(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Tools []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	descriptions := map[string]string{}
+	for _, tool := range parsed.Tools {
+		descriptions[tool.Name] = tool.Description
+	}
+
+	want := map[string][]string{
+		"tail_job_output": {"scheduler-universe", "DAGMan", "get_job_output"},
+		"exec_in_job":     {"scheduler- or grid-universe"},
+		"get_job_stdout":  {"RUNNING scheduler-universe", "do not poll"},
+		"get_job_stderr":  {"RUNNING scheduler-universe", "do not poll"},
+		"get_job_output":  {"RUNNING scheduler-universe", "dagman.out", "do not poll"},
+	}
+	for name, phrases := range want {
+		desc, ok := descriptions[name]
+		if !ok {
+			t.Errorf("%s is not in tools/list", name)
+			continue
+		}
+		for _, phrase := range phrases {
+			if !strings.Contains(desc, phrase) {
+				t.Errorf("%s's description does not mention %q: %s", name, phrase, desc)
+			}
+		}
+	}
+}
+
+// The instructions steer a model to tail "while it RUNS", which is
+// exactly the sentence that sends it at a DAGMan manager.
+func TestInstructionsCarryTheSchedulerUniverseCaveat(t *testing.T) {
+	instructions := defaultInstructions("test_schedd")
+	for _, want := range []string{
+		"Not for a scheduler-universe job",
+		"To read a running workflow's DAGMan log",
+	} {
+		if !strings.Contains(instructions, want) {
+			t.Errorf("the instructions do not say %q", want)
+		}
+	}
+}
