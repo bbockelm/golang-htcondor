@@ -268,6 +268,10 @@ type Config struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPSkillsReloadInterval is how often that directory is re-read so a
+	// checkout updated underneath this process is noticed without a
+	// reconfigure. Zero disables the poll.
+	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir publishes a directory of site-authored Markdown skills
 	// to agents. Empty disables the feature.
 	MCPSkillsDir    string
@@ -429,6 +433,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
+		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		TokenRetention:              cfg.TokenRetention,

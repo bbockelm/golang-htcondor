@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -279,5 +280,214 @@ func TestEmptyDirUnpublishesSkills(t *testing.T) {
 	}
 	if instr := s.instructions.Load(); instr != nil && strings.Contains(*instr, "Site skills") {
 		t.Error("instructions still advertise skills after they were unpublished")
+	}
+}
+
+// The reload poll is what lets a site keep its library current by updating
+// a checkout -- nothing outside this process can signal it, so it looks.
+// These tests cover the two ways that goes wrong: never noticing a change,
+// and "noticing" one that did not happen.
+
+// skillsServerPolling is skillsServer with the reload poll running.
+func skillsServerPolling(t *testing.T, dir string, interval time.Duration) *Server {
+	t.Helper()
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(Config{
+		ScheddProvider:       func() *htcondor.Schedd { return htcondor.NewSchedd("test", "127.0.0.1:1") },
+		Logger:               logger,
+		SkillsDir:            dir,
+		SkillsReloadInterval: interval,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
+
+// eventuallyWithin bounds how long a poll-driven assertion waits. Generous
+// against a loaded CI machine; the loop below exits as soon as the
+// condition holds, so a passing run does not pay it.
+const eventuallyWithin = 5 * time.Second
+
+// eventually polls cond until it holds or the deadline passes. A fixed
+// sleep would either be flaky on a loaded machine or slow on every run.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(eventuallyWithin)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", eventuallyWithin, what)
+}
+
+func TestReloadPollPicksUpANewSkill(t *testing.T) {
+	root := skillsFixture(t)
+	s := skillsServerPolling(t, root, 10*time.Millisecond)
+
+	if _, ok := s.skillsLibrary().Get("storage"); ok {
+		t.Fatal("precondition: storage should not exist yet")
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "storage.md"),
+		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "the poll to notice a new skill", func() bool {
+		_, ok := s.skillsLibrary().Get("storage")
+		return ok
+	})
+
+	// And the initialize text has to name it: an agent connecting after the
+	// reload learns what exists from there, so a library that updated
+	// without the text updating is only half a reload.
+	eventually(t, "the instructions to name the new skill", func() bool {
+		instr := s.instructions.Load()
+		return instr != nil && strings.Contains(*instr, "Where to put data.")
+	})
+}
+
+func TestReloadPollNoticesADeletedSkill(t *testing.T) {
+	root := skillsFixture(t)
+	s := skillsServerPolling(t, root, 10*time.Millisecond)
+
+	if _, ok := s.skillsLibrary().Get("gpu"); !ok {
+		t.Fatal("precondition: gpu should exist")
+	}
+	if err := os.Remove(filepath.Join(root, "gpu.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "the poll to notice a removed skill", func() bool {
+		_, ok := s.skillsLibrary().Get("gpu")
+		return !ok
+	})
+}
+
+// The expensive half of a reload is not reading the files, it is bumping
+// the catalogue generation: that invalidates the per-scope SDK servers the
+// transport caches, so every connected scope rebuilds. A poll whose normal
+// outcome is "nothing changed" must not do that.
+func TestReloadPollDoesNotChurnTheCatalog(t *testing.T) {
+	s := skillsServerPolling(t, skillsFixture(t), 5*time.Millisecond)
+
+	settled := s.catalogGen.Load()
+	// Long enough for many ticks to have fired; if any of them republished,
+	// the generation moves.
+	time.Sleep(150 * time.Millisecond)
+
+	if got := s.catalogGen.Load(); got != settled {
+		t.Errorf("catalog generation moved from %d to %d with no change on disk; "+
+			"every poll is invalidating the cached per-scope servers", settled, got)
+	}
+}
+
+// Same property for the operator-driven path: a condor_reconfig run for an
+// unrelated reason should not disturb live sessions' catalogues.
+func TestSetSkillsDirIsQuietWhenNothingChanged(t *testing.T) {
+	root := skillsFixture(t)
+	s := skillsServer(t, root)
+
+	settled := s.catalogGen.Load()
+	s.SetSkillsDir(root)
+	s.SetSkillsDir(root)
+
+	if got := s.catalogGen.Load(); got != settled {
+		t.Errorf("catalog generation moved from %d to %d on a reload of identical content", settled, got)
+	}
+
+	// But a real change still gets through -- the check above must not have
+	// been bought by pinning the library.
+	if err := os.WriteFile(filepath.Join(root, "storage.md"),
+		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetSkillsDir(root)
+	if _, ok := s.skillsLibrary().Get("storage"); !ok {
+		t.Error("a real change was skipped along with the no-op reloads")
+	}
+	if s.catalogGen.Load() == settled {
+		t.Error("catalog generation did not move for a real change")
+	}
+}
+
+// Zero interval is an operator saying "I will drive reloads myself".
+func TestNoPollWhenTheIntervalIsZero(t *testing.T) {
+	root := skillsFixture(t)
+	s := skillsServerPolling(t, root, 0)
+
+	if err := os.WriteFile(filepath.Join(root, "storage.md"),
+		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := s.skillsLibrary().Get("storage"); ok {
+		t.Error("the library reloaded with polling disabled")
+	}
+	// The explicit path still works, which is the whole bargain of setting
+	// the interval to zero.
+	s.SetSkillsDir(root)
+	if _, ok := s.skillsLibrary().Get("storage"); !ok {
+		t.Error("an explicit reload did not work with polling disabled")
+	}
+}
+
+func TestCloseStopsThePoll(t *testing.T) {
+	root := skillsFixture(t)
+	s := skillsServerPolling(t, root, 5*time.Millisecond)
+
+	// Let it run at least one tick so we know it was alive to begin with.
+	eventually(t, "the poll to run once", func() bool {
+		return s.skillsLibrary().Len() > 0
+	})
+
+	s.Close()
+	s.Close() // idempotent: Close runs again from t.Cleanup
+
+	if err := os.WriteFile(filepath.Join(root, "storage.md"),
+		[]byte("---\nname: Storage\ndescription: Where to put data.\n---\nUse /staging.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := s.skillsLibrary().Get("storage"); ok {
+		t.Error("the poll kept reloading after Close")
+	}
+}
+
+// A directory that goes away mid-poll must not empty the library: agents
+// mid-session keep the guidance they had, and the next poll recovers.
+func TestPollSurvivesTheDirectoryVanishing(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "skills")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "gpu.md"),
+		[]byte("---\nname: GPU\ndescription: Ask for a GPU.\n---\nrequest_gpus = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := skillsServerPolling(t, root, 5*time.Millisecond)
+	before := s.skillsLibrary().Len()
+	if before == 0 {
+		t.Fatal("precondition: the library should have loaded")
+	}
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if got := s.skillsLibrary().Len(); got != before {
+		t.Errorf("library size = %d after the directory vanished, want the previous %d", got, before)
 	}
 }

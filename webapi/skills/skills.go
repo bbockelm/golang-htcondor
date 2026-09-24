@@ -28,7 +28,10 @@ package skills
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -83,6 +86,10 @@ type Library struct {
 	root   string
 	skills []Skill
 	byID   map[string]Skill
+	// stamp is the cheap fingerprint of the tree as it was when this
+	// library was read, so a caller polling for changes can ask whether
+	// there is anything to re-read without re-reading. See Stamp.
+	stamp string
 }
 
 // Root returns the directory the library was loaded from.
@@ -91,6 +98,18 @@ func (l *Library) Root() string {
 		return ""
 	}
 	return l.root
+}
+
+// Stamp returns the fingerprint of the directory this library was read
+// from, as of the read. Compare it with a fresh Stamp of the same root to
+// decide whether a reload would change anything; empty when the fingerprint
+// could not be taken, which compares unequal to every real one and so errs
+// toward reloading.
+func (l *Library) Stamp() string {
+	if l == nil {
+		return ""
+	}
+	return l.stamp
 }
 
 // Len reports how many skills were loaded.
@@ -151,58 +170,24 @@ func (l *Library) Get(idOrName string) (Skill, bool) {
 // pointing at a checkout has not agreed to serve whatever that checkout
 // links to.
 func Load(root string) (*Library, error) {
-	if strings.TrimSpace(root) == "" {
-		return nil, fmt.Errorf("no skills directory configured")
-	}
-	abs, err := filepath.Abs(root)
+	abs, err := resolveRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolving %s: %w", root, err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, fmt.Errorf("opening skills directory %s: %w", abs, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("skills path %s is not a directory", abs)
+		return nil, err
 	}
 
 	lib := &Library{root: abs, byID: map[string]Skill{}}
+	st := newStamper()
 
-	walkErr := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// A directory that cannot be read is skipped rather than
-			// failing the whole load: one unreadable subdirectory should
-			// not cost the site every other skill.
-			if d != nil && d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		name := d.Name()
-		if path != abs && strings.HasPrefix(name, ".") {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		// Not a regular file: a symlink, socket or device. Skipped, see
-		// the note about links above.
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		if !strings.EqualFold(filepath.Ext(name), ".md") {
-			return nil
-		}
+	walkErr := walkSkillFiles(abs, func(rel string, d fs.DirEntry) error {
+		// Stamped before it is read, and stamped even if reading it fails:
+		// the fingerprint has to describe the files a reload would VISIT,
+		// not the ones it managed to parse. An oversized file that shrinks
+		// below the limit is a change, and a stamp that ignored it would
+		// hide that change forever.
+		st.add(rel, d)
+
 		if len(lib.skills) >= maxSkills {
 			return fmt.Errorf("more than %d skills under %s; refusing to load the rest", maxSkills, abs)
-		}
-
-		rel, relErr := filepath.Rel(abs, path)
-		if relErr != nil {
-			return nil
 		}
 		skill, loadErr := loadSkill(abs, rel)
 		if loadErr != nil {
@@ -223,8 +208,138 @@ func Load(root string) (*Library, error) {
 		return nil, walkErr
 	}
 
+	lib.stamp = st.sum()
 	sort.Slice(lib.skills, func(i, j int) bool { return lib.skills[i].ID < lib.skills[j].ID })
 	return lib, nil
+}
+
+// Stamp fingerprints the directory without reading any of it.
+//
+// This is the cheap half of a poll. A caller that reloads on a timer wants
+// to know whether anything changed, and answering that by reading every
+// file defeats the point: a library is prose, but a big one is megabytes,
+// and re-reading it every minute to discover it is identical is work the
+// whole design is trying to avoid. So this walks the same files Load would
+// and hashes only what stat already knows -- path, size, modification time.
+//
+// Compare the result with a Library's Stamp. Equal means a reload would
+// find the same bytes and can be skipped; different means reload.
+//
+// The comparison is conservative in the right direction. Anything that
+// goes wrong -- an unreadable directory, a file that vanished mid-walk --
+// yields a stamp that does not match, so the caller reloads and finds out
+// properly. What it cannot catch is a file rewritten with identical size
+// and modification time; that is why an operator-driven reload
+// (reconfigure) re-reads unconditionally rather than consulting this.
+func Stamp(root string) (string, error) {
+	abs, err := resolveRoot(root)
+	if err != nil {
+		return "", err
+	}
+	st := newStamper()
+	if err := walkSkillFiles(abs, func(rel string, d fs.DirEntry) error {
+		st.add(rel, d)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return st.sum(), nil
+}
+
+// resolveRoot validates a configured directory and returns its absolute path.
+func resolveRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("no skills directory configured")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s: %w", root, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("opening skills directory %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("skills path %s is not a directory", abs)
+	}
+	return abs, nil
+}
+
+// walkSkillFiles calls visit for every file Load would consider, in a
+// stable order, with the path relative to abs.
+//
+// The selection rules live here rather than in Load so that Load and Stamp
+// cannot drift apart. A file one of them saw and the other did not would
+// make the cheap change check lie -- and it would lie by saying "nothing
+// changed", which is the failure that goes unnoticed.
+func walkSkillFiles(abs string, visit func(rel string, d fs.DirEntry) error) error {
+	return filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A directory that cannot be read is skipped rather than
+			// failing the whole load: one unreadable subdirectory should
+			// not cost the site every other skill.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if path != abs && strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// Not a regular file: a symlink, socket or device. Skipped, see
+		// the note about links on Load.
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(name), ".md") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(abs, path)
+		if relErr != nil {
+			return nil
+		}
+		return visit(rel, d)
+	})
+}
+
+// stamper accumulates the fingerprint Stamp describes.
+type stamper struct {
+	h     hash.Hash
+	count int
+}
+
+func newStamper() *stamper {
+	return &stamper{h: sha256.New()}
+}
+
+// add folds one file into the fingerprint. A file whose metadata cannot be
+// read is folded in as such: it contributed to the walk, so leaving it out
+// entirely would make this stamp equal to one taken when the file was
+// absent.
+func (st *stamper) add(rel string, d fs.DirEntry) {
+	st.count++
+	// hash.Hash promises its Write never returns an error, which is why
+	// these are discarded rather than handled.
+	info, err := d.Info()
+	if err != nil {
+		_, _ = fmt.Fprintf(st.h, "%s\x00?\x00?\x00", filepath.ToSlash(rel))
+		return
+	}
+	_, _ = fmt.Fprintf(st.h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano())
+}
+
+// sum returns the fingerprint. The count is included in the text so two
+// libraries of different sizes can never collide on a truncated hash, and
+// so a human reading a log line can tell them apart at a glance.
+func (st *stamper) sum() string {
+	return fmt.Sprintf("%d-%s", st.count, hex.EncodeToString(st.h.Sum(nil)))
 }
 
 // loadSkill reads and parses one file.

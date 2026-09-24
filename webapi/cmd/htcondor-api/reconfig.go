@@ -111,6 +111,12 @@ var reconfigParams = []reconfigParam{
 	},
 	// Reloaded unconditionally in reconfigure() as well; this entry is what
 	// handles the path being changed or cleared.
+	//
+	// A running daemon also polls this directory on its own
+	// (HTTP_API_MCP_SKILLS_RELOAD_INTERVAL), so a checkout updated in place
+	// no longer needs a reconfigure at all. What a reconfigure adds is
+	// immediacy and an unconditional re-read: the poll skips files whose
+	// size and modification time are unchanged, and this does not.
 	{
 		name:  "HTTP_API_MCP_SKILLS_DIR",
 		apply: func(s reconfigTarget, v string) { s.SetMCPSkillsDir(v) },
@@ -156,6 +162,11 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_OAUTH2_GROUPS_CLAIM"},
 	{name: "HTTP_API_OAUTH2_REQUIREMENTS"},
 	{name: "HTTP_API_IDENTITY_MAP_STRIP_DOMAIN"},
+
+	// The skills poll's ticker is started once, when the MCP server is
+	// built. Changing how often it fires needs a restart; changing what it
+	// reads does not (see HTTP_API_MCP_SKILLS_DIR above).
+	{name: "HTTP_API_MCP_SKILLS_RELOAD_INTERVAL"},
 
 	// Authorization groups. Worth making dynamic later -- they are consulted
 	// per request -- but some are also folded into policy objects at

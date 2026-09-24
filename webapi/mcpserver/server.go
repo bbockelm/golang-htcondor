@@ -59,8 +59,16 @@ type Server struct {
 	// caches learn they are stale.
 	catalogGen atomic.Uint64
 	// skills is the site-authored skill library. Swapped atomically: a
-	// reconfigure reloads it from disk while requests are reading.
-	skills         atomic.Pointer[skills.Library]
+	// reconfigure or the reload poll replaces it from disk while requests
+	// are reading.
+	skills atomic.Pointer[skills.Library]
+	// skillsDir is where that library is read from, kept so the reload
+	// poll knows what to look at. Atomic because a reconfigure can change
+	// it while the poll is running.
+	skillsDir atomic.Pointer[string]
+	// skillsStop halts the reload poll; nil when none was started.
+	skillsStop     chan struct{}
+	skillsStopOnce sync.Once
 	signingKeyPath string
 	// shareSigner mints the signed upload URLs create_input_upload_url
 	// hands back. Derived from the pool signing key so the URL verifies
@@ -177,6 +185,12 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// SkillsReloadInterval is how often to re-read SkillsDir so a checkout
+	// updated underneath this process is noticed without a reconfigure.
+	// Zero disables the poll, leaving reloads to reconfigure alone. The
+	// check is stat-only until something actually changes, so a short
+	// interval is cheap.
+	SkillsReloadInterval time.Duration
 	// SkillsDir is a directory of site-authored Markdown skills to publish
 	// to agents. Empty disables the feature.
 	SkillsDir       string
@@ -395,6 +409,10 @@ func NewServer(cfg Config) (*Server, error) {
 	// skills, so building it first would advertise an empty library.
 	if dir := strings.TrimSpace(cfg.SkillsDir); dir != "" {
 		s.SetSkillsDir(dir)
+		if s.startSkillsReload(cfg.SkillsReloadInterval) {
+			logger.Info(logging.DestinationMCP, "Polling the site skills directory for changes",
+				"dir", dir, "interval", cfg.SkillsReloadInterval.String())
+		}
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetInstructions(cfg.Instructions)
@@ -451,16 +469,20 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// Close releases what this server holds open beyond a single call:
-// today that is the interactive sessions' SSH connections and their
-// heartbeat goroutines.
+// Close releases what this server holds open beyond a single call: the
+// interactive sessions' SSH connections and their heartbeat goroutines,
+// and the goroutine polling the site skills directory.
 //
 // It deliberately leaves the session JOBS running. A daemon restart
 // should find them and re-adopt them, which is the property that makes
 // a named session usable across a restart at all; the in-job watchdog
 // is what reclaims a session whose server never comes back.
 func (s *Server) Close() {
-	if s == nil || s.interactive == nil {
+	if s == nil {
+		return
+	}
+	s.stopSkillsReload()
+	if s.interactive == nil {
 		return
 	}
 	s.interactive.Close()

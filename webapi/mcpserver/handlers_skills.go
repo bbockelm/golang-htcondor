@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
@@ -284,9 +285,12 @@ func skillsInstructions(lib *skills.Library) string {
 
 // SetSkillsDir loads (or reloads) the skill library from disk.
 //
-// Called at construction and again on a reconfigure, which is how a site
-// publishes an updated checkout without restarting the daemon: pull the
-// repository, then condor_reconfig.
+// Called at construction, on a reconfigure, and whenever the operator
+// changes where the library lives. It always re-reads: a reconfigure is a
+// deliberate act, and an operator who has just run condor_reconfig to make
+// the daemon notice something is owed an authoritative answer rather than
+// a cache check. The periodic poll is the one that tries to be cheap; see
+// reloadSkills.
 //
 // A failed load leaves the previous library in place rather than emptying
 // it. A directory that has momentarily gone missing -- a checkout being
@@ -297,6 +301,11 @@ func skillsInstructions(lib *skills.Library) string {
 // sessions that initialize after this call see the new catalogue.
 func (s *Server) SetSkillsDir(dir string) {
 	dir = strings.TrimSpace(dir)
+	// Remembered so the reload loop knows what to poll. Stored even when
+	// the load below fails, so a directory that comes back later is picked
+	// up without an operator having to do anything.
+	s.skillsDir.Store(&dir)
+
 	if dir == "" {
 		s.skills.Store(nil)
 		s.rebuildInstructions()
@@ -313,10 +322,113 @@ func (s *Server) SetSkillsDir(dir string) {
 		return
 	}
 
+	s.installSkills(lib)
+}
+
+// installSkills publishes a freshly read library, unless it is the same
+// one already published.
+//
+// The early return is not just an optimisation. Rebuilding the initialize
+// text bumps the catalogue generation, which invalidates the per-scope SDK
+// servers cached by the transport -- so republishing an identical library
+// makes every connected scope rebuild its server for nothing. On a poll
+// that runs every few minutes, "for nothing" is the normal case.
+func (s *Server) installSkills(lib *skills.Library) {
+	prev := s.skillsLibrary()
+	if prev != nil && prev.Root() == lib.Root() && prev.Stamp() == lib.Stamp() {
+		if s.logger != nil {
+			s.logger.Debug(logging.DestinationMCP, "Site skills unchanged",
+				"dir", lib.Root(), "count", lib.Len(), "stamp", lib.Stamp())
+		}
+		return
+	}
+
 	s.skills.Store(lib)
 	if s.logger != nil {
 		s.logger.Info(logging.DestinationMCP, "Loaded site skills",
 			"dir", lib.Root(), "count", lib.Len())
 	}
 	s.rebuildInstructions()
+}
+
+// reloadSkills is the polled half: re-read the library only if the files
+// on disk are not the ones already loaded.
+//
+// This is what lets a site keep the library current by updating a checkout
+// -- a git-sync sidecar, a cron pull, a config-management run -- without
+// anything having to signal the daemon afterwards. Nothing about that
+// update can reach into this process, so the process looks.
+//
+// The stat-only check is why this is affordable at a short interval: the
+// common outcome is "nothing changed", and reaching that conclusion costs
+// one stat per file rather than reading them all.
+func (s *Server) reloadSkills() {
+	dir := ""
+	if p := s.skillsDir.Load(); p != nil {
+		dir = *p
+	}
+	if dir == "" {
+		return
+	}
+
+	stamp, err := skills.Stamp(dir)
+	if err == nil {
+		if prev := s.skillsLibrary(); prev != nil && prev.Stamp() == stamp {
+			return
+		}
+	}
+	// A stamp that could not be taken is deliberately not an error here.
+	// It means something is odd about the directory, and the way to find
+	// out what is to try the real load, which reports properly and keeps
+	// the previous library if it fails.
+
+	lib, err := skills.Load(dir)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error(logging.DestinationMCP,
+				"Could not reload site skills; keeping the previously loaded set",
+				"dir", dir, "error", err, "loaded", s.skillsLibrary().Len())
+		}
+		return
+	}
+	s.installSkills(lib)
+}
+
+// startSkillsReload begins polling the skill library, and returns whether
+// it did.
+//
+// Not started when no directory is configured, or when the interval is
+// zero -- an operator who sets it to zero has said they will drive reloads
+// themselves with condor_reconfig, and a goroutine that wakes up to do
+// nothing is worse than no goroutine.
+func (s *Server) startSkillsReload(interval time.Duration) bool {
+	if interval <= 0 {
+		return false
+	}
+	if p := s.skillsDir.Load(); p == nil || *p == "" {
+		return false
+	}
+
+	s.skillsStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.skillsStop:
+				return
+			case <-ticker.C:
+				s.reloadSkills()
+			}
+		}
+	}()
+	return true
+}
+
+// stopSkillsReload halts the poll. Idempotent, because Close is.
+func (s *Server) stopSkillsReload() {
+	if s.skillsStop == nil {
+		return
+	}
+	s.skillsStopOnce.Do(func() { close(s.skillsStop) })
 }

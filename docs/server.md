@@ -609,8 +609,12 @@ HTTP_API_MCP_SKILLS_DIR = /etc/condor/skills
 
 ```
 git clone https://git.example.edu/ap/skills /etc/condor/skills
-condor_reconfig            # picks up the checkout without a restart
 ```
+
+The server re-reads that directory every five minutes, so keeping the
+library current is a matter of keeping the checkout current -- a cron
+`git pull`, a git-sync sidecar, a config-management run. Nothing has to
+signal the daemon afterwards.
 
 **What is loaded.** Every `*.md` file underneath the directory, at any
 depth. Hidden directories and hidden files are skipped, so a git checkout
@@ -656,14 +660,32 @@ catalogue is inlined rather than merely pointed at, because an agent reads
 the instructions before deciding anything -- a bare "call `skills_list`"
 is advice it has no reason to take until it has already guessed.
 
-**Reloading.** The library is re-read from disk on every
-`condor_reconfig` / SIGHUP, not only when the setting changes, since the
-usual reason to reload is that the checkout was updated while the path
-stayed the same. A reload that fails -- the directory momentarily missing,
-an automount that has not returned -- keeps the previously loaded set
-rather than leaving agents with nothing. Clearing the setting does
-unpublish them. Agents already connected keep the instructions they were
-given: MCP delivers those once, at initialize.
+**Reloading.** Two paths, and the difference between them matters if you
+are automating around it.
+
+*The poll.* Every `HTTP_API_MCP_SKILLS_RELOAD_INTERVAL` (default `5m`) the
+server checks the directory and re-reads it if anything changed. The check
+is stat-only -- one `stat` per Markdown file, comparing path, size and
+modification time against what is loaded -- so the normal outcome, nothing
+changed, costs almost nothing and a short interval is affordable. It also
+does not touch the published library or the `initialize` text when nothing
+changed, which matters because rebuilding that text invalidates the cached
+per-scope MCP servers.
+
+Set the interval to `0` to turn the poll off and drive reloads yourself.
+
+*`condor_reconfig` / SIGHUP.* Re-reads unconditionally, without consulting
+the stat check, and takes effect at once. It is the right tool when you
+have just changed the directory and want to know now, and the only one
+that catches the case the poll cannot see: a file rewritten with the same
+size and modification time.
+
+A reload that fails -- the directory momentarily missing, an automount that
+has not returned -- keeps the previously loaded set rather than leaving
+agents with nothing, on either path. Clearing the setting does unpublish
+them. Agents already connected keep the instructions they were given: MCP
+delivers those once, at initialize, so a reload reaches sessions that
+connect after it.
 
 ## API surface
 
@@ -872,7 +894,8 @@ Frequently-used knobs:
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `true` to also match the local part of a scoped subject. Pair with `HTTP_API_OAUTH2_REQUIREMENTS`. |
 | `HTTP_API_DAGMAN_PATH` | Absolute path to `condor_dagman` on the **access point**, for the `submit_dag` tool. **Normally unnecessary — discovered from the schedd's `BIN`; set it only if that discovery is refused.** The server asks the schedd for `BIN` once (a READ-level `condor_config_val` query) and uses `$(BIN)/condor_dagman`; this knob overrides that, and `/usr/bin/condor_dagman` is the fallback when neither is available. `condor_submit_dag` normally finds the binary with `which` on the submitting machine, which is no help here: this server submits to a schedd it shares no filesystem with. |
 | `HTTP_API_DAGMAN_ENVIRONMENT` | Extra environment for the DAGMan manager job, as whitespace-separated `KEY=VALUE` pairs. The schedd gives a scheduler-universe job only the environment its ad carries, and `getenv` cannot help because it would capture *this server's* environment rather than the access point's. `PATH` is set for you (PRE/POST scripts need it). Set `CONDOR_CONFIG` here if the access point keeps its configuration somewhere other than the default. A DAG's own `ENV SET` pairs are merged in too, underneath this: what an operator configures here wins, so a workflow cannot redirect `CONDOR_CONFIG` or `BEARER_TOKEN_FILE` by writing one line of DAG. `ENV GET` is reported as a warning and not honoured — it copies variables from the submitting process's environment, which here is this server's, not the access point's. |
-| `HTTP_API_MCP_SKILLS_DIR` | Directory of site-authored Markdown skills to publish to agents. Reloaded on SIGHUP. See [Site skills](#site-skills). |
+| `HTTP_API_MCP_SKILLS_DIR` | Directory of site-authored Markdown skills to publish to agents. Re-read periodically and on SIGHUP. See [Site skills](#site-skills). |
+| `HTTP_API_MCP_SKILLS_RELOAD_INTERVAL` | How often to re-read `HTTP_API_MCP_SKILLS_DIR` so a checkout updated underneath the daemon is noticed without a reconfigure (a duration, e.g. `1m`). Default `5m`; `0` disables the poll and leaves reloads to `condor_reconfig`. The check is stat-only until something actually changes. Read at startup. |
 | `HTTP_API_MCP_DISABLED_TOOLS` | MCP tools this access point does not offer, as glob patterns separated by commas or whitespace. Applied on SIGHUP. See [Disabling tools](#disabling-tools). |
 | `HTTP_API_TRUSTED_PROXIES` | Comma-separated CIDRs (or bare addresses) whose `X-Forwarded-For` / `X-Real-IP` are honored when recording a client address. Unset means none are, and the peer address is logged. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
