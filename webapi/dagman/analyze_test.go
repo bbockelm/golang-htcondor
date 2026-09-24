@@ -404,16 +404,19 @@ func TestAnalyzeRequiredIncludesDeclaredButNotMissingFiles(t *testing.T) {
 }
 
 func TestAnalyzeMacroValuesAreNotGuessed(t *testing.T) {
-	// VARS can give each node a different value, so a macro reference is
-	// unresolvable here. Guessing would either demand a file nothing uses
-	// or approve a workflow that is missing one.
+	// $(RETRY) is one of DAGMan's own macros: its value is the node's
+	// retry count at the moment it is submitted, which nothing here can
+	// know. Guessing would either demand a file nothing uses or approve a
+	// workflow that is missing one. (A macro that IS knowable -- a VARS
+	// value, $(JOB) -- is expanded instead; see
+	// TestAnalyzeExpandsVarsInFileNames.)
 	r := Analyze(Input{
 		DagName: "wf.dag",
 		Dag: `
 JOB A {
     executable = /bin/true
     transfer_executable = false
-    transfer_input_files = $(infile), sidecar.dat
+    transfer_input_files = input.$(RETRY), sidecar.dat
 }
 VARS A infile="a.dat"
 `,
@@ -922,5 +925,186 @@ transfer_executable = false
 	// -batch-name, so a DAG setting it is supported.
 	if len(r.JobAttrs) != 1 || r.JobAttrs[0].Name != "JobBatchName" {
 		t.Errorf("JobAttrs = %+v, want only JobBatchName to survive", r.JobAttrs)
+	}
+}
+
+// fanOutGatherDag is the commonest workflow shape there is: one submit
+// description, one node per sample through a VARS macro, and a gather
+// node that reads the files those produced by their literal names.
+//
+// It is a test fixture rather than a literal because the point of the
+// test below is one line of it -- the PARENT edges -- being removed.
+func fanOutGatherDag(edges bool) string {
+	dag := `
+SUBMIT-DESCRIPTION work {
+    executable = /bin/sh
+    transfer_executable = false
+    arguments = "-c 'echo $(sample) > result_$(sample).txt'"
+    transfer_output_files = result_$(sample).txt
+}
+JOB analyze_1 work
+JOB analyze_2 work
+JOB analyze_3 work
+VARS analyze_1 sample="1"
+VARS analyze_2 sample="2"
+VARS analyze_3 sample="3"
+JOB COMBINE {
+    executable = /bin/sh
+    transfer_executable = false
+    arguments = "-c 'cat result_*.txt > combined.txt'"
+    transfer_input_files = result_1.txt, result_2.txt, result_3.txt
+    transfer_output_files = combined.txt
+}
+`
+	if edges {
+		dag += "PARENT analyze_1 analyze_2 analyze_3 CHILD COMBINE\n"
+	}
+	return dag
+}
+
+// TestAnalyzeFanOutGatherIsClean: the producer's transfer_output_files is
+// `result_$(sample).txt` and the consumer names `result_1.txt`. Comparing
+// those unexpanded made every such workflow -- the most ordinary one
+// there is -- come back with three warnings that the files it produces
+// are missing, which teaches a caller to ignore the notes entirely.
+func TestAnalyzeFanOutGatherIsClean(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: fanOutGatherDag(true)})
+	if r.Fatal() {
+		t.Fatalf("a fan-out/gather workflow was refused: %v", r.Errors())
+	}
+	for _, f := range r.Findings {
+		if strings.Contains(f.Message, "result_") {
+			t.Errorf("a file an ancestor produces was reported: %s", f.Message)
+		}
+	}
+	// The files are still accounted for: they are expected to appear
+	// while the workflow runs.
+	if !contains(r.Deferred, "result_1.txt") {
+		t.Errorf("Deferred = %v, want the produced files in it", r.Deferred)
+	}
+}
+
+// TestAnalyzeFanOutGatherWithoutEdgesIsWarned is the other half, and the
+// one that proves the check above is not simply silence: with the
+// PARENT line gone nothing orders the gather after the producers, so the
+// gather can become ready before the files exist.
+func TestAnalyzeFanOutGatherWithoutEdgesIsWarned(t *testing.T) {
+	r := Analyze(Input{DagName: "wf.dag", Dag: fanOutGatherDag(false)})
+	f := findingAbout(r, "result_1.txt", "not an ancestor")
+	if f == nil {
+		t.Fatalf("an unordered producer/consumer pair was not reported: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, "analyze_1") || !strings.Contains(f.Message, "PARENT analyze_1 CHILD COMBINE") {
+		t.Errorf("the warning does not name the producer or the fix: %s", f.Message)
+	}
+	if f.Severity != Warning {
+		t.Errorf("severity = %v, want warning", f.Severity)
+	}
+}
+
+// TestAnalyzeExpandsVarsInFileNames: a node input named through a VARS
+// macro resolves to a file the caller DID supply, so it is neither
+// demanded nor called unreferenced.
+func TestAnalyzeExpandsVarsInFileNames(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = data_$(sample).txt
+}
+VARS A sample="1"
+`,
+		Files: map[string]string{"data_1.txt": "x\n"},
+	})
+	if len(r.Findings) != 0 {
+		t.Errorf("a supplied file named through VARS produced findings: %+v", r.Findings)
+	}
+	if !contains(r.Required, "data_1.txt") {
+		t.Errorf("Required = %v, want data_1.txt in the spool allow-set", r.Required)
+	}
+}
+
+// TestAnalyzeExpandsTheJobMacro: $(JOB) is the node's own name, which
+// DAGMan supplies to every node job it submits.
+func TestAnalyzeExpandsTheJobMacro(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB setup {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_output_files = $(JOB).out
+}
+JOB use {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = setup.out
+}
+PARENT setup CHILD use
+`,
+	})
+	if len(r.Findings) != 0 {
+		t.Errorf("$(JOB) was not expanded to the node name: %+v", r.Findings)
+	}
+}
+
+// TestAnalyzeUnresolvedMacroStillSoftensTheUnreferencedNote: a macro this
+// package cannot resolve leaves the analysis unable to see every
+// reference, and a "you misspelled this" verdict from a reader that
+// admits it cannot read the workflow is a guess dressed as a diagnosis.
+func TestAnalyzeUnresolvedMacroStillSoftensTheUnreferencedNote(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: `
+JOB A {
+    executable = /bin/true
+    transfer_executable = false
+    transfer_input_files = input.$(RETRY)
+}
+`,
+		Files: map[string]string{"orphan.dat": "x\n"},
+	})
+	if findingAbout(r, "input.$(RETRY)") != nil {
+		t.Errorf("an unresolvable macro was demanded as a file: %+v", r.Findings)
+	}
+	f := findingAbout(r, "orphan.dat")
+	if f == nil {
+		t.Fatalf("a supplied file nothing references was not mentioned: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, "VARS macros cannot be checked") {
+		t.Errorf("the note is stated as a diagnosis rather than a blind spot: %s", f.Message)
+	}
+	// And the softening is not permanent: with nothing unresolvable in
+	// the workflow the same orphan is named as the probable misspelling
+	// it is.
+	sure := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "JOB A {\n    executable = /bin/true\n    transfer_executable = false\n}\n",
+		Files:   map[string]string{"orphan.dat": "x\n"},
+	})
+	if findingAbout(sure, "orphan.dat", "usually a misspelling") == nil {
+		t.Errorf("without a blind spot the orphan should be named outright: %+v", sure.Findings)
+	}
+}
+
+// TestAnalyzeCycleUsesTheAuthorsSpelling: the graph is walked folded,
+// because DAGMan matches node names case-insensitively -- but a message
+// built from the folded form tells an author about nodes "a -> b -> c"
+// they never wrote.
+func TestAnalyzeCycleUsesTheAuthorsSpelling(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag: "JOB A a.sub\nJOB B a.sub\nJOB C a.sub\n" +
+			"PARENT A CHILD B\nPARENT B CHILD C\nPARENT C CHILD A\n",
+		Files: map[string]string{"a.sub": "queue\n"},
+	})
+	f := findingAbout(r, "cycle")
+	if f == nil {
+		t.Fatalf("the cycle was not reported: %+v", r.Findings)
+	}
+	if !strings.Contains(f.Message, "A -> B -> C -> A") {
+		t.Errorf("the cycle is not spelled as the DAG spells its nodes: %s", f.Message)
 	}
 }

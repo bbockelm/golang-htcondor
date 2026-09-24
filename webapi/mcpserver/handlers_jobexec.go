@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 )
@@ -56,7 +57,8 @@ func execInJobTool() Tool {
 			"keeps one connection open and its sandbox persists between calls.\n" +
 			"Each call is a FRESH shell: the working directory is the job's own, and environment changes do not carry " +
 			"over. Chain dependent steps in one command with '&&'. The command runs as the job's user, and anything it " +
-			"writes lands in the job's sandbox, which is deleted when the job ends.",
+			"writes lands in the job's sandbox, which is deleted when the job ends.\n" +
+			"Not for scheduler- or grid-universe jobs, which have no starter.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -89,8 +91,7 @@ func (s *Server) toolExecInJob(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("command is required")
 	}
 
-	cluster, proc, err := s.requireOwnRunningJob(ctx, jobID,
-		"exec_in_job reaches into the job through its starter, which exists only while the job runs")
+	cluster, proc, err := s.requireOwnRunningJob(ctx, jobID, execJobNeeds)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +146,7 @@ func (s *Server) liveJobQuery(ctx context.Context, cluster, proc int) (string, *
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
 		cluster, proc, classadStringLit(caller.Owner))
 	return constraint, &htcondor.QueryOptions{
-		Projection: []string{"ClusterId", "ProcId", "JobStatus"},
+		Projection: []string{"ClusterId", "ProcId", "JobStatus", "JobUniverse"},
 		Limit:      1,
 		FetchOpts:  htcondor.FetchMyJobs,
 		Owner:      caller.Owner,
@@ -163,9 +164,9 @@ func (s *Server) liveJobQuery(ctx context.Context, cluster, proc int) (string, *
 // the running check turns "the starter could not be reached" into a
 // sentence that says what to do instead.
 //
-// whyRunning is appended to the not-running error, because the reason
-// differs per tool and a caller acts on it.
-func (s *Server) requireOwnRunningJob(ctx context.Context, jobID, whyRunning string) (int, int, error) {
+// needs carries the per-tool wording, because the reason a job is out
+// of reach differs per tool and a caller acts on the difference.
+func (s *Server) requireOwnRunningJob(ctx context.Context, jobID string, needs liveJobNeeds) (int, int, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return 0, 0, fmt.Errorf("job_id is required")
 	}
@@ -185,10 +186,81 @@ func (s *Server) requireOwnRunningJob(ctx context.Context, jobID, whyRunning str
 	if len(ads) == 0 {
 		return 0, 0, fmt.Errorf("job not found: %s", jobID)
 	}
-	status, _ := ads[0].EvaluateAttrInt("JobStatus")
-	if int(status) != runningJobStatus {
-		return 0, 0, fmt.Errorf("job %s is %s, not running; %s",
-			jobID, describeJobStatus(int(status)), whyRunning)
+	if err := checkLiveJobAd(ads[0], jobID, needs); err != nil {
+		return 0, 0, err
 	}
 	return cluster, proc, nil
+}
+
+// liveJobNeeds is what one live-job tool needs of the job it was
+// pointed at, in words the caller can act on. Both fields are per-tool:
+// tail and exec are out of luck for the same reasons but have different
+// things to suggest instead.
+type liveJobNeeds struct {
+	// whyRunning is appended to the not-running error.
+	whyRunning string
+	// schedulerUniverse is the whole refusal for a scheduler-universe
+	// job: a format string with one %s for the job id.
+	schedulerUniverse string
+}
+
+// execJobNeeds is exec_in_job's wording. There is no fallback to
+// suggest for a scheduler-universe job -- nothing can run a command
+// inside one -- so the message says that rather than implying a retry.
+var execJobNeeds = liveJobNeeds{
+	whyRunning: "exec_in_job reaches into the job through its starter, which exists only while the job runs",
+	schedulerUniverse: "job %s is a scheduler-universe job (JobUniverse=7); condor_ssh_to_job needs a starter " +
+		"and there is none. There is no way to run a command inside it. Its files are readable with " +
+		"get_job_output while it runs.",
+}
+
+// gridUniverseRefusal is shared by both tools: a grid job runs on
+// somebody else's batch system, so neither has anything to offer.
+const gridUniverseRefusal = "job %s is a grid-universe job (JobUniverse=9): it runs on a remote batch " +
+	"system and HTCondor has no starter to reach into."
+
+// jobUniverseHasStarter reports whether a job of this universe runs
+// under a starter the schedd will broker a connection to.
+//
+// Both live-job tools go through GET_JOB_CONNECT_INFO, and its universe
+// switch (src/condor_schedd.V6/schedd.cpp,
+// Scheduler::get_job_connect_info) decides this: scheduler universe (7)
+// and grid universe (9) are refused with a bare "does not support
+// remote access", while local universe (12), vanilla/docker/java/vm and
+// parallel/mpi are served. Local universe runs on the access point but
+// still under a starter, so it must NOT be refused here. An ad with no
+// JobUniverse reads as 0 and is left alone: the schedd is the authority
+// and will say so itself.
+func jobUniverseHasStarter(universe int) bool {
+	switch universe {
+	case htcondor.UniverseScheduler, htcondor.UniverseGrid:
+		return false
+	default:
+		return true
+	}
+}
+
+// checkLiveJobAd decides whether the job the schedd just described can
+// be reached through its starter at all.
+//
+// The universe check comes first, and that ordering is the fix: a
+// running DAGMan manager passes the running check and then fails inside
+// the schedd with "does not support remote access", which tells a
+// caller neither why nor what to do instead.
+func checkLiveJobAd(ad *classad.ClassAd, jobID string, needs liveJobNeeds) error {
+	universe, _ := ad.EvaluateAttrInt("JobUniverse")
+	if !jobUniverseHasStarter(int(universe)) {
+		if int(universe) == htcondor.UniverseGrid {
+			// ST1005 wants an error fragment; these are whole
+			// sentences on purpose, because a model reads them.
+			return fmt.Errorf(gridUniverseRefusal, jobID) //nolint:staticcheck
+		}
+		return fmt.Errorf(needs.schedulerUniverse, jobID)
+	}
+	status, _ := ad.EvaluateAttrInt("JobStatus")
+	if int(status) != runningJobStatus {
+		return fmt.Errorf("job %s is %s, not running; %s",
+			jobID, describeJobStatus(int(status)), needs.whyRunning)
+	}
+	return nil
 }

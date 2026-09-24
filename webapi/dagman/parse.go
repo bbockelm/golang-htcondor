@@ -35,6 +35,7 @@ package dagman
 import (
 	"bufio"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -231,6 +232,17 @@ type DAG struct {
 	// VarNames maps the lower-cased key of Vars back to the spelling the
 	// DAG used, so a message about it quotes the author's own text.
 	VarNames map[string]string
+	// NodeVars is the same VARS material parsed: lower-cased node name to
+	// macro name (also lower-cased, because submit macros are
+	// case-insensitive) to value, last assignment winning. This is what
+	// the file cross-reference expands against, and it is the difference
+	// between seeing `result_$(sample).txt` and seeing `result_1.txt`.
+	NodeVars map[string]map[string]string
+	// NodeAttrVars are the VARS entries written `+attr` or `My.attr`:
+	// job-ad attributes rather than submit macros. They are kept apart
+	// because expanding $(attr) from one would invent a macro DAGMan does
+	// not define.
+	NodeAttrVars map[string]map[string]string
 	// Unrecognized are lines whose leading keyword this package does not
 	// know. They are passed through to DAGMan untouched.
 	Unrecognized []ParseError
@@ -311,6 +323,8 @@ func newDAG() *DAG {
 		Descriptions: map[string]Description{},
 		Vars:         map[string][]string{},
 		VarNames:     map[string]string{},
+		NodeVars:     map[string]map[string]string{},
+		NodeAttrVars: map[string]map[string]string{},
 	}
 }
 
@@ -356,15 +370,7 @@ func parseText(text string, rs *resolver) *DAG {
 				d.errf(lineNo, line, "expected WEAK PARENT p1 [p2 ...] CHILD c1 [c2 ...]")
 			}
 		case "VARS":
-			if len(fields) >= 2 {
-				n := strings.ToLower(fields[1])
-				d.Vars[n] = append(d.Vars[n], strings.Join(fields[2:], " "))
-				if _, ok := d.VarNames[n]; !ok {
-					d.VarNames[n] = fields[1]
-				}
-			} else {
-				d.errf(lineNo, line, "VARS needs a node name")
-			}
+			d.parseVars(fields, lineNo, line)
 		case "INCLUDE", "CONFIG", "DOT", "NODE_STATUS_FILE", "JOBSTATE_LOG", "SAVE_POINT_FILE":
 			d.parseFileCommand(keyword, fields, lineNo, line, rs)
 		case "SET_JOB_ATTR":
@@ -382,6 +388,182 @@ func parseText(text string, rs *resolver) *DAG {
 		}
 	}
 	return d
+}
+
+// parseVars handles `VARS <node> [PREPEND|APPEND] name="value" ...`.
+//
+// The raw remainder is still kept in Vars, for the messages that quote
+// the author's own text; the parsed pairs go into NodeVars, which is what
+// the analysis expands a node's file names against.
+//
+// PREPEND and APPEND (dag_parser.cpp DagParser::ParseVars) decide WHERE
+// DAGMan writes the assignment relative to the node's own submit
+// description, not what the value is, so they are recognized and dropped.
+// A name written `+attr` becomes the job-ad attribute `My.attr`, which is
+// not a macro at all and is kept separately.
+func (d *DAG) parseVars(fields []string, lineNo int, line string) {
+	if len(fields) < 2 {
+		d.errf(lineNo, line, "VARS needs a node name")
+		return
+	}
+	node := strings.ToLower(fields[1])
+	rest := fields[2:]
+	d.Vars[node] = append(d.Vars[node], strings.Join(rest, " "))
+	if _, ok := d.VarNames[node]; !ok {
+		d.VarNames[node] = fields[1]
+	}
+	if len(rest) > 0 && (strings.EqualFold(rest[0], "PREPEND") || strings.EqualFold(rest[0], "APPEND")) {
+		rest = rest[1:]
+	}
+	set := func(m map[string]map[string]string, name, value string) {
+		if m[node] == nil {
+			m[node] = map[string]string{}
+		}
+		m[node][name] = value
+	}
+	for _, p := range varPairs(rest) {
+		switch {
+		case strings.HasPrefix(p.name, "+"):
+			if len(p.name) > 1 {
+				set(d.NodeAttrVars, "My."+p.name[1:], p.value)
+			}
+		case len(p.name) > 3 && strings.EqualFold(p.name[:3], "My."):
+			set(d.NodeAttrVars, p.name, p.value)
+		default:
+			// Submit macro names are case-insensitive, so the lookup key
+			// is folded; the spelling survives in Vars.
+			set(d.NodeVars, strings.ToLower(p.name), p.value)
+		}
+	}
+}
+
+// varPair is one VARS assignment.
+type varPair struct{ name, value string }
+
+// varPairs reads the name="value" list of a VARS command.
+//
+// It mirrors DagLexer::next_key_value_pair (dag_parser.cpp): the '=' may
+// be attached to the name, attached to the value, or stand alone, the
+// value is a single token, and the quotes around it are not part of it.
+// The tokens arrive already lexed by splitFields, which is DagLexer::next
+// -- it keeps the surrounding quotes and has already resolved the `\"`
+// escapes inside them -- so unquote is all that is left to do.
+//
+// A token that is not part of an assignment is skipped rather than
+// treated as an error: DAGMan rejects the line outright, and this package
+// is not the authority on that.
+func varPairs(tokens []string) []varPair {
+	var out []varPair
+	for i := 0; i < len(tokens); i++ {
+		name, value := tokens[i], ""
+		if j := strings.Index(name, "="); j >= 0 {
+			if j == 0 {
+				continue // '=' with no name before it
+			}
+			name, value = name[:j], name[j+1:]
+			if value == "" {
+				// The token ended at the '='; the value is the next one.
+				i++
+				if i >= len(tokens) {
+					break
+				}
+				value = tokens[i]
+			}
+		} else {
+			// `name = value` or `name =value`: the '=' opens the next
+			// token.
+			if i+1 >= len(tokens) {
+				break
+			}
+			if !strings.HasPrefix(tokens[i+1], "=") {
+				continue // not an assignment; the next token starts a new one
+			}
+			i++
+			value = tokens[i][1:]
+			if value == "" {
+				i++
+				if i >= len(tokens) {
+					break
+				}
+				value = tokens[i]
+			}
+		}
+		if name == "" || value == "" {
+			continue
+		}
+		out = append(out, varPair{name: name, value: unquote(value)})
+	}
+	return out
+}
+
+// macroRef matches one $(name) reference.
+//
+// Only a plain name is matched. Submit's other forms -- $(name:default),
+// $F(name), $INT(...) -- mean things this package does not model, and a
+// value carrying one stays unresolved, which is the safe answer: it is
+// skipped rather than guessed at.
+var macroRef = regexp.MustCompile(`\$\(([A-Za-z_][A-Za-z0-9_]*)\)`)
+
+// maxMacroDepth caps the expansion. A VARS value may reference another
+// macro, so expansion repeats; two values that reference each other would
+// otherwise never settle. Hitting the cap leaves the `$(` standing, which
+// is exactly how an unresolvable reference is already marked.
+const maxMacroDepth = 8
+
+// nodeMacros is every macro whose value is statically knowable for one
+// node: DAGMan's $(JOB), then the VARS that apply to it. ALL_NODES comes
+// first and the node's own VARS last, because that is the order DAGMan
+// writes them and a submit file takes the last assignment.
+//
+// $(JOB) is the only built-in here, and that is the checked answer rather
+// than an omission. DAGMan defines JOB, RETRY, DAG_STATUS, FAILED_COUNT,
+// DAG_PARENT_NAMES and DAGManJobId for every node job it submits
+// (dagman_submit.cpp, and the "Job Macros" table in
+// docs/automated-workflows/dagman-reference.rst); of those only the node
+// name is knowable before the workflow runs. There is no $(NODE) alias --
+// DAGMan writes the node name into the job ad as DAGNodeName through the
+// `dag_node_name` submit command, not as a second macro.
+func nodeMacros(d *DAG, n *Node) map[string]string {
+	out := map[string]string{"job": n.Name}
+	if d == nil {
+		return out
+	}
+	for _, key := range []string{strings.ToLower(allNodes), strings.ToLower(n.Name)} {
+		for k, v := range d.NodeVars[key] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// expandNodeMacros resolves a submit value as DAGMan will for one node.
+//
+// fullyResolved is false when anything of the form `$(` survives: a macro
+// nothing defines here ($(RETRY), $(DAGManJobId)), a form this package
+// does not model, or a reference cycle. A caller must treat an
+// unresolved value as unknowable rather than as the text it is holding --
+// that is the whole reason the flag is returned separately.
+func expandNodeMacros(value string, n *Node, d *DAG) (string, bool) {
+	if n == nil || !strings.Contains(value, "$(") {
+		return value, !strings.Contains(value, "$(")
+	}
+	macros := nodeMacros(d, n)
+	out := value
+	for depth := 0; depth < maxMacroDepth && strings.Contains(out, "$("); depth++ {
+		changed := false
+		out = macroRef.ReplaceAllStringFunc(out, func(ref string) string {
+			v, ok := macros[strings.ToLower(ref[2:len(ref)-1])]
+			if !ok {
+				return ref
+			}
+			changed = true
+			return v
+		})
+		if !changed {
+			break
+		}
+	}
+	return out, !strings.Contains(out, "$(")
 }
 
 // parseFileCommand handles the commands whose argument is a file name.
@@ -605,6 +787,19 @@ func (d *DAG) merge(o *DAG, source, prefix string) {
 			d.VarNames[nk] = pfx(orig)
 		}
 	}
+	vars := func(dst, src map[string]map[string]string) {
+		for node, pairs := range src {
+			nk := strings.ToLower(pfx(node))
+			if dst[nk] == nil {
+				dst[nk] = map[string]string{}
+			}
+			for k, v := range pairs {
+				dst[nk][k] = v
+			}
+		}
+	}
+	vars(d.NodeVars, o.NodeVars)
+	vars(d.NodeAttrVars, o.NodeAttrVars)
 	for _, a := range o.JobAttrs {
 		a.Source = src(a.Source)
 		d.JobAttrs = append(d.JobAttrs, a)

@@ -39,6 +39,25 @@ const (
 	tailTimeout = 30 * time.Second
 )
 
+// tailJobNeeds is tail_job_output's wording for a job it cannot reach.
+//
+// A scheduler-universe job is not a dead end for a caller who wanted to
+// watch it: it writes its files in place in its spool directory while
+// it runs, and the sandbox-fetch tools read that spool of a running job
+// happily. What they must not do is poll it -- each fetch re-transfers
+// the job's whole changed-file set from the access point -- so the
+// message says so in the same breath as the suggestion.
+var tailJobNeeds = liveJobNeeds{
+	whyRunning: "this tool reads from the execute node, so use get_job_stdout / get_job_stderr " +
+		"for a job that is not running",
+	schedulerUniverse: "job %s is a scheduler-universe job (JobUniverse=7 -- a DAGMan manager or similar). " +
+		"It runs on the access point under the schedd, not under a starter, so there is no live stream to " +
+		"tail. Its stdout/stderr and other files are written in place in its spool directory while it runs: " +
+		"use get_job_stdout / get_job_stderr for its stdout/stderr, or get_job_output for the whole spool -- " +
+		"for a DAGMan workflow that includes its <dag>.dagman.out log. Each of those re-fetches the whole " +
+		"spool from the access point, so do not poll them.",
+}
+
 func tailTool() Tool {
 	return Tool{
 		Name: "tail_job_output",
@@ -48,7 +67,9 @@ func tailTool() Tool {
 			"output files, and this one talks to the starter, which no longer exists once the job ends.\n" +
 			"To follow a job, call it again with the offsets from the previous result (stdout_offset / stderr_offset in the " +
 			"metadata) and you get only what was appended since. Poll no more than every 5 seconds; each call is a round " +
-			"trip to the execute node.",
+			"trip to the execute node.\n" +
+			"Not for scheduler-universe jobs (DAGMan managers): those have no starter; read their spool with " +
+			"get_job_stdout / get_job_output instead, which works while they run.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -104,9 +125,7 @@ func (s *Server) toolTailJobOutput(ctx context.Context, args map[string]interfac
 	stdoutOffset := int64(intArg(args, "stdout_offset", -1))
 	stderrOffset := int64(intArg(args, "stderr_offset", -1))
 
-	cluster, proc, err := s.requireOwnRunningJob(ctx, jobID,
-		"this tool reads from the execute node, so use get_job_stdout / get_job_stderr "+
-			"for a job that is not running")
+	cluster, proc, err := s.requireOwnRunningJob(ctx, jobID, tailJobNeeds)
 	if err != nil {
 		return nil, err
 	}

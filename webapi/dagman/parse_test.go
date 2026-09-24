@@ -416,3 +416,97 @@ func TestParseEnvAndSetJobAttrAreNotUnrecognized(t *testing.T) {
 		t.Errorf("Unrecognized = %+v, want none", d.Unrecognized)
 	}
 }
+
+// TestParseVarsIntoPerNodeAssignments: the raw line was all this package
+// kept, and a raw line cannot be substituted into a file name -- which is
+// how a fan-out workflow's `result_$(sample).txt` went unmatched against
+// the literal names the gather node reads.
+func TestParseVarsIntoPerNodeAssignments(t *testing.T) {
+	d := Parse(`
+JOB A a.sub
+JOB B b.sub
+VARS A sample="1" label = "first run"
+VARS A APPEND greeting="say \"hi\""
+VARS A +Project="Chem" My.Group="grp"
+VARS B PREPEND sample="2"
+VARS ALL_NODES stage="prod"
+VARS a sample="1b"
+`)
+	if len(d.Errors) > 0 {
+		t.Fatalf("unexpected parse errors: %v", d.Errors)
+	}
+	for _, tc := range []struct{ node, name, want string }{
+		// The last assignment of a name wins, and the node name is folded
+		// exactly as DAGMan matches it.
+		{"a", "sample", "1b"},
+		// `name = value` with spaces around the '=' is one pair, and the
+		// quoted value keeps its space.
+		{"a", "label", "first run"},
+		// A \" inside a quoted value is one literal quote.
+		{"a", "greeting", `say "hi"`},
+		// APPEND/PREPEND change where DAGMan writes the assignment, not
+		// what it says.
+		{"b", "sample", "2"},
+		{"all_nodes", "stage", "prod"},
+	} {
+		if got := d.NodeVars[tc.node][tc.name]; got != tc.want {
+			t.Errorf("NodeVars[%q][%q] = %q, want %q (all: %+v)", tc.node, tc.name, got, tc.want, d.NodeVars)
+		}
+	}
+	// A +attr is a job-ad attribute, not a macro: expanding $(Project)
+	// from one would invent a macro DAGMan never defines.
+	if _, ok := d.NodeVars["a"]["project"]; ok {
+		t.Errorf("a +attr entry became a submit macro: %+v", d.NodeVars["a"])
+	}
+	for name, want := range map[string]string{"My.Project": "Chem", "My.Group": "grp"} {
+		if got := d.NodeAttrVars["a"][name]; got != want {
+			t.Errorf("NodeAttrVars[a][%q] = %q, want %q (all: %+v)", name, got, want, d.NodeAttrVars["a"])
+		}
+	}
+	// The raw text is still there for the messages that quote the author.
+	if len(d.Vars["a"]) != 4 || d.VarNames["b"] != "B" {
+		t.Errorf("the raw VARS material was lost: %v / %v", d.Vars, d.VarNames)
+	}
+}
+
+func TestExpandNodeMacros(t *testing.T) {
+	d := Parse(`
+JOB Analyze a.sub
+VARS Analyze sample="7" nested="run_$(sample)" self="$(self)"
+VARS Analyze loopa="$(loopb)" loopb="$(loopa)"
+VARS ALL_NODES stage="prod"
+`)
+	n, ok := d.NodeByName("Analyze")
+	if !ok {
+		t.Fatal("node Analyze not found")
+	}
+	for _, tc := range []struct {
+		value, want string
+		resolved    bool
+	}{
+		{"result_$(sample).txt", "result_7.txt", true},
+		// Macro names are case-insensitive, as submit's are.
+		{"$(SAMPLE)", "7", true},
+		// $(JOB) is the node name, which DAGMan supplies to every node.
+		{"$(JOB).out", "Analyze.out", true},
+		{"$(stage)/$(sample)", "prod/7", true},
+		// A VARS value that references another is expanded too.
+		{"$(nested).log", "run_7.log", true},
+		// DAGMan's own run-time macros are knowable only while the DAG
+		// runs, so they stay put and the value counts as unresolved.
+		{"input.$(RETRY)", "input.$(RETRY)", false},
+		{"$(DAGManJobId)", "$(DAGManJobId)", false},
+		// Neither a cycle nor a self-reference may loop.
+		{"$(self)", "$(self)", false},
+		{"$(loopa)", "$(loopa)", false},
+		// A form this reader does not model is left alone rather than
+		// half-substituted.
+		{"$(sample:2)", "$(sample:2)", false},
+		{"plain.txt", "plain.txt", true},
+	} {
+		got, resolved := expandNodeMacros(tc.value, n, d)
+		if got != tc.want || resolved != tc.resolved {
+			t.Errorf("expandNodeMacros(%q) = %q,%v; want %q,%v", tc.value, got, resolved, tc.want, tc.resolved)
+		}
+	}
+}

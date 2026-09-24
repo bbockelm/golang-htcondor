@@ -153,8 +153,12 @@ var outputSchemas = map[string]map[string]interface{}{
 		"input_files": arr(strSchema),
 		"notes":       arr(strSchema),
 		"deferred":    arr(strSchema),
-		"dry_run":     boolSchema,
-		"submit_file": strSchema,
+		// The constraint that matches the workflow's node jobs. They are
+		// not in the manager's cluster, so nothing else in this payload
+		// finds them.
+		"node_constraint": strSchema,
+		"dry_run":         boolSchema,
+		"submit_file":     strSchema,
 		// A dry run reports a workflow that cannot start rather than
 		// refusing it, so it needs somewhere to say so.
 		"fatal":  boolSchema,

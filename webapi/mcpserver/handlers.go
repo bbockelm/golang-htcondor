@@ -365,8 +365,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
-			Name:        "get_job_stdout",
-			Description: "Get stdout (output) from a completed or running HTCondor job",
+			Name: "get_job_stdout",
+			Description: "Get stdout (output) from a completed or running HTCondor job. " +
+				"Also works on a RUNNING scheduler-universe job (a DAGMan manager): its files are written in place " +
+				"in its spool, so this returns a live snapshot -- for a DAGMan workflow, get_job_output includes " +
+				"the <dag>.dagman.out log. Each call re-fetches the job's whole spool from the access point; " +
+				"do not poll.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -379,8 +383,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
-			Name:        "get_job_stderr",
-			Description: "Get stderr (error output) from a completed or running HTCondor job",
+			Name: "get_job_stderr",
+			Description: "Get stderr (error output) from a completed or running HTCondor job. " +
+				"Also works on a RUNNING scheduler-universe job (a DAGMan manager): its files are written in place " +
+				"in its spool, so this returns a live snapshot -- for a DAGMan workflow, get_job_output includes " +
+				"the <dag>.dagman.out log. Each call re-fetches the job's whole spool from the access point; " +
+				"do not poll.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -622,8 +630,13 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
-			Name:        "get_job_output",
-			Description: "Get all output files from a job's sandbox as structured data. Files are returned with their content (text or base64-encoded for binary), truncated if larger than 100KB per file.",
+			Name: "get_job_output",
+			Description: "Get all output files from a job's sandbox as structured data. Files are returned with " +
+				"their content (text or base64-encoded for binary), truncated if larger than 100KB per file. " +
+				"Also works on a RUNNING scheduler-universe job (a DAGMan manager): its files are written in place " +
+				"in its spool, so this returns a live snapshot -- for a DAGMan workflow, get_job_output includes " +
+				"the <dag>.dagman.out log. Each call re-fetches the job's whole spool from the access point; " +
+				"do not poll.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
