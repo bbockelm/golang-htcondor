@@ -172,27 +172,87 @@ function isPrimary(s: Slot): boolean {
 //   - dynamic slots contribute nothing (already in the leftover) and
 //     backfill slots are skipped entirely (they overlap primary cores).
 export function usageFor(slots: Slot[]): ResourceUsage {
-  const u = emptyUsage();
-  const seen = new Set<string>();
+  // Aggregate per machine so backfill is accounted for correctly.
+  //
+  // A backfill slot re-advertises the SAME physical machine as the primary
+  // slot and runs on the cores the primary partition leaves idle. So it
+  // must not add to the machine total -- but the resources it consumes ARE
+  // in use, which the old "skip backfill entirely" logic missed (a node
+  // whose primary slot was idle but whose backfill was full reported 0
+  // used). The residual truly-free amount on a machine is the MINIMUM free
+  // reported across its partitionable slots (primary + backfill): a
+  // backfill slot's free is what neither partition has taken. Then
+  // used = total - that residual free.
+  const byMachine = new Map<string, Slot[]>();
   for (const s of slots) {
-    if (!isPrimary(s)) continue;
-    if (!seen.has(s.machine)) {
-      seen.add(s.machine);
-      u.totalCpus += s.totalCpus ?? 0;
-      u.totalMemoryMB += s.totalMemoryMB ?? 0;
-      u.totalGpus += s.totalGpus ?? 0;
+    const arr = byMachine.get(s.machine);
+    if (arr) arr.push(s);
+    else byMachine.set(s.machine, [s]);
+  }
+
+  const u = emptyUsage();
+  for (const machineSlots of byMachine.values()) {
+    // Machine physical capacity: the Total* attrs, re-advertised
+    // identically by every slot on the machine, so take the max once.
+    let totalCpus = 0;
+    let totalMemoryMB = 0;
+    let totalGpus = 0;
+    for (const s of machineSlots) {
+      totalCpus = Math.max(totalCpus, s.totalCpus ?? 0);
+      totalMemoryMB = Math.max(totalMemoryMB, s.totalMemoryMB ?? 0);
+      totalGpus = Math.max(totalGpus, s.totalGpus ?? 0);
     }
-    if (s.partitionable) {
-      u.usedCpus += Math.max(0, (s.totalCpus ?? 0) - (s.cpus ?? 0));
-      u.usedMemoryMB += Math.max(0, (s.totalMemoryMB ?? 0) - (s.memoryMB ?? 0));
-      u.usedGpus += Math.max(0, (s.totalGpus ?? 0) - (s.gpus ?? 0));
-    } else if (!s.dynamic && s.state === 'Claimed') {
-      u.usedCpus += s.cpus ?? 0;
-      u.usedMemoryMB += s.memoryMB ?? 0;
-      u.usedGpus += s.gpus ?? 0;
+
+    const parts = machineSlots.filter((s) => s.partitionable);
+    let usedCpus = 0;
+    let usedMemoryMB = 0;
+    let usedGpus = 0;
+    if (parts.length > 0) {
+      const freeCpus = Math.min(...parts.map((s) => s.cpus ?? 0));
+      const freeMemoryMB = Math.min(...parts.map((s) => s.memoryMB ?? 0));
+      const freeGpus = Math.min(...parts.map((s) => s.gpus ?? 0));
+      usedCpus = totalCpus - freeCpus;
+      usedMemoryMB = totalMemoryMB - freeMemoryMB;
+      usedGpus = totalGpus - freeGpus;
+    } else {
+      // Static-slot machine: capacity and usage are the sum of the slots
+      // themselves; a Claimed static slot is in use.
+      let tc = 0;
+      let tm = 0;
+      let tg = 0;
+      for (const s of machineSlots) {
+        if (s.dynamic) continue;
+        tc += s.cpus ?? 0;
+        tm += s.memoryMB ?? 0;
+        tg += s.gpus ?? 0;
+        if (s.state === 'Claimed') {
+          usedCpus += s.cpus ?? 0;
+          usedMemoryMB += s.memoryMB ?? 0;
+          usedGpus += s.gpus ?? 0;
+        }
+      }
+      if (tc > 0) totalCpus = tc;
+      if (tm > 0) totalMemoryMB = tm;
+      if (tg > 0) totalGpus = tg;
     }
+
+    u.totalCpus += totalCpus;
+    u.totalMemoryMB += totalMemoryMB;
+    u.totalGpus += totalGpus;
+    u.usedCpus += clamp(usedCpus, totalCpus);
+    u.usedMemoryMB += clamp(usedMemoryMB, totalMemoryMB);
+    u.usedGpus += clamp(usedGpus, totalGpus);
   }
   return u;
+}
+
+// clamp keeps a used figure within [0, total] so a transient inconsistency
+// between the primary and backfill views can never report more used than
+// the machine physically has.
+function clamp(used: number, total: number): number {
+  if (used < 0) return 0;
+  if (used > total) return total;
+  return used;
 }
 
 // runningJobsFor counts jobs running on these machines without fetching the
@@ -200,9 +260,10 @@ export function usageFor(slots: Slot[]): ResourceUsage {
 // (its live children), and a claimed static slot is one job. Backfill
 // slots are excluded from the primary count.
 export function runningJobsFor(slots: Slot[]): number {
+  // Backfill jobs are real running jobs on the node, so count them too --
+  // a backfill partitionable slot's NumDynamicSlots is its running children.
   let n = 0;
   for (const s of slots) {
-    if (!isPrimary(s)) continue;
     if (s.partitionable) n += s.numDynamicSlots ?? 0;
     else if (!s.dynamic && s.state === 'Claimed') n += 1;
   }
@@ -213,9 +274,15 @@ export function runningJobsFor(slots: Slot[]): number {
 // reported separately because they run opportunistically on the primary
 // slots' idle cores (so they must not inflate the primary usage).
 export function backfillCpusInUse(slots: Slot[]): number {
+  // How much of the usage is opportunistic backfill. Read from the backfill
+  // partitionable slot (capacity it has carved out to its children) since
+  // the per-job backfill dynamic slots are not fetched, plus any claimed
+  // backfill static slots.
   let n = 0;
   for (const s of slots) {
-    if (s.backfill && s.state === 'Claimed') n += s.cpus ?? 0;
+    if (!s.backfill) continue;
+    if (s.partitionable) n += Math.max(0, (s.totalCpus ?? 0) - (s.cpus ?? 0));
+    else if (!s.dynamic && s.state === 'Claimed') n += s.cpus ?? 0;
   }
   return n;
 }
@@ -288,7 +355,13 @@ export function gib(mib: number | undefined): string {
 // the column header and need the cells to be bare, right-alignable numbers.
 export function gibNum(mib: number | undefined): string {
   if (mib === undefined) return '—';
-  return (mib / 1024).toFixed(mib < 1024 * 10 ? 1 : 0);
+  const g = mib / 1024;
+  // Thousands separators so a large aggregate (e.g. 104,552 GiB) reads like
+  // the CPU totals do; one decimal only for small values.
+  return g.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: g < 10 ? 1 : 0,
+  });
 }
 
 // pct renders used/total as an integer percentage, blank when no capacity.

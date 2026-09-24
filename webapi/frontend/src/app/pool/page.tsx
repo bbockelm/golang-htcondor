@@ -74,6 +74,16 @@ export default function PoolPage() {
   const summary = useMemo(() => summarize(filtered), [filtered]);
   const nodes = useMemo(() => groupByMachine(filtered), [filtered]);
 
+  const [sort, setSort] = useState<SortState>({ key: 'machine', dir: 'asc' });
+  const sortedNodes = useMemo(() => sortNodes(nodes, sort), [nodes, sort]);
+  const onSort = (key: SortKey) =>
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : // Names read best A→Z; usage columns most-used-first.
+          { key, dir: key === 'machine' ? 'asc' : 'desc' },
+    );
+
   const toggle = (machine: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -151,7 +161,9 @@ export default function PoolPage() {
                 </p>
               ) : (
                 <NodeTable
-                  nodes={nodes}
+                  nodes={sortedNodes}
+                  sort={sort}
+                  onSort={onSort}
                   expanded={expanded}
                   onToggle={toggle}
                   onSlot={(name) =>
@@ -271,13 +283,88 @@ function OwnerBadge() {
   );
 }
 
+type SortKey = 'machine' | 'running' | 'cpus' | 'memory' | 'gpus';
+interface SortState {
+  key: SortKey;
+  dir: 'asc' | 'desc';
+}
+
+// sortNodes orders the node rows by the clicked column. Usage columns sort
+// by the amount in use (what an operator scans for); the machine column
+// sorts by name.
+function sortNodes(nodes: NodeGroup[], sort: SortState): NodeGroup[] {
+  const value = (n: NodeGroup): number | string => {
+    switch (sort.key) {
+      case 'machine':
+        return n.machine;
+      case 'running':
+        return n.runningJobs;
+      case 'cpus':
+        return n.usage.usedCpus;
+      case 'memory':
+        return n.usage.usedMemoryMB;
+      case 'gpus':
+        return n.usage.usedGpus;
+    }
+  };
+  const sign = sort.dir === 'asc' ? 1 : -1;
+  return [...nodes].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    const c =
+      typeof va === 'string' && typeof vb === 'string'
+        ? va.localeCompare(vb)
+        : (va as number) - (vb as number);
+    // Stable tiebreak on machine so equal-usage rows don't reshuffle.
+    return sign * c || a.machine.localeCompare(b.machine);
+  });
+}
+
+function SortHeader({
+  label,
+  col,
+  align,
+  sort,
+  onSort,
+}: {
+  label: string;
+  col: SortKey;
+  align: 'left' | 'right';
+  sort: SortState;
+  onSort: (key: SortKey) => void;
+}) {
+  const active = sort.key === col;
+  const indicator = active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕';
+  return (
+    <th className={`px-3 py-2 ${align === 'right' ? 'text-right' : 'text-left'}`}>
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        className={`inline-flex items-center gap-1 uppercase tracking-wide hover:text-gray-700 ${
+          align === 'right' ? 'flex-row-reverse' : ''
+        }`}
+        title={`Sort by ${label}`}
+      >
+        {label}
+        <span className={active ? 'text-gray-700' : 'text-gray-300'}>
+          {indicator}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 function NodeTable({
   nodes,
+  sort,
+  onSort,
   expanded,
   onToggle,
   onSlot,
 }: {
   nodes: NodeGroup[];
+  sort: SortState;
+  onSort: (key: SortKey) => void;
   expanded: Set<string>;
   onToggle: (machine: string) => void;
   onSlot: (name: string) => void;
@@ -288,11 +375,11 @@ function NodeTable({
         <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th className="w-6 px-3 py-2" />
-            <th className="px-3 py-2 text-left">Execute node</th>
-            <th className="px-3 py-2 text-right">Running</th>
-            <th className="px-3 py-2 text-right">CPUs</th>
-            <th className="px-3 py-2 text-right">Memory (GiB)</th>
-            <th className="px-3 py-2 text-right">GPUs</th>
+            <SortHeader label="Execute node" col="machine" align="left" sort={sort} onSort={onSort} />
+            <SortHeader label="Running" col="running" align="right" sort={sort} onSort={onSort} />
+            <SortHeader label="CPUs" col="cpus" align="right" sort={sort} onSort={onSort} />
+            <SortHeader label="Memory (GiB)" col="memory" align="right" sort={sort} onSort={onSort} />
+            <SortHeader label="GPUs" col="gpus" align="right" sort={sort} onSort={onSort} />
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -321,9 +408,9 @@ function UsagePair({ used, total }: { used: string; total: string }) {
   }
   return (
     <span className="inline-flex items-baseline justify-end tabular-nums">
-      <span className="min-w-[4ch] text-right text-gray-800">{used}</span>
+      <span className="min-w-[5ch] text-right text-gray-800">{used}</span>
       <span className="px-1 text-gray-300">/</span>
-      <span className="min-w-[4ch] text-left text-gray-500">{total}</span>
+      <span className="min-w-[5ch] text-left text-gray-500">{total}</span>
     </span>
   );
 }

@@ -40,29 +40,54 @@ func TestParsePoolSlotLowercaseKeys(t *testing.T) {
 	}
 }
 
-func TestAggregateExcludesBackfill(t *testing.T) {
-	primary := gpuPartitionable(t)
-	// A backfill slot re-advertising the same cores/GPUs — must not add to
-	// capacity or usage, only to the separate backfill-CPU figure.
-	backfill := mustAd(t, `[ Name = "slot1_1@gpu1"; Machine = "gpu1"; SlotType = "Static";
-		BackfillSlot = true; State = "Claimed"; Cpus = 96;
-		TotalCpus = 128; TotalMemory = 256000; TotalGPUs = 8 ]`)
+func TestAggregateCountsBackfillUsage(t *testing.T) {
+	primary := gpuPartitionable(t) // 32 cpu / 2 gpu free of 128 / 8
+	// The backfill partition on the same machine: a second partitionable
+	// slot re-advertising the machine Total*, with 16 cpu / 1 gpu free.
+	backfill := mustAd(t, `[ Name = "backfill1@gpu1"; Machine = "gpu1"; SlotType = "Partitionable";
+		PartitionableSlot = true; BackfillSlot = true; State = "Unclaimed";
+		Cpus = 16; GPUs = 1; TotalCpus = 128; TotalMemory = 256000; TotalGPUs = 8;
+		NumDynamicSlots = 20 ]`)
 
-	withoutBF := aggregatePoolSummary([]*classad.ClassAd{primary})
-	withBF := aggregatePoolSummary([]*classad.ClassAd{primary, backfill})
+	got := aggregatePoolSummary([]*classad.ClassAd{primary, backfill})
 
-	if withBF.Summary.Usage != withoutBF.Summary.Usage {
-		t.Errorf("backfill changed usage: %+v vs %+v", withBF.Summary.Usage, withoutBF.Summary.Usage)
+	if got.Summary.Machines != 1 {
+		t.Errorf("Machines = %d, want 1 (backfill is not a separate machine)", got.Summary.Machines)
 	}
-	if withBF.Summary.BackfillCpus != 96 {
-		t.Errorf("BackfillCpus = %v, want 96", withBF.Summary.BackfillCpus)
+	if got.Summary.RunningJobs != 26 { // primary 6 + backfill 20
+		t.Errorf("RunningJobs = %d, want 26", got.Summary.RunningJobs)
 	}
-	if withBF.Summary.Machines != 1 {
-		t.Errorf("Machines = %d, want 1 (backfill is not a separate machine)", withBF.Summary.Machines)
+	if got.Summary.BackfillCpus != 112 { // 128 - 16 free
+		t.Errorf("BackfillCpus = %v, want 112", got.Summary.BackfillCpus)
 	}
-	u := withBF.Summary.Usage
-	if u.TotalCpus != 128 || u.UsedCpus != 96 || u.TotalGpus != 8 || u.UsedGpus != 6 {
-		t.Errorf("usage = %+v, want used 96/128 cpu, 6/8 gpu", u)
+	u := got.Summary.Usage
+	// Capacity counted once; used driven by residual free = min across
+	// partitions: cpu min(32,16)=16 -> 112; gpu min(2,1)=1 -> 7.
+	if u.TotalCpus != 128 || u.UsedCpus != 112 || u.TotalGpus != 8 || u.UsedGpus != 7 {
+		t.Errorf("usage = %+v, want used 112/128 cpu, 7/8 gpu", u)
+	}
+}
+
+func TestAggregateIdlePrimaryBackfillBusy(t *testing.T) {
+	// The reported bug: a node whose primary partition is idle (all free)
+	// but whose backfill partition is nearly full showed 0 used.
+	primary := mustAd(t, `[ Name = "slot1@e1"; Machine = "e1"; SlotType = "Partitionable";
+		PartitionableSlot = true; State = "Unclaimed"; Cpus = 128; GPUs = 8;
+		TotalCpus = 128; TotalGPUs = 8; NumDynamicSlots = 0 ]`)
+	backfill := mustAd(t, `[ Name = "backfill1@e1"; Machine = "e1"; SlotType = "Partitionable";
+		PartitionableSlot = true; BackfillSlot = true; State = "Unclaimed";
+		Cpus = 4; GPUs = 1; TotalCpus = 128; TotalGPUs = 8; NumDynamicSlots = 80 ]`)
+
+	got := aggregatePoolSummary([]*classad.ClassAd{primary, backfill})
+	u := got.Summary.Usage
+	if u.UsedCpus != 124 || u.TotalCpus != 128 || u.UsedGpus != 7 || u.TotalGpus != 8 {
+		t.Errorf("usage = %+v, want used 124/128 cpu, 7/8 gpu", u)
+	}
+	if got.Summary.RunningJobs != 80 {
+		t.Errorf("RunningJobs = %d, want 80", got.Summary.RunningJobs)
+	}
+	if got.Summary.BackfillCpus != 124 {
+		t.Errorf("BackfillCpus = %v, want 124", got.Summary.BackfillCpus)
 	}
 }
 
