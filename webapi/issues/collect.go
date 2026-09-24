@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -203,7 +204,13 @@ type Set struct {
 	Notes []string
 	// Truncated says a source hit MaxRecords, so the counts are a floor
 	// rather than a total.
-	Truncated  bool
+	Truncated bool
+	// Incomplete says a source could not be read at all, so this set is
+	// missing a section rather than merely being short. A caller that
+	// caches sets should keep this one only briefly: a transient failure
+	// that sticks for the full lifetime turns one bad moment into
+	// minutes of a banner nobody can dismiss.
+	Incomplete bool
 	ComputedAt time.Time
 
 	// What each read cost and returned. This page reads two large
@@ -274,8 +281,18 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 		// A missing epoch history is a configuration fact, not an error:
 		// JOB_EPOCH_HISTORY is off by default. Say so and show the rest
 		// rather than failing whole.
-		set.Notes = append(set.Notes,
-			"Could not read run-attempt history, so jobs that failed to start and holds that have already ended are not included: "+eerr.Error())
+		//
+		// A read that ran out of time is a different thing from one that
+		// could not be made, and saying "so they are not included" about
+		// both taught people to read a timeout as a misconfiguration.
+		set.Incomplete = true
+		if errors.Is(eerr, context.Canceled) || errors.Is(eerr, context.DeadlineExceeded) {
+			set.Notes = append(set.Notes,
+				"Reading run-attempt history took too long, so jobs that failed to start and holds that have already ended are missing from this answer. It will be retried.")
+		} else {
+			set.Notes = append(set.Notes,
+				"Could not read run-attempt history, so jobs that failed to start and holds that have already ended are not included: "+eerr.Error())
+		}
 		return set, nil
 	}
 	if len(attempts) >= MaxRecords {
