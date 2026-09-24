@@ -172,6 +172,18 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 		s.auditSuperuserAction(r, imp, "ssh-to-job", fmt.Sprintf("%d.%d", cluster, proc), nil)
 	}
 
+	// Universes with no starter are refused here rather than by the
+	// schedd, and deliberately BEFORE the upgrade: a browser cannot
+	// read the response to a failed WebSocket handshake, but it can
+	// read a 409 from a plain request, and the SPA hides the terminal
+	// for these universes anyway. Reported as a transport error after
+	// the upgrade -- which is where it used to land -- a structural
+	// refusal reads like a broken execute node.
+	if msg, refuse := s.refuseRemoteAccessByUniverse(ctx, "ssh", cluster, proc); refuse {
+		s.writeError(w, http.StatusConflict, msg)
+		return
+	}
+
 	// Everything above answers with an HTTP status: it is quick, and a
 	// non-WebSocket caller deserves to be told why it was refused. From
 	// here on the work is slow and the failures are the ones users

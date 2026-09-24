@@ -120,6 +120,17 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 		return
 	}
 
+	// Some universes have no starter to peek into, and the schedd says
+	// so by refusing GET_JOB_CONNECT_INFO. Left to the generic error
+	// path below, that arrives as "(job may not be running yet)" --
+	// which for a scheduler-universe job is exactly backwards: it IS
+	// running, and it will be refused for as long as it runs. Ask the
+	// queue first so the refusal can say what to do instead.
+	if msg, refuse := s.refuseRemoteAccessByUniverse(ctx, "peek", cluster, proc); refuse {
+		s.writeError(w, http.StatusConflict, msg)
+		return
+	}
+
 	// Bound the whole round-trip — it includes a schedd RPC + a
 	// starter session resume. 30s leaves slack for a busy schedd
 	// without making the SPA wait forever on a hung starter.
