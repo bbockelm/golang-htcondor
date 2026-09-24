@@ -7,6 +7,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/issues"
 )
 
@@ -36,6 +37,31 @@ type IssuesResponse struct {
 	Truncated     bool           `json:"truncated,omitempty"`
 	Notes         []string       `json:"notes,omitempty"`
 	Sections      []IssueSection `json:"sections"`
+	// Timings is what the answer cost to produce. Returned rather than
+	// only logged: this page reads two large tables and then does real
+	// work on what comes back, so "it is slow" has three possible
+	// answers, and the person who can see the slowness is usually not
+	// the person who can read the server's log.
+	Timings *IssueTimings `json:"timings,omitempty"`
+}
+
+// IssueTimings splits the cost of one answer.
+type IssueTimings struct {
+	// HoldsMs and RunAttemptsMs are the two reads, with what they
+	// returned beside them -- a slow read of forty rows and a slow read
+	// of forty thousand are different problems.
+	HoldsMs       int64 `json:"holds_query_ms"`
+	Holds         int   `json:"holds"`
+	RunAttemptsMs int64 `json:"run_attempts_query_ms"`
+	RunAttempts   int   `json:"run_attempts"`
+	// ClusterMs is the grouping: masking, the parse tree, the merge pass
+	// and the per-cluster summaries.
+	ClusterMs int64 `json:"cluster_ms"`
+	// Cached says the reads were not done for this request. Without it a
+	// second page load looks fast and hides what the first one cost.
+	Cached bool `json:"cached"`
+	// AgeSeconds is how old the cached reads are.
+	AgeSeconds int64 `json:"age_seconds,omitempty"`
 }
 
 // IssueSection is one kind of problem: holds, or run attempts that
@@ -143,7 +169,7 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
 	}
 	key := fmt.Sprintf("%s|%t|%d|%t", owner, ownedByMe, int64(window/time.Second), includeEnded)
-	set, err := s.issueSets().get(key, func() (*issues.Set, error) {
+	set, cached, err := s.issueSets().get(key, func() (*issues.Set, error) {
 		return issues.Collect(ctx, handlerIssueSource{s}, issues.Options{
 			Scope:        scope,
 			Window:       window,
@@ -155,7 +181,29 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, buildIssuesResponse(set, window, granularity, includeEnded))
+	clusterStart := time.Now()
+	resp := buildIssuesResponse(set, window, granularity, includeEnded)
+	resp.Timings = &IssueTimings{
+		HoldsMs:       set.HoldDuration.Milliseconds(),
+		Holds:         set.HoldCount,
+		RunAttemptsMs: set.EpochDuration.Milliseconds(),
+		RunAttempts:   set.EpochCount,
+		ClusterMs:     time.Since(clusterStart).Milliseconds(),
+		Cached:        cached,
+	}
+	if cached {
+		resp.Timings.AgeSeconds = int64(time.Since(set.ComputedAt).Seconds())
+	}
+	// Logged as well, so a slow page leaves a trace even when nobody was
+	// looking at the response.
+	if !cached {
+		s.logger.Info(logging.DestinationHTTP, "issues answered",
+			"holds_ms", resp.Timings.HoldsMs, "holds", resp.Timings.Holds,
+			"run_attempts_ms", resp.Timings.RunAttemptsMs, "run_attempts", resp.Timings.RunAttempts,
+			"cluster_ms", resp.Timings.ClusterMs,
+			"window_seconds", resp.WindowSeconds, "owned_by_me", ownedByMe)
+	}
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // buildIssuesResponse clusters a collected set at one granularity.

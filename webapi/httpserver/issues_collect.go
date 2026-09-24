@@ -112,7 +112,8 @@ func newIssueCache() *issueCache {
 	return &issueCache{byKey: make(map[string]*cachedIssues), now: time.Now}
 }
 
-func (c *issueCache) get(key string, compute func() (*issues.Set, error)) (*issues.Set, error) {
+// get returns a set and whether it came from the cache.
+func (c *issueCache) get(key string, compute func() (*issues.Set, error)) (*issues.Set, bool, error) {
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
@@ -124,19 +125,19 @@ func (c *issueCache) get(key string, compute func() (*issues.Set, error)) (*issu
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.set != nil && c.now().Sub(entry.at) < issueRefresh {
-		return entry.set, nil
+		return entry.set, true, nil
 	}
 	set, err := compute()
 	if err != nil {
 		// Serving the last good answer beats blanking the page when the
 		// schedd hiccups, the same trade the dashboard makes.
 		if entry.set != nil {
-			return entry.set, nil
+			return entry.set, true, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	entry.set, entry.at = set, c.now()
-	return set, nil
+	return set, false, nil
 }
 
 func (s *Handler) issueSets() *issueCache {

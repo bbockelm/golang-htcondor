@@ -210,3 +210,49 @@ func TestNoGlideinAttributesAtAllMeansNoFacets(t *testing.T) {
 		t.Errorf("facets = %v, want none", got)
 	}
 }
+
+func TestEpochWindowUsesTheZoneMappedAttribute(t *testing.T) {
+	// htcondordb zone-maps an epoch archive on EpochWriteDate and on
+	// EnteredHistoryTime, and on nothing else. A range predicate over
+	// any other attribute prunes no segments, so the read walks every
+	// run attempt the access point has ever made in order to answer a
+	// question about the last day.
+	src := &fakeSource{}
+	now := time.Unix(100000, 0)
+	if _, err := Collect(context.Background(), src, Options{
+		Window: time.Hour, IncludeEnded: true, Now: func() time.Time { return now },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(src.epochQuery, EpochTimeAttr+" >= 96400") {
+		t.Errorf("epoch query = %q, want the window on %s", src.epochQuery, EpochTimeAttr)
+	}
+	if strings.Contains(src.epochQuery, "JobCurrentStartDate") {
+		t.Errorf("epoch query = %q, still bounded on an attribute with no zone map", src.epochQuery)
+	}
+	// The existence test comes after the bound: it can prune nothing by
+	// itself, so it must not be what the scan leads with.
+	if i, j := strings.Index(src.epochQuery, EpochTimeAttr), strings.Index(src.epochQuery, "VacateReasonCode"); i > j {
+		t.Errorf("epoch query = %q, want the prunable bound first", src.epochQuery)
+	}
+}
+
+func TestRunFailureIsTimedWhenItEnded(t *testing.T) {
+	// EpochWriteDate is written when the run instance ends, which is
+	// when the failure happened; JobCurrentStartDate is when the attempt
+	// that failed began. The timeline is drawn from this, so the choice
+	// moves bars.
+	a := ad(t, `[ ClusterId = 1; ProcId = 0; VacateReason = "x"; VacateReasonCode = 1007; EpochWriteDate = 500; JobCurrentStartDate = 100 ]`)
+	rec, ok := vacateRecord(a)
+	if !ok || rec.At != 500 {
+		t.Errorf("At = %d, want the end of the attempt", rec.At)
+	}
+
+	// A schedd too old to write it still has to land somewhere on the
+	// timeline rather than being dropped as untimed.
+	old := ad(t, `[ ClusterId = 1; ProcId = 0; VacateReason = "x"; VacateReasonCode = 1007; JobCurrentStartDate = 100 ]`)
+	rec, ok = vacateRecord(old)
+	if !ok || rec.At != 100 {
+		t.Errorf("At = %d, want the fallback", rec.At)
+	}
+}
