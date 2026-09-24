@@ -169,8 +169,12 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
 	}
 	key := fmt.Sprintf("%s|%t|%d|%t", owner, ownedByMe, int64(window/time.Second), includeEnded)
-	set, cached, err := s.issueSets().get(key, func() (*issues.Set, error) {
-		return issues.Collect(ctx, handlerIssueSource{s}, issues.Options{
+	set, cached, err := s.issueSets().get(ctx, key, func() (*issues.Set, error) {
+		// Deliberately not the request's context; see
+		// issueCollectContext.
+		collectCtx, cancel := issueCollectContext(ctx)
+		defer cancel()
+		return issues.Collect(collectCtx, handlerIssueSource{s}, issues.Options{
 			Scope:        scope,
 			Window:       window,
 			IncludeEnded: includeEnded,
