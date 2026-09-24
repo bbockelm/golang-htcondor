@@ -1,6 +1,6 @@
 import { renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createBoolPreference } from './boolPreference';
+import { createBoolPreference } from './preference';
 import { MAX_AUTO_PAGES, useAutoLoadAll } from './loadAll';
 
 describe('createBoolPreference', () => {

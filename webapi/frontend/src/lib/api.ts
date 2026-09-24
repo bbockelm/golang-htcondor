@@ -894,6 +894,28 @@ export const api = {
       fetchJSON(`${BASE}/auth/logout`, { method: 'POST' }),
   },
 
+  // What is going wrong on this access point, grouped into problems.
+  // See webapi/issues for why the grouping is neither HoldReasonCode
+  // (too coarse) nor the reason text (too fine).
+  issues: (params?: {
+    window_seconds?: number;
+    granularity?: number;
+    include_ended?: boolean;
+    owned_by_me?: boolean;
+  }): Promise<IssuesResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.window_seconds !== undefined)
+      qs.set('window_seconds', String(params.window_seconds));
+    if (params?.granularity !== undefined)
+      qs.set('granularity', String(params.granularity));
+    if (params?.include_ended !== undefined)
+      qs.set('include_ended', String(params.include_ended));
+    if (params?.owned_by_me !== undefined)
+      qs.set('owned_by_me', String(params.owned_by_me));
+    const q = qs.toString();
+    return fetchJSON(`${BASE}/issues${q ? '?' + q : ''}`);
+  },
+
   // owned_by_me: server defaults to true. Admin sessions may pass
   // false for a pool-wide count; the server enforces the boundary
   // for non-admin sessions.
@@ -1501,6 +1523,90 @@ export function jobStatusLabel(code: unknown): string {
 //
 // Reference: condor_holdcodes.h, CONDOR_HOLD_CODE_SpoolingInput == 16.
 const HOLD_REASON_CODE_SPOOLING_INPUT = 16;
+
+
+// --- Issues -------------------------------------------------------
+// Mirrors webapi/httpserver/handlers_issues.go. The page's whole shape
+// is one problem per row, so the types are the clusters rather than the
+// records behind them.
+
+export interface IssueExample {
+  cluster_id: number;
+  proc_id: number;
+  owner?: string;
+  batch?: string;
+  at?: number;
+  message?: string;
+}
+
+export interface IssueOwnerCount {
+  owner: string;
+  count: number;
+}
+
+export interface IssueCodeCount {
+  code: number;
+  subcode: number;
+  label?: string;
+  count: number;
+}
+
+export interface IssueFacetValue {
+  value: string;
+  count: number;
+}
+
+// How one structured attribute -- on OSPool, the site or the resource --
+// is distributed across a cluster. distinct === 1 is the actionable case.
+export interface IssueFacetSpread {
+  name: string;
+  distinct: number;
+  top?: IssueFacetValue[];
+}
+
+export interface IssueVariant {
+  template: string;
+  count: number;
+}
+
+export interface IssueCluster {
+  kind: string;
+  // The masked, wildcarded form: what the occurrences have in common.
+  template: string;
+  count: number;
+  // How many distinct people this is happening to -- the difference
+  // between one broken submit file and a site problem.
+  users: number;
+  top_users?: IssueOwnerCount[];
+  codes?: IssueCodeCount[];
+  // Where it happened, most concentrated attribute first.
+  facets?: IssueFacetSpread[];
+  first_seen?: number;
+  last_seen?: number;
+  examples?: IssueExample[];
+  // The distinct templates a coarse granularity folded together.
+  variants?: IssueVariant[];
+}
+
+export interface IssueSection {
+  kind: string;
+  title: string;
+  total: number;
+  users: number;
+  clusters: IssueCluster[];
+}
+
+export interface IssuesResponse {
+  window_seconds: number;
+  computed_at: number;
+  granularity: number;
+  include_ended: boolean;
+  source?: string;
+  // A read hit its bound, so the counts are a floor rather than a total.
+  truncated?: boolean;
+  notes?: string[];
+  sections: IssueSection[];
+}
 
 // DisplayStatus is a UI-flavored job status: the seven stock
 // JobStatus values plus the "uploading" pseudo-status for spool

@@ -128,6 +128,7 @@ func (h *Handler) setupRoutes() {
 
 	// Web UI dashboard summary
 	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))
+	mux.Handle("/api/v1/issues", cors(h.requireCondorScope(http.HandlerFunc(h.handleIssues))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
 	mux.Handle("/api/v1/dashboard/activity/stream", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivityStream))))
 

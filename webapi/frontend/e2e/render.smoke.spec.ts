@@ -33,7 +33,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/submit']) {
+for (const path of ['/', '/jobs', '/issues', '/submit']) {
   test(`renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);
@@ -49,6 +49,26 @@ test('jobs page binds data from the API rather than rendering empty', async ({ p
   // the response was fetched, parsed and rendered. A page that loads
   // but never binds shows an empty table and fails here.
   await expect(page.getByText(/smoke-batch/).first()).toBeVisible();
+});
+
+// The issues page's whole job is to rank problems, so binding one row is
+// what proves it works: a page that fetched, parsed and rendered nothing
+// would still pass the render check above.
+test('issues page ranks the problems it was given', async ({ page }) => {
+  await page.goto('/issues');
+  // The representative message, not the masked template: a row that led
+  // with "<slot>" where the hostname belongs would be useless.
+  await expect(page.getByText(/smoke-host\.example\.edu/)).toBeVisible();
+  // The users count beside the problem is the number the page exists to
+  // put there.
+  // Exact, because the section header also says "2 users": the badge on
+  // the row is the one being asserted.
+  await expect(page.getByText('2 users', { exact: true })).toBeVisible();
+  // Where it happened, which is the other half of the ranking: a
+  // problem at one resource is that resource's problem.
+  await expect(page.getByText('all at SMOKE-CE1')).toBeVisible();
+  // Both sections bind, not just the first.
+  await expect(page.getByText(/could not keep running/i)).toBeVisible();
 });
 
 // Regression for the /admin/logs column collapse (#224): the message

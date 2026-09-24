@@ -1,5 +1,4 @@
-// A yes/no display preference that survives reloads and agrees across
-// tabs.
+// A display preference that survives reloads and agrees across tabs.
 //
 // The pattern is lib/scope.ts's, generalized: the value lives in
 // localStorage rather than React state so it outlives the page view, and
@@ -98,6 +97,92 @@ export function createBoolPreference(
 export function useBoolPreference(
   pref: BoolPreference,
 ): [boolean, (next: boolean) => void] {
+  const value = useSyncExternalStore(
+    pref.subscribe,
+    pref.getSnapshot,
+    pref.getServerSnapshot,
+  );
+  return [value, pref.set];
+}
+
+/**
+ * createNumberPreference is the same store for a numeric setting -- a
+ * window length, a granularity. `sanitize` runs on every value read or
+ * written, so a stale or hand-edited localStorage entry cannot put the
+ * UI into a state its controls cannot express.
+ */
+export function createNumberPreference(
+  storageKey: string,
+  defaultValue: number,
+  sanitize: (v: number) => number = (v) => v,
+): NumberPreference {
+  let cached: number | null = null;
+  const listeners = new Set<() => void>();
+
+  function read(): number {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === null) return defaultValue;
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return defaultValue;
+      return sanitize(n);
+    } catch {
+      return defaultValue;
+    }
+  }
+
+  function notify() {
+    listeners.forEach((l) => l());
+  }
+
+  function onStorage(e: StorageEvent) {
+    if (e.key !== null && e.key !== storageKey) return;
+    cached = read();
+    notify();
+  }
+
+  return {
+    subscribe(onChange) {
+      if (listeners.size === 0) {
+        window.addEventListener('storage', onStorage);
+      }
+      listeners.add(onChange);
+      return () => {
+        listeners.delete(onChange);
+        if (listeners.size === 0) {
+          window.removeEventListener('storage', onStorage);
+        }
+      };
+    },
+    getSnapshot() {
+      if (cached === null) cached = read();
+      return cached;
+    },
+    getServerSnapshot: () => defaultValue,
+    set(next) {
+      const clean = sanitize(next);
+      if (cached === clean) return;
+      cached = clean;
+      try {
+        window.localStorage.setItem(storageKey, String(clean));
+      } catch {
+        // Storage refused; the choice still applies to this page view.
+      }
+      notify();
+    },
+  };
+}
+
+export interface NumberPreference {
+  subscribe: (onChange: () => void) => () => void;
+  getSnapshot: () => number;
+  getServerSnapshot: () => number;
+  set: (next: number) => void;
+}
+
+export function useNumberPreference(
+  pref: NumberPreference,
+): [number, (next: number) => void] {
   const value = useSyncExternalStore(
     pref.subscribe,
     pref.getSnapshot,

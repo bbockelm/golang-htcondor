@@ -135,6 +135,63 @@ var outputSchemas = map[string]map[string]interface{}{
 		"truncated": boolSchema,
 	}),
 
+	// analyze_issues answers in clusters, and the shape is what makes it
+	// usable without re-reading the prose: an agent deciding whether to
+	// tell one user or raise a ticket wants count and users, not the
+	// sentence they were rendered into.
+	"analyze_issues": obj(map[string]interface{}{
+		"window_seconds": intSchema,
+		"granularity":    anySchema,
+		"include_ended":  boolSchema,
+		"source":         strSchema,
+		"truncated":      boolSchema,
+		"notes":          arr(strSchema),
+		"sections": arr(obj(map[string]interface{}{
+			"kind":  strSchema,
+			"title": strSchema,
+			"total": intSchema,
+			"users": intSchema,
+			"clusters": arr(obj(map[string]interface{}{
+				"kind":     strSchema,
+				"template": strSchema,
+				"count":    intSchema,
+				"users":    intSchema,
+				"top_users": arr(obj(map[string]interface{}{
+					"owner": strSchema,
+					"count": intSchema,
+				})),
+				"codes": arr(obj(map[string]interface{}{
+					"code":    intSchema,
+					"subcode": intSchema,
+					"label":   strSchema,
+					"count":   intSchema,
+				})),
+				"facets": arr(obj(map[string]interface{}{
+					"name":     strSchema,
+					"distinct": intSchema,
+					"top": arr(obj(map[string]interface{}{
+						"value": strSchema,
+						"count": intSchema,
+					})),
+				})),
+				"first_seen": intSchema,
+				"last_seen":  intSchema,
+				"examples": arr(obj(map[string]interface{}{
+					"cluster_id": intSchema,
+					"proc_id":    intSchema,
+					"owner":      strSchema,
+					"batch":      strSchema,
+					"at":         intSchema,
+					"message":    strSchema,
+				})),
+				"variants": arr(obj(map[string]interface{}{
+					"template": strSchema,
+					"count":    intSchema,
+				})),
+			})),
+		})),
+	}),
+
 	// --- match analysis ----------------------------------------------
 	"analyze_job_match": obj(map[string]interface{}{
 		"job_id":       strSchema,

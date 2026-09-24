@@ -453,6 +453,10 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
 		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
 		{"aggregate_jobs", aggregateStructured(nil, nil, "jobs", "schedd", false)},
+		// An access point with nothing wrong is the normal case, and the
+		// one where a client's schema check would otherwise first run on
+		// a live call: sections is an empty array, never null.
+		{"analyze_issues", structuredOf(emptyIssuesResult())},
 		// The dag object is absent here on purpose: it is present only
 		// for a DAGMan manager job, and the emptiest get_job result is
 		// an ordinary job's. The shape it takes when it IS present --
