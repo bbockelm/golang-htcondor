@@ -69,7 +69,7 @@ func (s *Server) toolCreateWatchURL(ctx context.Context, args map[string]interfa
 			"or it may have already expired", watchID, owner)
 	}
 
-	ttl := shareurl.ClampTTL(shareurl.KindWatch, argDuration(args, "ttl_seconds"))
+	ttl := shareurl.ClampTTL(shareurl.KindWatch, ttlSecondsArg(args))
 	exp := time.Now().Add(ttl)
 	tok, err := s.shareSigner.Sign(shareurl.Payload{
 		Owner: owner,

@@ -510,6 +510,9 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"create_input_upload_url", map[string]interface{}{
 			"cluster_id": 0, "owner": "", "expires_at": "", "ttl_seconds": 0,
 			"count": 0, "uploads": []map[string]interface{}(nil)}},
+		{"create_output_download_url", map[string]interface{}{
+			"cluster_id": 0, "owner": "", "expires_at": "", "ttl_seconds": 0,
+			"count": 0, "downloads": []map[string]interface{}(nil)}},
 
 		{"list_service_credentials", map[string]interface{}{
 			"credentials": []map[string]interface{}(nil), "count": 0}},

@@ -132,6 +132,10 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// the first nor changes anything, so: additive, and idempotent in the
 	// only sense that matters (calling twice leaves the same state).
 	"create_input_upload_url": writeAnn(false, true),
+	// create_output_download_url does not touch the job either -- it
+	// hands back a capability to read one. Idempotent in the sense that
+	// matters: calling it twice mints two equivalent URLs.
+	"create_output_download_url": writeAnn(false, true),
 	// create_watch_url does not touch the watch -- it hands back a
 	// read-only capability naming it. Minting a second URL for the same
 	// watch neither replaces the first nor changes anything.

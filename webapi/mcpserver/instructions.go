@@ -62,7 +62,14 @@ func defaultInstructions(scheddName string) string {
 	b.WriteString("5. get_job_stdout / get_job_stderr — retrieve output after the job FINISHES. " +
 		"These read the transferred files, so they are the right tools once a job is done and the " +
 		"wrong ones while it runs; tail_job_output is the reverse.\n")
-	b.WriteString("6. get_job_output — retrieve any other output files.\n\n")
+	b.WriteString("6. get_job_output — retrieve any other output files.\n")
+	b.WriteString("   create_output_download_url — the mirror of create_input_upload_url, for results too " +
+		"big to pass through this conversation: it returns a short-lived URL that GETs a tar of the " +
+		"job's sandbox, so the bytes go straight from the access point to wherever you want them. " +
+		"Reach for it the moment get_job_output truncates or does not fit, and fetch it with a shell " +
+		"command (curl -fsSL '<url>' | tar xv) rather than reading it in. The URL needs no " +
+		"credentials, so it can also just be handed to the person to click. Sandboxes are per proc, " +
+		"and they exist only while the job is in the queue.\n\n")
 
 	// Diagnosis
 	b.WriteString("## When things go wrong\n\n")

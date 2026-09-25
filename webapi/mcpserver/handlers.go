@@ -633,6 +633,43 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			},
 		},
 		{
+			Name: "create_output_download_url",
+			Description: "Create a short-lived URL for downloading one job's output sandbox, so the " +
+				"bytes never pass through this conversation. Use it INSTEAD OF get_job_output " +
+				"whenever the results are large -- and reach for it as soon as get_job_output " +
+				"comes back truncated or refuses to fit, which is the failure it exists for.\n\n" +
+				"The URL returns a tar of the whole sandbox on an ordinary GET and needs no " +
+				"credentials of its own -- possession of it is the authorization, and it reads as " +
+				"the job's owner. Fetch it with a shell command, e.g.\n" +
+				"  curl -fsSL '<url>' | tar xv -C ./results\n" +
+				"Do NOT read the archive into your context; that is what this tool exists to " +
+				"avoid. The URL can also simply be shown to the person you are working for, for " +
+				"them to click.\n\n" +
+				"A sandbox is PER PROC. Pass a bare cluster id (job_id=\"123\") to get one URL for " +
+				"every proc of that cluster in the queue; pass \"cluster.proc\" for exactly one.\n\n" +
+				"The sandbox lives only while the job is in the queue, so mint this before the " +
+				"job leaves it. Works on a running job too, including a DAGMan manager, where it " +
+				"returns a live snapshot of the workflow's spool.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type": "string",
+						"description": "Either one job as 'cluster.proc' (e.g. '123.0'), or a bare " +
+							"cluster id (e.g. '123') to mint a URL for every proc of that cluster.",
+					},
+					"ttl_seconds": map[string]interface{}{
+						"type": "integer",
+						"description": fmt.Sprintf("How long the URL stays valid, in seconds. "+
+							"Default %d, maximum %d. The job's presence in the queue is the real "+
+							"limit: the URL stops working once the sandbox is cleaned up.",
+							int(shareurl.DefaultOutputTTL.Seconds()), int(shareurl.MaxOutputTTL.Seconds())),
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
+		{
 			Name: "get_job_output",
 			Description: "Get all output files from a job's sandbox as structured data. Files are returned with " +
 				"their content (text or base64-encoded for binary), truncated if larger than 100KB per file. " +
@@ -941,6 +978,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJobOutputFiles(ctx, request.Arguments)
 	case "create_input_upload_url":
 		result, err = s.toolCreateInputUploadURL(ctx, request.Arguments)
+	case "create_output_download_url":
+		result, err = s.toolCreateOutputDownloadURL(ctx, request.Arguments)
 	case "list_service_credentials":
 		result, err = s.toolListServiceCredentials(ctx, request.Arguments)
 	case "get_credential_status":

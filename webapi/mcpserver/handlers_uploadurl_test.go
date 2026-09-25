@@ -91,7 +91,7 @@ func TestCreateInputUploadURLValidatesTheJobID(t *testing.T) {
 	}
 }
 
-func TestArgDuration(t *testing.T) {
+func TestTTLSecondsArg(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		val  interface{}
@@ -111,8 +111,8 @@ func TestArgDuration(t *testing.T) {
 			if tc.val != nil {
 				args["ttl_seconds"] = tc.val
 			}
-			if got := argDuration(args, "ttl_seconds"); got != tc.want {
-				t.Fatalf("argDuration = %v, want %v", got, tc.want)
+			if got := ttlSecondsArg(args); got != tc.want {
+				t.Fatalf("ttlSecondsArg = %v, want %v", got, tc.want)
 			}
 		})
 	}

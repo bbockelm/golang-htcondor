@@ -243,10 +243,18 @@ queue
 	// (1) The premise. This is not a defect in the handler: the access
 	// point has nothing to send.
 	t.Run("SpooledDagIsNeverInTheTransfer", func(t *testing.T) {
+		// Wait on the predicate the HANDLER uses, not on the file merely
+		// existing. DAGMan creates plain.dagman.out immediately and writes
+		// "Dag contains" a moment later, and dagmanPastStartup keys on the
+		// latter -- so "the file is there" let this proceed seconds before
+		// the endpoint would agree DAGMan had started, and the assertion
+		// below got the "retry in a few seconds" 409 instead of the one it
+		// is about. Calling dagmanPastStartup itself is what keeps the two
+		// from drifting apart again.
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			files := tryFetchDagSandbox(ctx, schedd, plain)
-			if _, ok := files["plain.dagman.out"]; ok {
+			if dagmanPastStartup(files) {
 				// DAGMan is running and its own log came back, so the
 				// transfer is working. The .dag still did not.
 				if _, ok := files["plain.dag"]; ok {
@@ -258,7 +266,7 @@ queue
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("DAGMan never wrote anything into the spool; files present: %v", sortedKeys(files))
+				t.Fatalf("DAGMan never got past startup; files present: %v", sortedKeys(files))
 			}
 			time.Sleep(5 * time.Second)
 		}

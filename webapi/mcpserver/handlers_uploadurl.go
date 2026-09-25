@@ -65,7 +65,7 @@ func (s *Server) toolCreateInputUploadURL(ctx context.Context, args map[string]i
 		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(caller.Owner)), nil
 	}
 
-	ttl := shareurl.ClampTTL(shareurl.KindInput, argDuration(args, "ttl_seconds"))
+	ttl := shareurl.ClampTTL(shareurl.KindInput, ttlSecondsArg(args))
 
 	procAds, remaining, err := s.procAdsToMintFor(ctx, target, ownerScope)
 	if err != nil {
@@ -233,11 +233,17 @@ func uniformExpected(first []string, all []minted) bool {
 	return true
 }
 
-// argDuration reads an optional whole-second duration argument. JSON
-// numbers arrive as float64 through the MCP transport, but an integer
-// spelled as a string is common enough from a model to be worth
-// accepting rather than refusing over.
-func argDuration(args map[string]interface{}, key string) time.Duration {
+// ttlSecondsArg reads the optional whole-second "ttl_seconds" argument
+// every share-URL tool takes. JSON numbers arrive as float64 through the
+// MCP transport, but an integer spelled as a string is common enough
+// from a model to be worth accepting rather than refusing over.
+//
+// The key is fixed rather than a parameter: all three callers read the
+// same one, and a parameter that only ever receives one value is a
+// generalization nothing asked for. Take a key again when a second one
+// exists.
+func ttlSecondsArg(args map[string]interface{}) time.Duration {
+	const key = "ttl_seconds"
 	switch v := args[key].(type) {
 	case float64:
 		return time.Duration(v) * time.Second
