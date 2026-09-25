@@ -243,3 +243,29 @@ func TestAliasSurvivesEncodingOnRewrite(t *testing.T) {
 		t.Errorf("alias = %q after a round trip through the encoder", parsed.Alias)
 	}
 }
+
+// HTCondor writes this parameter as CCBID. Matching the key literally is
+// invisible when it fails: the parameter stays, the address still parses,
+// and the dial goes through the broker anyway -- the feature silently doing
+// nothing, which is exactly what it exists to avoid.
+//
+// Every address in the first version of these tests spelled it in lower
+// case, which is why nothing caught it.
+func TestBrokerIsStrippedWhateverTheCase(t *testing.T) {
+	for _, addr := range []string{
+		"<192.0.2.9:9618?PrivNet=pool-a&CCBID=192.0.2.1:9618%23123>",
+		"<192.0.2.9:9618?PrivNet=pool-a&ccbid=192.0.2.1:9618%23123>",
+	} {
+		got, matched := rewriteForPrivateNetwork(addr, "pool-a")
+		if !matched {
+			t.Fatalf("%s: expected a match", addr)
+		}
+		parsed, err := addresses.ParseSinful(got)
+		if err != nil {
+			t.Fatalf("%s -> %s does not parse: %v", addr, got, err)
+		}
+		if parsed.IsCCB() {
+			t.Errorf("%s still routes through a broker after the rewrite: %s", addr, got)
+		}
+	}
+}

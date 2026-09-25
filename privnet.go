@@ -91,7 +91,12 @@ func stripSinfulParam(address, drop string) string {
 		// spelling of the key has to be dropped too, and everything that
 		// stays has to stay byte-for-byte.
 		key = sinfulDecode(key)
-		if key == drop {
+		// Case-folded. HTCondor writes this one as "CCBID", and matching
+		// literally is invisible when it fails: the parameter stays, the
+		// address still parses, and it goes on meaning exactly what the
+		// caller was trying to stop it meaning -- here, that the daemon
+		// must be reached through a broker.
+		if strings.EqualFold(key, drop) {
 			continue
 		}
 		kept = append(kept, pair)
