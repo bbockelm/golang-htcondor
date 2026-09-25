@@ -63,19 +63,19 @@ const (
 	dagCacheMaxEntries = 16
 	dagCacheTTL        = time.Hour
 
-	// dagStatusMaxAge is how stale the node status half of a cached entry
-	// may be before an ordinary load re-fetches the sandbox.
+	// An ordinary load NEVER re-fetches the sandbox.
 	//
-	// The structure and the state arrive in the same tar, so they share a
-	// cache entry -- but they do not share a lifetime. The status file is
-	// the AUTHORITATIVE source for node state, and serving an hour-old
-	// copy of it as if it were current would be worse than not having it.
-	// It is rewritten at most every 30 seconds (the interval this server
-	// asks for), so re-reading it about that often is the most the file
-	// itself can offer. A workflow that has finished is exempt: DAGMan
-	// says so in the status file's own NextUpdate, and a final file never
-	// changes again.
-	dagStatusMaxAge = 45 * time.Second
+	// There used to be a dagStatusMaxAge here: a cached entry whose node
+	// status half was older than 45 seconds was thrown away and an
+	// ordinary page load re-paid a whole-sandbox transfer. Almost every
+	// real page view is more than 45 seconds after the last one, so the
+	// "cheap cached load" was a fiction -- nearly every load paid the
+	// transfer -- and it quietly contradicted the panel's own design,
+	// which is explicit-load with a Refresh button and no polling.
+	//
+	// So the cached structure AND the cached state are served as they
+	// are, and the response says how old they are (FetchedAt) so the
+	// panel can too. ?refresh=1 is the only thing that fetches.
 
 	// dagBigFileMaxBytes is the ceiling on the files this endpoint exists
 	// to read: the DOT file and the node status file. It is generous
@@ -109,6 +109,23 @@ const (
 	// Go map entries exhaust memory long before a million small files
 	// add up to a byte limit.
 	dagMaxSpoolEntries = 50000
+
+	// dagNodeTextMaxBytes bounds the two per-node strings that come from
+	// outside this server and have no length of their own: DAGMan's
+	// StatusDetails and the schedd's HoldReason.
+	//
+	// Every other field in a node entry is a name, a state word or a job
+	// id, and 23 real nodes measured 2.8 KB of response in total. These
+	// two are the only ones that can make that arbitrarily large: a hold
+	// reason from a failed file transfer carries the plugin's own output
+	// and runs to kilobytes, and twenty of those is a response two
+	// orders of magnitude bigger than the workflow it describes.
+	//
+	// Truncating does not lose the information: the node carries its job
+	// id, and the job page shows the reason in full. The panel renders
+	// these as one paragraph in a group's detail box, which is far less
+	// than this much text.
+	dagNodeTextMaxBytes = 1024
 
 	// dagNodeListLimit is how many per-node entries the response will
 	// carry. Past this the caller gets groups only: a JSON array of
@@ -216,8 +233,16 @@ type DagGraphResponse struct {
 	StatusFileTime int64 `json:"status_file_time,omitempty"`
 	// Warnings carry what could not be consulted, so a missing archive
 	// reads as "not available" rather than as "nothing ran".
-	Warnings  []string  `json:"warnings,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+	// FetchedAt is when the structure and the node states in this answer
+	// were actually read out of the spool -- NOT when this response was
+	// assembled. On a cached load those are minutes apart, and the panel
+	// reports this as the age of what it is drawing.
 	FetchedAt time.Time `json:"fetched_at"`
+	// TookMS is how long this request spent producing the answer, which
+	// is the number the panel shows and the one an operator compares a
+	// cached load against a refresh with.
+	TookMS int64 `json:"took_ms"`
 }
 
 // DagGraphGroup is one collapsed group plus the state histogram of its
@@ -251,6 +276,39 @@ type DagGraphNode struct {
 	// node fail").
 	Detail string `json:"detail,omitempty"`
 	Source string `json:"source"`
+}
+
+// dagTimings is how long each phase of one /dag answer took.
+//
+// It exists because "the panel is slow" is not actionable: the answer is
+// assembled out of a whole-sandbox transfer, two file parses and two
+// queries, and which of those dominates decides what there is to fix.
+// A phase that did not run this time stays zero, which is itself the
+// interesting reading -- a cached load's sandbox time IS zero.
+type dagTimings struct {
+	manager   time.Duration // the manager job's own ad
+	structure time.Duration // cache lookup plus, on a miss, everything below
+	sandbox   time.Duration // the whole-sandbox transfer
+	dotParse  time.Duration
+	statParse time.Duration
+	queue     time.Duration
+	archive   time.Duration
+}
+
+// log emits one debug line with every phase, so a slow load in the field
+// can be attributed without a profiler.
+func (t *dagTimings) log(s *Handler, cluster, proc int, total time.Duration, cached bool) {
+	s.logger.Debug(logging.DestinationHTTP, "Served DAG graph",
+		"job", fmt.Sprintf("%d.%d", cluster, proc),
+		"cached", cached,
+		"total_ms", total.Milliseconds(),
+		"manager_ms", t.manager.Milliseconds(),
+		"structure_ms", t.structure.Milliseconds(),
+		"sandbox_ms", t.sandbox.Milliseconds(),
+		"dot_parse_ms", t.dotParse.Milliseconds(),
+		"status_parse_ms", t.statParse.Milliseconds(),
+		"queue_ms", t.queue.Milliseconds(),
+		"archive_ms", t.archive.Milliseconds())
 }
 
 // dagManagerProjection is what the manager job's ad has to answer:
@@ -288,8 +346,12 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
+	started := time.Now()
+	timings := &dagTimings{}
+	phase := time.Now()
 	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: dagManagerProjection})
+	timings.manager = time.Since(phase)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to query DAGMan manager job", "error", err,
 			"job", fmt.Sprintf("%d.%d", cluster, proc))
@@ -307,14 +369,19 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
+	phase = time.Now()
 	structure, status, msg := s.dagStructureFor(ctx, r, constraint, cluster, proc, dagFile, ads[0],
-		r.URL.Query().Get("refresh") == "1")
+		r.URL.Query().Get("refresh") == "1", timings)
+	timings.structure = time.Since(phase)
 	if status != 0 {
 		s.writeError(w, status, msg)
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, s.buildDagResponse(ctx, r, cluster, structure))
+	resp := s.buildDagResponse(ctx, r, cluster, structure, timings)
+	resp.TookMS = time.Since(started).Milliseconds()
+	timings.log(s, cluster, proc, time.Since(started), timings.sandbox == 0)
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // dagPrecondition decides whether this job has a workflow graph at all,
@@ -345,9 +412,8 @@ func dagPrecondition(ad *classad.ClassAd, cluster, proc int) (dagFile string, st
 	// it survives without the path.
 	if spooled, _ := ad.EvaluateAttrString("SUBMIT_Iwd"); strings.TrimSpace(spooled) == "" {
 		return "", http.StatusConflict, fmt.Sprintf(
-			"Workflow %d.%d was submitted from a shell on the access point, so its files are in "+
-				"its own submit directory rather than in the spool, and are not readable through "+
-				"this server.", cluster, proc)
+			"Workflow %d.%d was submitted from a shell on the access point, so its graph is not "+
+				"available here.", cluster, proc)
 	}
 
 	dagFile = dagFileFromAd(ad)
@@ -706,12 +772,11 @@ var errDagUnparsableDot = errors.New("workflow's dot file could not be parsed")
 
 // dagStructureFor returns the cached structure or fetches it.
 //
-// refresh bypasses the cache lookup. So does a cached entry whose node
-// status half has gone stale, because that half is live data sharing a
-// cache entry with data that is not: see dagStatusMaxAge.
+// refresh bypasses the cache lookup, and it is the ONLY thing that does:
+// an ordinary load is served whatever the cache holds, however old.
 func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constraint string,
-	cluster, proc int, dagFile string, managerAd *classad.ClassAd, refresh bool) (
-	*dagStructure, int, string) {
+	cluster, proc int, dagFile string, managerAd *classad.ClassAd, refresh bool,
+	timings *dagTimings) (*dagStructure, int, string) {
 
 	dotFile := dagman.DotFileName(dagFile)
 	owner, _ := managerAd.EvaluateAttrString("Owner")
@@ -721,11 +786,11 @@ func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constrai
 		admin:  s.isWebUIAdmin(r),
 	}
 	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile),
-		access, dagManagerDone(managerAd), refresh,
+		access, refresh,
 		func() (*dagStructure, error) {
 			fetchCtx, cancel := context.WithTimeout(ctx, dagSandboxTimeout)
 			defer cancel()
-			st, started, err := s.buildDagStructure(fetchCtx, constraint, dagFile, dotFile)
+			st, started, err := s.buildDagStructure(fetchCtx, constraint, dagFile, dotFile, timings)
 			if err != nil {
 				return nil, err
 			}
@@ -769,16 +834,15 @@ func dagManagerDone(ad *classad.ClassAd) bool {
 // sandbox showed DAGMan already past the point where it writes the file.
 func dagNoStructureMessage(ad *classad.ClassAd, dotFile string, started bool) string {
 	if !started && !dagManagerDone(ad) && !dagManagerRunningSince(ad, dagStartupGrace) {
-		return fmt.Sprintf(
-			"This workflow has not published its structure yet: DAGMan writes %s just after it "+
-				"finishes parsing the DAG, and it has not got there. Retry in a few seconds.",
-			dotFile)
+		return "This workflow has not published its structure yet. Retry in a few seconds."
 	}
+	// The remaining sentence is an instruction to the workflow's AUTHOR,
+	// not a description of this server: `DOT` is a line they put in their
+	// own DAG file, and without it there is nothing to draw, ever.
 	return fmt.Sprintf(
-		"This workflow does not publish its structure: its DAG declares no DOT command, so DAGMan "+
-			"wrote no %s into the spool and there is nothing to read the graph from. Workflows "+
-			"submitted through this server are instrumented for this automatically; one submitted "+
-			"another way needs `DOT %s` in its DAG file.", dotFile, dotFile)
+		"This workflow does not publish its structure: its DAG declares no DOT command, so there "+
+			"is nothing to draw. Add `DOT %s` to the DAG file, or submit it through this server, "+
+			"which adds it for you.", dotFile)
 }
 
 // dagManagerRunningSince reports whether the manager job has been running
@@ -800,16 +864,16 @@ func dagManagerRunningSince(ad *classad.ClassAd, d time.Duration) bool {
 // button and the next ordinary page load must not pay for another
 // whole-sandbox transfer.
 func cachedDagStructure(cache *dagStructureCache, key string, access dagCacheAccess,
-	managerDone, refresh bool, build func() (*dagStructure, error)) (*dagStructure, error) {
+	refresh bool, build func() (*dagStructure, error)) (*dagStructure, error) {
 
 	if !refresh {
 		if hit, ok := cache.get(key); ok && access.mayUse(hit) {
-			switch {
-			case hit.err != nil:
+			if hit.err != nil {
 				return nil, hit.err
-			case !dagStateStale(hit.value, managerDone, time.Now()):
-				return hit.value, nil
 			}
+			// However old. An ordinary load does not transfer a sandbox;
+			// it says how old what it is serving is instead.
+			return hit.value, nil
 		}
 	}
 
@@ -834,37 +898,14 @@ func cachedDagStructure(cache *dagStructureCache, key string, access dagCacheAcc
 	})
 }
 
-// dagStateStale says whether a cached entry's node states are too old to
-// serve.
-//
-// A workflow whose status file is final never goes stale. One with NO
-// status file is the interesting case: "publishes none" and "has not
-// written one yet" look identical here, and they are minutes apart. The
-// DOT file is written at parse time and the status file only on DAGMan's
-// first update cycle (~30s later), so the very first load of a young
-// workflow lands between them -- and treating that as "no live half"
-// pinned a stateless entry for the full hour, escapable only by
-// ?refresh=1. It is therefore stale on the ordinary schedule while the
-// manager job is still in the queue, and never once it has left, because
-// then no status file is ever coming.
-func dagStateStale(st *dagStructure, managerDone bool, now time.Time) bool {
-	if st.statusFileName == "" {
-		return !managerDone && now.Sub(st.fetchedAt) > dagStatusMaxAge
-	}
-	if st.stateIsFinal() {
-		return false
-	}
-	return now.Sub(st.fetchedAt) > dagStatusMaxAge
-}
-
 // buildDagStructure does the expensive half: one whole-sandbox transfer,
 // then the DOT file DAGMan wrote out of it.
 //
 // A nil structure with a nil error means the transfer worked and the
 // workflow had published no DOT file; started then says whether DAGMan
 // had already got far enough to have written one.
-func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, dotFile string) (
-	st *dagStructure, started bool, err error) {
+func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, dotFile string,
+	timings *dagTimings) (st *dagStructure, started bool, err error) {
 
 	// One slot per concurrent whole-sandbox transfer, process-wide. Each
 	// one buffers tens of megabytes for up to dagSandboxTimeout, so this
@@ -879,17 +920,22 @@ func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, do
 	}
 	dagSandboxFetches.Add(1)
 
+	phase := time.Now()
 	files, err := s.fetchSandboxTextFiles(ctx, constraint, dagBigFilePredicate(dagFile))
+	timings.sandbox = time.Since(phase)
 	if err != nil {
 		return nil, false, err
 	}
 
+	phase = time.Now()
 	name, body, ok := findDotFile(files, dotFile)
 	if !ok {
+		timings.dotParse = time.Since(phase)
 		return nil, dagmanPastStartup(files), nil
 	}
 
 	graph, err := dagman.ParseDot(strings.NewReader(body))
+	timings.dotParse = time.Since(phase)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w: %w", name, errDagUnparsableDot, err)
 	}
@@ -909,6 +955,8 @@ func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, do
 	// The node status file is the state half, and it is read out of the
 	// same tar because there is no cheaper way to reach one file of a
 	// spooled sandbox.
+	phase = time.Now()
+	defer func() { timings.statParse = time.Since(phase) }()
 	if statusName, statusBody, ok := findStatusFile(files, dagman.StatusFileName(dagFile)); ok {
 		states, at, next, sawEnd := parseNodeStatusFile(statusBody)
 		if len(states) > 0 {
@@ -1472,20 +1520,24 @@ type dagNodeState struct {
 // whichever source named the state. That is the "why" behind a status
 // file's number -- "error" is not actionable, "error, job 42.0 exited 1"
 // is.
-func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster int, st *dagStructure) DagGraphResponse {
+func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster int,
+	st *dagStructure, timings *dagTimings) DagGraphResponse {
+
 	live := map[string]dagNodeState{}
 	var sources []string
 	var warnings []string
 
+	phase := time.Now()
 	queued, err := s.dagQueueStates(ctx, r, cluster, live)
+	timings.queue = time.Since(phase)
 	if err != nil {
 		// Logged, not echoed: the error text carries the schedd's own
 		// address and internals, which handleJobOutputFile deliberately
 		// keeps out of a response body.
 		s.logger.Error(logging.DestinationHTTP, "DAG node queue query failed",
 			"error", err, "cluster", cluster)
-		warnings = append(warnings, "the job queue could not be consulted, so some nodes may read "+
-			"as unready; the reason is in the server log")
+		warnings = append(warnings, "The job queue could not be consulted, so some nodes may read "+
+			"as unready.")
 	}
 
 	// Only ask the archive about what the queue did not explain. On a
@@ -1494,14 +1546,16 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 	archived := 0
 	if len(live) < st.grouping.NodeCount {
 		var scanned int
-		archived, scanned, err = s.dagArchiveStates(ctx, r, cluster, live)
+		phase = time.Now()
+		archived, scanned, err = s.dagArchiveStates(ctx, r, cluster, st.grouping.NodeCount, live)
+		timings.archive = time.Since(phase)
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "DAG node archive query failed",
 				"error", err, "cluster", cluster)
-			warnings = append(warnings, "the job archive could not be consulted, so nodes that have "+
-				"left the queue may read as unready; the reason is in the server log")
+			warnings = append(warnings, "The job history could not be consulted, so nodes that have "+
+				"finished may read as unready.")
 		}
-		if w := dagArchiveTruncationWarning(scanned); w != "" {
+		if w := dagArchiveTruncationWarning(scanned, st.grouping.NodeCount); w != "" {
 			warnings = append(warnings, w)
 		}
 	}
@@ -1536,7 +1590,10 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 		ApproximateLayering: st.grouping.Approximate,
 		StateSources:        sources,
 		Warnings:            warnings,
-		FetchedAt:           time.Now().UTC(),
+		// When the spool was READ, not when this response was built. On
+		// a cached load those are minutes apart, and the age of the
+		// state is the thing the panel has to be able to say.
+		FetchedAt: st.fetchedAt.UTC(),
 	}
 	if used[dagSourceStatusFile] {
 		resp.StatusFileTime = st.statusFileTime
@@ -1546,9 +1603,8 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 		resp.Nodes = nil
 		resp.NodesOmitted = true
 		resp.NodesOmittedReason = fmt.Sprintf(
-			"this workflow has %d nodes, more than the %d this endpoint lists individually; "+
-				"the per-group status counts describe every node.",
-			st.grouping.NodeCount, dagNodeListLimit)
+			"This workflow has %d nodes, too many to list one by one. The per-group counts "+
+				"describe every node.", st.grouping.NodeCount)
 	}
 	return resp
 }
@@ -1615,9 +1671,9 @@ func rollUpDagGroups(g *dagman.Grouping, states map[string]dagNodeState) ([]DagG
 				GroupID:    grp.ID,
 				State:      st.state,
 				JobID:      st.jobID,
-				HoldReason: st.holdReason,
+				HoldReason: clampDagNodeText(st.holdReason),
 				ExitCode:   st.exitCode,
-				Detail:     st.detail,
+				Detail:     clampDagNodeText(st.detail),
 				Source:     st.source,
 			})
 		}
@@ -1635,6 +1691,20 @@ func rollUpDagGroups(g *dagman.Grouping, states map[string]dagNodeState) ([]DagG
 		})
 	}
 	return groups, nodes
+}
+
+// clampDagNodeText bounds one of the two free-text per-node fields. It
+// cuts on a rune boundary, because the result is JSON and half a rune is
+// not text.
+func clampDagNodeText(s string) string {
+	if len(s) <= dagNodeTextMaxBytes {
+		return s
+	}
+	cut := dagNodeTextMaxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\u2026"
 }
 
 // dagNodeProjection is what a node job has to answer about itself.
@@ -1679,21 +1749,22 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 
 // dagArchiveStates fills in nodes whose jobs have already left the queue,
 // from the same history the /api/v1/jobs/archive endpoint reads.
-func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster int,
+func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster, nodeCount int,
 	out map[string]dagNodeState) (n, scanned int, err error) {
 
 	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
 	if err != nil {
 		return 0, 0, err
 	}
+	limit, scanLimit := dagArchiveBounds(nodeCount)
 	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 		Source:     htcondor.HistorySourceJobHistory,
 		Projection: append(append([]string{}, dagNodeProjection...), "ExitCode", "ExitBySignal"),
 		// A workflow's nodes are contiguous and recent in the history
 		// file, so a bounded backwards scan finds them all without
 		// reading years of it.
-		Limit:     dagArchiveLimit,
-		ScanLimit: dagArchiveScanLimit,
+		Limit:     limit,
+		ScanLimit: scanLimit,
 		Backwards: true,
 	})
 	if err != nil {
@@ -1722,30 +1793,88 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 	return n, scanned, nil
 }
 
+// dagArchiveBounds sizes the history query to the workflow in front of
+// it, which is the whole difference between a page load that costs
+// nothing and one that costs seconds.
+//
+// The old bounds were flat: 20,000 matches and a 200,000-record scan,
+// for every workflow. The schedd walks the history file backwards and
+// stops at the FIRST of the two, so a 20-node workflow -- which can
+// never produce 20,000 matches -- never hit the match limit and the scan
+// ran the full 200,000 records EVERY TIME the panel was opened. Measured
+// against a 200,000-record history file that is ~0.9s of pure waste per
+// load on a warm local disk, and it is paid on a cached load too,
+// because the archive is not cached.
+//
+// So the match limit is sized to the workflow: once the workflow's own
+// node jobs have been found the scan stops, which for the ordinary case
+// -- a workflow whose nodes ran recently -- is a few dozen records
+// instead of two hundred thousand. The slack covers DAGMan retries,
+// which submit a node again under the same DAGNodeName.
+//
+// The scan limit still has to exist, because a workflow with fewer
+// finished nodes than the match limit (a RUNNING one: the common case)
+// can never satisfy the match limit and would otherwise run to the end
+// of the file again. It is bounded by the workflow too, with a floor
+// that is large enough to reach past unrelated jobs submitted since.
+// The cost of that bound is real and is stated in the response: a node
+// whose job left the queue but sits further back in the history than
+// the scan reaches keeps the state DAGMan gave it and loses its job id
+// and exit code.
+func dagArchiveBounds(nodeCount int) (limit, scanLimit int) {
+	limit = nodeCount*dagArchiveProcsPerNode + dagArchiveLimitSlack
+	if limit > dagArchiveLimit || limit <= 0 {
+		limit = dagArchiveLimit
+	}
+	scanLimit = nodeCount * dagArchiveScanPerNode
+	if scanLimit < dagArchiveScanFloor {
+		scanLimit = dagArchiveScanFloor
+	}
+	if scanLimit > dagArchiveScanLimit || scanLimit <= 0 {
+		scanLimit = dagArchiveScanLimit
+	}
+	return limit, scanLimit
+}
+
 // dagArchiveTruncationWarning says that the archive answer was cut off,
 // or "" when it was not.
 //
 // Silence here is the defect it exists for. The archive query stops at
-// dagArchiveLimit records, and the nodes past the cut read as "unready"
-// from "inferred" -- which is exactly what a node that never started
-// reads as. A finished 100,000-node workflow would report 80% of itself
-// as never having run, with nothing in the response to say otherwise.
+// its match limit, and the nodes past the cut read as "unready" from
+// "inferred" -- which is exactly what a node that never started reads
+// as. A finished 100,000-node workflow would report 80% of itself as
+// never having run, with nothing in the response to say otherwise.
 //
 // A full answer and a truncated one are indistinguishable in the ads
-// themselves, so the count is the only signal there is.
-func dagArchiveTruncationWarning(scanned int) string {
-	if scanned < dagArchiveLimit {
+// themselves, so the count is the only signal there is. It is compared
+// against the bound this workflow actually asked for, not against the
+// flat ceiling: sizing the query to the workflow moved the cut.
+func dagArchiveTruncationWarning(scanned, nodeCount int) string {
+	limit, _ := dagArchiveBounds(nodeCount)
+	if scanned < limit {
 		return ""
 	}
-	return fmt.Sprintf(
-		"the job archive answered with its %d-record limit and was therefore truncated: a node "+
-			"reported as %q from %q may simply not have been looked up rather than never started",
-		dagArchiveLimit, dagStateUnready, dagSourceInferred)
+	return "The job history answer was cut short, so some nodes that have finished may read " +
+		"as unready."
 }
 
 const (
+	// dagArchiveLimit and dagArchiveScanLimit are the ceilings the
+	// per-workflow bounds are clamped to; dagArchiveBounds explains why
+	// they are ceilings rather than the values used.
 	dagArchiveLimit     = 20000
 	dagArchiveScanLimit = 200000
+	// dagArchiveProcsPerNode and dagArchiveLimitSlack size the match
+	// limit: one record per node plus room for retries and multi-proc
+	// nodes, plus a fixed floor so a one-node workflow still asks for
+	// more than one record.
+	dagArchiveProcsPerNode = 4
+	dagArchiveLimitSlack   = 16
+	// dagArchiveScanPerNode and dagArchiveScanFloor size the scan: how
+	// far back into the history file this is willing to look for a
+	// workflow of this size.
+	dagArchiveScanPerNode = 200
+	dagArchiveScanFloor   = 5000
 )
 
 func adJobID(ad *classad.ClassAd) string {

@@ -1567,10 +1567,16 @@ export function workflowGraphAvailability(job: ClassAd): {
     // Deliberately NOT opening with the workflow log panel's sentence:
     // both panels render on this page for this job, and two paragraphs
     // starting identically read as one repeated.
+    // The fact and what to do about it. Where the files are and why
+    // this server cannot reach them is this server's problem, not the
+    // reader's.
+    //
+    // Deliberately NOT opening with the workflow log panel's sentence:
+    // both panels render on this page for this job, and two paragraphs
+    // starting identically read as one repeated.
     reason:
-      "This workflow's structure files are not readable through this server: it was submitted " +
-      'from a shell on the access point, so the .dot graph and node status file DAGMan writes ' +
-      `are in ${str(job.Iwd) ?? 'the submit directory'}. Use condor_q -dag on the access point instead.`,
+      'This workflow has no graph here: it was submitted from a shell on the access point. ' +
+      'Run condor_q -dag there instead.',
   };
 }
 
@@ -1621,7 +1627,13 @@ function WorkflowGraphPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
 
   const loaded = data !== null || notice !== null;
   return (
-    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+    // The test id is load-bearing: a smoke test asserts that NOTHING in
+    // this panel explains how the server works, and "the innermost div
+    // holding the heading" is the button row, not the panel.
+    <div
+      data-testid="workflow-graph-panel"
+      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3"
+    >
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-medium text-gray-900">Workflow graph</h2>
         {available && (
@@ -1629,6 +1641,10 @@ function WorkflowGraphPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
             type="button"
             onClick={() => load(loaded)}
             disabled={loading}
+            // A hint, not body text: the panel is explicit-load, and the
+            // only thing worth saying about Refresh is that it is the
+            // slow one.
+            title={loaded ? 'Re-read this workflow (slow)' : undefined}
             className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             {loading
@@ -1651,11 +1667,7 @@ function WorkflowGraphPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
         <>
           <p className="text-xs text-gray-500">
             The workflow&apos;s structure, with nodes that run the same thing
-            in the same place drawn as one box. Loading is answered from a
-            server-side cache and is cheap; <strong>Refresh</strong> is not
-            — it re-fetches the workflow&apos;s entire spool from the access
-            point to re-read the structure and node-status files. Nothing
-            here polls.
+            in the same place drawn as one box.
           </p>
 
           {error && (
@@ -1736,7 +1748,7 @@ function WorkflowGraphBody({
 
       {groups.length === 0 ? (
         <p className="text-xs text-gray-600">
-          The structure file named no nodes, so there is nothing to draw.
+          This workflow has no nodes to draw.
         </p>
       ) : drawable ? (
         <DagDrawing
@@ -1749,20 +1761,17 @@ function WorkflowGraphBody({
         <DagTooWide groups={groups} widest={widest} />
       )}
 
-      {/* The caveat the picture cannot state for itself. Rendered, not
-          hinted: a reader who takes a group link for "every node in A
-          feeds every node in B" will misread a fan-out of independent
-          chains as a synchronisation point, which is the opposite of
-          what it is. */}
+      {/* The one piece of explanation that earns its place: it is how to
+          READ the drawing, not how the server made it. A reader who takes
+          a group link for "every node in A feeds every node in B" will
+          misread a fan-out of independent chains as a synchronisation
+          point, which is the opposite of what it is. One sentence. */}
       <p className="rounded-sm border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
         <strong className="font-medium text-gray-800">
           A line means &ldquo;some&rdquo;, not &ldquo;every&rdquo;.
         </strong>{' '}
-        An arrow from one group to another says that <em>some</em> node in the
-        first is a parent of <em>some</em> node in the second. Ten independent
-        chains collapse to two boxes joined by one line, which draws like a
-        complete crossing but is really a perfect matching. Open a group to
-        see its members.
+        An arrow says that <em>some</em> node in the first is a parent of{' '}
+        <em>some</em> node in the second.
       </p>
 
       {groups.length > 0 && !drawable && (
@@ -1816,10 +1825,7 @@ function DagBanners({
     <>
       {data.truncated && (
         <DagNote>
-          The structure file was read while DAGMan was still writing it, so
-          this picture may be missing dependencies. The generator writes every
-          node before any arc, so the usual way to catch it half-written is
-          with all the boxes present and some of the lines missing.{' '}
+          This drawing may be missing dependencies.{' '}
           <button
             type="button"
             onClick={onRefresh}
@@ -1833,38 +1839,26 @@ function DagBanners({
       )}
 
       {data.incomplete && (
-        <DagNote>
-          Part of this workflow is missing from the picture: a SPLICE or
-          INCLUDE named a file that could not be read, so its nodes were never
-          in the graph. A workflow that looks one node wide may simply be one
-          whose other file was unreadable.
-        </DagNote>
+        <DagNote>Part of this workflow is missing from this drawing.</DagNote>
       )}
 
       {dangling > 0 && (
         <DagNote>
           <span className="tabular-nums">{dangling.toLocaleString()}</span>{' '}
-          {dangling === 1 ? 'dependency references' : 'dependencies reference'}{' '}
-          nodes that are not in the structure file, and{' '}
-          {dangling === 1 ? 'was' : 'were'} dropped. Those arrows are missing
-          from this drawing.
+          {dangling === 1 ? 'dependency is' : 'dependencies are'} missing from
+          this drawing.
         </DagNote>
       )}
 
       {data.approximate_layering && (
         <DagNote>
           This grouping is coarser than the workflow&apos;s real structure, so
-          the layers are a best effort rather than a topology: boxes may sit
-          at a depth the dependencies do not justify.
+          boxes may sit at a depth the dependencies do not justify.
           {data.approximate_reason === 'cycle' && (
-            <> The graph has a cycle, so it has no layering at all.</>
+            <> This workflow has a cycle.</>
           )}
           {data.approximate_reason === 'refinement-bound' && (
-            <>
-              {' '}
-              Splitting the groups hit its bound before it settled, so distinct
-              nodes are sharing a box.
-            </>
+            <> Distinct nodes are sharing a box.</>
           )}
         </DagNote>
       )}
@@ -1879,81 +1873,66 @@ function DagBanners({
   );
 }
 
-// dagSourceLabel names a state source in words rather than in the
-// response's tokens.
-function dagSourceLabel(s: string): string {
-  switch (s) {
-    case 'status-file':
-      return "DAGMan's node status file";
-    case 'dot-file':
-      return 'the structure (.dot) file';
-    case 'queue':
-      return 'the live job queue';
-    case 'archive':
-      return 'the job history';
-    case 'inferred':
-      return 'inference from the structure';
-    default:
-      return s;
-  }
+// dagStateAsOf is the unix time the state in this response is good as
+// of: the older of when the workflow's spool was read and when DAGMan
+// last wrote its node states, because the answer is only as fresh as
+// whichever of those is further behind.
+//
+// An unparseable or absent fetched_at falls back to the status file's
+// own time, and a response carrying neither returns 0, which the caller
+// renders as nothing rather than as 1970.
+export function dagStateAsOf(data: {
+  fetched_at?: string;
+  status_file_time?: number;
+}): number {
+  const parsed = data.fetched_at ? Date.parse(data.fetched_at) : NaN;
+  const fetched = Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  const status =
+    typeof data.status_file_time === 'number' && data.status_file_time > 0
+      ? data.status_file_time
+      : 0;
+  if (fetched && status) return Math.min(fetched, status);
+  return fetched || status;
 }
 
-// DagProvenance says where the node states came from and how old they
-// are. The two halves of the response have different freshness -- the
-// queue half is live, the status-file half is as old as DAGMan's last
-// write plus the last whole-spool fetch -- and a picture that does not
-// say which is which invites the reader to trust the stale half.
+// formatTookMs renders a server-reported duration the way a reader reads
+// one: sub-second in milliseconds, past that in seconds with one
+// decimal. It is the number the panel shows beside the state's age.
+export function formatTookMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+// DagProvenance is one line: how old the state is, and how long the load
+// took.
+//
+// It used to be three paragraphs naming the .dot and .status files, the
+// spool, the queue and DAGMan's write cycle. None of that is a fact
+// about the reader's workflow -- it is a description of this server --
+// and the project owner asked for it gone. What a reader needs is
+// whether they are looking at something current, which is the age, and
+// whether the panel is slow, which is the duration.
 function DagProvenance({ data }: { data: DagGraphResponse }) {
-  const sources = data.state_sources ?? [];
-  const hasStatusFile = sources.includes('status-file');
   // The same minute-resolution clock the rest of the page ages its
-  // timestamps against: the point of the number below is that it keeps
-  // growing while the panel sits open, which a value frozen at render
-  // would not.
+  // timestamps against: the age has to keep growing while the panel sits
+  // open, which a value frozen at render would not.
   const now = useNowTick(60_000);
+  const at = dagStateAsOf(data);
+  const took =
+    typeof data.took_ms === 'number' ? formatTookMs(data.took_ms) : '';
+  if (!at && !took) return null;
   return (
-    <DagNote tone="gray">
-      <p>
-        {sources.length > 0 ? (
-          <>Node state came from {joinWords(sources.map(dagSourceLabel))}.</>
-        ) : (
-          <>This response did not say where the node states came from.</>
-        )}{' '}
-        Structure read from{' '}
-        <code className="font-mono">{data.dot_file}</code>
-        {data.status_file && (
-          <>
-            {' '}
-            and <code className="font-mono">{data.status_file}</code>
-          </>
-        )}
-        . Fetched {new Date(data.fetched_at).toLocaleString()}.
-      </p>
-      {data.status_file_time !== undefined && data.status_file_time > 0 && (
-        <p className="mt-1">
-          The node status file was last written{' '}
-          {new Date(data.status_file_time * 1000).toLocaleString()} (
-          {humanDuration(Math.max(0, now - data.status_file_time))} ago) — every
-          state that came from it is at least that old, however live the queue
-          half of this page is.
-        </p>
+    <p className="text-xs text-gray-500">
+      {at > 0 && (
+        <>
+          State as of {new Date(at * 1000).toLocaleTimeString()} (
+          {humanDuration(Math.max(0, now - at))} ago)
+        </>
       )}
-      {!hasStatusFile && (
-        <p className="mt-1">
-          DAGMan&apos;s node status file did not contribute here, so per-node
-          state is inferred from the queue. The queue cannot tell a node that
-          has not started yet from one running a PRE or POST script — neither
-          has a job in it — so both read the same way above.
-        </p>
-      )}
-    </DagNote>
+      {at > 0 && took && ' · '}
+      {took && <>loaded in {took}</>}
+    </p>
   );
-}
-
-// joinWords renders a list as "a", "a and b", "a, b and c".
-function joinWords(items: string[]): string {
-  if (items.length <= 1) return items[0] ?? '';
-  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
 // truncateLabel keeps a label inside its box. The full text is in the
@@ -2311,11 +2290,11 @@ function DagGroupDetail({
         // as "this group has no members".
         <p className="text-xs text-gray-600">
           {data.nodes_omitted_reason ??
-            'This workflow is too large for the server to list node by node, so its members are not in this response.'}
+            'This workflow is too large to list node by node.'}
         </p>
       ) : members.length === 0 ? (
         <p className="text-xs text-gray-600">
-          The response lists no individual nodes for this group.
+          No individual nodes are listed for this group.
         </p>
       ) : (
         <>
@@ -2347,9 +2326,6 @@ function DagGroupDetail({
                       exit {n.exit_code}
                     </span>
                   )}
-                  <span className="ml-auto text-[10px] text-gray-400">
-                    from {n.source}
-                  </span>
                 </div>
                 {n.detail && <p className="text-gray-600">{n.detail}</p>}
                 {n.hold_reason && (
