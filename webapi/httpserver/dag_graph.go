@@ -1540,11 +1540,18 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 			"as unready.")
 	}
 
-	// Only ask the archive about what the queue did not explain. On a
-	// finished workflow that is every node; on a running one it is the
-	// nodes that already left the queue.
+	// Only ask the archive when some node could actually be IN it.
+	//
+	// The archive is never the source of a node's state on an
+	// instrumented workflow -- the status file outranks it, and a node
+	// waiting on a PRE script or futile from an ancestor's failure was
+	// never a job at all. What it uniquely supplies is the job id, and
+	// so the click-through, for a node whose job has left the queue.
+	// That means it is worth a history scan only when the structure
+	// says at least one node's job has in fact left, which is what
+	// dagNodesMaybeInHistory counts.
 	archived := 0
-	if len(live) < st.grouping.NodeCount {
+	if n := dagNodesMaybeInHistory(st, live); n > 0 {
 		var scanned int
 		phase = time.Now()
 		archived, scanned, err = s.dagArchiveStates(ctx, r, cluster, st.grouping.NodeCount, live)
@@ -1607,6 +1614,57 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 				"describe every node.", st.grouping.NodeCount)
 	}
 	return resp
+}
+
+// dagNodesMaybeInHistory counts the nodes whose job could plausibly be
+// in the job history: the ones the archive query exists to find.
+//
+// A node is a candidate when the queue did not already account for it
+// AND the workflow says a job of its has run. DAGMan's own node states
+// say that precisely: a node that is unready, ready, futile, or running
+// a PRE script has never had a job submitted, so no amount of history
+// contains one. Scanning for those is the pure-loss case this guards.
+//
+// When there is no status file the answer is unknowable here, so every
+// node not in the queue counts -- an uninstrumented workflow is exactly
+// the case where the archive is the ONLY source of state, and must not
+// be skipped.
+func dagNodesMaybeInHistory(st *dagStructure, live map[string]dagNodeState) int {
+	n := 0
+	for _, grp := range st.grouping.Groups {
+		for _, member := range grp.Members {
+			key := strings.ToLower(member)
+			if _, inQueue := live[key]; inQueue {
+				continue
+			}
+			entry, ok := st.statusStates[key]
+			if !ok {
+				// No authoritative word on this node; the archive may
+				// be the only thing that knows it ran.
+				n++
+				continue
+			}
+			if dagStateCouldHaveLeftTheQueue(entry.state) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// dagStateCouldHaveLeftTheQueue reports whether a node in this state has
+// ever had a job in the queue to leave it.
+//
+// It is an allowlist rather than a denylist: a state this server does
+// not recognise has to fall through to "ask the archive", because the
+// cost of asking needlessly is a query and the cost of not asking is a
+// node that reads as unready forever.
+func dagStateCouldHaveLeftTheQueue(state string) bool {
+	switch state {
+	case dagStateUnready, dagStateReady, dagStatePreRun, dagStateFutile:
+		return false
+	}
+	return true
 }
 
 // mergeDagStates applies the precedence to every node of the structure,

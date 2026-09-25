@@ -1884,3 +1884,85 @@ func TestDagArchiveTruncationStillSaysSomethingWasMissed(t *testing.T) {
 		t.Errorf("the warning does not say what the missing nodes may NOT mean: %s", w)
 	}
 }
+
+// TestDagNodesMaybeInHistoryDoesNotScanForJobsThatNeverRan pins the gate
+// on the archive query. The archive is the only source of a finished
+// node's job id, so it has to run whenever a node's job has left the
+// queue -- and it is pure loss on a workflow whose unfinished nodes have
+// never been submitted at all, which is most of a running workflow.
+func TestDagNodesMaybeInHistoryDoesNotScanForJobsThatNeverRan(t *testing.T) {
+	inQueue := map[string]dagNodeState{
+		"work_0": {state: dagStateRunning, jobID: "6.0", source: dagSourceQueue},
+		"work_1": {state: dagStateIdle, jobID: "6.1", source: dagSourceQueue},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status map[string]dagStatusEntry
+		live   map[string]dagNodeState
+		want   int
+	}{{
+		// The shape this guards: two jobs in the queue, and the other
+		// two nodes have never been submitted. Nothing of this workflow
+		// is in the history, so asking costs a scan and returns nothing.
+		name: "nothing has left the queue yet",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStatePreRun},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 0,
+	}, {
+		name: "a node finished and left",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStateDone},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 1,
+	}, {
+		// A POSTRUN node's job is gone from the queue while DAGMan still
+		// calls the node unfinished; its id is in the history and
+		// nowhere else.
+		name: "a node is running its POST script",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStatePostRun},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 1,
+	}, {
+		// Futile means an ancestor failed, so this node was never
+		// submitted -- however finished the workflow looks.
+		name: "futile nodes were never jobs",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStateFailed},
+			"work_0": {state: dagStateFutile},
+			"work_1": {state: dagStateFutile},
+			"gather": {state: dagStateFutile},
+		},
+		want: 1,
+	}, {
+		// The uninstrumented case: no status file, so nothing here can
+		// rule a node out and the archive is the only source of state.
+		name: "no status file means ask about everything",
+		want: 4,
+	}, {
+		name:   "a state this server does not know falls through to asking",
+		status: map[string]dagStatusEntry{"setup": {state: "invented-by-a-later-dagman"}},
+		want:   4,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fanStructure(t, tc.status, nil)
+			if got := dagNodesMaybeInHistory(st, tc.live); got != tc.want {
+				t.Errorf("dagNodesMaybeInHistory = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
