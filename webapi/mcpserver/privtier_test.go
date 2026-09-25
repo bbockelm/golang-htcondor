@@ -146,3 +146,84 @@ func TestNoScopesMeansNoSuperuser(t *testing.T) {
 		t.Error("no scopes must mean no mutate tier")
 	}
 }
+
+// The bug this file did not catch: an MCP_ADMIN_USERS member whose token
+// does NOT carry mcp:admin was given cross-user reads anyway.
+//
+// mcp:admin is rendered unchecked on the consent form so that granting
+// it is deliberate. Leaving it unchecked has to mean something, and the
+// subject list was quietly overriding it. Every case above used a
+// scopeless context, which is why this went unnoticed.
+func TestAdminListDoesNotOverrideAScopeBearingToken(t *testing.T) {
+	s := tierServer("root@uid.domain")
+	// A real OAuth caller: scopes present, mcp:admin deliberately absent.
+	ctx := tierCtx("root@uid.domain", "mcp:read", "mcp:write")
+
+	got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
+	if !ok {
+		t.Fatal("the caller is authenticated; scoping must succeed")
+	}
+	if !strings.Contains(got, `Owner == "root"`) {
+		t.Errorf("MCP_ADMIN_USERS overrode a token that withheld %s; got %q", scopeMCPAdmin, got)
+	}
+}
+
+// The stdio path is what the list exists for and must keep working:
+// that transport states no scopes, so there is nothing to withhold.
+func TestAdminListStillAppliesWithoutScopes(t *testing.T) {
+	s := tierServer("root@uid.domain")
+	ctx := tierCtx("root@uid.domain") // no scopes at all
+
+	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+		t.Errorf("MCP_ADMIN_USERS should still grant the read tier over stdio: got %q ok=%v", got, ok)
+	}
+}
+
+// Holding the scope works whether or not the caller is also listed.
+func TestAdminScopeWorksForAListedUserToo(t *testing.T) {
+	s := tierServer("root@uid.domain")
+	ctx := tierCtx("root@uid.domain", "mcp:read", scopeMCPAdmin)
+
+	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+		t.Errorf("the %s scope should be unconfined: got %q ok=%v", scopeMCPAdmin, got, ok)
+	}
+}
+
+// A token that granted NOTHING is still a token: it stated its scope set
+// and that set is empty. Only a transport that states no set at all --
+// stdio -- falls back to the list. Without this the distinction would be
+// "is the slice empty", which an empty grant would satisfy.
+func TestAnEmptyGrantIsStillAScopeBearingToken(t *testing.T) {
+	s := tierServer("root@uid.domain")
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
+	ctx = WithGrantedScopes(ctx, []string{}) // present, and empty
+
+	if !scopedTransport(ctx) {
+		t.Fatal("an empty-but-present scope set must count as scope-bearing")
+	}
+	got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
+	if !ok {
+		t.Fatal("the caller is authenticated; scoping must succeed")
+	}
+	if !strings.Contains(got, `Owner == "root"`) {
+		t.Errorf("an empty grant was treated as stdio; got %q", got)
+	}
+}
+
+// whoami must not claim a grant the rule refuses. Reporting "listed in
+// MCP_ADMIN_USERS" next to admin=false is how an operator concludes the
+// list is broken rather than that the scope is missing.
+func TestWhoamiExplainsWhyTheListDidNotApply(t *testing.T) {
+	s := tierServer("root@uid.domain")
+	ctx := tierCtx("root@uid.domain", "mcp:read", "mcp:write")
+
+	adminVia, _ := s.privilegeProvenance(ctx, "root@uid.domain")
+	if s.allowsAllUsers(ctx, "root@uid.domain", tierRead) {
+		t.Fatal("precondition: this caller should not be admin")
+	}
+	for _, want := range []string{scopeMCPAdmin, "MCP_ADMIN_USERS", "HTTP_API_MCP_ADMIN_GROUP"} {
+		if !strings.Contains(adminVia, want) {
+			t.Errorf("admin_via = %q; it should mention %q so the operator knows what to do", adminVia, want)
+		}
+	}
+}

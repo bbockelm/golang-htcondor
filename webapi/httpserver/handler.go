@@ -1407,6 +1407,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"MCP_ADMIN_USERS grants cross-user READS only; acting on another user's jobs now needs HTTP_API_MCP_SUPERUSER_GROUP, which is unset",
 			"admin_users", len(cfg.MCPAdminUsers))
 	}
+	// And it no longer applies to a caller whose token stated its scopes.
+	// Over HTTP the scope is the grant; the list is the stdio fallback.
+	// A deployment that had been relying on it for browser/OAuth callers
+	// sees their cross-user reads stop, so name the replacement.
+	if len(cfg.MCPAdminUsers) > 0 && !h.mcpAdminGroups.configured() {
+		logger.Warn(logging.DestinationHTTP,
+			"MCP_ADMIN_USERS applies only to callers whose transport supplies no scopes (stdio). "+
+				"OAuth callers need the mcp:admin scope, whose entitlement comes from "+
+				"HTTP_API_MCP_ADMIN_GROUP -- which is unset, so no OAuth caller can be granted it",
+			"admin_users", len(cfg.MCPAdminUsers))
+	}
 	h.webuiAdminGroups = newGroupSet(cfg.WebUIAdminGroup)
 	h.webuiAccessGroups = newGroupSet(cfg.WebUIAccessGroup)
 

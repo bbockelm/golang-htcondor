@@ -613,12 +613,36 @@ HTTP_API_MCP_READ_GROUP = mcp-read
 # Users in this group will receive both mcp:read and mcp:write scopes
 HTTP_API_MCP_WRITE_GROUP = mcp-write
 
-# MCP admin users (optional, comma-separated)
-# These subjects skip the owner-scope wrapper the MCP tools otherwise apply, so
-# they can query and act on other users' jobs. Matched exactly against the
-# authenticated actor: the OAuth2 username claim for an OAuth2 caller, or the
-# identity the schedd maps the caller to for a forwarded HTCondor IDTOKEN
-# (typically user@uid.domain). Unset = every caller is scoped to their own jobs.
+# Required group for the mcp:admin scope -- reading every user's jobs.
+# This is how an OAuth caller becomes an admin. Entitlement comes from the
+# group; the grant still requires the user to tick mcp:admin on the consent
+# form, which is rendered UNCHECKED so that granting it is deliberate.
+# Unset = nobody can be granted it (the opposite default from read/write,
+# because "no admin group configured" has to mean nobody, not everybody).
+HTTP_API_MCP_ADMIN_GROUP = mcp-admins
+
+# Required group for the mcp:superuser scope -- CHANGING another user's jobs
+# (remove, hold, release, edit). Deliberately not implied by mcp:admin.
+HTTP_API_MCP_SUPERUSER_GROUP = mcp-superusers
+
+# MCP admin users (optional, comma-separated) -- the stdio fallback ONLY.
+#
+# These subjects skip the owner-scope wrapper for READS, so they can query
+# other users' jobs. They cannot act on them: that needs mcp:superuser.
+#
+# IMPORTANT: this list applies only to callers whose transport supplies no
+# scopes -- the stdio server, where the process IS the user. It does NOT
+# override a token. An OAuth caller who was not granted mcp:admin stays
+# scoped to their own jobs even when listed here, because a token that
+# withheld the scope is the ceiling and a subject list may not raise it.
+# (It used to override, which silently defeated the unchecked consent box.)
+#
+# Matched exactly against the authenticated actor: the OAuth2 username claim
+# for an OAuth2 caller, or the identity the schedd maps the caller to for a
+# forwarded HTCondor IDTOKEN (typically user@uid.domain).
+# Unset = every caller is scoped to their own jobs.
+#
+# `whoami` reports which of these applied, and why, for a given caller.
 MCP_ADMIN_USERS = alice@example.edu, ops@example.edu
 ```
 

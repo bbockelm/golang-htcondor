@@ -200,7 +200,8 @@ const (
 // allowsAllUsers reports whether this caller may act outside their own
 // jobs at the given tier.
 //
-// MCP_ADMIN_USERS grants the read tier only. It used to grant both, and
+// MCP_ADMIN_USERS grants the read tier only, and only where the caller's
+// transport supplied no scopes at all. It used to grant both tiers, and
 // narrowing it is a real reduction for a deployment that relied on the
 // old behaviour -- which is why the server logs a warning at startup
 // when the list is configured and no superuser group is, rather than
@@ -216,9 +217,35 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 		if hasScope(ctx, scopeMCPAdmin) {
 			return true
 		}
+		// The list does not override a token that withheld the scope.
+		//
+		// mcp:admin is rendered UNCHECKED on the consent form precisely
+		// so that granting it is a deliberate act (see the note in
+		// oauth2_sso.go). Falling back to a subject list here undid that
+		// for exactly the people the box was written for: an operator
+		// who left it unchecked got a token without the scope and
+		// cross-user reads anyway, with nothing but whoami to say so.
+		//
+		// A token is the ceiling; a subject list is not allowed to raise
+		// it. This is what the mutate tier above has always done, and
+		// the two tiers disagreeing was the accident.
+		if scopedTransport(ctx) {
+			return false
+		}
 		_, ok := s.adminUsers[authenticatedUser]
 		return ok
 	}
+}
+
+// scopedTransport reports whether the caller arrived over a transport
+// that stated a scope set.
+//
+// This is what separates "the token withheld mcp:admin" from "nothing
+// here has scopes to withhold". The HTTP MCP transport always attaches
+// the granted set, so a nil set means stdio, where the process IS the
+// user and MCP_ADMIN_USERS remains the only way to grant the read tier.
+func scopedTransport(ctx context.Context) bool {
+	return grantedScopesFromContext(ctx) != nil
 }
 
 // hasScope reports whether the caller's granted scopes include name.
