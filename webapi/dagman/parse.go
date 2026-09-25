@@ -257,6 +257,89 @@ type DAG struct {
 	// could not be read, so the node set in hand is admittedly partial.
 	// Nothing may conclude "that node is not declared" from it.
 	Incomplete bool
+	// spliceBoundary maps a SPLICE placeholder's node name to the real
+	// nodes a dependency on it actually touches. It is how the graph
+	// keeps a splice-boundary edge: `PARENT pre CHILD mid` where mid is a
+	// splice is, to DAGMan, pre before every one of the splice's INITIAL
+	// nodes, and `PARENT mid CHILD post` is every one of its TERMINAL
+	// nodes before post (condor_dagman/parse.cpp, Dag::SetParent on the
+	// splice's initial/final node lists). Without it the edge names a
+	// placeholder that is not drawn and the dependency disappears, which
+	// turns one chain into two unrelated ones.
+	spliceBoundary map[string]spliceEnds
+}
+
+// spliceEnds are a splice's boundary nodes, already expanded to real
+// nodes: a nested splice's placeholder is replaced by its own boundary
+// when this is built, so nothing here ever names a placeholder.
+type spliceEnds struct {
+	initial  []string // parentless within the splice: where a parent attaches
+	terminal []string // childless within the splice: where a child attaches
+}
+
+// resolveEdgeEnd maps one end of a dependency to the real nodes it
+// touches: a splice placeholder becomes its boundary, ALL_NODES becomes
+// every node in scope, and any other name is itself. all is the node set
+// ALL_NODES stands for -- the whole DAG at the top level, one splice's
+// own nodes inside a splice.
+func (d *DAG) resolveEdgeEnd(name string, parentSide bool, all []string) []string {
+	if isAllNodes(name) {
+		return all
+	}
+	if b, ok := d.spliceBoundary[name]; ok {
+		if parentSide {
+			return b.terminal
+		}
+		return b.initial
+	}
+	return []string{name}
+}
+
+// recordSpliceBoundary works out where dependencies on a splice attach,
+// from the sub-DAG it was merged from. prefix is the splice scope the
+// merge applied to every name in it.
+func (d *DAG) recordSpliceBoundary(name string, o *DAG, prefix string) {
+	pfx := func(s string) string {
+		if isAllNodes(s) {
+			return s
+		}
+		return prefix + s
+	}
+	inside := make([]string, 0, len(o.Nodes))
+	for _, n := range o.Nodes {
+		if n.Type == NodeSplice {
+			continue
+		}
+		inside = append(inside, pfx(n.Name))
+	}
+	// Nested splices are already in d.spliceBoundary under their
+	// prefixed names (merge copied them there first), so expanding the
+	// sub-DAG's own edges here resolves them too.
+	hasParent := make(map[string]bool, len(inside))
+	hasChild := make(map[string]bool, len(inside))
+	for _, e := range o.Edges {
+		if isAllNodes(e.Parent) && isAllNodes(e.Child) {
+			continue
+		}
+		for _, p := range d.resolveEdgeEnd(pfx(e.Parent), true, inside) {
+			for _, c := range d.resolveEdgeEnd(pfx(e.Child), false, inside) {
+				if p == c {
+					continue
+				}
+				hasChild[p], hasParent[c] = true, true
+			}
+		}
+	}
+	b := spliceEnds{}
+	for _, n := range inside {
+		if !hasParent[n] {
+			b.initial = append(b.initial, n)
+		}
+		if !hasChild[n] {
+			b.terminal = append(b.terminal, n)
+		}
+	}
+	d.spliceBoundary[name] = b
 }
 
 // NodeByName finds a node, case-insensitively, as DAGMan does.
@@ -320,11 +403,12 @@ func Parse(text string) *DAG {
 
 func newDAG() *DAG {
 	return &DAG{
-		Descriptions: map[string]Description{},
-		Vars:         map[string][]string{},
-		VarNames:     map[string]string{},
-		NodeVars:     map[string]map[string]string{},
-		NodeAttrVars: map[string]map[string]string{},
+		Descriptions:   map[string]Description{},
+		Vars:           map[string][]string{},
+		VarNames:       map[string]string{},
+		NodeVars:       map[string]map[string]string{},
+		NodeAttrVars:   map[string]map[string]string{},
+		spliceBoundary: map[string]spliceEnds{},
 	}
 }
 
@@ -718,6 +802,11 @@ func (d *DAG) parseSplice(fields []string, line int, rs *resolver) {
 	body, _ := rs.lookup(n.Descriptor)
 	sub := parseText(body, rs.child(n.Descriptor))
 	d.merge(sub, n.Descriptor, n.Name+"+")
+	// A dependency naming the splice attaches to the splice's own
+	// boundary nodes, not to the placeholder -- which is not a node
+	// DAGMan runs and is not drawn. Recorded after the merge so nested
+	// splices are already resolved.
+	d.recordSpliceBoundary(n.Name, sub, n.Name+"+")
 }
 
 // include merges an INCLUDE'd file, which DAGMan reads at parse time as
@@ -760,6 +849,19 @@ func (d *DAG) merge(o *DAG, source, prefix string) {
 		n.Name = pfx(n.Name)
 		n.Source = src(n.Source)
 		d.Nodes = append(d.Nodes, n)
+	}
+	// A splice inside the merged file keeps its boundary, under the
+	// scope this merge is applying; recordSpliceBoundary then reads
+	// these back when it works out the outer splice's own boundary.
+	pfxAll := func(names []string) []string {
+		out := make([]string, len(names))
+		for i, s := range names {
+			out[i] = pfx(s)
+		}
+		return out
+	}
+	for k, b := range o.spliceBoundary {
+		d.spliceBoundary[pfx(k)] = spliceEnds{initial: pfxAll(b.initial), terminal: pfxAll(b.terminal)}
 	}
 	for _, e := range o.Edges {
 		e.Parent, e.Child, e.Source = pfx(e.Parent), pfx(e.Child), src(e.Source)
