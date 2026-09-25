@@ -21,6 +21,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 )
 
 // TestMCPSubmitDagIntegration runs a real DAGMan workflow, submitted the
@@ -341,6 +342,8 @@ queue
 		}
 	}
 
+	checkWorkflowWasInstrumented(t, harness.GetSpoolDir(), cluster, sandbox, meta)
+
 	// Second phase, on the same harness: removing the workflow has to
 	// remove the work.
 	//
@@ -353,6 +356,62 @@ queue
 	// anyone noticing: the only symptom is orphaned jobs on someone
 	// else's access point.
 	removeTakesTheNodeJobsWithIt(t, ctx, server, schedd)
+}
+
+// checkWorkflowWasInstrumented is the submit half of reading a running
+// workflow: the staged DAG has to carry the two commands, and DAGMan has
+// to have written the two files they ask for into the spool.
+//
+// Both halves are checked where they land, and they land in different
+// places for a reason. The staged .dag is read off the spool DIRECTORY,
+// because it is the one file that never comes back in a sandbox TRANSFER:
+// a spooled job's transfer is changed-files only, and a .dag staged as
+// input and only ever read is never newer than the stage-in catalog. That
+// is the whole reason the commands are injected at all -- what DAGMan
+// WRITES does come back, and that is what the tar is checked for.
+func checkWorkflowWasInstrumented(t *testing.T, spoolDir string, cluster int,
+	sandbox map[string]string, meta map[string]interface{}) {
+	t.Helper()
+
+	if got := fmt.Sprint(meta["dot_file"]); got != "fanout.dot" {
+		t.Errorf("submit_dag reported dot_file %q, want fanout.dot", got)
+	}
+	if got := fmt.Sprint(meta["status_file"]); got != "fanout.status" {
+		t.Errorf("submit_dag reported status_file %q, want fanout.status", got)
+	}
+
+	if staged := readSpoolDir(spoolDir, cluster)["fanout.dag"]; staged == "" {
+		t.Logf("the staged DAG could not be read off disk; the files it asks for are checked below")
+	} else {
+		for _, want := range []string{"DOT fanout.dot", "NODE_STATUS_FILE fanout.status 30"} {
+			if !strings.Contains(staged, want) {
+				t.Errorf("the staged DAG does not carry %q:\n%s", want, staged)
+			}
+		}
+	}
+
+	for _, name := range []string{"fanout.dot", "fanout.status"} {
+		if body := sandbox[name]; strings.TrimSpace(body) == "" {
+			t.Errorf("%s is not in the workflow's spool transfer; files present: %v",
+				name, keysOf(sandbox))
+		}
+	}
+
+	// And the files are the real thing, not empty placeholders: the dot
+	// file has to describe THIS workflow.
+	graph, err := dagman.ParseDot(strings.NewReader(sandbox["fanout.dot"]))
+	if err != nil {
+		t.Fatalf("the dot file DAGMan wrote does not parse: %v", err)
+	}
+	if len(graph.Nodes) != 3 || len(graph.Edges) != 2 {
+		t.Errorf("the dot file has %d nodes and %d edges, want 3 and 2: %+v",
+			len(graph.Nodes), len(graph.Edges), graph.Nodes)
+	}
+	g := dagman.CollapseGraph(graph)
+	if len(g.Groups) != 2 {
+		t.Errorf("the workflow collapsed to %d groups, want 2 (the producers, then COMBINE): %+v",
+			len(g.Groups), g.Groups)
+	}
 }
 
 // removeTakesTheNodeJobsWithIt submits a workflow whose one node sleeps,

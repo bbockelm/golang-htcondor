@@ -202,13 +202,19 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 			strings.Join(report.Errors(), "\n  - "))
 	}
 
+	// The staged DAG is instrumented: two commands appended so DAGMan
+	// writes its own structure and per-node status into the spool, which
+	// is the only way to read either back out of a spooled workflow (see
+	// dagman.Instrument). The analysis above ran on the CALLER's text, so
+	// every finding still points at a line they wrote.
+	instrumentedDag, instr := dagman.Instrument(s.policyForInlineDescriptions(dagText), dagName, files)
 	staged := fstest.MapFS{
 		// Site submit policy reaches the node jobs only here. DAGMan
 		// submits those itself, on the access point, long after this
 		// call returns, so the descriptions we are handed now are the
 		// last chance -- inline blocks in the DAG included, which is the
 		// shape this tool recommends.
-		dagName: &fstest.MapFile{Data: []byte(s.policyForInlineDescriptions(dagText)), Mode: 0o644},
+		dagName: &fstest.MapFile{Data: []byte(instrumentedDag), Mode: 0o644},
 	}
 	execSet := executableStagedNames(parsed, files)
 	for name, body := range files {
@@ -237,7 +243,7 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	if note := s.checkOAuthServicesNeeded(ctx, clusterID); note != "" {
 		notes = append(notes, strings.TrimSpace(note))
 	}
-	return dagSubmitResult(clusterID, dagName, report, notes), nil
+	return dagSubmitResult(clusterID, dagName, report, notes, instr), nil
 }
 
 // dagmanSubmitFile builds the manager job's submit file, filling in what
@@ -681,7 +687,8 @@ func dagDryRunResult(dagName, submitFile string, report *dagman.Report, notes []
 	}, structured)
 }
 
-func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes []string) map[string]interface{} {
+func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes []string,
+	instr dagman.Instrumentation) map[string]interface{} {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Submitted DAGMan workflow %s as cluster %d.\n", dagName, clusterID)
 	fmt.Fprintf(&sb, "Staged into the workflow's spool directory: %s\n", strings.Join(report.Required, ", "))
@@ -690,6 +697,9 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, dagName))
 	fmt.Fprintf(&sb, "%s\n", dagNodeJobAdvice(clusterID))
 	fmt.Fprintf(&sb, "Removing job %d.0 removes the whole workflow, including node jobs already running.\n", clusterID)
+	fmt.Fprintf(&sb, "This workflow was instrumented on submission: DAGMan writes its structure to %s and "+
+		"its per-node status to %s in the workflow's spool, so the graph and how far along each node is "+
+		"can be read while it runs.\n", instr.DotFile, instr.StatusFile)
 
 	structured := map[string]interface{}{
 		"cluster_id":  clusterID,
@@ -705,6 +715,10 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 		// nodes and a caller querying the manager job again and
 		// concluding the workflow has no jobs.
 		"node_constraint": dagNodeConstraint(clusterID),
+		// The files the instrumentation will produce, so a caller that
+		// wants the graph knows what to look for in the spool.
+		"dot_file":    instr.DotFile,
+		"status_file": instr.StatusFile,
 	}
 	return withStructured(map[string]interface{}{
 		"content":  []map[string]interface{}{{"type": "text", "text": sb.String()}},
