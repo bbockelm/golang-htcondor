@@ -789,3 +789,118 @@ func dagmanManagerJobAd(t *testing.T, dagName string) *classad.ClassAd {
 	}
 	return res.ProcAds[0]
 }
+
+// TestSubmitDagRejectsANameDagmanCannotLexBack is finding 2 at the tool
+// boundary. dag_name is caller-controlled and reaches DAGMan's own lexer
+// (src/condor_utils/dag_parser.cpp:30-77), which splits on whitespace and
+// treats " and ' as quote characters: "bob's_flow.dag" dies with
+// "Invalid quoting: no ending quote found", an embedded newline makes the
+// tail an unknown command, and a BALANCED pair parses but is stripped, so
+// DAGMan writes a file under a name nobody was told about. A spooled file
+// name with a control character in it is a problem beyond instrumentation
+// either way.
+func TestSubmitDagRejectsANameDagmanCannotLexBack(t *testing.T) {
+	s := &Server{}
+	for _, name := range []string{
+		"bob's_flow.dag",
+		`"quoted".dag`,
+		"two words.dag",
+		"line\nbreak.dag",
+		"tab\there.dag",
+		"bell\x07.dag",
+	} {
+		args := map[string]interface{}{"dag": "JOB A a.sub\n", "dag_name": name, "dry_run": true}
+		if _, _, err := dryRun(t, s, args); err == nil {
+			t.Errorf("dag_name %q was accepted; DAGMan's parser cannot read it back", name)
+		}
+	}
+	// The ordinary names still work.
+	for _, name := range []string{"workflow.dag", "run-2.dag", "my_flow.v2.dag", "a+b.dag"} {
+		args := map[string]interface{}{"dag": "JOB A a.sub\n", "dag_name": name, "dry_run": true}
+		if _, _, err := dryRun(t, s, args); err != nil {
+			t.Errorf("dag_name %q was refused: %v", name, err)
+		}
+	}
+}
+
+// TestSubmitDagOffersAnInstrumentationEscapeHatch is finding 5.
+//
+// Instrumentation is not free: DAGMan ABORTS a workflow whose node status
+// file cannot be written -- Dag::DumpNodeStatus calls
+// check_warning_strictness(DAG_STRICT_1) (dag.cpp:2435-2441) and
+// DAGMAN_USE_STRICT defaults to 1 -- so on a full or read-only spool the
+// commands this tool appends turn a degraded run into a dead one.
+// DumpDotFile only warns. The failure is per-workflow, so the escape
+// hatch is per-call.
+func TestSubmitDagOffersAnInstrumentationEscapeHatch(t *testing.T) {
+	var submitDag Tool
+	for _, tool := range dagTools() {
+		if tool.Name == "submit_dag" {
+			submitDag = tool
+		}
+	}
+	props, _ := submitDag.InputSchema["properties"].(map[string]interface{})
+	flag, ok := props["instrument"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("submit_dag has no instrument flag: %v", props)
+	}
+	if flag["type"] != "boolean" {
+		t.Errorf("instrument is %v, want boolean", flag["type"])
+	}
+	desc, _ := flag["description"].(string)
+	for _, want := range []string{"Default true", "ABORTS"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the instrument flag never says %q, which is the whole reason it exists: %s", want, desc)
+		}
+	}
+	// It is not in required: absent must mean on.
+	for _, r := range submitDag.InputSchema["required"].([]string) {
+		if r == "instrument" {
+			t.Error("instrument is required; it has to default to on")
+		}
+	}
+
+	// And absent means on, while an explicit false -- in either the
+	// boolean or the string form a model tends to send -- means off.
+	if !instrumentRequested(map[string]interface{}{}) {
+		t.Error("an absent instrument flag turned instrumentation off")
+	}
+	for _, v := range []interface{}{false, "false", "FALSE", "0"} {
+		if instrumentRequested(map[string]interface{}{"instrument": v}) {
+			t.Errorf("instrument=%#v did not turn instrumentation off", v)
+		}
+	}
+	for _, v := range []interface{}{true, "true", "1", "nonsense"} {
+		if !instrumentRequested(map[string]interface{}{"instrument": v}) {
+			t.Errorf("instrument=%#v turned instrumentation off", v)
+		}
+	}
+}
+
+// TestSubmitDagResultSaysWhenThereIsNoGraph: a result that promises a dot
+// file nobody will write sends the caller looking for a file that does
+// not exist, which is how findings 1 to 3 were invisible.
+func TestSubmitDagResultSaysWhenThereIsNoGraph(t *testing.T) {
+	report := &dagman.Report{Required: []string{"workflow.dag"}}
+	skipped := dagman.Instrumentation{Skipped: "the workflow was not instrumented: because of reasons."}
+	res := dagSubmitResult(7, "workflow.dag", report, []string{skipped.Skipped}, skipped)
+	text := res["content"].([]map[string]interface{})[0]["text"].(string)
+	if strings.Contains(text, "DAGMan writes this workflow's structure") {
+		t.Errorf("the result promises a graph that will not be written:\n%s", text)
+	}
+	if !strings.Contains(text, "because of reasons") {
+		t.Errorf("the result never says there is no graph or why:\n%s", text)
+	}
+	structured, _ := res["structuredContent"].(map[string]interface{})
+	if got := structured["dot_file"]; got != "" {
+		t.Errorf("dot_file = %v, want empty: nothing will write one", got)
+	}
+
+	// The instrumented case still names both files.
+	res = dagSubmitResult(7, "workflow.dag", report, nil,
+		dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status", AddedDot: true, AddedStatus: true})
+	text = res["content"].([]map[string]interface{})[0]["text"].(string)
+	if !strings.Contains(text, "workflow.dot") || !strings.Contains(text, "workflow.status") {
+		t.Errorf("an instrumented workflow's result does not name its files:\n%s", text)
+	}
+}

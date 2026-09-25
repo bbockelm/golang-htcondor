@@ -380,13 +380,19 @@ func checkWorkflowWasInstrumented(t *testing.T, spoolDir string, cluster int,
 		t.Errorf("submit_dag reported status_file %q, want fanout.status", got)
 	}
 
-	if staged := readSpoolDir(spoolDir, cluster)["fanout.dag"]; staged == "" {
-		t.Logf("the staged DAG could not be read off disk; the files it asks for are checked below")
-	} else {
-		for _, want := range []string{"DOT fanout.dot", "NODE_STATUS_FILE fanout.status 30"} {
-			if !strings.Contains(staged, want) {
-				t.Errorf("the staged DAG does not carry %q:\n%s", want, staged)
-			}
+	// Not a soft failure. Degrading this to a log made the assertion
+	// vanish whenever the read failed, so the test passed having checked
+	// nothing -- which is exactly the state a syntax regression needs to
+	// go unnoticed. The spool directory is readable in this harness; if
+	// it stops being, that is the bug to fix, not to skip.
+	staged := readSpoolDir(spoolDir, cluster)["fanout.dag"]
+	if staged == "" {
+		t.Fatalf("the staged DAG could not be read from %s for cluster %d, so the one check that "+
+			"looks at what DAGMan actually parses could not run", spoolDir, cluster)
+	}
+	for _, want := range []string{"DOT fanout.dot OVERWRITE", "NODE_STATUS_FILE fanout.status 30"} {
+		if !strings.Contains(staged, want) {
+			t.Errorf("the staged DAG does not carry %q:\n%s", want, staged)
 		}
 	}
 
