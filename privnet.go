@@ -1,7 +1,7 @@
 package htcondor
 
 import (
-	"net/url"
+	"fmt"
 	"strings"
 
 	"github.com/bbockelm/cedar/addresses"
@@ -90,9 +90,7 @@ func stripSinfulParam(address, drop string) string {
 		// Decoded for the comparison, raw for the output: a percent-encoded
 		// spelling of the key has to be dropped too, and everything that
 		// stays has to stay byte-for-byte.
-		if decoded, err := url.QueryUnescape(key); err == nil {
-			key = decoded
-		}
+		key = sinfulDecode(key)
 		if key == drop {
 			continue
 		}
@@ -143,5 +141,75 @@ func withAlias(address, alias string) string {
 	if strings.ContainsRune(body, '?') {
 		sep = "&"
 	}
-	return openB + body + sep + "alias=" + url.QueryEscape(alias) + closeB
+	return openB + body + sep + "alias=" + sinfulEncode(alias) + closeB
+}
+
+// sinfulEncode escapes a sinful parameter value the way HTCondor does.
+//
+// Not url.QueryEscape, which is a different encoding and disagrees where it
+// matters: Go writes a space as "+", and HTCondor's decoder treats "+" as a
+// literal plus -- it is in the unescaped set -- so the value comes back
+// changed. The rule here is needsUrlEncodeEscape from condor_sinful.cpp:
+// alphanumerics and . _ - : # [ ] + pass through, everything else becomes
+// %xx in lower case.
+func sinfulEncode(v string) string {
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if sinfulSafeByte(c) {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02x", c)
+	}
+	return b.String()
+}
+
+func sinfulSafeByte(c byte) bool {
+	switch {
+	case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		return true
+	}
+	switch c {
+	case '.', '_', '-', ':', '#', '[', ']', '+':
+		return true
+	}
+	return false
+}
+
+// sinfulDecode reverses it, for comparing a key against a known name.
+//
+// Also not the net/url function: that one decodes "+" to a space, which
+// would make a key spelled with a plus compare equal to one spelled with a
+// space. Only %xx means anything here.
+func sinfulDecode(v string) string {
+	if !strings.ContainsRune(v, '%') {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] == '%' && i+2 < len(v) {
+			if hi, ok1 := unhex(v[i+1]); ok1 {
+				if lo, ok2 := unhex(v[i+2]); ok2 {
+					b.WriteByte(hi<<4 | lo)
+					i += 2
+					continue
+				}
+			}
+		}
+		b.WriteByte(v[i])
+	}
+	return b.String()
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
