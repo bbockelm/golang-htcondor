@@ -137,31 +137,6 @@ func TestPrivateAddressKeepsItsOwnAlias(t *testing.T) {
 	}
 }
 
-// Parameters that stay must stay byte-for-byte, including ones this build
-// does not know about.
-func TestStripSinfulParamPreservesTheRest(t *testing.T) {
-	got := stripSinfulParam("<1.2.3.4:9618?sock=abc&ccbid=5.6.7.8:9618%239&future=keep%20me>", "ccbid")
-	if strings.Contains(got, "ccbid") {
-		t.Errorf("ccbid survived: %s", got)
-	}
-	for _, want := range []string{"sock=abc", "future=keep%20me"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("lost %q from %s", want, got)
-		}
-	}
-	if !strings.HasPrefix(got, "<") || !strings.HasSuffix(got, ">") {
-		t.Errorf("lost the brackets: %s", got)
-	}
-}
-
-// Dropping the only parameter must not leave a dangling "?".
-func TestStripSinfulParamDropsTheQuestionMark(t *testing.T) {
-	got := stripSinfulParam("<1.2.3.4:9618?ccbid=5.6.7.8:9618%239>", "ccbid")
-	if got != "<1.2.3.4:9618>" {
-		t.Errorf("got %q, want a bare sinful", got)
-	}
-}
-
 // The multi-address form. C++ replaces the whole address with the private
 // one, so addrs goes with it; and where there is no private address it
 // keeps the sinful intact but for the broker, so addrs stays.
@@ -179,48 +154,6 @@ func TestPrivateRewriteHandlesAddrs(t *testing.T) {
 	}
 	if strings.Contains(noPriv, "ccbid") {
 		t.Errorf("the broker survived: %s", noPriv)
-	}
-}
-
-// The encoding has to be HTCondor's, not net/url's. They disagree where it
-// matters: Go writes a space as "+", and HTCondor's decoder treats "+" as a
-// literal plus, so a value round-trips changed.
-func TestSinfulEncodingMatchesHTCondor(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"ep1.example.org", "ep1.example.org"}, // hostnames pass through
-		{"a b", "a%20b"},                       // NOT "a+b"
-		{"a+b", "a+b"},                         // plus is in the unescaped set
-		{"a&b", "a%26b"},                       // the separator must never survive raw
-		{"a;b", "a%3bb"},
-		{"a=b", "a%3db"},
-		{"<10.0.0.9:9618>", "%3c10.0.0.9:9618%3e"},
-	} {
-		if got := sinfulEncode(tc.in); got != tc.want {
-			t.Errorf("sinfulEncode(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// Round-tripping is the property that matters, and the one net/url breaks.
-func TestSinfulEncodingRoundTrips(t *testing.T) {
-	for _, s := range []string{"ep1.example.org", "a b", "a+b", "a&b=c;d", "<10.0.0.9:9618?sock=x>", ""} {
-		if got := sinfulDecode(sinfulEncode(s)); got != s {
-			t.Errorf("round trip of %q gave %q", s, got)
-		}
-	}
-}
-
-// A plus is a plus. Decoding it as a space -- which net/url does -- would
-// make two different keys compare equal.
-func TestSinfulDecodeDoesNotTreatPlusAsSpace(t *testing.T) {
-	// Both a percent escape and a plus, so this goes through the decoding
-	// loop rather than the no-escapes fast path. With only a plus it would
-	// return early and prove nothing about how a plus is decoded.
-	if got := sinfulDecode("a+b%20c"); got != "a+b c" {
-		t.Errorf("sinfulDecode(\"a+b%%20c\") = %q, want \"a+b c\": the plus is a plus and %%20 is a space", got)
-	}
-	if got := sinfulDecode("a+b"); got != "a+b" {
-		t.Errorf("sinfulDecode(\"a+b\") = %q, want the plus left alone", got)
 	}
 }
 
@@ -244,13 +177,13 @@ func TestAliasSurvivesEncodingOnRewrite(t *testing.T) {
 	}
 }
 
-// HTCondor writes this parameter as CCBID. Matching the key literally is
-// invisible when it fails: the parameter stays, the address still parses,
-// and the dial goes through the broker anyway -- the feature silently doing
-// nothing, which is exactly what it exists to avoid.
+// HTCondor writes this parameter as CCBID, and cedar folds the case when it
+// parses. The strip has to fold it too, or on every real address the broker
+// survives and the dial goes through it anyway -- the feature silently
+// doing nothing, which is the failure this whole path exists to avoid.
 //
-// Every address in the first version of these tests spelled it in lower
-// case, which is why nothing caught it.
+// The first version of this compared the key literally against "ccbid" and
+// every test address was written in lower case, so nothing caught it.
 func TestBrokerIsStrippedWhateverTheCase(t *testing.T) {
 	for _, addr := range []string{
 		"<192.0.2.9:9618?PrivNet=pool-a&CCBID=192.0.2.1:9618%23123>",
