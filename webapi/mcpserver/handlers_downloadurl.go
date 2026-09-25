@@ -64,7 +64,7 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(caller.Owner)), nil
 	}
 
-	ttl := shareurl.ClampTTL(shareurl.KindOutput, argDuration(args, "ttl_seconds"))
+	ttl := shareurl.ClampTTL(shareurl.KindOutput, ttlSecondsArg(args))
 
 	procAds, remaining, err := s.procAdsForDownload(ctx, target, ownerScope)
 	if err != nil {
