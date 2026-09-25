@@ -2991,6 +2991,16 @@ func loadCCBDialer(cfg *config.Config, logger *logging.Logger, router *sharedpor
 	dcfg := htcondor.CCBDialerConfig{
 		Streaming: loadCCBStreaming(cfg, logger),
 		Logger:    logger.Slog(logging.DestinationHTTP),
+		// Read through the ordinary config, so the parameter means here what
+		// it means to every other HTCondor client on the host -- including
+		// its default of $(FULL_HOSTNAME), which matches a remote PrivNet
+		// only when the daemon really is on this host.
+		PrivateNetworkName: strings.TrimSpace(firstConfigValue(cfg, "PRIVATE_NETWORK_NAME")),
+	}
+	if dcfg.PrivateNetworkName != "" {
+		logger.Info(logging.DestinationHTTP,
+			"Private network configured; daemons advertising this name are dialed directly instead of through CCB",
+			"private_network_name", dcfg.PrivateNetworkName)
 	}
 	if router != nil {
 		dcfg.Router = router

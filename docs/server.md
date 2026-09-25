@@ -802,6 +802,37 @@ Anything that reaches *into* a running job — a shell, `tail_job_output`,
 node. When that node is firewalled, its address carries a Condor Connection
 Broker contact and the connection has to go through the broker.
 
+### When you are already on their network
+
+Before any of that: if this server sits on the same private network as the
+execute nodes — a pod beside the pool is the usual case — it can open a TCP
+connection to them directly, and the broker is only in the way.
+
+HTCondor's convention for saying so is `PRIVATE_NETWORK_NAME`. A daemon
+publishes its own as `PrivNet` in the address it advertises, and a client whose
+name matches dials the daemon directly instead of through its broker:
+
+```
+PRIVATE_NETWORK_NAME = pool-internal
+```
+
+Set it to the same value the execute nodes use. When it matches, this server
+uses the daemon's `PrivAddr` if the address carries one, and otherwise dials the
+advertised address with the broker contact dropped — the same two cases C++
+HTCondor implements.
+
+Nothing has to listen inbound, so `HTTP_API_SHARED_PORT` and everything under it
+becomes unnecessary, and the dial no longer depends on the broker's version.
+
+A direct dial that fails falls back to the broker rather than failing the
+request, since a private network can be partly reachable. That failure is
+remembered for `HTTP_API_CCB_LEARNED_TTL` so the timeout is not paid on every
+dial, and is per network — one unreachable node steers the rest to the broker
+until the TTL expires. A success clears it.
+
+The parameter defaults to `$(FULL_HOSTNAME)`, matching C++. That is harmless:
+it only matches a remote `PrivNet` when the daemon really is on this host.
+
 CCB offers two ways through, and on a host that is itself firewalled neither is
 automatic:
 
@@ -904,6 +935,7 @@ Frequently-used knobs:
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. |
 | `HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE` | Site-policy text appended to every chat system prompt. |
+| `PRIVATE_NETWORK_NAME` | This host's private network name. When it equals a daemon's advertised `PrivNet`, that daemon is dialed directly instead of through its CCB broker. Defaults to `$(FULL_HOSTNAME)`, as in C++. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
 | `HTTP_API_SHARED_PORT` | Open an inbound HTCondor port (a port or `host:port`, e.g. `9618`) so this server can be reached by execute nodes behind a Condor Connection Broker. Off by default. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
 | `HTTP_API_SHARED_PORT_ADDRESS` | The `host` or `host:port` execute nodes should dial to reach that port, when it differs from what this process binds — behind NAT, a container port map, or a Kubernetes Service. Defaults to `TCP_FORWARDING_HOST`, else `FULL_HOSTNAME`, paired with the listen port. |
 | `HTTP_API_CCB_STREAMING` | Allow asking the broker to relay a CCB connection instead of being dialed back. Default: on unless running under `condor_master`. With `HTTP_API_SHARED_PORT` set this is the fallback, not the first choice. |

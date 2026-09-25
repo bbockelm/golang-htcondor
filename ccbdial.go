@@ -84,6 +84,11 @@ type CCBDialerConfig struct {
 	// (default DefaultCCBLearnedTTL).
 	LearnedTTL time.Duration
 
+	// PrivateNetworkName is this client's PRIVATE_NETWORK_NAME. When it
+	// equals a target's PrivNet, the target is dialed directly instead of
+	// through its broker. Empty disables the behaviour entirely.
+	PrivateNetworkName string
+
 	// Logger receives one line per mode change. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -112,8 +117,65 @@ type CCBDialer struct {
 	log       *slog.Logger
 	now       func() time.Time // overridden in tests
 
+	// privateNet is this client's PRIVATE_NETWORK_NAME. Empty means the
+	// client claims membership of no private network, so nothing matches.
+	privateNet string
+
 	mu      sync.Mutex
 	learned map[string]*ccbBrokerState
+	// privateFailed records private networks whose direct address did not
+	// answer, so the next dial does not pay that timeout again. Keyed by
+	// network rather than by host: the name is the claim that a whole
+	// network is reachable, and if it is not, it is not for any of them.
+	// Expires like everything else here, so a network that comes back is
+	// tried again rather than written off for the life of the process.
+	privateFailed map[string]time.Time
+}
+
+// privateRewrite returns the address to dial directly, and whether the
+// private network matched and is worth trying.
+func (d *CCBDialer) privateRewrite(address string) (string, bool) {
+	if d == nil || d.privateNet == "" {
+		return address, false
+	}
+	direct, matched := rewriteForPrivateNetwork(address, d.privateNet)
+	if !matched {
+		return address, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if until, ok := d.privateFailed[d.privateNet]; ok && d.now().Before(until) {
+		// Tried recently and it did not answer. Go straight to the broker
+		// rather than spending the timeout again on every dial.
+		return address, false
+	}
+	return direct, true
+}
+
+// recordPrivate remembers whether the private network answered.
+func (d *CCBDialer) recordPrivate(address string, err error) {
+	if d == nil || d.privateNet == "" {
+		return
+	}
+	_ = address
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err == nil {
+		delete(d.privateFailed, d.privateNet)
+		return
+	}
+	if d.privateFailed == nil {
+		d.privateFailed = map[string]time.Time{}
+	}
+	d.privateFailed[d.privateNet] = d.now().Add(d.ttl)
+}
+
+// logf is the dialer's logger, usable on a nil receiver.
+func (d *CCBDialer) logf() *slog.Logger {
+	if d == nil || d.log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return d.log
 }
 
 // ccbBrokerState is what we learned about one broker, and when it goes stale.
@@ -146,6 +208,9 @@ func NewCCBDialer(cfg CCBDialerConfig) *CCBDialer {
 		log:       log,
 		now:       time.Now,
 		learned:   make(map[string]*ccbBrokerState),
+
+		privateNet:    strings.TrimSpace(cfg.PrivateNetworkName),
+		privateFailed: make(map[string]time.Time),
 	}
 }
 
@@ -174,6 +239,22 @@ func (d *CCBDialer) Dial(ctx context.Context, address string, secConfig *securit
 	base.CCBReturnAddr = ""
 	base.CCBRequireStreaming = false
 	base.CCBReverseListener = nil
+
+	// A daemon on a private network we share is reachable without the
+	// broker, which is what PRIVATE_NETWORK_NAME exists to say. Try that
+	// first, and fall back to the broker if the direct address does not
+	// answer -- a private network can be partly reachable, and a client
+	// that gave up there would have no way to the daemon at all.
+	if direct, matched := d.privateRewrite(address); matched {
+		conn, err := ccbDialSinful(ctx, direct, secConfig, &base)
+		if err == nil {
+			d.recordPrivate(address, nil)
+			return conn, nil
+		}
+		d.recordPrivate(address, err)
+		d.logf().Warn("the private-network address did not answer; falling back to CCB",
+			"address", address, "direct", direct, "error", err)
+	}
 
 	broker, isCCB := ccbBrokerKey(address)
 	if d == nil || !isCCB {
