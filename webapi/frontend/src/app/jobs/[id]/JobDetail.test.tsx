@@ -4,11 +4,18 @@ import { describe, expect, it } from 'vitest';
 import {
   ResourceTable,
   UsageBar,
+  dagLayers,
+  dagStatePill,
+  dagStateRank,
+  dagStateShape,
+  dagStatusEntries,
   dagmanLogName,
+  dominantDagState,
   everRan,
   isSpooledJob,
   outputReadiness,
   supportsRemoteAccess,
+  workflowGraphAvailability,
   workflowLogAvailability,
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
@@ -252,5 +259,213 @@ describe('ResourceTable', () => {
       />,
     );
     expect(screen.getByText('50%')).toBeInTheDocument();
+  });
+});
+
+// --- Workflow graph -------------------------------------------------
+
+describe('dagLayers', () => {
+  // The shape of the argument is DagGraphGroup's, narrowed to what the
+  // layering reads. Tests build it inline so a change to the rest of
+  // the response does not touch them.
+  const g = (id: string, ...parent_ids: string[]) => ({ id, parent_ids });
+
+  it('walks a chain one layer at a time', () => {
+    expect(dagLayers([g('a'), g('b', 'a'), g('c', 'b')])).toEqual([
+      ['a'],
+      ['b'],
+      ['c'],
+    ]);
+  });
+
+  it('puts the two sides of a diamond on the same layer', () => {
+    // a -> b, a -> c, b -> d, c -> d
+    expect(
+      dagLayers([g('a'), g('b', 'a'), g('c', 'a'), g('d', 'b', 'c')]),
+    ).toEqual([['a'], ['b', 'c'], ['d']]);
+  });
+
+  it('spreads a fan-out across one layer and gathers it into the next', () => {
+    expect(
+      dagLayers([
+        g('setup'),
+        g('work1', 'setup'),
+        g('work2', 'setup'),
+        g('work3', 'setup'),
+        g('gather', 'work1', 'work2', 'work3'),
+      ]),
+    ).toEqual([['setup'], ['work1', 'work2', 'work3'], ['gather']]);
+  });
+
+  // The case that separates longest-path from shortest-path layering.
+  // `late` depends on the root AND on a node three deep; placed by
+  // shortest path it would sit at layer 1 with an edge pointing UP from
+  // layer 3, which is the one thing a layered drawing must not do.
+  it('places a node below its deepest parent, not its shallowest', () => {
+    const layers = dagLayers([
+      g('root'),
+      g('mid', 'root'),
+      g('deep', 'mid'),
+      g('late', 'root', 'deep'),
+    ]);
+    expect(layers).toEqual([['root'], ['mid'], ['deep'], ['late']]);
+  });
+
+  // A group with no edges at all is still part of the workflow. It is a
+  // root, so it belongs on the top layer -- dropping it would silently
+  // shrink the node count the panel reports beside the picture.
+  it('keeps a disconnected group as a root', () => {
+    expect(dagLayers([g('a'), g('b', 'a'), g('orphan')])).toEqual([
+      ['a', 'orphan'],
+      ['b'],
+    ]);
+  });
+
+  // Within-layer order is first appearance in the response, not
+  // discovery order, so two loads of the same workflow draw the same
+  // picture.
+  it('orders a layer by first appearance in the input', () => {
+    const layers = dagLayers([
+      g('root'),
+      g('z', 'root'),
+      g('a', 'root'),
+      g('m', 'root'),
+    ]);
+    expect(layers[1]).toEqual(['z', 'a', 'm']);
+  });
+
+  // A parent naming a group that is not in the response is a dangling
+  // edge (a torn DOT file, an unreadable splice). Treating it as a real
+  // parent would leave the child with an indegree that never reaches
+  // zero -- i.e. never drawn.
+  it('draws a node whose parent is not in the graph', () => {
+    expect(dagLayers([g('a'), g('b', 'ghost')])).toEqual([['a', 'b']]);
+  });
+
+  // A cycle has no layering. It must still terminate and still place
+  // every group somewhere, because the server hands us one (flagged
+  // approximate) rather than refusing.
+  it('places every group even when the graph has a cycle', () => {
+    const layers = dagLayers([g('a', 'b'), g('b', 'a'), g('c')]);
+    expect(layers.flat().sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('has no layers for no groups', () => {
+    expect(dagLayers([])).toEqual([]);
+  });
+});
+
+describe('dag node state urgency', () => {
+  // "Where is it stuck" is the question the picture answers, so the
+  // states that mean "stuck" have to sort ahead of the ones that mean
+  // "fine" -- a group is coloured by the first of these it contains.
+  it('ranks failed and held ahead of everything that is working', () => {
+    for (const ok of ['running', 'idle', 'ready', 'done', 'submitted']) {
+      expect(dagStateRank('failed')).toBeLessThan(dagStateRank(ok));
+      expect(dagStateRank('held')).toBeLessThan(dagStateRank(ok));
+    }
+  });
+
+  it('ranks done last of the states it knows', () => {
+    for (const other of ['failed', 'held', 'running', 'idle', 'unready']) {
+      expect(dagStateRank('done')).toBeGreaterThan(dagStateRank(other));
+    }
+  });
+
+  // A state name this UI has not seen is not evidence of trouble. If
+  // the unknown outranked `failed`, a server-side rename would recolour
+  // every group in every workflow red.
+  it('ranks an unrecognised state below failed', () => {
+    expect(dagStateRank('brand-new-state')).toBeGreaterThan(
+      dagStateRank('failed'),
+    );
+    expect(dagStateRank('brand-new-state')).toBeGreaterThanOrEqual(
+      dagStateRank('done'),
+    );
+  });
+
+  it('colours failed and held with the app red and done with the app grey', () => {
+    expect(dagStatePill('failed')).toBe(dagStatePill('held'));
+    expect(dagStatePill('failed')).toMatch(/red/);
+    expect(dagStateShape('failed')).toMatch(/fill-red/);
+    expect(dagStatePill('done')).toMatch(/gray/);
+    expect(dagStateShape('running')).toMatch(/fill-green/);
+  });
+
+  it('gives an unrecognised state a colour rather than nothing', () => {
+    expect(dagStatePill('brand-new-state')).not.toBe('');
+    expect(dagStateShape('brand-new-state')).toMatch(/fill-/);
+  });
+});
+
+describe('dagStatusEntries / dominantDagState', () => {
+  it('lists the histogram most urgent first', () => {
+    expect(
+      dagStatusEntries({ done: 9, running: 2, failed: 1 }).map((e) => e.state),
+    ).toEqual(['failed', 'running', 'done']);
+  });
+
+  it('drops the zeroes a full histogram carries', () => {
+    expect(dagStatusEntries({ done: 3, failed: 0, held: 0 })).toEqual([
+      { state: 'done', count: 3 },
+    ]);
+  });
+
+  it('has nothing to say about a missing histogram', () => {
+    expect(dagStatusEntries(undefined)).toEqual([]);
+    expect(dominantDagState(undefined)).toBeUndefined();
+    expect(dominantDagState({})).toBeUndefined();
+  });
+
+  // The whole point of the colour rule: the one failed node among the
+  // ninety-nine done ones is what the reader came for, so it decides
+  // the box's colour even though it is outnumbered 99 to 1.
+  it('colours by the most urgent state present, not the most numerous', () => {
+    expect(dominantDagState({ done: 99, failed: 1 })).toBe('failed');
+    expect(dominantDagState({ done: 5, running: 1 })).toBe('running');
+    expect(dominantDagState({ done: 5 })).toBe('done');
+  });
+});
+
+describe('workflowGraphAvailability', () => {
+  const manager = {
+    Cmd: '/usr/bin/condor_dagman',
+    Arguments: '-p 0 -f -l . -Dag fanout.dag',
+    Environment: '_CONDOR_DAGMAN_LOG=fanout.dagman.out',
+    Iwd: '/home/e2e/dags',
+  };
+
+  it('offers the graph for a spooled manager', () => {
+    const got = workflowGraphAvailability({
+      ...manager,
+      Iwd: '/var/lib/condor/spool/77/0/cluster77.proc0.subproc0',
+      SUBMIT_Iwd: '/home/e2e/dags',
+    } as ClassAd);
+    expect(got.applicable).toBe(true);
+    expect(got.available).toBe(true);
+    expect(got.reason).toBeUndefined();
+  });
+
+  // Same gate as the workflow log and for the same reason: the .dot and
+  // node-status files this reads live in the spool, and a
+  // shell-submitted manager's spool is empty. The panel stays, with a
+  // sentence -- offering a Load button here buys the user a 409.
+  it('explains itself for a manager that was not spooled', () => {
+    const got = workflowGraphAvailability(manager as ClassAd);
+    expect(got.applicable).toBe(true);
+    expect(got.available).toBe(false);
+    expect(got.reason).toContain('submitted from a shell');
+    expect(got.reason).toContain('/home/e2e/dags');
+  });
+
+  it('renders nothing at all for a job that is not a DAGMan manager', () => {
+    const got = workflowGraphAvailability({
+      Cmd: '/bin/sleep',
+      Arguments: '600',
+      SUBMIT_Iwd: '/home/e2e/dags',
+    } as ClassAd);
+    expect(got.applicable).toBe(false);
+    expect(got.available).toBe(false);
+    expect(got.reason).toBeUndefined();
   });
 });
