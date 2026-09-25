@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -87,8 +88,27 @@ const (
 	// from the spool. Anything larger is skipped rather than fetched into
 	// memory.
 	dagAuxFileMaxBytes = 8 << 20
-	// dagTotalFileMaxBytes is the ceiling on everything kept together.
-	dagTotalFileMaxBytes = 96 << 20
+	// dagAuxTotalMaxBytes is the budget for those OTHER files together.
+	//
+	// It deliberately does not cover the two files this endpoint exists
+	// to read. A shared ceiling made the generous per-file one a lie:
+	// the exact 100,000-node workflow dagBigFileMaxBytes exists for -- a
+	// 50 MiB dot file beside a 50 MiB status file -- clears both
+	// per-file ceilings and blew a 96 MiB shared total, so the endpoint
+	// hard-refused precisely the graphs it was sized for. The aux files
+	// are not essential (a log, a submit file), so their budget behaves
+	// like the per-file aux ceiling: past it they are skipped, and the
+	// graph is still read.
+	dagAuxTotalMaxBytes = 96 << 20
+
+	// dagMaxSpoolEntries caps how many regular files are looked at.
+	//
+	// The byte ceilings do not bound this. A fan-out workflow that
+	// writes a per-node output file into the DAG's own Iwd -- the normal
+	// shape -- leaves one tiny file per node in the spool, and a million
+	// Go map entries exhaust memory long before a million small files
+	// add up to a byte limit.
+	dagMaxSpoolEntries = 50000
 
 	// dagNodeListLimit is how many per-node entries the response will
 	// carry. Past this the caller gets groups only: a JSON array of
@@ -100,6 +120,25 @@ const (
 	// than the 30s the single-file endpoints use because this one reads
 	// the stream to the end rather than stopping at the first match.
 	dagSandboxTimeout = 2 * time.Minute
+
+	// dagSandboxConcurrency caps whole-sandbox transfers in flight
+	// across the whole process.
+	//
+	// Each one buffers up to the ceilings above for up to
+	// dagSandboxTimeout, so a handful is already a gigabyte of live
+	// heap. Without a cap, one caller looping on ?refresh=1 against
+	// their OWN workflow is an out-of-memory for everybody sharing this
+	// process.
+	dagSandboxConcurrency = 4
+
+	// dagNegativeCacheTTL is how long "this workflow publishes no
+	// structure" and "its dot file will not parse" are remembered.
+	//
+	// Short, because both can stop being true -- DAGMan may be about to
+	// write the file -- but not zero: a UI polls precisely because it
+	// got no answer, and without this each poll re-pays a whole-sandbox
+	// transfer.
+	dagNegativeCacheTTL = 30 * time.Second
 
 	// dagStartupGrace is how long after a manager job starts running its
 	// DOT file may be missing without that meaning the workflow does not
@@ -268,7 +307,7 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 		return
 	}
 
-	structure, status, msg := s.dagStructureFor(ctx, constraint, cluster, proc, dagFile, ads[0],
+	structure, status, msg := s.dagStructureFor(ctx, r, constraint, cluster, proc, dagFile, ads[0],
 		r.URL.Query().Get("refresh") == "1")
 	if status != 0 {
 		s.writeError(w, status, msg)
@@ -299,14 +338,16 @@ func dagPrecondition(ad *classad.ClassAd, cluster, proc int) (dagFile string, st
 	// the submit-time Iwd up in SUBMIT_Iwd exactly when it repoints Iwd
 	// there. A non-empty SUBMIT_Iwd is therefore the test for "the files
 	// are in the spool", which is the only place this server can reach.
+	// The Iwd is NOT echoed. The ad read that produced it is owner
+	// scoped only for a browser session, so for a token caller this path
+	// is reachable against another user's job, and Iwd is that user's
+	// home directory. The policy is the useful half of the message and
+	// it survives without the path.
 	if spooled, _ := ad.EvaluateAttrString("SUBMIT_Iwd"); strings.TrimSpace(spooled) == "" {
-		iwd, _ := ad.EvaluateAttrString("Iwd")
-		if iwd == "" {
-			iwd = "its submit directory"
-		}
 		return "", http.StatusConflict, fmt.Sprintf(
-			"This workflow was submitted from a shell on the access point, so its files are in %s "+
-				"and are not readable through this server.", iwd)
+			"Workflow %d.%d was submitted from a shell on the access point, so its files are in "+
+				"its own submit directory rather than in the spool, and are not readable through "+
+				"this server.", cluster, proc)
 	}
 
 	dagFile = dagFileFromAd(ad)
@@ -395,8 +436,13 @@ func splitArgsV2(raw string) []string {
 // dagStructure is everything one whole-sandbox fetch produced. It is
 // immutable once built, so a cached copy is shared without copying.
 type dagStructure struct {
-	dagFile  string
-	dotFile  string
+	dagFile string
+	dotFile string
+	// owner is the manager job's Owner attribute: WHOSE workflow this
+	// is. It is recorded because a cache hit skips the sandbox transfer,
+	// and the schedd's per-job owner check goes with it -- see
+	// dagCacheAccess.
+	owner    string
 	grouping *dagman.Grouping
 	// dotStates are the per-node states the DOT file's labels carried, by
 	// lower-cased node name. They are only meaningful when the DAG's
@@ -409,10 +455,17 @@ type dagStructure struct {
 	statusStates   map[string]dagStatusEntry
 	statusFileName string
 	statusFileTime int64
-	// statusNextUpdate is the status file's own NextUpdate: zero when
-	// DAGMan wrote the file for the last time, which is how a finished
-	// workflow says its state will never change again.
+	// statusNextUpdate is the status file's own NextUpdate, and
+	// sawStatusEnd says whether the ad that carries it was there at all.
+	//
+	// Both are needed. NextUpdate is inserted ONLY on the StatusEnd ad
+	// (condor_dagman/dag.cpp:2703), so a file truncated at its last ad
+	// -- the case parseNodeStatusFile deliberately tolerates -- leaves
+	// it zero, and reading that zero as "DAGMan has written this file
+	// for the last time" freezes a RUNNING workflow's state for the
+	// whole cache TTL while still reporting status-file as its source.
 	statusNextUpdate int64
+	sawStatusEnd     bool
 	fetchedAt        time.Time
 }
 
@@ -424,8 +477,12 @@ type dagStatusEntry struct {
 
 // stateIsFinal reports whether the state half of this structure can still
 // change. It is used to decide whether an ordinary load has to re-fetch.
+//
+// A zero NextUpdate is only DAGMan's "never again" when a StatusEnd ad
+// was actually read; an absent one means the file was truncated mid
+// rewrite, which is the opposite conclusion.
 func (st *dagStructure) stateIsFinal() bool {
-	return st.statusFileName != "" && st.statusNextUpdate == 0
+	return st.statusFileName != "" && st.sawStatusEnd && st.statusNextUpdate == 0
 }
 
 // dagStructureCache is a small bounded, time-bounded cache. There is no
@@ -434,10 +491,25 @@ func (st *dagStructure) stateIsFinal() bool {
 //
 // It is a package-level singleton rather than a Handler field because
 // adding a field means editing handler.go, which is not this change's to
-// edit. Entries are keyed by cluster.proc AND the resolved dot file name,
-// and nothing reaches the cache before the caller has passed the same
-// owner-scoped ad lookup the rest of the per-job endpoints use, so a hit
-// cannot serve a workflow the caller could not already read.
+// edit. Entries are keyed by cluster.proc AND the resolved dot file
+// name.
+//
+// The key is not enough to make a hit SAFE, and an earlier version of
+// this comment claimed that it was -- that "nothing reaches the cache
+// before the caller has passed the same owner-scoped ad lookup the rest
+// of the per-job endpoints use". The ad lookup is not that check. For a
+// bearer-token, API-key or UserHeader caller, bulkOwnerScope returns the
+// constraint UNSCOPED (it only scopes a browser session), deliberately,
+// because the schedd is supposed to be the backstop -- and the schedd
+// backstops a SANDBOX TRANSFER (UserCheck2, per job, on a
+// WRITE-registered command), not an ad read. A cache hit skips the
+// transfer, so a hit does not merely save work: it removes the only
+// authorization check on the path, and hands one user's node names,
+// edges and DAGMan status details to another.
+//
+// So every entry records the manager job's owner, and dagCacheAccess
+// decides whether this caller may be served it. A caller who may not
+// falls through to a real transfer, which the schedd refuses.
 type dagStructureCache struct {
 	mu      sync.Mutex
 	max     int
@@ -446,10 +518,61 @@ type dagStructureCache struct {
 	now     func() time.Time
 }
 
+// dagCacheEntry is one cached answer: a structure, or the refusal that
+// producing it yielded. Both are cached, for different lifetimes -- see
+// dagNegativeCacheTTL.
 type dagCacheEntry struct {
-	key   string
+	key string
+	// owner is the Owner of the manager job this entry describes. An
+	// empty one is never usable by anybody.
+	owner string
 	value *dagStructure
-	at    time.Time
+	// err is set on a negative entry, and then value is nil.
+	err error
+	at  time.Time
+}
+
+// lifetime is how long this entry may be served for.
+func (e dagCacheEntry) lifetime(def time.Duration) time.Duration {
+	if e.err != nil && dagNegativeCacheTTL < def {
+		return dagNegativeCacheTTL
+	}
+	return def
+}
+
+// dagCacheAccess is who is asking, and about whose workflow. It is what
+// makes a hit usable or not.
+type dagCacheAccess struct {
+	// owner is the Owner on the manager ad this request just read.
+	owner string
+	// caller is the authenticated actor reduced to the bare username
+	// that Owner is stored as (ownerFromActor).
+	caller string
+	// admin is the Web UI admin path the neighbouring handlers define
+	// (isWebUIAdmin). An admin may read any user's job, so an admin may
+	// be served any user's entry -- the cache must not be the one place
+	// that breaks the admin view.
+	admin bool
+}
+
+// mayUse reports whether this caller may be served this entry.
+//
+// The owner match is demanded of an admin too, for a different reason:
+// an entry whose owner is not the owner of the ad just read describes a
+// DIFFERENT workflow under a recycled cluster id.
+func (a dagCacheAccess) mayUse(e dagCacheEntry) bool {
+	if a.owner == "" || e.owner == "" || e.owner != a.owner {
+		return false
+	}
+	return a.admin || (a.caller != "" && a.caller == a.owner)
+}
+
+// mayShare reports whether this caller may be attached to a build
+// another caller has in flight. It is the question mayUse asks -- a
+// shared result is a cache hit under another name -- minus the entry,
+// which does not exist yet.
+func (a dagCacheAccess) mayShare() bool {
+	return a.owner != "" && (a.admin || (a.caller != "" && a.caller == a.owner))
 }
 
 func newDagStructureCache(maxEntries int, ttl time.Duration) *dagStructureCache {
@@ -458,32 +581,33 @@ func newDagStructureCache(maxEntries int, ttl time.Duration) *dagStructureCache 
 
 var dagStructures = newDagStructureCache(dagCacheMaxEntries, dagCacheTTL)
 
-func (c *dagStructureCache) get(key string) (*dagStructure, bool) {
+func (c *dagStructureCache) get(key string) (dagCacheEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, e := range c.entries {
 		if e.key != key {
 			continue
 		}
-		if c.now().Sub(e.at) > c.ttl {
+		if c.now().Sub(e.at) > e.lifetime(c.ttl) {
 			c.entries = append(c.entries[:i], c.entries[i+1:]...)
-			return nil, false
+			return dagCacheEntry{}, false
 		}
-		return e.value, true
+		return e, true
 	}
-	return nil, false
+	return dagCacheEntry{}, false
 }
 
-func (c *dagStructureCache) put(key string, v *dagStructure) {
+func (c *dagStructureCache) put(e dagCacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, e := range c.entries {
-		if e.key == key {
+	e.at = c.now()
+	for i, old := range c.entries {
+		if old.key == e.key {
 			c.entries = append(c.entries[:i], c.entries[i+1:]...)
 			break
 		}
 	}
-	c.entries = append(c.entries, dagCacheEntry{key: key, value: v, at: c.now()})
+	c.entries = append(c.entries, e)
 	if len(c.entries) > c.max {
 		c.entries = c.entries[len(c.entries)-c.max:]
 	}
@@ -491,6 +615,69 @@ func (c *dagStructureCache) put(key string, v *dagStructure) {
 
 func dagCacheKey(cluster, proc int, dotFile string) string {
 	return fmt.Sprintf("%d.%d|%s", cluster, proc, dotFile)
+}
+
+// dagSandboxSem caps concurrent whole-sandbox transfers process-wide.
+var dagSandboxSem = make(chan struct{}, dagSandboxConcurrency)
+
+// dagSandboxFetches counts the whole-sandbox transfers this endpoint has
+// started. It exists so a test can assert that a load was served from
+// the cache: "the structure came back and matches" is satisfied by an
+// implementation with no cache at all.
+var dagSandboxFetches atomic.Int64
+
+// dagFlight collapses concurrent builds of the same key into one.
+//
+// Without it, N simultaneous loads of one workflow are N whole-sandbox
+// transfers, each buffering up to the ceilings above: fifty tabs on a
+// dashboard, or fifty ?refresh=1 in a loop, is gigabytes of live heap in
+// a process shared with everyone else. x/sync/singleflight is only an
+// INDIRECT dependency of this module and promoting it is a go.mod change
+// this branch may not make, so this is the thirty lines of it needed.
+//
+// The key carries the caller when mayShare is false, so a caller who
+// would not be allowed a cache hit is not handed another caller's result
+// through the side door either: they get their own transfer, which the
+// schedd refuses.
+type dagFlight struct {
+	mu    sync.Mutex
+	calls map[string]*dagFlightCall
+}
+
+type dagFlightCall struct {
+	done  chan struct{}
+	value *dagStructure
+	err   error
+}
+
+var dagFlights = &dagFlight{}
+
+func (g *dagFlight) do(key string, fn func() (*dagStructure, error)) (*dagStructure, error) {
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = map[string]*dagFlightCall{}
+	}
+	if call, ok := g.calls[key]; ok {
+		g.mu.Unlock()
+		<-call.done
+		return call.value, call.err
+	}
+	call := &dagFlightCall{done: make(chan struct{})}
+	g.calls[key] = call
+	g.mu.Unlock()
+
+	// The delete happens before the close, so a caller arriving in
+	// between starts a fresh build rather than joining a finished one.
+	// Waiters read value/err only after the close, which orders the
+	// write before their read.
+	defer func() {
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+		close(call.done)
+	}()
+	call.value, call.err = fn()
+	return call.value, call.err
 }
 
 // errDagNoStructure means the transfer worked and the workflow had not
@@ -503,41 +690,75 @@ func dagCacheKey(cluster, proc int, dotFile string) string {
 // decides which to say.
 var errDagNoStructure = errors.New("workflow has not published a dot file")
 
+// dagNoStructureError is errDagNoStructure carrying the one fact
+// dagNoStructureMessage needs in order to tell those two causes apart.
+// It travels WITH the error so a negative cache entry can be re-served
+// without a sandbox to re-derive it from.
+type dagNoStructureError struct{ started bool }
+
+func (e *dagNoStructureError) Error() string { return errDagNoStructure.Error() }
+
+func (e *dagNoStructureError) Is(target error) bool { return target == errDagNoStructure }
+
+// errDagUnparsableDot means the DOT file was there and would not parse.
+// It is cached briefly for the same reason errDagNoStructure is.
+var errDagUnparsableDot = errors.New("workflow's dot file could not be parsed")
+
 // dagStructureFor returns the cached structure or fetches it.
 //
 // refresh bypasses the cache lookup. So does a cached entry whose node
 // status half has gone stale, because that half is live data sharing a
 // cache entry with data that is not: see dagStatusMaxAge.
-func (s *Handler) dagStructureFor(ctx context.Context, constraint string, cluster, proc int,
-	dagFile string, managerAd *classad.ClassAd, refresh bool) (*dagStructure, int, string) {
+func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constraint string,
+	cluster, proc int, dagFile string, managerAd *classad.ClassAd, refresh bool) (
+	*dagStructure, int, string) {
 
 	dotFile := dagman.DotFileName(dagFile)
-	var started bool
-	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile), refresh,
+	owner, _ := managerAd.EvaluateAttrString("Owner")
+	access := dagCacheAccess{
+		owner:  strings.TrimSpace(owner),
+		caller: ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx)),
+		admin:  s.isWebUIAdmin(r),
+	}
+	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile),
+		access, dagManagerDone(managerAd), refresh,
 		func() (*dagStructure, error) {
 			fetchCtx, cancel := context.WithTimeout(ctx, dagSandboxTimeout)
 			defer cancel()
-			st, ok, err := s.buildDagStructure(fetchCtx, constraint, dagFile, dotFile)
+			st, started, err := s.buildDagStructure(fetchCtx, constraint, dagFile, dotFile)
 			if err != nil {
 				return nil, err
 			}
 			if st == nil {
-				started = ok
-				return nil, errDagNoStructure
+				return nil, &dagNoStructureError{started: started}
 			}
+			st.owner = access.owner
 			return st, nil
 		})
+	var noStructure *dagNoStructureError
 	switch {
-	case errors.Is(err, errDagNoStructure):
-		return nil, http.StatusConflict, dagNoStructureMessage(managerAd, dotFile, started)
+	case errors.As(err, &noStructure):
+		return nil, http.StatusConflict, dagNoStructureMessage(managerAd, dotFile, noStructure.started)
 	case err != nil:
+		// The detail is logged, not returned. It carries the schedd's
+		// own sinful address and whatever the transfer said, which is
+		// operator information rather than the caller's;
+		// handleJobOutputFile draws the same line.
 		s.logger.Error(logging.DestinationHTTP, "Failed to read DAG structure from spool",
 			"error", err, "job", fmt.Sprintf("%d.%d", cluster, proc), "dot_file", dotFile)
 		return nil, http.StatusInternalServerError,
-			fmt.Sprintf("Failed to read the workflow's structure from its spool: %v", err)
+			"Failed to read the workflow's structure from its spool."
 	}
 
 	return structure, 0, ""
+}
+
+// dagManagerDone reports whether the manager job has left the queue, in
+// which case anything it has not already written into its spool will
+// never appear there.
+func dagManagerDone(ad *classad.ClassAd) bool {
+	status, _ := ad.EvaluateAttrInt("JobStatus")
+	return status == 3 || status == 4
 }
 
 // dagNoStructureMessage tells the two causes of a missing DOT file apart.
@@ -547,9 +768,7 @@ func (s *Handler) dagStructureFor(ctx context.Context, constraint string, cluste
 // whichever case the caller guessed wrong. started is true when the
 // sandbox showed DAGMan already past the point where it writes the file.
 func dagNoStructureMessage(ad *classad.ClassAd, dotFile string, started bool) string {
-	status, _ := ad.EvaluateAttrInt("JobStatus")
-	finished := status == 3 || status == 4
-	if !started && !finished && !dagManagerRunningSince(ad, dagStartupGrace) {
+	if !started && !dagManagerDone(ad) && !dagManagerRunningSince(ad, dagStartupGrace) {
 		return fmt.Sprintf(
 			"This workflow has not published its structure yet: DAGMan writes %s just after it "+
 				"finishes parsing the DAG, and it has not got there. Retry in a few seconds.",
@@ -580,27 +799,59 @@ func dagManagerRunningSince(ad *classad.ClassAd, d time.Duration) bool {
 // still replaces the cached one, because ?refresh=1 is a UI refresh
 // button and the next ordinary page load must not pay for another
 // whole-sandbox transfer.
-func cachedDagStructure(cache *dagStructureCache, key string, refresh bool,
-	build func() (*dagStructure, error)) (*dagStructure, error) {
+func cachedDagStructure(cache *dagStructureCache, key string, access dagCacheAccess,
+	managerDone, refresh bool, build func() (*dagStructure, error)) (*dagStructure, error) {
 
 	if !refresh {
-		if hit, ok := cache.get(key); ok && !dagStateStale(hit, time.Now()) {
-			return hit, nil
+		if hit, ok := cache.get(key); ok && access.mayUse(hit) {
+			switch {
+			case hit.err != nil:
+				return nil, hit.err
+			case !dagStateStale(hit.value, managerDone, time.Now()):
+				return hit.value, nil
+			}
 		}
 	}
-	structure, err := build()
-	if err != nil {
-		return nil, err
+
+	flightKey := key
+	if !access.mayShare() {
+		// This caller may not be served another caller's entry, so they
+		// may not be served another caller's in-flight build either.
+		flightKey = key + "\x00" + access.caller
 	}
-	cache.put(key, structure)
-	return structure, nil
+	return dagFlights.do(flightKey, func() (*dagStructure, error) {
+		st, err := build()
+		switch {
+		case err == nil:
+			cache.put(dagCacheEntry{key: key, owner: access.owner, value: st})
+		case errors.Is(err, errDagNoStructure), errors.Is(err, errDagUnparsableDot):
+			// A refusal a retry cannot change in the next few seconds.
+			// Caching it is what stops a UI that polls because it got no
+			// answer from re-paying a whole-sandbox transfer per poll.
+			cache.put(dagCacheEntry{key: key, owner: access.owner, err: err})
+		}
+		return st, err
+	})
 }
 
 // dagStateStale says whether a cached entry's node states are too old to
-// serve. A workflow whose status file is final never goes stale, and one
-// that publishes no status file has no live half to go stale.
-func dagStateStale(st *dagStructure, now time.Time) bool {
-	if st.statusFileName == "" || st.stateIsFinal() {
+// serve.
+//
+// A workflow whose status file is final never goes stale. One with NO
+// status file is the interesting case: "publishes none" and "has not
+// written one yet" look identical here, and they are minutes apart. The
+// DOT file is written at parse time and the status file only on DAGMan's
+// first update cycle (~30s later), so the very first load of a young
+// workflow lands between them -- and treating that as "no live half"
+// pinned a stateless entry for the full hour, escapable only by
+// ?refresh=1. It is therefore stale on the ordinary schedule while the
+// manager job is still in the queue, and never once it has left, because
+// then no status file is ever coming.
+func dagStateStale(st *dagStructure, managerDone bool, now time.Time) bool {
+	if st.statusFileName == "" {
+		return !managerDone && now.Sub(st.fetchedAt) > dagStatusMaxAge
+	}
+	if st.stateIsFinal() {
 		return false
 	}
 	return now.Sub(st.fetchedAt) > dagStatusMaxAge
@@ -615,6 +866,19 @@ func dagStateStale(st *dagStructure, now time.Time) bool {
 func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, dotFile string) (
 	st *dagStructure, started bool, err error) {
 
+	// One slot per concurrent whole-sandbox transfer, process-wide. Each
+	// one buffers tens of megabytes for up to dagSandboxTimeout, so this
+	// is what keeps one caller's refresh loop from being everyone's
+	// out-of-memory. The wait respects the caller's context, so a client
+	// that gives up does not hold a place in the queue.
+	select {
+	case dagSandboxSem <- struct{}{}:
+		defer func() { <-dagSandboxSem }()
+	case <-ctx.Done():
+		return nil, false, fmt.Errorf("waiting for a sandbox transfer slot: %w", ctx.Err())
+	}
+	dagSandboxFetches.Add(1)
+
 	files, err := s.fetchSandboxTextFiles(ctx, constraint, dagBigFilePredicate(dagFile))
 	if err != nil {
 		return nil, false, err
@@ -627,7 +891,7 @@ func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, do
 
 	graph, err := dagman.ParseDot(strings.NewReader(body))
 	if err != nil {
-		return nil, true, fmt.Errorf("read %s: %w", name, err)
+		return nil, true, fmt.Errorf("read %s: %w: %w", name, errDagUnparsableDot, err)
 	}
 	st = &dagStructure{
 		dagFile:   dagFile,
@@ -646,10 +910,11 @@ func (s *Handler) buildDagStructure(ctx context.Context, constraint, dagFile, do
 	// same tar because there is no cheaper way to reach one file of a
 	// spooled sandbox.
 	if statusName, statusBody, ok := findStatusFile(files, dagman.StatusFileName(dagFile)); ok {
-		states, at, next := parseNodeStatusFile(statusBody)
+		states, at, next, sawEnd := parseNodeStatusFile(statusBody)
 		if len(states) > 0 {
 			st.statusStates, st.statusFileName = states, statusName
 			st.statusFileTime, st.statusNextUpdate = at, next
+			st.sawStatusEnd = sawEnd
 		}
 	}
 	return st, true, nil
@@ -667,16 +932,30 @@ func findDotFile(files map[string]string, want string) (name, body string, ok bo
 	if body, ok := files[want]; ok && looksLikeDot(body) {
 		return want, body, true
 	}
-	best := ""
+	return bestNamedFile(files, want, looksLikeDot, dotNameRank)
+}
+
+// bestNamedFile picks the highest-ranking candidate among the files that
+// sniff right, breaking a tie on the sorted name.
+//
+// The tie-break is the point. Both fallbacks scan a map, and Go
+// randomises map iteration order deliberately, so two equal-ranking
+// candidates -- a node's own stdout that happens to contain the word
+// "digraph", beside the real file -- resolved differently on successive
+// requests for the same workflow, and the graph changed shape between
+// two page loads with nothing having changed. A strict ">" does not fix
+// that; it is what caused it.
+func bestNamedFile(files map[string]string, want string, looks func(string) bool,
+	rank func(name, want string) int) (string, string, bool) {
+
+	best, bestRank := "", 0
 	for name, body := range files {
-		if !looksLikeDot(body) {
+		if !looks(body) {
 			continue
 		}
-		// Prefer the longest match on the expected stem, so
-		// "workflow.dot.3" beats an unrelated "extra.dot" and the choice
-		// does not depend on map iteration order.
-		if best == "" || dotNameRank(name, want) > dotNameRank(best, want) {
-			best = name
+		r := rank(name, want)
+		if best == "" || r > bestRank || (r == bestRank && name < best) {
+			best, bestRank = name, r
 		}
 	}
 	if best == "" {
@@ -709,16 +988,32 @@ func dotNameRank(name, want string) int {
 // findStatusFile finds the node status file the same way: by the expected
 // name, then by what a node status file looks like. Its first ad is the
 // DagStatus ad in either format this endpoint reads.
+//
+// It ranks its candidates exactly as findDotFile does. It used to take
+// the first sniff match instead, and a spooled DAG's node outputs land
+// in the DAG's OWN spool: a node whose stdout mentions NodeStatus is a
+// plausible false candidate, and with no ranking it won or lost by map
+// order.
 func findStatusFile(files map[string]string, want string) (name, body string, ok bool) {
 	if body, ok := files[want]; ok && looksLikeNodeStatus(body) {
 		return want, body, true
 	}
-	for name, body := range files {
-		if looksLikeNodeStatus(body) {
-			return name, body, true
-		}
+	return bestNamedFile(files, want, looksLikeNodeStatus, statusNameRank)
+}
+
+// statusNameRank ranks a candidate status file the way dotNameRank ranks
+// a candidate dot file.
+func statusNameRank(name, want string) int {
+	switch {
+	case name == want:
+		return 3
+	case strings.HasPrefix(name, want):
+		return 2
+	case strings.HasSuffix(name, ".status"):
+		return 1
+	default:
+		return 0
 	}
-	return "", "", false
 }
 
 func looksLikeNodeStatus(body string) bool {
@@ -768,12 +1063,59 @@ func dagBigFilePredicate(dagFile string) func(string) bool {
 // small one and is SKIPPED past that rather than refused, since a
 // workflow's own <dag>.dagman.out log routinely runs to hundreds of
 // megabytes and refusing to draw the graph because the log is big would
-// be absurd. Only the total is a hard refusal.
+// be absurd. The hard refusals are a single oversize target file and a
+// spool with more files in it than dagMaxSpoolEntries.
 func (s *Handler) fetchSandboxTextFiles(ctx context.Context, constraint string,
 	big func(string) bool) (map[string]string, error) {
 
+	return sandboxTextFiles(big, defaultDagFileLimits(), func(w io.Writer) <-chan error {
+		return s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+	})
+}
+
+// dagFileLimits is the size discipline as a value.
+//
+// It is a parameter rather than four constants read straight out of the
+// loop so a test can prove the arithmetic -- which file is counted
+// against which budget, and which budget refuses rather than skips --
+// without allocating a hundred megabytes per case. The production
+// numbers are in defaultDagFileLimits and nowhere else.
+type dagFileLimits struct {
+	// big is the ceiling on a target file (the dot or status file).
+	// Exceeding it is a hard refusal: it is the file that was asked for.
+	big int64
+	// aux is the ceiling on any other file, which is skipped past it.
+	aux int64
+	// auxTotal is the budget for the aux files TOGETHER. The target
+	// files are exempt from it.
+	auxTotal int64
+	// entries is how many regular files are looked at at all.
+	entries int
+}
+
+func defaultDagFileLimits() dagFileLimits {
+	return dagFileLimits{
+		big:      dagBigFileMaxBytes,
+		aux:      dagAuxFileMaxBytes,
+		auxTotal: dagAuxTotalMaxBytes,
+		entries:  dagMaxSpoolEntries,
+	}
+}
+
+// sandboxTextFiles is the pipe plumbing and the error precedence, split
+// from the schedd so both can be tested.
+//
+// The precedence is the whole reason it is split. collectTarTextFiles
+// stops early on a refusal, closing the reader stops the transfer, and
+// the transfer then fails with io.ErrClosedPipe -- OUR doing. Reporting
+// that first, as this did, replaced every carefully worded refusal with
+// "download sandbox: io: read/write on closed pipe", which tells the
+// caller nothing about the workflow that provoked it.
+func sandboxTextFiles(big func(string) bool, lim dagFileLimits,
+	start func(io.Writer) <-chan error) (map[string]string, error) {
+
 	pipeReader, pipeWriter := io.Pipe()
-	sandboxErrChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	sandboxErrChan := start(pipeWriter)
 	finalErrChan := make(chan error, 1)
 	go func() {
 		err := <-sandboxErrChan
@@ -785,23 +1127,34 @@ func (s *Handler) fetchSandboxTextFiles(ctx context.Context, constraint string,
 		finalErrChan <- err
 	}()
 
-	files, readErr := collectTarTextFiles(tar.NewReader(pipeReader), big)
-
+	files, readErr := collectTarTextFiles(tar.NewReader(pipeReader), big, lim)
 	_ = pipeReader.Close()
-	if err := <-finalErrChan; err != nil {
-		return nil, fmt.Errorf("download sandbox: %w", err)
-	}
-	if readErr != nil {
+	transferErr := <-finalErrChan
+
+	switch {
+	case readErr != nil && transferErr != nil && errors.Is(readErr, transferErr):
+		// The read failed BECAUSE the transfer did -- CloseWithError
+		// hands the writer's error straight to the reader -- so the
+		// cause is the better message.
+		return nil, fmt.Errorf("download sandbox: %w", transferErr)
+	case readErr != nil:
+		// A refusal of our own. It outranks whatever closing the pipe
+		// under the transfer made the transfer say.
 		return nil, readErr
+	case transferErr != nil && !errors.Is(transferErr, io.ErrClosedPipe):
+		return nil, fmt.Errorf("download sandbox: %w", transferErr)
 	}
 	return files, nil
 }
 
 // collectTarTextFiles is the loop, split out so it can be tested against
 // a tar built in memory rather than against a schedd.
-func collectTarTextFiles(tr *tar.Reader, big func(string) bool) (map[string]string, error) {
+func collectTarTextFiles(tr *tar.Reader, big func(string) bool, lim dagFileLimits) (
+	map[string]string, error) {
+
 	files := map[string]string{}
 	var total int64
+	entries := 0
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -813,21 +1166,36 @@ func collectTarTextFiles(tr *tar.Reader, big func(string) bool) (map[string]stri
 		if header.Typeflag != tar.TypeReg {
 			continue
 		}
+		entries++
+		if entries > lim.entries {
+			// Counting is not redundant with the byte ceilings: a
+			// million one-line files clear every one of them and still
+			// exhaust memory on Go map overhead alone.
+			return nil, fmt.Errorf("this job's spool holds more than %d files, which is more than "+
+				"this endpoint will read; a workflow whose nodes write their output into the "+
+				"workflow's own submit directory cannot have its graph read here", lim.entries)
+		}
 		name := path.Base(filepath.ToSlash(header.Name))
-		limit := int64(dagAuxFileMaxBytes)
-		if big != nil && big(name) {
-			limit = dagBigFileMaxBytes
+		isBig := big != nil && big(name)
+		limit := lim.aux
+		if isBig {
+			limit = lim.big
 		}
 		if header.Size > limit {
-			if limit == dagBigFileMaxBytes {
+			if isBig {
 				return nil, fmt.Errorf("the workflow's %s is %d bytes, larger than the %d "+
 					"this endpoint will read", name, header.Size, limit)
 			}
 			continue
 		}
-		if total+header.Size > dagTotalFileMaxBytes {
-			return nil, fmt.Errorf("this job's spool holds more than %d bytes of files; its workflow "+
-				"graph cannot be read through this endpoint", int64(dagTotalFileMaxBytes))
+		// The aux budget governs only the aux files -- the two target
+		// files are exempt, or the generous per-file ceiling they exist
+		// for could never be spent -- and it is measured against the
+		// same number the accumulator keeps: bytes actually KEPT. The
+		// two used to disagree, the check counting a file the text
+		// sniff below was about to throw away.
+		if !isBig && total+header.Size > lim.auxTotal {
+			continue
 		}
 		buf := &bytes.Buffer{}
 		if _, err := io.CopyN(buf, tr, header.Size); err != nil && !errors.Is(err, io.EOF) {
@@ -836,7 +1204,9 @@ func collectTarTextFiles(tr *tar.Reader, big func(string) bool) (map[string]stri
 		if !looksLikeText(buf.Bytes()) {
 			continue
 		}
-		total += header.Size
+		if !isBig {
+			total += header.Size
+		}
 		files[name] = buf.String()
 	}
 }
@@ -874,8 +1244,11 @@ func looksLikeText(b []byte) bool {
 //
 // A file that is being rewritten while we read it will have a truncated
 // last ad; whatever parsed before that point is still good, so a parse
-// error ends the scan rather than discarding the result.
-func parseNodeStatusFile(body string) (map[string]dagStatusEntry, int64, int64) {
+// error ends the scan rather than discarding the result. The fourth
+// return says whether the closing StatusEnd ad was among what parsed,
+// which is exactly how a truncated file is told from a finished one:
+// NextUpdate rides on StatusEnd and on nothing else.
+func parseNodeStatusFile(body string) (map[string]dagStatusEntry, int64, int64, bool) {
 	if isJSONStatusFile(body) {
 		return parseNodeStatusJSON(body)
 	}
@@ -894,9 +1267,10 @@ func isJSONStatusFile(body string) bool {
 // parseNodeStatusJSON reads a stream of JSON objects, which handles both
 // COMPACT (one per line) and pretty-printed output: json.Decoder reads
 // concatenated values either way.
-func parseNodeStatusJSON(body string) (map[string]dagStatusEntry, int64, int64) {
+func parseNodeStatusJSON(body string) (map[string]dagStatusEntry, int64, int64, bool) {
 	states := map[string]dagStatusEntry{}
 	var at, next int64
+	var sawEnd bool
 	dec := json.NewDecoder(strings.NewReader(body))
 	for {
 		var raw map[string]interface{}
@@ -904,8 +1278,10 @@ func parseNodeStatusJSON(body string) (map[string]dagStatusEntry, int64, int64) 
 			break
 		}
 		ad := jsonAd(raw)
-		switch strings.ToLower(statusAdKind(ad.str("MyType"), ad.str("Type"))) {
+		kind := strings.ToLower(statusAdKind(ad.str("MyType"), ad.str("Type")))
+		switch kind {
 		case "dagstatus", "statusend":
+			sawEnd = sawEnd || kind == "statusend"
 			if ts := ad.num("Timestamp"); ts > at {
 				at = ts
 			}
@@ -926,7 +1302,7 @@ func parseNodeStatusJSON(body string) (map[string]dagStatusEntry, int64, int64) 
 			}
 		}
 	}
-	return states, at, next
+	return states, at, next, sawEnd
 }
 
 // jsonAd looks an attribute up by name, case-insensitively, because
@@ -968,9 +1344,10 @@ func (a jsonAd) num(name string) int64 {
 	}
 }
 
-func parseNodeStatusClassAds(body string) (map[string]dagStatusEntry, int64, int64) {
+func parseNodeStatusClassAds(body string) (map[string]dagStatusEntry, int64, int64, bool) {
 	states := map[string]dagStatusEntry{}
 	var at, next int64
+	var sawEnd bool
 	reader := classad.NewReader(strings.NewReader(body))
 	for reader.Next() {
 		ad := reader.ClassAd()
@@ -979,6 +1356,7 @@ func parseNodeStatusClassAds(body string) (map[string]dagStatusEntry, int64, int
 		myType = statusAdKind(myType, altType)
 		switch {
 		case strings.EqualFold(myType, "DagStatus"), strings.EqualFold(myType, "StatusEnd"):
+			sawEnd = sawEnd || strings.EqualFold(myType, "StatusEnd")
 			if ts, ok := ad.EvaluateAttrInt("Timestamp"); ok && ts > at {
 				at = ts
 			}
@@ -998,7 +1376,7 @@ func parseNodeStatusClassAds(body string) (map[string]dagStatusEntry, int64, int
 			states[strings.ToLower(name)] = dagStatusEntry{state: nodeStatusState(status), detail: detail}
 		}
 	}
-	return states, at, next
+	return states, at, next, sawEnd
 }
 
 // statusAdKind is which ad this is, under either name DAGMan has used
@@ -1101,7 +1479,13 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 
 	queued, err := s.dagQueueStates(ctx, r, cluster, live)
 	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("the job queue could not be consulted: %v", err))
+		// Logged, not echoed: the error text carries the schedd's own
+		// address and internals, which handleJobOutputFile deliberately
+		// keeps out of a response body.
+		s.logger.Error(logging.DestinationHTTP, "DAG node queue query failed",
+			"error", err, "cluster", cluster)
+		warnings = append(warnings, "the job queue could not be consulted, so some nodes may read "+
+			"as unready; the reason is in the server log")
 	}
 
 	// Only ask the archive about what the queue did not explain. On a
@@ -1109,11 +1493,16 @@ func (s *Handler) buildDagResponse(ctx context.Context, r *http.Request, cluster
 	// nodes that already left the queue.
 	archived := 0
 	if len(live) < st.grouping.NodeCount {
-		archived, err = s.dagArchiveStates(ctx, r, cluster, live)
+		var scanned int
+		archived, scanned, err = s.dagArchiveStates(ctx, r, cluster, live)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"the job archive could not be consulted, so nodes that have left the queue may read "+
-					"as unready: %v", err))
+			s.logger.Error(logging.DestinationHTTP, "DAG node archive query failed",
+				"error", err, "cluster", cluster)
+			warnings = append(warnings, "the job archive could not be consulted, so nodes that have "+
+				"left the queue may read as unready; the reason is in the server log")
+		}
+		if w := dagArchiveTruncationWarning(scanned); w != "" {
+			warnings = append(warnings, w)
 		}
 	}
 
@@ -1291,11 +1680,11 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 // dagArchiveStates fills in nodes whose jobs have already left the queue,
 // from the same history the /api/v1/jobs/archive endpoint reads.
 func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster int,
-	out map[string]dagNodeState) (int, error) {
+	out map[string]dagNodeState) (n, scanned int, err error) {
 
 	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 		Source:     htcondor.HistorySourceJobHistory,
@@ -1308,9 +1697,9 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 		Backwards: true,
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	n := 0
+	scanned = len(ads)
 	for _, ad := range ads {
 		name, ok := ad.EvaluateAttrString("DAGNodeName")
 		if !ok || name == "" {
@@ -1330,7 +1719,28 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 		out[key] = st
 		n++
 	}
-	return n, nil
+	return n, scanned, nil
+}
+
+// dagArchiveTruncationWarning says that the archive answer was cut off,
+// or "" when it was not.
+//
+// Silence here is the defect it exists for. The archive query stops at
+// dagArchiveLimit records, and the nodes past the cut read as "unready"
+// from "inferred" -- which is exactly what a node that never started
+// reads as. A finished 100,000-node workflow would report 80% of itself
+// as never having run, with nothing in the response to say otherwise.
+//
+// A full answer and a truncated one are indistinguishable in the ads
+// themselves, so the count is the only signal there is.
+func dagArchiveTruncationWarning(scanned int) string {
+	if scanned < dagArchiveLimit {
+		return ""
+	}
+	return fmt.Sprintf(
+		"the job archive answered with its %d-record limit and was therefore truncated: a node "+
+			"reported as %q from %q may simply not have been looked up rather than never started",
+		dagArchiveLimit, dagStateUnready, dagSourceInferred)
 }
 
 const (

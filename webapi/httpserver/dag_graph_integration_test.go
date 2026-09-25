@@ -120,14 +120,18 @@ func TestJobDagIntegration(t *testing.T) {
 		t.Fatal("the API server never reported a listen address")
 	}
 
-	get := func(t *testing.T, cluster int, query string) (int, DagGraphResponse, string) {
+	// getAs is the endpoint as some identity. The server runs with
+	// UserHeader + UserHeaderTrustAnyUnsafe, so a second user costs one
+	// header value -- and a second user is what the cache's
+	// authorization has to be tested with.
+	getAs := func(t *testing.T, as string, cluster int, query string) (int, DagGraphResponse, string) {
 		t.Helper()
 		url := fmt.Sprintf("%s/api/v1/jobs/%d.0/dag%s", baseURL, cluster, query)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			t.Fatalf("NewRequest: %v", err)
 		}
-		req.Header.Set("X-Test-User", me.Username)
+		req.Header.Set("X-Test-User", as)
 		resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
 		if err != nil {
 			t.Fatalf("GET %s: %v", url, err)
@@ -141,6 +145,10 @@ func TestJobDagIntegration(t *testing.T) {
 			}
 		}
 		return resp.StatusCode, out, string(body)
+	}
+	get := func(t *testing.T, cluster int, query string) (int, DagGraphResponse, string) {
+		t.Helper()
+		return getAs(t, me.Username, cluster, query)
 	}
 
 	// Four producers share one submit description and one (empty) parent
@@ -413,16 +421,97 @@ queue
 		// of this endpoint costs a whole-sandbox transfer, and an
 		// ordinary page load must not pay it again within the state
 		// freshness window.
+		//
+		// What that is asserted WITH matters. This subtest used to
+		// compare node and group counts, which an implementation with no
+		// cache at all satisfies -- the second transfer returns the same
+		// workflow. The transfer counter is the thing only a cache holds
+		// still.
+		if _, _, body := get(t, visible, "?refresh=1"); body == "" {
+			t.Fatalf("the seeding refresh returned nothing")
+		}
+		before := dagSandboxFetches.Load()
+
 		start := time.Now()
 		status, cached, body := get(t, visible, "")
 		if status != http.StatusOK {
 			t.Fatalf("cached load failed: %d %s", status, body)
 		}
+		if after := dagSandboxFetches.Load(); after != before {
+			t.Errorf("an ordinary load started %d whole-sandbox transfer(s); it must be served "+
+				"from the cache", after-before)
+		}
 		if cached.NodeCount != got.NodeCount || len(cached.Groups) != len(got.Groups) {
 			t.Errorf("the cached structure disagrees with the fetched one: %d/%d nodes, %d/%d groups",
 				cached.NodeCount, got.NodeCount, len(cached.Groups), len(got.Groups))
 		}
-		t.Logf("cached load took %v", time.Since(start))
+		t.Logf("cached load took %v (transfers %d)", time.Since(start), dagSandboxFetches.Load())
+
+		// ...and ?refresh=1 still costs one, or the counter above proves
+		// nothing.
+		if _, _, _ = get(t, visible, "?refresh=1"); dagSandboxFetches.Load() <= before {
+			t.Errorf("?refresh=1 did not re-fetch the sandbox")
+		}
+	})
+
+	// The authorization regression. A cache hit skips the sandbox
+	// transfer, and the transfer is where the schedd checks the job's
+	// owner (UserCheck2, per job, on a WRITE-registered command); the ad
+	// read in front of it is NOT owner-checked for a token or
+	// UserHeader caller, because bulkOwnerScope only scopes a browser
+	// session. So before this was fixed, the second user here was handed
+	// the first user's node names, edges, group labels and DAGMan status
+	// details straight out of the cache, for up to the full hour.
+	t.Run("AnotherUserIsNotServedTheCachedWorkflow", func(t *testing.T) {
+		if got.NodeCount == 0 {
+			t.Skip("the structure never came back")
+		}
+		// Warm the cache as the owner, so a hit is available to be
+		// wrongly served.
+		if status, _, body := get(t, visible, ""); status != http.StatusOK {
+			t.Fatalf("the owner's own load failed: %d %s", status, body)
+		}
+
+		const other = "someone-else"
+		if other == me.Username {
+			t.Skip("the test's second identity is the owner")
+		}
+		before := dagSandboxFetches.Load()
+		status, resp, body := getAs(t, other, visible, "")
+		spent := dagSandboxFetches.Load() - before
+
+		// The assertion is that the second user REACHED the schedd. A
+		// cache hit is the whole bug: it answers without a transfer, and
+		// the transfer is the only owner check on this path.
+		if spent == 0 {
+			t.Fatalf("a second user was served the first user's workflow out of the cache, with no "+
+				"sandbox transfer and therefore no owner check: %d nodes, %d groups, dot file %q",
+				resp.NodeCount, len(resp.Groups), resp.DotFile)
+		}
+
+		// What the schedd then decides is the schedd's policy, and this
+		// harness's is wide open on purpose: QUEUE_ALL_USERS_TRUSTED is
+		// True, ALLOW_* are *, and FS authentication resolves every
+		// connection from this process to the local user whatever the
+		// request header said. So a 200 here means the harness allowed
+		// the transfer, not that the endpoint served a cached answer --
+		// which is why the transfer count above is what is asserted. A
+		// production schedd refuses this (UserCheck2, per job, on a
+		// WRITE-registered command).
+		t.Logf("the second user's request cost %d sandbox transfer(s) and the harness schedd "+
+			"answered %d; the endpoint did not short-circuit it", spent, status)
+		if status != http.StatusOK {
+			for _, name := range []string{"produce_1", "produce_2", "COMBINE"} {
+				if strings.Contains(body, name) {
+					t.Errorf("the refusal leaks the workflow's node names (%q): %s", name, body)
+				}
+			}
+		}
+		// The owner's own entry survives the attempt.
+		if status, again, body := get(t, visible, ""); status != http.StatusOK ||
+			again.NodeCount != got.NodeCount {
+			t.Errorf("the owner lost their cached workflow: %d %s", status, body)
+		}
 	})
 }
 
