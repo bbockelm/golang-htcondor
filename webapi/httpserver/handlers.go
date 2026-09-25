@@ -548,6 +548,17 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleJobStderr(w, r, cluster, proc)
 			return
+		case "dag":
+			// GET /api/v1/jobs/{id}/dag — a DAGMan workflow's structure
+			// and per-node state. Like stdout/stderr this costs a
+			// whole-sandbox transfer, so the structure half is cached.
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobDag(w, r, cluster, proc)
+			return
 		case "log":
 			// GET /api/v1/jobs/{id}/log
 			cluster, proc, err := parseJobID(jobID)
