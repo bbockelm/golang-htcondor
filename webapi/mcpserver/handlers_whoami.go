@@ -152,12 +152,23 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 	case hasScope(ctx, scopeMCPAdmin):
 		adminVia = "granted by the " + scopeMCPAdmin + " scope"
 	default:
-		if _, ok := s.adminUsers[actor]; ok {
+		_, listed := s.adminUsers[actor]
+		switch {
+		case listed && !scopedTransport(ctx):
 			adminVia = "listed in MCP_ADMIN_USERS"
-		} else if len(s.adminUsers) > 0 {
+		case listed:
+			// Listed, but the token did not carry the scope. Say what
+			// happened and what to do, because the alternative is an
+			// operator concluding the list is broken: it worked until
+			// the list stopped overriding a scope-bearing token.
+			adminVia = fmt.Sprintf("no %s scope; %q is in MCP_ADMIN_USERS, but that list only "+
+				"applies where the transport supplies no scopes (stdio). Re-authorize and grant "+
+				"%s -- entitlement comes from HTTP_API_MCP_ADMIN_GROUP",
+				scopeMCPAdmin, actor, scopeMCPAdmin)
+		case len(s.adminUsers) > 0:
 			adminVia = fmt.Sprintf("no %s scope, and %q is not in the %d-entry MCP_ADMIN_USERS list",
 				scopeMCPAdmin, actor, len(s.adminUsers))
-		} else {
+		default:
 			adminVia = "no " + scopeMCPAdmin + " scope, and MCP_ADMIN_USERS is unset"
 		}
 	}
