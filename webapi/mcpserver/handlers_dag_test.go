@@ -556,7 +556,8 @@ func TestStagedModeFollowsTheParseNotTheExtension(t *testing.T) {
 // could not carry out; what it did instead was poll in a loop.
 func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 	report := &dagman.Report{Required: []string{"workflow.dag"}}
-	res := dagSubmitResult(42, "workflow.dag", report, nil)
+	res := dagSubmitResult(42, "workflow.dag", report, nil, dagman.Instrumentation{
+		DotFile: "workflow.dot", StatusFile: "workflow.status"})
 	text := res["content"].([]map[string]interface{})[0]["text"].(string)
 
 	want := `To wait for the whole workflow, register watch_jobs(constraint="ClusterId == 42", event="done") ` +
@@ -577,7 +578,8 @@ func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 // ready-made is the difference between querying the nodes and querying
 // the manager job again and concluding the workflow has no jobs.
 func TestSubmitDagResultHandsOverTheNodeConstraint(t *testing.T) {
-	res := dagSubmitResult(42, "workflow.dag", &dagman.Report{Required: []string{"workflow.dag"}}, nil)
+	res := dagSubmitResult(42, "workflow.dag", &dagman.Report{Required: []string{"workflow.dag"}}, nil,
+		dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status"})
 	structured, _ := res["structuredContent"].(map[string]interface{})
 	got, _ := structured["node_constraint"].(string)
 	if got != "DAGManJobId == 42" {
