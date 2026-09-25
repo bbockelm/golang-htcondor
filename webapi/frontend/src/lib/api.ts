@@ -678,6 +678,89 @@ export interface JobPeekResponse {
   stderr?: { text: string; offset: number };
 }
 
+// DagGraphGroup is one collapsed group of DAGMan nodes: the shape a
+// drawing draws. `status` is a histogram keyed by the node states
+// below, and `parent_ids` are the groups it depends on.
+//
+// IMPORTANT for anything rendering this: a link from group A to group B
+// means SOME node in A is a parent of SOME node in B. It does not mean
+// every node in A parents every node in B, and the collapse is lossy in
+// exactly that direction -- N independent A→B chains collapse to two
+// groups joined by one link.
+export interface DagGraphGroup {
+  id: string;
+  label: string;
+  // Empty for a workflow read from a DOT file, which carries no submit
+  // descriptions.
+  description: string;
+  count: number;
+  parent_ids: string[];
+  status: Record<string, number>;
+}
+
+// DagGraphNode is one DAGMan node's state. `state` is one of the names
+// in dag_graph.go's node-state block (done / running / idle / held /
+// failed / removed / transferring / suspended / submitted / ready /
+// prerun / postrun / futile / unready) -- a superset of JobStatus,
+// because the status file knows things the queue does not.
+export interface DagGraphNode {
+  name: string;
+  group_id: string;
+  state: string;
+  // The "why" behind a state, from the queue or the archive. Present
+  // only when something said which job the node is.
+  job_id?: string;
+  hold_reason?: string;
+  exit_code?: number;
+  // DAGMan's own note about the node, when the status file carried one.
+  detail?: string;
+  source: string;
+}
+
+// DagGraphResponse is the JSON returned by GET /api/v1/jobs/{id}/dag --
+// the collapsed workflow graph plus its provenance.
+//
+// VERSION SKEW: `truncated`, `incomplete`, `dangling_edges`,
+// `link_count` and `approximate_reason` are defined by dagman.Grouping
+// but are NOT copied into the HTTP response by every server version, so
+// a live server may not send them at all. They are optional here and
+// every consumer must render them only when present -- requiring them
+// would make the panel blank against the server that exists today.
+export interface DagGraphResponse {
+  cluster: number;
+  dag_file: string;
+  // The files this answer was read out of, so a caller looking at the
+  // spool can find them.
+  dot_file: string;
+  status_file?: string;
+  node_count: number;
+  edge_count: number;
+  group_count: number;
+  groups: DagGraphGroup[];
+  // null when the workflow is too large to list node by node;
+  // nodes_omitted then says so and nodes_omitted_reason says why.
+  nodes: DagGraphNode[] | null;
+  nodes_omitted?: boolean;
+  nodes_omitted_reason?: string;
+  // Set when the grouping is not the exact structural one (a cycle, or
+  // a refinement that hit its bound), so the layering is a best effort.
+  approximate_layering?: boolean;
+  truncated?: boolean;
+  incomplete?: boolean;
+  dangling_edges?: number;
+  link_count?: number;
+  approximate_reason?: string;
+  // Which of status-file / dot-file / queue / archive actually
+  // contributed a node state.
+  state_sources: string[];
+  // The node status file's own mtime, present only when that file
+  // contributed. The queue half of the response is live; this half is
+  // only as fresh as DAGMan's last write plus the last spool fetch.
+  status_file_time?: number;
+  warnings?: string[];
+  fetched_at: string;
+}
+
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's
 // Result struct in an envelope that also surfaces the raw Requirements
@@ -1165,6 +1248,26 @@ export const api = {
     // list. Explicit fetch only — the panel shows a "Load log" button.
     log: (id: string): Promise<JobLogResponse> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/log`),
+
+    // The collapsed workflow graph for a DAGMan manager job.
+    //
+    // The plain call is served from a server-side cache and is cheap.
+    // `refresh` bypasses that cache, and the miss behind it re-fetches
+    // the workflow's ENTIRE spool from the access point to re-read the
+    // DOT and node-status files -- so refresh is a user gesture, never
+    // a timer.
+    //
+    // 409 is the normal "this workflow has no structure to show" answer
+    // (not spooled / no DOT command / DAGMan has not written it yet) and
+    // its message is prose meant to be shown as prose. 404 and 500 are
+    // errors.
+    dagGraph: (
+      id: string,
+      opts?: { refresh?: boolean },
+    ): Promise<DagGraphResponse> =>
+      fetchJSON(
+        `${BASE}/jobs/${encodeURIComponent(id)}/dag${opts?.refresh ? '?refresh=1' : ''}`,
+      ),
 
     // Run condor_q -better-analyze-style match analysis for a job. This
     // is a heavy call (collector slot dump on first invocation, ~30s

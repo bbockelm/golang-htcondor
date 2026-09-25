@@ -346,7 +346,10 @@ test('a shell-submitted workflow says where its log is', async ({ page }) => {
   // Scoped to the explanation itself: the Iwd also shows up in the
   // execution table and the raw ClassAd, so a page-wide text match
   // would pass with the sentence missing entirely.
-  const explanation = page.getByText(/submitted from a shell on the access point/);
+  // Anchored at "This workflow was": the Workflow graph panel below
+  // explains the same non-spooled job in its own words, and a looser
+  // match now resolves to both paragraphs.
+  const explanation = page.getByText(/This workflow was submitted from a shell/);
   await expect(explanation).toBeVisible();
   await expect(explanation).toContainText('diamond.dagman.out');
   await expect(explanation).toContainText('/home/e2e/dags');
@@ -358,4 +361,261 @@ test('a shell-submitted workflow says where its log is', async ({ page }) => {
   // And the download the scheduler-universe branch offers is gone too:
   // there is nothing in the spool to download.
   await expect(page.getByRole('link', { name: 'Download as tar' })).toHaveCount(0);
+});
+
+// --- Workflow graph -------------------------------------------------
+//
+// A fan-out / gather workflow, which is the shape the collapse exists
+// for: ten independent work nodes become one box, and the two lines
+// around it are the some-to-some link the panel has to warn about.
+const fanoutManagerAd = {
+  ClusterId: 90,
+  ProcId: 0,
+  JobStatus: 2,
+  JobUniverse: 7,
+  Owner: 'e2e',
+  Cmd: '/usr/bin/condor_dagman',
+  Arguments: '-p 0 -f -l . -Lockfile fanout.dag.lock -Dag fanout.dag',
+  Environment: '_CONDOR_DAGMAN_LOG=fanout.dagman.out _CONDOR_MAX_DAGMAN_LOG=0',
+  Iwd: '/var/lib/condor/spool/90/0/cluster90.proc0.subproc0',
+  SUBMIT_Iwd: '/home/e2e/dags',
+  QDate: startedRecently - 60,
+  JobStartDate: startedRecently,
+};
+
+// Ten work nodes: eight done, one running, one failed. The failed one
+// is the reason anyone opens this panel, so it carries the exit code,
+// the job id and DAGMan's own note.
+const workNodes = [
+  ...Array.from({ length: 8 }, (_, i) => ({
+    name: `work_${i}`,
+    group_id: 'work',
+    state: 'done',
+    source: 'status-file',
+  })),
+  {
+    name: 'work_8',
+    group_id: 'work',
+    state: 'running',
+    job_id: '91.8',
+    source: 'queue',
+  },
+  {
+    name: 'work_9',
+    group_id: 'work',
+    state: 'failed',
+    job_id: '91.9',
+    exit_code: 1,
+    detail: 'Job exited with status 1',
+    source: 'archive',
+  },
+];
+
+const fanoutDagGraph = {
+  cluster: 90,
+  dag_file: 'fanout.dag',
+  dot_file: 'fanout.dag.dot',
+  status_file: 'fanout.dag.status',
+  node_count: 12,
+  edge_count: 20,
+  group_count: 3,
+  groups: [
+    {
+      id: 'setup',
+      label: 'setup',
+      description: '/bin/prepare',
+      count: 1,
+      parent_ids: [],
+      status: { done: 1 },
+    },
+    {
+      id: 'work',
+      label: 'work',
+      description: '/bin/crunch',
+      count: 10,
+      parent_ids: ['setup'],
+      status: { done: 8, running: 1, failed: 1 },
+    },
+    {
+      id: 'gather',
+      label: 'gather',
+      description: '/bin/collect',
+      count: 1,
+      parent_ids: ['work'],
+      status: { unready: 1 },
+    },
+  ],
+  nodes: [
+    { name: 'setup', group_id: 'setup', state: 'done', source: 'status-file' },
+    ...workNodes,
+    { name: 'gather', group_id: 'gather', state: 'unready', source: 'status-file' },
+  ],
+  state_sources: ['status-file', 'queue'],
+  status_file_time: Math.floor(Date.now() / 1000) - 120,
+  fetched_at: new Date().toISOString(),
+};
+
+// Route the dag endpoint with a RegExp rather than a glob: the refresh
+// button appends ?refresh=1, and the query string has to match too.
+async function routeDagGraph(
+  page: import('@playwright/test').Page,
+  body: unknown,
+  status = 200,
+) {
+  await page.route(/\/api\/v1\/jobs\/[^/]+\/dag(\?.*)?$/, (route) =>
+    route.fulfill({ status, json: body as object }),
+  );
+}
+
+test('a DAGMan manager draws its collapsed workflow on request', async ({ page }) => {
+  await routeDagGraph(page, fanoutDagGraph);
+  await openJobPage(page, '90.0', fanoutManagerAd);
+
+  await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
+
+  // Explicit load: every refresh re-fetches the workflow's whole spool,
+  // so nothing is drawn until the user asks.
+  const svg = page.locator('svg[role="img"]');
+  await expect(svg).toHaveCount(0);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+
+  await expect(svg).toBeVisible();
+  // The three groups, with the collapse made visible: ten work nodes
+  // are one box that says so.
+  await expect(svg).toContainText('setup');
+  await expect(svg).toContainText('work');
+  await expect(svg).toContainText('gather');
+  await expect(svg).toContainText('×10');
+  // Coloured by the most urgent state present, not the most numerous:
+  // one failed among ten is what the box has to carry.
+  await expect(svg.locator('[data-group-id="work"] rect').first()).toHaveClass(
+    /fill-red/,
+  );
+
+  // The caveat has to be on the page, not in a comment: a reader who
+  // takes the single line for "every work node feeds gather" has
+  // misread a fan-in as a barrier.
+  await expect(
+    page.getByText(/some.*node in the first is a parent of.*some.*node in the second/i),
+  ).toBeVisible();
+
+  // And the cost of Refresh is stated rather than left invisible.
+  await expect(page.getByText(/re-fetches the workflow's entire spool/)).toBeVisible();
+});
+
+test('clicking a group opens the members the collapse hid', async ({ page }) => {
+  await routeDagGraph(page, fanoutDagGraph);
+  await openJobPage(page, '90.0', fanoutManagerAd);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+
+  // Nothing per-node until asked: the box says "1 failed", and "which
+  // one" is a click away.
+  await expect(page.getByText('work_9')).toHaveCount(0);
+  await page.locator('[data-group-id="work"]').click();
+
+  await expect(page.getByText('work_9')).toBeVisible();
+  await expect(page.getByText('work_0')).toBeVisible();
+  // The three facts behind a failed node.
+  await expect(page.getByText('Job exited with status 1')).toBeVisible();
+  await expect(page.getByText('exit 1', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'job 91.9' })).toHaveAttribute(
+    'href',
+    '/jobs/91.9',
+  );
+
+  // And the constraint that finds these in the jobs list -- not
+  // guessable, and nothing else on the page spells DAGManJobId out.
+  await expect(page.getByText('DAGManJobId == 90')).toBeVisible();
+});
+
+test('the graph says how the picture may be wrong', async ({ page }) => {
+  await routeDagGraph(page, {
+    ...fanoutDagGraph,
+    approximate_layering: true,
+    dangling_edges: 3,
+  });
+  await openJobPage(page, '90.0', fanoutManagerAd);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+
+  await expect(
+    page.getByText(/grouping is coarser than the workflow's real structure/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/3\s+dependencies reference nodes that are not in the structure file/),
+  ).toBeVisible();
+});
+
+// Fields the HTTP layer does not copy out of dagman.Grouping yet are
+// absent from a live response, and absent means "this server does not
+// say" -- not "no". A reassuring banner either way would be a claim the
+// response never made.
+test('the graph claims nothing the response did not say', async ({ page }) => {
+  await routeDagGraph(page, fanoutDagGraph);
+  await openJobPage(page, '90.0', fanoutManagerAd);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+
+  await expect(page.locator('svg[role="img"]')).toBeVisible();
+  await expect(page.getByText(/still writing it/)).toHaveCount(0);
+  await expect(page.getByText(/SPLICE or INCLUDE/)).toHaveCount(0);
+  await expect(page.getByText(/dependencies reference nodes/)).toHaveCount(0);
+  await expect(page.getByText(/grouping is coarser/)).toHaveCount(0);
+});
+
+// 409 is the server saying "this workflow has no structure to show",
+// with a sentence that already explains which of the three reasons
+// applies. Rendering it as an error would contradict it.
+test('a workflow with no structure is explained, not error-boxed', async ({ page }) => {
+  await routeDagGraph(
+    page,
+    {
+      error: 'Conflict',
+      code: 409,
+      message:
+        'This workflow does not publish its structure: its DAG declares no DOT command, so ' +
+        'DAGMan wrote no fanout.dag.dot into the spool and there is nothing to read the graph from.',
+    },
+    409,
+  );
+  await openJobPage(page, '90.0', fanoutManagerAd);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+
+  await expect(
+    page.getByText(/does not publish its structure: its DAG declares no DOT command/),
+  ).toBeVisible();
+  await expect(page.getByText(/Could not load the workflow graph/)).toHaveCount(0);
+  // The red error box this page uses everywhere else.
+  await expect(page.locator('.border-red-200.bg-red-50')).toHaveCount(0);
+});
+
+// Same gate as the workflow log, same reason: the .dot and node-status
+// files are read out of the spool, and a shell-submitted manager's
+// spool is empty. One sentence beats a Load button that returns a 409.
+test('a shell-submitted workflow says why it has no graph', async ({ page }) => {
+  const { SUBMIT_Iwd: _spooled, ...notSpooled } = fanoutManagerAd;
+  await openJobPage(page, '92.0', {
+    ...notSpooled,
+    ClusterId: 92,
+    Iwd: '/home/e2e/dags',
+  });
+
+  await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
+  const explanation = page.getByText(/structure files are not readable through this server/);
+  await expect(explanation).toBeVisible();
+  await expect(explanation).toContainText('/home/e2e/dags');
+  await expect(page.getByRole('button', { name: 'Load graph' })).toHaveCount(0);
+});
+
+// A job that is not a DAGMan manager gets no panel at all.
+test('a vanilla job has no workflow graph panel', async ({ page }) => {
+  await openJobPage(page, '93.0', {
+    ...fanoutManagerAd,
+    ClusterId: 93,
+    JobUniverse: 5,
+    Cmd: '/bin/sleep',
+    Arguments: '600',
+    Environment: '',
+  });
+
+  await expect(page.getByRole('heading', { name: 'Output Files' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workflow graph' })).toHaveCount(0);
 });
