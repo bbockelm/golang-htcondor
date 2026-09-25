@@ -233,15 +233,25 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 	// figure out which slot values are unlocked by which Request*
 	// reductions. Skipping for non-narrowing predicates (score 0)
 	// avoids surfacing suggestions that wouldn't actually help.
-	for i, p := range preds {
-		if matchedAllOthers[i] == 0 {
-			continue
+	//
+	// Only when the job has NO fully matching slot. A suggestion is
+	// advice to ask for less, and asking for less is only worth doing
+	// when the current request cannot run at all. A job matching 20,923
+	// of 21,266 slots is not short of places to run, and telling its
+	// owner to cut RequestMemory from 512 to 54 to reach another 328 is
+	// advice that makes the job worse for no gain -- it was the loudest
+	// thing in the response for a job with no problem.
+	if res.FullMatches == 0 {
+		for i, p := range preds {
+			if matchedAllOthers[i] == 0 {
+				continue
+			}
+			if comps[i] == nil {
+				continue
+			}
+			_ = p // kept for future per-predicate metadata if needed
+			res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comps[i], jobAd, failing[i])
 		}
-		if comps[i] == nil {
-			continue
-		}
-		_ = p // kept for future per-predicate metadata if needed
-		res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comps[i], jobAd, failing[i])
 	}
 
 	return res, nil

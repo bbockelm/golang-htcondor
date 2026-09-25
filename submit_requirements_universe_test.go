@@ -45,7 +45,13 @@ func TestSchedulerUniverseRequirementsHaveNoMachineClauses(t *testing.T) {
 			}
 			expr, ok := ad.Lookup("Requirements")
 			if !ok {
-				return // no Requirements at all is the ideal outcome
+				// Omitting the attribute used to look ideal -- the schedd
+				// skips the check when it is absent. It is not: a schedd
+				// can carry SUBMIT_REQUIREMENT expressions that reference
+				// Requirements, and an absent attribute makes those
+				// non-boolean and fails the submit outright. See
+				// TestSchedulerUniverseRequirementsAreTrueNotAbsent.
+				t.Fatal("Requirements is absent; it must be present and TRUE")
 			}
 			got := expr.String()
 			for _, forbidden := range []string{"HasFileTransfer", "TARGET.Arch", "TARGET.OpSys", "TARGET.Disk", "TARGET.Memory"} {
@@ -103,5 +109,75 @@ func TestSchedulerUniverseKeepsUserRequirements(t *testing.T) {
 	}
 	if !strings.Contains(expr.String(), "TotalSchedulerJobsRunning") {
 		t.Errorf("Requirements = %s, lost what the user wrote", expr.String())
+	}
+}
+
+// TestSchedulerUniverseRequirementsAreTrueNotAbsent pins a submit that
+// fails before the job ever reaches the queue.
+//
+// A schedd may carry SUBMIT_REQUIREMENT_<name> expressions, and they are
+// allowed to reference the job's own Requirements. The OSPool access
+// point has one:
+//
+//	SUBMIT_REQUIREMENT_ModulesWarning = ! unresolved(Requirements, "HAS_MODULES")
+//
+// With no Requirements attribute that reads `! undefined`, which is not a
+// boolean, and the schedd rejects the transaction: "CommitTransaction
+// failed: Submit requirement ModulesWarning evaluated to non-boolean".
+// Every DAGMan submission to that access point failed this way, because
+// the manager job is precisely the case that asks for nothing.
+//
+// TRUE keeps the property the test above checks -- no machine clauses a
+// schedd ad cannot satisfy -- while giving such expressions something
+// defined to read.
+func TestSchedulerUniverseRequirementsAreTrueNotAbsent(t *testing.T) {
+	for _, universe := range []string{"scheduler", "local"} {
+		t.Run(universe, func(t *testing.T) {
+			sf, err := ParseSubmitFile(strings.NewReader(
+				"universe = " + universe + "\n" +
+					"executable = /usr/bin/condor_dagman\n" +
+					"transfer_executable = false\n" +
+					"queue\n"))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			ad, err := sf.MakeJobAd(JobID{Cluster: 1, Proc: 0}, nil)
+			if err != nil {
+				t.Fatalf("MakeJobAd: %v", err)
+			}
+			expr, ok := ad.Lookup("Requirements")
+			if !ok {
+				t.Fatal("Requirements is absent: a SUBMIT_REQUIREMENT that " +
+					"references it evaluates to non-boolean and the submit is refused")
+			}
+			if got := strings.ToLower(expr.String()); got != "true" {
+				t.Errorf("Requirements = %s, want true", expr.String())
+			}
+		})
+	}
+}
+
+// A user who writes their own requirements on a scheduler-universe job
+// must keep them -- the default must not overwrite what was asked for.
+func TestSchedulerUniverseUserRequirementsBeatTheDefault(t *testing.T) {
+	sf, err := ParseSubmitFile(strings.NewReader(
+		"universe = scheduler\n" +
+			"executable = /usr/bin/condor_dagman\n" +
+			"transfer_executable = false\n" +
+			"requirements = (MY.Owner == \"alice\")\n" +
+			"queue\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ad, err := sf.MakeJobAd(JobID{Cluster: 1, Proc: 0}, nil)
+	if err != nil {
+		t.Fatalf("MakeJobAd: %v", err)
+	}
+	expr, ok := ad.Lookup("Requirements")
+	if !ok {
+		t.Fatal("Requirements is absent")
+	}
+	if !strings.Contains(expr.String(), "alice") {
+		t.Errorf("Requirements = %s, want the user's own expression", expr.String())
 	}
 }
