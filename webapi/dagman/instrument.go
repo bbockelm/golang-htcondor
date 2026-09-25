@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -70,6 +71,12 @@ type Instrumentation struct {
 	// already declared that command.
 	AddedDot    bool
 	AddedStatus bool
+	// Skipped is why nothing was appended, for a caller to pass on. It
+	// is set only when instrumentation was REFUSED -- the DAG's text is
+	// one this package will not append to safely -- and is empty both
+	// when instrumentation ran and when the author had already declared
+	// both commands.
+	Skipped string
 }
 
 // Added reports whether Instrument changed the DAG text at all.
@@ -84,14 +91,25 @@ func InstrumentBase(dagName string) string {
 	if strings.EqualFold(path.Ext(b), ".dag") {
 		b = b[:len(b)-len(".dag")]
 	}
-	// DAGMan's own parser splits these commands on whitespace
-	// (parse.cpp uses strtok with " \t" and honours no quoting), so a
-	// generated name may not contain any.
+	// An allowlist, not a blocklist. The name goes into a DAG command
+	// that DAGMan's own lexer reads (dag_parser.cpp:30-77), and that
+	// lexer splits on whitespace AND treats " and ' as quotes: an
+	// unbalanced one is a fatal "Invalid quoting: no ending quote found"
+	// that kills the workflow, and a BALANCED pair is worse -- it parses,
+	// the lexer strips the quotes, DAGMan writes a file under a different
+	// name than the one this package reported, and the reader finds
+	// nothing. A newline in the name ends the command early and the
+	// remainder becomes an unknown command, which is fatal too. dagName
+	// is caller-controlled, so anything outside a character set known to
+	// survive the lexer intact becomes an underscore.
 	b = strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' {
-			return '_'
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.' || r == '_' || r == '+' || r == '-':
+			return r
 		}
-		return r
+		return '_'
 	}, b)
 	if b == "" || b == "." || b == "/" {
 		b = "workflow"
@@ -119,6 +137,13 @@ func StatusFileName(dagName string) string { return InstrumentBase(dagName) + ".
 // The author's own declarations win. A DAG that already says DOT or
 // NODE_STATUS_FILE is returned unchanged for that half, with their file
 // name reported instead.
+//
+// Instrumentation is REFUSED, and the text returned exactly as given,
+// whenever appending would risk the workflow itself: an unresolved
+// INCLUDE or SPLICE, a dangling line continuation, or an instrumented
+// text that no longer parses to the same graph. Instrumentation.Skipped
+// then says why, for the caller to pass on. Losing the graph is a
+// nuisance; changing what the workflow does is not.
 func Instrument(dagText, dagName string, staged map[string]string) (string, Instrumentation) {
 	var instr Instrumentation
 
@@ -133,6 +158,51 @@ func Instrument(dagText, dagName string, staged map[string]string) (string, Inst
 		case strings.EqualFold(ref.Command, "NODE_STATUS_FILE") && instr.StatusFile == "":
 			instr.StatusFile = ref.Path
 		}
+	}
+	// What the AUTHOR declared, kept apart from the generated names, so
+	// a refusal below still reports the files their own DAG writes.
+	declared := Instrumentation{DotFile: instr.DotFile, StatusFile: instr.StatusFile}
+	refuse := func(why string) (string, Instrumentation) {
+		out := declared
+		out.Skipped = why
+		return dagText, out
+	}
+
+	// A parse-time inclusion this function was not given makes the two
+	// questions below unanswerable. DAGMan folds an INCLUDE'd DOT into
+	// the parent scope (condor_dagman/parse.cpp:2727) and Dag::SetDotFileName
+	// is last-one-wins with no guard (dag.cpp:2309), so an appended DOT
+	// silently REPLACES the author's -- while the other half fails the
+	// opposite way: Dag::SetNodeStatusFileName keeps the FIRST and warns
+	// (dag.cpp:2388), and under DAGMAN_USE_STRICT=3 that warning is
+	// fatal. Neither outcome is worth a graph.
+	if parsed.Incomplete {
+		return refuse("the workflow was not instrumented: an INCLUDE or SPLICE file is not " +
+			"part of this submission, so a DOT or NODE_STATUS_FILE declared inside it cannot be " +
+			"seen, and adding a second one would override the author's or be refused by DAGMan. " +
+			"The workflow's structure will not be readable while it runs.")
+	}
+
+	// A dangling line continuation absorbs whatever is appended. A blank
+	// or comment line does NOT end one: DagParser::getnextline
+	// (src/condor_utils/dag_parser.cpp:218-241) tests skip_line FIRST and
+	// keeps accumulating, so the partial logical line swallows the next
+	// REAL line -- which would be the first command added here. Observed
+	// two ways: `PARENT a CHILD \` turns into "References to undefined
+	// nodes: Children [DOT,OVERWRITE,...]" and the workflow dies, and
+	// `SCRIPT POST a c.sh --keep \` silently gains three arguments with
+	// no complaint from any checker.
+	//
+	// The backslash is deliberately NOT stripped. Without instrumentation
+	// DAGMan discards that trailing partial line at EOF, so removing the
+	// backslash would make it start parsing a line the author's workflow
+	// currently ignores -- a behaviour change smuggled in by a tool that
+	// was only meant to be watching. Losing the graph beats corrupting
+	// the run; Analyze reports the dangling line separately.
+	if n, text, ok := danglingContinuation(dagText); ok {
+		return refuse(fmt.Sprintf("the workflow was not instrumented: line %d (%q) ends in a line "+
+			"continuation with nothing after it, and anything appended would be swallowed by it. "+
+			"The workflow's structure will not be readable while it runs.", n, text))
 	}
 
 	taken := map[string]bool{path.Base(filepath.ToSlash(dagName)): true}
@@ -183,16 +253,85 @@ func Instrument(dagText, dagName string, staged map[string]string) (string, Inst
 
 	var b strings.Builder
 	b.WriteString(strings.TrimRight(dagText, " \t\r\n"))
-	// Two newlines: the first ends the author's last line, the second
-	// ends any line-continuation backslash on it, which would otherwise
-	// swallow the first command appended.
+	// One newline ends the author's last line and a blank line separates
+	// what follows. Neither ends a line continuation -- nothing in DAG
+	// syntax does, which is why the dangling-continuation check above
+	// runs before we get here.
 	b.WriteString("\n\n")
 	b.WriteString("# Added on submission so this workflow can be read while it runs.\n")
 	for _, cmd := range added {
 		b.WriteString(cmd)
 		b.WriteByte('\n')
 	}
-	return b.String(), instr
+	out := b.String()
+
+	// The safety net. Everything upstream analysed the CALLER's text;
+	// this text is what DAGMan actually parses, and nothing else looks at
+	// it. Re-reading it and insisting the workflow is the same one turns
+	// any future mistake in this file -- a name that lexes oddly, a shape
+	// no one thought of -- from "the workflow dies" into "no graph this
+	// time".
+	if why, changed := instrumentChangedTheWorkflow(parsed, Parse(out)); changed {
+		return refuse("the workflow was not instrumented: appending the commands changed how the " +
+			"DAG parses (" + why + "), so the workflow was submitted exactly as written. " +
+			"The workflow's structure will not be readable while it runs.")
+	}
+	return out, instr
+}
+
+// instrumentChangedTheWorkflow compares the parse of the instrumented
+// text with the parse of the original. Nodes, edges and the lines DAGMan
+// itself would reject are the workflow; anything else appended is only
+// output.
+func instrumentChangedTheWorkflow(before, after *DAG) (string, bool) {
+	if got, want := nodeKey(after), nodeKey(before); got != want {
+		return fmt.Sprintf("the node set became %q, was %q", got, want), true
+	}
+	if got, want := edgeKey(after), edgeKey(before); got != want {
+		return fmt.Sprintf("the edge set became %q, was %q", got, want), true
+	}
+	if len(after.Fatals) != len(before.Fatals) {
+		return fmt.Sprintf("%d lines DAGMan rejects, was %d", len(after.Fatals), len(before.Fatals)), true
+	}
+	return "", false
+}
+
+func nodeKey(d *DAG) string {
+	out := make([]string, 0, len(d.Nodes))
+	for _, n := range d.Nodes {
+		out = append(out, string(n.Type)+" "+n.Name+" "+n.Descriptor)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+func edgeKey(d *DAG) string {
+	out := make([]string, 0, len(d.Edges))
+	for _, e := range d.Edges {
+		out = append(out, e.Parent+"->"+e.Child)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+// danglingContinuation reports the last non-blank, non-comment physical
+// line of a DAG when it ends in a continuation backslash, with its
+// 1-based line number.
+//
+// Such a line is already lost: DagParser::getnextline returns false at
+// EOF and the accumulated partial logical line is DISCARDED, so DAGMan
+// never sees it. Nothing tells the author -- which is why Analyze reports
+// it and Instrument refuses to append after it.
+func danglingContinuation(dagText string) (int, string, bool) {
+	lines := strings.Split(dagText, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		return i + 1, t, strings.HasSuffix(t, `\`)
+	}
+	return 0, "", false
 }
 
 // freeName picks base+ext, or base-1+ext, base-2+ext ... when the sandbox

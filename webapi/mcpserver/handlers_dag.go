@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing/fstest"
+	"unicode"
 
 	"github.com/PelicanPlatform/classad/classad"
 
@@ -134,6 +135,15 @@ func dagTools() []Tool {
 					"max_post": map[string]interface{}{"type": "integer", "description": "Throttle: maximum concurrent POST scripts"},
 					"append":   map[string]interface{}{"type": "string", "description": "Extra submit-file lines for the DAGMan manager job itself"},
 					"dry_run":  map[string]interface{}{"type": "boolean", "description": "Parse and check the workflow, report what would be submitted, and submit nothing"},
+					"instrument": map[string]interface{}{
+						"type": "boolean",
+						"description": "Default true: append DOT and NODE_STATUS_FILE commands so the workflow's " +
+							"structure and per-node progress can be read while it runs. Set false if the " +
+							"workflow must run even when its spool cannot be written -- DAGMan ABORTS a DAG " +
+							"whose node status file cannot be written (DAGMAN_USE_STRICT defaults to 1), so on " +
+							"a full or read-only spool instrumentation turns a degraded run into a dead one. " +
+							"With it off there is no graph and no per-node state for this workflow.",
+					},
 				},
 				"required": []string{"dag"},
 			},
@@ -153,6 +163,9 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	}
 	if strings.ContainsAny(dagName, `/\`) {
 		return nil, fmt.Errorf("dag_name %q must be a bare file name: a spooled sandbox is one flat directory", dagName)
+	}
+	if err := checkDagNameLexes(dagName); err != nil {
+		return nil, err
 	}
 
 	files, err := stringMapArg(args, "files")
@@ -207,7 +220,24 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	// is the only way to read either back out of a spooled workflow (see
 	// dagman.Instrument). The analysis above ran on the CALLER's text, so
 	// every finding still points at a line they wrote.
-	instrumentedDag, instr := dagman.Instrument(s.policyForInlineDescriptions(dagText), dagName, files)
+	//
+	// instrument=false is the escape hatch, and it exists because the
+	// NODE_STATUS_FILE half can kill a workflow that would otherwise run:
+	// Dag::DumpNodeStatus calls check_warning_strictness(DAG_STRICT_1)
+	// when the write fails (dag.cpp:2435-2441), and DAGMAN_USE_STRICT
+	// defaults to 1, so a full or read-only spool aborts the DAG instead
+	// of merely degrading it. DumpDotFile only warns.
+	instrumentedDag := s.policyForInlineDescriptions(dagText)
+	var instr dagman.Instrumentation
+	if instrumentRequested(args) {
+		instrumentedDag, instr = dagman.Instrument(instrumentedDag, dagName, files)
+	} else {
+		instr.Skipped = "instrument=false: nothing was appended to the DAG, so its structure and " +
+			"per-node status cannot be read while it runs."
+	}
+	if instr.Skipped != "" {
+		notes = append(notes, instr.Skipped)
+	}
 	staged := fstest.MapFS{
 		// Site submit policy reaches the node jobs only here. DAGMan
 		// submits those itself, on the access point, long after this
@@ -697,9 +727,18 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, dagName))
 	fmt.Fprintf(&sb, "%s\n", dagNodeJobAdvice(clusterID))
 	fmt.Fprintf(&sb, "Removing job %d.0 removes the whole workflow, including node jobs already running.\n", clusterID)
-	fmt.Fprintf(&sb, "This workflow was instrumented on submission: DAGMan writes its structure to %s and "+
-		"its per-node status to %s in the workflow's spool, so the graph and how far along each node is "+
-		"can be read while it runs.\n", instr.DotFile, instr.StatusFile)
+	switch {
+	case instr.DotFile != "" && instr.StatusFile != "":
+		fmt.Fprintf(&sb, "DAGMan writes this workflow's structure to %s and its per-node status to %s in "+
+			"the workflow's spool, so the graph and how far along each node is can be read while it "+
+			"runs.\n", instr.DotFile, instr.StatusFile)
+	case instr.Skipped != "":
+		// Named here as well as in the notes: a caller that is about to
+		// go looking for a graph should learn there is none from the
+		// same paragraph that would otherwise have told it where to
+		// look.
+		fmt.Fprintf(&sb, "%s\n", instr.Skipped)
+	}
 
 	structured := map[string]interface{}{
 		"cluster_id":  clusterID,
@@ -1120,6 +1159,58 @@ func boolFlag(args map[string]interface{}, key string) bool {
 	default:
 		return false
 	}
+}
+
+// instrumentRequested reads submit_dag's instrument flag, which is the
+// one boolean argument this package has whose absence does not mean
+// false: a workflow nobody said anything about is instrumented, and the
+// flag exists only to turn that OFF.
+//
+// It accepts the string forms for the same reason boolFlag does -- a
+// model told the parameter is a boolean still sends "false" often
+// enough that reading it as "not false" would make the escape hatch look
+// broken to exactly the caller who needs it.
+func instrumentRequested(args map[string]interface{}) bool {
+	switch v := args["instrument"].(type) {
+	case bool:
+		return v
+	case string:
+		if strings.EqualFold(v, "false") || v == "0" {
+			return false
+		}
+	}
+	return true
+}
+
+// checkDagNameLexes refuses a DAG file name that DAGMan's own lexer
+// would not read back intact.
+//
+// dag_name becomes a file name in the spool AND an argument to the
+// commands instrumentation appends, and the DAG lexer
+// (src/condor_utils/dag_parser.cpp:30-77) splits on whitespace and
+// treats " and ' as quote characters. An unbalanced quote is a fatal
+// "Invalid quoting: no ending quote found"; a newline ends the command
+// and makes the rest an unknown one; a balanced pair parses but is
+// stripped, so DAGMan writes a file under a name nobody reported. A
+// control character in a spooled file name is a problem well beyond
+// instrumentation, so this is refused at the boundary rather than
+// mangled quietly.
+func checkDagNameLexes(dagName string) error {
+	for _, r := range dagName {
+		switch {
+		case r == '"' || r == '\'':
+			return fmt.Errorf("dag_name %q contains a quote character, which DAGMan's parser reads as "+
+				"quoting and which kills the workflow with a parse error; use only letters, digits, "+
+				"and . _ + -", dagName)
+		case unicode.IsSpace(r):
+			return fmt.Errorf("dag_name %q contains whitespace, which DAGMan's parser splits on; "+
+				"use only letters, digits, and . _ + -", dagName)
+		case r < 0x20 || r == 0x7f:
+			return fmt.Errorf("dag_name %q contains a control character; use only letters, digits, "+
+				"and . _ + -", dagName)
+		}
+	}
+	return nil
 }
 
 // dagmanLayout is what the access point's own configuration says about

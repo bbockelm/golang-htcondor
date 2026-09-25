@@ -1108,3 +1108,50 @@ func TestAnalyzeCycleUsesTheAuthorsSpelling(t *testing.T) {
 		t.Errorf("the cycle is not spelled as the DAG spells its nodes: %s", f.Message)
 	}
 }
+
+// TestAnalyzeReportsADanglingLineContinuation is the one place an author
+// ever learns that DAGMan is silently dropping their last line.
+//
+// DagParser::getnextline accumulates the continuation, reaches EOF,
+// returns false, and throws the partial logical line away: no warning, no
+// parse error, and condor_dag_checker reports nothing either. The
+// workflow runs, missing whatever that line said.
+func TestAnalyzeReportsADanglingLineContinuation(t *testing.T) {
+	r := Analyze(Input{
+		DagName: "wf.dag",
+		Dag:     "JOB A a.sub\nJOB B b.sub\nPARENT A CHILD \\\n",
+	})
+	f := findingAbout(r, "line continuation", "discards")
+	if f == nil {
+		t.Fatalf("a DAG whose last line DAGMan throws away was reported as clean: %+v", r.Findings)
+	}
+	if f.Severity != Warning {
+		t.Errorf("severity = %v, want warning: the line is lost and nothing else says so", f.Severity)
+	}
+	if f.Line != 3 {
+		t.Errorf("finding is on line %d, want 3", f.Line)
+	}
+	if !strings.Contains(f.Message, `PARENT A CHILD \`) {
+		t.Errorf("the finding does not quote the line that is lost: %q", f.Message)
+	}
+
+	// Blank lines and comments after it do not end the continuation --
+	// DagParser::getnextline tests skip_line FIRST -- so the line is
+	// still the last real one and still lost.
+	r = Analyze(Input{DagName: "wf.dag", Dag: "JOB A a.sub\nRETRY A 3 \\\n\n# done\n"})
+	if findingAbout(r, "line continuation", "discards") == nil {
+		t.Errorf("a blank line and a comment hid the dangling continuation: %+v", r.Findings)
+	}
+
+	// A continuation that is actually continued is not reported, nor is
+	// a backslash anywhere but at the end of the last real line.
+	for _, dag := range []string{
+		"JOB A a.sub\nJOB B b.sub\nPARENT A CHILD \\\n  B\n",
+		`JOB A a.sub` + "\n" + `VARS A path="c:\\tmp"` + "\n",
+	} {
+		r := Analyze(Input{DagName: "wf.dag", Dag: dag})
+		if f := findingAbout(r, "line continuation", "discards"); f != nil {
+			t.Errorf("a well-formed DAG was reported as losing a line (%q):\n%s", f.Message, dag)
+		}
+	}
+}

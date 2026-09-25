@@ -239,6 +239,7 @@ func Analyze(in Input) *Report {
 			`one line, note that DAG syntax is line-oriented: use real newlines, not \n.`)
 	}
 
+	checkDanglingContinuation(r, in.Dag)
 	collectJobAttrs(r, d)
 	collectEnv(r, d)
 	checkDuplicateNodes(r, d)
@@ -262,6 +263,26 @@ func Analyze(in Input) *Report {
 		return r.Findings[i].Line < r.Findings[j].Line
 	})
 	return r
+}
+
+// checkDanglingContinuation reports a DAG whose last real line ends in a
+// continuation backslash with nothing after it.
+//
+// DAGMan simply loses that line. DagParser::getnextline accumulates the
+// continuation, hits EOF, returns false, and the partial logical line is
+// discarded without a word -- no warning, no parse error, and
+// condor_dag_checker reports nothing either. The workflow runs, missing
+// whatever that line said. This is the only place an author would learn
+// it, so it is a warning rather than a note: it is almost always a
+// truncated paste or a stray backslash.
+func checkDanglingContinuation(r *Report, dagText string) {
+	n, text, ok := danglingContinuation(dagText)
+	if !ok {
+		return
+	}
+	r.add(Warning, n, "", fmt.Sprintf("the last line of the DAG ends in a line continuation with "+
+		"nothing after it, so DAGMan discards it and the workflow runs without it: %q. "+
+		"Remove the trailing backslash, or add the line it was meant to continue onto.", text))
 }
 
 // checkUnreferenced reports files that were supplied and that nothing
