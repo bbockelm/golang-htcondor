@@ -452,7 +452,8 @@ const fanoutDagGraph = {
   ],
   state_sources: ['status-file', 'queue'],
   status_file_time: Math.floor(Date.now() / 1000) - 120,
-  fetched_at: new Date().toISOString(),
+  fetched_at: new Date(Date.now() - 120_000).toISOString(),
+  took_ms: 1240,
 };
 
 // Route the dag endpoint with a RegExp rather than a glob: the refresh
@@ -473,8 +474,7 @@ test('a DAGMan manager draws its collapsed workflow on request', async ({ page }
 
   await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
 
-  // Explicit load: every refresh re-fetches the workflow's whole spool,
-  // so nothing is drawn until the user asks.
+  // Explicit load: nothing is drawn until the user asks.
   const svg = page.locator('svg[role="img"]');
   await expect(svg).toHaveCount(0);
   await page.getByRole('button', { name: 'Load graph' }).click();
@@ -492,15 +492,62 @@ test('a DAGMan manager draws its collapsed workflow on request', async ({ page }
     /fill-red/,
   );
 
-  // The caveat has to be on the page, not in a comment: a reader who
-  // takes the single line for "every work node feeds gather" has
-  // misread a fan-in as a barrier.
+  // The one caveat that earns its place has to be on the page, not in a
+  // comment: a reader who takes the single line for "every work node
+  // feeds gather" has misread a fan-in as a barrier. One sentence.
   await expect(
     page.getByText(/some.*node in the first is a parent of.*some.*node in the second/i),
   ).toBeVisible();
 
-  // And the cost of Refresh is stated rather than left invisible.
-  await expect(page.getByText(/re-fetches the workflow's entire spool/)).toBeVisible();
+  // How old the state is and how long the load took -- the whole of what
+  // the panel now says about itself.
+  await expect(page.getByText(/State as of .*ago.*loaded in 1\.2s/)).toBeVisible();
+});
+
+// The project owner's rule: the panel says what is true of the WORKFLOW,
+// never how this server produced it. These four sentences were the worst
+// offenders and are gone; the rest of the rule is enforced by the
+// assertions above being short.
+test('the graph panel does not explain the server', async ({ page }) => {
+  await routeDagGraph(page, {
+    ...fanoutDagGraph,
+    truncated: true,
+    incomplete: true,
+    dangling_edges: 3,
+    approximate_layering: true,
+    approximate_reason: 'refinement-bound',
+    warnings: ['The job queue could not be consulted, so some nodes may read as unready.'],
+  });
+  await openJobPage(page, '90.0', fanoutManagerAd);
+  await page.getByRole('button', { name: 'Load graph' }).click();
+  await expect(page.locator('svg[role="img"]')).toBeVisible();
+  await page.locator('[data-group-id="work"]').click();
+
+  // By test id, not by "the div holding the heading": EVERY ancestor div
+  // holds the heading, so .first() is the whole page (which legitimately
+  // says "spool" in the workflow log panel and the raw ClassAd) and
+  // .last() is the button row (which says nothing at all). Both pass
+  // whatever the panel's prose says, which is the one thing this test
+  // must not do.
+  const panel = page.getByTestId('workflow-graph-panel');
+  await expect(panel).toBeVisible();
+  for (const implementation of [
+    /server-side cache/i,
+    /re-fetches the workflow/i,
+    /Nothing here polls/i,
+    /however live the queue half/i,
+    /\.dot\b/,
+    /node status file/i,
+    /spool/i,
+    /status file did not contribute/i,
+    /Node state came from/i,
+    /Structure read from/i,
+    /structure file/i,
+    /SPLICE or INCLUDE/i,
+    /perfect matching/i,
+  ]) {
+    await expect(panel.getByText(implementation)).toHaveCount(0);
+  }
 });
 
 test('clicking a group opens the members the collapse hid', async ({ page }) => {
@@ -541,7 +588,7 @@ test('the graph says how the picture may be wrong', async ({ page }) => {
     page.getByText(/grouping is coarser than the workflow's real structure/),
   ).toBeVisible();
   await expect(
-    page.getByText(/3\s+dependencies reference nodes that are not in the structure file/),
+    page.getByText(/3\s+dependencies are missing from this drawing/),
   ).toBeVisible();
 });
 
@@ -555,9 +602,9 @@ test('the graph claims nothing the response did not say', async ({ page }) => {
   await page.getByRole('button', { name: 'Load graph' }).click();
 
   await expect(page.locator('svg[role="img"]')).toBeVisible();
-  await expect(page.getByText(/still writing it/)).toHaveCount(0);
-  await expect(page.getByText(/SPLICE or INCLUDE/)).toHaveCount(0);
-  await expect(page.getByText(/dependencies reference nodes/)).toHaveCount(0);
+  await expect(page.getByText(/may be missing dependencies/)).toHaveCount(0);
+  await expect(page.getByText(/Part of this workflow is missing/)).toHaveCount(0);
+  await expect(page.getByText(/dependencies are missing from this drawing/)).toHaveCount(0);
   await expect(page.getByText(/grouping is coarser/)).toHaveCount(0);
 });
 
@@ -599,9 +646,9 @@ test('a shell-submitted workflow says why it has no graph', async ({ page }) => 
   });
 
   await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
-  const explanation = page.getByText(/structure files are not readable through this server/);
+  const explanation = page.getByText(/This workflow has no graph here/);
   await expect(explanation).toBeVisible();
-  await expect(explanation).toContainText('/home/e2e/dags');
+  await expect(explanation).toContainText('condor_q -dag');
   await expect(page.getByRole('button', { name: 'Load graph' })).toHaveCount(0);
 });
 

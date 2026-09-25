@@ -758,7 +758,14 @@ export interface DagGraphResponse {
   // only as fresh as DAGMan's last write plus the last spool fetch.
   status_file_time?: number;
   warnings?: string[];
+  // When the workflow's structure and node states were actually read --
+  // NOT when the response was assembled. A cached answer repeats the
+  // fetching load's timestamp, which is how the panel can say how old
+  // the state it is drawing is.
   fetched_at: string;
+  // How long the server spent producing this answer, in milliseconds.
+  // Optional: a server older than the field does not send it.
+  took_ms?: number;
 }
 
 // MatchAnalysisResponse is the JSON returned by

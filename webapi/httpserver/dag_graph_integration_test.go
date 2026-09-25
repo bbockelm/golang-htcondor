@@ -289,8 +289,8 @@ queue
 		if !strings.Contains(body, "declares no DOT") {
 			t.Errorf("the 409 does not explain that the DAG declares no DOT command: %s", body)
 		}
-		if !strings.Contains(body, "instrumented") {
-			t.Errorf("the 409 does not mention that workflows submitted here are instrumented: %s", body)
+		if !strings.Contains(body, "DOT ") {
+			t.Errorf("the 409 does not say what to add to the DAG file: %s", body)
 		}
 	})
 
@@ -427,7 +427,8 @@ queue
 		// cache at all satisfies -- the second transfer returns the same
 		// workflow. The transfer counter is the thing only a cache holds
 		// still.
-		if _, _, body := get(t, visible, "?refresh=1"); body == "" {
+		_, seeded, body := get(t, visible, "?refresh=1")
+		if body == "" {
 			t.Fatalf("the seeding refresh returned nothing")
 		}
 		before := dagSandboxFetches.Load()
@@ -445,7 +446,46 @@ queue
 			t.Errorf("the cached structure disagrees with the fetched one: %d/%d nodes, %d/%d groups",
 				cached.NodeCount, got.NodeCount, len(cached.Groups), len(got.Groups))
 		}
-		t.Logf("cached load took %v (transfers %d)", time.Since(start), dagSandboxFetches.Load())
+		t.Logf("cached load took %v, took_ms %d (transfers %d)",
+			time.Since(start), cached.TookMS, dagSandboxFetches.Load())
+
+		// The response has to SAY how long it took, because the panel
+		// shows it. Zero is a legitimate reading only on a load that did
+		// nothing at all, which this one did not.
+		if cached.TookMS < 0 {
+			t.Errorf("took_ms = %d", cached.TookMS)
+		}
+
+		// ...and it has to date the state it is serving. fetched_at used
+		// to be time.Now(), which reported an arbitrarily old cached
+		// answer as current; it is now when the spool was actually read,
+		// so a cached load repeats the timestamp of the refresh that
+		// filled the cache -- the one immediately above, not whichever
+		// earlier refresh an earlier subtest happened to make.
+		if !cached.FetchedAt.Equal(seeded.FetchedAt) {
+			t.Errorf("fetched_at on a cached load = %v, but the spool was read at %v; the panel "+
+				"cannot say how old the state is if the response restamps itself",
+				cached.FetchedAt, seeded.FetchedAt)
+		}
+		if !cached.FetchedAt.Before(time.Now()) {
+			t.Errorf("fetched_at = %v is not in the past", cached.FetchedAt)
+		}
+
+		// An ordinary load stays cheap however long the panel sits open.
+		// It used to go stale after 45 seconds and re-pay a whole-sandbox
+		// transfer, which is what made an ordinary page view slow -- and
+		// almost every real page view is more than 45 seconds after the
+		// last one.
+		time.Sleep(50 * time.Second)
+		aged := dagSandboxFetches.Load()
+		if status, later, body := get(t, visible, ""); status != http.StatusOK {
+			t.Fatalf("the load after the old staleness window failed: %d %s", status, body)
+		} else if n := dagSandboxFetches.Load() - aged; n != 0 {
+			t.Errorf("a load %v after the last one started %d whole-sandbox transfer(s)",
+				50*time.Second, n)
+		} else {
+			t.Logf("load after 50s: took_ms %d, still no transfer", later.TookMS)
+		}
 
 		// ...and ?refresh=1 still costs one, or the counter above proves
 		// nothing.

@@ -5,6 +5,7 @@ import {
   ResourceTable,
   UsageBar,
   dagLayers,
+  dagStateAsOf,
   dagStatePill,
   dagStateRank,
   dagStateShape,
@@ -12,6 +13,7 @@ import {
   dagmanLogName,
   dominantDagState,
   everRan,
+  formatTookMs,
   isSpooledJob,
   outputReadiness,
   supportsRemoteAccess,
@@ -446,16 +448,19 @@ describe('workflowGraphAvailability', () => {
     expect(got.reason).toBeUndefined();
   });
 
-  // Same gate as the workflow log and for the same reason: the .dot and
-  // node-status files this reads live in the spool, and a
-  // shell-submitted manager's spool is empty. The panel stays, with a
-  // sentence -- offering a Load button here buys the user a 409.
+  // Same gate as the workflow log and for the same reason. The panel
+  // stays, with a sentence -- offering a Load button here buys the user
+  // a 409. The sentence says the FACT and what to do next; it does not
+  // name the files, the spool, or why this server cannot reach them.
   it('explains itself for a manager that was not spooled', () => {
     const got = workflowGraphAvailability(manager as ClassAd);
     expect(got.applicable).toBe(true);
     expect(got.available).toBe(false);
     expect(got.reason).toContain('submitted from a shell');
-    expect(got.reason).toContain('/home/e2e/dags');
+    expect(got.reason).toContain('condor_q -dag');
+    for (const implementation of ['.dot', 'node status file', 'spool', 'DAGMan']) {
+      expect(got.reason).not.toContain(implementation);
+    }
   });
 
   it('renders nothing at all for a job that is not a DAGMan manager', () => {
@@ -467,5 +472,51 @@ describe('workflowGraphAvailability', () => {
     expect(got.applicable).toBe(false);
     expect(got.available).toBe(false);
     expect(got.reason).toBeUndefined();
+  });
+});
+
+// dagStateAsOf / formatTookMs back the one line the panel keeps: how old
+// the state is, and how long the load took. The rest of the provenance
+// paragraph -- which files were read, out of which spool, by which of
+// DAGMan's write cycles -- was a description of the server and is gone.
+describe('dagStateAsOf / formatTookMs', () => {
+  const at = (s: number) => new Date(s * 1000).toISOString();
+
+  // The answer is only as fresh as whichever half is further behind.
+  // With the auto-refetch gone, a cached structure can be much older
+  // than DAGMan's last status write, and reporting the newer of the two
+  // would tell the reader their picture is current when it is not.
+  it('dates the state by the older of the two halves', () => {
+    expect(
+      dagStateAsOf({ fetched_at: at(1000), status_file_time: 900 }),
+    ).toBe(900);
+    expect(
+      dagStateAsOf({ fetched_at: at(1000), status_file_time: 1100 }),
+    ).toBe(1000);
+  });
+
+  it('falls back to whichever half the response carries', () => {
+    expect(dagStateAsOf({ fetched_at: at(1234) })).toBe(1234);
+    expect(dagStateAsOf({ status_file_time: 555 })).toBe(555);
+    // A zero status_file_time means "that half did not contribute",
+    // not "1970".
+    expect(dagStateAsOf({ fetched_at: at(77), status_file_time: 0 })).toBe(77);
+  });
+
+  // A response with neither, or with a fetched_at that will not parse,
+  // must render as nothing rather than as the epoch.
+  it('says nothing rather than 1970', () => {
+    expect(dagStateAsOf({})).toBe(0);
+    expect(dagStateAsOf({ fetched_at: 'not a date' })).toBe(0);
+  });
+
+  it('renders a duration the way a reader reads one', () => {
+    expect(formatTookMs(38)).toBe('38ms');
+    expect(formatTookMs(940)).toBe('940ms');
+    expect(formatTookMs(1240)).toBe('1.2s');
+    expect(formatTookMs(5000)).toBe('5.0s');
+    // A server that does not send the field, or sends nonsense.
+    expect(formatTookMs(NaN)).toBe('');
+    expect(formatTookMs(-1)).toBe('');
   });
 });

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
@@ -284,14 +285,14 @@ func TestCachedDagStructureRefusesAnotherUsersHit(t *testing.T) {
 		st := testStructure("alice.dag")
 		return st, nil
 	}
-	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, false, build); err != nil {
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, build); err != nil {
 		t.Fatalf("alice's own load: %v", err)
 	}
 	if builds != 1 {
 		t.Fatalf("builds = %d, want 1", builds)
 	}
 	// Alice again: a hit, no transfer.
-	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, false, build); err != nil {
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, build); err != nil {
 		t.Fatalf("alice's cached load: %v", err)
 	}
 	if builds != 1 {
@@ -302,7 +303,7 @@ func TestCachedDagStructureRefusesAnotherUsersHit(t *testing.T) {
 	// copy; he must fall through to a real transfer, which is where the
 	// schedd refuses him.
 	bobBuilt := false
-	_, err := cachedDagStructure(c, "k", accessAs("bob"), false, false,
+	_, err := cachedDagStructure(c, "k", accessAs("bob"), false,
 		func() (*dagStructure, error) {
 			bobBuilt = true
 			return nil, errors.New("SCHEDD: permission denied")
@@ -314,7 +315,7 @@ func TestCachedDagStructureRefusesAnotherUsersHit(t *testing.T) {
 		t.Errorf("bob never reached the transfer the schedd would have refused")
 	}
 	// ...and his refusal did not evict or poison alice's entry.
-	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, false, build); err != nil ||
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, build); err != nil ||
 		builds != 1 {
 		t.Errorf("alice's entry did not survive bob's attempt: %v, %d builds", err, builds)
 	}
@@ -332,7 +333,7 @@ func TestCachedDagStructureDoesNotShareAFlightWithAnotherUser(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := cachedDagStructure(c, "k", accessAs(testOwner), false, false,
+		_, err := cachedDagStructure(c, "k", accessAs(testOwner), false,
 			func() (*dagStructure, error) {
 				mu.Lock()
 				builds++
@@ -349,7 +350,7 @@ func TestCachedDagStructureDoesNotShareAFlightWithAnotherUser(t *testing.T) {
 	bobBuilt := make(chan struct{})
 	bobDone := make(chan error, 1)
 	go func() {
-		_, err := cachedDagStructure(c, "k", accessAs("bob"), false, false,
+		_, err := cachedDagStructure(c, "k", accessAs("bob"), false,
 			func() (*dagStructure, error) {
 				close(bobBuilt)
 				return nil, errors.New("SCHEDD: permission denied")
@@ -392,7 +393,7 @@ func TestCachedDagStructureCollapsesConcurrentBuilds(t *testing.T) {
 			defer wg.Done()
 			// Half of them ask for a refresh, which must not be a way
 			// around the collapse.
-			_, err := cachedDagStructure(c, "k", accessAs(testOwner), false, i%2 == 0,
+			_, err := cachedDagStructure(c, "k", accessAs(testOwner), i%2 == 0,
 				func() (*dagStructure, error) {
 					mu.Lock()
 					builds++
@@ -432,7 +433,7 @@ func TestDagStructureCacheUnderRace(t *testing.T) {
 				if e, ok := c.get(key); ok && e.value.dagFile != "a.dag" {
 					t.Errorf("get returned %q", e.value.dagFile)
 				}
-				st, err := cachedDagStructure(c, key, accessAs(testOwner), false, j%5 == 0,
+				st, err := cachedDagStructure(c, key, accessAs(testOwner), j%5 == 0,
 					func() (*dagStructure, error) { return testStructure("a.dag"), nil })
 				if err != nil || st == nil {
 					t.Errorf("concurrent load: %v", err)
@@ -540,14 +541,14 @@ func TestCachedDagStructureRefreshBypass(t *testing.T) {
 	}
 	alice := accessAs(testOwner)
 
-	if _, err := cachedDagStructure(c, "k", alice, false, false, build); err != nil {
+	if _, err := cachedDagStructure(c, "k", alice, false, build); err != nil {
 		t.Fatalf("first build: %v", err)
 	}
 	if builds != 1 {
 		t.Fatalf("first call built %d times, want 1", builds)
 	}
 
-	got, err := cachedDagStructure(c, "k", alice, false, false, build)
+	got, err := cachedDagStructure(c, "k", alice, false, build)
 	if err != nil {
 		t.Fatalf("cached load: %v", err)
 	}
@@ -558,7 +559,7 @@ func TestCachedDagStructureRefreshBypass(t *testing.T) {
 		t.Errorf("cached load returned %q", got.dagFile)
 	}
 
-	got, err = cachedDagStructure(c, "k", alice, false, true, build)
+	got, err = cachedDagStructure(c, "k", alice, true, build)
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -570,7 +571,7 @@ func TestCachedDagStructureRefreshBypass(t *testing.T) {
 	}
 
 	// ...and the refreshed value is what the next ordinary load sees.
-	got, err = cachedDagStructure(c, "k", alice, false, false, build)
+	got, err = cachedDagStructure(c, "k", alice, false, build)
 	if err != nil {
 		t.Fatalf("load after refresh: %v", err)
 	}
@@ -582,7 +583,7 @@ func TestCachedDagStructureRefreshBypass(t *testing.T) {
 func TestCachedDagStructureDoesNotCacheFailures(t *testing.T) {
 	c := newDagStructureCache(4, time.Hour)
 	want := errors.New("boom")
-	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, false,
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false,
 		func() (*dagStructure, error) {
 			return nil, want
 		}); !errors.Is(err, want) {
@@ -613,10 +614,10 @@ func TestCachedDagStructureCachesARefusal(t *testing.T) {
 				return nil, tc.err
 			}
 			alice := accessAs(testOwner)
-			if _, err := cachedDagStructure(c, "k", alice, false, false, build); err == nil {
+			if _, err := cachedDagStructure(c, "k", alice, false, build); err == nil {
 				t.Fatalf("the refusal was swallowed")
 			}
-			got, err := cachedDagStructure(c, "k", alice, false, false, build)
+			got, err := cachedDagStructure(c, "k", alice, false, build)
 			if err == nil || got != nil {
 				t.Fatalf("the cached refusal did not come back: %v, %v", got, err)
 			}
@@ -633,7 +634,7 @@ func TestCachedDagStructureCachesARefusal(t *testing.T) {
 			}
 			// A refusal is not usable by another user either.
 			bobBuilt := false
-			_, _ = cachedDagStructure(c, "k", accessAs("bob"), false, false,
+			_, _ = cachedDagStructure(c, "k", accessAs("bob"), false,
 				func() (*dagStructure, error) {
 					bobBuilt = true
 					return nil, errors.New("denied")
@@ -864,9 +865,6 @@ func TestStateIsFinalNeedsAStatusEnd(t *testing.T) {
 	running := &dagStructure{statusFileName: "w.status", statusNextUpdate: next, sawStatusEnd: sawEnd}
 	if running.stateIsFinal() {
 		t.Errorf("a workflow whose status file was truncated mid rewrite was declared final")
-	}
-	if !dagStateStale(running, false, running.fetchedAt.Add(dagStatusMaxAge+time.Second)) {
-		t.Errorf("a running workflow's state was pinned for the cache TTL")
 	}
 
 	final := &dagStructure{statusFileName: "w.status", statusNextUpdate: 0, sawStatusEnd: true}
@@ -1387,8 +1385,16 @@ func TestDagNoStructureMessage(t *testing.T) {
 	if !strings.Contains(msg, "declares no DOT") {
 		t.Errorf("a long-running workflow with no dot file declares none: %q", msg)
 	}
-	if !strings.Contains(msg, "instrumented") {
-		t.Errorf("the message should say workflows submitted here are instrumented: %q", msg)
+	// The remaining instruction is to the workflow's AUTHOR -- a line
+	// they add to their own DAG file -- not a description of what this
+	// server does with the spool.
+	if !strings.Contains(msg, "DOT workflow.dot") {
+		t.Errorf("the message does not say what to add to the DAG file: %q", msg)
+	}
+	for _, banned := range []string{"spool", "DAGMan writes", "instrumented for this"} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("the message explains the server rather than the workflow (%q): %q", banned, msg)
+		}
 	}
 
 	done := adFrom(t, fmt.Sprintf("JobStatus = 4\nJobCurrentStartDate = %d\n", time.Now().Unix()))
@@ -1397,47 +1403,187 @@ func TestDagNoStructureMessage(t *testing.T) {
 	}
 }
 
-// --- state freshness --------------------------------------------------
+// --- an ordinary load never transfers a sandbox ----------------------
 
-// TestDagStateStale: the structure may be cached for an hour, but the
-// node states sharing its cache entry are live data and may not.
-func TestDagStateStale(t *testing.T) {
-	now := time.Now()
-	fresh := &dagStructure{statusFileName: "w.status", statusNextUpdate: now.Unix() + 30,
-		sawStatusEnd: true, fetchedAt: now}
-	if dagStateStale(fresh, false, now.Add(dagStatusMaxAge/2)) {
-		t.Errorf("a status file read seconds ago is not stale")
+// TestOrdinaryLoadNeverRefetchesHoweverOldTheEntryIs pins the fix to the
+// first of the two reported defects.
+//
+// There used to be a dagStatusMaxAge of 45 seconds: a cached entry whose
+// node status half was older than that was discarded and the ordinary
+// page load behind it re-paid a whole-sandbox transfer. Almost every
+// real page view is more than 45 seconds after the last one, so the
+// "cheap cached load" the panel advertised was a fiction and nearly
+// every load paid a spool transfer -- which is what made a 20-node
+// workflow take seconds to open.
+//
+// Restoring that auto-refetch makes this test fail: the build function
+// counts, and an ordinary load must never call it.
+func TestOrdinaryLoadNeverRefetchesHoweverOldTheEntryIs(t *testing.T) {
+	c := newDagStructureCache(4, time.Hour)
+	builds := 0
+	// A RUNNING workflow -- NextUpdate in the future, so DAGMan will
+	// write its status file again -- fetched an hour ago. This is
+	// exactly the entry the old rule threw away.
+	aged := &dagStructure{
+		dotFile:          "w.dot",
+		grouping:         &dagman.Grouping{},
+		statusFileName:   "w.status",
+		statusNextUpdate: time.Now().Add(30 * time.Second).Unix(),
+		sawStatusEnd:     true,
+		fetchedAt:        time.Now().Add(-time.Hour),
 	}
-	if !dagStateStale(fresh, false, now.Add(dagStatusMaxAge+time.Second)) {
-		t.Errorf("an old status file must be re-read: the state half of this endpoint is live")
+	build := func() (*dagStructure, error) {
+		builds++
+		return aged, nil
+	}
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), false, build); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if builds != 1 {
+		t.Fatalf("the first load must build: builds = %d", builds)
 	}
 
-	// A workflow DAGMan has finished with wrote NextUpdate 0 on its
-	// StatusEnd ad. Its states will never change again, so re-fetching
-	// its whole sandbox for them would be pure waste.
-	final := &dagStructure{statusFileName: "w.status", statusNextUpdate: 0,
-		sawStatusEnd: true, fetchedAt: now}
-	if dagStateStale(final, false, now.Add(24*time.Hour)) {
-		t.Errorf("a finished workflow's final status file never goes stale")
+	for i := 0; i < 5; i++ {
+		got, err := cachedDagStructure(c, "k", accessAs(testOwner), false, build)
+		if err != nil || got != aged {
+			t.Fatalf("ordinary load %d: %v / %p", i, err, got)
+		}
+	}
+	if builds != 1 {
+		t.Errorf("an ordinary load transferred a sandbox %d time(s); it must never do that",
+			builds-1)
 	}
 
-	// C1: no status file yet is NOT "no live half". DAGMan writes the
-	// DOT file at parse time and the status file only on its first
-	// update cycle, so the first load of a young workflow lands between
-	// them -- and pinning that entry reported a running workflow as
-	// having no state at all until the hour was up or someone found
-	// ?refresh=1.
-	none := &dagStructure{fetchedAt: now}
-	if dagStateStale(none, false, now.Add(dagStatusMaxAge/2)) {
-		t.Errorf("a first fetch seconds old was re-fetched immediately")
+	// A workflow that has NOT written a status file yet is the same
+	// rule. The old code re-fetched this one on a timer too.
+	c2 := newDagStructureCache(4, time.Hour)
+	stateless := &dagStructure{dotFile: "w.dot", grouping: &dagman.Grouping{},
+		fetchedAt: time.Now().Add(-time.Hour)}
+	n := 0
+	build2 := func() (*dagStructure, error) { n++; return stateless, nil }
+	for i := 0; i < 3; i++ {
+		if _, err := cachedDagStructure(c2, "k", accessAs(testOwner), false, build2); err != nil {
+			t.Fatalf("stateless load %d: %v", i, err)
+		}
 	}
-	if !dagStateStale(none, false, now.Add(dagStatusMaxAge+time.Second)) {
-		t.Errorf("a workflow that has not written its status file yet was pinned without one")
+	if n != 1 {
+		t.Errorf("a workflow with no status file was re-fetched %d times", n-1)
 	}
-	// The same entry for a manager that has LEFT the queue is not
-	// stale: no status file is ever coming for it.
-	if dagStateStale(none, true, now.Add(24*time.Hour)) {
-		t.Errorf("a finished manager's sandbox is re-fetched forever in the hope of a status file")
+
+	// ...and ?refresh=1 is still the thing that fetches, or the panel
+	// has no way to get a newer answer at all.
+	if _, err := cachedDagStructure(c, "k", accessAs(testOwner), true, build); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if builds != 2 {
+		t.Errorf("?refresh=1 did not fetch: builds = %d", builds)
+	}
+}
+
+// --- the archive query is sized to the workflow ----------------------
+
+// TestDagArchiveBoundsAreSizedToTheWorkflow pins the fix to the second
+// reported defect.
+//
+// The schedd walks the history file backwards and stops at the first of
+// the match limit and the scan limit. The old bounds were flat -- 20,000
+// matches, 200,000 records -- so a 20-node workflow, which can never
+// produce 20,000 matches, never hit the match limit and scanned the full
+// 200,000 records on EVERY page load, cached or not. Measured against a
+// 200,000-record history file that was ~0.9s per load with nothing else
+// in the request costing more than 50ms.
+//
+// Restoring either flat bound makes this test fail.
+func TestDagArchiveBoundsAreSizedToTheWorkflow(t *testing.T) {
+	// The size the report is about. The match limit has to be small
+	// enough that finding the workflow's own nodes ENDS the scan.
+	limit, scan := dagArchiveBounds(20)
+	if limit > 200 {
+		t.Errorf("a 20-node workflow asks the history for %d matches; the scan then cannot stop "+
+			"until it has read the whole file", limit)
+	}
+	if limit < 20 {
+		t.Errorf("a 20-node workflow asks for %d matches, fewer than it has nodes", limit)
+	}
+	if scan >= dagArchiveScanLimit {
+		t.Errorf("a 20-node workflow scans %d records; that is the flat ceiling this exists to "+
+			"get away from", scan)
+	}
+
+	// A one-node workflow still gets slack: DAGMan retries submit the
+	// node again under the same name, and a node may have several procs.
+	if l, _ := dagArchiveBounds(1); l <= 1 {
+		t.Errorf("a one-node workflow asks for %d records, leaving no room for a retry", l)
+	}
+
+	// Bigger workflows ask for more, up to the ceilings and never past
+	// them -- the ceilings are what keeps a 100,000-node workflow from
+	// asking the schedd for an unbounded read.
+	prevLimit, prevScan := 0, 0
+	for _, n := range []int{1, 20, 500, 5000, 100000, 1 << 20} {
+		l, sc := dagArchiveBounds(n)
+		if l > dagArchiveLimit || sc > dagArchiveScanLimit {
+			t.Errorf("bounds(%d) = %d/%d, past the ceilings %d/%d",
+				n, l, sc, dagArchiveLimit, dagArchiveScanLimit)
+		}
+		if l <= 0 || sc <= 0 {
+			// Zero or negative is "unlimited" to the history client, so
+			// an overflow here would remove the bound entirely.
+			t.Fatalf("bounds(%d) = %d/%d; a non-positive bound means UNLIMITED", n, l, sc)
+		}
+		if l < prevLimit || sc < prevScan {
+			t.Errorf("bounds are not monotonic at %d: %d/%d after %d/%d", n, l, sc, prevLimit, prevScan)
+		}
+		prevLimit, prevScan = l, sc
+	}
+}
+
+// TestDagArchiveTruncationWarningFollowsTheBound: the warning exists
+// because a cut-off archive answer and a complete one are
+// indistinguishable in the ads, and it has to compare against the bound
+// THIS workflow asked for -- sizing the query to the workflow moved the
+// cut, and a warning still checking the flat 20,000 would never fire.
+func TestDagArchiveTruncationWarningFollowsTheBound(t *testing.T) {
+	limit, _ := dagArchiveBounds(20)
+	if w := dagArchiveTruncationWarning(limit-1, 20); w != "" {
+		t.Errorf("a complete answer warned: %q", w)
+	}
+	w := dagArchiveTruncationWarning(limit, 20)
+	if w == "" {
+		t.Fatalf("an answer that hit this workflow's own %d-record bound did not warn", limit)
+	}
+	// ...and it says it in words that do not describe the server.
+	for _, banned := range []string{"inferred", "record limit", "looked up", "archive answered"} {
+		if strings.Contains(w, banned) {
+			t.Errorf("the warning explains the server rather than the workflow: %q", w)
+		}
+	}
+}
+
+// TestClampDagNodeTextBoundsTheOnlyUnboundedFields: a node entry is
+// otherwise a name, a state word and a job id -- 23 real nodes measured
+// 2.8 KB of response in total. StatusDetails and HoldReason come from
+// outside this server and have no length of their own; a hold reason
+// from a failed transfer carries the plugin's output and runs to
+// kilobytes.
+func TestClampDagNodeTextBoundsTheOnlyUnboundedFields(t *testing.T) {
+	if got := clampDagNodeText("short"); got != "short" {
+		t.Errorf("an ordinary detail was altered: %q", got)
+	}
+	long := strings.Repeat("x", 64<<10)
+	got := clampDagNodeText(long)
+	if len(got) > dagNodeTextMaxBytes+8 {
+		t.Errorf("a %d-byte hold reason came back as %d bytes", len(long), len(got))
+	}
+	if !strings.HasSuffix(got, "\u2026") {
+		t.Errorf("a truncated value does not say it was truncated: %q", got[len(got)-8:])
+	}
+	// Cut on a rune boundary: the result is JSON, and half a rune is not
+	// text. A string of 3-byte runes cannot be cut at any multiple of
+	// 1024 without landing inside one.
+	multibyte := strings.Repeat("\u4e16", 4096)
+	if cut := clampDagNodeText(multibyte); !utf8.ValidString(cut) {
+		t.Errorf("clamping produced invalid UTF-8")
 	}
 }
 
@@ -1716,31 +1862,107 @@ func TestFindStatusFileRanksItsCandidates(t *testing.T) {
 	}
 }
 
-// TestDagArchiveTruncationWarning is R5. The archive query stops at
-// dagArchiveLimit and the nodes past the cut read as "unready" from
-// "inferred" -- indistinguishable from a node that never started. A
+// TestDagArchiveTruncationStillSaysSomethingWasMissed is R5, kept. The
+// archive query stops at its match bound and the nodes past the cut read
+// as "unready" -- indistinguishable from a node that never started. A
 // finished 100,000-node workflow would report 80% of itself as never
-// having run, silently.
-func TestDagArchiveTruncationWarning(t *testing.T) {
-	if w := dagArchiveTruncationWarning(dagArchiveLimit - 1); w != "" {
-		t.Errorf("a complete answer produced a warning: %q", w)
-	}
-	if w := dagArchiveTruncationWarning(0); w != "" {
+// having run, silently. What the warning must NOT do any more is
+// explain the server: see
+// TestDagArchiveTruncationWarningFollowsTheBound.
+func TestDagArchiveTruncationStillSaysSomethingWasMissed(t *testing.T) {
+	big, _ := dagArchiveBounds(1 << 20)
+	if w := dagArchiveTruncationWarning(0, 1<<20); w != "" {
 		t.Errorf("an empty answer produced a warning: %q", w)
 	}
-	w := dagArchiveTruncationWarning(dagArchiveLimit)
+	w := dagArchiveTruncationWarning(big, 1<<20)
 	if w == "" {
 		t.Fatalf("an answer that hit the limit was reported as complete")
 	}
-	for _, want := range []string{"truncated", dagStateUnready, dagSourceInferred,
-		fmt.Sprint(dagArchiveLimit)} {
-		if !strings.Contains(w, want) {
-			t.Errorf("the warning does not mention %q: %s", want, w)
-		}
-	}
 	// A reader has to be able to tell this apart from "nothing ran",
 	// which is the whole point of saying anything.
-	if !strings.Contains(w, "never started") {
+	if !strings.Contains(w, "cut short") || !strings.Contains(w, dagStateUnready) {
 		t.Errorf("the warning does not say what the missing nodes may NOT mean: %s", w)
+	}
+}
+
+// TestDagNodesMaybeInHistoryDoesNotScanForJobsThatNeverRan pins the gate
+// on the archive query. The archive is the only source of a finished
+// node's job id, so it has to run whenever a node's job has left the
+// queue -- and it is pure loss on a workflow whose unfinished nodes have
+// never been submitted at all, which is most of a running workflow.
+func TestDagNodesMaybeInHistoryDoesNotScanForJobsThatNeverRan(t *testing.T) {
+	inQueue := map[string]dagNodeState{
+		"work_0": {state: dagStateRunning, jobID: "6.0", source: dagSourceQueue},
+		"work_1": {state: dagStateIdle, jobID: "6.1", source: dagSourceQueue},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status map[string]dagStatusEntry
+		live   map[string]dagNodeState
+		want   int
+	}{{
+		// The shape this guards: two jobs in the queue, and the other
+		// two nodes have never been submitted. Nothing of this workflow
+		// is in the history, so asking costs a scan and returns nothing.
+		name: "nothing has left the queue yet",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStatePreRun},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 0,
+	}, {
+		name: "a node finished and left",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStateDone},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 1,
+	}, {
+		// A POSTRUN node's job is gone from the queue while DAGMan still
+		// calls the node unfinished; its id is in the history and
+		// nowhere else.
+		name: "a node is running its POST script",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStatePostRun},
+			"work_0": {state: dagStateSubmitted},
+			"work_1": {state: dagStateSubmitted},
+			"gather": {state: dagStateUnready},
+		},
+		live: inQueue,
+		want: 1,
+	}, {
+		// Futile means an ancestor failed, so this node was never
+		// submitted -- however finished the workflow looks.
+		name: "futile nodes were never jobs",
+		status: map[string]dagStatusEntry{
+			"setup":  {state: dagStateFailed},
+			"work_0": {state: dagStateFutile},
+			"work_1": {state: dagStateFutile},
+			"gather": {state: dagStateFutile},
+		},
+		want: 1,
+	}, {
+		// The uninstrumented case: no status file, so nothing here can
+		// rule a node out and the archive is the only source of state.
+		name: "no status file means ask about everything",
+		want: 4,
+	}, {
+		name:   "a state this server does not know falls through to asking",
+		status: map[string]dagStatusEntry{"setup": {state: "invented-by-a-later-dagman"}},
+		want:   4,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fanStructure(t, tc.status, nil)
+			if got := dagNodesMaybeInHistory(st, tc.live); got != tc.want {
+				t.Errorf("dagNodesMaybeInHistory = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
