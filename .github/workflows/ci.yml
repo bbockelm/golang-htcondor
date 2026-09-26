@@ -209,7 +209,7 @@ jobs:
       with:
         # Match the version Dockerfile.release and release-binaries.yml
         # build with, so a green PR means the release build is green too.
-        node-version: '20'
+        node-version: '24'
         cache: 'npm'
         cache-dependency-path: webapi/frontend/package-lock.json
 

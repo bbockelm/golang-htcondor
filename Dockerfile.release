@@ -5,7 +5,7 @@
 # Stage 3: Copy just the binary into a minimal runtime image.
 
 # --- Stage 1: frontend ---
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS frontend-builder
 
 WORKDIR /build/frontend
 
