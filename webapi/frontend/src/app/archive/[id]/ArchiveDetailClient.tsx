@@ -52,21 +52,9 @@ export default function ArchiveDetailClient() {
     enabled: !!id && id !== '_',
     // Archive records are immutable; never refetch automatically.
     staleTime: Infinity,
-    queryFn: async () => {
-      const [clusterStr, procStr] = id.split('.');
-      const cluster = Number.parseInt(clusterStr, 10);
-      const proc = Number.parseInt(procStr ?? '0', 10);
-      if (!Number.isFinite(cluster) || !Number.isFinite(proc)) {
-        throw new ApiError(400, `Invalid job id: ${id}`);
-      }
-      const resp: HistoryListResponse = await api.jobs.archive({
-        constraint: `ClusterId == ${cluster} && ProcId == ${proc}`,
-        projection: '*',
-        limit: 1,
-      });
-      const ads = resp.ads ?? [];
-      return ads.length > 0 ? ads[0] : null;
-    },
+    // `projection=*` so the AttributesTable can render the full ad --
+    // same UX as the live detail page.
+    queryFn: () => api.jobs.archiveOne(id),
   });
 
   const [batchID, jobIdx] = id.split('.');
