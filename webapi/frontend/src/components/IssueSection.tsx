@@ -101,7 +101,13 @@ export function ClusterRow({
             ) : null}
           </div>
 
-          {lead ? (
+          {/* The example's own words when it has any. A record can
+              reach here with an empty message -- a hold with no reason
+              text -- and rendering that drew a row with nothing where
+              the problem should be, which reads as a rendering fault
+              rather than as an absence. The template at least names the
+              shape of the thing. */}
+          {lead?.message ? (
             <p className="mt-1.5 break-words font-mono text-xs leading-relaxed text-gray-800">
               {lead.message}
             </p>

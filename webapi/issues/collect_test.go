@@ -40,7 +40,10 @@ func ad(t *testing.T, text string) *classad.ClassAd {
 	return a
 }
 
-func heldAd(t *testing.T, cluster int, owner, reason string, code, sub int64, at int64) *classad.ClassAd {
+func heldAd(t *testing.T, cluster int, owner, reason string, code, sub int64) *classad.ClassAd {
+	// Inside the window every caller uses; the window itself is what the
+	// query tests vary.
+	const at = 900
 	return ad(t, fmt.Sprintf(`[ ClusterId = %d; ProcId = 0; Owner = %q; HoldReason = %q; HoldReasonCode = %d; HoldReasonSubCode = %d; EnteredCurrentStatus = %d ]`,
 		cluster, owner, reason, code, sub, at))
 }
@@ -51,7 +54,7 @@ func vacatedAd(t *testing.T, cluster int, owner, reason string, code int64) *cla
 }
 
 func TestCollectConfinesToScopeAndWindow(t *testing.T) {
-	src := &fakeSource{jobs: []*classad.ClassAd{heldAd(t, 1, "alice", "boom", 21, 102, 900)}}
+	src := &fakeSource{jobs: []*classad.ClassAd{heldAd(t, 1, "alice", "boom", 21, 102)}}
 	now := time.Unix(10000, 0)
 	_, err := Collect(context.Background(), src, Options{
 		Scope:  `Owner == "alice"`,
@@ -97,7 +100,7 @@ func TestCollectReportsMissingEpochHistoryRatherThanFailing(t *testing.T) {
 	// here would show nothing at all on a working access point, when it
 	// has a perfectly good answer about what is held.
 	src := &fakeSource{
-		jobs:     []*classad.ClassAd{heldAd(t, 1, "alice", "boom", 21, 102, 900)},
+		jobs:     []*classad.ClassAd{heldAd(t, 1, "alice", "boom", 21, 102)},
 		epochErr: fmt.Errorf("no epoch history configured"),
 	}
 	set, err := Collect(context.Background(), src, Options{Window: time.Hour, IncludeEnded: true})
@@ -149,7 +152,7 @@ func TestCollectFlagsTruncation(t *testing.T) {
 	// claim about what was read, not about the access point.
 	many := make([]*classad.ClassAd, MaxRecords)
 	for i := range many {
-		many[i] = heldAd(t, i, "alice", "boom", 21, 102, 900)
+		many[i] = heldAd(t, i, "alice", "boom", 21, 102)
 	}
 	set, err := Collect(context.Background(), &fakeSource{jobs: many}, Options{Window: time.Hour})
 	if err != nil {
@@ -254,5 +257,106 @@ func TestRunFailureIsTimedWhenItEnded(t *testing.T) {
 	rec, ok = vacateRecord(old)
 	if !ok || rec.At != 100 {
 		t.Errorf("At = %d, want the fallback", rec.At)
+	}
+}
+
+// --- one job, one row -----------------------------------------------
+//
+// Reported from ap40: the page showed the same job twice under two
+// different hold reasons, one of them blank. Three separate causes,
+// each enough on its own.
+
+func TestAJobHeldNowIsNotAlsoCountedFromItsRunInstance(t *testing.T) {
+	// The live queue says this job is held; the run instance that got it
+	// there is in epoch history saying the same thing a different way.
+	// One problem, recorded twice by two sources.
+	src := &fakeSource{
+		jobs: []*classad.ClassAd{
+			heldAd(t, 15799789, "derek", "Job credentials are not available", 4, 0),
+		},
+		epochs: []*classad.ClassAd{
+			ad(t, `[ ClusterId = 15799789; ProcId = 0; Owner = "derek"; VacateReason = "Job credentials are not available"; VacateReasonCode = 4; EpochWriteDate = 900 ]`),
+		},
+	}
+	set, err := Collect(context.Background(), src, Options{Window: time.Hour, IncludeEnded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Records) != 1 {
+		for _, r := range set.Records {
+			t.Logf("  kind=%s code=%d msg=%q", r.Kind, r.Code, r.Message)
+		}
+		t.Fatalf("records = %d, want the job counted once", len(set.Records))
+	}
+	// The queue's version survives: it is the current state, where the
+	// run instance is the attempt that produced it.
+	if set.Records[0].Message != "Job credentials are not available" {
+		t.Errorf("kept %+v, want the live hold", set.Records[0])
+	}
+}
+
+func TestAHeldJobsEarlierRunFailureIsStillCounted(t *testing.T) {
+	// Only the hold half is deduplicated. A job that is held now may
+	// also have failed to keep running earlier in the window, and those
+	// are different problems in different sections of the page.
+	src := &fakeSource{
+		jobs: []*classad.ClassAd{heldAd(t, 42, "alice", "held for a reason", 4, 0)},
+		epochs: []*classad.ClassAd{
+			ad(t, `[ ClusterId = 42; ProcId = 0; Owner = "alice"; VacateReason = "Failed to receive GoAhead message"; VacateReasonCode = 1007; EpochWriteDate = 800 ]`),
+		},
+	}
+	set, err := Collect(context.Background(), src, Options{Window: time.Hour, IncludeEnded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, r := range set.Records {
+		kinds[r.Kind]++
+	}
+	if kinds[KindHold] != 1 || kinds[KindRunFailure] != 1 {
+		t.Errorf("kinds = %v, want one of each", kinds)
+	}
+}
+
+func TestOnlyTheRunInstanceAdTypeIsRead(t *testing.T) {
+	// A run instance leaves several records behind and only one of them
+	// is the run ending: EPOCH is the finished instance, SPAWN is
+	// written at the start, and INPUT/OUTPUT/CHECKPOINT/COMMON are the
+	// transfer records. An access point that configures those banners to
+	// copy vacate attributes gets one failure reported as several rows.
+	src := &fakeSource{}
+	if _, err := Collect(context.Background(), src, Options{Window: time.Hour, IncludeEnded: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(src.epochQuery, `EpochAdType == "EPOCH"`) {
+		t.Errorf("epoch query = %q, want it confined to finished run instances", src.epochQuery)
+	}
+	// A schedd old enough not to write the attribute wrote only the one
+	// kind, so those records must not be excluded.
+	if !strings.Contains(src.epochQuery, "EpochAdType =?= undefined") {
+		t.Errorf("epoch query = %q, want records without the attribute kept", src.epochQuery)
+	}
+}
+
+func TestAVacateRecordWithNothingToSayIsDropped(t *testing.T) {
+	// Code zero and no text is the absence of a vacate reason, not a
+	// reason of "unspecified". Reported, it drew a row with a blank
+	// message under a label that made it look like a distinct problem.
+	silent := ad(t, `[ ClusterId = 1; ProcId = 0; Owner = "alice"; VacateReasonCode = 0; EpochWriteDate = 900 ]`)
+	if _, ok := vacateRecord(silent); ok {
+		t.Error("a vacate record with neither a reason nor a code was kept")
+	}
+
+	// Code zero WITH text is still something that happened.
+	spoken := ad(t, `[ ClusterId = 1; ProcId = 0; Owner = "alice"; VacateReason = "something happened"; VacateReasonCode = 0; EpochWriteDate = 900 ]`)
+	if rec, ok := vacateRecord(spoken); !ok || rec.Message != "something happened" {
+		t.Errorf("record = %+v ok=%v, want it kept", rec, ok)
+	}
+
+	// And a code with no text is still informative -- the code names the
+	// category even when nobody wrote a sentence.
+	coded := ad(t, `[ ClusterId = 1; ProcId = 0; Owner = "alice"; VacateReasonCode = 1007; EpochWriteDate = 900 ]`)
+	if _, ok := vacateRecord(coded); !ok {
+		t.Error("a coded vacate record with no text was dropped")
 	}
 }
