@@ -90,6 +90,34 @@ type localIdentity struct {
 	// store persists the index across restarts. Nil disables that, which
 	// is the case for a deployment with no application database.
 	store *identityIndexStore
+
+	// refreshStopped is closed when the background loop returns, so a
+	// caller that cancelled it can wait for it to actually be gone.
+	//
+	// A test needs that guarantee rather than a hope: the loop writes to
+	// the store, the store is a database under the test's temporary
+	// directory, and a write that lands after the directory has been
+	// removed fails the test in cleanup with "directory not empty" --
+	// having passed everything it asserted.
+	refreshStopped chan struct{}
+}
+
+// waitForRefreshStop blocks until the background refresh loop has
+// returned, or the timeout passes. Reports whether it stopped.
+//
+// Returning rather than failing on timeout: the caller knows whether a
+// loop it cancelled going missing is worth failing over, and a helper
+// that called t.Fatal would do it from whatever goroutine ran cleanup.
+func (l *localIdentity) waitForRefreshStop(timeout time.Duration) bool {
+	if l == nil || l.refreshStopped == nil {
+		return true
+	}
+	select {
+	case <-l.refreshStopped:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // mapsAccount reports whether the asserted subject is translated.
@@ -198,7 +226,16 @@ func (l *localIdentity) warmUp(ctx context.Context) {
 	// keep trying rather than give up for the rest of its life, and in a
 	// container t=0 is exactly when the directory is least likely to
 	// answer.
-	defer func() { go l.refreshLoop(context.WithoutCancel(parent)) }()
+	// parent, not context.WithoutCancel(parent).
+	//
+	// The loop has to outlive the warmUp TIMEOUT -- that is what ctx was
+	// shadowed with above, and the reason this uses parent at all -- but
+	// stripping cancellation entirely left it unstoppable by anything.
+	// The daemon passes context.Background() here, so this changes
+	// nothing for it; what it changes is that a caller which CAN cancel,
+	// including a test, is now able to.
+	l.refreshStopped = make(chan struct{})
+	defer func() { go l.refreshLoop(parent) }()
 
 	if err := l.resolver.Refresh(ctx); err != nil {
 		// Distinguish "there is no index" from "the index we already had
@@ -336,6 +373,9 @@ func (l *localIdentity) saveIndex(ctx context.Context) {
 // nothing from one that could not be read, and an unrelated edit to the
 // local passwd file looked the same as success.
 func (l *localIdentity) refreshLoop(ctx context.Context) {
+	if l.refreshStopped != nil {
+		defer close(l.refreshStopped)
+	}
 	if l.refreshEvery <= 0 {
 		return
 	}

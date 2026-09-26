@@ -47,6 +47,31 @@ func identityOverFile(t *testing.T, path string, every time.Duration) *localIden
 	return li
 }
 
+// warmUpForTest runs warmUp and guarantees the background refresh loop is
+// gone before the test's temporary directory is.
+//
+// The loop writes to the index store, which in these tests is a database
+// inside t.TempDir(). Left running, a write can land after RemoveAll has
+// begun and fail the test during cleanup with "directory not empty" --
+// after it has passed everything it asserts, which is how this surfaced:
+// as an intermittent failure on an unrelated commit.
+//
+// Cancelling is not enough on its own. Cleanup functions run last-in
+// first-out, so this one runs before the TempDir removal registered
+// earlier -- but the loop still has to be given the chance to notice,
+// which is what the wait is for.
+func warmUpForTest(t *testing.T, li *localIdentity) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		if !li.waitForRefreshStop(5 * time.Second) {
+			t.Error("the account-index refresh loop did not stop; it may still write into the test's directory")
+		}
+	})
+	li.warmUp(ctx)
+}
+
 const onePasswdEntry = "root:x:0:0:root:/root:/bin/sh\n" //nolint:gosec // a passwd(5) fixture line; the "x" means the hash lives in shadow(5)
 
 // The index must come back on its own, not because somebody happened to
@@ -60,7 +85,7 @@ func TestTheIndexRefreshesWithoutALogin(t *testing.T) {
 	}
 
 	li := identityOverFile(t, path, 5*time.Millisecond)
-	li.warmUp(context.Background())
+	warmUpForTest(t, li)
 
 	if got, _, _ := li.resolver.Stats(); got != 1 {
 		t.Fatalf("precondition: index holds %d accounts, want the one in the file", got)
@@ -96,7 +121,7 @@ func TestAFailedRefreshKeepsThePreviousIndex(t *testing.T) {
 	}
 
 	li := identityOverFile(t, path, 5*time.Millisecond)
-	li.warmUp(context.Background())
+	warmUpForTest(t, li)
 	if got, _, _ := li.resolver.Stats(); got != 2 {
 		t.Fatalf("precondition: index holds %d accounts, want 2", got)
 	}
@@ -130,7 +155,7 @@ func TestAnUnconfirmableHintFallsBackToTheIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	li := identityOverFile(t, path, time.Hour)
-	li.warmUp(context.Background())
+	warmUpForTest(t, li)
 
 	// "root" exists, but its GECOS is not this subject.
 	account, _, hinted, err := li.resolveWithHint(context.Background(), "bockelman", nil, "root")
@@ -153,7 +178,7 @@ func TestAConfirmedHintIsUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	li := identityOverFile(t, path, time.Hour)
-	li.warmUp(context.Background())
+	warmUpForTest(t, li)
 
 	account, _, hinted, err := li.resolveWithHint(context.Background(), "bockelman", nil, "bbockelm")
 	if err != nil {
@@ -161,5 +186,40 @@ func TestAConfirmedHintIsUsed(t *testing.T) {
 	}
 	if !hinted || account != "bbockelm" {
 		t.Errorf("account = %q, hinted = %v; want the hint to have been used", account, hinted)
+	}
+}
+
+// The refresh loop must stop when its context is cancelled.
+//
+// It used to be started with context.WithoutCancel, which made it
+// unstoppable by anything: it kept rebuilding the index and writing to the
+// store for as long as the process lived. In the daemon that is invisible,
+// because the context there is Background and the process owns the loop
+// anyway. In a test it is a goroutine writing into a directory the test is
+// about to delete, which fails in cleanup -- "directory not empty" -- long
+// after the test has passed everything it asserts.
+//
+// This asserts the property rather than trying to reproduce the race: the
+// failure needs the write to land inside the window RemoveAll is walking
+// the directory, which does not happen on demand.
+func TestRefreshLoopStopsWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(path, []byte(onePasswdEntry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	li := identityOverFile(t, path, time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	li.warmUp(ctx)
+
+	// Running: it must not have stopped on its own.
+	if li.waitForRefreshStop(50 * time.Millisecond) {
+		t.Fatal("the refresh loop stopped without being cancelled")
+	}
+
+	cancel()
+	if !li.waitForRefreshStop(5 * time.Second) {
+		t.Error("the refresh loop ignored cancellation; it can still write after the test is over")
 	}
 }
