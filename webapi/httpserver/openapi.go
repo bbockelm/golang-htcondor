@@ -31,6 +31,10 @@ const openAPISchema = `{
   ],
   "tags": [
     {
+      "name": "metrics",
+      "description": "Time-series metrics from the htcondordb archive. Today the one table is job_metrics -- per-job resource-usage samples (memory/CPU/disk/GPU) captured as the schedd commits usage updates, one series per run attempt. Reads are owner-scoped and time-bucketed. When the sampler is not enabled the endpoint answers 200 with enabled=false so a UI can hide the feature."
+    },
+    {
       "name": "placement",
       "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503."
     }
@@ -545,6 +549,50 @@ const openAPISchema = `{
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "Admin UI is not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/metrics/{table}": {
+      "get": {
+        "tags": ["metrics"],
+        "summary": "Query time-series metrics",
+        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows.",
+        "operationId": "queryMetrics",
+        "parameters": [
+          {"name": "table", "in": "path", "required": true, "schema": {"type": "string", "enum": ["job_metrics"]}, "description": "The metrics table to read."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression selecting rows (e.g. 'ClusterId == 12345 && ProcId == 0'). ANDed server-side with the caller's Owner unless they are an admin. Defaults to all the caller's rows."},
+          {"name": "group_by", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Comma-separated grouping columns, in output order (e.g. 'RunInstanceID'). The time bucket, if any, is always the last group column."},
+          {"name": "bucket", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Time bucket width on the table's time attribute (SampleTime for job_metrics): a duration like '15m' or a number of seconds. Omit for no time bucketing."},
+          {"name": "agg", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Comma-separated aggregates as func:Attr, e.g. 'max:MemoryUsage,avg:CpuUtil'. Functions: count (count:*), sum, avg, min, max."},
+          {"name": "since", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Lower bound (inclusive) on the time attribute, unix seconds."},
+          {"name": "until", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Upper bound (inclusive) on the time attribute, unix seconds."}
+        ],
+        "responses": {
+          "200": {
+            "description": "The aggregate result, or enabled=false when the sampler is off. Rows are arrays of string cell values aligned to columns; group cells come first (in group_by order, time bucket last), then one cell per agg. Numeric cells are decimal strings; a bucket cell is the bucket-start unix time.",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "properties": {
+                "enabled": {"type": "boolean", "description": "False when this server has no such table (sampler disabled or too old); then no columns/rows."},
+                "table": {"type": "string"},
+                "time_attr": {"type": "string", "description": "The attribute buckets/since/until act on."},
+                "bucket_seconds": {"type": "integer"},
+                "columns": {"type": "array", "items": {"type": "object", "properties": {
+                  "name": {"type": "string"},
+                  "kind": {"type": "string", "enum": ["group", "metric"]},
+                  "func": {"type": "string"},
+                  "attr": {"type": "string"},
+                  "bucket_seconds": {"type": "integer"}
+                }}},
+                "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                "truncated": {"type": "boolean", "description": "True if the row cap was hit; narrow the query."}
+              }
+            }}}
+          },
+          "400": {"description": "Bad parameters (unknown agg function, invalid attribute, unparseable constraint)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Unknown metrics table", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The mirror could not be reached or the query failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

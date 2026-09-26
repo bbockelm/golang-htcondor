@@ -4,6 +4,8 @@
 // the SPA; bearer tokens for programmatic use). All fetches include
 // credentials so the session cookie is sent with every request.
 
+import type { MetricsResponse } from './metrics';
+
 const BASE = '/api/v1';
 
 export class ApiError extends Error {
@@ -1030,6 +1032,31 @@ export const api = {
   },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
+
+  // Time-series metrics (htcondordb archive tables, e.g. job_metrics). The
+  // response is a generic column/row aggregate; lib/metrics.ts shapes it.
+  metrics: {
+    query: (
+      table: string,
+      params: {
+        constraint?: string;
+        group_by?: string;
+        bucket?: string | number;
+        agg: string;
+        since?: number;
+        until?: number;
+      },
+    ): Promise<MetricsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.constraint) qs.set('constraint', params.constraint);
+      if (params.group_by) qs.set('group_by', params.group_by);
+      if (params.bucket !== undefined) qs.set('bucket', String(params.bucket));
+      qs.set('agg', params.agg);
+      if (params.since !== undefined) qs.set('since', String(params.since));
+      if (params.until !== undefined) qs.set('until', String(params.until));
+      return fetchJSON(`${BASE}/metrics/${encodeURIComponent(table)}?${qs.toString()}`);
+    },
+  },
 
   jobs: {
     // limit accepts a number or '*' (unlimited). projection is a CSV.

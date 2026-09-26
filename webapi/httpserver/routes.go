@@ -127,6 +127,10 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/admin/superuser", cors(http.HandlerFunc(h.handleSuperuserMode)))
 
 	// Web UI dashboard summary
+	// Time-series metrics query (htcondordb archive tables, e.g. job_metrics).
+	// Trailing slash catches /api/v1/metrics/{table}.
+	mux.Handle("/api/v1/metrics/", cors(h.requireCondorScope(http.HandlerFunc(h.handleMetricsQuery))))
+
 	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))
 	mux.Handle("/api/v1/issues", cors(h.requireCondorScope(http.HandlerFunc(h.handleIssues))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
