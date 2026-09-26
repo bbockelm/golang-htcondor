@@ -72,7 +72,29 @@ var EpochProjection = append([]string{
 	"ClusterId", "ProcId", "Owner", "JobBatchName",
 	"VacateReason", "VacateReasonCode", "VacateReasonSubCode",
 	"EpochWriteDate", "JobCurrentStartDate", "NumShadowExceptions",
+	"EpochAdType",
 }, facetAttrs...)
+
+// A run instance leaves more than one record behind, and only one of
+// them is the run instance ending.
+//
+// job_ad_instance_recording.cpp writes a banner per record and names it
+// in EpochAdType: "EPOCH" is the finished run instance -- the shadow
+// writes the whole job ad at exit, at hold, and on vacate -- while
+// "SPAWN" is written when the run starts (a filtered projection, so it
+// usually carries none of this) and INPUT/OUTPUT/CHECKPOINT/COMMON are
+// the file-transfer records, which copy whatever attributes
+// <BANNER>_JOB_ATTRS names into them.
+//
+// Reading them all made one failure into several rows: the same job,
+// the same second, one row carrying the real reason and another
+// carrying whatever a differently-shaped record happened to have. An
+// access point that configures those banners to copy vacate attributes
+// gets that; ap40 did.
+//
+// Records with no EpochAdType at all are kept: a schedd old enough not
+// to write it wrote only the one kind.
+const epochRunInstanceType = "EPOCH"
 
 // EpochTimeAttr is the attribute the epoch window is expressed in.
 //
@@ -251,8 +273,16 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 		set.Truncated = true
 	}
 	set.Source = heldSource
+	// The jobs the queue has already accounted for. A job that is held
+	// now AND has a run instance in the window that ended in that hold
+	// is one problem recorded twice, once by each source -- which is
+	// what put the same job in two rows of the page with two different
+	// codes.
+	heldNow := make(map[[2]int64]bool, len(held))
 	for _, ad := range held {
-		set.Records = append(set.Records, holdRecord(ad))
+		rec := holdRecord(ad)
+		heldNow[[2]int64{rec.Cluster, rec.Proc}] = true
+		set.Records = append(set.Records, rec)
 	}
 
 	if !opts.IncludeEnded {
@@ -272,7 +302,9 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 	// is an existence test, true of no rows or many, with no range for a
 	// zone map to skip on.
 	epochConstraint := fmt.Sprintf(
-		"(%s) && %s >= %d && VacateReasonCode isnt undefined", scope, EpochTimeAttr, since)
+		"(%s) && %s >= %d && VacateReasonCode isnt undefined"+
+			" && (EpochAdType =?= undefined || EpochAdType == %q)",
+		scope, EpochTimeAttr, since, epochRunInstanceType)
 	epochStart := now()
 	attempts, epochSource, eerr := src.EpochAds(ctx, epochConstraint, EpochProjection, MaxRecords)
 	set.EpochDuration = now().Sub(epochStart)
@@ -302,9 +334,19 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 		set.Source = set.Source + " + " + epochSource
 	}
 	for _, ad := range attempts {
-		if rec, ok := vacateRecord(ad); ok {
-			set.Records = append(set.Records, rec)
+		rec, ok := vacateRecord(ad)
+		if !ok {
+			continue
 		}
+		// The live queue wins for a job that is still held: it is the
+		// current state, where the run instance is the attempt that got
+		// it there. Only the hold half is deduplicated -- a job held now
+		// may also have failed to keep running earlier in the window,
+		// and those are different problems in different sections.
+		if rec.Kind == KindHold && heldNow[[2]int64{rec.Cluster, rec.Proc}] {
+			continue
+		}
+		set.Records = append(set.Records, rec)
 	}
 	return set, nil
 }
@@ -333,11 +375,18 @@ func vacateRecord(ad *classad.ClassAd) (Record, bool) {
 	if !ok || benignVacateCodes[code] {
 		return Record{}, false
 	}
+	reason, _ := ad.EvaluateAttrString("VacateReason")
+	// Code zero with nothing to say is the absence of a vacate reason,
+	// not a vacate reason of "unspecified". Reported, it drew a row with
+	// a blank message under a label that made it look like a distinct
+	// problem somebody should investigate.
+	if code == 0 && strings.TrimSpace(reason) == "" {
+		return Record{}, false
+	}
 	cluster, _ := ad.EvaluateAttrInt("ClusterId")
 	proc, _ := ad.EvaluateAttrInt("ProcId")
 	owner, _ := ad.EvaluateAttrString("Owner")
 	batch, _ := ad.EvaluateAttrString("JobBatchName")
-	reason, _ := ad.EvaluateAttrString("VacateReason")
 	sub, _ := ad.EvaluateAttrInt("VacateReasonSubCode")
 	// When the attempt ended, falling back to when it started for a
 	// record from a schedd too old to write the one we ask the window

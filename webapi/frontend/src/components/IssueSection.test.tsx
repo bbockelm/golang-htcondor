@@ -234,3 +234,23 @@ describe('visibleFacets', () => {
     expect(got).toHaveLength(2);
   });
 });
+
+describe('a cluster whose example has no message', () => {
+  it('shows the template rather than an empty line', () => {
+    // A record can reach the page with an empty message -- a hold with
+    // no reason text. Rendering it drew a row with nothing where the
+    // problem should be, which reads as a rendering fault rather than
+    // as an absence.
+    render(
+      <IssueSectionPanel
+        section={section([
+          cluster({
+            template: '(no message)',
+            examples: [{ cluster_id: 5, proc_id: 0, owner: 'alice', message: '' }],
+          }),
+        ])}
+      />,
+    );
+    expect(screen.getByText('(no message)')).toBeInTheDocument();
+  });
+});
