@@ -219,6 +219,21 @@ func (p *Parser) SetNextOffset(offset int64) {
 }
 
 // GetNextOffset returns the current file offset
+// CurrentOffset is the byte offset just past the last complete line read from the OPEN file: the
+// resume offset plus the bytes consumed since Open.
+//
+// It differs from GetNextOffset, which only folds in the consumed bytes at Close and therefore
+// reports the offset the pass STARTED at while a pass is in progress. A caller that needs to know
+// where in the log a particular entry sat -- to record it, or to recognise an entry it has already
+// processed after a rewind or a restart -- needs this one. The value is absolute within the file,
+// so a given entry has the same CurrentOffset no matter which offset the pass began at, which is
+// what makes it usable as a durable position.
+//
+// Valid between Open and Close; before the first Open it equals GetNextOffset.
+func (p *Parser) CurrentOffset() int64 {
+	return p.nextOffset + p.consumed
+}
+
 func (p *Parser) GetNextOffset() int64 {
 	return p.nextOffset
 }
