@@ -45,7 +45,7 @@ func TestTheIndexSurvivesARestart(t *testing.T) {
 
 	before := identityOverFile(t, full, time.Hour)
 	before.store = store
-	before.warmUp(context.Background())
+	warmUpForTest(t, before)
 	if got, _, _ := before.resolver.Stats(); got != 3 {
 		t.Fatalf("precondition: first run indexed %d accounts, want 3", got)
 	}
@@ -59,7 +59,7 @@ func TestTheIndexSurvivesARestart(t *testing.T) {
 
 	after := identityOverFile(t, cold, time.Hour)
 	after.store = store
-	after.warmUp(context.Background())
+	warmUpForTest(t, after)
 
 	// The mapping the cold source cannot possibly know still resolves,
 	// because the saved index proposed it and the verifier confirmed it.
@@ -92,7 +92,7 @@ func TestARestartDoesNotOverwriteTheSavedIndexWithAPartialOne(t *testing.T) {
 
 	first := identityOverFile(t, full, time.Hour)
 	first.store = store
-	first.warmUp(context.Background())
+	warmUpForTest(t, first)
 
 	saved, ok, err := store.Load(context.Background())
 	if err != nil || !ok {
@@ -106,7 +106,7 @@ func TestARestartDoesNotOverwriteTheSavedIndexWithAPartialOne(t *testing.T) {
 	missing := filepath.Join(dir, "gone")
 	second := identityOverFile(t, missing, time.Hour)
 	second.store = store
-	second.warmUp(context.Background())
+	warmUpForTest(t, second)
 
 	again, ok, err := store.Load(context.Background())
 	if err != nil || !ok {
@@ -140,7 +140,7 @@ func TestAnUnreadableSavedIndexIsNotFatal(t *testing.T) {
 	}
 	li := identityOverFile(t, path, time.Hour)
 	li.store = store
-	li.warmUp(context.Background()) // must not panic or hang
+	warmUpForTest(t, li) // must not panic or hang
 	if got, _, _ := li.resolver.Stats(); got != 1 {
 		t.Errorf("index holds %d accounts; the corrupt cache disturbed a normal start", got)
 	}
@@ -199,7 +199,7 @@ func TestAProtectedStartupBuildStillStartsTheRefreshLoop(t *testing.T) {
 	}
 	first := identityOverFile(t, full, time.Hour)
 	first.store = store
-	first.warmUp(context.Background())
+	warmUpForTest(t, first)
 	if got, _, _ := first.resolver.Stats(); got != 2 {
 		t.Fatalf("precondition: first run indexed %d accounts, want 2", got)
 	}
@@ -210,7 +210,7 @@ func TestAProtectedStartupBuildStillStartsTheRefreshLoop(t *testing.T) {
 	after := identityOverFile(t, missing, time.Hour)
 	after.store = store
 	after.refreshEvery = 5 * time.Millisecond
-	after.warmUp(context.Background())
+	warmUpForTest(t, after)
 
 	if got, _, _ := after.resolver.Stats(); got != 2 {
 		t.Fatalf("the restored index was lost: %d accounts", got)
