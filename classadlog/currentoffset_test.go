@@ -22,7 +22,7 @@ func TestCurrentOffsetIsAbsoluteAndPerEntry(t *testing.T) {
 103 2.0 Owner "bob"
 106
 `
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,7 +84,7 @@ func TestCurrentOffsetIsAbsoluteAndPerEntry(t *testing.T) {
 // caller that wants a per-entry position must not reach for the older one.
 func TestCurrentOffsetDiffersFromGetNextOffsetMidPass(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "job_queue.log")
-	if err := os.WriteFile(path, []byte("105\n103 1.0 Owner \"alice\"\n106\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("105\n103 1.0 Owner \"alice\"\n106\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p := NewParser(path)
