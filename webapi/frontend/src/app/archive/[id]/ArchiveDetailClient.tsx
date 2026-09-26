@@ -40,6 +40,7 @@ import {
   useNowTick,
 } from '@/app/jobs/[id]/JobDetailClient';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
+import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 
 export default function ArchiveDetailClient() {
   const { id } = useResolvedParams<{ id: string }>('/archive/[id]');
@@ -200,6 +201,15 @@ function ArchiveJobDetail({
         <Field label="Command" value={cmd ?? '—'} mono full />
         {args && <Field label="Arguments" value={args} mono full />}
       </div>
+
+      {/* The same resource-usage graphs the live page draws. job_metrics
+          is an append-only archive, so a job's samples outlive its queue
+          entry and this is often the most useful view of them: the run is
+          over, so the curve is the whole story rather than a partial one.
+          The panel renders nothing once retention has aged the samples
+          out, which is why there is no empty-state here. The job's final
+          status means it never polls for updates. */}
+      <ResourceUsagePanel jobID={jobID} status={jobStatus} />
 
       {/* "Would this job match the current pool?" — uses the same
           analyzer the live page does, but pulls the ad from the
