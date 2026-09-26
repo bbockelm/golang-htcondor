@@ -42,9 +42,40 @@ export default function JobDetailClient(_props: {
     // id is "" briefly during initial client hydration if the pathname
     // hasn't been read yet; skip those calls.
     enabled: !!id && id !== '_',
+    // A 404 is an answer, not a failure to get one. Retrying it three
+    // times with backoff would spend seconds re-asking a question the
+    // schedd has already answered, and this page has somewhere to go
+    // next as soon as it hears it.
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 3,
   });
 
   const router = useRouter();
+
+  // A job that finished between a page being drawn and one of its links
+  // being clicked is no longer in the queue -- the schedd destroys a
+  // completed job within seconds. That is an ordinary outcome of
+  // following a link from /issues or a stale tab, and a 404 is a poor
+  // answer to it when the job is sitting in the archive under the same
+  // id. Look there, and send the reader on if it is.
+  const goneFromQueue = error instanceof ApiError && error.status === 404;
+  const { data: archived, isLoading: searchingArchive } = useQuery({
+    queryKey: ['job-archive-probe', id],
+    // Existence is the whole question here; the archive page it
+    // redirects to fetches the full ad for itself.
+    queryFn: () => api.jobs.archiveOne(id, 'ClusterId,ProcId'),
+    enabled: goneFromQueue && !!id && id !== '_',
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (!archived) return;
+    // replace, not push: the dead /jobs URL should not sit in the back
+    // stack between the page the reader came from and the one they
+    // asked for.
+    router.replace(`/archive/${id}`);
+  }, [archived, id, router]);
   const queryClient = useQueryClient();
 
   // Status 3 = Removed, 4 = Completed. Don't offer Remove for those.
@@ -161,9 +192,26 @@ export default function JobDetailClient(_props: {
 
       {isLoading && <p className="text-gray-400">Loading...</p>}
 
-      {error && (
+      {error && !goneFromQueue && (
         <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {(error as Error).message}
+        </div>
+      )}
+
+      {goneFromQueue && (searchingArchive || archived) && (
+        <p className="text-sm text-gray-500">
+          This job has finished and left the queue — opening its archived
+          record…
+        </p>
+      )}
+
+      {goneFromQueue && !searchingArchive && !archived && (
+        <div className="rounded-sm border border-gray-200 bg-white p-3 text-sm text-gray-600">
+          No job {id} in the queue, and no record of it in the archive.{' '}
+          <Link href="/archive" className="text-brand-700 hover:underline">
+            Search the archive
+          </Link>{' '}
+          if you know roughly when it ran.
         </div>
       )}
 
@@ -1548,10 +1596,17 @@ export function dominantDagState(
 // on the access point keeps its files in the user's own directory where
 // nothing here can reach them.
 //
-// applicable=false means "this job is not a DAGMan manager" and the
-// page gets no panel. A manager that was not spooled DOES get the
-// panel, with one sentence: "why is there no graph" is a question worth
-// an answer, and silence answers it worse.
+// applicable=false means the page gets no panel. Two cases produce it:
+// a job that is not a DAGMan manager at all, and a manager that was not
+// spooled.
+//
+// The second used to render an explanatory sentence instead. It read as
+// noise, because the workflow LOG panel is on the same page for the
+// same job and already says the workflow was submitted from a shell and
+// where its files are. An empty box underneath repeating that is a
+// second paragraph making the same point -- worse than silence, which
+// is not what silence usually is here, but is when the answer is
+// already on the screen.
 export function workflowGraphAvailability(job: ClassAd): {
   applicable: boolean;
   available: boolean;
@@ -1560,24 +1615,8 @@ export function workflowGraphAvailability(job: ClassAd): {
   // dagmanLogName returning a name is the existing "is this a DAGMan
   // manager" test -- it keys off Cmd/-Dag, not off the log file.
   if (!dagmanLogName(job)) return { applicable: false, available: false };
-  if (isSpooledJob(job)) return { applicable: true, available: true };
-  return {
-    applicable: true,
-    available: false,
-    // Deliberately NOT opening with the workflow log panel's sentence:
-    // both panels render on this page for this job, and two paragraphs
-    // starting identically read as one repeated.
-    // The fact and what to do about it. Where the files are and why
-    // this server cannot reach them is this server's problem, not the
-    // reader's.
-    //
-    // Deliberately NOT opening with the workflow log panel's sentence:
-    // both panels render on this page for this job, and two paragraphs
-    // starting identically read as one repeated.
-    reason:
-      'This workflow has no graph here: it was submitted from a shell on the access point. ' +
-      'Run condor_q -dag there instead.',
-  };
+  if (!isSpooledJob(job)) return { applicable: false, available: false };
+  return { applicable: true, available: true };
 }
 
 // WorkflowGraphPanel draws the collapsed workflow. Explicit load, one
@@ -3269,10 +3308,14 @@ export function workflowLogAvailability(job: ClassAd): {
   return {
     available: false,
     name,
+    // Where the log is, and nothing else. The sentence used to end
+    // "Use condor_q -better-analyze / the access point directly" --
+    // advice for a different question (why a job is not matching),
+    // aimed at somebody who has already been told the path to the file
+    // and can be trusted to know what to do with it.
     reason:
       `This workflow was submitted from a shell on the access point, so its log (${name}) is in ` +
-      `${str(job.Iwd) ?? 'the submit directory'} and is not readable through this server. ` +
-      `Use condor_q -better-analyze / the access point directly.`,
+      `${str(job.Iwd) ?? 'the submit directory'} and is not readable through this server.`,
   };
 }
 

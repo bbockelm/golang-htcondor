@@ -198,7 +198,11 @@ describe('workflowLogAvailability', () => {
     expect(got.name).toBe('diamond.dagman.out');
     expect(got.reason).toContain('diamond.dagman.out');
     expect(got.reason).toContain('/home/e2e/dags');
-    expect(got.reason).toContain('condor_q -better-analyze');
+    // Where the log is, and nothing else: the trailing "use
+    // condor_q -better-analyze / the access point directly" was advice
+    // for a different question, given to somebody who has just been
+    // handed the path to the file.
+    expect(got.reason).not.toContain('condor_q');
   });
 
   it('has nothing to say about a job that is not a DAGMan manager', () => {
@@ -448,19 +452,17 @@ describe('workflowGraphAvailability', () => {
     expect(got.reason).toBeUndefined();
   });
 
-  // Same gate as the workflow log and for the same reason. The panel
-  // stays, with a sentence -- offering a Load button here buys the user
-  // a 409. The sentence says the FACT and what to do next; it does not
-  // name the files, the spool, or why this server cannot reach them.
-  it('explains itself for a manager that was not spooled', () => {
+  // No panel at all for a manager that was not spooled.
+  //
+  // It used to render an explanatory sentence. The workflow LOG panel
+  // is on the same page for the same job and already says the workflow
+  // was submitted from a shell and where its files are, so an empty box
+  // underneath repeating that was a second paragraph making one point.
+  it('renders nothing at all for a manager that was not spooled', () => {
     const got = workflowGraphAvailability(manager as ClassAd);
-    expect(got.applicable).toBe(true);
+    expect(got.applicable).toBe(false);
     expect(got.available).toBe(false);
-    expect(got.reason).toContain('submitted from a shell');
-    expect(got.reason).toContain('condor_q -dag');
-    for (const implementation of ['.dot', 'node status file', 'spool', 'DAGMan']) {
-      expect(got.reason).not.toContain(implementation);
-    }
+    expect(got.reason).toBeUndefined();
   });
 
   it('renders nothing at all for a job that is not a DAGMan manager', () => {

@@ -1051,6 +1051,35 @@ export const api = {
       return fetchJSON(`${BASE}/jobs${query ? '?' + query : ''}`);
     },
 
+    // Look up one archived job by "cluster.proc", or null when history
+    // has no such record.
+    //
+    // Shared by the archive detail page and by the live job page's
+    // fallback: a job that finished between a listing being drawn and a
+    // link in it being clicked is gone from the queue and present here,
+    // and the two pages should agree on how to find it.
+    //
+    // projection defaults to the whole ad, which is what a detail page
+    // wants; a caller only testing for existence should ask for less.
+    archiveOne: async (
+      id: string,
+      projection = '*',
+    ): Promise<ClassAd | null> => {
+      const [clusterStr, procStr] = id.split('.');
+      const cluster = Number.parseInt(clusterStr, 10);
+      const proc = Number.parseInt(procStr ?? '0', 10);
+      if (!Number.isFinite(cluster) || !Number.isFinite(proc)) {
+        throw new ApiError(400, `Invalid job id: ${id}`);
+      }
+      const resp = await api.jobs.archive({
+        constraint: `ClusterId == ${cluster} && ProcId == ${proc}`,
+        projection,
+        limit: 1,
+      });
+      const ads = resp.ads ?? [];
+      return ads.length > 0 ? ads[0] : null;
+    },
+
     // Query the schedd's history (completed / removed jobs) at
     // /api/v1/jobs/archive. The Go side is a wrapper around
     // condor_history; the schedd owner-scopes results server-side

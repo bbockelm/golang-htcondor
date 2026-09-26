@@ -346,14 +346,14 @@ test('a shell-submitted workflow says where its log is', async ({ page }) => {
   // Scoped to the explanation itself: the Iwd also shows up in the
   // execution table and the raw ClassAd, so a page-wide text match
   // would pass with the sentence missing entirely.
-  // Anchored at "This workflow was": the Workflow graph panel below
-  // explains the same non-spooled job in its own words, and a looser
-  // match now resolves to both paragraphs.
   const explanation = page.getByText(/This workflow was submitted from a shell/);
   await expect(explanation).toBeVisible();
   await expect(explanation).toContainText('diamond.dagman.out');
   await expect(explanation).toContainText('/home/e2e/dags');
-  await expect(explanation).toContainText('condor_q -better-analyze');
+  // Where the log is, and nothing else: the sentence used to end with
+  // advice to run condor_q, which answers a different question and was
+  // aimed at somebody who has just been handed the path to the file.
+  await expect(explanation).not.toContainText('condor_q');
   // No viewer, so no way to ask for a fetch that cannot work.
   await expect(page.getByRole('button', { name: 'Refresh' })).toHaveCount(0);
   await expect(page.getByText(/re-fetches the workflow's spool/)).toHaveCount(0);
@@ -636,8 +636,13 @@ test('a workflow with no structure is explained, not error-boxed', async ({ page
 
 // Same gate as the workflow log, same reason: the .dot and node-status
 // files are read out of the spool, and a shell-submitted manager's
-// spool is empty. One sentence beats a Load button that returns a 409.
-test('a shell-submitted workflow says why it has no graph', async ({ page }) => {
+// spool is empty.
+//
+// No panel at all, where there used to be one carrying a sentence. The
+// Workflow log panel is on this same page for this same job and already
+// says the workflow was submitted from a shell and where its files are;
+// an empty box underneath repeating that is one point made twice.
+test('a shell-submitted workflow has no workflow graph box', async ({ page }) => {
   const { SUBMIT_Iwd: _spooled, ...notSpooled } = fanoutManagerAd;
   await openJobPage(page, '92.0', {
     ...notSpooled,
@@ -645,10 +650,11 @@ test('a shell-submitted workflow says why it has no graph', async ({ page }) => 
     Iwd: '/home/e2e/dags',
   });
 
-  await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
-  const explanation = page.getByText(/This workflow has no graph here/);
-  await expect(explanation).toBeVisible();
-  await expect(explanation).toContainText('condor_q -dag');
+  // The page rendered -- so the absence below is the panel being gone,
+  // not the page failing to load.
+  await expect(page.getByRole('heading', { name: 'Workflow log' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workflow graph' })).toHaveCount(0);
+  await expect(page.getByText(/This workflow has no graph here/)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Load graph' })).toHaveCount(0);
 });
 
@@ -665,4 +671,55 @@ test('a vanilla job has no workflow graph panel', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Output Files' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Workflow graph' })).toHaveCount(0);
+});
+
+// A job that finished between a page being drawn and one of its links
+// being clicked is gone from the queue -- the schedd destroys a
+// completed job within seconds -- and sitting in the archive under the
+// same id. Following a link from /issues or a stale tab should land on
+// the record, not on an error.
+test('a job that has left the queue opens its archived record', async ({ page }) => {
+  const placeholder = path.join(__dirname, '..', 'out', 'jobs', '_.html');
+  const archivePlaceholder = path.join(__dirname, '..', 'out', 'archive', '_.html');
+  await page.route('**/jobs/8801.0', async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.route('**/archive/8801.0', async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: archivePlaceholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.route('**/api/v1/jobs/8801.0', (route) =>
+    route.fulfill({ status: 404, json: { error: 'Not Found', message: 'Job not found' } }),
+  );
+  await page.route('**/api/v1/jobs/archive**', (route) =>
+    route.fulfill({
+      json: {
+        ads: [
+          {
+            ClusterId: 8801,
+            ProcId: 0,
+            Owner: 'e2e',
+            JobStatus: 4,
+            ExitCode: 0,
+            CompletionDate: Math.floor(Date.now() / 1000) - 120,
+            Cmd: '/bin/smoke-finished',
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto('/jobs/8801.0');
+
+  // The URL is the assertion: the reader asked for a queue page and
+  // ends up on the archived record rather than at an error.
+  await expect(page).toHaveURL(/\/archive\/8801\.0$/);
+  await expect(page.getByText('archived')).toBeVisible();
 });
