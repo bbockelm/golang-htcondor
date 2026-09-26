@@ -218,7 +218,6 @@ func (p *Parser) SetNextOffset(offset int64) {
 	p.nextOffset = offset
 }
 
-// GetNextOffset returns the current file offset
 // CurrentOffset is the byte offset just past the last complete line read from the OPEN file: the
 // resume offset plus the bytes consumed since Open.
 //
@@ -234,6 +233,7 @@ func (p *Parser) CurrentOffset() int64 {
 	return p.nextOffset + p.consumed
 }
 
+// GetNextOffset returns the current file offset
 func (p *Parser) GetNextOffset() int64 {
 	return p.nextOffset
 }
