@@ -16,7 +16,7 @@ import {
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
-import { ResourceUsagePanel } from './ResourceUsagePanel';
+import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
