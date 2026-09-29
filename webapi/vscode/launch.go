@@ -27,6 +27,21 @@ import (
 // to look.
 const BatchPrefix = "htcondor-api-vscode-"
 
+// AppAttr is a custom job attribute marking a job as one of ours, and
+// AppAttrValue its value.
+//
+// The JobBatchName carries the same fact and is what `condor_q -batch`
+// shows a human, but it cannot be queried portably: finding an app by
+// it means a prefix match, while this is an equality constraint every
+// schedd understands. That matters because the alternative -- fetching
+// the caller's jobs and filtering here -- silently loses an app to the
+// query limit for anyone with a few hundred jobs in the queue, which is
+// an ordinary number.
+const (
+	AppAttr      = "HTCondorAPIApp"
+	AppAttrValue = "code-server"
+)
+
 // SocketName is the socket the server listens on, relative to the
 // job's scratch directory. The proxy addresses a session by it, so it
 // is part of the URL and cannot vary per session without the caller
@@ -345,6 +360,9 @@ func BuildSubmitFile(a SubmitArgs) (string, error) {
 	// session shows up as a bare vscode-launch.sh among the user's real
 	// work, which is what made the Jupyter ones look strange.
 	fmt.Fprintf(&sb, "batch_name = %s\n", BatchName(a.SessionID))
+	// Queried on; see AppAttr. The batch name stays because it is what
+	// a human sees in condor_q.
+	fmt.Fprintf(&sb, "+%s = %q\n", AppAttr, AppAttrValue)
 
 	if expr := PeriodicRemoveExpr(a.MaxLifetime); expr != "" {
 		fmt.Fprintf(&sb, "%s\n", expr)

@@ -448,3 +448,23 @@ func TestRecommendedImageIsPinned(t *testing.T) {
 		t.Errorf("containerImageRef rewrote RecommendedImage to %q", got)
 	}
 }
+
+// TestSubmitFileCarriesTheQueryableAttribute: the JobBatchName is what
+// a human sees in condor_q, but finding an app by it means a prefix
+// match. The attribute is an equality constraint the schedd evaluates,
+// which is what keeps an app from falling off the end of a query limit
+// for somebody with a busy queue.
+func TestSubmitFileCarriesTheQueryableAttribute(t *testing.T) {
+	out, err := BuildSubmitFile(SubmitArgs{SessionID: "s1", Image: "example/code-server:1"})
+	if err != nil {
+		t.Fatalf("BuildSubmitFile: %v", err)
+	}
+	want := `+` + AppAttr + ` = "` + AppAttrValue + `"`
+	if !strings.Contains(out, want) {
+		t.Errorf("submit file is missing %q:\n%s", want, out)
+	}
+	// And the batch name stays, because that is the human-visible half.
+	if !strings.Contains(out, "batch_name = "+BatchName("s1")) {
+		t.Errorf("submit file lost its batch name:\n%s", out)
+	}
+}

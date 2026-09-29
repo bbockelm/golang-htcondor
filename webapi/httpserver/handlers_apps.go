@@ -340,7 +340,18 @@ func (s *Handler) handleAppList(w http.ResponseWriter, r *http.Request) {
 // applied after the query rather than as a constraint, matching the
 // interactive terminal list.
 func (s *Handler) queryAppAds(ctx context.Context, owner string) ([]*classad.ClassAd, error) {
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, "true", &htcondor.QueryOptions{
+	return s.queryAppAdsWithConstraint(ctx, owner, appConstraint)
+}
+
+// appConstraint matches any of our app jobs. Equality on a custom
+// attribute rather than a prefix match on JobBatchName: it is what
+// every schedd understands, and it is evaluated by the SCHEDD, so a
+// caller with hundreds of jobs in the queue still gets their apps back.
+// Filtering here instead would lose them to the query limit.
+var appConstraint = fmt.Sprintf("%s =?= %q", vscode.AppAttr, vscode.AppAttrValue)
+
+func (s *Handler) queryAppAdsWithConstraint(ctx context.Context, owner, constraint string) ([]*classad.ClassAd, error) {
+	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Limit: 200,
 		Projection: []string{
 			"ClusterId", "ProcId", "JobStatus", "JobBatchName",
@@ -455,12 +466,17 @@ func (s *Handler) removeAppJob(ctx context.Context, cluster int) {
 }
 
 // findApp locates one of the caller's apps by id.
+//
+// Asks the schedd for that one job rather than for all of them: an app
+// belonging to somebody with a busy queue would otherwise fall off the
+// end of the limit and read as "no such app".
 func (s *Handler) findApp(ctx context.Context, owner, id string) (AppSummary, bool) {
-	ads, err := s.queryAppAds(ctx, owner)
+	want := vscode.BatchName(id)
+	constraint := fmt.Sprintf("%s && JobBatchName =?= %q", appConstraint, want)
+	ads, err := s.queryAppAdsWithConstraint(ctx, owner, constraint)
 	if err != nil {
 		return AppSummary{}, false
 	}
-	want := vscode.BatchName(id)
 	for _, ad := range ads {
 		if name, ok := ad.EvaluateAttrString("JobBatchName"); !ok || name != want {
 			continue
