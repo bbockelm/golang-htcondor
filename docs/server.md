@@ -636,11 +636,19 @@ what makes running the server with its own authentication disabled safe.
 
 A Unix socket address is capped at about 100 bytes, for binding as much as for
 connecting, and an HTCondor scratch directory routinely exceeds that on its own —
-a glidein nests its `execute/dir_N` under the host batch system's. So the job
-binds its socket by bare name against its own working directory and publishes a
-short address for the proxy to use. Nothing is required of an operator for this,
-but it explains why a session works in a sandbox whose path is far too long to
-name.
+a glidein nests its `execute/dir_N` under the host batch system's.
+
+So a session whose sandbox path fits keeps its socket inside the sandbox, where
+HTCondor cleans it up with everything else; one whose path does not gets a socket
+in a short private directory under `/tmp` (mode 0700, owned by the job's user),
+and publishes where it put it. Nothing is required of an operator either way, but
+it explains why a session works in a sandbox far too deep to name, and why you
+may see a `/tmp/.condor-app-<pid>` directory on an execute node. The job cannot
+remove that directory itself — it `exec`s the server, so no cleanup of its own
+can run — so a killed session leaves one behind holding a dead socket.
+
+`/tmp` is used rather than `$TMPDIR`, because HTCondor commonly points `TMPDIR`
+at the job's scratch directory, which is the one place guaranteed not to work.
 
 ### Lifetime
 
