@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -97,6 +98,12 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 			go func(nch ssh.NewChannel) {
 				defer wg.Done()
 				s.handleDirectTCPIP(ctx, account, conn.User(), nch)
+			}(nch)
+		case streamLocalChannelType:
+			wg.Add(1)
+			go func(nch ssh.NewChannel) {
+				defer wg.Done()
+				s.handleStreamLocal(ctx, account, conn.User(), nch)
 			}(nch)
 		default:
 			_ = nch.Reject(ssh.UnknownChannelType,
@@ -248,12 +255,24 @@ func (s *Server) handleSession(ctx context.Context, account, user string, nch ss
 // code with no observable effect, which is worse than absent: nothing
 // would notice if it broke.
 func (s *Server) failSession(ch ssh.Channel, msg string, cancelled bool) {
-	if cancelled {
+	// "cancelled" only when there is nothing better to say. A resolver
+	// that was interrupted mid-wait knows what it left behind -- a job
+	// that is still starting, and worth reconnecting to -- and that is
+	// more use than the word.
+	if cancelled && isBareCancellation(msg) {
 		msg = "cancelled"
 	}
 	_, _ = fmt.Fprintf(ch.Stderr(), "%s\r\n", msg)
 	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 	_ = ch.CloseWrite()
+}
+
+// isBareCancellation reports whether a message is just Go's own words
+// for a cancelled context, which mean nothing to somebody at a
+// terminal.
+func isBareCancellation(msg string) bool {
+	m := strings.TrimSpace(msg)
+	return m == context.Canceled.Error() || m == context.DeadlineExceeded.Error()
 }
 
 // requestPump holds the client's session requests until there is a job
@@ -526,6 +545,69 @@ func (s *Server) handleDirectTCPIP(ctx context.Context, account, user string, nc
 	conn, err := s.Transport.DialJob(ctx, key, "tcp", addr)
 	if err != nil {
 		_ = nch.Reject(ssh.ConnectionFailed, fmt.Sprintf("could not reach %s inside %s: %v", addr, target, err))
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	ch, reqs, err := nch.Accept()
+	if err != nil {
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go ssh.DiscardRequests(reqs)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = copyStream(conn, ch); closeWrite(conn) }()
+	go func() { defer wg.Done(); _, _ = copyStream(ch, conn); _ = ch.CloseWrite() }()
+	wg.Wait()
+}
+
+// streamLocalChannelType is OpenSSH's extension for forwarding to a
+// Unix socket rather than a port.
+const streamLocalChannelType = "direct-streamlocal@openssh.com"
+
+// handleStreamLocal forwards to a Unix socket inside the job.
+//
+// Worth having rather than telling people to use a port: a TCP port
+// bound to 127.0.0.1 in a sandbox is reachable by every local user on
+// the execute node unless the job has its own network namespace, which
+// no pool can be assumed to configure. A socket in the scratch
+// directory is protected by file permissions instead.
+//
+// Like a port forward and unlike a session, this opens no session
+// channel in the job and so does not draw on the sshd's session
+// budget.
+func (s *Server) handleStreamLocal(ctx context.Context, account, user string, nch ssh.NewChannel) {
+	// RFC-less but stable: socket path, then two reserved fields that
+	// OpenSSH sends empty.
+	var p struct {
+		SocketPath string
+		Reserved   string
+		ReservedN  uint32
+	}
+	if err := ssh.Unmarshal(nch.ExtraData(), &p); err != nil {
+		_ = nch.Reject(ssh.ConnectionFailed, "could not read the socket-forwarding request")
+		return
+	}
+	if p.SocketPath == "" {
+		_ = nch.Reject(ssh.ConnectionFailed, "no socket path in the forwarding request")
+		return
+	}
+
+	key, target, err := s.resolve(ctx, account, user, nil)
+	if err != nil {
+		_ = nch.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+
+	conn, err := s.Transport.DialJob(ctx, key, "unix", p.SocketPath)
+	if err != nil {
+		// sun_path is capped near 104 bytes and an HTCondor scratch
+		// directory can fill most of it, so a path that is simply too
+		// long is a realistic cause and the failure names nothing.
+		_ = nch.Reject(ssh.ConnectionFailed,
+			fmt.Sprintf("could not reach the socket %s inside %s: %v", p.SocketPath, target, err))
 		return
 	}
 	defer func() { _ = conn.Close() }()

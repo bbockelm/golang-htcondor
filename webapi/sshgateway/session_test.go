@@ -529,47 +529,64 @@ func TestSubsystemIsRefusedWithAReason(t *testing.T) {
 	}
 }
 
-// A forwarded port is not a session and must not draw on the session
-// budget -- that is what keeps the reverse proxy working when every
-// terminal is in use.
-func TestPortForwardDoesNotConsumeASession(t *testing.T) {
-	tr := &fakeTransport{}
-	client := gatewayClient(t, gateway(t, tr), "12345.0")
+// Neither kind of forward is a session, so neither draws on the
+// sshd's session budget -- which is what keeps a reverse proxy working
+// when every terminal for that job is in use.
+//
+// The socket form matters more than the port form: a TCP port bound to
+// 127.0.0.1 in a sandbox is open to every local user on the execute
+// node unless the job has its own network namespace, which no pool can
+// be assumed to configure. A socket is protected by file permissions.
+func TestForwardingReachesTheJobWithoutASession(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		network string
+		addr    string
+		want    string
+	}{
+		{"tcp port", "tcp", "127.0.0.1:8888", "tcp 127.0.0.1:8888"},
+		{"unix socket", "unix", "/scratch/dir_123/vscode.sock", "unix /scratch/dir_123/vscode.sock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &fakeTransport{}
+			client := gatewayClient(t, gateway(t, tr), "12345.0")
 
-	conn, err := client.Dial("tcp", "127.0.0.1:8888")
-	if err != nil {
-		t.Fatalf("dial through the job: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
+			conn, err := client.Dial(tc.network, tc.addr)
+			if err != nil {
+				t.Fatalf("dial through the job: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
 
-	tr.mu.Lock()
-	far := tr.forwarded
-	dialed := append([]string(nil), tr.dialed...)
-	sessions := len(tr.sessions)
-	tr.mu.Unlock()
+			tr.mu.Lock()
+			far := tr.forwarded
+			dialed := append([]string(nil), tr.dialed...)
+			sessions := len(tr.sessions)
+			tr.mu.Unlock()
 
-	if len(dialed) != 1 || dialed[0] != "tcp 127.0.0.1:8888" {
-		t.Fatalf("dialed = %v", dialed)
-	}
-	if sessions != 0 {
-		t.Errorf("a port forward opened %d sessions; it must open none", sessions)
-	}
+			if len(dialed) != 1 || dialed[0] != tc.want {
+				t.Fatalf("dialed = %v, want [%q]", dialed, tc.want)
+			}
+			if sessions != 0 {
+				t.Errorf("a forward opened %d sessions; it must open none", sessions)
+			}
 
-	go func() {
-		b := make([]byte, 5)
-		_, _ = io.ReadFull(far, b)
-		_, _ = far.Write([]byte("pong"))
-	}()
+			go func() {
+				b := make([]byte, 4)
+				_, _ = io.ReadFull(far, b)
+				_, _ = far.Write([]byte("pong"))
+			}()
 
-	if _, err := conn.Write([]byte("ping!")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	reply := make([]byte, 4)
-	if _, err := io.ReadFull(conn, reply); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(reply) != "pong" {
-		t.Errorf("reply = %q", reply)
+			if _, err := conn.Write([]byte("ping")); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			reply := make([]byte, 4)
+			if _, err := io.ReadFull(conn, reply); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if string(reply) != "pong" {
+				t.Errorf("reply = %q", reply)
+			}
+		})
 	}
 }
 
@@ -1045,5 +1062,28 @@ func TestTypingAfterTheSessionStartsIsNotEaten(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("what was typed never reached the job")
+	}
+}
+
+// An empty socket path is refused rather than passed down to become an
+// opaque dial error.
+func TestEmptySocketPathIsRefused(t *testing.T) {
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gateway(t, tr), "12345.0")
+
+	payload := ssh.Marshal(struct {
+		SocketPath string
+		Reserved   string
+		ReservedN  uint32
+	}{})
+	_, _, err := client.OpenChannel(streamLocalChannelType, payload)
+	if err == nil {
+		t.Fatal("an empty socket path was accepted")
+	}
+	tr.mu.Lock()
+	dialed := len(tr.dialed)
+	tr.mu.Unlock()
+	if dialed != 0 {
+		t.Errorf("the job was dialled %d times for an empty path", dialed)
 	}
 }

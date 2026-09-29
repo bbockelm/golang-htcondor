@@ -399,7 +399,15 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 
 		select {
 		case <-ctx.Done():
-			return jobssh.Key{}, ctx.Err()
+			// Deliberately NOT removing the job. A caller who gave up
+			// waiting almost always wants the session they asked for;
+			// reconnecting picks it up once it starts, and the lease
+			// and watchdog reclaim it if they never come back.
+			// Removing it would make Ctrl-C destroy several minutes of
+			// queue position.
+			return jobssh.Key{}, fmt.Errorf(
+				"stopped waiting for session %q (job %s). It is still starting -- reconnect to pick it up: %w",
+				name, info.JobID, ctx.Err())
 		case <-time.After(2 * time.Second):
 		}
 

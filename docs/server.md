@@ -566,6 +566,113 @@ HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS = [ \
 | `identity_domain` | Local identity is `<sub>@this`. Defaults to the issuer's host. |
 | `allowed_scopes` | Ceiling of scopes a token from this issuer may obtain. |
 
+## SSH gateway
+
+An SSH port on the API server that authenticates with the OAuth2 device flow
+and drops the caller into an HTCondor job. Users get an interactive terminal
+without an account on the access point.
+
+```
+HTTP_API_SSH_GATEWAY_ADDRESS = :2222
+HTTP_API_SSH_HOST_KEY_FILE = /etc/condor/htcondor-api/ssh_host_key
+```
+
+A user connects with a stock `ssh` and sees:
+
+```
+$ ssh 12345.0@ap.example.edu -p 2222
+Sign in to ap.example.edu
+
+  Open  https://ap.example.edu/mcp/oauth2/device/verify?user_code=WDJB-MJHT
+
+  The page will show the code  WDJB-MJHT  -- check it matches this one.
+
+This session continues by itself once you approve it.
+```
+
+No client configuration, no key to distribute: the prompt is an ordinary
+RFC 4256 keyboard-interactive challenge, which every SSH client already
+renders. Approving in the browser lets the session continue by itself.
+
+### What the username selects
+
+The username carries no identity — the OAuth2 grant does — so it names the
+target instead:
+
+| `ssh <this>@gateway` | reaches |
+| --- | --- |
+| `12345.0`, or `12345` | that job, proc 0 if omitted |
+| anything else | your interactive session of that name, **started if you have none** |
+
+A bare `ssh gateway` sends your local login, which never looks like a job id,
+so it starts or attaches a session named after it. Two machines with different
+local logins therefore reach two different sessions.
+
+While a newly created session waits in the queue, the terminal shows what it is
+waiting for and how long it has been waiting. Ctrl-C stops waiting; it does
+**not** remove the job, so reconnecting picks the session up once it starts.
+
+### Host key and CA key
+
+Both are long-lived and both are dangerous to lose: replacing a host key trips
+`StrictHostKeyChecking` for every user at once, and replacing the CA key
+invalidates every certificate it signed. They come from, in order:
+
+1. `HTTP_API_SSH_HOST_KEY_FILE` / `HTTP_API_SSH_CA_KEY_FILE` — a path to an
+   OpenSSH private key you staged (`ssh-keygen -t ed25519 -N '' -f <path>`).
+   World-readable is refused; group-readable is fine, because a kubelet
+   `fsGroup` mount turns 0400 into 0440. Passphrase-protected keys are refused
+   with an error saying how to strip it.
+2. Otherwise the daemon generates one and keeps it **sealed in the application
+   database**, which requires `HTTP_API_KEK_FILE`.
+
+There is deliberately no setting carrying the key bytes themselves:
+`/proc/<pid>/environ` and crash dumps both leak the environment, and HTCondor
+configuration is public to anyone who can run `condor_config_val`.
+
+A stored key that cannot be decrypted is a **startup error**, never silently
+replaced — the usual cause is a swapped `HTTP_API_KEK_FILE`, which is
+recoverable, while a new host key is indistinguishable from an attack. Enabling
+the gateway with neither a key file nor a KEK is also a startup error rather
+than a port that quietly is not there.
+
+**Running more than one replica?** Use the key file. A database-minted key
+belongs to one database, so replicas would present different host keys.
+
+### Knobs
+
+| Knob | Purpose |
+| --- | --- |
+| `HTTP_API_SSH_GATEWAY_ADDRESS` | Where to listen, e.g. `:2222`. Empty disables the gateway. |
+| `HTTP_API_SSH_GATEWAY_ISSUER` | OAuth2 issuer the device flow runs against. Defaults to the server's own issuer; set it when this process cannot reach its own public URL. |
+| `HTTP_API_SSH_HOST_KEY_FILE` | Host key clients pin. Generated and sealed in the DB when unset. |
+| `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment. |
+| `HTTP_API_SSH_GATEWAY_SESSION_CPUS` | CPUs a session created on demand requests. Default 1. |
+| `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
+| `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 1024. |
+
+The gateway needs OAuth2 configured (`HTTP_API_ENABLE_MCP`), since the device
+flow is how it authenticates. Shell access needs no new scope: the schedd
+registers `GET_JOB_CONNECT_INFO` at `WRITE`, so `condor:/WRITE` covers it.
+
+If logins fail with *"could not start the login flow"*, the gateway cannot reach
+its own device endpoint. It checks once shortly after startup and logs the URL
+it tried — the usual cause is an unset `HTTP_API_OAUTH2_ISSUER`, which leaves
+the default `http://localhost:8080` pointing at nothing.
+
+### Limits worth knowing
+
+- **`scp` and `sftp` do not work.** HTCondor's ssh-to-job wrapper turns a
+  subsystem request into `eval sftp`. The gateway says so rather than letting
+  it fail as "subsystem request failed".
+- **`BatchMode=yes` cannot log in.** The client declines keyboard-interactive
+  outright. A terminal is not required otherwise — `ssh -T` and piped stdin
+  both work.
+- **Ten sessions per job.** The sshd HTCondor starts uses OpenSSH's default
+  `MaxSessions`, and every terminal for one job shares it. Port and socket
+  forwards do not count against it.
+- Each `ssh` is its own device authorization, so each asks for approval.
+
 ## Disabling tools
 
 Some tools cannot work at some sites for reasons this server cannot see.
