@@ -228,6 +228,17 @@ type Config struct {
 	// live only in a directory. Accounts it does map are still verified
 	// against the live database, directory included.
 	IdentityMapPasswdFile string
+
+	// SSHGatewayAddress is where the SSH gateway listens, e.g. ":2222".
+	// Empty disables it. See httpserver/sshgateway.go.
+	SSHGatewayAddress string
+	// SSHGatewayIssuer is the OAuth2 issuer the gateway drives the
+	// device flow against. Empty means the server's own issuer.
+	SSHGatewayIssuer string
+	// SSHHostKeyFile and SSHCAKeyFile point at operator-staged private
+	// keys; empty means keep them sealed in the application database.
+	SSHHostKeyFile string
+	SSHCAKeyFile   string
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
@@ -426,6 +437,10 @@ func NewServer(cfg Config) (*Server, error) {
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityGroupSources:        cfg.IdentityGroupSources,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
+		SSHGatewayAddress:           cfg.SSHGatewayAddress,
+		SSHGatewayIssuer:            cfg.SSHGatewayIssuer,
+		SSHHostKeyFile:              cfg.SSHHostKeyFile,
+		SSHCAKeyFile:                cfg.SSHCAKeyFile,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,

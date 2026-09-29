@@ -38,6 +38,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
 	"github.com/ory/fosite"
@@ -379,8 +380,16 @@ type Handler struct {
 	// job) for the reverse proxy into a server the job is running.
 	// Built lazily, because a deployment that never proxies into a job
 	// should not carry a reaper goroutine for it.
-	jobSSHCache   *jobssh.Cache
-	jobSSHCacheMu sync.Mutex
+	jobSSHCache *jobssh.Cache
+
+	// The SSH gateway: an ssh listener that authenticates with the
+	// OAuth2 device flow and proxies into a job. Nil when unconfigured.
+	sshGateway        *sshgateway.Listener
+	sshGatewayAddress string
+	sshGatewayIssuer  string
+	sshHostKeyFile    string
+	sshCAKeyFile      string
+	jobSSHCacheMu     sync.Mutex
 
 	// jupyterWorkDir is where the materialized helper binary plus
 	// per-instance scratch artifacts (token files, launch scripts) are
@@ -631,6 +640,23 @@ type HandlerConfig struct {
 	// live only in a directory. Accounts it does map are still verified
 	// against the live database, directory included.
 	IdentityMapPasswdFile string
+
+	// SSHGatewayAddress is where the SSH gateway listens, e.g. ":2222".
+	// Empty disables it. Setting it makes a missing host key a startup
+	// error rather than a quietly absent listener.
+	SSHGatewayAddress string
+	// SSHGatewayIssuer is the OAuth2 issuer the gateway drives the
+	// device flow against. Empty means the server's own issuer, which
+	// is right unless this process cannot reach its own public URL --
+	// a container behind a proxy terminating TLS, typically.
+	SSHGatewayIssuer string
+	// SSHHostKeyFile and SSHCAKeyFile point at operator-staged private
+	// keys. Empty means generate and keep them sealed in the
+	// application database, which needs HTTP_API_KEK_FILE. The key
+	// bytes deliberately have no environment variable: /proc/<pid>/environ
+	// and crash dumps both leak the environment, a secret volume does not.
+	SSHHostKeyFile string
+	SSHCAKeyFile   string
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
@@ -1337,6 +1363,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// so a deployment with MCP off had HTTP_API_IDENTITY_MAP parsed,
 	// logged as configured, and then silently ignored -- the worst of
 	// both, because the log said the mapping was in force.
+	h.sshGatewayAddress = strings.TrimSpace(cfg.SSHGatewayAddress)
+	h.sshGatewayIssuer = strings.TrimSpace(cfg.SSHGatewayIssuer)
+	h.sshHostKeyFile = strings.TrimSpace(cfg.SSHHostKeyFile)
+	h.sshCAKeyFile = strings.TrimSpace(cfg.SSHCAKeyFile)
+
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupSources,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
@@ -2216,6 +2247,17 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Initialize OAuth2 provider with actual address
 	h.initializeOAuth2(ln, protocol)
 
+	// After initializeOAuth2, which is what settles the issuer the
+	// gateway points its device flow at.
+	if h.oauth2Provider != nil {
+		if err := h.startSSHGateway(h.ctx, h.oauth2Provider.config.AccessTokenIssuer); err != nil {
+			return fmt.Errorf("starting the SSH gateway: %w", err)
+		}
+	} else if h.sshGatewayAddress != "" {
+		return errors.New("HTTP_API_SSH_GATEWAY_ADDRESS is set but OAuth2 is not configured; " +
+			"the gateway authenticates with the device flow and cannot run without it")
+	}
+
 	// Start OAuth2 state store cleanup if it exists
 	if h.oauth2StateStore != nil {
 		h.oauth2StateStore.Start(ctx)
@@ -2526,6 +2568,9 @@ func (h *Handler) Stop(ctx context.Context) error {
 	// reason: each is a live connection into a running job, and an
 	// in-flight proxied response keeps its own transport alive until
 	// it finishes rather than being cut off mid-body.
+	// Before the transports, since its connections hold them.
+	h.stopSSHGateway()
+
 	h.closeJobSSHCache()
 
 	// Close OAuth2 provider if enabled

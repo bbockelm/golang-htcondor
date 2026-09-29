@@ -167,13 +167,21 @@ type mcpConfig struct {
 	identityGroupSources  []string
 	identityMapPasswdFile string
 	identityMapTTL        time.Duration
-	mcpAccessGroup        string
-	mcpReadGroup          string
-	mcpWriteGroup         string
-	mcpAdminGroup         string
-	mcpSuperuserGroup     string
-	instructions          string
-	adminUsers            []string
+
+	// The SSH gateway: an ssh port that authenticates with the OAuth2
+	// device flow and proxies into a job, so a user needs a terminal
+	// but not an account on the access point.
+	sshGatewayAddress string
+	sshGatewayIssuer  string
+	sshHostKeyFile    string
+	sshCAKeyFile      string
+	mcpAccessGroup    string
+	mcpReadGroup      string
+	mcpWriteGroup     string
+	mcpAdminGroup     string
+	mcpSuperuserGroup string
+	instructions      string
+	adminUsers        []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -1190,6 +1198,16 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 		mcpCfg.identityGroupSources = specs
 	}
 
+	// The SSH gateway. Only the PATHS of the keys come from config:
+	// HTCondor treats configuration values as public -- any user on the
+	// machine can dump them with condor_config_val -- so a private key
+	// must come from a file the operator has permission-locked, not
+	// from a setting and not from the environment.
+	mcpCfg.sshGatewayAddress, _ = cfg.Get("HTTP_API_SSH_GATEWAY_ADDRESS")
+	mcpCfg.sshGatewayIssuer, _ = cfg.Get("HTTP_API_SSH_GATEWAY_ISSUER")
+	mcpCfg.sshHostKeyFile, _ = cfg.Get("HTTP_API_SSH_HOST_KEY_FILE")
+	mcpCfg.sshCAKeyFile, _ = cfg.Get("HTTP_API_SSH_CA_KEY_FILE")
+
 	if len(mcpCfg.identityMapStrategies) > 0 || len(mcpCfg.identityGroupSources) > 0 {
 		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
 		// Whether a scoped subject may also be matched by its local part.
@@ -1895,6 +1913,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
 		IdentityGroupSources:       mcpCfg.identityGroupSources,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
+		SSHGatewayAddress:          mcpCfg.sshGatewayAddress,
+		SSHGatewayIssuer:           mcpCfg.sshGatewayIssuer,
+		SSHHostKeyFile:             mcpCfg.sshHostKeyFile,
+		SSHCAKeyFile:               mcpCfg.sshCAKeyFile,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		IdentityMapStripDomain:     mcpCfg.identityMapStripDomain,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,

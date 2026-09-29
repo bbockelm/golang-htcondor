@@ -1,0 +1,249 @@
+// Copyright 2026 Morgridge Institute for Research
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package httpserver
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ory/fosite"
+	"golang.org/x/crypto/ssh"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	"github.com/bbockelm/golang-htcondor/webapi/sshkeys"
+)
+
+// sshGatewayClientID is the public OAuth2 client the gateway drives the
+// device flow as. Seeded at startup the way the Swagger client is.
+const sshGatewayClientID = "ssh-gateway"
+
+// sshGatewayScopes are what a terminal in a job needs.
+//
+// condor:/WRITE and nothing wider: the schedd registers
+// GET_JOB_CONNECT_INFO at WRITE, so that one scope covers shell access
+// and there is no reason to ask for more. offline_access is what lets a
+// session outlive its access token.
+var sshGatewayScopes = []string{"openid", "offline_access", "condor:/WRITE"}
+
+// withCondorCredential attaches an HTCondor credential minted for
+// username with scopes, so everything done under the returned context
+// runs as that person rather than as this daemon.
+//
+// Extracted from mcpAuthContext so the SSH gateway shares it. A second
+// copy would be a second place for the SecurityTag to be forgotten --
+// and forgetting it is not a subtle bug: cedar's client session cache
+// is keyed {SecurityTag, address, command}, so with an empty tag one
+// caller's request resumes a session another caller authenticated and
+// runs as them.
+func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string) (context.Context, error) {
+	if h.signingKeyPath == "" || h.trustDomain == "" {
+		// Nothing to mint with. The caller still gets a usable context;
+		// the schedd will decide what an unauthenticated one may do.
+		return ctx, nil
+	}
+	htcToken, err := h.generateHTCondorTokenWithScopes(username, scopes)
+	if err != nil {
+		return ctx, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
+	}
+	secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+	if err != nil {
+		return ctx, fmt.Errorf("building a security config for %q: %w", username, err)
+	}
+	secConfig.SecurityTag = username
+	return htcondor.WithSecurityConfig(ctx, secConfig), nil
+}
+
+// startSSHGateway brings up the SSH gateway when one is configured.
+//
+// issuer is the OAuth2 issuer as finally resolved, which is why this
+// runs after initializeOAuth2 rather than during construction.
+func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
+	if strings.TrimSpace(h.sshGatewayAddress) == "" {
+		return nil
+	}
+	if h.oauth2Provider == nil {
+		return errors.New("the SSH gateway needs the OAuth2 provider, which is not configured; " +
+			"enable MCP/OAuth2 or unset HTTP_API_SSH_GATEWAY_ADDRESS")
+	}
+
+	hostKey, err := sshkeys.Resolve(ctx, sshkeys.HostKey, sshkeys.Options{
+		DB:          h.db,
+		Sealer:      h.sealer,
+		Logger:      h.logger,
+		HostKeyFile: h.sshHostKeyFile,
+	})
+	if err != nil {
+		// Deliberately fatal rather than "carry on without the
+		// gateway". The address was set on purpose, and a listener
+		// that silently does not exist is worse to diagnose than a
+		// startup error naming what to fix -- which Resolve's errors
+		// already do.
+		return err
+	}
+
+	if err := h.seedSSHGatewayClient(ctx); err != nil {
+		return err
+	}
+
+	cache, err := h.getOrCreateJobSSHCache()
+	if err != nil {
+		return fmt.Errorf("preparing the job transport cache: %w", err)
+	}
+
+	gatewayIssuer := strings.TrimSpace(h.sshGatewayIssuer)
+	if gatewayIssuer == "" {
+		gatewayIssuer = issuer
+	}
+
+	auth, err := sshgateway.NewAuthenticator(sshgateway.Options{
+		Flow: &sshgateway.HTTPFlow{
+			Issuer:   gatewayIssuer,
+			ClientID: sshGatewayClientID,
+			Scopes:   sshGatewayScopes,
+		},
+		Identity: h.sshGatewayIdentity,
+		Logger:   h.logger,
+		Prompt:   h.sshGatewayPromptName(issuer),
+	})
+	if err != nil {
+		return err
+	}
+
+	listener := &sshgateway.Listener{
+		Addr:    h.sshGatewayAddress,
+		HostKey: hostKey.Signer,
+		Auth:    auth,
+		Server: &sshgateway.Server{
+			Transport: cache,
+			Resolve:   h.sshGatewayResolve,
+			Logger:    h.logger,
+		},
+		ConnContext: h.sshGatewayConnContext,
+		Logger:      h.logger,
+	}
+
+	h.sshGateway = listener
+	h.logger.Info(logging.DestinationHTTP, "Starting the SSH gateway",
+		"address", h.sshGatewayAddress,
+		"issuer", gatewayIssuer,
+		"host_key", hostKey.Fingerprint,
+		"host_key_source", hostKey.Source)
+
+	go func() {
+		if err := listener.ListenAndServe(ctx); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "The SSH gateway stopped", "error", err)
+		}
+	}()
+	return nil
+}
+
+// stopSSHGateway closes the listener and waits for connections in
+// flight, so a terminal is not cut off mid-keystroke by a reload.
+func (h *Handler) stopSSHGateway() {
+	if h.sshGateway == nil {
+		return
+	}
+	if err := h.sshGateway.Close(); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Closing the SSH gateway", "error", err)
+	}
+	h.sshGateway = nil
+}
+
+// sshGatewayPromptName is what the login prompt calls this service.
+func (h *Handler) sshGatewayPromptName(issuer string) string {
+	if u, err := parseURL(issuer); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return issuer
+}
+
+// sshGatewayIdentity resolves who an approved grant belongs to.
+//
+// The access token is introspected rather than parsed: it is one this
+// server issued, so fosite is the thing that can say whether it is
+// still valid and what it was granted. A token's claims are not an
+// identity until something authoritative says so.
+func (h *Handler) sshGatewayIdentity(ctx context.Context, g *sshgateway.Grant) (string, error) {
+	_, ar, err := h.oauth2Provider.GetProvider().IntrospectToken(
+		ctx, g.AccessToken, fosite.AccessToken, newEmptySession())
+	if err != nil {
+		return "", fmt.Errorf("introspecting the access token: %w", err)
+	}
+	// The same extraction the MCP surface uses, so the gateway and the
+	// API agree on who a token belongs to -- including the deployments
+	// where that is a mapped local account rather than the raw subject.
+	return h.extractUsernameFromToken(ar), nil
+}
+
+// sshGatewayConnContext attaches the caller's HTCondor credential to
+// everything the connection goes on to do.
+func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerConn) (context.Context, error) {
+	if conn.Permissions == nil {
+		return nil, errors.New("the connection carries no permissions")
+	}
+	account := conn.Permissions.Extensions[sshgateway.ExtAccount]
+	if account == "" {
+		return nil, errors.New("the connection carries no account")
+	}
+	scopes := strings.Fields(conn.Permissions.Extensions[sshgateway.ExtScopes])
+	return h.withCondorCredential(ctx, account, scopes)
+}
+
+// sshGatewayResolve turns a target into a job.
+//
+// Ownership is not checked here. The schedd checks it, on every
+// GET_JOB_CONNECT_INFO, against the credential the context carries --
+// and it is the only thing whose answer is authoritative. Repeating the
+// check here would add a second opinion that can only ever be wrong in
+// the direction of letting somebody in.
+func (h *Handler) sshGatewayResolve(_ context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
+	if !t.IsJob() {
+		return jobssh.Key{}, fmt.Errorf(
+			"connecting by session name is not supported yet; use a job id, as in %d.0", 12345)
+	}
+	return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
+}
+
+// seedSSHGatewayClient makes sure the public client the gateway drives
+// the device flow as exists.
+//
+// A public client with no secret, exactly as the device-authorize
+// endpoint expects: it performs no client authentication, so a secret
+// here would protect nothing and would have to be stored somewhere.
+func (h *Handler) seedSSHGatewayClient(ctx context.Context) error {
+	storage := h.oauth2Provider.GetStorage()
+	if _, err := storage.GetClient(ctx, sshGatewayClientID); err == nil {
+		return nil
+	}
+	client := &fosite.DefaultClient{
+		ID:         sshGatewayClientID,
+		Secret:     nil,
+		GrantTypes: []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
+		Scopes:     sshGatewayScopes,
+		Public:     true,
+	}
+	if err := storage.CreateClient(ctx, client); err != nil {
+		return fmt.Errorf("creating the SSH gateway OAuth2 client: %w", err)
+	}
+	h.markSeededClient(ctx, sshGatewayClientID, "SSH gateway")
+	h.logger.Info(logging.DestinationHTTP, "Created the SSH gateway OAuth2 client",
+		"client_id", sshGatewayClientID, "scopes", sshGatewayScopes)
+	return nil
+}
