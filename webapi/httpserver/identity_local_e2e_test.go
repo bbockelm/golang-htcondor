@@ -204,7 +204,8 @@ func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(passwordsDir, "POOL"), key, 0o600); err != nil {
+	poolKeyPath := filepath.Join(passwordsDir, "POOL")
+	if err := os.WriteFile(poolKeyPath, key, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,7 +214,7 @@ func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup
 		ListenAddr:          "127.0.0.1:0",
 		ScheddName:          "local",
 		ScheddAddr:          "127.0.0.1:9618",
-		SigningKeyPath:      passwordsDir,
+		SigningKeyPath:      poolKeyPath,
 		TrustDomain:         "test.local",
 		UIDDomain:           "test.local",
 		EnableMCP:           true,

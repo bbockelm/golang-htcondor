@@ -1175,6 +1175,13 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	ctx := withRequestToken(r.Context(), token)
 	ctx = WithToken(ctx, token)
 
+	// condorCredential is what cedar authenticates with, which is not
+	// always the bearer we were handed. For a HTCondor IDTOKEN the two
+	// are the same and this stays as-is; for an opaque access token this
+	// server issued, the branch below replaces it with a minted IDTOKEN,
+	// because the opaque one is not a credential HTCondor can verify.
+	condorCredential := token
+
 	// Determine which session cache to use based on authentication mode
 	var sessionCache *security.SessionCache
 	// sessionTag isolates this caller's cedar sessions when they land in
@@ -1229,17 +1236,47 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			if err != nil {
 				// If failed to parse as JWT, check if it's an opaque token and we have OAuth2 provider
 				if s.oauth2Provider != nil {
-					// Try to validate as opaque token
-					session, accessErr := s.oauth2Provider.IntrospectToken(r.Context(), token)
+					// Try to validate as opaque token. Keep the
+					// requester rather than just the session: the
+					// granted scopes live on it, and they bound the
+					// IDTOKEN minted below.
+					ar, accessErr := s.oauth2Provider.IntrospectAccessToken(r.Context(), token)
 					if accessErr == nil {
-						username := session.GetSubject()
-						expiration := session.GetExpiresAt(fosite.AccessToken)
+						// Honour oauth2UsernameClaim, as the MCP path
+						// does. Reading GetSubject() directly here
+						// ignored an operator's configured claim on
+						// every REST endpoint while respecting it on
+						// /mcp/message, so the same grant authenticated
+						// as two different people depending on which
+						// door it came through.
+						username := s.extractUsernameFromToken(ar)
+						expiration := ar.GetSession().GetExpiresAt(fosite.AccessToken)
 
 						entry, err = s.tokenCache.AddValidated(token, username, expiration)
 						if err != nil {
 							return nil, fmt.Errorf("failed to cache validated token: %w", err)
 						}
 						sessionCache = entry.SessionCache
+
+						// An access token this server issued is opaque:
+						// it carries no signature the schedd knows, and
+						// the FS fallback is stripped below, so handing
+						// it to cedar offers the schedd a credential it
+						// must reject. Every endpoint that dials the
+						// schedd therefore failed for precisely the
+						// callers who HAD authenticated correctly --
+						// while /api/v1/whoami, which reads the token
+						// cache and never dials, answered with their
+						// name. That split is why this looked like a
+						// schedd problem rather than an auth one.
+						//
+						// Mint the IDTOKEN the schedd can verify, the
+						// same way the MCP data path does, bounded by
+						// the scopes this grant actually carries.
+						condorCredential, err = s.generateHTCondorTokenWithScopes(username, ar.GetGrantedScopes())
+						if err != nil {
+							return nil, fmt.Errorf("failed to mint HTCondor token for %s: %w", username, err)
+						}
 						s.logger.Debug(logging.DestinationSecurity, "Validated opaque token via OAuth2 storage", "username", username)
 					} else {
 						// Both JWT parsing and opaque token introspection failed
@@ -1270,7 +1307,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// instead of the header identity. A caller then could not see, hold
 	// or remove the job they had just submitted, because every
 	// owner-scoped query filters on an Owner that is not theirs.
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(token, sessionCache, false)
+	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(condorCredential, sessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}

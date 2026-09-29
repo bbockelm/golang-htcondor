@@ -651,7 +651,7 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
-		SigningKeyPath:     passwordsDir,
+		SigningKeyPath:     poolKeyPath,
 		TrustDomain:        "test.local",
 		UIDDomain:          "test.local",
 		EnableMCP:          true,

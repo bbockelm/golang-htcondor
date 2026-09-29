@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -2672,6 +2673,19 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 
 	if h.trustDomain == "" {
 		return "", fmt.Errorf("trust domain not configured")
+	}
+
+	// The setting names the key FILE -- HTTP_API_SIGNING_KEY defaults to
+	// SEC_TOKEN_POOL_SIGNING_KEY_FILE, which is .../passwords.d/POOL --
+	// and every caller here splits it into a directory and a kid. Point
+	// it at the passwords.d directory instead and the split produces a
+	// key name that is really a directory, which surfaces from the JWT
+	// library as "is a directory" against a path the operator never
+	// typed. Say which setting is wrong instead.
+	if info, statErr := os.Stat(h.signingKeyPath); statErr == nil && info.IsDir() {
+		return "", fmt.Errorf(
+			"signing key path %s is a directory; it must name the key file inside it (for example %s)",
+			h.signingKeyPath, filepath.Join(h.signingKeyPath, "POOL"))
 	}
 
 	// Ensure username has domain suffix
