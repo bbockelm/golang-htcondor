@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,11 +18,16 @@ type fakeConn struct {
 	mu      sync.Mutex
 	dialErr error
 	dials   int
+	runOut  string
+	runErr  error
+	runs    int
 	closed  bool
 	done    chan struct{} // closed to make Wait return, i.e. the job ended
 }
 
-func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
+func newFakeConn() *fakeConn {
+	return &fakeConn{done: make(chan struct{}), runOut: "/var/lib/condor/execute/dir_42\n"}
+}
 
 func (f *fakeConn) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
 	f.mu.Lock()
@@ -33,6 +39,16 @@ func (f *fakeConn) DialContext(_ context.Context, _, _ string) (net.Conn, error)
 	client, server := net.Pipe()
 	go func() { _ = server.Close() }()
 	return client, nil
+}
+
+func (f *fakeConn) Run(_ context.Context, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runs++
+	if f.runErr != nil {
+		return "", f.runErr
+	}
+	return f.runOut, nil
 }
 
 func (f *fakeConn) Wait() error {
@@ -70,17 +86,18 @@ func (f *fakeConn) end() {
 }
 
 type fakeDialer struct {
-	mu    sync.Mutex
-	calls int
-	conns []*fakeConn
-	err   error
-	delay time.Duration
+	mu      sync.Mutex
+	calls   int
+	conns   []*fakeConn
+	err     error
+	delay   time.Duration
+	scratch string
 }
 
 func (d *fakeDialer) dial(_ context.Context, _ Key) (Conn, error) {
 	d.mu.Lock()
 	d.calls++
-	err, delay := d.err, d.delay
+	err, delay, scratch := d.err, d.delay, d.scratch
 	d.mu.Unlock()
 
 	if delay > 0 {
@@ -90,6 +107,9 @@ func (d *fakeDialer) dial(_ context.Context, _ Key) (Conn, error) {
 		return nil, err
 	}
 	c := newFakeConn()
+	if scratch != "" {
+		c.runOut = scratch
+	}
 	d.mu.Lock()
 	d.conns = append(d.conns, c)
 	d.mu.Unlock()
@@ -357,5 +377,100 @@ func TestCloseWaitsForTheLastConnection(t *testing.T) {
 	case <-closed:
 	case <-time.After(2 * time.Second):
 		t.Error("Close did not return")
+	}
+}
+
+// TestScratchDirIsResolvedOnce pins the memo. A relative socket path
+// does not resolve over a forward, so every Unix dial needs the
+// sandbox's absolute scratch directory -- asking for it per request
+// would put a round trip in front of each one.
+func TestScratchDirIsResolvedOnce(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	for i := 0; i < 4; i++ {
+		got, err := c.ScratchDir(context.Background(), testKey)
+		if err != nil {
+			t.Fatalf("ScratchDir %d: %v", i, err)
+		}
+		if got != "/var/lib/condor/execute/dir_42" {
+			t.Fatalf("ScratchDir = %q, want the sandbox's path with the newline trimmed", got)
+		}
+	}
+	d.mu.Lock()
+	runs := d.conns[0].runs
+	d.mu.Unlock()
+	if runs != 1 {
+		t.Errorf("asked the sandbox %d times, want 1", runs)
+	}
+}
+
+// TestScratchDirFailureIsCached: a sandbox that will not answer will
+// not answer the next request either, and retrying costs a round trip
+// per request to learn the same thing.
+func TestScratchDirFailureIsCached(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	// Establish the transport, then make Run fail.
+	if _, err := c.DialJob(context.Background(), testKey, "tcp", "127.0.0.1:1"); err != nil {
+		t.Fatalf("DialJob: %v", err)
+	}
+	d.mu.Lock()
+	d.conns[0].mu.Lock()
+	d.conns[0].runErr = errors.New("no shell")
+	d.conns[0].mu.Unlock()
+	d.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.ScratchDir(context.Background(), testKey); err == nil {
+			t.Fatal("ScratchDir succeeded with a failing shell")
+		}
+	}
+	d.mu.Lock()
+	runs := d.conns[0].runs
+	d.mu.Unlock()
+	if runs != 1 {
+		t.Errorf("retried the failing lookup %d times, want it cached after 1", runs)
+	}
+}
+
+func TestValidateSocketName(t *testing.T) {
+	good := []string{"vscode.sock", "a", "code-server_1.sock", "X.Y-Z_0"}
+	for _, n := range good {
+		if err := validateSocketName(n); err != nil {
+			t.Errorf("validateSocketName(%q) = %v, want nil", n, err)
+		}
+	}
+	// Everything about the path but this component comes from the
+	// sandbox, so a separator or a parent reference here would let a
+	// request name a socket anywhere on the execute node.
+	bad := []string{"", ".", "..", "a/b", "../etc/x", "a\x00b", "a b", "sock;rm", strings.Repeat("x", 65)}
+	for _, n := range bad {
+		if err := validateSocketName(n); err == nil {
+			t.Errorf("validateSocketName(%q) = nil, want an error", n)
+		}
+	}
+}
+
+// TestUnixPathLengthIsRefusedWithAReason: sun_path is ~104 bytes and
+// both ends of a forward are bound by it, but the kernel's complaint
+// arrives as "open failed" and names nothing. A pool whose EXECUTE
+// directory is too deep should be told that, not left guessing.
+func TestUnixPathLengthIsRefusedWithAReason(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	deep := "/" + strings.Repeat("longdir/", 14) + "scratch"
+	d.mu.Lock()
+	d.scratch = deep + "\n"
+	d.mu.Unlock()
+
+	_, err := c.DialJobUnix(context.Background(), testKey, "vscode.sock")
+	if err == nil {
+		t.Fatal("DialJobUnix accepted a path over the sun_path limit")
+	}
+	if !strings.Contains(err.Error(), "Unix socket address allows") {
+		t.Errorf("error %q does not explain the sun_path limit", err)
 	}
 }

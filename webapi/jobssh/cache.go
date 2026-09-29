@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,10 @@ func (k Key) String() string { return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster
 // shut it down. An interface so the cache is testable without a pool.
 type Conn interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+	// Run executes cmd in the sandbox and returns its standard output.
+	// Used for the one thing only the sandbox knows: where its scratch
+	// directory is.
+	Run(ctx context.Context, cmd string) (string, error)
 	// Wait blocks until the transport is finished, and is how the
 	// cache learns the job ended.
 	Wait() error
@@ -113,6 +118,14 @@ type entry struct {
 	// arrives afterwards closes the transport instead of resurrecting
 	// bookkeeping nobody will read.
 	evicted bool
+
+	// scratch caches the sandbox's scratch directory, resolved once
+	// per transport. scratchErr is cached too: if the sandbox will not
+	// tell us, it will not tell the next request either, and retrying
+	// costs a round trip per request to learn the same thing.
+	scratchOnce sync.Once
+	scratch     string
+	scratchErr  error
 
 	// closeOnce makes shutting the transport idempotent. Three things
 	// can decide a transport is finished -- the reaper, the watcher
@@ -408,4 +421,92 @@ func (t *trackedConn) Close() error {
 	err := t.Conn.Close()
 	t.once.Do(t.release)
 	return err
+}
+
+// maxUnixPath is the practical ceiling on a Unix socket address.
+// sun_path is 108 bytes on Linux and 104 on macOS, and both ends of a
+// forward are bound by it. An HTCondor scratch directory can fill most
+// of that on its own, and the kernel's complaint arrives as nothing
+// more informative than "open failed" -- so the check is here, where
+// the path can be named in the error.
+const maxUnixPath = 100
+
+// ScratchDir returns the job's scratch directory, asking the sandbox
+// once per transport.
+//
+// It has to be asked. A relative socket path does not resolve over a
+// forward -- sshd's working directory is not the sandbox -- so an
+// absolute path is the only way to reach a socket, and only the job
+// knows what its own is.
+func (c *Cache) ScratchDir(ctx context.Context, key Key) (string, error) {
+	e, err := c.acquire(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer c.release(e)
+
+	e.scratchOnce.Do(func() {
+		out, rerr := e.conn.Run(ctx, `echo "$_CONDOR_SCRATCH_DIR"`)
+		if rerr != nil {
+			e.scratchErr = fmt.Errorf("asking job %s for its scratch directory: %w", key, rerr)
+			return
+		}
+		dir := strings.TrimSpace(out)
+		if dir == "" {
+			e.scratchErr = fmt.Errorf("job %s reported no scratch directory", key)
+			return
+		}
+		e.scratch = dir
+	})
+	return e.scratch, e.scratchErr
+}
+
+// DialJobUnix opens a connection to a Unix socket in the job's scratch
+// directory. name is a bare filename, not a path.
+//
+// This is how a server in the job should be reached. A TCP port bound
+// to 127.0.0.1 in a sandbox is reachable by any local user on the
+// execute node unless the job has its own network namespace, which no
+// pool can be assumed to configure; a socket is protected by file
+// permissions instead.
+func (c *Cache) DialJobUnix(ctx context.Context, key Key, name string) (net.Conn, error) {
+	if err := validateSocketName(name); err != nil {
+		return nil, err
+	}
+	dir, err := c.ScratchDir(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	path := dir + "/" + name
+	if len(path) > maxUnixPath {
+		return nil, fmt.Errorf(
+			"socket path %q is %d bytes, over the ~%d a Unix socket address allows; "+
+				"this pool's EXECUTE directory is too deep to serve a job over a socket",
+			path, len(path), maxUnixPath)
+	}
+	return c.DialJob(ctx, key, "unix", path)
+}
+
+// validateSocketName keeps the caller-supplied component to a bare
+// filename. Everything about the path but this comes from the sandbox,
+// and a name with a separator or a parent reference in it would let a
+// request name a socket anywhere on the execute node.
+func validateSocketName(name string) error {
+	if name == "" {
+		return errors.New("socket name is empty")
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("socket name %q is too long", name)
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("socket name %q must be a bare filename", name)
+	}
+	for _, r := range name {
+		ok := r == '.' || r == '_' || r == '-' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return fmt.Errorf("socket name %q has a character outside [A-Za-z0-9._-]", name)
+		}
+	}
+	return nil
 }

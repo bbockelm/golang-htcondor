@@ -85,14 +85,43 @@ func parseProxyPort(s string) (int, error) {
 	return port, nil
 }
 
-// handleJobProxy proxies one request to 127.0.0.1:port inside the job.
+// jobProxyTarget names what to connect to inside the sandbox: a TCP
+// port, or a Unix socket in the job's scratch directory.
+//
+// A socket is the better of the two and the one anything we launch
+// should use. A TCP port bound to 127.0.0.1 in a sandbox is reachable
+// by any local user on the execute node unless the job has its own
+// network namespace, which no pool can be assumed to configure,
+// whereas a socket is protected by file permissions. The port form
+// stays because it is the only way to reach a job somebody else set
+// up.
+type jobProxyTarget struct {
+	Port   int    // TCP port; used when Socket is empty
+	Socket string // bare filename in the scratch directory
+}
+
+func (t jobProxyTarget) describe() string {
+	if t.Socket != "" {
+		return "socket " + t.Socket
+	}
+	return fmt.Sprintf("port %d", t.Port)
+}
+
+func (t jobProxyTarget) dial(ctx context.Context, cache *jobssh.Cache, key jobssh.Key) (net.Conn, error) {
+	if t.Socket != "" {
+		return cache.DialJobUnix(ctx, key, t.Socket)
+	}
+	return cache.DialJob(ctx, key, "tcp", fmt.Sprintf("127.0.0.1:%d", t.Port))
+}
+
+// handleJobProxy proxies one request to a target inside the job.
 //
 // upstreamPath is what remains after /proxy/{port}, and is what the
 // server in the job sees as its own path. Callers running a web app
 // there should be told to mount it at the same prefix the browser uses
 // (code-server's --abs-proxy-base-path, JupyterLab's base_url), since
 // nothing here rewrites the HTML that comes back.
-func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster, proc, port int, upstreamPath string) {
+func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster, proc int, target jobProxyTarget, upstreamPath string) {
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
@@ -140,7 +169,6 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		owner = username
 	}
 	key := jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}
-	target := fmt.Sprintf("127.0.0.1:%d", port)
 
 	// Preserve the browser's Host. Our dialer ignores it -- the
 	// destination is decided by key and target, not by routing -- but
@@ -183,7 +211,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 				dialCtx, cancel := context.WithTimeout(dialCtx, jobProxyDialTimeout)
 				defer cancel()
-				return cache.DialJob(dialCtx, key, "tcp", target)
+				return target.dial(dialCtx, cache, key)
 			},
 			// Keep-alives on, unlike the yamux proxy: there each
 			// stream is single-use, whereas here a pooled connection
@@ -200,18 +228,38 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, perr error) {
 			s.logger.Error(logging.DestinationHTTP, "job proxy failed",
 				"user", username, "cluster", cluster, "proc", proc,
-				"port", port, "error", perr)
+				"target", target.describe(), "error", perr)
 			// 502: we reached the job (or could not), but the failure
 			// is upstream of the caller either way. The body stays
 			// vague on purpose -- perr can name internal addresses.
 			s.writeError(rw, http.StatusBadGateway,
-				fmt.Sprintf("could not reach port %d inside job %d.%d", port, cluster, proc))
+				fmt.Sprintf("could not reach %s inside job %d.%d", target.describe(), cluster, proc))
 		},
 	}
 
 	s.logger.Debug(logging.DestinationHTTP, "proxying into job",
-		"user", username, "cluster", cluster, "proc", proc, "port", port, "path", upstreamPath)
+		"user", username, "cluster", cluster, "proc", proc,
+		"target", target.describe(), "path", upstreamPath)
 	proxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// parseProxyTarget reads the segment after /proxy/ as either the
+// literal "unix" (the socket name then follows) or a TCP port.
+func parseProxyTarget(segments []string) (jobProxyTarget, []string, error) {
+	if len(segments) == 0 {
+		return jobProxyTarget{}, nil, fmt.Errorf("expected a port or \"unix\"")
+	}
+	if segments[0] == "unix" {
+		if len(segments) < 2 {
+			return jobProxyTarget{}, nil, fmt.Errorf("unix needs a socket name: /proxy/unix/{name}/")
+		}
+		return jobProxyTarget{Socket: segments[1]}, segments[2:], nil
+	}
+	port, err := parseProxyPort(segments[0])
+	if err != nil {
+		return jobProxyTarget{}, nil, err
+	}
+	return jobProxyTarget{Port: port}, segments[1:], nil
 }
 
 // jobProxyUpstreamPath rebuilds the path the job's server should see
