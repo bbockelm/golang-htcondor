@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -107,14 +106,16 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	}
 	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
 
-	// Bound by bare name, against the working directory the launcher
-	// cd'd into. An absolute address would carry the whole scratch path
-	// into sun_path, which is capped at ~100 bytes and which a glidein's
-	// sandbox exceeds on its own.
-	if !containsPair(args, "--socket", SocketName) {
-		t.Errorf("args %q do not bind --socket by bare name (%q)", args, SocketName)
-	}
+	// A sandbox whose path fits keeps its socket inside it, so HTCondor
+	// cleans it up with everything else. The address is absolute
+	// because code-server resolves --socket before binding anyway.
 	wantSock := filepath.Join(scratch, SocketName)
+	if !containsPair(args, "--socket", wantSock) {
+		t.Errorf("args %q do not carry --socket %q", args, wantSock)
+	}
+	if !containsPair(args, "--socket-mode", "600") {
+		t.Errorf("args %q do not pin the socket mode", args)
+	}
 	// Authentication off is only correct because the socket's
 	// permissions are the authorization; if one goes the other must.
 	if !contains(args, "--auth") || !contains(args, "none") {
@@ -134,14 +135,15 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 }
 
 func TestLaunchScriptWorksInADeepSandbox(t *testing.T) {
-	// The glidein case, and the one the previous version of this
-	// launcher refused outright. sun_path is capped at ~100 bytes for
-	// bind() as much as for connect(), and an EP running inside a SLURM
-	// job nests its execute/dir_N under the host batch system's -- so
-	// the scratch path can exceed the limit before anything of ours is
-	// added. Refusing there would refuse on exactly the pools this is
-	// for. The launcher binds by bare name and publishes an address
-	// short enough to reach the socket by.
+	// The glidein case: an EP inside a SLURM job nests its execute/dir_N
+	// under the host batch system's, so the scratch path passes the
+	// ~100-byte sun_path cap before anything of ours is added.
+	//
+	// Binding by bare name would keep the address short, and does not
+	// work: code-server resolves --socket to an absolute path before
+	// binding, and dies with "listen EINVAL" on the long one. Measured
+	// against code-server 4.139.1. So the socket goes in a short
+	// private directory and the job publishes where it put it.
 	base := shortScratch(t)
 	deep := filepath.Join(base, strings.Repeat("glide_dir/", 12), "execute", "dir_9")
 	if err := os.MkdirAll(deep, 0o700); err != nil {
@@ -172,41 +174,39 @@ func TestLaunchScriptWorksInADeepSandbox(t *testing.T) {
 		t.Errorf("published address is %d bytes (%q), over the ~%d a Unix socket allows",
 			len(addr), addr, MaxSocketPath)
 	}
+	// It must not have been left in the sandbox, which is the path that
+	// does not fit.
+	if strings.HasPrefix(addr, deep) {
+		t.Errorf("published address %q is still inside the over-long sandbox path", addr)
+	}
 
-	// The socket itself is bound in the sandbox, and its mode is what
-	// makes running the server with authentication disabled safe.
-	//nolint:gosec // G703: a path this test built from its own temp dir
-	st, serr := os.Stat(filepath.Join(deep, SocketName))
+	//nolint:gosec // G703: the address the launcher just published for this test
+	st, serr := os.Stat(addr)
 	if serr != nil {
-		t.Fatalf("no socket was bound in the sandbox: %v", serr)
+		t.Fatalf("the published address %q does not resolve: %v", addr, serr)
 	}
 	if perm := st.Mode().Perm(); perm&0o077 != 0 {
 		t.Errorf("socket mode is %04o; group and other must have no access", perm)
 	}
-
-	// Whether the published address resolves is deliberately NOT
-	// asserted here, and the first version of this test got that wrong.
-	// On Linux the address is /proc/<pid>/cwd/..., which is valid only
-	// while that process lives -- and the stand-in server has exited by
-	// now, so it resolves on macOS (a symlink) and not on Linux. What
-	// can be checked without a live process is the shape, and that the
-	// mechanism is the one meant for this platform. Reachability is the
-	// integration test's job, where the server is still running.
-	if strings.HasPrefix(addr, "/proc/") {
-		if !procAddrRE.MatchString(addr) {
-			t.Errorf("published address %q is not /proc/<pid>/cwd/%s", addr, SocketName)
-		}
-	} else {
-		//nolint:gosec // G703: the address the launcher just published for this test
-		if _, lerr := os.Stat(addr); lerr != nil {
-			t.Errorf("published address %q does not resolve: %v", addr, lerr)
-		}
+	// The directory holding it is the only thing between this socket
+	// and every other user on the execute node.
+	//nolint:gosec // G703: the directory of the address published above
+	dst, derr := os.Stat(filepath.Dir(addr))
+	if derr != nil {
+		t.Fatalf("stat %q: %v", filepath.Dir(addr), derr)
 	}
+	if perm := dst.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("socket directory mode is %04o; it must be private to the owner", perm)
+	}
+	// The launcher cannot clean this up itself: it exec's the server,
+	// so no trap of its own can fire. In a job the directory outlives
+	// the session; here the test owns it.
+	sockDir := filepath.Dir(addr)
+	t.Cleanup(func() {
+		//nolint:gosec // G703: the directory of the address the launcher published for this test
+		_ = os.RemoveAll(sockDir)
+	})
 }
-
-// procAddrRE matches the address the launcher publishes on Linux, where
-// a kernel symlink keeps it short however deep the sandbox is.
-var procAddrRE = regexp.MustCompile(`^/proc/[0-9]+/cwd/` + regexp.QuoteMeta(SocketName) + `$`)
 
 func TestLaunchScriptRefusesAMissingServer(t *testing.T) {
 	scratch := shortScratch(t)

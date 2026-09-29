@@ -137,55 +137,67 @@ set -eu
 SCRATCH="${_CONDOR_SCRATCH_DIR:-$PWD}"
 cd "$SCRATCH"
 
-# The socket is bound RELATIVE, and an address to reach it by is
-# written to %[2]s.path for the proxy to read.
+# Where the socket goes, and why it is not simply in the sandbox.
 #
-# Both ends of a Unix socket are capped at ~%[3]d bytes of sun_path --
-# bind() as much as connect() -- and an HTCondor scratch directory
-# routinely exceeds that. A glidein is the normal case, not the corner:
-# an EP inside a SLURM job nests its own execute/dir_N under the host
-# batch system's, and the absolute path runs past the limit before
-# anything of ours is added. Binding by bare name sidesteps it, because
-# the address is resolved against the working directory and only the
-# short string travels to the kernel.
+# A Unix socket address is capped at ~%[3]d bytes of sun_path, for
+# bind() as much as for connect(), and an HTCondor scratch directory
+# routinely exceeds that. A glidein is the normal case rather than the
+# corner: an EP inside a SLURM job nests its own execute/dir_N under
+# the host batch system's, and the path runs past the limit before
+# anything of ours is added.
 #
-# That leaves the far end, which has no such working directory: sshd
-# resolves what we give it against its own. So the job publishes an
-# address instead of the proxy guessing one.
-rm -f "%[2]s" "%[2]s.path"
-
+# Binding by bare name against the working directory would keep the
+# address short -- but code-server resolves --socket to an absolute
+# path before binding, so the long path comes back and it dies with
+# "listen EINVAL". Measured against code-server 4.139.1; do not
+# "simplify" this back to a relative path without re-checking.
+#
+# So a sandbox too deep to name gets its socket in a short private
+# directory instead, and the job publishes the address either way. The
+# far end has no working directory of its own to resolve against --
+# sshd resolves what it is given against its own -- so it reads the
+# address rather than guessing one.
 ABS="$SCRATCH/%[2]s"
 ABSLEN=$(printf '%%s' "$ABS" | wc -c | tr -d ' ')
+SOCKDIR=""
 if [ "$ABSLEN" -le %[3]d ]; then
-	# Short enough to say plainly. Nothing to clean up afterwards.
-	CONNECT="$ABS"
-elif [ -d "/proc/$$" ]; then
-	# Linux, which is every glidein. /proc/<pid>/cwd is a kernel
-	# symlink to this process's working directory, so the address
-	# stays about thirty bytes however deep the sandbox is, and the
-	# kernel resolves the rest. $$ survives the exec below, and the
-	# server inherits this working directory, so it stays valid for
-	# as long as there is something to connect to.
-	CONNECT="/proc/$$/cwd/%[2]s"
+	# Short enough to say plainly, and it stays inside the sandbox,
+	# so HTCondor cleans it up with everything else.
+	SOCK="$ABS"
 else
-	# No /proc and a long path: reach the socket through a symlink in
-	# a directory short enough to name. 0700, so the link is no more
-	# reachable than the socket it points at.
-	SHORTDIR="/tmp/.condor-app-$$"
-	if ! mkdir "$SHORTDIR" 2>/dev/null; then
-		echo "vscode: cannot make $SHORTDIR, and $ABS is $ABSLEN bytes," >&2
-		echo "vscode: over the ~%[3]d a Unix socket address allows" >&2
+	# /tmp rather than $TMPDIR. HTCondor commonly points TMPDIR AT the
+	# job's scratch directory, which is the very path that is too long
+	# -- so honouring it here would pick the one place guaranteed not
+	# to work. TMPDIR is tried second, for a site that has no /tmp.
+	SOCKDIR=""
+	for base in /tmp "${TMPDIR:-}"; do
+		[ -n "$base" ] || continue
+		candidate="$base/.condor-app-$$"
+		# A stale directory from a reused pid would otherwise make the
+		# mkdir fail and take the session with it.
+		rm -rf "$candidate" 2>/dev/null
+		if mkdir "$candidate" 2>/dev/null; then
+			SOCKDIR="$candidate"
+			break
+		fi
+	done
+	if [ -z "$SOCKDIR" ]; then
+		echo "vscode: $ABS is $ABSLEN bytes, over the ~%[3]d a Unix socket address" >&2
+		echo "vscode: allows, and no short directory could be created to hold one" >&2
 		exit 1
 	fi
-	chmod 700 "$SHORTDIR"
-	ln -s "$ABS" "$SHORTDIR/s"
-	CONNECT="$SHORTDIR/s"
-	# Best effort only: exec replaces this shell, so the trap cannot
-	# fire. The directory is named for a pid and holds one dangling
-	# symlink once the job is gone.
-	trap 'rm -rf "$SHORTDIR"' EXIT INT TERM
+	# 0700: the directory is the only thing standing between this
+	# socket and any other user on the execute node.
+	chmod 700 "$SOCKDIR"
+	SOCK="$SOCKDIR/s"
+	SOCKLEN=$(printf '%%s' "$SOCK" | wc -c | tr -d ' ')
+	if [ "$SOCKLEN" -gt %[3]d ]; then
+		echo "vscode: even $SOCK is $SOCKLEN bytes; no short enough directory exists here" >&2
+		exit 1
+	fi
 fi
-printf '%%s' "$CONNECT" > "%[2]s.path"
+rm -f "$SOCK" "%[2]s.path"
+printf '%%s' "$SOCK" > "%[2]s.path"
 
 if ! command -v %[1]s >/dev/null 2>&1; then
 	echo "vscode: %[1]s is not installed in this job's environment" >&2
@@ -210,16 +222,28 @@ fi
 mkdir -p "$STATE/extensions"
 
 # The socket's permissions are the authorization -- the server runs
-# with auth disabled because nothing else can open it. umask rather
-# than a chmod after the fact: there is no moment where
-# the socket exists and is world-writable.
+# with auth disabled because nothing else can open it.
+#
+# Both umask and --socket-mode, because they cover different things.
+# umask applies before the socket exists -- so there is no instant
+# where it is world-writable -- and to everything else the job writes.
+# --socket-mode pins the socket itself at 0600.
+#
+# Note that code-server chmods the socket after binding whether or not
+# --socket-mode is given; passing it only chooses the value. Measured,
+# because the obvious conclusion is the wrong one: dropping the flag
+# does NOT avoid the chmod. A filesystem that refuses chmod on a socket
+# therefore kills code-server outright with "EINVAL ... chmod" whatever
+# we pass -- a Docker Desktop bind mount does exactly that, while a
+# real execute node's local /tmp does not.
 umask 077
 
 exec %[1]s \
 	--auth none \
 	--disable-telemetry \
 	--disable-update-check \
-	--socket "%[2]s" \
+	--socket "$SOCK" \
+	--socket-mode 600 \
 	--user-data-dir "$STATE" \
 	--extensions-dir "$STATE/extensions" \
 	--config "$STATE/config.yaml"%[5]s \
