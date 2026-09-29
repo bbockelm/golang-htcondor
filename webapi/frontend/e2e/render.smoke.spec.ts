@@ -721,5 +721,9 @@ test('a job that has left the queue opens its archived record', async ({ page })
   // The URL is the assertion: the reader asked for a queue page and
   // ends up on the archived record rather than at an error.
   await expect(page).toHaveURL(/\/archive\/8801\.0$/);
-  await expect(page.getByText('archived')).toBeVisible();
+  // exact, because getByText matches substrings: the match-analysis
+  // panel's helper text says "Re-evaluate this archived job's
+  // Requirements", so a loose locator resolves to two elements and
+  // fails on strict mode rather than on anything being wrong.
+  await expect(page.getByText('archived', { exact: true })).toBeVisible();
 });
