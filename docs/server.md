@@ -646,7 +646,7 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_GATEWAY_ADDRESS` | Where to listen, e.g. `:2222`. Empty disables the gateway. |
 | `HTTP_API_SSH_GATEWAY_ISSUER` | OAuth2 issuer the device flow runs against. Defaults to the server's own issuer; set it when this process cannot reach its own public URL. |
 | `HTTP_API_SSH_HOST_KEY_FILE` | Host key clients pin. Generated and sealed in the DB when unset. |
-| `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment. |
+| `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment; without it certificates are unavailable and the device flow still works. |
 | `HTTP_API_SSH_GATEWAY_SESSION_CPUS` | CPUs a session created on demand requests. Default 1. |
 | `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
 | `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 1024. |
@@ -660,14 +660,57 @@ its own device endpoint. It checks once shortly after startup and logs the URL
 it tried — the usual cause is an unset `HTTP_API_OAUTH2_ISSUER`, which leaves
 the default `http://localhost:8080` pointing at nothing.
 
+### Certificates, for scripts and for not approving every connection
+
+`BatchMode=yes` refuses keyboard-interactive outright, so a script cannot use
+the device flow at all — and nobody wants a browser prompt per connection
+either. A certificate is obtained once and then works until it expires.
+
+The gateway signs them with a CA key resolved exactly like the host key:
+`HTTP_API_SSH_CA_KEY_FILE`, else generated and sealed in the database. Without
+either, certificates are simply unavailable and the device flow still works —
+losing convenience, not access.
+
+```bash
+# The CA, so your client trusts the gateway's host key.
+curl -H "Authorization: Bearer $TOKEN" https://ap.example.edu/api/v1/ssh/ca
+
+# A certificate for a key you already have.
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -d "{\"public_key\": \"$(cat ~/.ssh/id_ed25519.pub)\"}" \
+     https://ap.example.edu/api/v1/ssh/certificate
+```
+
+Save the `certificate` field as `~/.ssh/id_ed25519-cert.pub`, beside the private
+key; `ssh` finds it on its own. Add the `known_hosts_line` to `~/.ssh/known_hosts`
+and the gateway's host key verifies without pinning it by hand.
+
+Certificates last 12 hours by default and never more than 24. That is not
+conservatism for its own sake: **there is no revocation**. No CRL, no OCSP, no
+list to add a stolen key to. The lifetime is the only control, which is the
+reason not to make it generous.
+
+Three properties worth knowing, because they differ from how OpenSSH
+certificates usually work:
+
+- **The principal is the account, and the request cannot choose it.** The name
+  signed is the one the access point resolved for the caller.
+- **The username is not checked against the principal.** On this gateway the
+  username names the job to reach, so requiring a match would mean a
+  certificate per job.
+- **Bare public keys are never accepted**, only certificates. A key on its own
+  carries no identity and no expiry, so accepting one would mean this server
+  keeping a list of whose key is whose — and a list that never forgets a
+  compromised key.
+
 ### Limits worth knowing
 
 - **`scp` and `sftp` do not work.** HTCondor's ssh-to-job wrapper turns a
   subsystem request into `eval sftp`. The gateway says so rather than letting
   it fail as "subsystem request failed".
-- **`BatchMode=yes` cannot log in.** The client declines keyboard-interactive
-  outright. A terminal is not required otherwise — `ssh -T` and piped stdin
-  both work.
+- **`BatchMode=yes` cannot use the device flow.** The client declines
+  keyboard-interactive outright; use a certificate. A terminal is not required
+  otherwise — `ssh -T` and piped stdin both work.
 - **Ten sessions per job.** The sshd HTCondor starts uses OpenSSH's default
   `MaxSessions`, and every terminal for one job shares it. Port and socket
   forwards do not count against it.

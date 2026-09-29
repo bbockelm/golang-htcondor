@@ -118,6 +118,12 @@ func (h *Handler) setupRoutes() {
 
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
+	// The gateway's certificate authority, and certificates signed by
+	// it. Registered whether or not the gateway listens: the endpoints
+	// answer 503 without a CA, which is a clearer answer than a 404
+	// that looks like an old build.
+	mux.Handle("/api/v1/ssh/ca", cors(http.HandlerFunc(h.handleSSHCA)))
+	mux.Handle("/api/v1/ssh/certificate", cors(http.HandlerFunc(h.handleSSHCertificate)))
 
 	// Web UI session endpoints (browser-session aware; cookie-only)
 	mux.Handle("/api/v1/auth/me", cors(http.HandlerFunc(h.handleAuthMe)))

@@ -21,6 +21,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/collections/crypt"
 	"github.com/bbockelm/cedar/security"
+	"golang.org/x/crypto/ssh"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/idmap"
@@ -392,7 +394,11 @@ type Handler struct {
 	// What a session created on demand asks for; zero fields mean
 	// the interactive package's own defaults.
 	sshGatewaySessionSpec sshGatewaySessionSize
-	jobSSHCacheMu         sync.Mutex
+	// sshCASigner signs user certificates. Nil when the gateway is off
+	// or has nowhere to keep a CA key, which is what makes the
+	// certificate endpoints answer 503 rather than 500.
+	sshCASigner   ssh.Signer
+	jobSSHCacheMu sync.Mutex
 
 	// jupyterWorkDir is where the materialized helper binary plus
 	// per-instance scratch artifacts (token files, launch scripts) are

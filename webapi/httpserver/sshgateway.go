@@ -107,6 +107,29 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		return err
 	}
 
+	// The CA is optional in a way the host key is not: without one,
+	// the device flow is still a complete way in, so a deployment that
+	// cannot keep a CA key loses convenience rather than access.
+	caKey, caErr := sshkeys.Resolve(ctx, sshkeys.CAKey, sshkeys.Options{
+		DB:        h.db,
+		Sealer:    h.sealer,
+		Logger:    h.logger,
+		CAKeyFile: h.sshCAKeyFile,
+	})
+	switch {
+	case caErr == nil:
+		h.sshCASigner = caKey.Signer
+	case errors.Is(caErr, sshkeys.ErrNoKeyStore):
+		h.logger.Info(logging.DestinationHTTP,
+			"No SSH certificate authority; the gateway will accept the device flow only",
+			"reason", caErr)
+	default:
+		// A CA that exists and cannot be opened is the same hazard as
+		// a host key that cannot: silently minting a replacement would
+		// invalidate every certificate already issued.
+		return caErr
+	}
+
 	cache, err := h.getOrCreateJobSSHCache()
 	if err != nil {
 		return fmt.Errorf("preparing the job transport cache: %w", err)
@@ -131,10 +154,20 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		return err
 	}
 
+	var certs *sshgateway.CertAuth
+	if h.sshCASigner != nil {
+		certs = &sshgateway.CertAuth{
+			Authority: h.sshCASigner.PublicKey(),
+			Scopes:    sshGatewayScopes,
+			Logger:    h.logger,
+		}
+	}
+
 	listener := &sshgateway.Listener{
 		Addr:    h.sshGatewayAddress,
 		HostKey: hostKey.Signer,
 		Auth:    auth,
+		Certs:   certs,
 		Server: &sshgateway.Server{
 			Transport: cache,
 			Resolve:   h.sshGatewayResolve,
@@ -149,7 +182,8 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"address", h.sshGatewayAddress,
 		"issuer", gatewayIssuer,
 		"host_key", hostKey.Fingerprint,
-		"host_key_source", hostKey.Source)
+		"host_key_source", hostKey.Source,
+		"certificates", certs != nil)
 
 	go func() {
 		if err := listener.ListenAndServe(ctx); err != nil {
