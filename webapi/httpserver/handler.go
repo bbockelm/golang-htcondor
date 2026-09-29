@@ -121,6 +121,14 @@ type Handler struct {
 	// those jobs off machines where attaching to them cannot work.
 	// See HandlerConfig.InteractiveRequirements.
 	interactiveRequirements string
+	// vscodeImage is the container image a code-server app runs, from
+	// HTTP_API_VSCODE_IMAGE. Empty means vscode.RecommendedImage.
+	//
+	// An operator setting rather than a caller one: which image runs is
+	// a code-execution decision, and it is also where a site puts its
+	// own toolchain. Any transfer scheme works, so a .sif staged on
+	// OSDF is named here directly.
+	vscodeImage string
 	// build is the site's container-build configuration; see
 	// HandlerConfig.Build.
 	build mcpserver.BuildConfig
@@ -467,6 +475,10 @@ type HandlerConfig struct {
 	// expression, and a submitter who could set it could widen their own
 	// match rather than narrow it.
 	InteractiveRequirements string
+
+	// VSCodeImage is the container image a code-server app runs.
+	// Empty means vscode.RecommendedImage.
+	VSCodeImage string
 
 	// Build is the site's container-build configuration, handed to the
 	// MCP server's build_container tool. See mcpserver.BuildConfig.
@@ -1028,6 +1040,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Independent of the extras block: an operator may constrain where
 	// terminals land without supplying any verbatim submit directives.
 	h.interactiveRequirements = strings.TrimSpace(cfg.InteractiveRequirements)
+	h.vscodeImage = strings.TrimSpace(cfg.VSCodeImage)
 	if h.interactiveRequirements != "" {
 		// Checked here rather than trusted, because the failure is
 		// silent: a discarded requirement yields a job that runs and

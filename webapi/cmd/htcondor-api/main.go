@@ -1926,6 +1926,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
 		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
 		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
+		VSCodeImage:                firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
 		Build:                      loadBuildConfig(cfg, logger),
 		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
 		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),

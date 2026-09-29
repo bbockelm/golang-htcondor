@@ -158,6 +158,10 @@ type Config struct {
 	// HandlerConfig.InteractiveRequirements.
 	InteractiveRequirements string
 
+	// VSCodeImage is the container image a code-server app runs; see
+	// HandlerConfig.VSCodeImage.
+	VSCodeImage string
+
 	// Build is the site's container-build configuration; see
 	// mcpserver.BuildConfig and HandlerConfig.Build.
 	Build mcpserver.BuildConfig
@@ -404,6 +408,7 @@ func NewServer(cfg Config) (*Server, error) {
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,
 		InteractiveRequirements:     cfg.InteractiveRequirements,
+		VSCodeImage:                 cfg.VSCodeImage,
 		Build:                       cfg.Build,
 		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,
 		SubmitFileDefaults:          cfg.SubmitFileDefaults,
