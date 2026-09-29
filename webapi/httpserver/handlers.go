@@ -601,6 +601,32 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reverse-proxy into a server the job is running:
+	// /api/v1/jobs/{id}/proxy/{port}/{rest...}
+	if len(parts) >= 3 && parts[1] == "proxy" {
+		cluster, proc, err := parseJobID(jobID)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+			return
+		}
+		port, err := parseProxyPort(parts[2])
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid port: %v", err))
+			return
+		}
+		s.handleJobProxy(w, r, cluster, proc, port, jobProxyUpstreamPath(parts[3:]))
+		return
+	}
+
+	// The prefix with no path of its own. Kept separate from the case
+	// above because parts[3:] is empty either way, but only this form
+	// needs the trailing slash the app's relative links resolve
+	// against.
+	if len(parts) == 2 && parts[1] == "proxy" {
+		s.writeError(w, http.StatusBadRequest, "proxy requires a port: /api/v1/jobs/{id}/proxy/{port}/")
+		return
+	}
+
 	// Check if this is a file fetch operation: /api/v1/jobs/{id}/files/{filename}
 	if len(parts) >= 3 && parts[1] == "files" {
 		cluster, proc, err := parseJobID(jobID)
