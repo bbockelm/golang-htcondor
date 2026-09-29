@@ -3,10 +3,15 @@
 package htcondor
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +26,8 @@ import (
 //     starter's one-shot RSA keypair.
 //  2. Execute a remote command and read its stdout.
 //  3. Open a PTY-backed interactive shell and exchange data over it.
+//  4. Forward a TCP connection to a port the job listens on (direct-tcpip).
+//  5. Forward to a Unix socket in the sandbox (direct-streamlocal).
 //
 // Run with:   go test -tags=integration -run TestSSHToJobIntegration -v ./...
 //
@@ -54,6 +61,15 @@ func TestSSHToJobIntegration(t *testing.T) {
 		"/usr/lib64/condor/condor_ssh_to_job_sshd_config_template",
 		"/etc/condor/condor_ssh_to_job_sshd_config_template",
 		"/usr/share/condor/condor_ssh_to_job_sshd_config_template",
+	}
+	// A developer's HTCondor is a build tree, where the template sits in
+	// release_dir/lib next to the sbin holding condor_master. Probing only
+	// the packaged locations meant this test skipped itself on exactly the
+	// machines it was being written on, and a skip reads as a pass.
+	if masterPath, lookErr := exec.LookPath("condor_master"); lookErr == nil {
+		root := filepath.Dir(filepath.Dir(masterPath))
+		tmplCandidates = append(tmplCandidates,
+			filepath.Join(root, "lib", "condor_ssh_to_job_sshd_config_template"))
 	}
 	tmplPath := ""
 	for _, p := range tmplCandidates {
@@ -259,6 +275,215 @@ queue
 		}
 	case <-time.After(10 * time.Second):
 		t.Logf("PTY session did not exit in 10s; closing forcibly")
+	}
+
+	// --- Step 4: Forward a TCP port out of the sandbox (direct-tcpip) -------
+	//
+	// This is what carries a web IDE, a debugger, or anything else the job
+	// listens on, and it is the one capability nothing else in this package
+	// exercised. It is not obviously available: the sshd HTCondor generates
+	// sets no AllowTcpForwarding, so OpenSSH's default of "yes" applies --
+	// a default nobody wrote down, which a future edit of the template
+	// could take away silently. A forward that stopped working would
+	// surface as a hung editor, a long way from the cause.
+	//
+	// Note what a failure here means. "administratively prohibited" is
+	// forwarding being disabled; "connect failed" is forwarding working and
+	// nothing listening on the far side. They are not the same finding.
+	python, perr := exec.LookPath("python3")
+	if perr != nil {
+		t.Skip("python3 not found; skipping the port-forward step")
+	}
+
+	const fwdSentinel = "DIRECT-TCPIP-OK"
+	port := 34000 + (os.Getpid() % 1000)
+
+	// The payload goes over base64 because condor_ssh_to_job_shell_setup
+	// runs `eval ${SSH_ORIGINAL_COMMAND}` with the expansion UNQUOTED: the
+	// command is word-split on IFS -- newlines included -- and rejoined
+	// with spaces before eval re-parses it. A multi-line `python3 -c`
+	// script arrives as one line and dies on the first indented block.
+	// Anything sent through ssh-to-job must survive that round trip, so
+	// keep it to a single line with no significant whitespace.
+	script := fmt.Sprintf(`import socket
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",%d))
+s.listen(8)
+while True:
+    c,_=s.accept(); c.sendall(b"%s\n"); c.close()
+`, port, fwdSentinel)
+
+	// An absolute interpreter path: the job's PATH is the starter's plus
+	// /bin:/usr/bin (condor_ssh_to_job_shell_setup), which need not contain
+	// the python3 this machine's developer has.
+	listenerCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))"`,
+		python, base64.StdEncoding.EncodeToString([]byte(script)))
+
+	// Run it in the foreground of a session we hold open, rather than
+	// backgrounding it. A nohup'd child is killed with the session's
+	// process group when Run returns, and macOS has no setsid to escape
+	// with.
+	sess3, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession (listener) failed: %v", err)
+	}
+	defer func() { _ = sess3.Close() }()
+	var listenerErr strings.Builder
+	sess3.Stderr = &listenerErr
+	listenerDone := make(chan error, 1)
+	go func() { listenerDone <- sess3.Run(listenerCmd) }()
+
+	// The listener needs a moment to bind, and Dial is the only way to ask.
+	// Retry rather than sleeping a guessed interval: a fixed wait either
+	// flakes on a slow machine or wastes time on a fast one.
+	var fwd net.Conn
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		fwd, err = client.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			break
+		}
+		select {
+		case lerr := <-listenerDone:
+			t.Fatalf("in-sandbox listener exited before it could be reached: %v\nstderr:\n%s", lerr, listenerErr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("direct-tcpip to 127.0.0.1:%d never succeeded: %v", port, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	defer func() { _ = fwd.Close() }()
+
+	_ = fwd.SetReadDeadline(time.Now().Add(10 * time.Second))
+	got, rerr := bufio.NewReader(fwd).ReadString('\n')
+	if rerr != nil {
+		t.Fatalf("reading from forwarded port failed: %v", rerr)
+	}
+	if strings.TrimSpace(got) != fwdSentinel {
+		t.Fatalf("forwarded port said %q, want %q", strings.TrimSpace(got), fwdSentinel)
+	}
+	t.Logf("direct-tcpip forward to 127.0.0.1:%d returned %q", port, strings.TrimSpace(got))
+
+	// --- Step 5: Forward to a Unix socket in the sandbox (streamlocal) ------
+	//
+	// A TCP port bound to 127.0.0.1 inside a sandbox is reachable by any
+	// local user on the execute node unless the job has its own network
+	// namespace, which is not something a pool can be assumed to
+	// configure. A Unix socket in the job's scratch directory is
+	// protected by file permissions instead, so anything served into a
+	// job -- an editor, a notebook -- should listen on one of those and
+	// not on a port.
+	//
+	// Whether that is reachable at all depends on the sshd HTCondor
+	// generates supporting direct-streamlocal@openssh.com, and on what a
+	// relative socket path resolves against: if the sandbox is sshd's
+	// working directory then a launcher needs no way to discover its own
+	// absolute path, and if it is not then it does. Both are checked
+	// here because the answer decides how the launcher is written.
+	sockName := "sshjob.sock"
+	// Bind by chdir + bare name rather than by absolute path. A Unix
+	// socket address is capped at ~104 bytes (sun_path), and an
+	// HTCondor scratch directory is long enough to blow that on its
+	// own -- the harness's certainly is. Both ends of a forward have
+	// the same limit, so a launcher that builds an absolute path from
+	// _CONDOR_SCRATCH_DIR can fail for no reason it can see.
+	shortPath := fmt.Sprintf("/tmp/%s", sockName)
+	sockScript := fmt.Sprintf(`import os,socket
+os.chdir(os.environ.get("_CONDOR_SCRATCH_DIR",os.getcwd()))
+for p in ("%s","%s"):
+    try: os.unlink(p)
+    except OSError: pass
+s=socket.socket(socket.AF_UNIX)
+s.bind("%s"); os.chmod("%s",0o600); s.listen(8)
+t=socket.socket(socket.AF_UNIX)
+t.bind("%s"); os.chmod("%s",0o600); t.listen(8)
+print(os.path.join(os.getcwd(),"%s"),flush=True)
+import threading
+def serve(x):
+    while True:
+        c,_=x.accept(); c.sendall(b"%s\n"); c.close()
+threading.Thread(target=serve,args=(t,),daemon=True).start()
+serve(s)
+`, sockName, shortPath, sockName, sockName, shortPath, shortPath, sockName, fwdSentinel)
+
+	sess4, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession (unix listener) failed: %v", err)
+	}
+	defer func() { _ = sess4.Close() }()
+	sockOut, err := sess4.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe failed: %v", err)
+	}
+	var sockErr strings.Builder
+	sess4.Stderr = &sockErr
+	unixCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))"`,
+		python, base64.StdEncoding.EncodeToString([]byte(sockScript)))
+	if err := sess4.Start(unixCmd); err != nil {
+		t.Fatalf("starting the unix listener failed: %v", err)
+	}
+
+	// The listener prints its absolute path once bound, which removes a
+	// sleep and gives us the absolute case to try.
+	absPath, err := bufio.NewReader(sockOut).ReadString('\n')
+	if err != nil {
+		t.Fatalf("unix listener never reported its path: %v\nstderr:\n%s", err, sockErr.String())
+	}
+	absPath = strings.TrimSpace(absPath)
+	t.Logf("in-sandbox unix socket at %s", absPath)
+
+	readSentinel := func(c net.Conn) (string, error) {
+		defer func() { _ = c.Close() }()
+		line, rerr := bufio.NewReader(c).ReadString('\n')
+		return strings.TrimSpace(line), rerr
+	}
+
+	// Relative path first: if sshd's working directory is the sandbox
+	// this resolves, and a launcher then needs neither a discovery step
+	// nor an absolute path long enough to hit the sun_path limit.
+	relWorks := false
+	if rc, rerr := client.Dial("unix", sockName); rerr != nil {
+		t.Logf("relative socket path %q does not resolve: %v", sockName, rerr)
+	} else if line, lerr := readSentinel(rc); lerr != nil {
+		t.Logf("relative socket path %q connected but did not read: %v", sockName, lerr)
+	} else if line == fwdSentinel {
+		relWorks = true
+		t.Logf("relative socket path %q resolves against the sandbox", sockName)
+	}
+
+	// A short absolute path, to separate "streamlocal is refused" from
+	// "that path is too long". sun_path is ~104 bytes and the harness's
+	// scratch directory alone nearly fills it, so a failure on the
+	// scratch path proves nothing on its own.
+	shortWorks := false
+	if sc, serr := client.Dial("unix", shortPath); serr != nil {
+		t.Logf("short absolute socket path %s does not resolve: %v", shortPath, serr)
+	} else if line, lerr := readSentinel(sc); lerr != nil {
+		t.Logf("short absolute socket path connected but did not read: %v", lerr)
+	} else if line == fwdSentinel {
+		shortWorks = true
+		t.Logf("short absolute socket path %s works -- streamlocal forwarding is enabled", shortPath)
+	}
+
+	absWorks := false
+	if uc, uerr := client.Dial("unix", absPath); uerr != nil {
+		t.Logf("absolute socket path %s does not resolve: %v (sun_path is ~104 bytes; "+
+			"an HTCondor scratch directory can exceed it on its own)", absPath, uerr)
+	} else if line, lerr := readSentinel(uc); lerr != nil {
+		t.Logf("absolute socket path connected but did not read: %v", lerr)
+	} else if line == fwdSentinel {
+		absWorks = true
+		t.Logf("absolute socket path %s works", absPath)
+	}
+
+	// One of them has to work, or nothing can be served into a job over
+	// a socket -- and a TCP port in the sandbox is reachable by any
+	// local user on the execute node, so "use a port instead" is not an
+	// answer on a shared pool.
+	if !relWorks && !absWorks && !shortWorks {
+		t.Fatalf("direct-streamlocal reached the socket by neither path; stderr:\n%s", sockErr.String())
 	}
 }
 
