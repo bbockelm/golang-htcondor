@@ -3,12 +3,15 @@ package jobssh
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // fakeConn stands in for an *ssh.Client. dialErr, when set, is what
@@ -21,6 +24,8 @@ type fakeConn struct {
 	runOut  string
 	runErr  error
 	runs    int
+	openErr error
+	opens   int
 	closed  bool
 	done    chan struct{} // closed to make Wait return, i.e. the job ended
 }
@@ -49,6 +54,39 @@ func (f *fakeConn) Run(_ context.Context, _ string) (string, error) {
 		return "", f.runErr
 	}
 	return f.runOut, nil
+}
+
+// fakeSession is a JobSession that does nothing but exist and close,
+// which is all the cache's accounting cares about.
+type fakeSession struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (f *fakeSession) RequestPty(string, int, int, ssh.TerminalModes) error { return nil }
+func (f *fakeSession) WindowChange(int, int) error                          { return nil }
+func (f *fakeSession) Shell() error                                         { return nil }
+func (f *fakeSession) Start(string) error                                   { return nil }
+func (f *fakeSession) Signal(ssh.Signal) error                              { return nil }
+func (f *fakeSession) Wait() error                                          { return nil }
+func (f *fakeSession) StdinPipe() (io.WriteCloser, error)                   { return nil, nil }
+func (f *fakeSession) StdoutPipe() (io.Reader, error)                       { return nil, nil }
+func (f *fakeSession) StderrPipe() (io.Reader, error)                       { return nil, nil }
+func (f *fakeSession) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	return nil
+}
+
+func (f *fakeConn) OpenSession(context.Context) (JobSession, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opens++
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return &fakeSession{}, nil
 }
 
 func (f *fakeConn) Wait() error {
@@ -472,5 +510,153 @@ func TestUnixPathLengthIsRefusedWithAReason(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Unix socket address allows") {
 		t.Errorf("error %q does not explain the sun_path limit", err)
+	}
+}
+
+// TestSessionHoldsTheTransportOpen is the rule that matters most: an
+// interactive shell can sit silent for an hour, so a held session must
+// count as a live user of the transport exactly as a forwarded
+// connection does, or the reaper closes it out from under the user.
+func TestSessionHoldsTheTransportOpen(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+
+	d := &fakeDialer{}
+	c := newTestCache(t, d, now)
+
+	_, release, err := c.Session(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+
+	clock.Add(int64(24 * time.Hour))
+	c.reapOnce()
+	if c.Len() != 1 {
+		t.Fatal("the reaper closed a transport with a session open")
+	}
+
+	release()
+	clock.Add(int64(24 * time.Hour))
+	c.reapOnce()
+	if c.Len() != 0 {
+		t.Errorf("transport was not reaped after its session was released; Len = %d", c.Len())
+	}
+}
+
+// TestSessionCapIsRefusedWithAReason: the generated sshd sets no
+// MaxSessions, so OpenSSH's default of 10 applies -- per CONNECTION.
+// Sharing a transport makes that one budget for every terminal and
+// command on a job, and the far end rejects the eleventh channel with
+// nothing an operator can act on.
+func TestSessionCapIsRefusedWithAReason(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	var releases []func()
+	for i := 0; i < MaxSessionsPerTransport; i++ {
+		_, rel, err := c.Session(context.Background(), testKey)
+		if err != nil {
+			t.Fatalf("session %d of %d: %v", i+1, MaxSessionsPerTransport, err)
+		}
+		releases = append(releases, rel)
+	}
+
+	_, _, err := c.Session(context.Background(), testKey)
+	if err == nil {
+		t.Fatalf("session %d was allowed past the cap", MaxSessionsPerTransport+1)
+	}
+	if !errors.Is(err, ErrTooManySessions) {
+		t.Errorf("error %v is not ErrTooManySessions", err)
+	}
+	if !strings.Contains(err.Error(), "session budget") {
+		t.Errorf("error %q does not explain the shared budget", err)
+	}
+
+	// Releasing one makes room again, or the cap would be a one-way
+	// door for a long-lived transport.
+	releases[0]()
+	if _, rel, rerr := c.Session(context.Background(), testKey); rerr != nil {
+		t.Errorf("no room after a release: %v", rerr)
+	} else {
+		rel()
+	}
+	for _, rel := range releases[1:] {
+		rel()
+	}
+	if got := c.LiveSessions(testKey); got != 0 {
+		t.Errorf("LiveSessions = %d after releasing everything, want 0", got)
+	}
+}
+
+// TestClosingOneSessionLeavesTheJobReachable: two terminals on one job
+// share a transport, and the first to close must not take the second
+// with it.
+func TestClosingOneSessionLeavesTheJobReachable(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	_, releaseA, err := c.Session(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("first session: %v", err)
+	}
+	_, releaseB, err := c.Session(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("second session: %v", err)
+	}
+	if got := d.count(); got != 1 {
+		t.Errorf("two sessions opened %d transports, want 1", got)
+	}
+
+	releaseA()
+
+	if c.Len() != 1 {
+		t.Fatal("releasing one session closed the transport the other is using")
+	}
+	d.mu.Lock()
+	closed := d.conns[0].isClosed()
+	d.mu.Unlock()
+	if closed {
+		t.Fatal("releasing one session closed the shared transport")
+	}
+	// The job is still reachable for the surviving session's owner.
+	conn, err := c.DialJob(context.Background(), testKey, "tcp", "127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("job unreachable after one session closed: %v", err)
+	}
+	_ = conn.Close()
+
+	releaseB()
+}
+
+// TestFailedSessionOpenDoesNotEvict mirrors the dial rule: a sandbox
+// that cannot start a session right now says nothing about whether the
+// transport is alive.
+func TestFailedSessionOpenDoesNotEvict(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	if _, rel, err := c.Session(context.Background(), testKey); err != nil {
+		t.Fatalf("first session: %v", err)
+	} else {
+		rel()
+	}
+
+	d.mu.Lock()
+	d.conns[0].mu.Lock()
+	d.conns[0].openErr = errors.New("sandbox busy")
+	d.conns[0].mu.Unlock()
+	d.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := c.Session(context.Background(), testKey); err == nil {
+			t.Fatal("Session succeeded against a refusing sandbox")
+		}
+	}
+	if got := d.count(); got != 1 {
+		t.Errorf("a refused session cost %d transport dials, want 1", got)
+	}
+	if got := c.LiveSessions(testKey); got != 0 {
+		t.Errorf("LiveSessions = %d after failed opens, want 0", got)
 	}
 }
