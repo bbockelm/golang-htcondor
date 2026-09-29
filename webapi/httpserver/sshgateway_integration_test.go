@@ -17,8 +17,13 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +37,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
@@ -150,7 +157,7 @@ queue
 		_ = server.Shutdown(c)
 	}()
 
-	gwAddr := waitForGateway(t, server, startErr, 30*time.Second)
+	gwAddr := waitForGateway(t, server, startErr)
 	gwPort, err := portOf(gwAddr)
 	if err != nil {
 		t.Fatalf("gateway address %q: %v", gwAddr, err)
@@ -308,7 +315,7 @@ MEMORY = 8192
 		_ = server.Shutdown(c)
 	}()
 
-	gwAddr := waitForGateway(t, server, startErr, 30*time.Second)
+	gwAddr := waitForGateway(t, server, startErr)
 	gwPort, err := portOf(gwAddr)
 	if err != nil {
 		t.Fatalf("gateway address %q: %v", gwAddr, err)
@@ -465,7 +472,7 @@ func TestSSHGatewayRefusesSomeoneElsesJob(t *testing.T) {
 		_ = server.Shutdown(c)
 	}()
 
-	gwAddr := waitForGateway(t, server, startErr, 30*time.Second)
+	gwAddr := waitForGateway(t, server, startErr)
 	gwPort, err := portOf(gwAddr)
 	if err != nil {
 		t.Fatalf("gateway address %q: %v", gwAddr, err)
@@ -539,9 +546,11 @@ func reserveAddr(t *testing.T) (listenAddr, issuer string) {
 // here -- no key file and no KEK means there is nowhere to keep a host
 // key -- and without this the symptom is a bare "never bound a port"
 // with the actual reason discarded in a goroutine.
-func waitForGateway(t *testing.T, s *Server, startErr <-chan error, timeout time.Duration) string {
+func waitForGateway(t *testing.T, s *Server, startErr <-chan error) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	// Thirty seconds: the gateway binds during Start, so this covers a
+	// slow machine rather than any real work.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if s.Handler != nil && s.sshGateway != nil {
 			if addr := s.sshGateway.BoundAddr(); addr != "" {
@@ -623,4 +632,205 @@ func portOf(addr string) (string, error) {
 		return "", fmt.Errorf("no port in %q", addr)
 	}
 	return addr[i+1:], nil
+}
+
+// TestSSHGatewayCertificateEndToEnd proves the whole certificate
+// chain against a real pool: ask the endpoint for a certificate, then
+// use it to reach a real job with a real ssh client, in BatchMode.
+//
+// BatchMode is the point. It refuses keyboard-interactive outright, so
+// this path is the only way a script reaches a job -- and a run that
+// never shows the device prompt is what proves no browser was
+// involved.
+func TestSSHGatewayCertificateEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	for _, bin := range []string{"condor_master", "ssh"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not in PATH; skipping", bin)
+		}
+	}
+	extraConfig, ok := htcondor.SSHToJobHarnessConfig()
+	if !ok {
+		t.Skip("ssh-to-job prerequisites not found; skipping")
+	}
+
+	harness := htcondor.SetupCondorHarnessWithConfig(t, extraConfig)
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("daemons: %v", err)
+	}
+	if err := harness.WaitForStartd(45 * time.Second); err != nil {
+		t.Fatalf("startd never reported in: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
+	collector := htcondor.NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("locate schedd: %v", err)
+	}
+	schedd := htcondor.NewSchedd(location.Name, location.Address)
+
+	submitCtx, err := contextAsUser(ctx, harness, testUser)
+	if err != nil {
+		t.Fatalf("submit context: %v", err)
+	}
+	clusterIDStr, err := schedd.Submit(submitCtx, `
+universe = vanilla
+executable = /bin/sleep
+transfer_executable = false
+arguments = 600
+output = job.out
+error = job.err
+log = job.log
+request_cpus = 1
+request_memory = 64
+request_disk = 64
+queue
+`)
+	if err != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("submit: %v", err)
+	}
+	clusterID, err := strconv.Atoi(clusterIDStr)
+	if err != nil {
+		t.Fatalf("submit returned %q: %v", clusterIDStr, err)
+	}
+	jobID := fmt.Sprintf("%d.0", clusterID)
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = schedd.RemoveJobs(c, fmt.Sprintf("ClusterId == %d", clusterID), "test cleanup")
+	}()
+	if err := waitForJobRunningHTTP(ctx, schedd, clusterID, 90*time.Second); err != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("job %s never ran: %v", jobID, err)
+	}
+
+	listenAddr, issuerURL := reserveAddr(t)
+	server, err := NewServer(Config{
+		ListenAddr:               listenAddr,
+		OAuth2Issuer:             issuerURL,
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           harness.GetSigningKeyPath(),
+		TrustDomain:              harness.GetTrustDomain(),
+		UIDDomain:                harness.GetTrustDomain(),
+		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2-cert.db"),
+		KEKFilePath:              writeKEK(t, t.TempDir()),
+		EnableMCP:                true,
+		SSHGatewayAddress:        "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- server.Start() }()
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(c)
+	}()
+
+	gwAddr := waitForGateway(t, server, startErr)
+	gwPort, err := portOf(gwAddr)
+	if err != nil {
+		t.Fatalf("gateway address %q: %v", gwAddr, err)
+	}
+
+	// A key that never leaves this test, and a certificate for it from
+	// the real endpoint.
+	keyDir := t.TempDir()
+	keyPath := filepath.Join(keyDir, "id_ed25519")
+	pubLine := writeUserKey(t, keyPath)
+
+	certBody, err := json.Marshal(map[string]string{"public_key": pubLine})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	certReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		issuerURL+"/api/v1/ssh/certificate", bytes.NewReader(certBody))
+	if err != nil {
+		t.Fatalf("certificate request: %v", err)
+	}
+	certReq.Header.Set("X-Test-User", testUser)
+	certReq.Header.Set("Content-Type", "application/json")
+	certResp, err := http.DefaultClient.Do(certReq)
+	if err != nil {
+		t.Fatalf("certificate: %v", err)
+	}
+	certRaw, _ := io.ReadAll(certResp.Body)
+	_ = certResp.Body.Close()
+	if certResp.StatusCode != http.StatusOK {
+		t.Fatalf("certificate endpoint returned %s: %s", certResp.Status, certRaw)
+	}
+	var issued struct {
+		Certificate string `json:"certificate"`
+		Principal   string `json:"principal"`
+	}
+	if err := json.Unmarshal(certRaw, &issued); err != nil {
+		t.Fatalf("decode certificate: %v", err)
+	}
+	if issued.Principal != testUser {
+		t.Fatalf("certificate principal = %q, want %q", issued.Principal, testUser)
+	}
+	if err := os.WriteFile(keyPath+"-cert.pub", []byte(issued.Certificate+"\n"), 0o600); err != nil {
+		t.Fatalf("write certificate: %v", err)
+	}
+
+	//nolint:gosec // fixed argv; the binary is resolved by LookPath above
+	cmd := exec.CommandContext(ctx, "ssh",
+		"-F", "/dev/null",
+		"-p", gwPort,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "LogLevel=ERROR",
+		"-o", "BatchMode=yes",
+		"-o", "PreferredAuthentications=publickey",
+		"-i", keyPath,
+		"-T",
+		jobID+"@127.0.0.1",
+		"echo certificate-reached-the-job",
+	)
+	out, sshErr := cmd.CombinedOutput()
+	t.Logf("ssh exit=%v output:\n%s", sshErr, out)
+
+	if sshErr != nil {
+		harness.PrintScheddLog()
+		t.Fatalf("a certificate did not reach the job in BatchMode: %v", sshErr)
+	}
+	if !strings.Contains(string(out), "certificate-reached-the-job") {
+		t.Fatalf("the command did not run in the job:\n%s", out)
+	}
+	// No browser: the device prompt never appeared.
+	if strings.Contains(string(out), "Sign in to") {
+		t.Errorf("the certificate path fell back to the device flow:\n%s", out)
+	}
+}
+
+// writeUserKey stages a private key and returns its public line.
+func writeUserKey(t *testing.T, path string) string {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "gateway integration test")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
 }
