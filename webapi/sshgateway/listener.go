@@ -66,16 +66,20 @@ type Listener struct {
 
 	mu       sync.Mutex
 	ln       net.Listener
+	cfg      *ssh.ServerConfig
 	closed   bool
 	conns    sync.WaitGroup
 	shutdown chan struct{}
 }
 
-// ListenAndServe serves until the listener is closed or ctx is done.
+// Listen binds the port and prepares the server configuration.
 //
-// It returns nil on a deliberate Close, so a caller can run it in a
-// goroutine and treat any non-nil error as worth reporting.
-func (l *Listener) ListenAndServe(ctx context.Context) error {
+// Separate from Serve so a caller can fail startup on a bind error.
+// When this ran inside the serving goroutine, "address already in use"
+// only reached a log line while the daemon carried on without the
+// gateway -- which is the same class of failure as a missing host key,
+// and that one is fatal.
+func (l *Listener) Listen(ctx context.Context) error {
 	if l.HostKey == nil {
 		return errors.New("sshgateway: a host key is required")
 	}
@@ -84,9 +88,10 @@ func (l *Listener) ListenAndServe(ctx context.Context) error {
 	}
 
 	cfg := &ssh.ServerConfig{
-		// The only method advertised. A client therefore never
-		// attempts publickey, and a user with a loaded agent reaches
-		// the prompt without configuring anything.
+		// The device flow is the only method advertised unless
+		// certificates are configured below. A client therefore does
+		// not attempt publickey, and a user with a loaded agent
+		// reaches the prompt without configuring anything.
 		KeyboardInteractiveCallback: l.Auth.KeyboardInteractive(ctx),
 		ServerVersion:               "SSH-2.0-HTCondorGateway",
 	}
@@ -114,12 +119,27 @@ func (l *Listener) ListenAndServe(ctx context.Context) error {
 		return ln.Close()
 	}
 	l.ln = ln
+	l.cfg = cfg
 	l.shutdown = make(chan struct{})
-	shutdown := l.shutdown
 	l.mu.Unlock()
 
 	l.logf("SSH gateway listening", "address", ln.Addr().String(),
-		"host_key", ssh.FingerprintSHA256(l.HostKey.PublicKey()))
+		"host_key", ssh.FingerprintSHA256(l.HostKey.PublicKey()),
+		"certificates", l.Certs != nil)
+	return nil
+}
+
+// Serve accepts until the listener is closed or ctx is done.
+//
+// Returns nil on a deliberate Close, so a caller can run it in a
+// goroutine and treat any non-nil error as worth reporting.
+func (l *Listener) Serve(ctx context.Context) error {
+	l.mu.Lock()
+	ln, cfg, shutdown := l.ln, l.cfg, l.shutdown
+	l.mu.Unlock()
+	if ln == nil || cfg == nil {
+		return errors.New("sshgateway: Serve called before Listen")
+	}
 
 	// Closing on ctx cancellation, so a shutdown does not wait for the
 	// next connection to arrive before noticing.
@@ -149,6 +169,14 @@ func (l *Listener) ListenAndServe(ctx context.Context) error {
 			l.serveConn(ctx, nc, cfg)
 		}()
 	}
+}
+
+// ListenAndServe is Listen followed by Serve.
+func (l *Listener) ListenAndServe(ctx context.Context) error {
+	if err := l.Listen(ctx); err != nil {
+		return err
+	}
+	return l.Serve(ctx)
 }
 
 // BoundAddr reports the address actually bound, which differs from the

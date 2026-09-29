@@ -185,8 +185,14 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"host_key_source", hostKey.Source,
 		"certificates", certs != nil)
 
+	// Bind before returning, so a port already in use fails startup
+	// the way a missing host key does rather than leaving a listener
+	// that silently is not there.
+	if err := listener.Listen(ctx); err != nil {
+		return err
+	}
 	go func() {
-		if err := listener.ListenAndServe(ctx); err != nil {
+		if err := listener.Serve(ctx); err != nil {
 			h.logger.Error(logging.DestinationHTTP, "The SSH gateway stopped", "error", err)
 		}
 	}()
