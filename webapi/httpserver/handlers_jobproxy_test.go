@@ -69,6 +69,13 @@ func (f *fakeJobConn) Run(context.Context, string) (string, error) {
 	return "/var/lib/condor/execute/dir_42\n", nil
 }
 
+// OpenSession is unused by the proxy -- forwarding uses direct-tcpip
+// channels, which are not sessions -- and exists so the fake satisfies
+// the interface.
+func (f *fakeJobConn) OpenSession(context.Context) (jobssh.JobSession, error) {
+	return nil, errors.New("the proxy does not open sessions")
+}
+
 func (f *fakeJobConn) Wait() error { <-f.done; return nil }
 
 func (f *fakeJobConn) Close() error {
@@ -486,8 +493,11 @@ func (u *unixJobConn) DialContext(ctx context.Context, network, addr string) (ne
 	return d.DialContext(ctx, network, addr)
 }
 func (u *unixJobConn) Run(context.Context, string) (string, error) { return u.dir + "\n", nil }
-func (u *unixJobConn) Wait() error                                 { <-u.done; return nil }
-func (u *unixJobConn) Close() error                                { u.once.Do(func() { close(u.done) }); return nil }
+func (u *unixJobConn) OpenSession(context.Context) (jobssh.JobSession, error) {
+	return nil, errors.New("the proxy does not open sessions")
+}
+func (u *unixJobConn) Wait() error  { <-u.done; return nil }
+func (u *unixJobConn) Close() error { u.once.Do(func() { close(u.done) }); return nil }
 
 // TestJobProxyRedirectsToTrailingSlash pins the thing that makes a web
 // app served this way work at all. Neither code-server nor

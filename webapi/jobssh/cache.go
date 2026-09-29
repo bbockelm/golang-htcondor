@@ -14,10 +14,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -51,6 +54,10 @@ func (k Key) String() string { return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster
 // shut it down. An interface so the cache is testable without a pool.
 type Conn interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+	// OpenSession starts a session channel in the sandbox: a shell, a
+	// PTY, or a command. Sessions are what an interactive client needs
+	// and what MaxSessionsPerTransport counts.
+	OpenSession(ctx context.Context) (JobSession, error)
 	// Run executes cmd in the sandbox and returns its standard output.
 	// Used for the one thing only the sandbox knows: where its scratch
 	// directory is.
@@ -60,6 +67,44 @@ type Conn interface {
 	Wait() error
 	Close() error
 }
+
+// JobSession is a session channel inside the sandbox.
+//
+// It is the slice of *ssh.Session this package hands out, as an
+// interface so the cache stays testable without a pool. *ssh.Session
+// satisfies it directly -- no wrapper is needed -- but note what is
+// deliberately absent: its Stdin/Stdout/Stderr FIELDS, which an
+// interface cannot express. Callers wire I/O through the pipes.
+type JobSession interface {
+	RequestPty(term string, h, w int, modes ssh.TerminalModes) error
+	WindowChange(h, w int) error
+	Shell() error
+	Start(cmd string) error
+	Signal(sig ssh.Signal) error
+	Wait() error
+	StdinPipe() (io.WriteCloser, error)
+	StdoutPipe() (io.Reader, error)
+	StderrPipe() (io.Reader, error)
+	Close() error
+}
+
+// MaxSessionsPerTransport caps live sessions on one transport.
+//
+// The sshd HTCondor generates sets no MaxSessions, so OpenSSH's
+// default of 10 applies -- and that budget is per CONNECTION. Before
+// this cache each client had its own connection and so its own 10;
+// sharing a transport per (caller, job) makes it one budget shared by
+// every terminal and command for that job. Hitting it at the far end
+// produces an opaque channel-open rejection partway through a session,
+// so the limit is enforced here, where the error can say what it is.
+//
+// Port forwards do not count: direct-tcpip channels are not sessions,
+// so the reverse proxy contributes nothing to this.
+const MaxSessionsPerTransport = 10
+
+// ErrTooManySessions is returned when a transport already holds
+// MaxSessionsPerTransport live sessions.
+var ErrTooManySessions = errors.New("jobssh: too many concurrent sessions for this job")
 
 // Dialer opens a transport for key. The context carries the caller's
 // credentials, so it must be one authenticated as key.Owner.
@@ -118,6 +163,12 @@ type entry struct {
 	// arrives afterwards closes the transport instead of resurrecting
 	// bookkeeping nobody will read.
 	evicted bool
+
+	// sessions counts live session channels, which is what the sshd's
+	// MaxSessions budget applies to. Tracked apart from refs because
+	// refs also covers forwarded connections, and those do not consume
+	// the budget.
+	sessions int
 
 	// scratch caches the sandbox's scratch directory, resolved once
 	// per transport. scratchErr is cached too: if the sandbox will not
@@ -513,4 +564,65 @@ func ValidateSocketName(name string) error {
 		}
 	}
 	return nil
+}
+
+// Session opens a session channel inside the job, reusing the cached
+// transport or establishing one.
+//
+// The returned release must be called when the session is done. Until
+// it is, the session counts as a live user of the transport exactly as
+// a forwarded connection does: an interactive shell can sit silent for
+// an hour, and the reaper's idle clock alone would close the transport
+// out from under it.
+func (c *Cache) Session(ctx context.Context, key Key) (JobSession, func(), error) {
+	e, err := c.acquire(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	c.mu.Lock()
+	if e.sessions >= MaxSessionsPerTransport {
+		live := e.sessions
+		c.mu.Unlock()
+		c.release(e)
+		return nil, nil, fmt.Errorf("%w: job %s already has %d of %d (every terminal and command for one job shares the sshd's session budget)",
+			ErrTooManySessions, key, live, MaxSessionsPerTransport)
+	}
+	e.sessions++
+	c.mu.Unlock()
+
+	sess, err := e.conn.OpenSession(ctx)
+	if err != nil {
+		c.mu.Lock()
+		e.sessions--
+		c.mu.Unlock()
+		c.release(e)
+		// Deliberately NOT evicting, for the same reason DialJob does
+		// not: opening a session can fail because the sandbox is not
+		// ready, which says nothing about the transport. Only watch()
+		// can tell a dead transport from one whose far end is busy.
+		return nil, nil, fmt.Errorf("opening a session in job %s: %w", key, err)
+	}
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			c.mu.Lock()
+			e.sessions--
+			c.mu.Unlock()
+			c.release(e)
+		})
+	}
+	return sess, release, nil
+}
+
+// LiveSessions reports how many sessions are open on key's transport.
+// For tests and metrics.
+func (c *Cache) LiveSessions(key Key) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok {
+		return e.sessions
+	}
+	return 0
 }

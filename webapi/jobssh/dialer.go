@@ -19,6 +19,24 @@ var _ Conn = (*sshConn)(nil)
 // its output.
 type sshConn struct{ *ssh.Client }
 
+// OpenSession starts a session channel. *ssh.Session satisfies
+// JobSession as it stands, so there is nothing to wrap.
+//
+// The context bounds opening the channel only. A session, once open,
+// outlives it -- an interactive shell is meant to, and tying it to a
+// request context would cut the shell off when the request that
+// started it returned.
+func (c *sshConn) OpenSession(ctx context.Context) (JobSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sess, err := c.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
 // Run executes cmd in the sandbox and returns its standard output.
 //
 // Note what the command has to survive: condor_ssh_to_job_shell_setup
