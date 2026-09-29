@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -153,6 +154,38 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 
+	// Redirect the bare prefix to its trailing-slash form before doing
+	// any work.
+	//
+	// Neither code-server nor openvscode-server can be told the path it
+	// is served under (code-server's --abs-proxy-base-path configures
+	// its OWN built-in proxy, not this), so the supported arrangement
+	// is a reverse proxy that strips the prefix while the app emits
+	// relative URLs. That only works if the browser's address ends in a
+	// slash: at /proxy/unix/vscode.sock a relative "static/x.js"
+	// resolves to /proxy/unix/static/x.js and nothing loads, while at
+	// /proxy/unix/vscode.sock/ it resolves correctly.
+	//
+	// 307 rather than 308: the redirect is right only while this job
+	// exists, and a permanent one would be cached against a URL that
+	// stops meaning anything when the job ends.
+	if upstreamPath == "/" && !strings.HasSuffix(r.URL.Path, "/") {
+		// Built from the job id and the target, never from the request
+		// path. A redirect assembled by appending to r.URL.Path carries
+		// whatever the request put there: a path of "//evil.example"
+		// makes "//evil.example/", which a browser reads as a
+		// protocol-relative URL and follows off-site. The route prefix
+		// happens to prevent that today, which is exactly the kind of
+		// guarantee that stops being true when a route moves.
+		//
+		// Every part below is ours: cluster and proc are ints, the port
+		// is an int, and the socket name was held to [A-Za-z0-9._-] in
+		// parseProxyTarget.
+		redirect := url.URL{Path: jobProxyPrefix(cluster, proc, target), RawQuery: r.URL.RawQuery}
+		http.Redirect(w, r, redirect.String(), http.StatusTemporaryRedirect)
+		return
+	}
+
 	cache, err := s.getOrCreateJobSSHCache()
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "job transport cache unavailable")
@@ -243,6 +276,16 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 	proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// jobProxyPrefix is the canonical, trailing-slash URL for a target
+// inside a job: what a browser must be at for the app's relative URLs
+// to resolve.
+func jobProxyPrefix(cluster, proc int, t jobProxyTarget) string {
+	if t.Socket != "" {
+		return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/unix/%s/", cluster, proc, t.Socket)
+	}
+	return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/%d/", cluster, proc, t.Port)
+}
+
 // parseProxyTarget reads the segment after /proxy/ as either the
 // literal "unix" (the socket name then follows) or a TCP port.
 func parseProxyTarget(segments []string) (jobProxyTarget, []string, error) {
@@ -252,6 +295,14 @@ func parseProxyTarget(segments []string) (jobProxyTarget, []string, error) {
 	if segments[0] == "unix" {
 		if len(segments) < 2 {
 			return jobProxyTarget{}, nil, fmt.Errorf("unix needs a socket name: /proxy/unix/{name}/")
+		}
+		// Check the name here rather than at dial time. It is the only
+		// part of the socket path a request controls, and refusing it
+		// where it arrives gives a 400 saying what is wrong instead of
+		// a 502 from a dial that was never going to work -- and leaves
+		// nothing request-shaped in the redirect built below.
+		if err := jobssh.ValidateSocketName(segments[1]); err != nil {
+			return jobProxyTarget{}, nil, err
 		}
 		return jobProxyTarget{Socket: segments[1]}, segments[2:], nil
 	}

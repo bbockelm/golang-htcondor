@@ -488,3 +488,101 @@ func (u *unixJobConn) DialContext(ctx context.Context, network, addr string) (ne
 func (u *unixJobConn) Run(context.Context, string) (string, error) { return u.dir + "\n", nil }
 func (u *unixJobConn) Wait() error                                 { <-u.done; return nil }
 func (u *unixJobConn) Close() error                                { u.once.Do(func() { close(u.done) }); return nil }
+
+// TestJobProxyRedirectsToTrailingSlash pins the thing that makes a web
+// app served this way work at all. Neither code-server nor
+// openvscode-server can be told the path it is served under, so the
+// arrangement is a prefix-stripping proxy plus relative URLs -- and a
+// relative URL only resolves correctly when the browser's address ends
+// in a slash. Without the redirect the page loads and every asset
+// 404s, one path component too high.
+func TestJobProxyRedirectsToTrailingSlash(t *testing.T) {
+	h := newProxyTestHandler(t, "127.0.0.1:1") // never dialled
+
+	for _, tc := range []struct {
+		name     string
+		url      string
+		wantLoc  string
+		wantCode int
+	}{
+		{
+			name:     "bare prefix redirects",
+			url:      "/api/v1/jobs/12.0/proxy/unix/vscode.sock",
+			wantLoc:  "/api/v1/jobs/12.0/proxy/unix/vscode.sock/",
+			wantCode: http.StatusTemporaryRedirect,
+		},
+		{
+			name:     "query is carried across",
+			url:      "/api/v1/jobs/12.0/proxy/unix/vscode.sock?folder=/work",
+			wantLoc:  "/api/v1/jobs/12.0/proxy/unix/vscode.sock/?folder=/work",
+			wantCode: http.StatusTemporaryRedirect,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, tc.url, nil)
+			r.Header.Set("X-Test-User", "alice")
+			w := httptest.NewRecorder()
+			h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Socket: "vscode.sock"}, "/")
+			if w.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantCode)
+			}
+			if got := w.Header().Get("Location"); got != tc.wantLoc {
+				t.Errorf("Location = %q, want %q", got, tc.wantLoc)
+			}
+		})
+	}
+
+	// The trailing-slash form must be proxied, not redirected again --
+	// a redirect to itself is an infinite loop in a browser.
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/api/v1/jobs/12.0/proxy/unix/vscode.sock/", nil)
+	r.Header.Set("X-Test-User", "alice")
+	w := httptest.NewRecorder()
+	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Socket: "vscode.sock"}, "/")
+	if w.Code == http.StatusTemporaryRedirect {
+		t.Fatalf("the trailing-slash form redirected to %q; that is a loop",
+			w.Header().Get("Location"))
+	}
+}
+
+// TestJobProxyRedirectCannotLeaveTheSite: a redirect assembled by
+// appending to r.URL.Path carries whatever the request put there, and
+// a path beginning "//" becomes a protocol-relative URL a browser
+// follows off-site. The route prefix happens to prevent that today,
+// which is the kind of guarantee that stops holding when a route
+// moves, so the target is built from the job id and the parsed target
+// instead.
+func TestJobProxyRedirectCannotLeaveTheSite(t *testing.T) {
+	h := newProxyTestHandler(t, "127.0.0.1:1") // never dialled
+
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/api/v1/jobs/12.0/proxy/8080", nil)
+	// A request that would poison a path-derived redirect.
+	r.URL.Path = "//evil.example/api/v1/jobs/12.0/proxy/8080"
+	r.Header.Set("X-Test-User", "alice")
+	w := httptest.NewRecorder()
+
+	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
+
+	loc := w.Header().Get("Location")
+	if strings.HasPrefix(loc, "//") || strings.Contains(loc, "evil.example") {
+		t.Fatalf("Location %q leaves the site", loc)
+	}
+	if loc != "/api/v1/jobs/12.0/proxy/8080/" {
+		t.Errorf("Location = %q, want the canonical prefix", loc)
+	}
+}
+
+// TestProxyTargetRejectsBadSocketNamesAtParse: the socket name is the
+// only part of the socket path a request controls, so it is refused
+// where it arrives rather than travelling as far as a dial.
+func TestProxyTargetRejectsBadSocketNamesAtParse(t *testing.T) {
+	for _, name := range []string{"..", "a b", "sock;rm", "."} {
+		if _, _, err := parseProxyTarget([]string{"unix", name}); err == nil {
+			t.Errorf("parseProxyTarget accepted socket name %q", name)
+		}
+	}
+	if _, _, err := parseProxyTarget([]string{"unix", "vscode.sock"}); err != nil {
+		t.Errorf("parseProxyTarget rejected a good socket name: %v", err)
+	}
+}
