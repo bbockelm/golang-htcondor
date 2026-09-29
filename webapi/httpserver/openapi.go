@@ -64,6 +64,20 @@ const openAPISchema = `{
       }
     },
     "schemas": {
+      "App": {
+        "type": "object",
+        "required": ["id", "type", "job_id", "state"],
+        "properties": {
+          "id":        {"type": "string", "description": "Opaque id; also carried in the job's JobBatchName"},
+          "type":      {"type": "string", "description": "code-server"},
+          "job_id":    {"type": "string", "description": "cluster.proc"},
+          "owner":     {"type": "string"},
+          "state":     {"type": "string", "enum": ["waiting", "starting", "running", "held", "ended"], "description": "A queued app and a dead one are identical through the proxy (both 502), so these distinguish them: 'waiting' has no slot yet, 'starting' is running but not yet listening, 'running' is reachable."},
+          "detail":    {"type": "string", "description": "Why, for a state that would otherwise have to be guessed at: what it waits for, or the HoldReason"},
+          "url":       {"type": "string", "description": "Where to open it. Present only when there is something to open. The trailing slash matters: the app is served by stripping this prefix and emits relative URLs."},
+          "submitted": {"type": "integer", "description": "QDate, so a caller can say how long a wait has been going on"}
+        }
+      },
       "Error": {
         "type": "object",
         "properties": {
@@ -2480,6 +2494,76 @@ const openAPISchema = `{
               }
             }
           }
+        }
+      }
+    },
+    "/apps": {
+      "get": {
+        "summary": "List the caller's apps",
+        "description": "Apps are long-lived servers running inside a job and reached through the job proxy. There is no registry: an app is a job marked by its JobBatchName, so this is a queue query. Deliberately does NOT probe whether each app is listening yet -- that costs a connection into the job -- so an app reported as 'running' may not be reachable for a few more seconds. Use GET /apps/{id} for that.",
+        "operationId": "listApps",
+        "responses": {
+          "200": {"description": "The caller's apps", "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["apps"],
+            "properties": {"apps": {"type": "array", "items": {"$ref": "#/components/schemas/App"}}}
+          }}}},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Schedd query failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Launch an app in the pool",
+        "description": "Submits a container-universe job running a VS Code server on a Unix socket in its sandbox. Returns immediately, before the job has a slot: the app is 'waiting' until one is matched, then 'starting' until the server binds its socket. Poll GET /apps/{id}, which is the call that probes.",
+        "operationId": "createApp",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type":         {"type": "string", "description": "App type. Only \"code-server\" is implemented, and it is the default."},
+                  "cpus":         {"type": "integer", "description": "CPU cores requested. Default 1", "minimum": 1, "maximum": 64},
+                  "memory_mb":    {"type": "integer", "description": "Memory in MiB. Default 4096", "minimum": 256},
+                  "disk_mb":      {"type": "integer", "description": "Scratch disk in MiB. Default 10240", "minimum": 256},
+                  "image":        {"type": "string", "description": "Container image. Ignored when the operator has set HTTP_API_VSCODE_IMAGE, which wins outright."},
+                  "workdir":      {"type": "string", "description": "Folder the editor opens. Defaults to the job's scratch directory."},
+                  "submit_lines": {"type": "string", "description": "Extra submit commands. The ones that would redefine what the job is are refused."}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {"description": "Job submitted; no slot yet", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/App"}}}},
+          "400": {"description": "Invalid request body, unknown app type, or a container universe with no image", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Schedd refused the submit, or spooling the launcher failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/apps/{id}": {
+      "get": {
+        "summary": "Get one app, probing whether it is reachable",
+        "description": "Unlike the list, this opens a connection into the job to see whether the server is listening, and reports 'starting' until it is. A running job is not the same as a reachable one.",
+        "operationId": "getApp",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The app", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/App"}}}},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such app for this caller", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "End an app",
+        "description": "Removes the app's job from the queue.",
+        "operationId": "deleteApp",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Removed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/App"}}}},
+          "401": {"description": "Authentication required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such app for this caller", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
