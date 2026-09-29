@@ -45,6 +45,12 @@ type Listener struct {
 	Auth   *Authenticator
 	Server *Server
 
+	// Certs, when set, lets a client authenticate with a certificate
+	// this deployment's CA signed instead of going through the
+	// browser. Optional; without it the device flow is the only way
+	// in.
+	Certs *CertAuth
+
 	// ConnContext derives the context each connection's work runs
 	// under, from the identity the Authenticator resolved. This is
 	// where the caller's HTCondor credential is attached: everything
@@ -83,6 +89,16 @@ func (l *Listener) ListenAndServe(ctx context.Context) error {
 		// the prompt without configuring anything.
 		KeyboardInteractiveCallback: l.Auth.KeyboardInteractive(ctx),
 		ServerVersion:               "SSH-2.0-HTCondorGateway",
+	}
+	if l.Certs != nil {
+		cfg.PublicKeyCallback = l.Certs.Callback
+		// A client offers every key it has before it gets to the
+		// certificate, and each offer costs an attempt. The default of
+		// six is spent by a developer with a populated agent, who then
+		// never reaches the prompt. Raising it does not weaken
+		// anything meaningful: guessing a key is not a thing, and the
+		// device flow has its own concurrency cap.
+		cfg.MaxAuthTries = 32
 	}
 	cfg.AddHostKey(l.HostKey)
 

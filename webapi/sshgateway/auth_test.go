@@ -325,6 +325,44 @@ func (b *blockingFlow) Poll(context.Context, string) (*Grant, error) {
 	return nil, ErrAuthorizationPending
 }
 
+// baseSSHArgs are the flags every invocation needs.
+//
+// -F /dev/null so the developer's own ~/.ssh/config cannot reach these
+// tests. ControlMaster in particular is not a stylistic difference: the
+// mux layer swallows the reason a channel was refused and reports
+// "Session open refused by peer", which is exactly the diagnostic
+// these tests exist for.
+func baseSSHArgs(portFlag, port string) []string {
+	return []string{
+		"-F", "/dev/null",
+		portFlag, port,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "LogLevel=ERROR",
+	}
+}
+
+// realSSHRaw runs the system ssh with only the flags every test needs,
+// leaving the authentication method to the caller.
+func realSSHRaw(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
+	t.Helper()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	args := append(baseSSHArgs("-p", port), extra...)
+	for i, a := range tail {
+		tail[i] = strings.ReplaceAll(a, "HOST", host)
+	}
+	args = append(args, tail...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	//nolint:gosec // fixed argv; the binary is resolved by LookPath in the caller
+	return exec.CommandContext(ctx, bin, args...).CombinedOutput()
+}
+
 // realSSH runs the system ssh (or scp) against srv and returns its
 // combined output.
 func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
@@ -337,19 +375,15 @@ func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]
 	if strings.HasSuffix(bin, "scp") {
 		portFlag = "-P"
 	}
+	// The device-flow defaults. Options are appended AFTER these and
+	// OpenSSH takes the FIRST occurrence of each, so a caller cannot
+	// override them -- which is why the certificate tests use
+	// realSSHRaw instead of passing extra flags here.
 	args := []string{
-		// Ignore the developer's own ~/.ssh/config: ControlMaster there
-		// makes the client mux, and the mux layer replaces a channel's
-		// refusal reason with a generic one.
-		"-F", "/dev/null",
-		portFlag, port,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "PubkeyAuthentication=no",
 		"-o", "PreferredAuthentications=keyboard-interactive",
-		"-o", "IdentitiesOnly=yes",
-		"-o", "LogLevel=ERROR",
 	}
+	args = append(args, baseSSHArgs(portFlag, port)...)
 	args = append(args, extra...)
 	for i, a := range tail {
 		tail[i] = strings.ReplaceAll(a, "HOST", host)
