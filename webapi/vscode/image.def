@@ -1,0 +1,50 @@
+Bootstrap: docker
+From: rockylinux:9
+
+# A code-server image for VS Code sessions.
+#
+# This file is what we ship. The server itself is a ~220 MB download,
+# which belongs on the execute node and nowhere near this project's
+# binaries -- so build this once with the build_container tool, stage
+# the .sif to the site's object store, and point HTTP_API_VSCODE_IMAGE
+# at it. OSDF caches per site, so those bytes cross the WAN once for a
+# site rather than once per session.
+#
+#   build_container(name: "code-server.sif", definition: <this file>)
+#
+# It is also the right place for a group's own toolchain. Extensions
+# installed into the image are present in every session at no cost,
+# whereas extensions installed by hand are reinstalled each time unless
+# the session has a home directory mounted.
+
+%post
+    set -eu
+    dnf -y install --setopt=install_weak_deps=False \
+        git openssh-clients ca-certificates tar gzip which findutils procps-ng
+    dnf clean all
+
+    # Pin the version. `latest` makes an image nobody can rebuild
+    # identically, which defeats the point of staging one.
+    VERSION=4.139.1
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  CS_ARCH=amd64 ;;
+        aarch64) CS_ARCH=arm64 ;;
+        *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
+    esac
+
+    curl -fsSL -o /tmp/code-server.tar.gz \
+        "https://github.com/coder/code-server/releases/download/v${VERSION}/code-server-${VERSION}-linux-${CS_ARCH}.tar.gz"
+    mkdir -p /opt/code-server
+    tar -xzf /tmp/code-server.tar.gz -C /opt/code-server --strip-components=1
+    rm -f /tmp/code-server.tar.gz
+    ln -sf /opt/code-server/bin/code-server /usr/local/bin/code-server
+
+    # Fail the build rather than the session if the binary cannot run.
+    /usr/local/bin/code-server --version
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+
+%labels
+    Purpose VS Code session for htcondor-api

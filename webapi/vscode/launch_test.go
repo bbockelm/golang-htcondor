@@ -2,6 +2,7 @@ package vscode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,6 +37,13 @@ func shortScratch(t *testing.T) string {
 // happily for a script that never executes.
 func runScript(t *testing.T, a ScriptArgs, scratch, fakeBin string) (string, error) {
 	t.Helper()
+	return runScriptEnv(t, a, scratch, fakeBin)
+}
+
+// runScriptEnv is runScript with extra environment, for the cases that
+// turn on what $HOME is.
+func runScriptEnv(t *testing.T, a ScriptArgs, scratch, fakeBin string, env ...string) (string, error) {
+	t.Helper()
 	path := filepath.Join(scratch, ExecutableName)
 	//nolint:gosec // G306: the launcher is the job's executable; running it is the test
 	if err := os.WriteFile(path, []byte(LaunchScript(a)), 0o700); err != nil {
@@ -51,6 +59,7 @@ func runScript(t *testing.T, a ScriptArgs, scratch, fakeBin string) (string, err
 	cmd.Env = append(os.Environ(),
 		"_CONDOR_SCRATCH_DIR="+scratch,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -58,8 +67,9 @@ func runScript(t *testing.T, a ScriptArgs, scratch, fakeBin string) (string, err
 // fakeServer puts a program named `name` on a fresh PATH directory. It
 // records its own argv and the mode of the socket path it was handed,
 // then exits, standing in for a server that would otherwise block.
-func fakeServer(t *testing.T, name, argvFile string) string {
+func fakeServer(t *testing.T, argvFile string) string {
 	t.Helper()
+	const name = DefaultServerCommand
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > %q
@@ -82,7 +92,7 @@ exit 0
 func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	scratch := shortScratch(t)
 	argvFile := filepath.Join(t.TempDir(), "argv")
-	bin := fakeServer(t, "code-server", argvFile)
+	bin := fakeServer(t, argvFile)
 
 	out, err := runScript(t, ScriptArgs{}, scratch, bin)
 	if err != nil {
@@ -127,7 +137,7 @@ func TestLaunchScriptRefusesAnOverlongSocketPath(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Skipf("cannot create a deep path here: %v", err)
 	}
-	bin := fakeServer(t, "code-server", filepath.Join(t.TempDir(), "argv"))
+	bin := fakeServer(t, filepath.Join(t.TempDir(), "argv"))
 
 	out, err := runScript(t, ScriptArgs{}, deep, bin)
 	if err == nil {
@@ -165,7 +175,7 @@ func TestLaunchScriptRefusesAMissingServer(t *testing.T) {
 func TestLaunchScriptQuotesTheWorkdir(t *testing.T) {
 	scratch := shortScratch(t)
 	argvFile := filepath.Join(t.TempDir(), "argv")
-	bin := fakeServer(t, "code-server", argvFile)
+	bin := fakeServer(t, argvFile)
 	canary := filepath.Join(shortScratch(t), "pwned")
 
 	out, err := runScript(t, ScriptArgs{
@@ -217,7 +227,7 @@ func TestContainerImageRef(t *testing.T) {
 }
 
 func TestBuildSubmitFile(t *testing.T) {
-	out := BuildSubmitFile(SubmitArgs{
+	out, err := BuildSubmitFile(SubmitArgs{
 		SessionID:         "s1",
 		Universe:          "container",
 		Image:             "codercom/code-server:latest",
@@ -227,6 +237,9 @@ func TestBuildSubmitFile(t *testing.T) {
 		CallerSubmitLines: "+WantGPU = true",
 		ExtraSubmitLines:  "accounting_group = interactive",
 	})
+	if err != nil {
+		t.Fatalf("BuildSubmitFile: %v", err)
+	}
 	for _, want := range []string{
 		"universe = container",
 		"container_image = docker://codercom/code-server:latest",
@@ -263,4 +276,101 @@ func containsPair(args []string, flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildSubmitFileDefaultsToContainer: the server is a ~220 MB
+// download that has to be on the execute node, so it comes from an
+// image the node can cache. Vanilla is the exception, not the default.
+func TestBuildSubmitFileDefaultsToContainer(t *testing.T) {
+	out, err := BuildSubmitFile(SubmitArgs{SessionID: "s1", Image: "example/code-server:1"})
+	if err != nil {
+		t.Fatalf("BuildSubmitFile: %v", err)
+	}
+	if !strings.Contains(out, "universe = container") {
+		t.Errorf("an unspecified universe did not default to container:\n%s", out)
+	}
+}
+
+// TestBuildSubmitFileRefusesContainerWithNoImage: caught here rather
+// than at the schedd, which answers a missing container_image with
+// something far less specific.
+func TestBuildSubmitFileRefusesContainerWithNoImage(t *testing.T) {
+	if _, err := BuildSubmitFile(SubmitArgs{SessionID: "s1"}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("err = %v, want ErrNoImage", err)
+	}
+	// Vanilla needs no image: the launcher's command -v check reports
+	// a server that is not installed.
+	if _, err := BuildSubmitFile(SubmitArgs{SessionID: "s1", Universe: "vanilla"}); err != nil {
+		t.Errorf("vanilla universe rejected without an image: %v", err)
+	}
+}
+
+// TestLaunchScriptKeepsStateOutOfAnUnusableHome: left to itself the
+// server writes under $HOME, which in a container is often unwritable
+// -- and when it is writable it may be a real shared home, where one
+// session's extensions outlive it and reach the next.
+func TestLaunchScriptKeepsStateOutOfAnUnusableHome(t *testing.T) {
+	scratch := shortScratch(t)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, argvFile)
+
+	// HOME pointing at something that does not exist, as a container
+	// without a mounted home gives.
+	out, err := runScriptEnv(t, ScriptArgs{}, scratch, bin, "HOME=/nonexistent-home")
+	if err != nil {
+		t.Fatalf("launcher failed: %v\n%s", err, out)
+	}
+	argv, rerr := os.ReadFile(argvFile) //nolint:gosec // G304: a path this test just created
+	if rerr != nil {
+		t.Fatalf("the launcher never reached the server: %v\n%s", rerr, out)
+	}
+	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
+
+	for _, flag := range []string{"--user-data-dir", "--extensions-dir", "--config"} {
+		v, ok := valueFor(args, flag)
+		if !ok {
+			t.Errorf("args %q do not set %s", args, flag)
+			continue
+		}
+		if !strings.HasPrefix(v, scratch) {
+			t.Errorf("%s = %q, want it under the scratch directory %q", flag, v, scratch)
+		}
+	}
+}
+
+// TestLaunchScriptUsesAUsableHome is the other half: a session with a
+// home directory mounted is exactly where a user wants their
+// extensions to persist.
+func TestLaunchScriptUsesAUsableHome(t *testing.T) {
+	scratch := shortScratch(t)
+	home := shortScratch(t)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, argvFile)
+
+	out, err := runScriptEnv(t, ScriptArgs{}, scratch, bin, "HOME="+home)
+	if err != nil {
+		t.Fatalf("launcher failed: %v\n%s", err, out)
+	}
+	argv, rerr := os.ReadFile(argvFile) //nolint:gosec // G304: a path this test just created
+	if rerr != nil {
+		t.Fatalf("the launcher never reached the server: %v\n%s", rerr, out)
+	}
+	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
+
+	v, ok := valueFor(args, "--user-data-dir")
+	if !ok {
+		t.Fatalf("args %q do not set --user-data-dir", args)
+	}
+	if !strings.HasPrefix(v, home) {
+		t.Errorf("--user-data-dir = %q, want it under the usable home %q", v, home)
+	}
+}
+
+func valueFor(args []string, flag string) (string, bool) {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag {
+			return args[i+1], true
+		}
+	}
+	return "", false
 }
