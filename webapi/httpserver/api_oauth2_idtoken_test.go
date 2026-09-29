@@ -170,3 +170,25 @@ func TestOpaqueOAuth2TokenHonoursUsernameClaim(t *testing.T) {
 		t.Errorf("sub = %v, want alice@example.com", got)
 	}
 }
+
+// TestSigningKeyPathDirectoryIsExplained: HTTP_API_SIGNING_KEY names
+// the key FILE, and every minting path splits it into a directory and
+// a kid. Pointed at the passwords.d directory instead, the split makes
+// a key name that is itself a directory, and the JWT library complains
+// about a path the operator never typed. Two integration tests were
+// configured that way and only failed once the REST surface started
+// minting, so the mistake is one people actually make.
+func TestSigningKeyPathDirectoryIsExplained(t *testing.T) {
+	h := newRESTOAuth2Handler(t)
+	// Point at the directory holding the key rather than the key.
+	h.signingKeyPath = filepath.Dir(h.signingKeyPath)
+
+	_, err := h.generateHTCondorTokenWithScopes("alice", []string{"condor:/READ"})
+	if err == nil {
+		t.Fatal("minting accepted a signing key path that names a directory")
+	}
+	if !strings.Contains(err.Error(), "is a directory") ||
+		!strings.Contains(err.Error(), "must name the key file") {
+		t.Errorf("error %q does not say the setting names a directory and what to use instead", err)
+	}
+}
