@@ -266,6 +266,20 @@ func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerCon
 	return h.withCondorCredential(ctx, account, scopes)
 }
 
+// sshGatewaySessionSize is what a session created by the gateway asks
+// for. A zero field means the interactive package's own default, so an
+// unset deployment gets exactly what it got before these knobs
+// existed.
+//
+// Worth configuring because these sessions are created by somebody
+// typing `ssh`, not by somebody filling in a form: nobody chose the
+// size, so the site has to.
+type sshGatewaySessionSize struct {
+	Cpus     int
+	MemoryMB int
+	DiskMB   int
+}
+
 // sshGatewaySessionWait bounds how long a caller waits for a session
 // they just asked for to start running.
 //
@@ -282,11 +296,11 @@ const sshGatewaySessionWait = 3 * time.Minute
 // and it is the only thing whose answer is authoritative. Repeating the
 // check here would add a second opinion that can only ever be wrong in
 // the direction of letting somebody in.
-func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
+func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	if t.IsJob() {
 		return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
-	return h.sshGatewaySession(ctx, account, t.Name)
+	return h.sshGatewaySession(ctx, account, t.Name, report)
 }
 
 // sshGatewaySession attaches to the caller's named interactive session,
@@ -302,7 +316,7 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 // channel is accepted and there is nowhere to write until it is.
 // Moving it after Accept is what the progress display needs, and is
 // the next piece of work.
-func (h *Handler) sshGatewaySession(ctx context.Context, account, name string) (jobssh.Key, error) {
+func (h *Handler) sshGatewaySession(ctx context.Context, account, name string, report func(string)) (jobssh.Key, error) {
 	mgr := h.mcpServer.InteractiveManager()
 	if mgr == nil {
 		return jobssh.Key{}, fmt.Errorf(
@@ -314,16 +328,22 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account, name string) (
 	if info, err := findInteractiveSession(ctx, mgr, caller, name); err != nil {
 		return jobssh.Key{}, err
 	} else if info != nil {
-		return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info)
+		return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
 	}
 
-	info, err := mgr.Create(ctx, caller, interactive.CreateSpec{Name: name})
+	report(fmt.Sprintf("Submitting session %q", name))
+	info, err := mgr.Create(ctx, caller, interactive.CreateSpec{
+		Name:     name,
+		Cpus:     h.sshGatewaySessionSpec.Cpus,
+		MemoryMB: h.sshGatewaySessionSpec.MemoryMB,
+		DiskMB:   h.sshGatewaySessionSpec.DiskMB,
+	})
 	if err != nil {
 		return jobssh.Key{}, fmt.Errorf("starting session %q: %w", name, err)
 	}
 	h.logger.Info(logging.DestinationHTTP, "SSH gateway started an interactive session",
 		"account", account, "session", name, "job", info.JobID)
-	return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info)
+	return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
 }
 
 // findInteractiveSession returns the caller's session called name, or
@@ -347,7 +367,10 @@ func findInteractiveSession(ctx context.Context, mgr *interactive.Manager, calle
 // its id would produce a connection failure that reads like the gateway
 // is broken rather than like the queue being busy. A job that is HELD
 // never will run, and saying so beats waiting out the timeout.
-func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string, info interactive.Info) (jobssh.Key, error) {
+func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string, info interactive.Info, report func(string)) (jobssh.Key, error) {
+	if report == nil {
+		report = func(string) {}
+	}
 	const (
 		jobStatusRunning = 2
 		jobStatusHeld    = 5
@@ -365,6 +388,8 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 			}
 			return jobssh.Key{}, fmt.Errorf("session %q (job %s) is held: %s", name, info.JobID, reason)
 		}
+
+		report(fmt.Sprintf("Session %q (job %s) is %s", name, info.JobID, strings.ToLower(info.Status)))
 
 		if time.Now().After(deadline) {
 			return jobssh.Key{}, fmt.Errorf(

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -222,7 +223,7 @@ func gateway(t *testing.T, tr *fakeTransport) string {
 	a := grantingAuthenticator(t, "bbockelm", Options{Prompt: "ap.example.edu"})
 	srv := &Server{
 		Transport: tr,
-		Resolve: func(_ context.Context, account string, target Target) (jobssh.Key, error) {
+		Resolve: func(_ context.Context, account string, target Target, _ func(string)) (jobssh.Key, error) {
 			if account != "bbockelm" {
 				return jobssh.Key{}, fmt.Errorf("unexpected account %q", account)
 			}
@@ -468,19 +469,33 @@ func TestStdoutAndStderrReachTheClient(t *testing.T) {
 }
 
 // The session budget is shared per job, so hitting it is an ordinary
-// thing a user will do. It has to arrive as words rather than as an
-// unexplained channel rejection.
+// thing a user will do. It has to arrive as words.
+//
+// It reaches them on stderr rather than as a channel rejection,
+// because the channel is now accepted before the job is resolved --
+// that is what makes a queue wait visible. The user sees the same
+// sentence either way; what changes is that ssh exits 1 rather than
+// reporting a refused channel.
 func TestTooManySessionsIsExplained(t *testing.T) {
 	tr := &fakeTransport{sessionErr: fmt.Errorf("%w: job bbockelm/12345.0 already has 10 of 10", jobssh.ErrTooManySessions)}
 	client := gatewayClient(t, gateway(t, tr), "12345.0")
 
-	_, err := client.NewSession()
-	if err == nil {
-		t.Fatal("a session was opened past the cap")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
 	}
-	msg := err.Error()
+	// Through the pipe, not sess.Stderr: x/crypto wires the latter
+	// when a command starts, and here no command ever does.
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if runErr := sess.Start("true"); runErr == nil {
+		t.Error("the exec was accepted despite the session cap")
+	}
+	msg := readAvailable(t, stderrPipe)
 	if !strings.Contains(msg, "sessions open") || !strings.Contains(msg, "Close a terminal") {
-		t.Errorf("the rejection does not explain itself: %q", msg)
+		t.Errorf("the failure does not explain itself: %q", msg)
 	}
 }
 
@@ -575,11 +590,460 @@ func TestUnresolvableTargetIsExplained(t *testing.T) {
 	tr := &fakeTransport{}
 	client := gatewayClient(t, gateway(t, tr), "nosuchsession")
 
-	_, err := client.NewSession()
-	if err == nil {
-		t.Fatal("a session opened against an unresolvable target")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
 	}
-	if !strings.Contains(err.Error(), "nosuchsession") {
-		t.Errorf("the rejection does not name the target: %v", err)
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if runErr := sess.Start("true"); runErr == nil {
+		t.Error("an exec was accepted against an unresolvable target")
+	}
+	msg := readAvailable(t, stderrPipe)
+	if !strings.Contains(msg, "nosuchsession") {
+		t.Errorf("the failure does not name the target: %q", msg)
+	}
+}
+
+// A username that names nothing at all is knowable without asking the
+// pool, so it still gets a proper channel rejection -- there is no
+// wait to make visible and a rejection reason is the clearer signal.
+func TestUnparseableTargetIsRejectedOutright(t *testing.T) {
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gateway(t, tr), "has space")
+
+	if _, err := client.NewSession(); err == nil {
+		t.Fatal("a channel was accepted for an unusable username")
+	}
+}
+
+// blockingResolve is a ResolveFunc that reports progress and waits.
+type blockingResolve struct {
+	statuses []string
+	release  chan struct{}
+	entered  chan struct{}
+	ctxErr   chan error
+	once     sync.Once
+}
+
+func newBlockingResolve(statuses ...string) *blockingResolve {
+	return &blockingResolve{
+		statuses: statuses,
+		release:  make(chan struct{}),
+		entered:  make(chan struct{}),
+		ctxErr:   make(chan error, 1),
+	}
+}
+
+func (b *blockingResolve) fn(ctx context.Context, account string, _ Target, report func(string)) (jobssh.Key, error) {
+	b.once.Do(func() { close(b.entered) })
+	for _, st := range b.statuses {
+		report(st)
+		time.Sleep(60 * time.Millisecond)
+	}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		b.ctxErr <- ctx.Err()
+		return jobssh.Key{}, ctx.Err()
+	case <-time.After(3 * time.Second):
+	}
+	b.ctxErr <- nil
+	return jobssh.Key{Owner: account, Cluster: 1, Proc: 0}, nil
+}
+
+// gatewayWithResolve is gateway() with a caller-supplied resolver.
+func gatewayWithResolve(t *testing.T, tr *fakeTransport, resolve ResolveFunc) string {
+	t.Helper()
+	a := grantingAuthenticator(t, "bbockelm", Options{Prompt: "ap.example.edu"})
+	srv := &Server{Transport: tr, Resolve: resolve}
+
+	cfg := &ssh.ServerConfig{KeyboardInteractiveCallback: a.KeyboardInteractive(context.Background())}
+	cfg.AddHostKey(testSigner(t))
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
+				if err != nil {
+					_ = nc.Close()
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				srv.Serve(context.Background(), conn, chans, reqs)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A caller waiting on a queued job must see WHY. A spinner with no
+// reason is indistinguishable from a hang, which is the complaint this
+// whole display exists to answer.
+func TestWaitShowsTheReasonOnATerminal(t *testing.T) {
+	br := newBlockingResolve("Session \"work\" (job 5.0) is idle")
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gatewayWithResolve(t, tr, br.fn), "work")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	// Asynchronously: the reply is held until the job exists, which is
+	// the other side of the wait being measured here.
+	go func() { _ = sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}) }()
+
+	// Read whatever the wait paints, then let the resolve finish.
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := stdout.Read(buf)
+		got <- string(buf[:n])
+	}()
+
+	select {
+	case painted := <-got:
+		if !strings.Contains(painted, "is idle") {
+			t.Errorf("the wait did not say why: %q", painted)
+		}
+		if !strings.Contains(painted, "\r") {
+			t.Errorf("a terminal wait should redraw in place: %q", painted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was painted during the wait")
+	}
+	close(br.release)
+}
+
+// Without a terminal, progress goes to stderr and stdout stays the
+// command's alone.
+//
+// Both halves matter. A pipe has no cursor to move, so escape
+// sequences in it corrupt whatever is reading; and stdout belongs to
+// the command, so status lines there end up inside
+// `ssh -T gateway cat file > out`.
+func TestWaitWithoutATerminalKeepsStdoutClean(t *testing.T) {
+	br := newBlockingResolve("Session \"work\" (job 5.0) is idle")
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gatewayWithResolve(t, tr, br.fn), "work")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	// No RequestPty: start the command straight away, as a script does.
+	go func() { _ = sess.Start("true") }()
+
+	// Anything arriving on stdout during the wait is a bug, so watch
+	// it while reading the status off stderr.
+	stdoutSaw := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := stdout.Read(buf)
+		stdoutSaw <- string(buf[:n])
+	}()
+
+	painted := readAvailable(t, stderrPipe)
+	if !strings.Contains(painted, "is idle") {
+		t.Errorf("the wait did not say why: %q", painted)
+	}
+	if strings.Contains(painted, "\x1b[") {
+		t.Errorf("escape sequences reached a pipe: %q", painted)
+	}
+
+	select {
+	case leaked := <-stdoutSaw:
+		t.Errorf("progress leaked into the command's stdout: %q", leaked)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(br.release)
+}
+
+// Ctrl-C during the wait has to end it. Otherwise the only way out of
+// a queue is to kill the terminal, which leaves the job behind.
+func TestInterruptDuringTheWaitCancels(t *testing.T) {
+	br := newBlockingResolve()
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gatewayWithResolve(t, tr, br.fn), "work")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	go func() { _ = sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}) }()
+
+	<-br.entered
+	if _, err := stdin.Write([]byte{0x03}); err != nil {
+		t.Fatalf("write ctrl-c: %v", err)
+	}
+
+	select {
+	case err := <-br.ctxErr:
+		if err == nil {
+			t.Fatal("the resolve finished normally; Ctrl-C did not cancel it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ctrl-C did not reach the wait")
+	}
+}
+
+// Input sent before the job exists must still reach it.
+//
+// `echo hi | ssh gateway cat` writes immediately, long before a queued
+// job is running. Nothing reads the channel during the wait for a
+// session with no terminal, precisely so those bytes stay in the SSH
+// window rather than being consumed looking for a Ctrl-C that a pipe
+// will never send.
+func TestStdinSentDuringTheWaitSurvives(t *testing.T) {
+	br := newBlockingResolve()
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gatewayWithResolve(t, tr, br.fn), "work")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	go func() { _ = sess.Start("cat") }()
+
+	<-br.entered
+	if _, err := stdin.Write([]byte("hello-from-before\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	close(br.release)
+
+	remote := tr.lastSession(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && remote.snapshot().started == "" {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	buf := make([]byte, 64)
+	done := make(chan int, 1)
+	go func() {
+		n, _ := remote.stdinR.Read(buf)
+		done <- n
+	}()
+	select {
+	case n := <-done:
+		if !strings.Contains(string(buf[:n]), "hello-from-before") {
+			t.Errorf("the job received %q", string(buf[:n]))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("input written during the wait never reached the job")
+	}
+}
+
+// readAvailable returns what is already waiting on r, giving the writer
+// a moment to get there. A deadline rather than io.ReadAll because the
+// stream stays open and ReadAll would wait for a close that the
+// failure path does not always perform.
+func readAvailable(t *testing.T, r io.Reader) string {
+	t.Helper()
+	out := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := r.Read(buf)
+		out <- string(buf[:n])
+	}()
+	select {
+	case s := <-out:
+		return s
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was written where the failure should have been explained")
+		return ""
+	}
+}
+
+// autoFinishSessions answers whatever the gateway opens: writes a line
+// and exits cleanly, so a real client has something to see and a reason
+// to exit 0.
+func autoFinishSessions(t *testing.T, tr *fakeTransport, output string) {
+	t.Helper()
+	go func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			tr.mu.Lock()
+			n := len(tr.sessions)
+			var s *fakeSession
+			if n > 0 {
+				s = tr.sessions[n-1]
+			}
+			tr.mu.Unlock()
+			if s != nil {
+				for time.Now().Before(deadline) && s.snapshot().started == "" {
+					time.Sleep(5 * time.Millisecond)
+				}
+				_, _ = s.stdoutW.Write([]byte(output))
+				s.finish(nil)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+}
+
+// The whole point of the wait display is what a person sees. x/crypto
+// proves the bytes were sent; only a real client proves they are shown.
+func TestRealClientSeesTheWaitAndItsReason(t *testing.T) {
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh binary to test against")
+	}
+
+	br := newBlockingResolve("Session \"work\" (job 5.0) is idle, waiting for a slot")
+	tr := &fakeTransport{}
+	addr := gatewayWithResolve(t, tr, br.fn)
+
+	// Let the wait run visibly, then let it succeed.
+	go func() {
+		<-br.entered
+		time.Sleep(700 * time.Millisecond)
+		close(br.release)
+	}()
+	autoFinishSessions(t, tr, "shell-ran\r\n")
+
+	out, sshErr := realSSH(t, sshBin, addr, []string{"-tt"}, "work@HOST", "true")
+	t.Logf("ssh exit=%v output:\n%q", sshErr, out)
+
+	if !strings.Contains(string(out), "waiting for a slot") {
+		t.Errorf("a real client never saw why it was waiting:\n%q", out)
+	}
+	if !strings.Contains(string(out), "shell-ran") {
+		t.Errorf("the session did not run after the wait:\n%q", out)
+	}
+	// The spinner line is erased before the session starts, so the
+	// job's own first line is not appended to a progress line.
+	if idx := strings.Index(string(out), "shell-ran"); idx > 0 {
+		if strings.Contains(string(out[:idx]), "waiting for a slot\rshell") {
+			t.Errorf("the progress line was not cleared before output:\n%q", out)
+		}
+	}
+}
+
+// A failure after the channel is accepted reaches the terminal, and the
+// client exits non-zero rather than reporting a dropped connection.
+func TestRealClientSeesAFailureReason(t *testing.T) {
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh binary to test against")
+	}
+
+	tr := &fakeTransport{}
+	addr := gatewayWithResolve(t, tr, func(context.Context, string, Target, func(string)) (jobssh.Key, error) {
+		return jobssh.Key{}, fmt.Errorf("session %q is held: no matching machines", "work")
+	})
+
+	out, sshErr := realSSH(t, sshBin, addr, nil, "work@HOST", "echo should-not-run")
+	t.Logf("ssh exit=%v output:\n%q", sshErr, out)
+
+	if sshErr == nil {
+		t.Error("ssh reported success for a session that could not be opened")
+	}
+	if !strings.Contains(string(out), "no matching machines") {
+		t.Errorf("the reason never reached the terminal:\n%q", out)
+	}
+	if strings.Contains(string(out), "should-not-run") {
+		t.Errorf("the command ran anyway:\n%q", out)
+	}
+}
+
+// Keystrokes typed after the shell starts must all reach the job.
+//
+// The interrupt scanner and the stdin copier are the same goroutine
+// for exactly this reason. When they were separate they raced for
+// every Read, and whichever won took the bytes -- so roughly half of
+// what the user typed vanished. Nothing caught it, because a test that
+// types nothing after the shell starts cannot.
+//
+// Several separate writes rather than one: with two readers each write
+// is its own coin flip, so the old shape fails this almost always,
+// while the fixed shape passes deterministically.
+func TestTypingAfterTheSessionStartsIsNotEaten(t *testing.T) {
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gateway(t, tr), "12345.0")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+
+	remote := tr.lastSession(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && remote.snapshot().started == "" {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		var seen []byte
+		buf := make([]byte, 64)
+		for len(seen) < 10 {
+			n, err := remote.stdinR.Read(buf)
+			seen = append(seen, buf[:n]...)
+			if err != nil {
+				break
+			}
+		}
+		got <- string(seen)
+	}()
+
+	for _, chunk := range []string{"ab", "cd", "ef", "gh", "ij"} {
+		if _, err := stdin.Write([]byte(chunk)); err != nil {
+			t.Fatalf("write %q: %v", chunk, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case seen := <-got:
+		if seen != "abcdefghij" {
+			t.Errorf("the job received %q, want everything that was typed", seen)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("what was typed never reached the job")
 	}
 }

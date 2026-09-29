@@ -239,6 +239,11 @@ type Config struct {
 	// keys; empty means keep them sealed in the application database.
 	SSHHostKeyFile string
 	SSHCAKeyFile   string
+	// SSHGatewaySessionCpus/MemoryMB/DiskMB size a session the gateway
+	// creates on demand. Zero means the interactive default.
+	SSHGatewaySessionCpus     int
+	SSHGatewaySessionMemoryMB int
+	SSHGatewaySessionDiskMB   int
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
@@ -441,6 +446,9 @@ func NewServer(cfg Config) (*Server, error) {
 		SSHGatewayIssuer:            cfg.SSHGatewayIssuer,
 		SSHHostKeyFile:              cfg.SSHHostKeyFile,
 		SSHCAKeyFile:                cfg.SSHCAKeyFile,
+		SSHGatewaySessionCpus:       cfg.SSHGatewaySessionCpus,
+		SSHGatewaySessionMemoryMB:   cfg.SSHGatewaySessionMemoryMB,
+		SSHGatewaySessionDiskMB:     cfg.SSHGatewaySessionDiskMB,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,

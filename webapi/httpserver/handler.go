@@ -389,7 +389,10 @@ type Handler struct {
 	sshGatewayIssuer  string
 	sshHostKeyFile    string
 	sshCAKeyFile      string
-	jobSSHCacheMu     sync.Mutex
+	// What a session created on demand asks for; zero fields mean
+	// the interactive package's own defaults.
+	sshGatewaySessionSpec sshGatewaySessionSize
+	jobSSHCacheMu         sync.Mutex
 
 	// jupyterWorkDir is where the materialized helper binary plus
 	// per-instance scratch artifacts (token files, launch scripts) are
@@ -657,6 +660,15 @@ type HandlerConfig struct {
 	// and crash dumps both leak the environment, a secret volume does not.
 	SSHHostKeyFile string
 	SSHCAKeyFile   string
+
+	// SSHGatewaySessionCpus, SSHGatewaySessionMemoryMB and
+	// SSHGatewaySessionDiskMB size the session the gateway creates for
+	// a caller who connected by name rather than to an existing job.
+	// Zero means the interactive default, which is what these sessions
+	// asked for before the knobs existed.
+	SSHGatewaySessionCpus     int
+	SSHGatewaySessionMemoryMB int
+	SSHGatewaySessionDiskMB   int
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
@@ -1367,6 +1379,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.sshGatewayIssuer = strings.TrimSpace(cfg.SSHGatewayIssuer)
 	h.sshHostKeyFile = strings.TrimSpace(cfg.SSHHostKeyFile)
 	h.sshCAKeyFile = strings.TrimSpace(cfg.SSHCAKeyFile)
+	h.sshGatewaySessionSpec = sshGatewaySessionSize{
+		Cpus:     cfg.SSHGatewaySessionCpus,
+		MemoryMB: cfg.SSHGatewaySessionMemoryMB,
+		DiskMB:   cfg.SSHGatewaySessionDiskMB,
+	}
 
 	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupSources,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {

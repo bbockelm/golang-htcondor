@@ -90,7 +90,7 @@ func TestCondorCredentialWithoutASigningKey(t *testing.T) {
 
 func TestSSHGatewayResolvesJobIDs(t *testing.T) {
 	h := &Handler{}
-	key, err := h.sshGatewayResolve(context.Background(), "bbockelm", sshgateway.Target{Cluster: 12345, Proc: 7})
+	key, err := h.sshGatewayResolve(context.Background(), "bbockelm", sshgateway.Target{Cluster: 12345, Proc: 7}, nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSSHGatewayResolvesJobIDs(t *testing.T) {
 func TestSSHGatewayKeyOwnerIsTheAccount(t *testing.T) {
 	h := &Handler{}
 	key, err := h.sshGatewayResolve(context.Background(), "alice",
-		sshgateway.Target{Raw: "bob", Cluster: 1, Proc: 0})
+		sshgateway.Target{Raw: "bob", Cluster: 1, Proc: 0}, nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSSHGatewayKeyOwnerIsTheAccount(t *testing.T) {
 // without asking for anything.
 func TestSSHGatewaySessionWithoutAManagerIsExplained(t *testing.T) {
 	h := &Handler{logger: testLogger(t)}
-	_, err := h.sshGatewayResolve(context.Background(), "bbockelm", sshgateway.Target{Name: "work"})
+	_, err := h.sshGatewayResolve(context.Background(), "bbockelm", sshgateway.Target{Name: "work"}, nil)
 	if err == nil {
 		t.Fatal("a session resolved with no manager")
 	}
@@ -140,7 +140,7 @@ func TestSSHGatewayHeldSessionReportsTheHoldReason(t *testing.T) {
 		interactive.Info{
 			Name: "work", JobID: "12345.0", ClusterID: 12345,
 			JobStatus: 5, Status: "Held", HoldReason: "no matching machines",
-		})
+		}, nil)
 	if err == nil {
 		t.Fatal("a held session resolved")
 	}
@@ -156,7 +156,7 @@ func TestSSHGatewayRunningSessionResolves(t *testing.T) {
 	h := &Handler{logger: testLogger(t)}
 	key, err := h.sshGatewayAwaitRunning(context.Background(), nil,
 		interactive.Caller{Actor: "bbockelm", Owner: "bbockelm"}, "work",
-		interactive.Info{Name: "work", JobID: "77.3", ClusterID: 77, ProcID: 3, JobStatus: 2})
+		interactive.Info{Name: "work", JobID: "77.3", ClusterID: 77, ProcID: 3, JobStatus: 2}, nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
