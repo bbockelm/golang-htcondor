@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -172,16 +173,40 @@ func TestLaunchScriptWorksInADeepSandbox(t *testing.T) {
 			len(addr), addr, MaxSocketPath)
 	}
 
-	// It has to actually lead to the socket the server bound.
-	//nolint:gosec // G703: addr is what the launcher just published into this test's own sandbox
-	st, serr := os.Stat(addr)
+	// The socket itself is bound in the sandbox, and its mode is what
+	// makes running the server with authentication disabled safe.
+	//nolint:gosec // G703: a path this test built from its own temp dir
+	st, serr := os.Stat(filepath.Join(deep, SocketName))
 	if serr != nil {
-		t.Fatalf("the published address %q does not resolve: %v", addr, serr)
+		t.Fatalf("no socket was bound in the sandbox: %v", serr)
 	}
 	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("socket reached via %q has mode %04o; group and other must have no access", addr, perm)
+		t.Errorf("socket mode is %04o; group and other must have no access", perm)
+	}
+
+	// Whether the published address resolves is deliberately NOT
+	// asserted here, and the first version of this test got that wrong.
+	// On Linux the address is /proc/<pid>/cwd/..., which is valid only
+	// while that process lives -- and the stand-in server has exited by
+	// now, so it resolves on macOS (a symlink) and not on Linux. What
+	// can be checked without a live process is the shape, and that the
+	// mechanism is the one meant for this platform. Reachability is the
+	// integration test's job, where the server is still running.
+	if strings.HasPrefix(addr, "/proc/") {
+		if !procAddrRE.MatchString(addr) {
+			t.Errorf("published address %q is not /proc/<pid>/cwd/%s", addr, SocketName)
+		}
+	} else {
+		//nolint:gosec // G703: the address the launcher just published for this test
+		if _, lerr := os.Stat(addr); lerr != nil {
+			t.Errorf("published address %q does not resolve: %v", addr, lerr)
+		}
 	}
 }
+
+// procAddrRE matches the address the launcher publishes on Linux, where
+// a kernel symlink keeps it short however deep the sandbox is.
+var procAddrRE = regexp.MustCompile(`^/proc/[0-9]+/cwd/` + regexp.QuoteMeta(SocketName) + `$`)
 
 func TestLaunchScriptRefusesAMissingServer(t *testing.T) {
 	scratch := shortScratch(t)
