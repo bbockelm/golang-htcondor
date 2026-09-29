@@ -29,6 +29,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/sshkeys"
@@ -265,6 +266,15 @@ func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerCon
 	return h.withCondorCredential(ctx, account, scopes)
 }
 
+// sshGatewaySessionWait bounds how long a caller waits for a session
+// they just asked for to start running.
+//
+// Generous because it covers a negotiation cycle and a sandbox setup,
+// and bounded because the caller is sitting at a terminal with no
+// indication anything is happening -- see the note on the silent wait
+// in sshGatewayResolve.
+const sshGatewaySessionWait = 3 * time.Minute
+
 // sshGatewayResolve turns a target into a job.
 //
 // Ownership is not checked here. The schedd checks it, on every
@@ -272,12 +282,111 @@ func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerCon
 // and it is the only thing whose answer is authoritative. Repeating the
 // check here would add a second opinion that can only ever be wrong in
 // the direction of letting somebody in.
-func (h *Handler) sshGatewayResolve(_ context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
-	if !t.IsJob() {
-		return jobssh.Key{}, fmt.Errorf(
-			"connecting by session name is not supported yet; use a job id, as in %d.0", 12345)
+func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
+	if t.IsJob() {
+		return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
-	return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
+	return h.sshGatewaySession(ctx, account, t.Name)
+}
+
+// sshGatewaySession attaches to the caller's named interactive session,
+// creating it if there is not one.
+//
+// Any username that is not a job id lands here, so `ssh work@gateway`
+// and a bare `ssh gateway` from a machine whose local login is "work"
+// are the same request. That is the point: a user who does not care
+// which job they get should not have to name one.
+//
+// KNOWN GAP: creating a session blocks here with nothing on the
+// caller's terminal, because resolution happens before the session
+// channel is accepted and there is nowhere to write until it is.
+// Moving it after Accept is what the progress display needs, and is
+// the next piece of work.
+func (h *Handler) sshGatewaySession(ctx context.Context, account, name string) (jobssh.Key, error) {
+	mgr := h.mcpServer.InteractiveManager()
+	if mgr == nil {
+		return jobssh.Key{}, fmt.Errorf(
+			"interactive sessions are not available on this server, so %q cannot be started; "+
+				"connect to a job you already have, as in 12345.0", name)
+	}
+	caller := interactive.Caller{Actor: account, Owner: account}
+
+	if info, err := findInteractiveSession(ctx, mgr, caller, name); err != nil {
+		return jobssh.Key{}, err
+	} else if info != nil {
+		return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info)
+	}
+
+	info, err := mgr.Create(ctx, caller, interactive.CreateSpec{Name: name})
+	if err != nil {
+		return jobssh.Key{}, fmt.Errorf("starting session %q: %w", name, err)
+	}
+	h.logger.Info(logging.DestinationHTTP, "SSH gateway started an interactive session",
+		"account", account, "session", name, "job", info.JobID)
+	return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info)
+}
+
+// findInteractiveSession returns the caller's session called name, or
+// nil when they have none.
+func findInteractiveSession(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string) (*interactive.Info, error) {
+	sessions, err := mgr.List(ctx, caller)
+	if err != nil {
+		return nil, fmt.Errorf("looking for session %q: %w", name, err)
+	}
+	for i := range sessions {
+		if sessions[i].Name == name {
+			return &sessions[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// sshGatewayAwaitRunning waits for a session's job to start.
+//
+// A job that is not running yet has no starter to reach, so returning
+// its id would produce a connection failure that reads like the gateway
+// is broken rather than like the queue being busy. A job that is HELD
+// never will run, and saying so beats waiting out the timeout.
+func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string, info interactive.Info) (jobssh.Key, error) {
+	const (
+		jobStatusRunning = 2
+		jobStatusHeld    = 5
+	)
+
+	deadline := time.Now().Add(sshGatewaySessionWait)
+	for {
+		switch info.JobStatus {
+		case jobStatusRunning:
+			return jobssh.Key{Owner: caller.Owner, Cluster: info.ClusterID, Proc: info.ProcID}, nil
+		case jobStatusHeld:
+			reason := info.HoldReason
+			if reason == "" {
+				reason = "no reason given"
+			}
+			return jobssh.Key{}, fmt.Errorf("session %q (job %s) is held: %s", name, info.JobID, reason)
+		}
+
+		if time.Now().After(deadline) {
+			return jobssh.Key{}, fmt.Errorf(
+				"session %q (job %s) is still %s after %s; it is queued and will keep waiting, so reconnect shortly",
+				name, info.JobID, strings.ToLower(info.Status), sshGatewaySessionWait)
+		}
+
+		select {
+		case <-ctx.Done():
+			return jobssh.Key{}, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+
+		found, err := findInteractiveSession(ctx, mgr, caller, name)
+		if err != nil {
+			return jobssh.Key{}, err
+		}
+		if found == nil {
+			return jobssh.Key{}, fmt.Errorf("session %q disappeared while waiting for it to start", name)
+		}
+		info = *found
+	}
 }
 
 // seedSSHGatewayClient makes sure the public client the gateway drives

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
 
@@ -112,14 +113,55 @@ func TestSSHGatewayKeyOwnerIsTheAccount(t *testing.T) {
 	}
 }
 
-func TestSSHGatewaySessionNamesAreNotSupportedYet(t *testing.T) {
-	h := &Handler{}
+// Any username that is not a job id is a session name, so a server
+// with no session manager has to say so in terms the person at the
+// terminal can act on -- they typed their own login and got here
+// without asking for anything.
+func TestSSHGatewaySessionWithoutAManagerIsExplained(t *testing.T) {
+	h := &Handler{logger: testLogger(t)}
 	_, err := h.sshGatewayResolve(context.Background(), "bbockelm", sshgateway.Target{Name: "work"})
 	if err == nil {
-		t.Fatal("a session name resolved")
+		t.Fatal("a session resolved with no manager")
 	}
-	if !strings.Contains(err.Error(), "job id") {
-		t.Errorf("the error does not say what to use instead: %v", err)
+	if !strings.Contains(err.Error(), "work") {
+		t.Errorf("the error does not name the session asked for: %v", err)
+	}
+	if !strings.Contains(err.Error(), "12345.0") {
+		t.Errorf("the error does not show the form that would work: %v", err)
+	}
+}
+
+// A held job never runs, so waiting out the timeout tells the caller
+// nothing they can use. The hold reason is what they need.
+func TestSSHGatewayHeldSessionReportsTheHoldReason(t *testing.T) {
+	h := &Handler{logger: testLogger(t)}
+	_, err := h.sshGatewayAwaitRunning(context.Background(), nil,
+		interactive.Caller{Actor: "bbockelm", Owner: "bbockelm"}, "work",
+		interactive.Info{
+			Name: "work", JobID: "12345.0", ClusterID: 12345,
+			JobStatus: 5, Status: "Held", HoldReason: "no matching machines",
+		})
+	if err == nil {
+		t.Fatal("a held session resolved")
+	}
+	if !strings.Contains(err.Error(), "no matching machines") {
+		t.Errorf("the hold reason is missing: %v", err)
+	}
+}
+
+// A running session resolves straight through, without a schedd round
+// trip -- which is also what makes the held case above reachable with a
+// nil manager.
+func TestSSHGatewayRunningSessionResolves(t *testing.T) {
+	h := &Handler{logger: testLogger(t)}
+	key, err := h.sshGatewayAwaitRunning(context.Background(), nil,
+		interactive.Caller{Actor: "bbockelm", Owner: "bbockelm"}, "work",
+		interactive.Info{Name: "work", JobID: "77.3", ClusterID: 77, ProcID: 3, JobStatus: 2})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if key.Owner != "bbockelm" || key.Cluster != 77 || key.Proc != 3 {
+		t.Errorf("key = %+v", key)
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 )
 
 // TestSSHGatewayIntegration drives the whole thing against a real pool:
@@ -57,49 +58,11 @@ func TestSSHGatewayIntegration(t *testing.T) {
 			t.Skipf("%s not in PATH; skipping", bin)
 		}
 	}
-	sshdPath := ""
-	for _, p := range []string{"/usr/sbin/sshd", "/usr/bin/sshd"} {
-		if _, err := os.Stat(p); err == nil {
-			sshdPath = p
-			break
-		}
+	extraConfig, ok := htcondor.SSHToJobHarnessConfig()
+	if !ok {
+		t.Skip("ssh-to-job prerequisites (sshd, sshd config template) not found; skipping")
 	}
-	if sshdPath == "" {
-		t.Skip("sshd not found; skipping")
-	}
-	// The template lives beside whichever condor is on PATH, which for a
-	// developer build is a release_dir nowhere near /usr. Derived from
-	// condor_master rather than listed, so testing a local build does not
-	// need the list extended.
-	candidates := []string{
-		"/usr/lib/condor_ssh_to_job_sshd_config_template",
-		"/usr/lib64/condor/condor_ssh_to_job_sshd_config_template",
-		"/etc/condor/condor_ssh_to_job_sshd_config_template",
-		"/usr/share/condor/condor_ssh_to_job_sshd_config_template",
-	}
-	if master, err := exec.LookPath("condor_master"); err == nil {
-		root := filepath.Dir(filepath.Dir(master)) // .../sbin/condor_master -> ...
-		candidates = append([]string{
-			filepath.Join(root, "lib", "condor_ssh_to_job_sshd_config_template"),
-			filepath.Join(root, "lib", "condor", "condor_ssh_to_job_sshd_config_template"),
-		}, candidates...)
-	}
-	tmplPath := ""
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			tmplPath = p
-			break
-		}
-	}
-	if tmplPath == "" {
-		t.Skip("condor_ssh_to_job_sshd_config_template not found; skipping")
-	}
-
-	harness := htcondor.SetupCondorHarnessWithConfig(t, fmt.Sprintf(`
-ENABLE_SSH_TO_JOB = True
-SSH_TO_JOB_SSHD = %s
-SSH_TO_JOB_SSHD_CONFIG_TEMPLATE = %s
-`, sshdPath, tmplPath))
+	harness := htcondor.SetupCondorHarnessWithConfig(t, extraConfig)
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("daemons: %v", err)
 	}
@@ -229,6 +192,12 @@ queue
 	// not an identity; the identity is whatever the grant resolved to.
 	//nolint:gosec // fixed argv; the binary is resolved by LookPath above
 	cmd := exec.CommandContext(ctx, "ssh",
+		// -F /dev/null so the developer's own ~/.ssh/config cannot reach
+		// this. ControlMaster in particular is not a stylistic
+		// difference: the mux layer swallows the reason a session
+		// channel was refused and reports "Session open refused by
+		// peer", which is exactly the diagnostic these tests exist for.
+		"-F", "/dev/null",
 		"-p", gwPort,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -262,6 +231,182 @@ queue
 	// anywhere on the access point.
 	if !strings.Contains(string(out), "dir_") && !strings.Contains(string(out), "execute") {
 		t.Errorf("the shell does not look like it is in a job sandbox:\n%s", out)
+	}
+}
+
+// TestSSHGatewayCreatesASessionOnDemand drives the other half of the
+// target rule: any username that is not a job id names an interactive
+// session, started if the caller has none.
+//
+// This is what a user gets from a bare `ssh gateway`, since the client
+// sends their local login and nothing about it looks like a job id.
+func TestSSHGatewayCreatesASessionOnDemand(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	for _, bin := range []string{"condor_master", "ssh"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not in PATH; skipping", bin)
+		}
+	}
+	extraConfig, ok := htcondor.SSHToJobHarnessConfig()
+	if !ok {
+		t.Skip("ssh-to-job prerequisites (sshd, sshd config template) not found; skipping")
+	}
+	// A created session asks for the interactive defaults -- 1 CPU and
+	// 1 GB each of memory and disk -- and the harness's slot is sized
+	// from whatever the host reports, which on a laptop is not
+	// necessarily enough. Sizing the slot here rather than shrinking
+	// the request keeps the test honest about what the gateway
+	// actually submits: a slot too small is a site's problem to
+	// configure, and a test that quietly asked for less would not have
+	// caught this at all.
+	harness := htcondor.SetupCondorHarnessWithConfig(t, extraConfig+`
+NUM_CPUS = 4
+MEMORY = 8192
+`)
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("daemons: %v", err)
+	}
+	if err := harness.WaitForStartd(45 * time.Second); err != nil {
+		t.Fatalf("startd never reported in: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	collector := htcondor.NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("locate schedd: %v", err)
+	}
+
+	listenAddr, issuerURL := reserveAddr(t)
+	server, err := NewServer(Config{
+		ListenAddr:               listenAddr,
+		OAuth2Issuer:             issuerURL,
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           harness.GetSigningKeyPath(),
+		TrustDomain:              harness.GetTrustDomain(),
+		UIDDomain:                harness.GetTrustDomain(),
+		OAuth2DBPath:             filepath.Join(harness.GetSpoolDir(), "oauth2-ondemand.db"),
+		KEKFilePath:              writeKEK(t, t.TempDir()),
+		EnableMCP:                true,
+		SSHGatewayAddress:        "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- server.Start() }()
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(c)
+	}()
+
+	gwAddr := waitForGateway(t, server, startErr, 30*time.Second)
+	gwPort, err := portOf(gwAddr)
+	if err != nil {
+		t.Fatalf("gateway address %q: %v", gwAddr, err)
+	}
+
+	approveCtx, stopApproving := context.WithCancel(ctx)
+	defer stopApproving()
+	go approvePendingDeviceCodes(approveCtx, t, server.Handler, testUser, nil)
+
+	defer func() {
+		schedd := htcondor.NewSchedd(location.Name, location.Address)
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if sctx, err := contextAsUser(c, harness, testUser); err == nil {
+			_, _ = schedd.RemoveJobs(sctx, "True", "test cleanup")
+		}
+	}()
+
+	//nolint:gosec // fixed argv; the binary is resolved by LookPath above
+	cmd := exec.CommandContext(ctx, "ssh",
+		// -F /dev/null so the developer's own ~/.ssh/config cannot reach
+		// this. ControlMaster in particular is not a stylistic
+		// difference: the mux layer swallows the reason a session
+		// channel was refused and reports "Session open refused by
+		// peer", which is exactly the diagnostic these tests exist for.
+		"-F", "/dev/null",
+		"-p", gwPort,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PreferredAuthentications=keyboard-interactive",
+		"-o", "IdentitiesOnly=yes",
+		// Not ERROR: the reason a session channel was refused is logged
+		// at INFO, and that reason is the whole diagnostic when
+		// creating a session goes wrong.
+		"-o", "LogLevel=INFO",
+		"-T",
+		"gwsession@127.0.0.1",
+		"echo on-demand-session-reached",
+	)
+	out, sshErr := cmd.CombinedOutput()
+	t.Logf("ssh exit=%v output:\n%s", sshErr, out)
+
+	if sshErr != nil {
+		logInteractiveSessions(ctx, t, server, testUser)
+		harness.PrintScheddLog()
+		t.Fatalf("ssh to a named session failed: %v", sshErr)
+	}
+	if !strings.Contains(string(out), "on-demand-session-reached") {
+		t.Fatalf("the command did not run in the created session:\n%s", out)
+	}
+
+	// The session is a real one the rest of the API can see, not
+	// something the gateway keeps to itself.
+	// Server has its own mcpServer field (the HTTP one), which shadows
+	// the Handler's. Named explicitly so this reaches the MCP server.
+	mgr := server.Handler.mcpServer.InteractiveManager()
+	if mgr == nil {
+		t.Fatal("no interactive manager")
+	}
+	sessions, err := mgr.List(ctx, interactive.Caller{Actor: testUser, Owner: testUser})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	found := false
+	for _, s := range sessions {
+		t.Logf("session %q job=%s status=%s", s.Name, s.JobID, s.Status)
+		if s.Name == "gwsession" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the session the gateway created is not listed")
+	}
+}
+
+// logInteractiveSessions dumps what the caller's sessions are doing.
+//
+// The ssh error on its own cannot tell "queued behind the negotiator"
+// from "held" from "never submitted", and those want different fixes.
+func logInteractiveSessions(ctx context.Context, t *testing.T, server *Server, account string) {
+	t.Helper()
+	mgr := server.Handler.mcpServer.InteractiveManager()
+	if mgr == nil {
+		t.Log("no interactive manager")
+		return
+	}
+	sessions, err := mgr.List(ctx, interactive.Caller{Actor: account, Owner: account})
+	if err != nil {
+		t.Logf("listing sessions: %v", err)
+		return
+	}
+	if len(sessions) == 0 {
+		t.Log("the caller has no interactive sessions at all")
+	}
+	for _, s := range sessions {
+		t.Logf("session %q job=%s status=%s(%d) hold=%q",
+			s.Name, s.JobID, s.Status, s.JobStatus, s.HoldReason)
 	}
 }
 
@@ -333,6 +478,12 @@ func TestSSHGatewayRefusesSomeoneElsesJob(t *testing.T) {
 	// A cluster id nobody owns, because nothing was submitted.
 	//nolint:gosec // fixed argv; the binary is resolved by LookPath above
 	cmd := exec.CommandContext(ctx, "ssh",
+		// -F /dev/null so the developer's own ~/.ssh/config cannot reach
+		// this. ControlMaster in particular is not a stylistic
+		// difference: the mux layer swallows the reason a session
+		// channel was refused and reports "Session open refused by
+		// peer", which is exactly the diagnostic these tests exist for.
+		"-F", "/dev/null",
 		"-p", gwPort,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",

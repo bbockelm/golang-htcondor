@@ -150,6 +150,21 @@ type Server struct {
 	interactive *interactive.Manager
 }
 
+// InteractiveManager returns the session manager, or nil when this
+// server has none.
+//
+// Exported for the SSH gateway, which creates a session for a caller
+// who asked for one by name. It shares this manager rather than
+// building a second: the per-owner limits, the leases and the watchdog
+// windows are per-manager state, and two of them would enforce half a
+// limit each.
+func (s *Server) InteractiveManager() *interactive.Manager {
+	if s == nil {
+		return nil
+	}
+	return s.interactive
+}
+
 // Config holds server configuration
 type Config struct {
 	ScheddName string // Schedd name
