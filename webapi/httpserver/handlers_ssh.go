@@ -378,26 +378,40 @@ func bridgeSSHToWebSocket(
 		stop := s.startInteractiveHeartbeat(ctx, sshClient, opts.JobID, lastKeystroke)
 		defer stop()
 
-		// On disconnect from an interactive session, condor_rm the job.
-		// The watchdog inside the job would also reap it after ~120s
+		// On disconnect from an interactive session, tear the job
+		// down: drop a `.shutdown` sentinel for the watchdog, then
+		// condor_rm. The watchdog would also reap the job after ~120s
 		// of stale heartbeat, but users expect closing the browser tab
 		// (or hitting "End session" in the UI) to free the slot
-		// immediately. We do this from a deferred closure so it runs
-		// once the bridge has torn down — `s.removeJobOnDisconnect`
-		// uses a fresh context (not `ctx`, which is dying) and a
-		// short timeout, since by then the WS handler is exiting and
-		// any remaining schedd I/O is best-effort.
-		defer s.removeJobOnDisconnect(opts.JobID)
-
-		// Drop a `.shutdown` sentinel via the still-open ssh.Client
-		// before we tear it down. The watchdog polls for that file
-		// and exits within POLL_INTERVAL seconds, which is faster
-		// than condor_rm's schedd round-trip and works even if
-		// condor_rm is somehow lossy (e.g., schedd backlog). LIFO
-		// order matters: this defer is declared AFTER the close-all
-		// defer at the top of the function, so it runs first — the
-		// sshClient is still alive when we open this last session.
-		defer s.sendInteractiveShutdownSignal(sshClient, opts.JobID)
+		// immediately. The sentinel goes first because the watchdog
+		// polls for it and exits within POLL_INTERVAL seconds, which
+		// beats condor_rm's schedd round trip and works even if
+		// condor_rm is lossy (a schedd backlog, say).
+		//
+		// Only for the LAST terminal on this job. Both halves used to
+		// run on every disconnect, so with two terminals open on one
+		// session, closing either removed the job and killed the
+		// other. The teardown belongs to the session, not to whichever
+		// client happened to leave first.
+		//
+		// A deferred closure so it runs once the bridge has torn down.
+		// Note what it depends on: sshClient must still be alive when
+		// the sentinel is sent, which holds because the close-all
+		// defer is declared at the top of the function and so runs
+		// after this one. removeJobOnDisconnect uses a fresh context
+		// rather than `ctx`, which is dying by then, and treats its
+		// schedd I/O as best effort.
+		s.interactiveTerminals.attach(opts.JobID)
+		defer func() {
+			if !s.interactiveTerminals.detach(opts.JobID) {
+				s.logger.Debug(logging.DestinationHTTP,
+					"interactive disconnect: another terminal is still attached; leaving the job alone",
+					"job_id", opts.JobID)
+				return
+			}
+			s.sendInteractiveShutdownSignal(sshClient, opts.JobID)
+			s.removeJobOnDisconnect(opts.JobID)
+		}()
 	}
 
 	// Channel to surface the wait result without blocking the bridges.

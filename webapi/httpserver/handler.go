@@ -371,6 +371,10 @@ type Handler struct {
 	jupyterRegistry   *jupytertunnel.Registry
 	jupyterRegistryMu sync.Mutex
 
+	// interactiveTerminals counts live browser terminals per job, so
+	// that the last one to leave is the one that tears the job down.
+	interactiveTerminals *interactiveTerminals
+
 	// jobSSHCache holds one condor_ssh_to_job transport per (caller,
 	// job) for the reverse proxy into a server the job is running.
 	// Built lazily, because a deployment that never proxies into a job
@@ -971,14 +975,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the
 		// catalog isn't available until the post-DB path runs.
-		signingKeyPath:     cfg.SigningKeyPath,
-		tlsCACertFile:      cfg.TLSCACertFile,
-		logger:             logger,
-		tokenCache:         NewTokenCache(), // Initialize token cache (includes username for rate limiting)
-		streamBufferSize:   streamBufferSize,
-		streamWriteTimeout: streamWriteTimeout,
-		metricsPublic:      cfg.MetricsPublic,
-		htcondorConfig:     cfg.HTCondorConfig,
+		signingKeyPath:       cfg.SigningKeyPath,
+		interactiveTerminals: newInteractiveTerminals(),
+		tlsCACertFile:        cfg.TLSCACertFile,
+		logger:               logger,
+		tokenCache:           NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		streamBufferSize:     streamBufferSize,
+		streamWriteTimeout:   streamWriteTimeout,
+		metricsPublic:        cfg.MetricsPublic,
+		htcondorConfig:       cfg.HTCondorConfig,
 		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
