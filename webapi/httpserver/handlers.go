@@ -601,6 +601,24 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reverse-proxy into a server the job is running:
+	//   /api/v1/jobs/{id}/proxy/{port}/{rest...}
+	//   /api/v1/jobs/{id}/proxy/unix/{socket}/{rest...}
+	if len(parts) >= 2 && parts[1] == "proxy" {
+		cluster, proc, err := parseJobID(jobID)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+			return
+		}
+		target, rest, err := parseProxyTarget(parts[2:])
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid proxy target: %v", err))
+			return
+		}
+		s.handleJobProxy(w, r, cluster, proc, target, jobProxyUpstreamPath(rest))
+		return
+	}
+
 	// Check if this is a file fetch operation: /api/v1/jobs/{id}/files/{filename}
 	if len(parts) >= 3 && parts[1] == "files" {
 		cluster, proc, err := parseJobID(jobID)

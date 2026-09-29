@@ -32,6 +32,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
@@ -369,6 +370,13 @@ type Handler struct {
 	// don't enable Jupyter pay no startup cost.
 	jupyterRegistry   *jupytertunnel.Registry
 	jupyterRegistryMu sync.Mutex
+
+	// jobSSHCache holds one condor_ssh_to_job transport per (caller,
+	// job) for the reverse proxy into a server the job is running.
+	// Built lazily, because a deployment that never proxies into a job
+	// should not carry a reaper goroutine for it.
+	jobSSHCache   *jobssh.Cache
+	jobSSHCacheMu sync.Mutex
 
 	// jupyterWorkDir is where the materialized helper binary plus
 	// per-instance scratch artifacts (token files, launch scripts) are
@@ -2487,6 +2495,12 @@ func (h *Handler) Stop(ctx context.Context) error {
 	if h.mcpServer != nil {
 		h.mcpServer.Close()
 	}
+
+	// Drop the cached condor_ssh_to_job transports for the same
+	// reason: each is a live connection into a running job, and an
+	// in-flight proxied response keeps its own transport alive until
+	// it finishes rather than being cut off mid-body.
+	h.closeJobSSHCache()
 
 	// Close OAuth2 provider if enabled
 	if h.oauth2Provider != nil {
