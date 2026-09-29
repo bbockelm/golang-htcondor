@@ -338,6 +338,10 @@ func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]
 		portFlag = "-P"
 	}
 	args := []string{
+		// Ignore the developer's own ~/.ssh/config: ControlMaster there
+		// makes the client mux, and the mux layer replaces a channel's
+		// refusal reason with a generic one.
+		"-F", "/dev/null",
 		portFlag, port,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -398,8 +402,13 @@ func TestRealOpenSSHClientAuthenticates(t *testing.T) {
 				t.Fatalf("a real ssh client did not print the device code; keyboard-interactive with "+
 					"no questions is not a usable channel for it. Output:\n%s", out)
 			}
-			if strings.Contains(string(out), "user_code=") {
-				t.Errorf("a one-click approval link reached the terminal:\n%s", out)
+			// The fake flow carries no complete URI, so the prompt
+			// falls back to the plain URL and the code. Whether a
+			// one-click link is offered when the server sends one is
+			// TestOneClickLinkIsOfferedWithTheCodeToCheck's business,
+			// not this test's.
+			if !strings.Contains(string(out), "Enter the code") {
+				t.Errorf("the fallback prompt did not tell the user what to do:\n%s", out)
 			}
 			perms := srv.lastPermissions()
 			if perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {

@@ -48,20 +48,35 @@ var (
 
 // DeviceAuth is a started device authorization.
 //
-// There is deliberately no field for the verification_uri_complete the
-// server also returns. That URI carries the user code in its query
-// string, so following it approves the request with one click -- which
-// is exactly the shape of the device-flow phishing attack, where an
-// attacker starts a flow and gets the victim to click the link. Making
-// the user transcribe the code is the mitigation, and the way to keep
-// that mitigation is to not carry the convenient URI to where a prompt
-// could print it.
+// VerificationURIComplete carries the user code in its query string, so
+// following it reaches the approval page with the code already filled
+// in. An earlier version of this package deliberately dropped it, on
+// the grounds that making the user transcribe the code defends against
+// device-flow phishing. That reasoning does not survive contact with
+// the threat model:
+//
+//   - The device-authorize endpoint performs no client authentication,
+//     so an attacker can start their own flow and build the same URL.
+//     Whether we print it changes nothing about what they can send.
+//   - RFC 8628 section 3.3.1 offers the complete URI precisely for
+//     delivery on the same device, out of band -- which is what
+//     printing it on the terminal the user just typed `ssh` into is.
+//     The section 5.4 phishing warning is about a code arriving over a
+//     channel an attacker controls.
+//   - The check that actually catches a phished victim is the approval
+//     page displaying the code and asking whether it matches the one on
+//     their device. That page already does this. A victim who followed
+//     an attacker's link sees a code matching nothing they have.
+//
+// So the prompt shows the link AND the code, and tells the user to
+// compare them. See loginInstruction.
 type DeviceAuth struct {
-	DeviceCode      string
-	UserCode        string
-	VerificationURI string
-	ExpiresIn       time.Duration
-	Interval        time.Duration
+	DeviceCode              string
+	UserCode                string
+	VerificationURI         string
+	VerificationURIComplete string
+	ExpiresIn               time.Duration
+	Interval                time.Duration
 }
 
 // Grant is a completed authorization.
@@ -191,13 +206,12 @@ func (f *HTTPFlow) Authorize(ctx context.Context) (*DeviceAuth, error) {
 	}
 
 	var resp struct {
-		DeviceCode      string `json:"device_code"`
-		UserCode        string `json:"user_code"`
-		VerificationURI string `json:"verification_uri"`
-		ExpiresIn       int    `json:"expires_in"`
-		Interval        int    `json:"interval"`
-		// verification_uri_complete is deliberately not decoded; see
-		// the DeviceAuth doc comment.
+		DeviceCode              string `json:"device_code"`
+		UserCode                string `json:"user_code"`
+		VerificationURI         string `json:"verification_uri"`
+		ExpiresIn               int    `json:"expires_in"`
+		Interval                int    `json:"interval"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("sshgateway: device authorization response: %w", err)
@@ -206,11 +220,12 @@ func (f *HTTPFlow) Authorize(ctx context.Context) (*DeviceAuth, error) {
 		return nil, errors.New("sshgateway: device authorization response carried no code")
 	}
 	return &DeviceAuth{
-		DeviceCode:      resp.DeviceCode,
-		UserCode:        resp.UserCode,
-		VerificationURI: resp.VerificationURI,
-		ExpiresIn:       time.Duration(resp.ExpiresIn) * time.Second,
-		Interval:        time.Duration(resp.Interval) * time.Second,
+		DeviceCode:              resp.DeviceCode,
+		UserCode:                resp.UserCode,
+		VerificationURI:         resp.VerificationURI,
+		VerificationURIComplete: resp.VerificationURIComplete,
+		ExpiresIn:               time.Duration(resp.ExpiresIn) * time.Second,
+		Interval:                time.Duration(resp.Interval) * time.Second,
 	}, nil
 }
 

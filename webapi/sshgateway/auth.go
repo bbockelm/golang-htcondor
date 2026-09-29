@@ -202,10 +202,13 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 
 // loginInstruction is what the user reads in their terminal.
 //
-// The user code is printed for the user to TYPE into the page. The
-// one-click verification_uri_complete is deliberately never shown --
-// see the DeviceAuth doc comment for why that link is the phishable
-// half of this flow.
+// The one-click link is shown when the server offers one, because this
+// text reaches the user on the very terminal they typed `ssh` into --
+// the same-device, out-of-band delivery RFC 8628 section 3.3.1 offers
+// it for. The code is printed beside it so the user can check it
+// against what the approval page displays, which is the step that
+// catches somebody who followed a link they were sent rather than one
+// they were shown. See the DeviceAuth doc comment.
 func loginInstruction(service string, auth *DeviceAuth) string {
 	var b strings.Builder
 	if service != "" {
@@ -213,8 +216,15 @@ func loginInstruction(service string, auth *DeviceAuth) string {
 	} else {
 		b.WriteString("Sign in to continue\r\n\r\n")
 	}
-	fmt.Fprintf(&b, "  1. Open  %s\r\n", auth.VerificationURI)
-	fmt.Fprintf(&b, "  2. Enter the code  %s\r\n\r\n", auth.UserCode)
+
+	if auth.VerificationURIComplete != "" {
+		fmt.Fprintf(&b, "  Open  %s\r\n\r\n", auth.VerificationURIComplete)
+		fmt.Fprintf(&b, "  The page will show the code  %s  -- check it matches this one.\r\n\r\n", auth.UserCode)
+	} else {
+		fmt.Fprintf(&b, "  1. Open  %s\r\n", auth.VerificationURI)
+		fmt.Fprintf(&b, "  2. Enter the code  %s\r\n\r\n", auth.UserCode)
+	}
+
 	b.WriteString("This session continues by itself once you approve it.\r\n")
 	return b.String()
 }

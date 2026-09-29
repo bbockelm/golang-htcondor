@@ -272,12 +272,16 @@ func TestHTTPFlowAuthorizeAndPoll(t *testing.T) {
 	}
 }
 
-// The one-click verification_uri_complete is the phishable half of the
-// device flow. Not decoding it is what keeps it out of reach of a
-// prompt, so assert the structure rather than trusting the comment:
-// the server sends it above, and nothing the user could be shown may
-// contain it.
-func TestVerificationURICompleteIsNeverCarried(t *testing.T) {
+// The one-click link is offered, and the code is shown beside it.
+//
+// This test previously asserted the opposite -- that the complete URI
+// was never carried. That was wrong: the device-authorize endpoint
+// authenticates no client, so an attacker builds the same URL without
+// our help, and the check that catches a phished victim is the
+// approval page asking whether the code matches their device. Dropping
+// the link cost every legitimate user a transcription and stopped
+// nothing.
+func TestOneClickLinkIsOfferedWithTheCodeToCheck(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT",
@@ -292,15 +296,36 @@ func TestVerificationURICompleteIsNeverCarried(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if strings.Contains(auth.VerificationURI, "user_code") {
-		t.Errorf("the verification URI carries the code: %q", auth.VerificationURI)
+	if auth.VerificationURIComplete == "" {
+		t.Fatal("the complete URI was dropped")
+	}
+
+	shown := loginInstruction("ap.example.edu", auth)
+	if !strings.Contains(shown, auth.VerificationURIComplete) {
+		t.Errorf("the one-click link is not offered:\n%s", shown)
+	}
+	// The code has to be there too, or there is nothing to compare
+	// against what the approval page displays.
+	if !strings.Contains(shown, "WDJB-MJHT") {
+		t.Errorf("the code to check against the page is missing:\n%s", shown)
+	}
+	if !strings.Contains(strings.ToLower(shown), "matches") {
+		t.Errorf("the prompt does not ask the user to compare the code:\n%s", shown)
+	}
+}
+
+// A server that offers no complete URI still gets a usable prompt:
+// the plain URL and the code to type.
+func TestPromptFallsBackToTypingTheCode(t *testing.T) {
+	auth := &DeviceAuth{
+		UserCode:        "WDJB-MJHT",
+		VerificationURI: "https://ap.example.edu/device",
 	}
 	shown := loginInstruction("ap.example.edu", auth)
-	if strings.Contains(shown, "user_code=") {
-		t.Errorf("the login instruction offers a one-click approval link:\n%s", shown)
+	if !strings.Contains(shown, "https://ap.example.edu/device") {
+		t.Errorf("the verification URL is missing:\n%s", shown)
 	}
-	// The code itself must still be there for the user to type.
 	if !strings.Contains(shown, "WDJB-MJHT") {
-		t.Errorf("the login instruction does not show the code to type:\n%s", shown)
+		t.Errorf("the code is missing:\n%s", shown)
 	}
 }
