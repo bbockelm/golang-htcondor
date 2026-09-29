@@ -18,7 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/ssh"
@@ -151,7 +155,62 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			h.logger.Error(logging.DestinationHTTP, "The SSH gateway stopped", "error", err)
 		}
 	}()
+	go h.probeSSHGatewayIssuer(ctx, gatewayIssuer)
 	return nil
+}
+
+// probeSSHGatewayIssuer checks, once, that the device endpoint the
+// gateway will drive is actually reachable from this process.
+//
+// It has to run in the background: startSSHGateway is called from
+// Handler.Start, before the HTTP server is serving, so a synchronous
+// probe would fail on every startup. The delay is for the same reason.
+//
+// Worth doing at all because the failure is otherwise invisible until a
+// user tries to log in, and reaches them only as "could not start the
+// login flow" -- which names neither the URL nor the setting. The issuer
+// defaults to the OAuth2 issuer, and that default is itself a hardcoded
+// http://localhost:8080 when nothing configured one, so "points at a
+// server that is not there" is the expected state of an unconfigured
+// deployment rather than an exotic one.
+func (h *Handler) probeSSHGatewayIssuer(ctx context.Context, issuer string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Second):
+	}
+
+	endpoint := strings.TrimSuffix(issuer, "/") + "/mcp/oauth2/device/authorize"
+	form := url.Values{}
+	form.Set("client_id", sshGatewayClientID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP,
+			"The SSH gateway cannot reach the device endpoint it authenticates with; every login will fail. "+
+				"Set HTTP_API_SSH_GATEWAY_ISSUER to a URL this process can reach, or HTTP_API_OAUTH2_ISSUER "+
+				"to this server's real address",
+			"endpoint", endpoint, "error", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+
+	if resp.StatusCode != http.StatusOK {
+		h.logger.Error(logging.DestinationHTTP,
+			"The SSH gateway's device endpoint answered unexpectedly; logins are likely to fail",
+			"endpoint", endpoint, "status", resp.Status)
+		return
+	}
+	h.logger.Info(logging.DestinationHTTP,
+		"The SSH gateway reached its device endpoint", "endpoint", endpoint)
 }
 
 // stopSSHGateway closes the listener and waits for connections in
