@@ -24,6 +24,7 @@ import Link from 'next/link';
 import {
   api,
   ApiError,
+  type AppSummary,
   type InteractiveTerminalSummary,
   type JupyterInstanceSummary,
 } from '@/lib/api';
@@ -57,9 +58,201 @@ export default function InteractivePage() {
       </div>
 
       <JupyterSection />
+      <VSCodeSection />
       <TerminalSection />
     </div>
   );
+}
+
+// ----------------------------------------------------------------------
+// VS Code
+// ----------------------------------------------------------------------
+
+function VSCodeSection() {
+  const queryClient = useQueryClient();
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['apps'],
+    queryFn: api.apps.list,
+    refetchInterval: 5_000,
+  });
+
+  // Matches the server's applyDefaults, so the form opens showing what
+  // it would submit rather than something it will silently change.
+  const [resources, setResources] = useState<ResourceRequest>({
+    ...DEFAULT_RESOURCE_REQUEST,
+    cpus: 1,
+    memoryMB: 4096,
+    diskMB: 10240,
+  });
+  const [image, setImage] = useState('');
+  const [workdir, setWorkdir] = useState('');
+  const [submitLines, setSubmitLines] = useState('');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const submit = useMutation({
+    mutationFn: () =>
+      api.apps.create({
+        ...resourceRequestToApi(resources),
+        image: image.trim() || undefined,
+        workdir: workdir.trim() || undefined,
+        submit_lines: submitLines.trim() || undefined,
+      }),
+    onMutate: () => setErrorMsg(null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] });
+    },
+    onError: (err) => {
+      setErrorMsg(err instanceof ApiError ? err.message : String(err));
+    },
+  });
+
+  const apps = data?.apps ?? [];
+
+  return (
+    <SectionCard
+      title="VS Code"
+      hint="Run a VS Code server inside the pool and open it in this browser. Needs a container image that provides code-server."
+    >
+      {isLoading && <p className="text-gray-400 text-sm">Loading sessions…</p>}
+      {error && (
+        <p className="text-red-600 text-sm">
+          Could not load sessions: {(error as Error).message}
+        </p>
+      )}
+      {!isLoading && apps.length === 0 && (
+        <p className="text-gray-500 text-sm">No VS Code sessions.</p>
+      )}
+      {apps.length > 0 && <VSCodeTable apps={apps} />}
+
+      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
+        <div className="text-sm font-medium text-gray-700">Launch new</div>
+        <Field label="Container image (optional)">
+          <input
+            type="text"
+            value={image}
+            onChange={(e) => setImage(e.target.value)}
+            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+            placeholder="leave blank for this pool's default"
+          />
+          <p className="mt-1 text-xs text-gray-500">
+            Ignored if your administrator has pinned an image. Extensions
+            baked into an image are available in every session; ones you
+            install by hand are reinstalled each time.
+          </p>
+        </Field>
+        <Field label="Folder to open (optional)">
+          <input
+            type="text"
+            value={workdir}
+            onChange={(e) => setWorkdir(e.target.value)}
+            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+            placeholder="the job's scratch directory"
+          />
+        </Field>
+        <ResourceRequestPanel value={resources} onChange={setResources} />
+        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+        {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
+        <button
+          onClick={() => submit.mutate()}
+          disabled={submit.isPending}
+          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+        >
+          {submit.isPending ? 'Submitting…' : 'Launch VS Code'}
+        </button>
+      </div>
+    </SectionCard>
+  );
+}
+
+function VSCodeTable({ apps }: { apps: AppSummary[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
+          <th className="py-1 font-medium">Job</th>
+          <th className="py-1 font-medium">State</th>
+          <th className="py-1 font-medium" />
+        </tr>
+      </thead>
+      <tbody>
+        {apps.map((app) => (
+          <VSCodeRow key={app.id} app={app} />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function VSCodeRow({ app }: { app: AppSummary }) {
+  const queryClient = useQueryClient();
+
+  // The list does not probe whether the server is listening yet -- only
+  // the single-app call does, because it costs a connection into the
+  // job. So a row that the list calls "running" asks once it matters,
+  // which is exactly while somebody is watching it start.
+  const probe = useQuery({
+    queryKey: ['apps', app.id],
+    queryFn: () => api.apps.get(app.id),
+    enabled: app.state === 'running',
+    refetchInterval: 3_000,
+  });
+  const current = app.state === 'running' && probe.data ? probe.data : app;
+
+  const remove = useMutation({
+    mutationFn: () => api.apps.remove(app.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
+  });
+
+  return (
+    <tr className="border-t border-gray-100">
+      <td className="py-2 font-mono text-xs text-gray-700">{current.job_id}</td>
+      <td className="py-2">
+        <span className="text-gray-800">{vscodeStateLabel(current.state)}</span>
+        {current.detail && (
+          <span className="ml-2 text-xs text-gray-500">{current.detail}</span>
+        )}
+      </td>
+      <td className="py-2 text-right space-x-3">
+        {current.url && (
+          <a
+            href={current.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-brand-600 hover:underline"
+          >
+            Open
+          </a>
+        )}
+        <ConfirmButton
+          compact
+          label="End"
+          confirmLabel="End"
+          onConfirm={() => remove.mutate()}
+          pending={remove.isPending}
+        />
+      </td>
+    </tr>
+  );
+}
+
+// vscodeStateLabel keeps the distinction the API is careful about: a
+// session with no slot yet is waiting, not broken.
+function vscodeStateLabel(state: string): string {
+  switch (state) {
+    case 'waiting':
+      return 'Waiting for a slot';
+    case 'starting':
+      return 'Starting';
+    case 'running':
+      return 'Ready';
+    case 'held':
+      return 'Held';
+    case 'ended':
+      return 'Ended';
+    default:
+      return state;
+  }
 }
 
 // ----------------------------------------------------------------------

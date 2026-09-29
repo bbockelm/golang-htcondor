@@ -33,7 +33,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/issues', '/submit']) {
+for (const path of ['/', '/jobs', '/issues', '/submit', '/interactive']) {
   test(`renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);
@@ -726,4 +726,60 @@ test('a job that has left the queue opens its archived record', async ({ page })
   // Requirements", so a loose locator resolves to two elements and
   // fails on strict mode rather than on anything being wrong.
   await expect(page.getByText('archived', { exact: true })).toBeVisible();
+});
+
+test('a VS Code session with no slot yet reads as waiting, not as broken', async ({ page }) => {
+  // Through the proxy a queued app and a dead one are identical -- both
+  // 502 -- and queue latency is the likeliest reason somebody gives up
+  // on this. The UI has to say which one it is, and must not offer
+  // somewhere to open that cannot be opened.
+  await page.route('**/api/v1/apps', (route) =>
+    route.fulfill({
+      json: {
+        apps: [
+          {
+            id: 'abc123',
+            type: 'code-server',
+            job_id: '4242.0',
+            state: 'waiting',
+            detail: 'waiting for a slot',
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto('/interactive');
+
+  await expect(page.getByText('Waiting for a slot', { exact: true })).toBeVisible();
+  await expect(page.getByText('4242.0', { exact: true })).toBeVisible();
+  // Nothing to open yet, so no link offering to.
+  await expect(page.getByRole('link', { name: 'Open' })).toHaveCount(0);
+});
+
+test('a ready VS Code session offers the proxy URL', async ({ page }) => {
+  const url = '/api/v1/jobs/4242.0/proxy/unix/vscode.sock/';
+  await page.route('**/api/v1/apps', (route) =>
+    route.fulfill({
+      json: {
+        apps: [
+          { id: 'abc123', type: 'code-server', job_id: '4242.0', state: 'running', url },
+        ],
+      },
+    }),
+  );
+  // The row probes the single-app endpoint once the list says running.
+  await page.route('**/api/v1/apps/abc123', (route) =>
+    route.fulfill({
+      json: { id: 'abc123', type: 'code-server', job_id: '4242.0', state: 'running', url },
+    }),
+  );
+
+  await page.goto('/interactive');
+
+  const open = page.getByRole('link', { name: 'Open' });
+  await expect(open).toBeVisible();
+  // The trailing slash is load-bearing: the app is served by stripping
+  // this prefix and emits relative URLs.
+  await expect(open).toHaveAttribute('href', url);
 });
