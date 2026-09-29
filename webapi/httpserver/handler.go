@@ -1888,11 +1888,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // isTransparentProxyPath reports whether the given request path is
 // served by a transparent reverse proxy whose upstream owns the
-// response headers (and in particular CSP). Today this is just the
-// JupyterLab tunnel path; add to the list when introducing new
-// proxy passthroughs.
+// response headers (and in particular CSP). Add to the list when
+// introducing new proxy passthroughs.
 func isTransparentProxyPath(p string) bool {
-	return strings.HasPrefix(p, "/api/v1/jupyter/")
+	return strings.HasPrefix(p, "/api/v1/jupyter/") || isJobProxyPath(p)
+}
+
+// isJobProxyPath reports whether p is /api/v1/jobs/{id}/proxy/...,
+// the reverse proxy into a server a job is running.
+//
+// It matters most for what an editor served this way needs. Our CSP
+// sets default-src 'self' and no worker-src, and VS Code in a browser
+// runs its extension host and language services as workers created
+// from blob: URLs -- which that policy forbids. The page would load
+// and then quietly fail to do anything, which is the worst shape a
+// bug can have here.
+//
+// Matched structurally rather than by looking for "/proxy/" anywhere
+// in the path: /api/v1/jobs/{id}/files/proxy/... is an ordinary API
+// response and must keep our headers.
+func isJobProxyPath(p string) bool {
+	rest, ok := strings.CutPrefix(p, "/api/v1/jobs/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	return len(parts) >= 2 && parts[1] == "proxy"
 }
 
 // statusCapturingResponseWriter records the status code passed to
