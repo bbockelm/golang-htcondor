@@ -374,3 +374,17 @@ func valueFor(args []string, flag string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestRecommendedImageIsPinned: `latest` makes a session whose editor
+// can change under it between one day and the next, which is a support
+// problem nobody can reproduce.
+func TestRecommendedImageIsPinned(t *testing.T) {
+	if strings.HasSuffix(RecommendedImage, ":latest") || !strings.Contains(RecommendedImage, ":") {
+		t.Errorf("RecommendedImage = %q; it must name a version, not a moving tag", RecommendedImage)
+	}
+	// It goes into container_image unchanged, so it must already carry
+	// a scheme -- containerImageRef only rescues a bare repo:tag.
+	if got := containerImageRef(RecommendedImage); got != RecommendedImage {
+		t.Errorf("containerImageRef rewrote RecommendedImage to %q", got)
+	}
+}

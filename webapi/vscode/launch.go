@@ -42,6 +42,33 @@ const SocketName = "vscode.sock"
 // start rather than leaving the proxy to report a mystery.
 const MaxSocketPath = 100
 
+// RecommendedImage is a published code-server image, offered as a
+// default an operator can override. We do not build or maintain an
+// image: this project ships no container, and nothing here builds one
+// for you.
+//
+// codercom/code-server is code-server's own image, tracks its releases
+// closely and publishes amd64 and arm64. The obvious alternatives are
+// worth knowing about:
+//
+//   - gitpod/openvscode-server has not had a release since 2025-10.
+//   - linuxserver/code-server is built around s6-overlay, which wants
+//     to be PID 1 and supervise services. A job's executable is not
+//     PID 1 in that sense, so it is a poor shape for this even though
+//     it is the most popular image on Docker Hub.
+//
+// Pinned, not `latest`: a session whose editor changes under it
+// between one day and the next is a support problem nobody can
+// reproduce. Bump it deliberately.
+//
+// A site that wants its own toolchain should build its own image --
+// extensions baked in are free in every session, while extensions
+// installed by hand are reinstalled each time unless the session has a
+// home directory mounted. The build_container tool does that from a
+// definition file or Dockerfile and stages the .sif to OSDF; this
+// package does not do it for you.
+const RecommendedImage = "docker://codercom/code-server:4.139.1-debian"
+
 // DefaultServerCommand is the program the launcher execs. Anything
 // that serves the VS Code UI over a Unix socket and emits relative
 // URLs will do: code-server and openvscode-server both qualify, and
