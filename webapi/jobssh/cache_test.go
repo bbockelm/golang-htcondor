@@ -438,8 +438,8 @@ func TestScratchDirFailureIsCached(t *testing.T) {
 func TestValidateSocketName(t *testing.T) {
 	good := []string{"vscode.sock", "a", "code-server_1.sock", "X.Y-Z_0"}
 	for _, n := range good {
-		if err := validateSocketName(n); err != nil {
-			t.Errorf("validateSocketName(%q) = %v, want nil", n, err)
+		if err := ValidateSocketName(n); err != nil {
+			t.Errorf("ValidateSocketName(%q) = %v, want nil", n, err)
 		}
 	}
 	// Everything about the path but this component comes from the
@@ -447,8 +447,8 @@ func TestValidateSocketName(t *testing.T) {
 	// request name a socket anywhere on the execute node.
 	bad := []string{"", ".", "..", "a/b", "../etc/x", "a\x00b", "a b", "sock;rm", strings.Repeat("x", 65)}
 	for _, n := range bad {
-		if err := validateSocketName(n); err == nil {
-			t.Errorf("validateSocketName(%q) = nil, want an error", n)
+		if err := ValidateSocketName(n); err == nil {
+			t.Errorf("ValidateSocketName(%q) = nil, want an error", n)
 		}
 	}
 }

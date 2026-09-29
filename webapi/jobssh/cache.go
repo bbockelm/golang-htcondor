@@ -470,7 +470,7 @@ func (c *Cache) ScratchDir(ctx context.Context, key Key) (string, error) {
 // pool can be assumed to configure; a socket is protected by file
 // permissions instead.
 func (c *Cache) DialJobUnix(ctx context.Context, key Key, name string) (net.Conn, error) {
-	if err := validateSocketName(name); err != nil {
+	if err := ValidateSocketName(name); err != nil {
 		return nil, err
 	}
 	dir, err := c.ScratchDir(ctx, key)
@@ -487,11 +487,15 @@ func (c *Cache) DialJobUnix(ctx context.Context, key Key, name string) (net.Conn
 	return c.DialJob(ctx, key, "unix", path)
 }
 
-// validateSocketName keeps the caller-supplied component to a bare
+// ValidateSocketName keeps the caller-supplied component to a bare
 // filename. Everything about the path but this comes from the sandbox,
 // and a name with a separator or a parent reference in it would let a
 // request name a socket anywhere on the execute node.
-func validateSocketName(name string) error {
+//
+// Exported so an HTTP layer can refuse a bad name where it arrives,
+// with a 400 that says what is wrong, rather than letting it travel as
+// far as a dial and come back as a 502.
+func ValidateSocketName(name string) error {
 	if name == "" {
 		return errors.New("socket name is empty")
 	}
