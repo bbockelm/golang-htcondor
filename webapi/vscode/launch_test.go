@@ -1,0 +1,266 @@
+package vscode
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// shortScratch makes a scratch directory with a short path.
+//
+// t.TempDir() will not do: on macOS it is under /var/folders/... and
+// includes the test's own name, which put these paths at 112 and 121
+// bytes and tripped the launcher's own sun_path check. That is the
+// check doing its job -- an EXECUTE directory really can be that deep
+// -- but it makes t.TempDir() unusable for the tests that need the
+// launcher to get as far as starting something.
+func shortScratch(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "vsc")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// runScript writes the launcher into scratch and runs it with
+// _CONDOR_SCRATCH_DIR set, with fakeBin first on PATH. The script is
+// what actually runs in a sandbox, so the tests run it rather than
+// matching strings against it: a golden file would pass just as
+// happily for a script that never executes.
+func runScript(t *testing.T, a ScriptArgs, scratch, fakeBin string) (string, error) {
+	t.Helper()
+	path := filepath.Join(scratch, ExecutableName)
+	//nolint:gosec // G306: the launcher is the job's executable; running it is the test
+	if err := os.WriteFile(path, []byte(LaunchScript(a)), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	// A context bounds the run: a launcher bug that blocks instead of
+	// exiting would otherwise hang the suite until the test timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	//nolint:gosec // G204: running the generated script is the whole point
+	cmd := exec.CommandContext(ctx, "/bin/sh", path)
+	cmd.Dir = scratch
+	cmd.Env = append(os.Environ(),
+		"_CONDOR_SCRATCH_DIR="+scratch,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// fakeServer puts a program named `name` on a fresh PATH directory. It
+// records its own argv and the mode of the socket path it was handed,
+// then exits, standing in for a server that would otherwise block.
+func fakeServer(t *testing.T, name, argvFile string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$@" > %q
+# Create the socket the way the real server would, so the test can see
+# what umask the launcher left in place.
+for a in "$@"; do
+	case "$prev" in --socket) : > "$a" ;; esac
+	prev="$a"
+done
+exit 0
+`, argvFile)
+	path := filepath.Join(dir, name)
+	//nolint:gosec // G306: a stand-in for the server binary, so executable
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	return dir
+}
+
+func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
+	scratch := shortScratch(t)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, "code-server", argvFile)
+
+	out, err := runScript(t, ScriptArgs{}, scratch, bin)
+	if err != nil {
+		t.Fatalf("launcher failed: %v\n%s", err, out)
+	}
+
+	//nolint:gosec // G304: a path this test just created in its own temp dir
+	argv, rerr := os.ReadFile(argvFile)
+	if rerr != nil {
+		t.Fatalf("the launcher never reached the server: %v\n%s", rerr, out)
+	}
+	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
+
+	wantSock := filepath.Join(scratch, SocketName)
+	if !containsPair(args, "--socket", wantSock) {
+		t.Errorf("args %q do not carry --socket %q", args, wantSock)
+	}
+	// Authentication off is only correct because the socket's
+	// permissions are the authorization; if one goes the other must.
+	if !contains(args, "--auth") || !contains(args, "none") {
+		t.Errorf("args %q do not disable the server's own auth", args)
+	}
+
+	// umask 077 must be in force when the socket is created, or any
+	// local user on the execute node can open it -- which is the whole
+	// reason this is a socket and not a port.
+	info, serr := os.Stat(wantSock)
+	if serr != nil {
+		t.Fatalf("socket was not created: %v", serr)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("socket mode is %04o; group and other must have no access", perm)
+	}
+}
+
+func TestLaunchScriptRefusesAnOverlongSocketPath(t *testing.T) {
+	// A scratch directory deep enough to blow sun_path. The failure at
+	// the far end of a forward is an uninformative "open failed", so
+	// the launcher has to be the one that explains it.
+	base := t.TempDir()
+	deep := filepath.Join(base, strings.Repeat("d/", 40))
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Skipf("cannot create a deep path here: %v", err)
+	}
+	bin := fakeServer(t, "code-server", filepath.Join(t.TempDir(), "argv"))
+
+	out, err := runScript(t, ScriptArgs{}, deep, bin)
+	if err == nil {
+		t.Fatalf("launcher started with a socket path over the limit:\n%s", out)
+	}
+	if !strings.Contains(out, "over the ~") || !strings.Contains(out, "EXECUTE directory") {
+		t.Errorf("output does not explain the sun_path limit:\n%s", out)
+	}
+}
+
+func TestLaunchScriptRefusesAMissingServer(t *testing.T) {
+	scratch := shortScratch(t)
+	empty := t.TempDir() // nothing named code-server on PATH
+
+	out, err := runScript(t, ScriptArgs{ServerCommand: "definitely-not-installed"}, scratch, empty)
+	if err == nil {
+		t.Fatalf("launcher started without the server present:\n%s", out)
+	}
+	if !strings.Contains(out, "is not installed") {
+		t.Errorf("output does not say the server is missing:\n%s", out)
+	}
+}
+
+// TestLaunchScriptQuotesTheWorkdir: the workdir reaches the script
+// from a caller, and the script is the job's own executable, so an
+// unquoted one is command injection into the job.
+//
+// The payload is a command substitution, deliberately. Two more
+// obvious ones do not work and would make this test pass whatever the
+// code did: a payload carrying its own quotes (\'; touch x; echo \')
+// is turned into a literal by the surrounding quotes it is trying to
+// escape, and a trailing \'; touch x\' never runs because exec has
+// already replaced the shell. $(...) is expanded before exec, so it
+// fires if and only if the word is unquoted.
+func TestLaunchScriptQuotesTheWorkdir(t *testing.T) {
+	scratch := shortScratch(t)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, "code-server", argvFile)
+	canary := filepath.Join(shortScratch(t), "pwned")
+
+	out, err := runScript(t, ScriptArgs{
+		Workdir: "/work$(touch " + canary + ")",
+	}, scratch, bin)
+	if err != nil {
+		t.Fatalf("launcher failed: %v\n%s", err, out)
+	}
+	if _, serr := os.Stat(canary); serr == nil {
+		t.Fatal("a workdir containing a command substitution ran it")
+	}
+}
+
+func TestBatchNameRoundTrip(t *testing.T) {
+	id := "abc123"
+	got, ok := SessionIDFromBatchName(BatchName(id))
+	if !ok || got != id {
+		t.Errorf("round trip gave (%q, %v), want (%q, true)", got, ok, id)
+	}
+	for _, bad := range []string{"", "other-job", BatchPrefix} {
+		if _, ok := SessionIDFromBatchName(bad); ok {
+			t.Errorf("SessionIDFromBatchName(%q) claimed a session", bad)
+		}
+	}
+}
+
+func TestPeriodicRemoveExpr(t *testing.T) {
+	if got := PeriodicRemoveExpr(0); got != "" {
+		t.Errorf("zero lifetime gave %q, want no expression", got)
+	}
+	got := PeriodicRemoveExpr(2 * time.Hour)
+	if !strings.Contains(got, "7200") || !strings.HasPrefix(got, "periodic_remove") {
+		t.Errorf("PeriodicRemoveExpr(2h) = %q", got)
+	}
+}
+
+func TestContainerImageRef(t *testing.T) {
+	for in, want := range map[string]string{
+		"codercom/code-server:latest": "docker://codercom/code-server:latest",
+		"docker://already":            "docker://already",
+		"/images/thing.sif":           "/images/thing.sif",
+		"thing.sif":                   "thing.sif",
+		"":                            "",
+	} {
+		if got := containerImageRef(in); got != want {
+			t.Errorf("containerImageRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBuildSubmitFile(t *testing.T) {
+	out := BuildSubmitFile(SubmitArgs{
+		SessionID:         "s1",
+		Universe:          "container",
+		Image:             "codercom/code-server:latest",
+		Cpus:              2,
+		MemoryMB:          4096,
+		MaxLifetime:       time.Hour,
+		CallerSubmitLines: "+WantGPU = true",
+		ExtraSubmitLines:  "accounting_group = interactive",
+	})
+	for _, want := range []string{
+		"universe = container",
+		"container_image = docker://codercom/code-server:latest",
+		"executable = " + ExecutableName,
+		"request_cpus = 2",
+		"request_memory = 4096",
+		"batch_name = " + BatchName("s1"),
+		"periodic_remove",
+		"queue",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("submit file is missing %q:\n%s", want, out)
+		}
+	}
+	// Operator policy last, so it overrides the caller's.
+	if strings.Index(out, "accounting_group") < strings.Index(out, "+WantGPU") {
+		t.Error("operator submit lines must come after the caller's so they win")
+	}
+}
+
+func contains(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPair(args []string, flag, value string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
