@@ -492,7 +492,16 @@ func (u *unixJobConn) DialContext(ctx context.Context, network, addr string) (ne
 	var d net.Dialer
 	return d.DialContext(ctx, network, addr)
 }
-func (u *unixJobConn) Run(context.Context, string) (string, error) { return u.dir + "\n", nil }
+
+// Run answers the two questions the cache asks a sandbox. Returning
+// the directory for both -- which it used to -- made the resolver treat
+// the scratch path itself as the published socket address.
+func (u *unixJobConn) Run(_ context.Context, cmd string) (string, error) {
+	if strings.HasPrefix(cmd, "cat ") {
+		return "", nil // this job publishes no address; the joined path is used
+	}
+	return u.dir + "\n", nil
+}
 func (u *unixJobConn) OpenSession(context.Context) (jobssh.JobSession, error) {
 	return nil, errors.New("the proxy does not open sessions")
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/vscode"
 )
 
 // appsTestPool brings up a mini-pool and an httpserver in front of it,
@@ -238,24 +239,22 @@ func TestAppsLifecycleIntegration(t *testing.T) {
 	}
 }
 
-// TestAppProxyServesHTTPIntegration is the end-to-end assertion for the
-// whole feature: a browser request reaching a server running inside a
-// job.
+// TestAppProxyServesHTTPOverAUnixSocketIntegration is the end-to-end
+// assertion for the whole feature, over the transport a real app uses.
 //
 // It goes HTTP -> handler -> jobssh transport cache -> condor_ssh_to_job
-// over CEDAR -> the job's sandbox -> the server -> back. Every unit test
-// for the proxy substitutes something for the middle of that; this one
-// substitutes nothing.
+// over CEDAR -> the sandbox -> a Unix socket -> the server -> back.
+// Every unit test substitutes something for the middle of that; this one
+// substitutes nothing, and it runs the REAL launcher script, so the
+// socket addressing under test is the one production uses.
 //
-// The server in the job listens on a TCP port rather than the Unix
-// socket a real app would use, for one environmental reason: a Unix
-// socket address is capped at ~104 bytes of sun_path, and this harness's
-// scratch directory is long enough on macOS to exceed it on its own (see
-// the core package's ssh integration test, which measures exactly that).
-// The proxy code path is identical either way -- both end in
-// jobssh.Cache.DialJob -- so the port form tests the chain without
-// making the test unrunnable wherever EXECUTE happens to be deep.
-func TestAppProxyServesHTTPIntegration(t *testing.T) {
+// The harness's scratch directory is long -- long enough to exceed
+// sun_path on its own -- and that is the point rather than an obstacle.
+// It is the shape of a glidein, an EP running inside a SLURM job, where
+// execute/dir_N nests under the host batch system's own. A proxy that
+// only worked with short paths would fail on exactly the pools this is
+// for.
+func TestAppProxyServesHTTPOverAUnixSocketIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -266,13 +265,27 @@ func TestAppProxyServesHTTPIntegration(t *testing.T) {
 	addr, harness, schedd := appsTestPool(t)
 
 	const sentinel = "hello from inside the job"
-	port := 35000 + (os.Getpid() % 900)
 
-	scriptDir := t.TempDir()
-	scriptPath := filepath.Join(scriptDir, "server.py")
-	script := fmt.Sprintf(`import http.server, socketserver
+	// A stand-in for code-server: it takes --socket, ignores the rest,
+	// and serves HTTP over that socket. The launcher is the real one,
+	// so it is the launcher that decides where the socket lives and
+	// what address it publishes.
+	toolDir := t.TempDir()
+	fakeServerPath := filepath.Join(toolDir, "fake-code-server")
+	fake := fmt.Sprintf(`#!%s
+import http.server, socketserver, os, sys
+args = sys.argv[1:]
+sock = None
+for i, a in enumerate(args):
+    if a == "--socket" and i + 1 < len(args):
+        sock = args[i + 1]
+if not sock:
+    sys.stderr.write("no --socket\n")
+    sys.exit(2)
 BODY = b"%s"
 class H(http.server.BaseHTTPRequestHandler):
+    def address_string(self):
+        return "local"
     def do_GET(self):
         body = BODY + b" at " + self.path.encode()
         self.send_response(200)
@@ -282,12 +295,23 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *a):
         pass
-socketserver.TCPServer.allow_reuse_address = True
-with socketserver.TCPServer(("127.0.0.1", %d), H) as s:
+try:
+    os.unlink(sock)
+except OSError:
+    pass
+class S(socketserver.UnixStreamServer):
+    allow_reuse_address = True
+with S(sock, H) as s:
     s.serve_forever()
-`, sentinel, port)
-	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
-		t.Fatalf("write server script: %v", err)
+`, python, sentinel)
+	if err := os.WriteFile(fakeServerPath, []byte(fake), 0o700); err != nil { //nolint:gosec // G306: it is an executable
+		t.Fatalf("write fake server: %v", err)
+	}
+
+	launcherPath := filepath.Join(toolDir, vscode.ExecutableName)
+	launcher := vscode.LaunchScript(vscode.ScriptArgs{ServerCommand: fakeServerPath})
+	if err := os.WriteFile(launcherPath, []byte(launcher), 0o700); err != nil { //nolint:gosec // G306: it is the job's executable
+		t.Fatalf("write launcher: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -300,7 +324,6 @@ with socketserver.TCPServer(("127.0.0.1", %d), H) as s:
 	submitFile := fmt.Sprintf(`
 universe = vanilla
 executable = %s
-arguments = %s
 transfer_executable = false
 output = server.out
 error = server.err
@@ -309,16 +332,15 @@ request_cpus = 1
 request_memory = 128
 request_disk = 128
 queue
-`, python, scriptPath)
+`, launcherPath)
 
 	cluster, _, err := schedd.SubmitRemote(submitCtx, submitFile)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	jobID := fmt.Sprintf("%d.0", cluster)
-	t.Logf("submitted the in-job server as %s on port %d", jobID, port)
+	t.Logf("submitted the in-job server as %s", jobID)
 
-	// Wait for it to start; the proxy cannot reach a job with no starter.
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		qctx, qcancel := context.WithTimeout(ctx, 20*time.Second)
@@ -335,10 +357,36 @@ queue
 	}
 	t.Logf("job %s is running", jobID)
 
-	proxyBase := fmt.Sprintf("http://%s/api/v1/jobs/%s/proxy/%d", addr, jobID, port)
+	// Prove the precondition rather than assume it. If this harness's
+	// scratch directory happened to be short, everything below would
+	// pass through the plain absolute path and say nothing at all about
+	// the case this test exists for.
+	shell, err := schedd.OpenJobShell(ctx, cluster, 0, nil)
+	if err != nil {
+		t.Fatalf("opening a shell to check the sandbox path: %v", err)
+	}
+	sess, err := shell.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	scratchOut, err := sess.Output(`printf %s "$_CONDOR_SCRATCH_DIR"`)
+	_ = sess.Close()
+	_ = shell.Close()
+	if err != nil {
+		t.Fatalf("asking the job for its scratch directory: %v", err)
+	}
+	scratchLen := len(strings.TrimSpace(string(scratchOut)))
+	sockLen := scratchLen + 1 + len(vscode.SocketName)
+	t.Logf("sandbox scratch path is %d bytes; the joined socket path would be %d", scratchLen, sockLen)
+	if sockLen <= 100 {
+		t.Fatalf("this harness's scratch path is short (%d bytes), so the test would pass "+
+			"through the plain absolute path and prove nothing about the glidein case", sockLen)
+	}
 
-	// The bare prefix must redirect to the trailing-slash form, or an
-	// app's relative URLs resolve one path component too high.
+	proxyBase := fmt.Sprintf("http://%s/api/v1/jobs/%s/proxy/unix/%s", addr, jobID, vscode.SocketName)
+
+	// The bare prefix redirects to the trailing-slash form, or an app's
+	// relative URLs resolve one path component too high.
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -355,9 +403,8 @@ queue
 		t.Errorf("redirect Location = %q, which does not end in a slash", loc)
 	}
 
-	// Now the real thing. Retry: the job is running, but python needs a
-	// moment to bind, which is precisely the window the app API reports
-	// as "starting" rather than as a failure.
+	// Retry: the job is running, but the server needs a moment to bind,
+	// which is the window the app API reports as "starting".
 	var gotBody string
 	var gotStatus int
 	deadline = time.Now().Add(90 * time.Second)
@@ -374,7 +421,7 @@ queue
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("never reached the server in the job: last status %d body %q err %v",
+			t.Fatalf("never reached the socket in the job: last status %d body %q err %v",
 				gotStatus, gotBody, rerr)
 		}
 		time.Sleep(2 * time.Second)
@@ -384,13 +431,13 @@ queue
 		t.Errorf("body = %q, want it to contain %q", gotBody, sentinel)
 	}
 	// The prefix is stripped: the server sees its own path, not ours.
-	// An app relies on this, since none of them can be told the path
+	// Every app relies on this, since none of them can be told the path
 	// they are served under.
 	if !strings.Contains(gotBody, "at /hello") {
 		t.Errorf("the server saw %q; the proxy did not strip its prefix", gotBody)
 	}
 
-	// A second request must reuse the transport rather than pay another
+	// A second request reuses the transport rather than paying another
 	// schedd RPC, CEDAR handshake and sshd spawn.
 	start := time.Now()
 	req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, proxyBase+"/again", nil)

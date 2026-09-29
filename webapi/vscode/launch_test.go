@@ -106,10 +106,14 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	}
 	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
 
-	wantSock := filepath.Join(scratch, SocketName)
-	if !containsPair(args, "--socket", wantSock) {
-		t.Errorf("args %q do not carry --socket %q", args, wantSock)
+	// Bound by bare name, against the working directory the launcher
+	// cd'd into. An absolute address would carry the whole scratch path
+	// into sun_path, which is capped at ~100 bytes and which a glidein's
+	// sandbox exceeds on its own.
+	if !containsPair(args, "--socket", SocketName) {
+		t.Errorf("args %q do not bind --socket by bare name (%q)", args, SocketName)
 	}
+	wantSock := filepath.Join(scratch, SocketName)
 	// Authentication off is only correct because the socket's
 	// permissions are the authorization; if one goes the other must.
 	if !contains(args, "--auth") || !contains(args, "none") {
@@ -128,23 +132,54 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	}
 }
 
-func TestLaunchScriptRefusesAnOverlongSocketPath(t *testing.T) {
-	// A scratch directory deep enough to blow sun_path. The failure at
-	// the far end of a forward is an uninformative "open failed", so
-	// the launcher has to be the one that explains it.
-	base := t.TempDir()
-	deep := filepath.Join(base, strings.Repeat("d/", 40))
+func TestLaunchScriptWorksInADeepSandbox(t *testing.T) {
+	// The glidein case, and the one the previous version of this
+	// launcher refused outright. sun_path is capped at ~100 bytes for
+	// bind() as much as for connect(), and an EP running inside a SLURM
+	// job nests its execute/dir_N under the host batch system's -- so
+	// the scratch path can exceed the limit before anything of ours is
+	// added. Refusing there would refuse on exactly the pools this is
+	// for. The launcher binds by bare name and publishes an address
+	// short enough to reach the socket by.
+	base := shortScratch(t)
+	deep := filepath.Join(base, strings.Repeat("glide_dir/", 12), "execute", "dir_9")
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Skipf("cannot create a deep path here: %v", err)
 	}
-	bin := fakeServer(t, filepath.Join(t.TempDir(), "argv"))
+	if len(filepath.Join(deep, SocketName)) <= MaxSocketPath {
+		t.Fatalf("the test's own scratch path is only %d bytes; it is not exercising the limit",
+			len(filepath.Join(deep, SocketName)))
+	}
+
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, argvFile)
 
 	out, err := runScript(t, ScriptArgs{}, deep, bin)
-	if err == nil {
-		t.Fatalf("launcher started with a socket path over the limit:\n%s", out)
+	if err != nil {
+		t.Fatalf("the launcher refused a deep sandbox, which is the normal glidein shape: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "over the ~") || !strings.Contains(out, "EXECUTE directory") {
-		t.Errorf("output does not explain the sun_path limit:\n%s", out)
+
+	published, rerr := os.ReadFile(filepath.Join(deep, SocketName+".path")) //nolint:gosec // G304: a path this test just created
+	if rerr != nil {
+		t.Fatalf("the launcher published no address for its socket: %v\n%s", rerr, out)
+	}
+	addr := strings.TrimSpace(string(published))
+	if !strings.HasPrefix(addr, "/") {
+		t.Errorf("published address %q is relative; sshd resolves it against its own cwd", addr)
+	}
+	if len(addr) > MaxSocketPath {
+		t.Errorf("published address is %d bytes (%q), over the ~%d a Unix socket allows",
+			len(addr), addr, MaxSocketPath)
+	}
+
+	// It has to actually lead to the socket the server bound.
+	//nolint:gosec // G703: addr is what the launcher just published into this test's own sandbox
+	st, serr := os.Stat(addr)
+	if serr != nil {
+		t.Fatalf("the published address %q does not resolve: %v", addr, serr)
+	}
+	if perm := st.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("socket reached via %q has mode %04o; group and other must have no access", addr, perm)
 	}
 }
 

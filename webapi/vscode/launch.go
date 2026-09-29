@@ -120,19 +120,57 @@ func LaunchScript(a ScriptArgs) string {
 set -eu
 
 SCRATCH="${_CONDOR_SCRATCH_DIR:-$PWD}"
-SOCK="$SCRATCH/%[2]s"
+cd "$SCRATCH"
 
-# Fail here, with the path, rather than at the far end of a forward.
-# A Unix socket address is capped at ~%[3]d bytes; an EXECUTE directory
-# deep enough to blow that makes every connection fail with nothing
-# more informative than "open failed".
-LEN=$(printf '%%s' "$SOCK" | wc -c | tr -d ' ')
-if [ "$LEN" -gt %[3]d ]; then
-	echo "vscode: socket path is $LEN bytes, over the ~%[3]d a Unix socket allows:" >&2
-	echo "  $SOCK" >&2
-	echo "vscode: this pool's EXECUTE directory is too deep to serve a session over a socket" >&2
-	exit 1
+# The socket is bound RELATIVE, and an address to reach it by is
+# written to %[2]s.path for the proxy to read.
+#
+# Both ends of a Unix socket are capped at ~%[3]d bytes of sun_path --
+# bind() as much as connect() -- and an HTCondor scratch directory
+# routinely exceeds that. A glidein is the normal case, not the corner:
+# an EP inside a SLURM job nests its own execute/dir_N under the host
+# batch system's, and the absolute path runs past the limit before
+# anything of ours is added. Binding by bare name sidesteps it, because
+# the address is resolved against the working directory and only the
+# short string travels to the kernel.
+#
+# That leaves the far end, which has no such working directory: sshd
+# resolves what we give it against its own. So the job publishes an
+# address instead of the proxy guessing one.
+rm -f "%[2]s" "%[2]s.path"
+
+ABS="$SCRATCH/%[2]s"
+ABSLEN=$(printf '%%s' "$ABS" | wc -c | tr -d ' ')
+if [ "$ABSLEN" -le %[3]d ]; then
+	# Short enough to say plainly. Nothing to clean up afterwards.
+	CONNECT="$ABS"
+elif [ -d "/proc/$$" ]; then
+	# Linux, which is every glidein. /proc/<pid>/cwd is a kernel
+	# symlink to this process's working directory, so the address
+	# stays about thirty bytes however deep the sandbox is, and the
+	# kernel resolves the rest. $$ survives the exec below, and the
+	# server inherits this working directory, so it stays valid for
+	# as long as there is something to connect to.
+	CONNECT="/proc/$$/cwd/%[2]s"
+else
+	# No /proc and a long path: reach the socket through a symlink in
+	# a directory short enough to name. 0700, so the link is no more
+	# reachable than the socket it points at.
+	SHORTDIR="/tmp/.condor-app-$$"
+	if ! mkdir "$SHORTDIR" 2>/dev/null; then
+		echo "vscode: cannot make $SHORTDIR, and $ABS is $ABSLEN bytes," >&2
+		echo "vscode: over the ~%[3]d a Unix socket address allows" >&2
+		exit 1
+	fi
+	chmod 700 "$SHORTDIR"
+	ln -s "$ABS" "$SHORTDIR/s"
+	CONNECT="$SHORTDIR/s"
+	# Best effort only: exec replaces this shell, so the trap cannot
+	# fire. The directory is named for a pid and holds one dangling
+	# symlink once the job is gone.
+	trap 'rm -rf "$SHORTDIR"' EXIT INT TERM
 fi
+printf '%%s' "$CONNECT" > "%[2]s.path"
 
 if ! command -v %[1]s >/dev/null 2>&1; then
 	echo "vscode: %[1]s is not installed in this job's environment" >&2
@@ -158,17 +196,15 @@ mkdir -p "$STATE/extensions"
 
 # The socket's permissions are the authorization -- the server runs
 # with auth disabled because nothing else can open it. umask rather
-# than a chmod after the fact: there is no moment where the socket
-# exists and is world-writable.
+# than a chmod after the fact: there is no moment where
+# the socket exists and is world-writable.
 umask 077
-rm -f "$SOCK"
 
-cd "$SCRATCH"
 exec %[1]s \
 	--auth none \
 	--disable-telemetry \
 	--disable-update-check \
-	--socket "$SOCK" \
+	--socket "%[2]s" \
 	--user-data-dir "$STATE" \
 	--extensions-dir "$STATE/extensions" \
 	--config "$STATE/config.yaml"%[5]s \
