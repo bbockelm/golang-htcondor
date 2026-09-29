@@ -3,10 +3,15 @@
 package htcondor
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +26,7 @@ import (
 //     starter's one-shot RSA keypair.
 //  2. Execute a remote command and read its stdout.
 //  3. Open a PTY-backed interactive shell and exchange data over it.
+//  4. Forward a TCP connection to a port the job listens on (direct-tcpip).
 //
 // Run with:   go test -tags=integration -run TestSSHToJobIntegration -v ./...
 //
@@ -54,6 +60,15 @@ func TestSSHToJobIntegration(t *testing.T) {
 		"/usr/lib64/condor/condor_ssh_to_job_sshd_config_template",
 		"/etc/condor/condor_ssh_to_job_sshd_config_template",
 		"/usr/share/condor/condor_ssh_to_job_sshd_config_template",
+	}
+	// A developer's HTCondor is a build tree, where the template sits in
+	// release_dir/lib next to the sbin holding condor_master. Probing only
+	// the packaged locations meant this test skipped itself on exactly the
+	// machines it was being written on, and a skip reads as a pass.
+	if masterPath, lookErr := exec.LookPath("condor_master"); lookErr == nil {
+		root := filepath.Dir(filepath.Dir(masterPath))
+		tmplCandidates = append(tmplCandidates,
+			filepath.Join(root, "lib", "condor_ssh_to_job_sshd_config_template"))
 	}
 	tmplPath := ""
 	for _, p := range tmplCandidates {
@@ -260,6 +275,95 @@ queue
 	case <-time.After(10 * time.Second):
 		t.Logf("PTY session did not exit in 10s; closing forcibly")
 	}
+
+	// --- Step 4: Forward a TCP port out of the sandbox (direct-tcpip) -------
+	//
+	// This is what carries a web IDE, a debugger, or anything else the job
+	// listens on, and it is the one capability nothing else in this package
+	// exercised. It is not obviously available: the sshd HTCondor generates
+	// sets no AllowTcpForwarding, so OpenSSH's default of "yes" applies --
+	// a default nobody wrote down, which a future edit of the template
+	// could take away silently. A forward that stopped working would
+	// surface as a hung editor, a long way from the cause.
+	//
+	// Note what a failure here means. "administratively prohibited" is
+	// forwarding being disabled; "connect failed" is forwarding working and
+	// nothing listening on the far side. They are not the same finding.
+	python, perr := exec.LookPath("python3")
+	if perr != nil {
+		t.Skip("python3 not found; skipping the port-forward step")
+	}
+
+	const fwdSentinel = "DIRECT-TCPIP-OK"
+	port := 34000 + (os.Getpid() % 1000)
+
+	// The payload goes over base64 because condor_ssh_to_job_shell_setup
+	// runs `eval ${SSH_ORIGINAL_COMMAND}` with the expansion UNQUOTED: the
+	// command is word-split on IFS -- newlines included -- and rejoined
+	// with spaces before eval re-parses it. A multi-line `python3 -c`
+	// script arrives as one line and dies on the first indented block.
+	// Anything sent through ssh-to-job must survive that round trip, so
+	// keep it to a single line with no significant whitespace.
+	script := fmt.Sprintf(`import socket
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",%d))
+s.listen(8)
+while True:
+    c,_=s.accept(); c.sendall(b"%s\n"); c.close()
+`, port, fwdSentinel)
+
+	// An absolute interpreter path: the job's PATH is the starter's plus
+	// /bin:/usr/bin (condor_ssh_to_job_shell_setup), which need not contain
+	// the python3 this machine's developer has.
+	listenerCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))"`,
+		python, base64.StdEncoding.EncodeToString([]byte(script)))
+
+	// Run it in the foreground of a session we hold open, rather than
+	// backgrounding it. A nohup'd child is killed with the session's
+	// process group when Run returns, and macOS has no setsid to escape
+	// with.
+	sess3, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession (listener) failed: %v", err)
+	}
+	defer func() { _ = sess3.Close() }()
+	var listenerErr strings.Builder
+	sess3.Stderr = &listenerErr
+	listenerDone := make(chan error, 1)
+	go func() { listenerDone <- sess3.Run(listenerCmd) }()
+
+	// The listener needs a moment to bind, and Dial is the only way to ask.
+	// Retry rather than sleeping a guessed interval: a fixed wait either
+	// flakes on a slow machine or wastes time on a fast one.
+	var fwd net.Conn
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		fwd, err = client.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			break
+		}
+		select {
+		case lerr := <-listenerDone:
+			t.Fatalf("in-sandbox listener exited before it could be reached: %v\nstderr:\n%s", lerr, listenerErr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("direct-tcpip to 127.0.0.1:%d never succeeded: %v", port, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	defer func() { _ = fwd.Close() }()
+
+	_ = fwd.SetReadDeadline(time.Now().Add(10 * time.Second))
+	got, rerr := bufio.NewReader(fwd).ReadString('\n')
+	if rerr != nil {
+		t.Fatalf("reading from forwarded port failed: %v", rerr)
+	}
+	if strings.TrimSpace(got) != fwdSentinel {
+		t.Fatalf("forwarded port said %q, want %q", strings.TrimSpace(got), fwdSentinel)
+	}
+	t.Logf("direct-tcpip forward to 127.0.0.1:%d returned %q", port, strings.TrimSpace(got))
 }
 
 // getJobConnectInfoWithRetry retries GET_JOB_CONNECT_INFO while the schedd
