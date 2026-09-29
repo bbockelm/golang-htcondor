@@ -596,6 +596,63 @@ A pattern that is not a valid glob is logged as an error and ignored,
 leaving the tools it was meant to disable still offered — check the log
 after setting one.
 
+## VS Code sessions
+
+A VS Code session is an ordinary job running a `code-server` inside its sandbox,
+reached through the job proxy. Users launch one from **Interactive** in the web
+UI, or through `POST /api/v1/apps`; `GET /api/v1/apps` lists their own.
+
+There is no registry and nothing persisted. A session *is* a job, marked by its
+`JobBatchName`, so a restarted daemon finds them again with a query and a user
+sees them in `condor_q -batch` alongside their real work.
+
+### The image
+
+The server is roughly a 220 MB download, which belongs on the execute node and
+is cached there — so it comes from a container image, never from
+`transfer_input_files`. This project ships no image and builds none for you.
+
+Point `HTTP_API_VSCODE_IMAGE` at one you trust. `codercom/code-server` is
+code-server's own, tracks its releases and publishes amd64 and arm64; pin a
+version rather than `latest`, or a session's editor changes under it between one
+day and the next. Note that `linuxserver/code-server`, though the most popular on
+Docker Hub, is built around s6-overlay, which wants to be PID 1 supervising
+services — a poor shape for a job's executable.
+
+Building your own is worth it for a group with its own toolchain: extensions
+baked into an image are present in every session at no cost, while extensions a
+user installs by hand are reinstalled each time unless the session has a home
+directory mounted. The `build_container` MCP tool builds from a definition file
+or a Dockerfile inside a job and stages the `.sif` to your object store, which
+`HTTP_API_VSCODE_IMAGE` can then name.
+
+### How it is reached, and why that matters on a glidein
+
+The server listens on a **Unix socket** in the job's scratch directory, not a TCP
+port. A port bound to `127.0.0.1` in a sandbox is reachable by any local user on
+the execute node unless the job has its own network namespace, which no pool can
+be assumed to configure. The socket's permissions are the authorization, which is
+what makes running the server with its own authentication disabled safe.
+
+A Unix socket address is capped at about 100 bytes, for binding as much as for
+connecting, and an HTCondor scratch directory routinely exceeds that on its own —
+a glidein nests its `execute/dir_N` under the host batch system's. So the job
+binds its socket by bare name against its own working directory and publishes a
+short address for the proxy to use. Nothing is required of an operator for this,
+but it explains why a session works in a sandbox whose path is far too long to
+name.
+
+### Lifetime
+
+`HTTP_API_JUPYTER_MAX_LIFETIME_SEC` applies to these too: both are a browser app
+in a job, and an operator who has decided how long one may live has decided for
+the other. It is enforced by the schedd with `periodic_remove`, so it holds
+whatever the sandbox or the browser are doing — which matters, because an editor
+left open in a tab talks to its server indefinitely and so never looks idle.
+
+`HTTP_API_INTERACTIVE_REQUIREMENTS` is ANDed into the job's requirements, to keep
+sessions off machines where attaching to them cannot work.
+
 ## Site skills
 
 A site can publish its own documentation to agents: how work is actually
@@ -929,6 +986,7 @@ Frequently-used knobs:
 | `HTTP_API_MCP_SKILLS_RELOAD_INTERVAL` | How often to re-read `HTTP_API_MCP_SKILLS_DIR` so a checkout updated underneath the daemon is noticed without a reconfigure (a duration, e.g. `1m`). Default `5m`; `0` disables the poll and leaves reloads to `condor_reconfig`. The check is stat-only until something actually changes. Read at startup. |
 | `HTTP_API_JUPYTER_MAX_LIFETIME_SEC` | Wall-clock ceiling on a JupyterLab session, from when it starts running. Enforced by the schedd (`periodic_remove`), so it holds whatever the sandbox or the browser are doing. Default 28800 (8h); `0` disables. |
 | `HTTP_API_JUPYTER_KERNEL_IDLE_SEC` | How long a JupyterLab kernel may sit without executing before it is culled and the server shuts down. Measured from kernel execution, not HTTP traffic, so a tab polling in the background does not look busy. Default 3600; `0` disables. |
+| `HTTP_API_VSCODE_IMAGE` | Container image a VS Code session runs. Any transfer scheme works, so a `.sif` staged on OSDF can be named directly. Set, it wins outright and a caller cannot override it; unset, a caller may name an image, which grants nothing new since they can already submit a job with any image. Defaults to a published code-server image. See [VS Code sessions](#vs-code-sessions). |
 | `HTTP_API_MCP_DISABLED_TOOLS` | MCP tools this access point does not offer, as glob patterns separated by commas or whitespace. Applied on SIGHUP. See [Disabling tools](#disabling-tools). |
 | `HTTP_API_TRUSTED_PROXIES` | Comma-separated CIDRs (or bare addresses) whose `X-Forwarded-For` / `X-Real-IP` are honored when recording a client address. Unset means none are, and the peer address is logged. |
 | `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
