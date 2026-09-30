@@ -3424,10 +3424,18 @@ func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Create authenticated context (optional for advertise, but recommended)
-	ctx := r.Context()
-	if authCtx, err := s.createAuthenticatedContext(r); err == nil {
-		ctx = authCtx
+	// Authentication is required, and the error that says it failed used
+	// to be discarded. An unauthenticated request then reached the
+	// collector on the bare request context, which has no credential --
+	// so GetSecurityConfigOrDefault built the connection out of this
+	// daemon's own configuration and the ad was written as the daemon,
+	// with a command the caller chose (ParseAdvertiseCommand below). The
+	// OpenAPI document has always declared this operation under the global
+	// bearerAuth/oauth2 requirement; the handler simply did not enforce it.
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
 	}
 
 	// Add timeout

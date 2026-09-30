@@ -7,6 +7,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -67,6 +69,32 @@ func TestParseUpdateCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// advertiseAuth gives server the means to issue schedd credentials and
+// returns a bearer for an API key that carries condor:/WRITE.
+//
+// Advertising is an authenticated operation -- the OpenAPI document has
+// always said so, and handleCollectorAdvertise now enforces it -- so these
+// tests, which are about parsing and the multi-ad protocol, have to present a
+// credential to reach the parsing at all.
+func advertiseAuth(t *testing.T, server *Server) string {
+	t.Helper()
+	keyPath := filepath.Join(t.TempDir(), "POOL")
+	// The on-disk format is the raw key XOR 0xdeadbeef; the minter
+	// unscrambles it, so scramble a known key here.
+	raw := []byte("this-is-a-test-signing-key-0123456789")
+	deadbeef := []byte{0xde, 0xad, 0xbe, 0xef}
+	scrambled := make([]byte, len(raw))
+	for i := range raw {
+		scrambled[i] = raw[i] ^ deadbeef[i%len(deadbeef)]
+	}
+	if err := os.WriteFile(keyPath, scrambled, 0o600); err != nil {
+		t.Fatalf("write signing key: %v", err)
+	}
+	server.signingKeyPath = keyPath
+	server.trustDomain = "test.example.org"
+	return gateTestKey(t, server.Handler, []string{condorScopeWrite})
 }
 
 func TestHandleCollectorAdvertise_NoCollector(t *testing.T) {
@@ -144,6 +172,7 @@ func TestHandleCollectorAdvertise_JSON_SingleAd(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -189,6 +218,7 @@ func TestHandleCollectorAdvertise_JSON_MissingAd(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -219,6 +249,7 @@ TestAttr = 123
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", strings.NewReader(adText))
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -281,6 +312,7 @@ Name = "test-ad-2"
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -311,6 +343,7 @@ func TestHandleCollectorAdvertise_UnsupportedMediaType(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", strings.NewReader("data"))
 	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -348,6 +381,7 @@ func TestHandleCollectorAdvertise_InvalidCommand(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorAdvertise(w, req)
@@ -430,6 +464,7 @@ func TestHandleCollectorPath_Advertise(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/collector/advertise", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+advertiseAuth(t, server))
 	w := httptest.NewRecorder()
 
 	server.handleCollectorPath(w, req)
