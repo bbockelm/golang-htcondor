@@ -103,8 +103,11 @@ func (req *InteractiveCreateTerminalRequest) applyDefaults() {
 	if req.MemoryMB == 0 {
 		req.MemoryMB = 1024
 	}
+	// 8 GiB. Same reason as interactive.applySpecDefaults, which is
+	// the other half of this default: a VS Code Remote server does not
+	// fit in 1 GiB.
 	if req.DiskMB == 0 {
-		req.DiskMB = 1024
+		req.DiskMB = 8192
 	}
 }
 

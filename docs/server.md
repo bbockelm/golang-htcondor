@@ -660,7 +660,7 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_GATEWAY_HOST` | The name users actually `ssh` to, e.g. `ap.example.edu`. Purely cosmetic: it is what the web UI prints as the `ssh` command for a session. It cannot be derived, because the listen address is usually not what anybody types — a container listening on `:2222` sits behind a service publishing 22 on another address. Unset means no command is printed. |
 | `HTTP_API_SSH_GATEWAY_SESSION_CPUS` | CPUs a session created on demand requests. Default 1. |
 | `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
-| `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 1024. |
+| `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 8192 — a VS Code Remote server does not fit in less. |
 
 The gateway needs OAuth2 configured (`HTTP_API_ENABLE_MCP`), since the device
 flow is how it authenticates. Shell access needs no new scope: the schedd
