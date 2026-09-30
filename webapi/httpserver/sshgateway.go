@@ -64,9 +64,19 @@ var sshGatewayScopes = []string{"openid", "condor:/READ", "condor:/WRITE"}
 // runs as them.
 func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string) (context.Context, error) {
 	if h.signingKeyPath == "" || h.trustDomain == "" {
-		// Nothing to mint with. The caller still gets a usable context;
-		// the schedd will decide what an unauthenticated one may do.
-		return ctx, nil
+		// Nothing to mint with, so there is nothing safe to return.
+		//
+		// This used to hand back the context unchanged, on the reasoning
+		// that the schedd would decide what an unauthenticated one may
+		// do. It does not: a context with no credential is not
+		// unauthenticated downstream, it is THIS DAEMON -- a queue
+		// superuser on a normal access point -- because
+		// GetSecurityConfigOrDefault falls through to the daemon's own
+		// configuration. Every caller of this function needs a minted
+		// credential and has nothing to fall back to, so failing here is
+		// the only honest answer.
+		return ctx, errors.New("no signing key or trust domain is configured, so no HTCondor " +
+			"credential can be minted for this caller; set HTTP_API_SIGNING_KEY and a trust domain")
 	}
 	htcToken, err := h.generateHTCondorTokenWithScopes(username, scopes)
 	if err != nil {
@@ -361,10 +371,10 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 	if err != nil {
 		return nil, err
 	}
-	// Belt and braces with the startup check. withCondorCredential is
-	// deliberately lenient -- the MCP path forwards tokens it does not
-	// mint -- so a missing credential has to be caught rather than
-	// carried, or the channel silently runs as this daemon.
+	// Belt and braces with the startup check and with
+	// withCondorCredential's own refusal. A missing credential has to be
+	// caught rather than carried: a context without one is not
+	// unauthenticated downstream, it is this daemon.
 	if _, ok := htcondor.GetSecurityConfigFromContext(cctx); !ok {
 		return nil, fmt.Errorf("no HTCondor credential could be minted for %q; refusing to run the "+
 			"session as this daemon", account)

@@ -83,6 +83,38 @@ func (h *Handler) extractUsernameFromToken(token fosite.AccessRequester) string 
 // included.
 const maxMCPBody = 16 << 20 // 16 MB
 
+// warnIfMCPCannotMintCredentials says so at startup when the OAuth2 login
+// path will refuse every caller.
+//
+// A warning and NOT a refusal, which is where this differs from
+// startSSHGateway's check of the same two settings. The gateway has one way
+// in and it needs to mint; the MCP endpoint has two, and only one of them
+// does. A site that proxies MCP and forwards an HTCondor IDTOKEN on every
+// request never reaches withCondorCredential at all: mcpAuthContext's
+// forwarded-token branch builds its own security config from the bearer and
+// lets the schedd validate it. Refusing to start would break that deployment
+// over a setting none of its requests touch -- and /mcp is only registered
+// when an OAuth2 provider exists, so it cannot be told apart by configuration
+// alone.
+//
+// The hazard itself is closed per request instead: withCondorCredential now
+// returns an error rather than a credential-less context, so an OAuth2 caller
+// gets a 500 and no CEDAR call is made. This exists so the reason appears in
+// the log at startup rather than only in the first failed request.
+func (h *Handler) warnIfMCPCannotMintCredentials() {
+	if h.oauth2Provider == nil || h.mcpServer == nil {
+		return
+	}
+	if h.signingKeyPath != "" && h.trustDomain != "" {
+		return
+	}
+	h.logger.Warn(logging.DestinationHTTP,
+		"MCP is enabled with no way to mint a per-caller HTCondor credential; "+
+			"OAuth2 logins to the MCP endpoint will be refused. Callers that forward "+
+			"an HTCondor token are unaffected.",
+		"setting", "HTTP_API_SIGNING_KEY")
+}
+
 // mcpAuthContext authenticates an MCP request and builds the context its
 // tools run in: the HTCondor security config, the caller's granted scopes,
 // and the identity the schedd attributes the connection to.
