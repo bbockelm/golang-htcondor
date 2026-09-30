@@ -208,7 +208,13 @@ func (h *Handler) setupRoutes() {
 	// Interactive batch jobs (terminal sessions backed by a vanilla-universe
 	// watchdog the SSH bridge heartbeats over the existing ssh.Client).
 	// POST creates a session, GET lists the caller's sessions.
-	mux.Handle("/api/v1/interactive/terminal", cors(http.HandlerFunc(h.handleInteractiveTerminal)))
+	// Gated like every other route that reaches the schedd. This one
+	// SUBMITS, and an API key with no condor:/* scopes reaches
+	// createAuthenticatedContext's API-key branch, which deliberately
+	// attaches no schedd credential -- so without this the submit fell
+	// through to GetSecurityConfigOrDefault and ran as THIS DAEMON,
+	// which on a normal access point is a queue superuser.
+	mux.Handle("/api/v1/interactive/terminal", cors(h.requireCondorScope(http.HandlerFunc(h.handleInteractiveTerminal))))
 
 	// Batch-submission templates: built-in + global + user-saved.
 	// Catch-all so handleTemplates can split on the trailing /{id}.
