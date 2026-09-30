@@ -2313,6 +2313,8 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// Initialize OAuth2 provider with actual address
 	h.initializeOAuth2(ln, protocol)
 
+	h.warnIfMCPCannotMintCredentials()
+
 	// After initializeOAuth2, which is what settles the issuer the
 	// gateway points its device flow at.
 	if h.oauth2Provider != nil {

@@ -80,14 +80,22 @@ func TestCondorCredentialIsTaggedPerCaller(t *testing.T) {
 // With nothing to mint from, the context comes back usable and
 // uncredentialed rather than erroring: the schedd decides what an
 // unauthenticated caller may do, and that is not this function's call.
+// With nothing to mint from, there is nothing safe to return.
+//
+// This used to assert the opposite -- that a caller got a context and no
+// error -- on the reasoning that the schedd would then decide what an
+// unauthenticated connection may do. It does not. A context with no
+// credential is not unauthenticated downstream, it is THIS DAEMON, so the
+// old behaviour handed a caller whose credential could not be minted more
+// authority than one whose could.
 func TestCondorCredentialWithoutASigningKey(t *testing.T) {
 	h := &Handler{logger: testLogger(t)}
-	ctx, err := h.withCondorCredential(context.Background(), "alice", nil)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
+	_, err := h.withCondorCredential(context.Background(), "alice", nil)
+	if err == nil {
+		t.Fatal("a caller with no mintable credential was handed a context anyway")
 	}
-	if ctx == nil {
-		t.Fatal("no context returned")
+	if !strings.Contains(err.Error(), "HTTP_API_SIGNING_KEY") {
+		t.Errorf("the refusal does not say what to configure: %v", err)
 	}
 }
 
@@ -247,8 +255,11 @@ func TestSSHGatewayCredentialRefusesWhenNothingCanBeMinted(t *testing.T) {
 	if err == nil {
 		t.Fatal("a channel with no mintable credential was allowed to proceed")
 	}
-	if !strings.Contains(err.Error(), "alice") {
-		t.Errorf("the error does not name the account: %v", err)
+	// The refusal now comes from withCondorCredential, one layer in, so
+	// it names the missing setting rather than the account. Either is a
+	// usable diagnostic; what must not happen is the channel proceeding.
+	if !strings.Contains(err.Error(), "HTTP_API_SIGNING_KEY") {
+		t.Errorf("the error does not say what to configure: %v", err)
 	}
 }
 
