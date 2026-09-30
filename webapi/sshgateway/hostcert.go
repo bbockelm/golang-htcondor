@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -105,19 +106,53 @@ func hostCertSerial() (uint64, error) {
 	return binary.BigEndian.Uint64(b[:]), nil
 }
 
+// ParseHostNames reads the operator's configured gateway name(s).
+//
+// Comma-separated, because a gateway reached by an alias needs both
+// named or the alias stops verifying. A port is tolerated and dropped:
+// the setting is documented as the name users ssh to, somebody will
+// write it the way they type it, and a principal is a host name.
+func ParseHostNames(configured string) []string {
+	var names []string
+	for _, raw := range strings.Split(configured, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		// host, [host]:port and host:port all reduce to host.
+		if h, _, err := net.SplitHostPort(name); err == nil {
+			name = h
+		}
+		name = strings.Trim(name, "[]")
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // KnownHostsLine is the line a client adds so this gateway verifies
 // from the CA alone.
 //
-// The pattern is the operator's host names when they configured any,
-// and `*` otherwise. `*` is broad -- it says "trust this CA for any
-// host" -- but it is also the only thing that works when the server
-// does not know its own names, and narrowing it silently would break
-// the first person who reaches the gateway by an alias.
+// With names configured the pattern names them, which confines what
+// this CA is trusted to vouch for on that client. Without, it is `*` --
+// broad, since it says "trust this CA for any host", but the only thing
+// that works when the server does not know its own names, and better
+// than a guess that fails closed for whoever uses an alias.
+//
+// Each name appears twice, bare and as `[name]:*`. OpenSSH looks a host
+// up under `[name]:port` whenever the port is not 22, so a bare pattern
+// silently matches nothing for a gateway reached on 2222 -- which is
+// the default this software ships with.
 func KnownHostsLine(ca ssh.PublicKey, hostNames []string) string {
 	authority := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(ca)))
 	pattern := "*"
 	if len(hostNames) > 0 {
-		pattern = strings.Join(hostNames, ",")
+		patterns := make([]string, 0, len(hostNames)*2)
+		for _, name := range hostNames {
+			patterns = append(patterns, name, fmt.Sprintf("[%s]:*", name))
+		}
+		pattern = strings.Join(patterns, ",")
 	}
 	return fmt.Sprintf("@cert-authority %s %s", pattern, authority)
 }

@@ -120,8 +120,86 @@ func TestKnownHostsLinePattern(t *testing.T) {
 		t.Error("the line contains a newline")
 	}
 
+	// Every name twice, bare and bracketed: see
+	// TestKnownHostsLineCoversANonDefaultPort.
 	named := KnownHostsLine(ca, []string{"ap.example.edu", "alias.example.org"})
-	if !strings.HasPrefix(named, "@cert-authority ap.example.edu,alias.example.org ") {
+	wantPrefix := "@cert-authority ap.example.edu,[ap.example.edu]:*," +
+		"alias.example.org,[alias.example.org]:* "
+	if !strings.HasPrefix(named, wantPrefix) {
 		t.Errorf("with host names, got %q", named)
+	}
+}
+
+func TestParseHostNames(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"ap.example.edu", []string{"ap.example.edu"}},
+		{"ap.example.edu, alias.example.org", []string{"ap.example.edu", "alias.example.org"}},
+		// Written the way somebody types an ssh command. The setting is
+		// documented as the name users ssh to, so this will happen.
+		{"ap.example.edu:2222", []string{"ap.example.edu"}},
+		{"[ap.example.edu]:2222", []string{"ap.example.edu"}},
+		{"a,,b", []string{"a", "b"}},
+	} {
+		got := ParseHostNames(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("ParseHostNames(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("ParseHostNames(%q) = %v, want %v", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// A gateway on a port other than 22 is the default this software
+// ships, and OpenSSH looks such a host up as [name]:port. A line
+// carrying only the bare name matches nothing for those users -- the
+// certificate would verify and the client would still prompt.
+func TestKnownHostsLineCoversANonDefaultPort(t *testing.T) {
+	ca := testSigner(t).PublicKey()
+	line := KnownHostsLine(ca, []string{"ap.example.edu"})
+
+	patterns := strings.Fields(line)[1]
+	for _, want := range []string{"ap.example.edu", "[ap.example.edu]:*"} {
+		found := false
+		for _, p := range strings.Split(patterns, ",") {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("pattern list %q does not cover %q", patterns, want)
+		}
+	}
+}
+
+// The certificate has to name the same hosts the line points at, or a
+// client that matches the pattern is handed a certificate that does not
+// list it.
+func TestConfiguredNameIsBothPrincipalAndPattern(t *testing.T) {
+	host, ca := testSigner(t), testSigner(t)
+	names := ParseHostNames("ap.example.edu:2222")
+	signer, err := NewHostCertSigner(host, ca, names, time.Now())
+	if err != nil {
+		t.Fatalf("issuing a host certificate: %v", err)
+	}
+	checker := &ssh.CertChecker{
+		IsHostAuthority: func(auth ssh.PublicKey, _ string) bool {
+			return string(auth.Marshal()) == string(ca.PublicKey().Marshal())
+		},
+	}
+	if err := checker.CheckHostKey("ap.example.edu:2222", nil, signer.PublicKey()); err != nil {
+		t.Errorf("the configured name was rejected: %v", err)
+	}
+	if !strings.Contains(KnownHostsLine(ca.PublicKey(), names), "ap.example.edu") {
+		t.Error("the published line does not mention the configured name")
 	}
 }

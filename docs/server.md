@@ -657,7 +657,7 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_GATEWAY_ISSUER` | OAuth2 issuer the device flow runs against. Defaults to the server's own issuer; set it when this process cannot reach its own public URL. |
 | `HTTP_API_SSH_HOST_KEY_FILE` | Host key clients pin. Generated and sealed in the DB when unset. |
 | `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment; without it certificates are unavailable and the device flow still works. |
-| `HTTP_API_SSH_GATEWAY_HOST` | The name users actually `ssh` to, e.g. `ap.example.edu`. Purely cosmetic: it is what the web UI prints as the `ssh` command for a session. It cannot be derived, because the listen address is usually not what anybody types — a container listening on `:2222` sits behind a service publishing 22 on another address. Unset means no command is printed. |
+| `HTTP_API_SSH_GATEWAY_HOST` | The name(s) users actually `ssh` to, e.g. `ap.example.edu`, comma-separated. It is what the web UI prints as the `ssh` command, **and** what the host certificate and published `known_hosts` line are narrowed to — so list every name and alias in use. It cannot be derived, because the listen address is usually not what anybody types: a container listening on `:2222` sits behind a service publishing 22 on another address. Unset means no command is printed, and host verification falls back to a `*` pattern. |
 | `HTTP_API_SSH_GATEWAY_LOCKOUT_THRESHOLD` | Failed logins one host may accumulate within the window before it is locked out. Default 10. |
 | `HTTP_API_SSH_GATEWAY_LOCKOUT_NET_THRESHOLD` | The same budget for the surrounding network, shared by every host in it. Defaults to four times the host threshold. |
 | `HTTP_API_SSH_GATEWAY_LOCKOUT_WINDOW` | How long failures are remembered. Needs a unit: `10m`. |
@@ -767,10 +767,21 @@ key; `ssh` finds it on its own. Add the `known_hosts_line` to `~/.ssh/known_host
 and the gateway's host key verifies without pinning it by hand: the gateway
 presents a host certificate signed by the same CA, so trusting the CA is enough.
 
-That host certificate lists no principals, which makes it valid for every name.
-This process does not know the names it is reached by — it binds `:2222` behind
-whatever the operator put in front of it — and a certificate naming the wrong one
-fails closed for everyone. The published `known_hosts_line` uses a matching `*`.
+Set `HTTP_API_SSH_GATEWAY_HOST` to the name users reach the gateway by, and both
+the certificate's principals and the published `known_hosts_line` narrow to it.
+That is worth doing: a line reading `@cert-authority * <ca>` tells the client to
+trust this CA for **any** host, so naming yours confines what a stolen CA key
+could vouch for. Several names are comma-separated, and a port is tolerated and
+ignored — list every name and alias in use, because one left out stops verifying.
+
+Left unset, the certificate lists no principals and the line uses `*`. A server
+that does not know the names it is reached by cannot do better: it binds `:2222`
+behind whatever the operator put in front of it, and a certificate naming the
+wrong name fails closed for everyone.
+
+Each configured name appears in the line twice, as `name` and `[name]:*`, because
+OpenSSH looks a host up as `[name]:port` for any port but 22 — and this gateway
+defaults to 2222.
 
 The bare host key is still offered alongside it, so a client that pinned the key
 before certificates existed keeps connecting and notices nothing. A client that

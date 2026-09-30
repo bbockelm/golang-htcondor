@@ -101,10 +101,11 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 	authorized := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
 	s.writeJSON(w, http.StatusOK, sshCAResponse{
 		PublicKey: authorized,
-		// The wildcard is deliberate: a gateway may be reached by
-		// several names, and narrowing it here would silently stop
-		// working the first time somebody uses an alias.
-		KnownHostsLine: sshgateway.KnownHostsLine(pub, nil),
+		// Narrowed to the operator's configured names when there are
+		// any, which confines what this CA is trusted to vouch for on
+		// the client. A wildcard otherwise: narrowing on a guess would
+		// silently stop working the first time somebody uses an alias.
+		KnownHostsLine: sshgateway.KnownHostsLine(pub, sshgateway.ParseHostNames(s.sshGatewayPublicHost)),
 		Fingerprint:    ssh.FingerprintSHA256(pub),
 	})
 }

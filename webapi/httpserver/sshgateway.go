@@ -196,16 +196,16 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 	// CA key has always had.
 	var hostCert ssh.Signer
 	if h.sshCASigner != nil {
-		// No principals, so the certificate is good for every name.
-		// This process does not know the names it is reached by -- it
-		// binds :2222 behind whatever the operator put in front of it
-		// -- and a certificate naming the wrong one fails closed for
-		// everybody. HTTP_API_SSH_GATEWAY_HOST looks like the answer
-		// and is not: it is one name, it is documented as cosmetic, and
-		// promoting it would break the first deployment reached by an
-		// alias.
+		// Principals are the operator's configured gateway names, and
+		// none when they configured none -- a certificate listing no
+		// principals is good for every name, which is what a server
+		// that does not know the names it is reached by has to say. It
+		// binds :2222 behind whatever the operator put in front of it,
+		// and a certificate naming the wrong name fails closed for
+		// everybody.
+		names := sshgateway.ParseHostNames(h.sshGatewayPublicHost)
 		signer, err := sshgateway.NewHostCertSigner(
-			hostKey.Signer, h.sshCASigner, nil, time.Now())
+			hostKey.Signer, h.sshCASigner, names, time.Now())
 		if err != nil {
 			return fmt.Errorf("issuing the gateway's host certificate: %w", err)
 		}
@@ -235,6 +235,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"host_key", hostKey.Fingerprint,
 		"host_key_source", hostKey.Source,
 		"host_certificate", hostCert != nil,
+		"host_certificate_names", h.sshGatewayPublicHost,
 		"certificates", certs != nil,
 		"lockout", bans != nil)
 
