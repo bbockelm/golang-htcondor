@@ -403,6 +403,8 @@ type Handler struct {
 	// What a session created on demand asks for; zero fields mean
 	// the interactive package's own defaults.
 	sshGatewaySessionSpec sshGatewaySessionSize
+	// How the gateway locks out a source that keeps failing to log in.
+	sshGatewayLockout SSHGatewayLockoutConfig
 	// sshCASigner signs user certificates. Nil when the gateway is off
 	// or has nowhere to keep a CA key, which is what makes the
 	// certificate endpoints answer 503 rather than 500.
@@ -688,6 +690,12 @@ type HandlerConfig struct {
 	// web UI simply does not print an ssh command, which is better
 	// than printing one that does not work.
 	SSHGatewayPublicHost string
+
+	// SSHGatewayLockout refuses connections from a source that keeps
+	// failing to log in. The zero value is enabled with defaults,
+	// because a public SSH port with no lockout at all is not a
+	// reasonable thing to ship.
+	SSHGatewayLockout SSHGatewayLockoutConfig
 
 	// SSHGatewaySessionCpus, SSHGatewaySessionMemoryMB and
 	// SSHGatewaySessionDiskMB size the session the gateway creates for
@@ -1409,6 +1417,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.sshHostKeyFile = strings.TrimSpace(cfg.SSHHostKeyFile)
 	h.sshCAKeyFile = strings.TrimSpace(cfg.SSHCAKeyFile)
 	h.sshGatewayPublicHost = strings.TrimSpace(cfg.SSHGatewayPublicHost)
+	h.sshGatewayLockout = cfg.SSHGatewayLockout
 	h.sshGatewaySessionSpec = sshGatewaySessionSize{
 		Cpus:     cfg.SSHGatewaySessionCpus,
 		MemoryMB: cfg.SSHGatewaySessionMemoryMB,

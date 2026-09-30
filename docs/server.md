@@ -658,6 +658,13 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_HOST_KEY_FILE` | Host key clients pin. Generated and sealed in the DB when unset. |
 | `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment; without it certificates are unavailable and the device flow still works. |
 | `HTTP_API_SSH_GATEWAY_HOST` | The name users actually `ssh` to, e.g. `ap.example.edu`. Purely cosmetic: it is what the web UI prints as the `ssh` command for a session. It cannot be derived, because the listen address is usually not what anybody types — a container listening on `:2222` sits behind a service publishing 22 on another address. Unset means no command is printed. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_THRESHOLD` | Failed logins one host may accumulate within the window before it is locked out. Default 10. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_NET_THRESHOLD` | The same budget for the surrounding network, shared by every host in it. Defaults to four times the host threshold. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_WINDOW` | How long failures are remembered. Needs a unit: `10m`. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_TIME` | How long the first lockout lasts; each subsequent one doubles. Default `15m`. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_MAX_TIME` | Where the doubling stops. Default `24h`. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` | Addresses and CIDR blocks never counted and never locked out, separated by commas or spaces. A typo here is a startup error. |
+| `HTTP_API_SSH_GATEWAY_LOCKOUT_DISABLE` | `true` turns the lockout off. |
 | `HTTP_API_SSH_GATEWAY_SESSION_CPUS` | CPUs a session created on demand requests. Default 1. |
 | `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
 | `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 8192 — a VS Code Remote server does not fit in less. |
@@ -670,6 +677,69 @@ If logins fail with *"could not start the login flow"*, the gateway cannot reach
 its own device endpoint. It checks once shortly after startup and logs the URL
 it tried — the usual cause is an unset `HTTP_API_OAUTH2_ISSUER`, which leaves
 the default `http://localhost:8080` pointing at nothing.
+
+### Locking out what keeps knocking
+
+A public SSH port attracts traffic from people who are not users, so
+the gateway counts failed logins per source and refuses new connections
+from one that fails too often -- fail2ban's idea, without the log
+scraping. It is on by default.
+
+Counting happens at two granularities, because one is not enough. Per
+host alone is free to evade over IPv6, where one allocation holds more
+addresses than anyone could enumerate; per network alone would let a
+single bad machine on a campus lock out the campus. So a host has its
+own budget and the network around it has a larger shared one, and
+tripping either is enough. A host is a `/32` on IPv4 and a `/64` on
+IPv6, since one machine there routinely has several addresses; a
+network is a `/24` and a `/48`. Once a host is locked out its further
+failures stop counting anywhere, so it cannot spend its neighbours'
+budget on their behalf.
+
+Not every failure weighs the same:
+
+| What happened | Weight |
+| --- | --- |
+| A login that began and was not finished -- the code expired, the browser said no | 1 |
+| A certificate this deployment's CA did not sign, or one that did not verify | 1 |
+| A **self-signed** certificate | 5 |
+| Added when a failed login asked for a name a scanner works through -- `root`, `admin`, `ubuntu` | 3 |
+| Authentication by a method this gateway never advertised -- password, GSSAPI | locked out at once |
+| A refusal that is the gateway's own doing -- at its concurrency cap, issuer unreachable | 0 |
+| `none` and `publickey` failures | 0 |
+
+The last two rows are the ones that matter in practice. `none` is how
+every SSH client asks what the server offers, and a client with a full
+agent offers every key it holds before its certificate -- counting
+either would lock out the people this is meant to protect. And an
+issuer outage must not be mistaken for an attack, or a degraded gateway
+locks out everybody who tried to reach it during the outage.
+
+Asking for password authentication, on the other hand, is unambiguous:
+this gateway never offers it, so no real client asks. That is the
+strongest signal there is, and it is what most scanners trip on.
+
+The username is a weaker one and is only ever added to a login that
+*already failed*. `ssh root@gateway` is not by itself evidence of
+anything here: an unprefixed username means "my default session", so
+that is exactly what a real person gets from a container, and a real
+person finishes the login. An explicit `+root` is somebody naming a
+session and is never counted.
+
+A lockout lasts `15m`, and doubles each time the same source comes back
+for another, up to a day. Knocking while locked out does not extend it.
+
+**Two caveats worth knowing.** The list lives in memory, so a restart
+clears it and each replica keeps its own -- a restarted gateway starts
+counting again rather than staying protected. And it counts whatever
+address the connection arrives from, which behind a load balancer that
+does not preserve the client address is the balancer: on Kubernetes
+that means `externalTrafficPolicy: Local` on the gateway's Service, or
+one bad client locks out everyone.
+
+Put the office and the monitoring host in
+`HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` so testing the gateway cannot
+lock you out of it.
 
 ### Certificates, for scripts and for not approving every connection
 

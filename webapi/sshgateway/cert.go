@@ -42,6 +42,11 @@ type CertAuth struct {
 	// Scopes are granted to a certificate-authenticated session, since
 	// there is no OAuth2 grant to take them from.
 	Scopes []string
+
+	// Bans, when set, is charged for a certificate that could only
+	// have been offered on purpose. Optional; a nil *Banlist is safe
+	// to call.
+	Bans *Banlist
 }
 
 // ErrNotACertificate is returned for a bare public key.
@@ -58,7 +63,7 @@ var ErrNotACertificate = errors.New("sshgateway: this gateway accepts certificat
 // it is why the certificate must name exactly one. A certificate with
 // several would leave the gateway choosing an identity, and choosing
 // is the thing to never do.
-func (c *CertAuth) Callback(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+func (c *CertAuth) Callback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	cert, ok := key.(*ssh.Certificate)
 	if !ok {
 		return nil, ErrNotACertificate
@@ -90,6 +95,21 @@ func (c *CertAuth) Callback(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 	}
 	if cert.SignatureKey == nil ||
 		!bytes.Equal(cert.SignatureKey.Marshal(), c.Authority.Marshal()) {
+		// A SELF-signed certificate is the bypass being attempted:
+		// the check above is the only thing standing between it and a
+		// session, and nobody offers one by accident. Charged
+		// heavily.
+		//
+		// A certificate from some other authority is charged as an
+		// ordinary failure instead, because a CA rotation turns every
+		// legitimate user's certificate into exactly that overnight,
+		// and locking out the whole site the morning after a key
+		// rotation is a worse outcome than the one being prevented.
+		weight, why := WeightAbandoned, "certificate from an unrecognized authority"
+		if cert.SignatureKey != nil && bytes.Equal(cert.SignatureKey.Marshal(), cert.Key.Marshal()) {
+			weight, why = WeightForged, "self-signed certificate"
+		}
+		c.charge(conn, weight, why)
 		return nil, errors.New("sshgateway: certificate signed by an unrecognized authority")
 	}
 
@@ -102,6 +122,13 @@ func (c *CertAuth) Callback(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 		},
 	}
 	if err := checker.CheckCert(account, cert); err != nil {
+		// Charged lightly and deliberately not inspected. The reasons
+		// CheckCert refuses -- expiry, an unknown critical option, a
+		// principal that does not match -- are mostly what a real
+		// user hits the morning after, and telling those apart from a
+		// tampered signature means matching on error strings this
+		// package does not own.
+		c.charge(conn, WeightAbandoned, "certificate did not verify")
 		return nil, fmt.Errorf("sshgateway: %w", err)
 	}
 
@@ -127,6 +154,19 @@ func (c *CertAuth) Callback(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 			ExtScopes:  joinScopes(c.Scopes),
 		},
 	}, nil
+}
+
+// charge records a certificate failure against the lockout list.
+//
+// Bare public keys are never charged, and they are the common case: a
+// client offers every key in its agent before the certificate, and
+// each one arrives here as a failure. Only a certificate that was
+// built to be offered counts.
+func (c *CertAuth) charge(conn ssh.ConnMetadata, weight int, why string) {
+	if c.Bans == nil || conn == nil {
+		return
+	}
+	c.Bans.Fail(conn.RemoteAddr(), weight, why)
 }
 
 func joinScopes(scopes []string) string {

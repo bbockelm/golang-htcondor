@@ -54,6 +54,11 @@ type Listener struct {
 	// in.
 	Certs *CertAuth
 
+	// Bans locks out a source that keeps failing to authenticate.
+	// Optional; nil means no lockout, and every method on a nil
+	// *Banlist works, so nothing here is conditional.
+	Bans *Banlist
+
 	// MaxConnections caps sockets being served at once. Zero means
 	// DefaultMaxConnections.
 	//
@@ -98,6 +103,9 @@ func (l *Listener) Listen(ctx context.Context) error {
 		// reaches the prompt without configuring anything.
 		KeyboardInteractiveCallback: l.Auth.KeyboardInteractive(ctx),
 		ServerVersion:               "SSH-2.0-HTCondorGateway",
+		// Every refused authentication is reported here, which is
+		// where the lockout counts them. Nil when Bans is nil.
+		AuthLogCallback: l.Bans.AuthLogCallback(),
 	}
 	if l.Certs != nil {
 		cfg.PublicKeyCallback = l.Certs.Callback
@@ -172,6 +180,16 @@ func (l *Listener) Serve(ctx context.Context) error {
 			}
 			return fmt.Errorf("sshgateway: accept: %w", err)
 		}
+		// Checked before a connection slot is taken, so a locked-out
+		// source cannot spend the concurrency budget it was locked
+		// out for spending.
+		if ok, until := l.Bans.Allow(nc.RemoteAddr()); !ok {
+			l.debugf("SSH gateway refused a connection: source is locked out",
+				"remote", nc.RemoteAddr().String(), "until", until.Format(time.RFC3339))
+			_ = nc.Close()
+			continue
+		}
+
 		select {
 		case l.connSlots <- struct{}{}:
 		default:

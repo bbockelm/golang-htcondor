@@ -245,6 +245,9 @@ type Config struct {
 	SSHCAKeyFile   string
 	// SSHGatewayPublicHost is the name users ssh to; see HandlerConfig.
 	SSHGatewayPublicHost string
+	// SSHGatewayLockout refuses connections from a source that keeps
+	// failing to log in; see HandlerConfig.
+	SSHGatewayLockout SSHGatewayLockoutConfig
 	// SSHGatewaySessionCpus/MemoryMB/DiskMB size a session the gateway
 	// creates on demand. Zero means the interactive default.
 	SSHGatewaySessionCpus     int
@@ -454,6 +457,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SSHHostKeyFile:              cfg.SSHHostKeyFile,
 		SSHCAKeyFile:                cfg.SSHCAKeyFile,
 		SSHGatewayPublicHost:        cfg.SSHGatewayPublicHost,
+		SSHGatewayLockout:           cfg.SSHGatewayLockout,
 		SSHGatewaySessionCpus:       cfg.SSHGatewaySessionCpus,
 		SSHGatewaySessionMemoryMB:   cfg.SSHGatewaySessionMemoryMB,
 		SSHGatewaySessionDiskMB:     cfg.SSHGatewaySessionDiskMB,

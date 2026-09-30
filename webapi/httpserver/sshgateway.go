@@ -173,11 +173,17 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		return err
 	}
 
+	bans, err := h.sshGatewayBanlist()
+	if err != nil {
+		return err
+	}
+
 	var certs *sshgateway.CertAuth
 	if h.sshCASigner != nil {
 		certs = &sshgateway.CertAuth{
 			Authority: h.sshCASigner.PublicKey(),
 			Scopes:    sshGatewayScopes,
+			Bans:      bans,
 		}
 	}
 
@@ -192,6 +198,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Credential: h.sshGatewayCredential,
 			Logger:     h.logger,
 		},
+		Bans:   bans,
 		Logger: h.logger,
 	}
 
@@ -201,7 +208,8 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"issuer", gatewayIssuer,
 		"host_key", hostKey.Fingerprint,
 		"host_key_source", hostKey.Source,
-		"certificates", certs != nil)
+		"certificates", certs != nil,
+		"lockout", bans != nil)
 
 	// Bind before returning, so a port already in use fails startup
 	// the way a missing host key does rather than leaving a listener
@@ -527,4 +535,62 @@ func (h *Handler) seedSSHGatewayClient(ctx context.Context) error {
 	h.logger.Info(logging.DestinationHTTP, "Created the SSH gateway OAuth2 client",
 		"client_id", sshGatewayClientID, "scopes", sshGatewayScopes)
 	return nil
+}
+
+// SSHGatewayLockoutConfig configures the gateway's fail2ban-style
+// lockout: how many failed logins a source may accumulate before new
+// connections from it are refused, and for how long.
+//
+// The zero value is the enabled default. Only Disabled turns it off,
+// so a deployment that says nothing gets the protection.
+type SSHGatewayLockoutConfig struct {
+	// Threshold and NetThreshold are the failure budgets for one host
+	// and for the network around it. Zero means the package default.
+	Threshold    int
+	NetThreshold int
+
+	// Window is how long failures are remembered, BanTime how long
+	// the first lockout lasts, and MaxBanTime the ceiling the
+	// doubling stops at. Zero means the package default.
+	Window     time.Duration
+	BanTime    time.Duration
+	MaxBanTime time.Duration
+
+	// TrustedNetworks are addresses and CIDR blocks that are never
+	// counted and never locked out.
+	TrustedNetworks []string
+
+	// Disabled turns the lockout off entirely.
+	Disabled bool
+}
+
+// sshGatewayBanlist builds the lockout list, or nil when it is off.
+//
+// A bad trusted-network list is a startup error rather than a warning.
+// The setting exists so an operator cannot be locked out of their own
+// gateway, and silently ignoring a typo in it would leave them
+// believing they are safe.
+func (h *Handler) sshGatewayBanlist() (*sshgateway.Banlist, error) {
+	cfg := h.sshGatewayLockout
+	if cfg.Disabled {
+		h.logger.Warn(logging.DestinationHTTP,
+			"The SSH gateway will not lock out sources that repeatedly fail to log in",
+			"setting", "HTTP_API_SSH_GATEWAY_LOCKOUT_DISABLE")
+		return nil, nil
+	}
+
+	trusted, err := sshgateway.ParseTrustedNetworks(cfg.TrustedNetworks)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED: %w", err)
+	}
+
+	return sshgateway.NewBanlist(sshgateway.BanlistOptions{
+		HostThreshold: cfg.Threshold,
+		NetThreshold:  cfg.NetThreshold,
+		Window:        cfg.Window,
+		BanTime:       cfg.BanTime,
+		MaxBanTime:    cfg.MaxBanTime,
+		Trusted:       trusted,
+		Logger:        h.logger,
+	}), nil
 }

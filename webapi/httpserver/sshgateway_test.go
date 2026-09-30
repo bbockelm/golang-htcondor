@@ -21,8 +21,11 @@ import (
 	"strings"
 	"testing"
 
+	"net"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
 
@@ -254,5 +257,81 @@ func TestSSHGatewayCredentialRefusesAnEmptyAccount(t *testing.T) {
 	h := &Handler{logger: testLogger(t)}
 	if _, err := h.sshGatewayCredential(context.Background(), "", nil); err == nil {
 		t.Fatal("a credential was minted for nobody")
+	}
+}
+
+func TestSSHGatewayLockoutIsOnByDefault(t *testing.T) {
+	h := &Handler{logger: testLogger(t)}
+	bans, err := h.sshGatewayBanlist()
+	if err != nil {
+		t.Fatalf("building the lockout list: %v", err)
+	}
+	// A zero config is the enabled default: a public SSH port with no
+	// lockout is not a reasonable thing to ship, so nothing has to be
+	// set for one to exist.
+	if bans == nil {
+		t.Fatal("no lockout list for a default configuration")
+	}
+}
+
+func TestSSHGatewayLockoutCanBeTurnedOff(t *testing.T) {
+	h := &Handler{
+		logger:            testLogger(t),
+		sshGatewayLockout: SSHGatewayLockoutConfig{Disabled: true},
+	}
+	bans, err := h.sshGatewayBanlist()
+	if err != nil {
+		t.Fatalf("building the lockout list: %v", err)
+	}
+	if bans != nil {
+		t.Fatal("the lockout list was built although it is disabled")
+	}
+}
+
+// A typo in the trusted list must stop startup. It is the setting that
+// exists so an operator cannot lock themselves out of their own
+// gateway, and one that is silently ignored leaves them believing they
+// are covered when they are not.
+func TestSSHGatewayLockoutRejectsABadTrustedNetwork(t *testing.T) {
+	h := &Handler{
+		logger: testLogger(t),
+		sshGatewayLockout: SSHGatewayLockoutConfig{
+			TrustedNetworks: []string{"192.0.2.0/24", "192.0.2.oops"},
+		},
+	}
+	if _, err := h.sshGatewayBanlist(); err == nil {
+		t.Fatal("a malformed trusted network was accepted")
+	}
+}
+
+func TestSSHGatewayLockoutHonoursItsSettings(t *testing.T) {
+	h := &Handler{
+		logger: testLogger(t),
+		sshGatewayLockout: SSHGatewayLockoutConfig{
+			Threshold:       2,
+			TrustedNetworks: []string{"192.0.2.0/24"},
+		},
+	}
+	bans, err := h.sshGatewayBanlist()
+	if err != nil {
+		t.Fatalf("building the lockout list: %v", err)
+	}
+
+	stranger := &net.TCPAddr{IP: net.ParseIP("198.51.100.5"), Port: 1}
+	bans.Fail(stranger, sshgateway.WeightAbandoned, "test")
+	if ok, _ := bans.Allow(stranger); !ok {
+		t.Fatal("one failure locked a source out although the threshold is two")
+	}
+	bans.Fail(stranger, sshgateway.WeightAbandoned, "test")
+	if ok, _ := bans.Allow(stranger); ok {
+		t.Fatal("the configured threshold of two was not applied")
+	}
+
+	friend := &net.TCPAddr{IP: net.ParseIP("192.0.2.5"), Port: 1}
+	for i := 0; i < 20; i++ {
+		bans.Fail(friend, sshgateway.WeightForged, "test")
+	}
+	if ok, _ := bans.Allow(friend); !ok {
+		t.Fatal("a trusted network was locked out")
 	}
 }
