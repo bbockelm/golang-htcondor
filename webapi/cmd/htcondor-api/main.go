@@ -176,6 +176,7 @@ type mcpConfig struct {
 	sshHostKeyFile    string
 	sshCAKeyFile      string
 	sshGatewayHost    string
+	sshLockout        httpserver.SSHGatewayLockoutConfig
 	sshSessionCpus    int
 	sshSessionMemMB   int
 	sshSessionDiskMB  int
@@ -1212,6 +1213,7 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 	mcpCfg.sshHostKeyFile, _ = cfg.Get("HTTP_API_SSH_HOST_KEY_FILE")
 	mcpCfg.sshCAKeyFile, _ = cfg.Get("HTTP_API_SSH_CA_KEY_FILE")
 	mcpCfg.sshGatewayHost, _ = cfg.Get("HTTP_API_SSH_GATEWAY_HOST")
+	mcpCfg.sshLockout = loadSSHGatewayLockout(cfg, logger)
 	mcpCfg.sshSessionCpus = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_CPUS", logger)
 	mcpCfg.sshSessionMemMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB", logger)
 	mcpCfg.sshSessionDiskMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_DISK_MB", logger)
@@ -1926,6 +1928,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		SSHHostKeyFile:             mcpCfg.sshHostKeyFile,
 		SSHCAKeyFile:               mcpCfg.sshCAKeyFile,
 		SSHGatewayPublicHost:       mcpCfg.sshGatewayHost,
+		SSHGatewayLockout:          mcpCfg.sshLockout,
 		SSHGatewaySessionCpus:      mcpCfg.sshSessionCpus,
 		SSHGatewaySessionMemoryMB:  mcpCfg.sshSessionMemMB,
 		SSHGatewaySessionDiskMB:    mcpCfg.sshSessionDiskMB,
@@ -3417,6 +3420,86 @@ func publicBaseURL(cfg *config.Config) string {
 // somebody may not create for weeks, and refusing to boot the whole API
 // over a typo in one of them is out of proportion. The warning names
 // the value so the typo is findable.
+// loadSSHGatewayLockout reads the gateway's fail2ban-style settings.
+//
+// Enabled unless HTTP_API_SSH_GATEWAY_LOCKOUT_DISABLE says otherwise:
+// the gateway listens on a public SSH port, where unauthenticated
+// traffic from people who are not users is not an exception but the
+// background noise, and a default of "count nothing" would mean nobody
+// gets the protection unless they went looking for it.
+func loadSSHGatewayLockout(cfg *config.Config, logger *logging.Logger) httpserver.SSHGatewayLockoutConfig {
+	out := httpserver.SSHGatewayLockoutConfig{
+		Threshold:    positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_LOCKOUT_THRESHOLD", logger),
+		NetThreshold: positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_LOCKOUT_NET_THRESHOLD", logger),
+		Window:       configDurationSetting(cfg, "HTTP_API_SSH_GATEWAY_LOCKOUT_WINDOW", logger),
+		BanTime:      configDurationSetting(cfg, "HTTP_API_SSH_GATEWAY_LOCKOUT_TIME", logger),
+		MaxBanTime:   configDurationSetting(cfg, "HTTP_API_SSH_GATEWAY_LOCKOUT_MAX_TIME", logger),
+	}
+	if raw, ok := cfg.Get("HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED"); ok {
+		out.TrustedNetworks = splitConfigList(raw)
+	}
+	if raw, ok := cfg.Get("HTTP_API_SSH_GATEWAY_LOCKOUT_DISABLE"); ok {
+		out.Disabled = isTruthyConfigValue(raw)
+	}
+	return out
+}
+
+// splitConfigList reads a list written with commas, spaces or both,
+// which is how HTCondor configuration lists are written in practice.
+func splitConfigList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// isTruthyConfigValue reads an HTCondor boolean.
+func isTruthyConfigValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "t", "yes", "y", "1", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// configDurationSetting reads a duration that must carry a unit ("15m",
+// not "15"), and refuses to start without one.
+//
+// Fatal rather than defaulted because the two readings of a bare
+// number differ by a factor of sixty, and a lockout that lasts fifteen
+// seconds when somebody wrote fifteen minutes is a setting that looks
+// applied and is not.
+func configDurationSetting(cfg *config.Config, name string, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "A duration must be positive: refusing to start",
+			"setting", name, "value", raw)
+		log.Fatalf("invalid %s=%q: must be > 0", name, raw)
+	}
+	return d
+}
+
 func positiveConfigInt(cfg *config.Config, name string, logger *logging.Logger) int {
 	raw, ok := cfg.Get(name)
 	if !ok || strings.TrimSpace(raw) == "" {

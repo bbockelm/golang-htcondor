@@ -90,6 +90,16 @@ type Options struct {
 	MaxConcurrent int
 }
 
+// ErrServerSide marks a login refused for a reason that is this
+// gateway's own doing rather than the client's: it was at its
+// concurrency cap, or its OAuth2 issuer could not be reached.
+//
+// It exists so the lockout list can tell the two apart. Without it, an
+// issuer outage or a busy afternoon would be indistinguishable from an
+// attack, and the gateway would spend the outage locking out every
+// user who tried to get in during it.
+var ErrServerSide = errors.New("sshgateway: refused for a server-side reason")
+
 // Defaults applied to a zero Options.
 const (
 	DefaultTimeout       = 5 * time.Minute
@@ -185,7 +195,10 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	remote := conn.RemoteAddr().String()
 	if !a.takeSource(remote) {
 		a.tell(challenge, "Too many logins are already in progress from your address.")
-		return nil, fmt.Errorf("sshgateway: too many concurrent logins from %s", remote)
+		// Server-side: this cap is itself the defence, and a shared
+		// address -- a NAT'd department, a login node -- reaches it
+		// without anybody misbehaving.
+		return nil, fmt.Errorf("sshgateway: too many concurrent logins from %s: %w", remote, ErrServerSide)
 	}
 	defer a.releaseSource(remote)
 
@@ -194,7 +207,7 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 		defer func() { <-a.slots }()
 	default:
 		a.tell(challenge, "Too many logins are in progress. Please try again in a moment.")
-		return nil, errors.New("sshgateway: too many concurrent logins")
+		return nil, fmt.Errorf("sshgateway: too many concurrent logins: %w", ErrServerSide)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, a.opts.Timeout)
@@ -206,7 +219,7 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 		// The issuer's own words are for the log. What the user needs
 		// is to know it was not their fault and to try again.
 		a.tell(challenge, "Could not start the login flow. Please try again, and tell your administrator if it keeps happening.")
-		return nil, fmt.Errorf("sshgateway: starting the device authorization: %w", err)
+		return nil, fmt.Errorf("sshgateway: starting the device authorization: %w: %w", ErrServerSide, err)
 	}
 
 	// The code goes in a PROMPT, not only in the instruction.
