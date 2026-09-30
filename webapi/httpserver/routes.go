@@ -193,6 +193,12 @@ func (h *Handler) setupRoutes() {
 	// embed in an iframe and don't want extra CORS headers from us.
 	mux.HandleFunc("/api/v1/jupyter/", h.handleJupyterPath)
 
+	// Apps: long-lived servers running inside a job, reached through
+	// the job proxy. Both forms, because the collection and a single
+	// app are different paths and ServeMux does not fold them.
+	mux.Handle("/api/v1/apps", cors(http.HandlerFunc(h.handleAppsPath)))
+	mux.Handle("/api/v1/apps/", cors(http.HandlerFunc(h.handleAppsPath)))
+
 	// Interactive batch jobs (terminal sessions backed by a vanilla-universe
 	// watchdog the SSH bridge heartbeats over the existing ssh.Client).
 	// POST creates a session, GET lists the caller's sessions.

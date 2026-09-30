@@ -183,6 +183,7 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_BUILD_EXTRA_SUBMIT"},
 	{name: "HTTP_API_BUILD_REQUIREMENTS"},
 	{name: "HTTP_API_BUILD_STAGING_BASE"},
+	{name: "HTTP_API_VSCODE_IMAGE"},
 	{name: "HTTP_API_BUILD_DEFAULT_CPUS"},
 	{name: "HTTP_API_BUILD_DEFAULT_MEMORY_MB"},
 	{name: "HTTP_API_BUILD_DEFAULT_DISK_MB"},

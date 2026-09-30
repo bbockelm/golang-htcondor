@@ -259,6 +259,11 @@ export async function installApiFixtures(page: Page) {
     // ChatPanel entirely on enabled=false, which would leave it untested.
     '/api/v1/chat/info': { enabled: true },
     '/api/v1/templates': { templates: [] },
+    // The /interactive page's three lists. Empty is the interesting
+    // default: it renders the launch forms, which is most of the page.
+    '/api/v1/jupyter/instances': { instances: [] },
+    '/api/v1/interactive/terminal': { terminals: [] },
+    '/api/v1/apps': { apps: [] },
   };
 
   await page.route('**/api/v1/**', async (route) => {

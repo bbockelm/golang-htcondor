@@ -18,16 +18,18 @@ import (
 // DialContext returns -- the "nothing is listening on that port yet"
 // case, which must not be confused with the transport dying.
 type fakeConn struct {
-	mu      sync.Mutex
-	dialErr error
-	dials   int
-	runOut  string
-	runErr  error
-	runs    int
-	openErr error
-	opens   int
-	closed  bool
-	done    chan struct{} // closed to make Wait return, i.e. the job ended
+	mu        sync.Mutex
+	dialErr   error
+	dials     int
+	runOut    string
+	runErr    error
+	runs      int
+	openErr   error
+	opens     int
+	published string // what "cat <name>.path" returns
+	pathReads int
+	closed    bool
+	done      chan struct{} // closed to make Wait return, i.e. the job ended
 }
 
 func newFakeConn() *fakeConn {
@@ -46,12 +48,18 @@ func (f *fakeConn) DialContext(_ context.Context, _, _ string) (net.Conn, error)
 	return client, nil
 }
 
-func (f *fakeConn) Run(_ context.Context, _ string) (string, error) {
+func (f *fakeConn) Run(_ context.Context, cmd string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.runs++
 	if f.runErr != nil {
 		return "", f.runErr
+	}
+	// The sandbox answers two questions: where its scratch directory
+	// is, and what address a socket is reachable at.
+	if strings.HasPrefix(cmd, "cat ") {
+		f.pathReads++
+		return f.published, nil
 	}
 	return f.runOut, nil
 }
@@ -124,18 +132,19 @@ func (f *fakeConn) end() {
 }
 
 type fakeDialer struct {
-	mu      sync.Mutex
-	calls   int
-	conns   []*fakeConn
-	err     error
-	delay   time.Duration
-	scratch string
+	mu            sync.Mutex
+	calls         int
+	conns         []*fakeConn
+	err           error
+	delay         time.Duration
+	scratch       string
+	publishedPath string
 }
 
 func (d *fakeDialer) dial(_ context.Context, _ Key) (Conn, error) {
 	d.mu.Lock()
 	d.calls++
-	err, delay, scratch := d.err, d.delay, d.scratch
+	err, delay, scratch, published := d.err, d.delay, d.scratch, d.publishedPath
 	d.mu.Unlock()
 
 	if delay > 0 {
@@ -148,6 +157,7 @@ func (d *fakeDialer) dial(_ context.Context, _ Key) (Conn, error) {
 	if scratch != "" {
 		c.runOut = scratch
 	}
+	c.published = published
 	d.mu.Lock()
 	d.conns = append(d.conns, c)
 	d.mu.Unlock()
@@ -658,5 +668,95 @@ func TestFailedSessionOpenDoesNotEvict(t *testing.T) {
 	}
 	if got := c.LiveSessions(testKey); got != 0 {
 		t.Errorf("LiveSessions = %d after failed opens, want 0", got)
+	}
+}
+
+// TestSocketAddressComesFromTheJob is the glidein case. Both ends of a
+// Unix socket are capped at ~100 bytes of sun_path, and an EP running
+// inside a SLURM job nests its execute/dir_N under the host batch
+// system's -- so the scratch directory alone can exceed the limit
+// before anything of ours is added. The job binds by bare name and
+// publishes an address short enough to connect to; joining the scratch
+// path would refuse to work on exactly the pools this is for.
+func TestSocketAddressComesFromTheJob(t *testing.T) {
+	deep := "/" + strings.Repeat("glide_dir/", 12) + "execute/dir_9"
+	if len(deep) <= maxUnixPath {
+		t.Fatalf("the test's own path is only %d bytes; it is not exercising the limit", len(deep))
+	}
+
+	d := &fakeDialer{scratch: deep + "\n"}
+	c := newTestCache(t, d, nil)
+	d.mu.Lock()
+	d.publishedPath = "/proc/4242/cwd/vscode.sock"
+	d.mu.Unlock()
+
+	got, err := c.SocketPath(context.Background(), testKey, "vscode.sock")
+	if err != nil {
+		t.Fatalf("SocketPath: %v", err)
+	}
+	if got != "/proc/4242/cwd/vscode.sock" {
+		t.Errorf("SocketPath = %q, want the address the job published", got)
+	}
+
+	// Resolved once per transport: it is a round trip into the sandbox,
+	// and a browser opens connections constantly.
+	for i := 0; i < 4; i++ {
+		if _, err := c.SocketPath(context.Background(), testKey, "vscode.sock"); err != nil {
+			t.Fatalf("SocketPath %d: %v", i, err)
+		}
+	}
+	d.mu.Lock()
+	reads := d.conns[0].pathReads
+	d.mu.Unlock()
+	if reads != 1 {
+		t.Errorf("asked the job for its socket address %d times, want 1", reads)
+	}
+}
+
+// TestSocketAddressFallsBackWhenNothingPublished keeps a job that
+// predates this, or one set up by hand, working wherever the joined
+// path fits.
+func TestSocketAddressFallsBackWhenNothingPublished(t *testing.T) {
+	d := &fakeDialer{scratch: "/var/lib/condor/execute/dir_42\n"}
+	c := newTestCache(t, d, nil)
+
+	got, err := c.SocketPath(context.Background(), testKey, "vscode.sock")
+	if err != nil {
+		t.Fatalf("SocketPath: %v", err)
+	}
+	if got != "/var/lib/condor/execute/dir_42/vscode.sock" {
+		t.Errorf("SocketPath = %q, want the joined path", got)
+	}
+}
+
+// TestSocketAddressRefusesWhatCannotWork: a published address that is
+// relative would be resolved by sshd against its own working directory
+// rather than the sandbox's, and one over the limit fails in the kernel
+// with nothing to go on. Both are worth naming here.
+func TestSocketAddressRefusesWhatCannotWork(t *testing.T) {
+	deep := "/" + strings.Repeat("glide_dir/", 12) + "execute/dir_9"
+
+	relative := &fakeDialer{scratch: deep + "\n", publishedPath: "vscode.sock"}
+	c1 := newTestCache(t, relative, nil)
+	if _, err := c1.SocketPath(context.Background(), testKey, "vscode.sock"); err == nil {
+		t.Error("a relative published address was accepted")
+	} else if !strings.Contains(err.Error(), "relative") {
+		t.Errorf("error %q does not say the address is relative", err)
+	}
+
+	long := &fakeDialer{scratch: deep + "\n", publishedPath: "/" + strings.Repeat("x", maxUnixPath+10)}
+	c2 := newTestCache(t, long, nil)
+	if _, err := c2.SocketPath(context.Background(), testKey, "vscode.sock"); err == nil {
+		t.Error("an over-long published address was accepted")
+	}
+
+	// And with nothing published at all, the refusal says what the job
+	// has to do about it.
+	none := &fakeDialer{scratch: deep + "\n"}
+	c3 := newTestCache(t, none, nil)
+	if _, err := c3.SocketPath(context.Background(), testKey, "vscode.sock"); err == nil {
+		t.Error("a scratch path over the limit was accepted with nothing published")
+	} else if !strings.Contains(err.Error(), "bind by bare name") {
+		t.Errorf("error %q does not say what the job must do", err)
 	}
 }

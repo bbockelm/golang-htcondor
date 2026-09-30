@@ -566,6 +566,46 @@ export interface JupyterInstanceSummary {
   hold_reason?: string;
 }
 
+// AppSummary mirrors the Go-side struct in handlers_apps.go. An "app"
+// is a long-lived server running inside a job, reached through the job
+// proxy; code-server is the only type so far.
+//
+// The states matter to the UI more than they look. Through the proxy a
+// queued app and a dead one are identical -- both 502 -- and queue
+// latency is the likeliest reason somebody gives up, so it must not
+// also look like a failure. `url` is only ever set when there is
+// genuinely something to open.
+export interface AppSummary {
+  id: string;
+  type: string;
+  job_id: string;
+  owner?: string;
+  // waiting | starting | running | held | ended
+  state: string;
+  // Why, for a state the reader would otherwise have to guess at: what
+  // it is waiting for, or the HoldReason.
+  detail?: string;
+  url?: string;
+  submitted?: number;
+}
+
+// AppCreateRequest is the JSON body of POST /api/v1/apps. All fields
+// are optional; the server fills defaults and an operator may pin the
+// image, in which case `image` here is ignored.
+export interface AppCreateRequest {
+  type?: string;
+  cpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+  image?: string;
+  workdir?: string;
+  submit_lines?: string;
+}
+
+export interface AppListResponse {
+  apps: AppSummary[];
+}
+
 // InteractiveTerminalCreateRequest is the optional JSON body of
 // POST /api/v1/interactive/terminal. All fields are optional; the
 // server fills sensible defaults (1 CPU / 1 GB / 1 GB).
@@ -1400,6 +1440,28 @@ export const api = {
     // Iframe target — the path the proxy serves Jupyter at.
     proxyUrl: (id: string): string =>
       `${BASE}/jupyter/instances/${encodeURIComponent(id)}/proxy/`,
+  },
+
+  apps: {
+    // POST /api/v1/apps — submits a job that runs a VS Code server on a
+    // Unix socket in its sandbox. Returns immediately, before the job
+    // has a slot: poll get() for the state.
+    create: (req: AppCreateRequest): Promise<AppSummary> =>
+      fetchJSON(`${BASE}/apps`, {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }),
+
+    list: (): Promise<AppListResponse> => fetchJSON(`${BASE}/apps`),
+
+    // get() probes whether the server is actually listening, which
+    // list() deliberately does not -- so this is what to poll after
+    // creating one.
+    get: (id: string): Promise<AppSummary> =>
+      fetchJSON(`${BASE}/apps/${encodeURIComponent(id)}`),
+
+    remove: (id: string): Promise<AppSummary> =>
+      fetchJSON(`${BASE}/apps/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   },
 
   interactive: {

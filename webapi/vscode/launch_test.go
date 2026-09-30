@@ -106,9 +106,15 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	}
 	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
 
+	// A sandbox whose path fits keeps its socket inside it, so HTCondor
+	// cleans it up with everything else. The address is absolute
+	// because code-server resolves --socket before binding anyway.
 	wantSock := filepath.Join(scratch, SocketName)
 	if !containsPair(args, "--socket", wantSock) {
 		t.Errorf("args %q do not carry --socket %q", args, wantSock)
+	}
+	if !containsPair(args, "--socket-mode", "600") {
+		t.Errorf("args %q do not pin the socket mode", args)
 	}
 	// Authentication off is only correct because the socket's
 	// permissions are the authorization; if one goes the other must.
@@ -128,24 +134,78 @@ func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
 	}
 }
 
-func TestLaunchScriptRefusesAnOverlongSocketPath(t *testing.T) {
-	// A scratch directory deep enough to blow sun_path. The failure at
-	// the far end of a forward is an uninformative "open failed", so
-	// the launcher has to be the one that explains it.
-	base := t.TempDir()
-	deep := filepath.Join(base, strings.Repeat("d/", 40))
+func TestLaunchScriptWorksInADeepSandbox(t *testing.T) {
+	// The glidein case: an EP inside a SLURM job nests its execute/dir_N
+	// under the host batch system's, so the scratch path passes the
+	// ~100-byte sun_path cap before anything of ours is added.
+	//
+	// Binding by bare name would keep the address short, and does not
+	// work: code-server resolves --socket to an absolute path before
+	// binding, and dies with "listen EINVAL" on the long one. Measured
+	// against code-server 4.139.1. So the socket goes in a short
+	// private directory and the job publishes where it put it.
+	base := shortScratch(t)
+	deep := filepath.Join(base, strings.Repeat("glide_dir/", 12), "execute", "dir_9")
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Skipf("cannot create a deep path here: %v", err)
 	}
-	bin := fakeServer(t, filepath.Join(t.TempDir(), "argv"))
+	if len(filepath.Join(deep, SocketName)) <= MaxSocketPath {
+		t.Fatalf("the test's own scratch path is only %d bytes; it is not exercising the limit",
+			len(filepath.Join(deep, SocketName)))
+	}
+
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	bin := fakeServer(t, argvFile)
 
 	out, err := runScript(t, ScriptArgs{}, deep, bin)
-	if err == nil {
-		t.Fatalf("launcher started with a socket path over the limit:\n%s", out)
+	if err != nil {
+		t.Fatalf("the launcher refused a deep sandbox, which is the normal glidein shape: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "over the ~") || !strings.Contains(out, "EXECUTE directory") {
-		t.Errorf("output does not explain the sun_path limit:\n%s", out)
+
+	published, rerr := os.ReadFile(filepath.Join(deep, SocketName+".path")) //nolint:gosec // G304: a path this test just created
+	if rerr != nil {
+		t.Fatalf("the launcher published no address for its socket: %v\n%s", rerr, out)
 	}
+	addr := strings.TrimSpace(string(published))
+	if !strings.HasPrefix(addr, "/") {
+		t.Errorf("published address %q is relative; sshd resolves it against its own cwd", addr)
+	}
+	if len(addr) > MaxSocketPath {
+		t.Errorf("published address is %d bytes (%q), over the ~%d a Unix socket allows",
+			len(addr), addr, MaxSocketPath)
+	}
+	// It must not have been left in the sandbox, which is the path that
+	// does not fit.
+	if strings.HasPrefix(addr, deep) {
+		t.Errorf("published address %q is still inside the over-long sandbox path", addr)
+	}
+
+	//nolint:gosec // G703: the address the launcher just published for this test
+	st, serr := os.Stat(addr)
+	if serr != nil {
+		t.Fatalf("the published address %q does not resolve: %v", addr, serr)
+	}
+	if perm := st.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("socket mode is %04o; group and other must have no access", perm)
+	}
+	// The directory holding it is the only thing between this socket
+	// and every other user on the execute node.
+	//nolint:gosec // G703: the directory of the address published above
+	dst, derr := os.Stat(filepath.Dir(addr))
+	if derr != nil {
+		t.Fatalf("stat %q: %v", filepath.Dir(addr), derr)
+	}
+	if perm := dst.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("socket directory mode is %04o; it must be private to the owner", perm)
+	}
+	// The launcher cannot clean this up itself: it exec's the server,
+	// so no trap of its own can fire. In a job the directory outlives
+	// the session; here the test owns it.
+	sockDir := filepath.Dir(addr)
+	t.Cleanup(func() {
+		//nolint:gosec // G703: the directory of the address the launcher published for this test
+		_ = os.RemoveAll(sockDir)
+	})
 }
 
 func TestLaunchScriptRefusesAMissingServer(t *testing.T) {
@@ -386,5 +446,25 @@ func TestRecommendedImageIsPinned(t *testing.T) {
 	// a scheme -- containerImageRef only rescues a bare repo:tag.
 	if got := containerImageRef(RecommendedImage); got != RecommendedImage {
 		t.Errorf("containerImageRef rewrote RecommendedImage to %q", got)
+	}
+}
+
+// TestSubmitFileCarriesTheQueryableAttribute: the JobBatchName is what
+// a human sees in condor_q, but finding an app by it means a prefix
+// match. The attribute is an equality constraint the schedd evaluates,
+// which is what keeps an app from falling off the end of a query limit
+// for somebody with a busy queue.
+func TestSubmitFileCarriesTheQueryableAttribute(t *testing.T) {
+	out, err := BuildSubmitFile(SubmitArgs{SessionID: "s1", Image: "example/code-server:1"})
+	if err != nil {
+		t.Fatalf("BuildSubmitFile: %v", err)
+	}
+	want := `+` + AppAttr + ` = "` + AppAttrValue + `"`
+	if !strings.Contains(out, want) {
+		t.Errorf("submit file is missing %q:\n%s", want, out)
+	}
+	// And the batch name stays, because that is the human-visible half.
+	if !strings.Contains(out, "batch_name = "+BatchName("s1")) {
+		t.Errorf("submit file lost its batch name:\n%s", out)
 	}
 }

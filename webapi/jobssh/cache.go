@@ -88,6 +88,14 @@ type JobSession interface {
 	Close() error
 }
 
+// socketPathResult is a memoized socket-address lookup, failure
+// included: a job that publishes nothing now will publish nothing on
+// the next request either.
+type socketPathResult struct {
+	path string
+	err  error
+}
+
 // MaxSessionsPerTransport caps live sessions on one transport.
 //
 // The sshd HTCondor generates sets no MaxSessions, so OpenSSH's
@@ -169,6 +177,10 @@ type entry struct {
 	// refs also covers forwarded connections, and those do not consume
 	// the budget.
 	sessions int
+
+	// socketPaths caches the address for each socket name the job
+	// publishes, resolved once per transport like scratch.
+	socketPaths map[string]socketPathResult
 
 	// scratch caches the sandbox's scratch directory, resolved once
 	// per transport. scratchErr is cached too: if the sandbox will not
@@ -512,30 +524,103 @@ func (c *Cache) ScratchDir(ctx context.Context, key Key) (string, error) {
 	return e.scratch, e.scratchErr
 }
 
-// DialJobUnix opens a connection to a Unix socket in the job's scratch
-// directory. name is a bare filename, not a path.
+// DialJobUnix opens a connection to a Unix socket the job is serving
+// on. name is a bare filename, not a path.
 //
 // This is how a server in the job should be reached. A TCP port bound
 // to 127.0.0.1 in a sandbox is reachable by any local user on the
 // execute node unless the job has its own network namespace, which no
 // pool can be assumed to configure; a socket is protected by file
 // permissions instead.
+//
+// The address comes from the job, not from joining the scratch
+// directory to name. Both ends of a Unix socket are capped at ~100
+// bytes of sun_path, and an HTCondor scratch directory routinely
+// exceeds that on its own -- a glidein, an EP running inside a SLURM
+// job, nests its execute/dir_N under the host batch system's, and the
+// path runs past the limit before anything of ours is added. So a job
+// binds its socket by bare name, against its own working directory,
+// and publishes an address short enough to connect to in
+// "<name>.path". Falling back to the joined path keeps a job that
+// publishes nothing working wherever the path does fit.
 func (c *Cache) DialJobUnix(ctx context.Context, key Key, name string) (net.Conn, error) {
 	if err := ValidateSocketName(name); err != nil {
 		return nil, err
 	}
-	dir, err := c.ScratchDir(ctx, key)
+	path, err := c.SocketPath(ctx, key, name)
 	if err != nil {
 		return nil, err
 	}
+	return c.DialJob(ctx, key, "unix", path)
+}
+
+// SocketPath returns the address to connect to for the job's socket
+// name, asking the job once per transport.
+//
+// The lookup runs in the sandbox, where the working directory is the
+// job's, so reading "<name>.path" needs no long path of its own --
+// which is the whole point, since a long path is what this exists to
+// get around.
+func (c *Cache) SocketPath(ctx context.Context, key Key, name string) (string, error) {
+	if err := ValidateSocketName(name); err != nil {
+		return "", err
+	}
+	e, err := c.acquire(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer c.release(e)
+
+	c.mu.Lock()
+	cached, ok := e.socketPaths[name]
+	c.mu.Unlock()
+	if ok {
+		return cached.path, cached.err
+	}
+
+	path, perr := c.resolveSocketPath(ctx, e, key, name)
+	c.mu.Lock()
+	if e.socketPaths == nil {
+		e.socketPaths = map[string]socketPathResult{}
+	}
+	e.socketPaths[name] = socketPathResult{path: path, err: perr}
+	c.mu.Unlock()
+	return path, perr
+}
+
+func (c *Cache) resolveSocketPath(ctx context.Context, e *entry, key Key, name string) (string, error) {
+	// `cat` rather than a shell test: a missing file is an error we
+	// recognise by getting nothing usable back, and anything sent
+	// through ssh-to-job is word-split and rejoined, so the command
+	// stays a single line with no quoting to survive.
+	out, err := e.conn.Run(ctx, "cat "+name+".path 2>/dev/null")
+	if err == nil {
+		if published := strings.TrimSpace(out); published != "" {
+			if !strings.HasPrefix(published, "/") {
+				return "", fmt.Errorf("job %s published a relative socket address %q; sshd resolves it against its own working directory, not the sandbox's", key, published)
+			}
+			if len(published) > maxUnixPath {
+				return "", fmt.Errorf("job %s published a socket address of %d bytes, over the ~%d a Unix socket allows: %q",
+					key, len(published), maxUnixPath, published)
+			}
+			return published, nil
+		}
+	}
+
+	// Nothing published: a job that predates this, or one somebody set
+	// up by hand. The joined path is right whenever it fits.
+	dir, derr := c.ScratchDir(ctx, key)
+	if derr != nil {
+		return "", derr
+	}
 	path := dir + "/" + name
 	if len(path) > maxUnixPath {
-		return nil, fmt.Errorf(
-			"socket path %q is %d bytes, over the ~%d a Unix socket address allows; "+
-				"this pool's EXECUTE directory is too deep to serve a job over a socket",
-			path, len(path), maxUnixPath)
+		return "", fmt.Errorf(
+			"job %s publishes no %s.path and %q is %d bytes, over the ~%d a Unix socket address allows; "+
+				"a server in a sandbox this deep must bind by bare name and publish a short address",
+			key, name, path, len(path), maxUnixPath)
 	}
-	return c.DialJob(ctx, key, "unix", path)
+	return path, nil
 }
 
 // ValidateSocketName keeps the caller-supplied component to a bare
