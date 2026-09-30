@@ -247,6 +247,16 @@ func (s *Server) handleSession(ctx context.Context, account, user string, nch ss
 		return ok
 	}
 
+	// Stdin is connected BEFORE the shell is allowed to start.
+	//
+	// release is what runs shell/exec, so attaching after it leaves a
+	// window in which the command is running and the channel reader is
+	// still in its Ctrl-C-scanning mode -- discarding, not forwarding.
+	// Anything typed in that window vanished. It is a few microseconds
+	// on an idle machine and wide enough to lose half a line on a
+	// loaded one, which is how CI found it and a laptop never would.
+	input.attach(stdin)
+
 	// Everything the client asked for while it was waiting now reaches
 	// the job, in the order it was asked.
 	pump.release(s, sess, ch, start)
@@ -264,9 +274,6 @@ func (s *Server) handleSession(ctx context.Context, account, user string, nch ss
 	ioWG.Add(2)
 	go func() { defer ioWG.Done(); _, _ = copyStream(ch, stdout) }()
 	go func() { defer ioWG.Done(); _, _ = copyStream(ch.Stderr(), stderr) }()
-	// The one reader that has owned this channel all along now carries
-	// stdin, so no keystroke is read twice or dropped at the handover.
-	input.attach(stdin)
 
 	waitErr := sess.Wait()
 	ioWG.Wait()

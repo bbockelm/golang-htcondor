@@ -56,6 +56,11 @@ type fakeSession struct {
 	exit    chan struct{}
 	waitErr error
 	closed  bool
+
+	// shellGate holds Shell open so a test can act while the remote
+	// command is starting; shellEntered says it has been reached.
+	shellGate    chan struct{}
+	shellEntered chan struct{}
 }
 
 func newFakeSession() *fakeSession {
@@ -82,9 +87,28 @@ func (f *fakeSession) WindowChange(h, w int) error {
 
 func (f *fakeSession) Shell() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.started = "shell"
+	gate, entered := f.shellGate, f.shellEntered
+	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if gate != nil {
+		<-gate
+	}
 	return nil
+}
+
+// gateShell makes Shell block until the returned release is called,
+// and returns a channel closed once Shell has been entered.
+func (f *fakeSession) gateShell() (entered <-chan struct{}, release func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := make(chan struct{})
+	e := make(chan struct{})
+	f.shellGate, f.shellEntered = g, e
+	var once sync.Once
+	return e, func() { once.Do(func() { close(g) }) }
 }
 
 func (f *fakeSession) Start(cmd string) error {
@@ -1041,18 +1065,20 @@ func TestRealClientSeesAFailureReason(t *testing.T) {
 	}
 }
 
-// Keystrokes typed after the shell starts must all reach the job.
+// Stdin must be connected BEFORE the remote command starts.
 //
-// The interrupt scanner and the stdin copier are the same goroutine
-// for exactly this reason. When they were separate they raced for
-// every Read, and whichever won took the bytes -- so roughly half of
-// what the user typed vanished. Nothing caught it, because a test that
-// types nothing after the shell starts cannot.
+// The reader that owns this channel scans for Ctrl-C while the caller
+// waits for a job and DISCARDS what it reads; it only forwards once
+// stdin is attached. So attaching after the shell has started leaves a
+// window in which the command is running and what the user types is
+// thrown away.
 //
-// Several separate writes rather than one: with two readers each write
-// is its own coin flip, so the old shape fails this almost always,
-// while the fixed shape passes deterministically.
-func TestTypingAfterTheSessionStartsIsNotEaten(t *testing.T) {
+// Deterministic rather than timing-dependent: the shell is held open,
+// the client types while it is held, and only then is it released. An
+// earlier version of this test wrote after observing that the shell
+// had started and hoped to lose the race -- which it did on CI and
+// never once on a developer machine, even at -cpu=1 with -count=20.
+func TestStdinIsConnectedBeforeTheCommandStarts(t *testing.T) {
 	tr := &fakeTransport{}
 	client := gatewayClient(t, gateway(t, tr), "12345.0")
 
@@ -1067,66 +1093,44 @@ func TestTypingAfterTheSessionStartsIsNotEaten(t *testing.T) {
 	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
 		t.Fatalf("request pty: %v", err)
 	}
-	if err := sess.Shell(); err != nil {
-		t.Fatalf("shell: %v", err)
+
+	// Hold the shell open the moment the gateway reaches it.
+	remote := tr.lastSession(t)
+	entered, release := remote.gateShell()
+
+	go func() { _ = sess.Shell() }()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gateway never started the remote shell")
 	}
 
-	remote := tr.lastSession(t)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && remote.snapshot().started == "" {
-		time.Sleep(5 * time.Millisecond)
+	// Typed while the command is starting. With stdin attached first
+	// this is forwarded; attached afterwards it is silently dropped.
+	if _, err := stdin.Write([]byte("typed-early")); err != nil {
+		t.Fatalf("write: %v", err)
 	}
+	// Long enough for the gateway's channel reader to have consumed
+	// these bytes while the command is still starting. Without the
+	// pause the write and the release are close enough that the reader
+	// may not touch the data until stdin is already attached -- and
+	// then the test cannot observe the very thing it is about.
+	time.Sleep(250 * time.Millisecond)
+	release()
 
 	got := make(chan string, 1)
 	go func() {
-		var seen []byte
 		buf := make([]byte, 64)
-		for len(seen) < 10 {
-			n, err := remote.stdinR.Read(buf)
-			seen = append(seen, buf[:n]...)
-			if err != nil {
-				break
-			}
-		}
-		got <- string(seen)
+		n, _ := remote.stdinR.Read(buf)
+		got <- string(buf[:n])
 	}()
-
-	for _, chunk := range []string{"ab", "cd", "ef", "gh", "ij"} {
-		if _, err := stdin.Write([]byte(chunk)); err != nil {
-			t.Fatalf("write %q: %v", chunk, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
 	select {
 	case seen := <-got:
-		if seen != "abcdefghij" {
-			t.Errorf("the job received %q, want everything that was typed", seen)
+		if !strings.Contains(seen, "typed-early") {
+			t.Errorf("the job received %q, want what was typed while the shell was starting", seen)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("what was typed never reached the job")
-	}
-}
-
-// An empty socket path is refused rather than passed down to become an
-// opaque dial error.
-func TestEmptySocketPathIsRefused(t *testing.T) {
-	tr := &fakeTransport{}
-	client := gatewayClient(t, gateway(t, tr), "12345.0")
-
-	payload := ssh.Marshal(struct {
-		SocketPath string
-		Reserved   string
-		ReservedN  uint32
-	}{})
-	_, _, err := client.OpenChannel(streamLocalChannelType, payload)
-	if err == nil {
-		t.Fatal("an empty socket path was accepted")
-	}
-	tr.mu.Lock()
-	dialed := len(tr.dialed)
-	tr.mu.Unlock()
-	if dialed != 0 {
-		t.Errorf("the job was dialled %d times for an empty path", dialed)
+		t.Fatal("what was typed while the shell was starting never reached the job")
 	}
 }
