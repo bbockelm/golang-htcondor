@@ -421,20 +421,11 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 	}
 	h.logger.Info(logging.DestinationHTTP, "SSH gateway started an interactive session",
 		"account", account, "session", name, "job", info.JobID,
-		// The username when it is not the session name: a login like
-		// "_appstore" or one with a space is derived from, and an
-		// operator correlating a report to a job needs both.
-		"username", loggedUsername(t))
+		// Whether they asked for this session by name or took the
+		// default, and the username verbatim -- an operator
+		// correlating a user's report to a job wants both.
+		"explicit", t.Explicit, "username", t.Raw)
 	return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
-}
-
-// loggedUsername returns the raw username when the session name was
-// derived from it, and empty when they are the same.
-func loggedUsername(t sshgateway.Target) string {
-	if t.Raw == t.Name {
-		return ""
-	}
-	return t.Raw
 }
 
 // findInteractiveSession returns the caller's session called name, or

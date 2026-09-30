@@ -24,28 +24,49 @@ import (
 
 // Target is what the SSH username asked to connect to.
 //
-// The username carries no identity here -- the OAuth2 grant does -- so
-// the field is free to mean something useful instead. It names either a
-// job already in the queue or an interactive session by name:
+// The username carries no identity here -- the OAuth2 grant or the
+// certificate does -- so the field is free to mean something useful
+// instead. It is also the ONLY thing SSH offers before authentication:
+// no path, no Host header, no SNI. That matters beyond shells, because
+// a port forward and an scp carry no command, so the username is the
+// only place they can say which job they mean.
 //
 //	ssh 12345.0@gateway    the job with that cluster and proc
 //	ssh 12345@gateway      proc 0 of that cluster
-//	ssh work@gateway       the interactive session called "work"
-//	ssh gateway            a session named after your local login
+//	ssh +work@gateway      the interactive session called "work"
+//	ssh gateway            your default session
 //
-// A bare `ssh gateway` sends whatever the local account is called, so
-// it lands in the session-name case and gives that user a session named
-// after their laptop login. That is predictable rather than clever, and
-// it is worth knowing that two machines with different local usernames
-// therefore reach two different sessions.
+// The leading "+" is required to name a session, and that is the point.
+// A bare `ssh gateway` sends whatever the local machine calls you, and
+// your laptop login has nothing to do with your HTCondor session: an
+// earlier version read it as a session name, so the same command gave
+// you "bbockelm" from a laptop, "brian" from a login node and "root"
+// from a container -- three sessions for somebody who asked for none of
+// them. Everything unprefixed now means the same session from every
+// machine you own.
+//
+// "+" is chosen because a POSIX username cannot contain it, so no local
+// login can be mistaken for an explicit request. A word like "session-"
+// would have needed an escape hatch for the account actually called
+// "session-manager"; this needs none.
+//
+// It doubles as the escape hatch for the other collision: a session
+// legitimately named "12345.0" is unreachable bare, because job ids are
+// tried first, but "+12345.0" names it unambiguously.
 type Target struct {
 	// Raw is the username exactly as the client sent it.
 	Raw string
 
 	// Cluster and Proc are set when Raw named a job.
 	Cluster, Proc int
-	// Name is set when Raw named an interactive session.
+	// Name is set when Raw named an interactive session, explicitly or
+	// by default.
 	Name string
+	// Explicit records that the session was asked for by name rather
+	// than being the default. Only useful for logs -- it is the
+	// difference between "they wanted this one" and "they did not
+	// say".
+	Explicit bool
 }
 
 // IsJob reports whether the target named a job id rather than a session.
@@ -58,27 +79,21 @@ func (t Target) String() string {
 	return fmt.Sprintf("session %q", t.Name)
 }
 
+// SessionPrefix marks a username as naming an interactive session.
+const SessionPrefix = "+"
+
+// DefaultSessionName is what an unprefixed username reaches.
+//
+// A fixed name rather than a derived one, so `ssh gateway` means the
+// same session from every machine.
+const DefaultSessionName = "default"
+
 // ParseTarget reads an SSH username.
 //
-// A job id is tried first, so "12345.0" reaches that job. An
-// interactive session may legally be named "12345.0" as well, since
-// session names allow digits and dots; such a session is unreachable
-// by name here. Naming a session after a job id is pathological enough
-// to leave alone rather than to grow a prefix syntax for.
-//
-// Anything else becomes a session name, and ANY username produces one.
-// A login is not chosen with this in mind -- `_appstore`, `bob@wisc.edu`
-// and names with spaces are all real -- and refusing them would mean a
-// bare `ssh gateway` failing for reasons the person cannot act on. The
-// name is derived instead; see sessionNameFor.
-//
-// Whitespace is not trimmed. Padding is not something a client sends
-// by accident, and quietly turning " 5" into job 5 reaches a different
-// job than the text names -- which is the same hazard allDigits guards
-// against for signs. A padded name is derived like any other.
+// A job id is tried first, so "12345.0" reaches that job.
 func ParseTarget(user string) (Target, error) {
 	if user == "" {
-		return Target{}, fmt.Errorf("no target: connect as a job id (12345.0) or a session name")
+		return Target{}, fmt.Errorf("no target: connect as a job id (12345.0), +<session>, or bare for your default session")
 	}
 	t := Target{Raw: user}
 
@@ -87,29 +102,38 @@ func ParseTarget(user string) (Target, error) {
 		return t, nil
 	}
 
-	t.Name = sessionNameFor(user)
+	if rest, ok := strings.CutPrefix(user, SessionPrefix); ok {
+		if strings.TrimSpace(rest) == "" {
+			// "+" alone asked for a session and named none, which is
+			// the default by any reading.
+			t.Name = DefaultSessionName
+			return t, nil
+		}
+		t.Name = sessionNameFor(rest)
+		t.Explicit = true
+		return t, nil
+	}
+
+	t.Name = DefaultSessionName
 	return t, nil
 }
 
-// sessionNameFor derives a usable session name from a username.
+// sessionNameFor derives a usable session name from what followed the
+// prefix.
 //
-// Session names are narrow on purpose -- they are spliced into a
-// submit file and a batch name -- so this maps anything outside
+// Session names are narrow on purpose -- they are spliced into a submit
+// file and a batch name -- so this maps anything outside
 // [A-Za-z0-9._-] to a dash, drops leading characters that cannot start
-// one, and truncates to the 64 the validator allows.
+// one, and truncates to the 64 the validator allows. A name that is
+// already usable survives untouched, which is the case that matters.
 //
-// A username that survives unchanged is the overwhelmingly common
-// case, and it is the one this must not disturb: `ssh work@gateway`
-// has to reach the session called "work" and nothing else.
-//
-// When nothing usable is left -- a login of "@@@", or one written in a
-// script the pattern does not admit -- the name falls back to a short
-// digest of the original. Deterministic, so the same laptop reaches
-// the same session every time, and distinct, so two unrelated logins
-// do not collide into one.
-func sessionNameFor(user string) string {
+// When nothing usable is left, the name falls back to a short digest of
+// the original: deterministic, so the same request reaches the same
+// session every time, and distinct, so two unrelated ones do not
+// collide.
+func sessionNameFor(name string) string {
 	var b strings.Builder
-	for _, r := range user {
+	for _, r := range name {
 		switch {
 		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
 			r == '.', r == '_', r == '-':
@@ -118,16 +142,16 @@ func sessionNameFor(user string) string {
 			b.WriteByte('-')
 		}
 	}
-	name := strings.TrimLeft(b.String(), "._-")
+	out := strings.TrimLeft(b.String(), "._-")
 
-	if len(name) > sessionNameMaxLen {
-		name = name[:sessionNameMaxLen]
+	if len(out) > sessionNameMaxLen {
+		out = out[:sessionNameMaxLen]
 	}
-	if name == "" {
-		sum := sha256.Sum256([]byte(user))
+	if out == "" {
+		sum := sha256.Sum256([]byte(name))
 		return "session-" + hex.EncodeToString(sum[:4])
 	}
-	return name
+	return out
 }
 
 // sessionNameMaxLen mirrors interactive.ValidateSessionName's limit.

@@ -601,11 +601,22 @@ target instead:
 | `ssh <this>@gateway` | reaches |
 | --- | --- |
 | `12345.0`, or `12345` | that job, proc 0 if omitted |
-| anything else | your interactive session of that name, **started if you have none** |
+| `+work` | your interactive session called `work`, **started if you have none** |
+| anything else, including a bare `ssh gateway` | your **default** session |
 
-A bare `ssh gateway` sends your local login, which never looks like a job id,
-so it starts or attaches a session named after it. Two machines with different
-local logins therefore reach two different sessions.
+The `+` is required to name a session, and a bare `ssh gateway` reaches the
+same `default` session from every machine you own. That is the point: the
+username is whatever your local machine calls you, and your laptop login has
+nothing to do with your HTCondor session — reading it as one would give you a
+different session from a laptop, a login node and a container.
+
+`+` is used because a POSIX username cannot contain it, so no local login can
+be mistaken for an explicit request. A word like `session-` would need an
+escape hatch for the account actually called `session-manager`; this needs
+none.
+
+It also reaches a session whose name looks like a job id, which is otherwise
+unreachable because job ids are tried first: `ssh +12345.0@gateway`.
 
 While a newly created session waits in the queue, the terminal shows what it is
 waiting for and how long it has been waiting. Ctrl-C stops waiting; it does

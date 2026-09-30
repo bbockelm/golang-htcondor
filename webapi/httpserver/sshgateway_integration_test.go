@@ -353,7 +353,7 @@ MEMORY = 8192
 		// creating a session goes wrong.
 		"-o", "LogLevel=INFO",
 		"-T",
-		"gwsession@127.0.0.1",
+		"+gwsession@127.0.0.1",
 		"echo on-demand-session-reached",
 	)
 	out, sshErr := cmd.CombinedOutput()

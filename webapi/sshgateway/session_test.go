@@ -605,7 +605,7 @@ func TestUnknownChannelTypeIsRefused(t *testing.T) {
 
 func TestUnresolvableTargetIsExplained(t *testing.T) {
 	tr := &fakeTransport{}
-	client := gatewayClient(t, gateway(t, tr), "nosuchsession")
+	client := gatewayClient(t, gateway(t, tr), "+nosuchsession")
 
 	sess, err := client.NewSession()
 	if err != nil {
@@ -649,9 +649,10 @@ func TestEmptyUsernameIsRejectedOutright(t *testing.T) {
 }
 
 // A username that is not a job id reaches a session, whatever it looks
-// like -- the channel is accepted and the resolver is asked.
+// like -- the channel is accepted and the resolver is asked. Awkward
+// logins land on the default session rather than being refused.
 func TestAwkwardUsernamesStillReachASession(t *testing.T) {
-	for _, user := range []string{"has space", "_appstore", "bob@wisc.edu", "-leading"} {
+	for _, user := range []string{"has space", "_appstore", "bob@wisc.edu", "-leading", "+work"} {
 		t.Run(user, func(t *testing.T) {
 			tr := &fakeTransport{}
 			client := gatewayClient(t, gateway(t, tr), user)
