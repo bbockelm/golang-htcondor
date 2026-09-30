@@ -105,3 +105,23 @@ func TestInteractiveTerminalSubmitFileIncludesCallerLines(t *testing.T) {
 		t.Errorf("caller submit line missing from submit file:\n%s", src)
 	}
 }
+
+// TestInteractiveCreateDefaultsDisk pins the REST surface's default
+// scratch disk, which is the other half of the same default as
+// interactive.applySpecDefaults and drifts independently of it.
+func TestInteractiveCreateDefaultsDisk(t *testing.T) {
+	req := &InteractiveCreateTerminalRequest{}
+	req.applyDefaults()
+	if req.DiskMB != 8192 {
+		t.Errorf("default disk_mb = %d, want 8192", req.DiskMB)
+	}
+	if err := req.validate(); err != nil {
+		t.Errorf("the default request does not validate: %v", err)
+	}
+
+	asked := &InteractiveCreateTerminalRequest{DiskMB: 512}
+	asked.applyDefaults()
+	if asked.DiskMB != 512 {
+		t.Errorf("explicit disk_mb = %d, want it left at 512", asked.DiskMB)
+	}
+}

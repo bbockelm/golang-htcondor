@@ -1098,3 +1098,52 @@ func TestUnattachedSessionIsReaped(t *testing.T) {
 		return false
 	})
 }
+
+// TestApplySpecDefaultsDisk pins the session's default scratch disk.
+//
+// It is here because the value is load-bearing and invisible: a session
+// that asks for too little disk does not fail as a held job on an EP
+// that enforces disk with a per-job filesystem. It fails as ENOSPC
+// inside whatever the user is running, which is how a VS Code Remote
+// server came to die halfway through unpacking itself with nothing in
+// the HTCondor log to say why.
+func TestApplySpecDefaultsDisk(t *testing.T) {
+	var spec CreateSpec
+	applySpecDefaults(&spec)
+	if spec.DiskMB != 8192 {
+		t.Errorf("default DiskMB = %d, want 8192", spec.DiskMB)
+	}
+
+	// A caller who asks for a size gets the size they asked for,
+	// including one smaller than the default.
+	asked := CreateSpec{DiskMB: 512}
+	applySpecDefaults(&asked)
+	if asked.DiskMB != 512 {
+		t.Errorf("explicit DiskMB = %d, want it left at 512", asked.DiskMB)
+	}
+}
+
+// TestDefaultDiskReachesSubmitFile follows the default all the way to
+// the submit file, in the unit HTCondor actually reads.
+//
+// The two halves are tested separately everywhere else, which is what
+// lets a units bug live in the join: `request_disk` is KiB while this
+// API speaks MiB, and an earlier version of that conversion turned a
+// 4096 MB request into 4 MiB and killed jobs in file transfer.
+func TestDefaultDiskReachesSubmitFile(t *testing.T) {
+	var spec CreateSpec
+	applySpecDefaults(&spec)
+
+	submit := BuildSubmitFile(SubmitArgs{
+		InstanceID: "probe",
+		BatchName:  "probe",
+		Cpus:       spec.Cpus,
+		MemoryMB:   spec.MemoryMB,
+		DiskMB:     spec.DiskMB,
+	})
+
+	const want = "request_disk = 8388608" // 8192 MiB in KiB
+	if !strings.Contains(submit, want) {
+		t.Errorf("submit file does not request the default disk;\nwant a line %q\ngot:\n%s", want, submit)
+	}
+}

@@ -724,8 +724,17 @@ func applySpecDefaults(spec *CreateSpec) {
 	if spec.MemoryMB == 0 {
 		spec.MemoryMB = 1024
 	}
+	// 8 GiB, not the 1 GiB this used to be. A VS Code Remote session
+	// installs its server into the sandbox and dies unpacking it at
+	// 1 GiB -- measured 2026-09-30, and it fails as a kernel ENOSPC
+	// rather than a held job wherever disk is enforced with a per-job
+	// filesystem, so it surfaces as a tar error deep in a client log
+	// and not as anything HTCondor reports. That is before any of the
+	// user's own code. The neighbours already assume more: Jupyter
+	// defaults to 4 GiB and an app to 10 GiB; a session is the one
+	// that was still sized like a batch job.
 	if spec.DiskMB == 0 {
-		spec.DiskMB = 1024
+		spec.DiskMB = 8192
 	}
 }
 
