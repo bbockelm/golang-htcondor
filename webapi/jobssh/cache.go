@@ -551,7 +551,19 @@ func (c *Cache) DialJobUnix(ctx context.Context, key Key, name string) (net.Conn
 	if err != nil {
 		return nil, err
 	}
-	return c.DialJob(ctx, key, "unix", path)
+	conn, err := c.DialJob(ctx, key, "unix", path)
+	if err != nil {
+		return nil, err
+	}
+	// A guess that works is as good as a published address, and worth
+	// not re-deriving on every connection. One that does not work is
+	// never cached, so a server still starting up is re-asked.
+	e, aerr := c.acquire(ctx, key)
+	if aerr == nil {
+		c.rememberSocketPath(e, name, path)
+		c.release(e)
+	}
+	return conn, nil
 }
 
 // SocketPath returns the address to connect to for the job's socket
@@ -578,32 +590,56 @@ func (c *Cache) SocketPath(ctx context.Context, key Key, name string) (string, e
 		return cached.path, cached.err
 	}
 
-	path, perr := c.resolveSocketPath(ctx, e, key, name)
-	c.mu.Lock()
-	if e.socketPaths == nil {
-		e.socketPaths = map[string]socketPathResult{}
+	path, published, perr := c.resolveSocketPath(ctx, e, key, name)
+	// Only an address the job actually published is worth remembering.
+	//
+	// Caching whatever the first lookup produced is what made a session
+	// sit at "starting" forever: the first probe lands in the seconds
+	// before the server has written its address, the lookup falls back
+	// to joining the scratch path, and that guess is then answered to
+	// every later request -- including after the server has published a
+	// real address somewhere else entirely. The job was running the
+	// whole time and ssh-to-job worked, which is exactly how it looked.
+	//
+	// A guess costs one command in the sandbox to re-ask, and only for
+	// as long as nothing has been published, so re-asking is cheap and
+	// self-healing. DialJobUnix promotes a guess to the cache once a
+	// connection over it actually works.
+	if published && perr == nil {
+		c.rememberSocketPath(e, name, path)
 	}
-	e.socketPaths[name] = socketPathResult{path: path, err: perr}
-	c.mu.Unlock()
 	return path, perr
 }
 
-func (c *Cache) resolveSocketPath(ctx context.Context, e *entry, key Key, name string) (string, error) {
+// rememberSocketPath records an address that is known good.
+func (c *Cache) rememberSocketPath(e *entry, name, path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e.socketPaths == nil {
+		e.socketPaths = map[string]socketPathResult{}
+	}
+	e.socketPaths[name] = socketPathResult{path: path}
+}
+
+// resolveSocketPath asks the job where its socket is. published
+// reports whether the answer came from the job rather than from
+// guessing, which is what decides whether it may be cached.
+func (c *Cache) resolveSocketPath(ctx context.Context, e *entry, key Key, name string) (path string, published bool, err error) {
 	// `cat` rather than a shell test: a missing file is an error we
 	// recognise by getting nothing usable back, and anything sent
 	// through ssh-to-job is word-split and rejoined, so the command
 	// stays a single line with no quoting to survive.
 	out, err := e.conn.Run(ctx, "cat "+name+".path 2>/dev/null")
 	if err == nil {
-		if published := strings.TrimSpace(out); published != "" {
-			if !strings.HasPrefix(published, "/") {
-				return "", fmt.Errorf("job %s published a relative socket address %q; sshd resolves it against its own working directory, not the sandbox's", key, published)
+		if addr := strings.TrimSpace(out); addr != "" {
+			if !strings.HasPrefix(addr, "/") {
+				return "", true, fmt.Errorf("job %s published a relative socket address %q; sshd resolves it against its own working directory, not the sandbox's", key, addr)
 			}
-			if len(published) > maxUnixPath {
-				return "", fmt.Errorf("job %s published a socket address of %d bytes, over the ~%d a Unix socket allows: %q",
-					key, len(published), maxUnixPath, published)
+			if len(addr) > maxUnixPath {
+				return "", true, fmt.Errorf("job %s published a socket address of %d bytes, over the ~%d a Unix socket allows: %q",
+					key, len(addr), maxUnixPath, addr)
 			}
-			return published, nil
+			return addr, true, nil
 		}
 	}
 
@@ -611,16 +647,16 @@ func (c *Cache) resolveSocketPath(ctx context.Context, e *entry, key Key, name s
 	// up by hand. The joined path is right whenever it fits.
 	dir, derr := c.ScratchDir(ctx, key)
 	if derr != nil {
-		return "", derr
+		return "", false, derr
 	}
-	path := dir + "/" + name
-	if len(path) > maxUnixPath {
-		return "", fmt.Errorf(
+	guess := dir + "/" + name
+	if len(guess) > maxUnixPath {
+		return "", false, fmt.Errorf(
 			"job %s publishes no %s.path and %q is %d bytes, over the ~%d a Unix socket address allows; "+
-				"a server in a sandbox this deep must bind by bare name and publish a short address",
-			key, name, path, len(path), maxUnixPath)
+				"a server in a sandbox this deep must put its socket somewhere shorter and publish where",
+			key, name, guess, len(guess), maxUnixPath)
 	}
-	return path, nil
+	return guess, false, nil
 }
 
 // ValidateSocketName keeps the caller-supplied component to a bare
