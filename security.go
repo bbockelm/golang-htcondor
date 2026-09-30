@@ -795,7 +795,15 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 	}
 
 	// 2. No caller credential on the context: everything below this point
-	// authenticates as this daemon.
+	// authenticates as this daemon, so decide first whether that is
+	// legitimate for this context. The check sits here rather than inside
+	// loadClientSecurityDefaults because both of that function's outcomes
+	// are the daemon -- the configured one and the compiled-in fallback,
+	// whose FS method plus privileged credential reader authenticate as the
+	// daemon's OS user on a same-host schedd with no token involved at all.
+	if err := checkDaemonFallbackAllowed(ctx, command, secContext, peerName); err != nil {
+		return nil, err
+	}
 	return loadClientSecurityDefaults(cfg, command, secContext, peerName)
 }
 

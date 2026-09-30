@@ -1966,6 +1966,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sw := &statusCapturingResponseWriter{ResponseWriter: w}
 	defer h.markValidatedOnSuccess(r, sw)
+	// Every request is somebody else's, marked here for the same reason
+	// applySecurityHeaders is: no route can opt out by accident, and a route
+	// added later inherits it. What it buys is downstream, in
+	// GetSecurityConfigOrDefault: an authentication branch that ends without
+	// attaching a credential now produces a context that CEDAR refuses,
+	// instead of one that falls through to this daemon's own configuration
+	// and talks to the schedd as a queue superuser. Plumbing that really is
+	// this daemon's own work says so with htcondor.WithDaemonCredential.
+	r = r.WithContext(htcondor.WithUserRequest(r.Context(),
+		"HTTP request "+r.Method+" "+r.URL.Path))
 	if h.httpMetricsState != nil {
 		h.httpMetricsState.middleware(h.mux).ServeHTTP(sw, r)
 		return

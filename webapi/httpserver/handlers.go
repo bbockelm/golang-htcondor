@@ -99,6 +99,16 @@ func isAuthenticationError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A refused daemon fallback is an authentication failure and nothing
+	// else: the request reached a CEDAR call with no credential this server
+	// was willing to use. Typed rather than matched on its text, and checked
+	// first, so it cannot be classified by whichever of the substrings below
+	// its message happens to contain. Without this the handlers report it as
+	// 500, which reads as "this server is broken" when what happened is
+	// "this request was not authenticated".
+	if htcondor.IsDaemonFallbackRefused(err) {
+		return true
+	}
 	errMsg := err.Error()
 	// Check for explicit authentication/authorization failures
 	if strings.Contains(errMsg, "DENIED") ||
