@@ -255,7 +255,7 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	}
 
 	schedd := s.getSchedd()
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("submitting the DAGMan job failed: %w", err)
 	}

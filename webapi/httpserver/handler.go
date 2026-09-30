@@ -1858,6 +1858,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
 		SubmitPolicy:   h.submitPolicy,
+		// The same preparation every REST submit path runs (see
+		// Handler.submitJob), handed over so the agent tools and the
+		// interactive sessions the SSH gateway creates get it too. One
+		// implementation: the credd handle, the required-service list and
+		// the cache that keeps it off the hot path are all this daemon's.
+		EnsureCredentials: h.ensureRequiredCredentials,
 		// An agent's interactive session is the same kind of job as the
 		// SPA's terminal, on the same pool, so it gets the same
 		// operator-supplied submit directives, the same site-wide

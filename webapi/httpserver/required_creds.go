@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -147,4 +149,29 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 			"service", service, "user", user)
 		s.requiredCredCache.record(user, service)
 	}
+}
+
+// submitJob is the one door every job this daemon submits goes through:
+// the credential bootstrap above, then the site's submit policy, then
+// the schedd.
+//
+// It is a function because the two lines in front of the submit were
+// something each surface had to remember. The REST endpoint, the web
+// terminal, JupyterLab and VS Code each carried their own copy;
+// interactive sessions, which are submitted by the manager in
+// webapi/interactive rather than by anything here, carried the policy
+// (it is one of that manager's options) and not the bootstrap. So a
+// person who typed `ssh` at an access point that requires OAuth service
+// credentials got a job held with "Job credentials are not available",
+// for a reason with nothing to do with what they asked for -- while the
+// same session started from the web UI worked.
+//
+// Surfaces outside this package reach the same preparation through the
+// hook the MCP server is handed (mcpserver.Config.EnsureCredentials),
+// which is a func value rather than a second implementation because the
+// credd handle, the list of required services and the cache that keeps
+// this off the hot path all live here.
+func (s *Handler) submitJob(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	s.ensureRequiredCredentials(ctx)
+	return s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 }

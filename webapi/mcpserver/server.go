@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -84,6 +86,7 @@ type Server struct {
 	prometheusExporter *metricsd.PrometheusExporter
 	delegated          bool
 	submitPolicy       submitpolicy.Policy
+	ensureCreds        func(ctx context.Context)
 	// dagmanPath is the access point's condor_dagman binary. See
 	// Config.DagmanPath.
 	dagmanPath string
@@ -163,6 +166,31 @@ func (s *Server) InteractiveManager() *interactive.Manager {
 		return nil
 	}
 	return s.interactive
+}
+
+// ensureCredentials runs the host's pre-submit preparation, if it gave
+// this server one. Safe on a nil hook and on a nil server.
+func (s *Server) ensureCredentials(ctx context.Context) {
+	if s == nil || s.ensureCreds == nil {
+		return
+	}
+	s.ensureCreds(ctx)
+}
+
+// submitRemote is the one door every job this server submits goes
+// through: the host's preparation, then the site's submit policy, then
+// the schedd.
+//
+// Kept as a function rather than three lines at each tool because the
+// three lines were the bug. Every surface that submits a job needs the
+// credentials the access point demands to exist first, and a surface
+// that forgets does not fail -- it produces a job held for a reason its
+// user cannot connect to anything they did. The interactive manager
+// gets the same preparation injected (Options.BeforeSubmit) for the
+// same reason.
+func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	s.ensureCredentials(ctx)
+	return s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
 }
 
 // Config holds server configuration
@@ -271,6 +299,26 @@ type Config struct {
 	// and web surfaces: a site requirement an agent cannot know about is
 	// exactly the kind this exists to satisfy.
 	SubmitPolicy submitpolicy.Policy
+
+	// EnsureCredentials is the host's one preparation step for a submit,
+	// run under the caller's context immediately before the job is handed
+	// to the schedd.
+	//
+	// It is how the credentials an access point demands get bootstrapped
+	// for surfaces that live here rather than in the HTTP daemon -- the
+	// MCP tools and, through them, the interactive sessions the SSH
+	// gateway creates. Without it a session submitted by somebody typing
+	// `ssh` is held with "Job credentials are not available", which is
+	// how this was found.
+	//
+	// A func value rather than a second implementation because the credd
+	// handle, the list of required services and the cache that keeps the
+	// check off the hot path all belong to the HTTP daemon; see
+	// httpserver.Handler.submitJob. Nil (the standalone stdio server)
+	// means there is nothing to prepare.
+	//
+	// Best effort: it cannot refuse a submit, by design.
+	EnsureCredentials func(ctx context.Context)
 
 	// CCB decides how to reach a daemon behind a Condor Connection
 	// Broker. Same setting the REST surface uses (HandlerConfig.CCB),
@@ -400,6 +448,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ccbDialer:      cfg.CCB,
 		delegated:      cfg.Delegated,
 		submitPolicy:   cfg.SubmitPolicy,
+		ensureCreds:    cfg.EnsureCredentials,
 		dagmanPath:     cfg.DagmanPath,
 		dagmanEnv:      cfg.DagmanEnvironment,
 		dbMirror:       cfg.DBMirror,
@@ -447,6 +496,17 @@ func NewServer(cfg Config) (*Server, error) {
 	// it is created unconditionally: an access point that cannot run
 	// condor_ssh_to_job reports that per call, which is a better
 	// answer than a tool that silently does not exist.
+	//
+	// BeforeSubmit is nil rather than a method value when the host gave no hook. A
+	// method value is non-nil whatever it closes over, so wiring one
+	// unconditionally would tell the manager -- and anything asking the
+	// manager -- that preparation is in place on a host that never
+	// supplied any. That is the shape of the bug this hook exists to
+	// fix, so it must not be possible to reintroduce it here.
+	var beforeSubmit func(context.Context)
+	if cfg.EnsureCredentials != nil {
+		beforeSubmit = s.ensureCredentials
+	}
 	interactiveMgr, err := interactive.NewManager(interactive.Options{
 		// getSchedd, not the s.schedd snapshot: this server replaces its
 		// schedd when the collector reports a new address, and holding
@@ -456,6 +516,11 @@ func NewServer(cfg Config) (*Server, error) {
 		Logger:       logger,
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
+		// The same preparation the tools here run before a submit. A
+		// session created by the SSH gateway is submitted through this
+		// manager and never through one of the tools, so wiring it in one
+		// place and not the other is exactly the gap that held those jobs.
+		BeforeSubmit: beforeSubmit,
 		ExtraSubmit:  cfg.InteractiveExtraSubmit,
 		CCB:          cfg.CCB,
 		Requirements: cfg.InteractiveRequirements,

@@ -339,7 +339,7 @@ func (m *Manager) attach(ctx context.Context, caller Caller, info *Info) (Shell,
 	// every other session shares.
 	shell, err := m.opts.Dial(ctx, info.ClusterID, info.ProcID)
 	if err != nil {
-		return nil, fmt.Errorf("connect to session %q (job %s): %w", info.Name, info.JobID, err)
+		return nil, m.dialFailure(ctx, caller, info, err)
 	}
 
 	m.mu.Lock()
@@ -368,6 +368,61 @@ func (m *Manager) attach(ctx context.Context, caller Caller, info *Info) (Shell,
 	m.log().Info(m.opts.LogDest, "interactive session attached",
 		"session", info.Name, "owner", caller.Owner, "job_id", info.JobID)
 	return shell, nil
+}
+
+// dialFailure explains why a dial into a session's sandbox failed,
+// re-reading the job first.
+//
+// The status a caller waited for is not the status at the moment of the
+// dial, and the gap is not a narrow one. A session's job is Running as
+// soon as its shadow is spawned, and the shadow is also what holds it
+// when the access point's OAuth credentials cannot be fetched -- so
+// "Running" and then "Held: Job credentials are not available" seconds
+// apart is the NORMAL shape of that failure, not a race that a longer
+// wait would have avoided. What the schedd then says about the dial is
+// "Job 123.0 is not running", which mentions neither the hold nor its
+// reason, and reads to the person at the terminal as though the gateway
+// were broken.
+//
+// So: any failure to reach the sandbox asks the queue what became of
+// the job. The ad is the authority on that; the refusal text is not,
+// which is why nothing here looks at what the schedd said.
+func (m *Manager) dialFailure(ctx context.Context, caller Caller, info *Info, err error) error {
+	if reason, held := m.heldReason(ctx, caller, info.Name); held {
+		return fmt.Errorf("session %q (job %s) is held: %s", info.Name, info.JobID, reason)
+	}
+	return fmt.Errorf("connect to session %q (job %s): %w", info.Name, info.JobID, err)
+}
+
+// heldReason reports whether the named session's job is on hold now,
+// and why.
+//
+// listAds rather than lookup: this runs on a failure path, where
+// adopting a session into this process or forgetting one -- both of
+// which lookup does -- would be a side effect of reporting an error.
+// A query that itself fails says nothing, and the caller falls back to
+// the error it already had.
+func (m *Manager) heldReason(ctx context.Context, caller Caller, name string) (string, bool) {
+	infos, err := m.listAds(ctx, caller, name)
+	if err != nil {
+		return "", false
+	}
+	for i := range infos {
+		if infos[i].Name != name || infos[i].JobStatus != jobStatusHeld {
+			continue
+		}
+		// The spooling hold is part of submitting, not a failure; it is
+		// already reported as "starting" everywhere else.
+		if infos[i].HoldReasonCode == holdReasonSpoolingInput {
+			return "", false
+		}
+		reason := infos[i].HoldReason
+		if reason == "" {
+			reason = "no reason reported"
+		}
+		return reason, true
+	}
+	return "", false
 }
 
 // startHeartbeatLocked launches the heartbeat loop for a session.

@@ -78,7 +78,40 @@ type Server struct {
 	// Serve, which carries no caller credential.
 	Credential func(ctx context.Context, account string, scopes []string) (context.Context, error)
 
+	// Diagnose replaces a failure to reach a job's sandbox with a
+	// better account of it, and is given the key and the error to
+	// decide. Returning nil means "nothing better to say", and the
+	// original error stands.
+	//
+	// It is needed because the schedd's refusal is not an explanation.
+	// A job whose shadow has just held it -- which is what happens when
+	// the access point's credentials cannot be fetched, AFTER the job
+	// has started running -- is refused with "Job 123.0 is not
+	// running", and the person at the terminal is told nothing about
+	// the hold or its reason. Only the job ad has that, and reading it
+	// is the host's job: this package knows about SSH channels, not
+	// queues.
+	//
+	// Called on every failure to reach the sandbox, a forwarded port
+	// that nothing is listening on included, so it should be cheap and
+	// should answer nil whenever the job is running -- the transport's
+	// own error is the better one in that case.
+	//
+	// Optional.
+	Diagnose func(ctx context.Context, key jobssh.Key, err error) error
+
 	Logger *logging.Logger
+}
+
+// explain applies Diagnose, falling back to the error as given.
+func (s *Server) explain(ctx context.Context, key jobssh.Key, err error) error {
+	if s.Diagnose == nil || err == nil {
+		return err
+	}
+	if better := s.Diagnose(ctx, key, err); better != nil {
+		return better
+	}
+	return err
 }
 
 // Serve handles one authenticated connection until it ends.
@@ -245,24 +278,32 @@ func (s *Server) handleSession(ctx context.Context, account, user string, nch ss
 	go input.run(ctx, pump.ptySeen)
 
 	key, target, err := s.resolve(ctx, account, user, prog.report)
-	prog.stop()
 	if err != nil {
+		prog.stop("")
 		s.failSession(ch, fmt.Sprintf("%v", err), ctx.Err() != nil)
 		s.logf("Could not resolve a session target", "account", account, "target", user, "error", err)
 		return
 	}
-
+	// The display runs on through opening the transport, which is a
+	// CEDAR handshake and an sshd spawn inside the sandbox and can take
+	// seconds of its own, and is stopped by whichever way that ends.
 	sess, release, err := s.Transport.Session(ctx, key)
 	if err != nil {
-		msg := fmt.Sprintf("could not open a session in %s: %v", target, err)
+		prog.stop("")
+		var msg string
 		if errors.Is(err, jobssh.ErrTooManySessions) {
+			// The job is fine and its state is not the question, so
+			// this one is not worth a query to find that out.
 			msg = fmt.Sprintf("%s already has %d sessions open, which is all the job's sshd allows. "+
 				"Close a terminal and try again.", target, jobssh.MaxSessionsPerTransport)
+		} else {
+			msg = fmt.Sprintf("could not open a session in %s: %v", target, s.explain(ctx, key, err))
 		}
 		s.failSession(ch, msg, ctx.Err() != nil)
 		s.logf("Could not open a job session", "account", account, "job", key.String(), "error", err)
 		return
 	}
+	prog.stop(connectedTo(target, key, account))
 	defer release()
 	defer func() { _ = sess.Close() }()
 
@@ -325,6 +366,26 @@ func (s *Server) handleSession(ctx context.Context, account, user string, nch ss
 	waitErr := sess.Wait()
 	ioWG.Wait()
 	sendExitStatus(ch, waitErr)
+}
+
+// connectedTo says what the caller reached, and as whom.
+//
+// The account is the point. On this gateway the SSH username is a
+// TARGET, not an identity: `ssh gateway` and `ssh anything@gateway`
+// both mean "my default session", and who that session belongs to
+// comes from the OAuth2 grant the login produced. So the username on
+// the command line is exactly what cannot be trusted to answer "which
+// account am I?", and somebody who has access to more than one has no
+// other way to tell -- short of running id(1) once they are in, which
+// is a question they should not have had to ask.
+//
+// The job id goes with it because it is the handle for everything else
+// about the session: condor_q, condor_ssh_to_job, a bug report.
+func connectedTo(t Target, key jobssh.Key, account string) string {
+	if t.IsJob() {
+		return fmt.Sprintf("Connected to job %d.%d as %s", key.Cluster, key.Proc, account)
+	}
+	return fmt.Sprintf("Connected to session %q (job %d.%d) as %s", t.Name, key.Cluster, key.Proc, account)
 }
 
 // failSession reports a failure on an already-accepted channel.
@@ -641,7 +702,8 @@ func (s *Server) handleDirectTCPIP(ctx context.Context, account, user string, nc
 	addr := net.JoinHostPort(p.Host, fmt.Sprint(p.Port))
 	conn, err := s.Transport.DialJob(ctx, key, "tcp", addr)
 	if err != nil {
-		_ = nch.Reject(ssh.ConnectionFailed, fmt.Sprintf("could not reach %s inside %s: %v", addr, target, err))
+		_ = nch.Reject(ssh.ConnectionFailed,
+			fmt.Sprintf("could not reach %s inside %s: %v", addr, target, s.explain(ctx, key, err)))
 		return
 	}
 	defer func() { _ = conn.Close() }()
@@ -704,7 +766,8 @@ func (s *Server) handleStreamLocal(ctx context.Context, account, user string, nc
 		// directory can fill most of it, so a path that is simply too
 		// long is a realistic cause and the failure names nothing.
 		_ = nch.Reject(ssh.ConnectionFailed,
-			fmt.Sprintf("could not reach the socket %s inside %s: %v", p.SocketPath, target, err))
+			fmt.Sprintf("could not reach the socket %s inside %s: %v", p.SocketPath, target,
+				s.explain(ctx, key, err)))
 		return
 	}
 	defer func() { _ = conn.Close() }()

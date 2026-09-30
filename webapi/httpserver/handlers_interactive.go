@@ -305,13 +305,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		ExtraSubmitLines:      s.interactiveExtraSubmit,
 	})
 
-	// Some access points hold every job submitted without particular OAuth
-	// service credentials on file. Create them first, so a person using the
-	// web UI does not get a held job for a reason unrelated to what they
-	// asked for. Best effort: see ensureRequiredCredentials.
-	s.ensureRequiredCredentials(ctx)
-
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	clusterID, procAds, err := s.submitJob(ctx, submitFile)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "interactive submit failed",
 			"owner", username, "error", err)
