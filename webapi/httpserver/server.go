@@ -232,6 +232,22 @@ type Config struct {
 	// live only in a directory. Accounts it does map are still verified
 	// against the live database, directory included.
 	IdentityMapPasswdFile string
+
+	// SSHGatewayAddress is where the SSH gateway listens, e.g. ":2222".
+	// Empty disables it. See httpserver/sshgateway.go.
+	SSHGatewayAddress string
+	// SSHGatewayIssuer is the OAuth2 issuer the gateway drives the
+	// device flow against. Empty means the server's own issuer.
+	SSHGatewayIssuer string
+	// SSHHostKeyFile and SSHCAKeyFile point at operator-staged private
+	// keys; empty means keep them sealed in the application database.
+	SSHHostKeyFile string
+	SSHCAKeyFile   string
+	// SSHGatewaySessionCpus/MemoryMB/DiskMB size a session the gateway
+	// creates on demand. Zero means the interactive default.
+	SSHGatewaySessionCpus     int
+	SSHGatewaySessionMemoryMB int
+	SSHGatewaySessionDiskMB   int
 	// IdentityMapTTL is how long the GECOS index and the group lookups
 	// are reused. Zero means five minutes.
 	IdentityMapTTL time.Duration
@@ -431,6 +447,13 @@ func NewServer(cfg Config) (*Server, error) {
 		IdentityMapStrategies:       cfg.IdentityMapStrategies,
 		IdentityGroupSources:        cfg.IdentityGroupSources,
 		IdentityMapPasswdFile:       cfg.IdentityMapPasswdFile,
+		SSHGatewayAddress:           cfg.SSHGatewayAddress,
+		SSHGatewayIssuer:            cfg.SSHGatewayIssuer,
+		SSHHostKeyFile:              cfg.SSHHostKeyFile,
+		SSHCAKeyFile:                cfg.SSHCAKeyFile,
+		SSHGatewaySessionCpus:       cfg.SSHGatewaySessionCpus,
+		SSHGatewaySessionMemoryMB:   cfg.SSHGatewaySessionMemoryMB,
+		SSHGatewaySessionDiskMB:     cfg.SSHGatewaySessionDiskMB,
 		IdentityMapTTL:              cfg.IdentityMapTTL,
 		IdentityMapStripDomain:      cfg.IdentityMapStripDomain,
 		OAuth2AccessTokenLifespan:   cfg.OAuth2AccessTokenLifespan,
@@ -1282,6 +1305,11 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						if err != nil {
 							return nil, fmt.Errorf("failed to mint HTCondor token for %s: %w", username, err)
 						}
+						// Carry the grant's scopes so a handler can gate
+						// on them. Without this only API keys are
+						// scope-checkable, and an OAuth2 grant approved
+						// for less than it asks for looks unscoped.
+						ctx = withAPIKeyScopes(ctx, ar.GetGrantedScopes())
 						s.logger.Debug(logging.DestinationSecurity, "Validated opaque token via OAuth2 storage", "username", username)
 					} else {
 						// Both JWT parsing and opaque token introspection failed

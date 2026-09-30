@@ -167,13 +167,24 @@ type mcpConfig struct {
 	identityGroupSources  []string
 	identityMapPasswdFile string
 	identityMapTTL        time.Duration
-	mcpAccessGroup        string
-	mcpReadGroup          string
-	mcpWriteGroup         string
-	mcpAdminGroup         string
-	mcpSuperuserGroup     string
-	instructions          string
-	adminUsers            []string
+
+	// The SSH gateway: an ssh port that authenticates with the OAuth2
+	// device flow and proxies into a job, so a user needs a terminal
+	// but not an account on the access point.
+	sshGatewayAddress string
+	sshGatewayIssuer  string
+	sshHostKeyFile    string
+	sshCAKeyFile      string
+	sshSessionCpus    int
+	sshSessionMemMB   int
+	sshSessionDiskMB  int
+	mcpAccessGroup    string
+	mcpReadGroup      string
+	mcpWriteGroup     string
+	mcpAdminGroup     string
+	mcpSuperuserGroup string
+	instructions      string
+	adminUsers        []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -1190,6 +1201,19 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 		mcpCfg.identityGroupSources = specs
 	}
 
+	// The SSH gateway. Only the PATHS of the keys come from config:
+	// HTCondor treats configuration values as public -- any user on the
+	// machine can dump them with condor_config_val -- so a private key
+	// must come from a file the operator has permission-locked, not
+	// from a setting and not from the environment.
+	mcpCfg.sshGatewayAddress, _ = cfg.Get("HTTP_API_SSH_GATEWAY_ADDRESS")
+	mcpCfg.sshGatewayIssuer, _ = cfg.Get("HTTP_API_SSH_GATEWAY_ISSUER")
+	mcpCfg.sshHostKeyFile, _ = cfg.Get("HTTP_API_SSH_HOST_KEY_FILE")
+	mcpCfg.sshCAKeyFile, _ = cfg.Get("HTTP_API_SSH_CA_KEY_FILE")
+	mcpCfg.sshSessionCpus = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_CPUS", logger)
+	mcpCfg.sshSessionMemMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB", logger)
+	mcpCfg.sshSessionDiskMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_DISK_MB", logger)
+
 	if len(mcpCfg.identityMapStrategies) > 0 || len(mcpCfg.identityGroupSources) > 0 {
 		mcpCfg.identityMapPasswdFile, _ = cfg.Get("HTTP_API_IDENTITY_MAP_PASSWD_FILE")
 		// Whether a scoped subject may also be matched by its local part.
@@ -1895,6 +1919,13 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
 		IdentityGroupSources:       mcpCfg.identityGroupSources,
 		IdentityMapPasswdFile:      mcpCfg.identityMapPasswdFile,
+		SSHGatewayAddress:          mcpCfg.sshGatewayAddress,
+		SSHGatewayIssuer:           mcpCfg.sshGatewayIssuer,
+		SSHHostKeyFile:             mcpCfg.sshHostKeyFile,
+		SSHCAKeyFile:               mcpCfg.sshCAKeyFile,
+		SSHGatewaySessionCpus:      mcpCfg.sshSessionCpus,
+		SSHGatewaySessionMemoryMB:  mcpCfg.sshSessionMemMB,
+		SSHGatewaySessionDiskMB:    mcpCfg.sshSessionDiskMB,
 		IdentityMapTTL:             mcpCfg.identityMapTTL,
 		IdentityMapStripDomain:     mcpCfg.identityMapStripDomain,
 		OAuth2AccessTokenLifespan:  mcpCfg.oauth2AccessTokenLifespan,
@@ -3374,4 +3405,28 @@ func publicBaseURL(cfg *config.Config) string {
 		return ""
 	}
 	return strings.TrimSuffix(v, "/")
+}
+
+// positiveConfigInt reads a whole-number setting, treating unset and
+// unparseable alike as "not configured".
+//
+// A bad value warns rather than stopping startup: these size a session
+// somebody may not create for weeks, and refusing to boot the whole API
+// over a typo in one of them is out of proportion. The warning names
+// the value so the typo is findable.
+func positiveConfigInt(cfg *config.Config, name string, logger *logging.Logger) int {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v <= 0 {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring a setting that is not a positive whole number; the default applies",
+				"setting", name, "value", raw)
+		}
+		return 0
+	}
+	return v
 }

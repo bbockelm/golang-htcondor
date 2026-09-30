@@ -157,21 +157,15 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	}
 	h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
 
-	if h.signingKeyPath != "" && h.trustDomain != "" {
-		htcToken, err := h.generateHTCondorTokenWithScopes(username, token.GetGrantedScopes())
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to generate HTCondor token", "error", err, "username", username)
-			h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
-			return nil, nil, false
-		}
-		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
-			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
-			return nil, nil, false
-		}
-		secConfig.SecurityTag = username
-		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	// Shared with the SSH gateway, which needs exactly this and must
+	// not grow its own copy -- see withCondorCredential for what a
+	// second copy would be free to forget.
+	ctx, err = h.withCondorCredential(ctx, username, token.GetGrantedScopes())
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to prepare the caller's HTCondor credential",
+			"error", err, "username", username)
+		h.writeError(w, http.StatusInternalServerError, "Failed to generate authentication token")
+		return nil, nil, false
 	}
 
 	// The caller's granted scopes, so the catalogue can be filtered and every

@@ -61,6 +61,20 @@ func withAPIKeyScopes(ctx context.Context, scopes []string) context.Context {
 	return context.WithValue(ctx, scopesContextKey{}, set)
 }
 
+// scopedCredential returns the scopes attached to this request, and
+// whether any were.
+//
+// The second return is the point: "no scopes attached" means the
+// caller authenticated by a route that has no scope model at all --
+// a browser session, a trusted user header -- which is a different
+// thing from a scoped credential that was granted nothing. A handler
+// gating on a scope has to tell those apart or it either refuses
+// every interactive user or admits every under-scoped key.
+func scopedCredential(ctx context.Context) (map[string]struct{}, bool) {
+	v, ok := ctx.Value(scopesContextKey{}).(map[string]struct{})
+	return v, ok && len(v) > 0
+}
+
 // ContainsScope reports whether the request's API key was minted
 // with the named scope. Returns false when the request was NOT
 // authenticated via an API key (or was authenticated via one with
