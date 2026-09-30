@@ -468,3 +468,23 @@ func TestSubmitFileCarriesTheQueryableAttribute(t *testing.T) {
 		t.Errorf("submit file lost its batch name:\n%s", out)
 	}
 }
+
+// TestSubmitFileOverridesTheImageEntrypoint is the difference between
+// the launcher running and not running at all.
+//
+// HTCondor follows docker's rule: with an entrypoint, the executable is
+// passed as its first argument. codercom/code-server's entrypoint is
+// ["/usr/bin/entrypoint.sh", "--bind-addr", "0.0.0.0:8080", "."], so
+// without the override the container starts code-server with the
+// image's own arguments and our script arrives as a folder to open --
+// a server on a TCP port with authentication on, no socket, and no way
+// for the proxy to reach it.
+func TestSubmitFileOverridesTheImageEntrypoint(t *testing.T) {
+	out, err := BuildSubmitFile(SubmitArgs{SessionID: "s1", Image: "example/code-server:1"})
+	if err != nil {
+		t.Fatalf("BuildSubmitFile: %v", err)
+	}
+	if !strings.Contains(out, "docker_override_entrypoint = true") {
+		t.Errorf("submit file does not override the image entrypoint, so the launcher never runs:\n%s", out)
+	}
+}
