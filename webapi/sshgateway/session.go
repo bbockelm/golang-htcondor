@@ -484,7 +484,7 @@ func (in *channelInput) run(ctx context.Context, ptySeen <-chan struct{}) {
 
 // handleSessionRequest translates one of the client's session requests
 // onto the job's own session.
-func (s *Server) handleSessionRequest(req *ssh.Request, sess jobssh.JobSession, ch ssh.Channel, start func(func() error) bool) {
+func (s *Server) handleSessionRequest(req *ssh.Request, sess jobssh.JobSession, _ ssh.Channel, start func(func() error) bool) {
 	switch req.Type {
 	case "pty-req":
 		var p struct {
@@ -540,16 +540,27 @@ func (s *Server) handleSessionRequest(req *ssh.Request, sess jobssh.JobSession, 
 		replyTo(req, true)
 
 	case "subsystem":
+		// Forwarded like exec, because the job's sshd really does
+		// serve it.
+		//
+		// This used to be refused outright, on the belief that the
+		// forced command in condor_ssh_to_job_shell_setup turns a
+		// subsystem request into `eval sftp`. It does not: sshd honours
+		// its own Subsystem directive, and a probe against a real job
+		// gets a genuine SSH_FXP_VERSION reply from a real sftp-server.
+		// The refusal was the only thing stopping it.
+		//
+		// It matters beyond scp and sftp being useful in their own
+		// right: VS Code's Remote-SSH installs its server by copying it
+		// over SFTP or SCP, so a gateway that refuses subsystems cannot
+		// host a remote editor.
 		var p struct{ Name string }
-		_ = ssh.Unmarshal(req.Payload, &p)
-		// sftp cannot work through condor_ssh_to_job: the forced
-		// command in condor_ssh_to_job_shell_setup turns the subsystem
-		// request into `eval sftp`. Say so, because "subsystem request
-		// failed" sends people looking in the wrong place.
-		_, _ = fmt.Fprintf(ch.Stderr(),
-			"This gateway cannot run the %q subsystem: HTCondor's ssh-to-job wrapper does not support it.\r\n",
-			p.Name)
-		replyTo(req, false)
+		if err := ssh.Unmarshal(req.Payload, &p); err != nil {
+			replyTo(req, false)
+			return
+		}
+		name := p.Name
+		replyTo(req, start(func() error { return sess.RequestSubsystem(name) }))
 
 	default:
 		replyTo(req, false)

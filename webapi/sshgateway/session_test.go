@@ -118,6 +118,13 @@ func (f *fakeSession) Start(cmd string) error {
 	return nil
 }
 
+func (f *fakeSession) RequestSubsystem(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = "subsystem: " + name
+	return nil
+}
+
 func (f *fakeSession) Signal(sig ssh.Signal) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -523,11 +530,19 @@ func TestTooManySessionsIsExplained(t *testing.T) {
 	}
 }
 
-// sftp cannot work through condor_ssh_to_job: the forced command turns
-// the subsystem request into `eval sftp`. "subsystem request failed"
-// sends people looking in the wrong place, so the reason is written to
-// the channel first.
-func TestSubsystemIsRefusedWithAReason(t *testing.T) {
+// TestSubsystemIsForwardedToTheJob pins that a subsystem request
+// reaches the job rather than being refused at the gateway.
+//
+// It was refused, on the belief that the forced command in
+// condor_ssh_to_job_shell_setup turns a subsystem request into `eval
+// sftp`. It does not: sshd honours its own Subsystem directive, and a
+// probe against a real job gets a genuine SSH_FXP_VERSION reply. The
+// refusal was the only thing in the way.
+//
+// It matters beyond scp and sftp being useful: VS Code's Remote-SSH
+// installs its server by copying it over SFTP or SCP, so a gateway
+// that refuses subsystems cannot host a remote editor.
+func TestSubsystemIsForwardedToTheJob(t *testing.T) {
 	tr := &fakeTransport{}
 	client := gatewayClient(t, gateway(t, tr), "12345.0")
 
@@ -537,19 +552,16 @@ func TestSubsystemIsRefusedWithAReason(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	stderrPipe, err := sess.StderrPipe()
-	if err != nil {
-		t.Fatalf("stderr pipe: %v", err)
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("the sftp subsystem was refused: %v", err)
 	}
-	subsystemErr := sess.RequestSubsystem("sftp")
-	if subsystemErr == nil {
-		t.Fatal("the sftp subsystem was accepted")
+	remote := tr.lastSession(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && remote.snapshot().started == "" {
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	buf := make([]byte, 256)
-	n, _ := stderrPipe.Read(buf)
-	if !strings.Contains(string(buf[:n]), "sftp") {
-		t.Errorf("the refusal did not name the subsystem: %q", string(buf[:n]))
+	if got := remote.snapshot().started; got != "subsystem: sftp" {
+		t.Errorf("the job was asked to start %q, want the sftp subsystem", got)
 	}
 }
 
