@@ -69,6 +69,7 @@ export default function InteractivePage() {
 // ----------------------------------------------------------------------
 
 function VSCodeSection() {
+  const router = useRouter();
   const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
@@ -99,8 +100,12 @@ function VSCodeSection() {
         submit_lines: submitLines.trim() || undefined,
       }),
     onMutate: () => setErrorMsg(null),
-    onSuccess: () => {
+    onSuccess: (app) => {
       queryClient.invalidateQueries({ queryKey: ['apps'] });
+      // Straight to the session, the way launching a notebook does.
+      // A launch that leaves you on the form looks like it did nothing,
+      // and the waiting is the part that most needs somewhere to show.
+      router.push(`/interactive/vscode/${encodeURIComponent(app.id)}`);
     },
     onError: (err) => {
       setErrorMsg(err instanceof ApiError ? err.message : String(err));
@@ -206,7 +211,14 @@ function VSCodeRow({ app }: { app: AppSummary }) {
 
   return (
     <tr className="border-t border-gray-100">
-      <td className="py-2 font-mono text-xs text-gray-700">{current.job_id}</td>
+      <td className="py-2 font-mono text-xs">
+        <Link
+          href={`/jobs/${encodeURIComponent(current.job_id)}`}
+          className="text-brand-600 hover:underline"
+        >
+          {current.job_id}
+        </Link>
+      </td>
       <td className="py-2">
         <span className="text-gray-800">{vscodeStateLabel(current.state)}</span>
         {current.detail && (
@@ -214,16 +226,12 @@ function VSCodeRow({ app }: { app: AppSummary }) {
         )}
       </td>
       <td className="py-2 text-right space-x-3">
-        {current.url && (
-          <a
-            href={current.url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-brand-600 hover:underline"
-          >
-            Open
-          </a>
-        )}
+        <Link
+          href={`/interactive/vscode/${encodeURIComponent(app.id)}`}
+          className="text-brand-600 hover:underline"
+        >
+          {current.url ? 'Open' : 'Details'}
+        </Link>
         <ConfirmButton
           compact
           label="End"

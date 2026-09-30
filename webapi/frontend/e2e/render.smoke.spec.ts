@@ -752,9 +752,14 @@ test('a VS Code session with no slot yet reads as waiting, not as broken', async
   await page.goto('/interactive');
 
   await expect(page.getByText('Waiting for a slot', { exact: true })).toBeVisible();
-  await expect(page.getByText('4242.0', { exact: true })).toBeVisible();
-  // Nothing to open yet, so no link offering to.
-  await expect(page.getByRole('link', { name: 'Open' })).toHaveCount(0);
+  // The job id is a link to the job, which is where somebody goes to
+  // ask why it has not started.
+  const job = page.getByRole('link', { name: '4242.0', exact: true });
+  await expect(job).toBeVisible();
+  await expect(job).toHaveAttribute('href', '/jobs/4242.0');
+  // Nothing to open yet, so the row does not offer to open anything.
+  await expect(page.getByRole('link', { name: 'Open', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Details', exact: true })).toBeVisible();
 });
 
 test('a ready VS Code session offers the proxy URL', async ({ page }) => {
@@ -777,9 +782,10 @@ test('a ready VS Code session offers the proxy URL', async ({ page }) => {
 
   await page.goto('/interactive');
 
-  const open = page.getByRole('link', { name: 'Open' });
+  // The row leads to the session page, which is what mounts the editor
+  // and says what is happening while it is not yet mounted -- launching
+  // straight into a bare iframe gives nowhere to show "waiting".
+  const open = page.getByRole('link', { name: 'Open', exact: true });
   await expect(open).toBeVisible();
-  // The trailing slash is load-bearing: the app is served by stripping
-  // this prefix and emits relative URLs.
-  await expect(open).toHaveAttribute('href', url);
+  await expect(open).toHaveAttribute('href', '/interactive/vscode/abc123');
 });

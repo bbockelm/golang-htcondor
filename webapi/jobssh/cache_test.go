@@ -756,7 +756,83 @@ func TestSocketAddressRefusesWhatCannotWork(t *testing.T) {
 	c3 := newTestCache(t, none, nil)
 	if _, err := c3.SocketPath(context.Background(), testKey, "vscode.sock"); err == nil {
 		t.Error("a scratch path over the limit was accepted with nothing published")
-	} else if !strings.Contains(err.Error(), "bind by bare name") {
+	} else if !strings.Contains(err.Error(), "somewhere shorter and publish where") {
 		t.Errorf("error %q does not say what the job must do", err)
+	}
+}
+
+// TestSocketAddressIsNotCachedBeforeItIsPublished reproduces a session
+// that sat at "starting" forever while the job was running perfectly
+// well and ssh-to-job worked.
+//
+// The first probe lands in the seconds before the server has written
+// its address. The lookup falls back to joining the scratch path, and
+// caching that guess meant every later request got it too -- including
+// long after the server had published a real address somewhere else.
+func TestSocketAddressIsNotCachedBeforeItIsPublished(t *testing.T) {
+	d := &fakeDialer{scratch: "/var/lib/condor/execute/dir_42\n"}
+	c := newTestCache(t, d, nil)
+
+	// Nothing published yet: the answer is a guess.
+	first, err := c.SocketPath(context.Background(), testKey, "vscode.sock")
+	if err != nil {
+		t.Fatalf("SocketPath: %v", err)
+	}
+	if first != "/var/lib/condor/execute/dir_42/vscode.sock" {
+		t.Fatalf("first answer = %q, want the joined guess", first)
+	}
+
+	// The server comes up and publishes where it actually bound.
+	d.mu.Lock()
+	d.conns[0].mu.Lock()
+	d.conns[0].published = "/tmp/.condor-app-4242/s"
+	d.conns[0].mu.Unlock()
+	d.mu.Unlock()
+
+	second, err := c.SocketPath(context.Background(), testKey, "vscode.sock")
+	if err != nil {
+		t.Fatalf("SocketPath after publish: %v", err)
+	}
+	if second != "/tmp/.condor-app-4242/s" {
+		t.Errorf("after the server published its address, SocketPath still answers %q; "+
+			"a guess was cached and the session can never become reachable", second)
+	}
+
+	// Now that it is authoritative, it is cached: no more asking.
+	d.mu.Lock()
+	before := d.conns[0].pathReads
+	d.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if _, err := c.SocketPath(context.Background(), testKey, "vscode.sock"); err != nil {
+			t.Fatalf("SocketPath %d: %v", i, err)
+		}
+	}
+	d.mu.Lock()
+	after := d.conns[0].pathReads
+	d.mu.Unlock()
+	if after != before {
+		t.Errorf("a published address was re-asked %d more times; it should be cached", after-before)
+	}
+}
+
+// TestAWorkingGuessIsRemembered: a job that publishes nothing still
+// works wherever the joined path fits, and must not pay a command in
+// the sandbox for every connection a browser opens.
+func TestAWorkingGuessIsRemembered(t *testing.T) {
+	d := &fakeDialer{scratch: "/var/lib/condor/execute/dir_42\n"}
+	c := newTestCache(t, d, nil)
+
+	for i := 0; i < 4; i++ {
+		conn, err := c.DialJobUnix(context.Background(), testKey, "vscode.sock")
+		if err != nil {
+			t.Fatalf("DialJobUnix %d: %v", i, err)
+		}
+		_ = conn.Close()
+	}
+	d.mu.Lock()
+	reads := d.conns[0].pathReads
+	d.mu.Unlock()
+	if reads != 1 {
+		t.Errorf("asked the sandbox %d times for a guess that works, want 1", reads)
 	}
 }
