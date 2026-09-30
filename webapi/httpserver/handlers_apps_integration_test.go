@@ -357,10 +357,17 @@ queue
 	}
 	t.Logf("job %s is running", jobID)
 
-	// Prove the precondition rather than assume it. If this harness's
-	// scratch directory happened to be short, everything below would
-	// pass through the plain absolute path and say nothing at all about
-	// the case this test exists for.
+	// Report which of the launcher's two socket placements this
+	// environment exercises, so a failure below can be read.
+	//
+	// Not a requirement, which an earlier version made it: the branch
+	// taken depends on how deep the harness's scratch directory
+	// happens to be, and CI's is 53 bytes where a developer Mac's is
+	// over 100. Demanding the deep one failed the test for being in a
+	// perfectly good environment. The deep branch is covered
+	// deterministically by TestLaunchScriptWorksInADeepSandbox, which
+	// builds its own over-long path on any platform; what this test is
+	// for is that the whole chain works against a real pool.
 	shell, err := schedd.OpenJobShell(ctx, cluster, 0, nil)
 	if err != nil {
 		t.Fatalf("opening a shell to check the sandbox path: %v", err)
@@ -377,11 +384,12 @@ queue
 	}
 	scratchLen := len(strings.TrimSpace(string(scratchOut)))
 	sockLen := scratchLen + 1 + len(vscode.SocketName)
-	t.Logf("sandbox scratch path is %d bytes; the joined socket path would be %d", scratchLen, sockLen)
+	placement := "a short directory outside it (the glidein shape)"
 	if sockLen <= 100 {
-		t.Fatalf("this harness's scratch path is short (%d bytes), so the test would pass "+
-			"through the plain absolute path and prove nothing about the glidein case", sockLen)
+		placement = "the sandbox itself"
 	}
+	t.Logf("sandbox scratch path is %d bytes, so the joined socket path would be %d: "+
+		"this run exercises the socket living in %s", scratchLen, sockLen, placement)
 
 	proxyBase := fmt.Sprintf("http://%s/api/v1/jobs/%s/proxy/unix/%s", addr, jobID, vscode.SocketName)
 
