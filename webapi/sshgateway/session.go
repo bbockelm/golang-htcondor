@@ -26,6 +26,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 )
@@ -147,11 +148,20 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 
 // channelContext mints this channel's credential.
 //
-// A failure is logged and the bare context returned rather than the
-// channel refused: the handlers all fail closed on a context with no
-// credential -- the schedd refuses them -- and a rejection here would
-// lose the reason, which the handler can still write to the channel.
+// A failure is logged and the bare context returned rather than the channel
+// refused, because the handler can still write the reason to the channel and
+// a rejection here cannot. That is only safe because the context is marked as
+// the caller's first: an unmarked credential-less context did NOT fail
+// closed, whatever this comment used to claim. It fell through to this
+// daemon's own configuration, so a channel whose credential could not be
+// minted reached the schedd as a queue superuser -- more authority than one
+// whose credential worked, not less.
+//
+// So the mark goes on before anything that can fail, and every path out of
+// here carries it.
 func (s *Server) channelContext(ctx context.Context, account string, scopes []string, nch ssh.NewChannel) context.Context {
+	ctx = htcondor.WithUserRequest(ctx,
+		"SSH gateway "+nch.ChannelType()+" channel for "+account)
 	if s.Credential == nil {
 		return ctx
 	}

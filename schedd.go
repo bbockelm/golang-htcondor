@@ -38,8 +38,15 @@ func WithSecurityConfig(ctx context.Context, secConfig *security.SecurityConfig)
 // recognise.
 //
 // Cancellation and deadlines are preserved -- only the credential is dropped.
+//
+// Detaching the credential is also a statement about who the connection is,
+// so this classifies the context as daemon work (see CredentialOrigin).
+// Without that, a plumbing context derived from a request would keep the
+// request's own classification and be refused for having no credential --
+// which is the correct treatment of an accident and the wrong treatment of
+// this, where the daemon's credential is the one the peer recognises.
 func WithoutSecurityConfig(ctx context.Context) context.Context {
-	return context.WithValue(ctx, securityConfigContextKey{}, (*security.SecurityConfig)(nil))
+	return WithDaemonCredential(ctx, "credential detached by WithoutSecurityConfig")
 }
 
 // GetSecurityConfigFromContext retrieves the security configuration from the context

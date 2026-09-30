@@ -118,6 +118,15 @@ func runNormalMode() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Everything this process does is its own work, and saying so is what
+	// keeps it working once the HTTP and SSH transports start refusing
+	// credential-less contexts. This binary is not a service with callers:
+	// it is launched by one person's MCP client and runs as that person, so
+	// "authenticate as whoever this process is" IS authenticating as the
+	// caller. FS auth to a local schedd is the normal case here, not the
+	// accident it is on the server side.
+	ctx = htcondor.WithDaemonCredential(ctx, "stdio MCP server")
+
 	// Drop the SSH connections and heartbeat goroutines an interactive
 	// session holds. The session JOBS stay in the queue on purpose -- the
 	// next server to be asked for one by name adopts it -- but the
@@ -277,6 +286,10 @@ func runDemoMode() error {
 	// Set up signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Same reason as the normal path: this process runs as the person who
+	// started it, so its own identity is the caller's.
+	ctx = htcondor.WithDaemonCredential(ctx, "stdio MCP server (demo mode)")
 
 	// Same reason as the normal path: drop the sessions' connections and
 	// goroutines, leave their jobs in the queue.
