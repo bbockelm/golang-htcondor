@@ -134,6 +134,30 @@ type Options struct {
 	// condor_ssh_to_job; tests substitute a fake.
 	Dial Dialer
 
+	// BeforeSubmit runs immediately before a session's job is handed to
+	// the schedd, under the caller's own context.
+	//
+	// It exists because submitting a job on somebody's behalf takes more
+	// than a submit file on an access point that requires OAuth service
+	// credentials: a job that arrives without them is held with "Job
+	// credentials are not available", which has nothing to do with what
+	// the caller asked for. The host bootstraps them here.
+	//
+	// A hook rather than a call this package makes for itself, because
+	// what has to happen first is the host's business and differs by
+	// deployment -- and because the credd handle, the list of required
+	// services and the cache that keeps this off the hot path all live
+	// in the host. Sessions are not the only surface that submits jobs,
+	// and the point of injecting it is that the host has ONE such
+	// preparation step which every one of its submit paths runs,
+	// including this one.
+	//
+	// Best effort by contract: it returns nothing, and a failure inside
+	// it must leave submission to proceed exactly as it would have
+	// otherwise. A convenience that can refuse a submit is a new way for
+	// submission to break.
+	BeforeSubmit func(ctx context.Context)
+
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -361,6 +385,15 @@ func NewManager(opts Options) (*Manager, error) {
 // no unit test of this package can trigger on its own.
 func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
 
+// HasBeforeSubmitForTest reports whether a host wired its pre-submit
+// preparation into this manager.
+//
+// It exists for the same reason ScheddForTest does: forgetting is
+// invisible from outside until it costs somebody a held job, days
+// later, with a hold reason that names none of this. A host that means
+// to prepare something before a submit can assert that it did.
+func (m *Manager) HasBeforeSubmitForTest() bool { return m.opts.BeforeSubmit != nil }
+
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
 // lockSession serializes work on one (owner, name) and returns the
@@ -501,6 +534,13 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
 	}
+	// Whatever the host must do before one of its users' jobs reaches
+	// the schedd -- on this deployment, bootstrapping the credentials
+	// the access point demands. Under ctx, so it runs as the caller.
+	if m.opts.BeforeSubmit != nil {
+		m.opts.BeforeSubmit(ctx)
+	}
+
 	clusterID, procAds, err := schedd.SubmitRemote(ctx, m.opts.SubmitPolicy.Apply(submitFile))
 	if err != nil {
 		return nil, fmt.Errorf("schedd submit failed: %w", err)

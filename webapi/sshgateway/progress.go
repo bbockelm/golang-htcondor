@@ -51,10 +51,17 @@ type progress struct {
 	pty     <-chan struct{}
 	started time.Time
 
-	// w is whichever of the two this run settled on.
-	w io.Writer
+	mu sync.Mutex
+	// w is whichever of the two this run settled on, and hasPTY is
+	// which one it was. decided records that the choice has been made,
+	// because both run and stop may be the one to make it: a wait that
+	// ends before run has looked at the pty channel still has something
+	// to say, and saying it on the wrong stream is as good as not
+	// saying it.
+	w       io.Writer
+	hasPTY  bool
+	decided bool
 
-	mu       sync.Mutex
 	status   string
 	lastLine string
 	drawn    bool
@@ -92,13 +99,11 @@ func (p *progress) run(ctx context.Context) {
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	p.mu.Lock()
-	if hasPTY {
-		p.w = p.tty
-	} else {
-		p.w = p.plain
-	}
-	p.mu.Unlock()
+	p.settle(hasPTY)
+	// Read the choice back rather than trusting the local: stop may
+	// have settled it first, and two writers for one channel would
+	// interleave a spinner with the line that ends it.
+	hasPTY = p.terminal()
 
 	ticker := time.NewTicker(spinnerInterval)
 	defer ticker.Stop()
@@ -170,23 +175,80 @@ func (p *progress) writeOnce(status string) {
 // spinner itself is erased -- it is motion, and motion does not belong
 // in a scrollback.
 //
-// Nothing is printed when nothing was ever drawn. Reaching a job that
-// is already running takes no measurable time, and "ready after 0:00"
-// is noise on every single connection.
-func (p *progress) stop() {
+// connected is what the caller ended up connected to -- which job, and
+// as which account -- or empty when the wait failed and there is
+// nothing to report. It is worth a line even when there was no wait,
+// because on this gateway the SSH username is not an identity: a bare
+// `ssh gateway` means "my default session" and the account comes from
+// the OAuth2 grant, so nothing the person typed tells them which
+// account the session actually runs as.
+//
+// Otherwise nothing is printed when nothing was ever drawn. Reaching a
+// job that is already running takes no measurable time, and "ready
+// after 0:00" is noise on every single connection.
+func (p *progress) stop(connected string) {
+	// run may not have chosen a writer yet, because reaching a session
+	// that is already running is faster than the grace period it waits
+	// out. A pty-req that has already arrived is enough to decide on.
+	select {
+	case <-p.pty:
+		p.settle(true)
+	default:
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.done {
 		return
 	}
 	p.done = true
-	if !p.drawn && p.lastLine == "" {
+
+	waited := p.drawn || p.lastLine != ""
+	// Without a terminal, only a wait earns a line. The summary would
+	// otherwise go to the stderr of `ssh -T gateway cmd`, an scp or an
+	// sftp -- none of which asked who they are, and all of which are
+	// read by something other than a person.
+	if !waited && (connected == "" || !p.hasPTY) {
 		return
 	}
+	// One write, erase included: the channel is a stream somebody is
+	// reading as it arrives, and splitting this in two lets a reader
+	// see the erase without the line that replaces it.
+	erase := ""
 	if p.drawn {
-		_, _ = fmt.Fprint(p.w, "\r\x1b[K")
+		erase = "\r\x1b[K"
 	}
-	_, _ = fmt.Fprintf(p.w, "Ready after %s.\r\n", elapsed(time.Since(p.started)))
+	switch {
+	case waited && connected != "":
+		_, _ = fmt.Fprintf(p.w, "%sReady after %s. %s.\r\n", erase, elapsed(time.Since(p.started)), connected)
+	case waited:
+		_, _ = fmt.Fprintf(p.w, "%sReady after %s.\r\n", erase, elapsed(time.Since(p.started)))
+	default:
+		_, _ = fmt.Fprintf(p.w, "%s%s.\r\n", erase, connected)
+	}
+}
+
+// settle fixes which stream this channel's progress and summary go to.
+// First caller wins; later ones are no-ops.
+func (p *progress) settle(hasPTY bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.decided {
+		return
+	}
+	p.decided, p.hasPTY = true, hasPTY
+	if hasPTY {
+		p.w = p.tty
+	} else {
+		p.w = p.plain
+	}
+}
+
+// terminal reports the settled answer.
+func (p *progress) terminal() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hasPTY
 }
 
 // elapsed formats a wait the way a person reads a clock.

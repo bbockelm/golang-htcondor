@@ -306,7 +306,7 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	submitFile := buildSubmitFile(cfg, name, destination, cpus, memoryMB, diskMB, verify != "", dockerfile != "")
 
 	schedd := s.getSchedd()
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("build job submission failed: %w", err)
 	}

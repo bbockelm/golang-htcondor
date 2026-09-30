@@ -60,7 +60,7 @@ func TestElapsedTimeSurvivesTheSpinner(t *testing.T) {
 	for time.Now().Before(deadline) && !strings.Contains(tty.String(), "is idle") {
 		time.Sleep(10 * time.Millisecond)
 	}
-	p.stop()
+	p.stop("")
 
 	out := tty.String()
 	if !strings.Contains(out, "Ready after ") {
@@ -77,7 +77,7 @@ func TestElapsedTimeSurvivesTheSpinner(t *testing.T) {
 func TestNoSummaryWhenThereWasNoWait(t *testing.T) {
 	tty, plain := &syncBuf{}, &syncBuf{}
 	p := newProgress(tty, plain, make(chan struct{}))
-	p.stop()
+	p.stop("")
 
 	if got := tty.String() + plain.String(); got != "" {
 		t.Errorf("something was printed for a wait that never happened: %q", got)
@@ -99,7 +99,7 @@ func TestSummaryWithoutATerminalIsPlain(t *testing.T) {
 	for time.Now().Before(deadline) && !strings.Contains(plain.String(), "is idle") {
 		time.Sleep(10 * time.Millisecond)
 	}
-	p.stop()
+	p.stop("")
 
 	out := plain.String()
 	if !strings.Contains(out, "Ready after ") {
@@ -110,5 +110,45 @@ func TestSummaryWithoutATerminalIsPlain(t *testing.T) {
 	}
 	if tty.String() != "" {
 		t.Errorf("progress went to stdout with no terminal: %q", tty.String())
+	}
+}
+
+// Reaching a session that is already running is the common case, and it
+// is also when somebody is most likely to be unsure which account they
+// are: they typed no username at all. So the summary is printed even
+// though there was no wait to report.
+func TestTheAccountIsPrintedWithNoWaitOnATerminal(t *testing.T) {
+	tty, plain := &syncBuf{}, &syncBuf{}
+	pty := make(chan struct{})
+	close(pty)
+
+	p := newProgress(tty, plain, pty)
+	// No run(): a connection this fast stops the display before the
+	// goroutine has chosen a stream, which is exactly the case that
+	// printed nothing.
+	p.stop(`Connected to session "default" (job 5.0) as tannenba`)
+
+	out := tty.String()
+	if !strings.Contains(out, "as tannenba") {
+		t.Errorf("the account was not printed: %q", out)
+	}
+	if strings.Contains(out, "Ready after") {
+		t.Errorf("a wait that never happened was reported: %q", out)
+	}
+	if plain.String() != "" {
+		t.Errorf("the summary went to stderr although there is a terminal: %q", plain.String())
+	}
+}
+
+// Without a terminal the summary is suppressed. That stderr belongs to
+// `ssh -T gateway cmd`, to scp and to sftp -- none of which asked who
+// they are, and all of which are read by something other than a person.
+func TestTheAccountIsNotPrintedWithoutATerminal(t *testing.T) {
+	tty, plain := &syncBuf{}, &syncBuf{}
+	p := newProgress(tty, plain, make(chan struct{})) // never closed: no pty
+	p.stop(`Connected to session "default" (job 5.0) as tannenba`)
+
+	if got := tty.String() + plain.String(); got != "" {
+		t.Errorf("a scripted client was told about its account: %q", got)
 	}
 }

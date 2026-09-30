@@ -1147,3 +1147,96 @@ func TestDefaultDiskReachesSubmitFile(t *testing.T) {
 		t.Errorf("submit file does not request the default disk;\nwant a line %q\ngot:\n%s", want, submit)
 	}
 }
+
+// ctxKey is a value a test plants on the context it calls with, to
+// check that what reaches a hook is the CALLER's context and not one
+// the manager made up.
+type ctxKey struct{}
+
+// The host's pre-submit hook has to run, and has to run before the job
+// exists. Its whole purpose is to put things in place that the schedd
+// checks as the job arrives -- on this deployment, the OAuth
+// credentials whose absence holds a job with "Job credentials are not
+// available" -- and a hook that runs afterwards prepares nothing.
+func TestCreateRunsBeforeSubmitWithTheCallersContext(t *testing.T) {
+	schedd := newFakeSchedd()
+
+	var calls, submittedWhenCalled int
+	var sawValue bool
+	mgr, _ := testManager(t, schedd, Options{
+		BeforeSubmit: func(ctx context.Context) {
+			calls++
+			submittedWhenCalled = len(schedd.submittedFiles())
+			_, sawValue = ctx.Value(ctxKey{}).(string)
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "alice's request")
+	if _, err := mgr.Create(ctx, alice, CreateSpec{Name: "build"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("BeforeSubmit ran %d times, want exactly 1", calls)
+	}
+	if submittedWhenCalled != 0 {
+		t.Errorf("BeforeSubmit ran after %d job(s) had been submitted; it has to run first or it prepares nothing",
+			submittedWhenCalled)
+	}
+	if !sawValue {
+		// A hook given a context of the manager's own would reach the
+		// credd as this daemon rather than as the caller, and bootstrap
+		// the wrong person's credentials.
+		t.Error("BeforeSubmit did not receive the caller's context")
+	}
+}
+
+// A job can be Running when the wait for it ends and Held by the time
+// the dial lands: the shadow is what marks it running AND what holds it
+// when the access point's credentials cannot be fetched. The schedd
+// then refuses with "is not running", which says nothing about the hold
+// -- so the failure has to re-read the ad.
+func TestDialFailureAfterAHoldReportsTheHold(t *testing.T) {
+	schedd := newFakeSchedd()
+	var job *fakeJob
+	refusal := errors.New("schedd refused GET_JOB_CONNECT_INFO for 100.0: Job 100.0 is not running")
+
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			schedd.setHeld(job, "Job credentials are not available", 13)
+			return nil, refusal
+		},
+	})
+	job = mustCreate(t, mgr, schedd, alice, "build")
+	schedd.setStatus(job, jobStatusRunning)
+
+	_, err := mgr.Exec(context.Background(), alice, "build", ExecRequest{Command: "true"})
+	if err == nil {
+		t.Fatal("Exec returned no error after the dial failed")
+	}
+	if !strings.Contains(err.Error(), "is held: Job credentials are not available") {
+		t.Errorf("the hold and its reason are missing from:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "GET_JOB_CONNECT_INFO") {
+		t.Errorf("the schedd's refusal was surfaced instead of the hold:\n%v", err)
+	}
+}
+
+// The other half: a dial that fails while the job really is running is
+// a transport problem, and replacing that error with a guess about the
+// queue would hide the only information there is.
+func TestDialFailureOnARunningJobKeepsTheError(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{
+		Dial: func(context.Context, int, int) (Shell, error) {
+			return nil, errors.New("ccb: broker failure: failed to connect")
+		},
+	})
+	job := mustCreate(t, mgr, schedd, alice, "build")
+	schedd.setStatus(job, jobStatusRunning)
+
+	_, err := mgr.Exec(context.Background(), alice, "build", ExecRequest{Command: "true"})
+	if err == nil || !strings.Contains(err.Error(), "broker failure") {
+		t.Fatalf("the transport error was lost: %v", err)
+	}
+}

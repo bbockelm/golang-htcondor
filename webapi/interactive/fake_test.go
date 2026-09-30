@@ -178,6 +178,16 @@ func (f *fakeSchedd) setOwner(owner string) *fakeJob {
 	return job
 }
 
+// setHeld puts a job on hold the way a shadow does: after the job has
+// already been seen running, and with a reason only the ad carries.
+func (f *fakeSchedd) setHeld(job *fakeJob, reason string, code int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	job.status = jobStatusHeld
+	job.holdReason = reason
+	job.holdCode = code
+}
+
 func (f *fakeSchedd) setStatus(job *fakeJob, status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

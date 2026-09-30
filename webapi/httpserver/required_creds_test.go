@@ -235,3 +235,28 @@ func TestNoServicesConfiguredDoesNothing(t *testing.T) {
 		t.Errorf("touched the credd with nothing configured: %d statuses, %d puts", statuses, puts)
 	}
 }
+
+// Every submit this daemon makes goes through submitJob, and that is
+// where the bootstrap lives now. It used to be a line each surface
+// copied, and the surfaces added later -- interactive sessions, reached
+// from the SSH gateway and from the MCP tools -- did not copy it, so
+// somebody who typed `ssh` got a job held with "Job credentials are not
+// available".
+func TestSubmitJobBootstrapsTheRequiredCredentials(t *testing.T) {
+	credd := newFakeCredd()
+	h := credTestHandler(t, credd, "scitokens")
+	// Nothing listens on port 1, so the submit fails. That is fine and
+	// deliberate: what is being pinned is that the preparation happens
+	// on this path at all.
+	h.schedd = htcondor.NewSchedd("test", "127.0.0.1:1")
+
+	ctx, cancel := context.WithTimeout(ctxAs("alice@ap.example.org"), 20*time.Second)
+	defer cancel()
+	if _, _, err := h.submitJob(ctx, "executable = /bin/true\nqueue\n"); err == nil {
+		t.Fatal("a submit to an address nothing listens on succeeded")
+	}
+
+	if _, puts := credd.counts(); puts != 1 {
+		t.Errorf("the submit path stored %d credentials, want 1", puts)
+	}
+}

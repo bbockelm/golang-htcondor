@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/ory/fosite"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -206,6 +207,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Transport:  cache,
 			Resolve:    h.sshGatewayResolve,
 			Credential: h.sshGatewayCredential,
+			Diagnose:   h.sshGatewayDiagnose,
 			Logger:     h.logger,
 		},
 		Bans:   bans,
@@ -517,6 +519,86 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 			return jobssh.Key{}, fmt.Errorf("session %q disappeared while waiting for it to start", name)
 		}
 		info = *found
+	}
+}
+
+// sshGatewayDiagnose explains a failure to reach a job's sandbox by
+// asking the queue what became of the job.
+//
+// It is what the reported failure needed and did not have.
+// The schedd refuses GET_JOB_CONNECT_INFO for a job that is not running
+// with "Job 123.0 is not running" and nothing else, and that refusal is
+// reached in the ordinary case: a session's job is Running from the
+// moment its shadow is spawned, and the shadow is also what puts it on
+// hold when the access point's OAuth credentials cannot be fetched. So
+// the wait ends legitimately -- the job WAS running -- and the connect
+// that follows a second later is refused, leaving the person at the
+// terminal a message about a job that is "not running" with no mention
+// of the hold that stopped it. Waiting differently cannot fix that; the
+// only fix is to look again at the end.
+//
+// Nothing here parses the schedd's words. The refusal text is the
+// schedd's business and changes between versions; the job ad is the
+// authority on what the job is doing, and it is what gets read.
+//
+// Returning nil means "nothing better to say", which covers a job that
+// really is running (the transport itself failed, and that error is the
+// one worth showing) and a query that could not be answered.
+func (h *Handler) sshGatewayDiagnose(ctx context.Context, key jobssh.Key, _ error) error {
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", key.Cluster, key.Proc)
+	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Limit:      1,
+		Projection: []string{"ClusterId", "ProcId", "JobStatus", "HoldReason", "HoldReasonCode"},
+		// Confined to the caller the same way every other query on this
+		// path is. The context carries their credential, so the schedd
+		// confines it too; this only makes the query ask the same
+		// question the connect asked.
+		FetchOpts: htcondor.FetchMyJobs,
+		Owner:     key.Owner,
+	})
+	if err != nil {
+		// A query that could not be answered says nothing, and the
+		// caller keeps the error it already had.
+		h.logger.Warn(logging.DestinationHTTP, "could not re-read a job after a transport failure",
+			"job", key.String(), "error", err)
+		return nil
+	}
+	return diagnoseFromAds(key, ads)
+}
+
+// diagnoseFromAds turns what the queue says about a job into what to
+// tell the person whose connection just failed.
+func diagnoseFromAds(key jobssh.Key, ads []*classad.ClassAd) error {
+	const (
+		jobStatusRunning = 2
+		jobStatusHeld    = 5
+	)
+	if len(ads) == 0 {
+		// An empty answer is an answer: the job the caller was told to
+		// connect to is no longer theirs to connect to.
+		return fmt.Errorf("job %d.%d is no longer in the queue", key.Cluster, key.Proc)
+	}
+
+	status, _ := ads[0].EvaluateAttrInt("JobStatus")
+	switch int(status) {
+	case jobStatusRunning:
+		// The job really is running, so the transport is what failed and
+		// its error is the only information there is. Replacing it with
+		// a remark about the queue would hide that.
+		return nil
+	case jobStatusHeld:
+		code, _ := ads[0].EvaluateAttrInt("HoldReasonCode")
+		if int(code) == holdReasonCodeSpoolingInput {
+			return fmt.Errorf("job %d.%d is still starting: its input is being spooled",
+				key.Cluster, key.Proc)
+		}
+		reason, _ := ads[0].EvaluateAttrString("HoldReason")
+		if strings.TrimSpace(reason) == "" {
+			reason = "no reason reported"
+		}
+		return fmt.Errorf("job %d.%d is held: %s", key.Cluster, key.Proc, reason)
+	default:
+		return fmt.Errorf("job %d.%d is not running (JobStatus=%d)", key.Cluster, key.Proc, status)
 	}
 }
 

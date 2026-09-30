@@ -243,13 +243,7 @@ func (s *Handler) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 
 	script := vscode.LaunchScript(vscode.ScriptArgs{Workdir: req.Workdir})
 
-	// Some access points hold every job submitted without particular
-	// OAuth service credentials on file. Create them first, so that a
-	// person opening an editor does not get a held job for a reason
-	// unrelated to what they asked for. Best effort.
-	s.ensureRequiredCredentials(ctx)
-
-	clusterID, procAds, err := s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	clusterID, procAds, err := s.submitJob(ctx, submitFile)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "app submit failed",
 			"app", id, "owner", owner, "error", err)

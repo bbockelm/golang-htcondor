@@ -753,8 +753,14 @@ func (b *blockingResolve) fn(ctx context.Context, account string, _ Target, repo
 // gatewayWithResolve is gateway() with a caller-supplied resolver.
 func gatewayWithResolve(t *testing.T, tr *fakeTransport, resolve ResolveFunc) string {
 	t.Helper()
+	return gatewayWithServer(t, &Server{Transport: tr, Resolve: resolve})
+}
+
+// gatewayWithServer serves a caller-built Server, for the fields the
+// two helpers above do not set.
+func gatewayWithServer(t *testing.T, srv *Server) string {
+	t.Helper()
 	a := grantingAuthenticator(t, "bbockelm", Options{Prompt: "ap.example.edu"})
-	srv := &Server{Transport: tr, Resolve: resolve}
 
 	cfg := &ssh.ServerConfig{KeyboardInteractiveCallback: a.KeyboardInteractive(context.Background())}
 	cfg.AddHostKey(testSigner(t))
@@ -1144,5 +1150,172 @@ func TestStdinIsConnectedBeforeTheCommandStarts(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("what was typed while the shell was starting never reached the job")
+	}
+}
+
+// jobResolve answers with the job the username named, which is what a
+// host's resolver does for a job target.
+func jobResolve(_ context.Context, account string, t Target, _ func(string)) (jobssh.Key, error) {
+	return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
+}
+
+// A job that has gone on hold must be reported as held, whatever the
+// schedd said about the dial.
+//
+// This is the reported failure. A session's job is Running the moment
+// its shadow is spawned, and the shadow is also what holds it when the
+// access point's credentials cannot be fetched -- so the wait ends on a
+// job that really was running and the connect a moment later is refused
+// with "Job 123.0 is not running". That refusal reached the user
+// verbatim, mentioning neither the hold nor its reason, and reads like
+// a broken gateway rather than a job that needs releasing.
+func TestATransportFailureReportsTheHoldInstead(t *testing.T) {
+	tr := &fakeTransport{sessionErr: errors.New(
+		"opening a transport to job bbockelm/12345.0: schedd refused GET_JOB_CONNECT_INFO for 12345.0: Job 12345.0 is not running")}
+
+	var asked []jobssh.Key
+	var mu sync.Mutex
+	srv := &Server{
+		Transport: tr,
+		Resolve:   jobResolve,
+		Diagnose: func(_ context.Context, key jobssh.Key, _ error) error {
+			mu.Lock()
+			asked = append(asked, key)
+			mu.Unlock()
+			return fmt.Errorf("job %d.%d is held: Job credentials are not available", key.Cluster, key.Proc)
+		},
+	}
+	client := gatewayClient(t, gatewayWithServer(t, srv), "12345.0")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if runErr := sess.Start("true"); runErr == nil {
+		t.Error("the exec was accepted although the transport failed")
+	}
+
+	msg := readAvailable(t, stderrPipe)
+	if !strings.Contains(msg, "is held: Job credentials are not available") {
+		t.Errorf("the hold was not reported: %q", msg)
+	}
+	if strings.Contains(msg, "GET_JOB_CONNECT_INFO") {
+		t.Errorf("the schedd's refusal reached the user instead of the hold: %q", msg)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != (jobssh.Key{Owner: "bbockelm", Cluster: 12345, Proc: 0}) {
+		t.Errorf("the job asked about was %v, want the one the caller was connecting to", asked)
+	}
+}
+
+// The session cap is a fact about the sshd in the job, not about the
+// job's state, so it must not cost a query to say so -- and must keep
+// the sentence that tells the user what to do about it.
+func TestTheSessionCapIsNotDiagnosed(t *testing.T) {
+	tr := &fakeTransport{sessionErr: fmt.Errorf("%w: job bbockelm/12345.0 already has 10 of 10", jobssh.ErrTooManySessions)}
+	var diagnosed int
+	var mu sync.Mutex
+	srv := &Server{
+		Transport: tr,
+		Resolve:   jobResolve,
+		Diagnose: func(context.Context, jobssh.Key, error) error {
+			mu.Lock()
+			diagnosed++
+			mu.Unlock()
+			return errors.New("job 12345.0 is held: something else")
+		},
+	}
+	client := gatewayClient(t, gatewayWithServer(t, srv), "12345.0")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	_ = sess.Start("true")
+
+	msg := readAvailable(t, stderrPipe)
+	if !strings.Contains(msg, "Close a terminal") {
+		t.Errorf("the session cap lost its explanation: %q", msg)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if diagnosed != 0 {
+		t.Errorf("the queue was asked about a job whose state was not in question (%d times)", diagnosed)
+	}
+}
+
+// Which account the session runs as has to be on the screen.
+//
+// The SSH username cannot answer it: here it is a TARGET -- a job id, a
+// session name, or nothing at all -- and the account comes from the
+// OAuth2 grant. This connects as "12345.0" and is authenticated as
+// bbockelm, which is the whole point: the two have nothing to do with
+// each other.
+func TestTheAccountIsReportedAfterAWait(t *testing.T) {
+	br := newBlockingResolve("Session \"work\" (job 12345.0) is idle")
+	tr := &fakeTransport{}
+	client := gatewayClient(t, gatewayWithResolve(t, tr, br.fn), "12345.0")
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	// Held until the job exists, like every other request sent during a
+	// wait -- and it is what makes this a terminal, so the summary has
+	// somewhere to go.
+	go func() { _ = sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}) }()
+
+	painted := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := stdout.Read(buf)
+		painted <- string(buf[:n])
+	}()
+	select {
+	case <-painted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was painted during the wait")
+	}
+	close(br.release)
+
+	// Read on until the summary arrives: the spinner may still have a
+	// frame or two in flight behind it.
+	got := make(chan string, 1)
+	go func() {
+		var seen strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			seen.Write(buf[:n])
+			if strings.Contains(seen.String(), "Ready after ") || err != nil {
+				got <- seen.String()
+				return
+			}
+		}
+	}()
+	select {
+	case line := <-got:
+		if !strings.Contains(line, "as bbockelm") {
+			t.Errorf("the account the session runs as is missing from %q", line)
+		}
+		if !strings.Contains(line, "Ready after ") {
+			t.Errorf("the wait's duration was dropped: %q", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was written once the session was ready")
 	}
 }

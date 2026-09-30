@@ -23,8 +23,11 @@ import (
 
 	"net"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
@@ -344,5 +347,119 @@ func TestSSHGatewayLockoutHonoursItsSettings(t *testing.T) {
 	}
 	if ok, _ := bans.Allow(friend); !ok {
 		t.Fatal("a trusted network was locked out")
+	}
+}
+
+// jobAd builds the slice of the queue's answer that diagnoseFromAds
+// reads.
+func jobAd(status int, holdCode int, holdReason string) *classad.ClassAd {
+	ad := classad.New()
+	ad.InsertAttr("ClusterId", int64(12345))
+	ad.InsertAttr("ProcId", int64(0))
+	ad.InsertAttr("JobStatus", int64(status))
+	if holdCode != 0 {
+		ad.InsertAttr("HoldReasonCode", int64(holdCode))
+	}
+	if holdReason != "" {
+		ad.InsertAttrString("HoldReason", holdReason)
+	}
+	return ad
+}
+
+// The reported failure, at the level where it is decided.
+//
+// A job's shadow is what marks it Running and also what holds it when
+// the access point's credentials cannot be fetched, so "Running" and
+// then "Held: Job credentials are not available" seconds apart is the
+// ordinary shape of this. The wait ends honestly and the connect is
+// then refused with "Job 12345.0 is not running" -- the schedd's words
+// for it, which name neither the hold nor its reason. The ad does.
+func TestDiagnoseReportsAHold(t *testing.T) {
+	key := jobssh.Key{Owner: "tannenba", Cluster: 12345, Proc: 0}
+
+	tests := []struct {
+		name string
+		ads  []*classad.ClassAd
+		want string // "" means: nothing better to say
+	}{
+		{
+			name: "held",
+			ads:  []*classad.ClassAd{jobAd(5, 13, "Job credentials are not available")},
+			want: "job 12345.0 is held: Job credentials are not available",
+		},
+		{
+			// A hold with no reason on the ad is still a hold, and the
+			// word "held" is the part that tells the user what to do.
+			name: "held with no reason",
+			ads:  []*classad.ClassAd{jobAd(5, 13, "")},
+			want: "job 12345.0 is held: no reason reported",
+		},
+		{
+			// Code 16 is the hold every spooled submit passes through.
+			// Calling it held would report a job that is starting
+			// normally as a failure.
+			name: "spooling",
+			ads:  []*classad.ClassAd{jobAd(5, 16, "Spooling input data files")},
+			want: "job 12345.0 is still starting: its input is being spooled",
+		},
+		{
+			// The transport failed while the job was running, so its
+			// error is the only information there is.
+			name: "running",
+			ads:  []*classad.ClassAd{jobAd(2, 0, "")},
+			want: "",
+		},
+		{
+			name: "idle again",
+			ads:  []*classad.ClassAd{jobAd(1, 0, "")},
+			want: "job 12345.0 is not running (JobStatus=1)",
+		},
+		{
+			name: "gone",
+			ads:  nil,
+			want: "job 12345.0 is no longer in the queue",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := diagnoseFromAds(key, tc.ads)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("a running job produced an explanation that would replace the real error: %v", err)
+			case tc.want == "":
+				return
+			case err == nil:
+				t.Fatalf("no explanation; want %q", tc.want)
+			case err.Error() != tc.want:
+				t.Errorf("explanation = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The gateway's sessions are submitted by the MCP server's interactive
+// manager, not by any handler in this package, so the preparation every
+// REST submit path runs has to be handed over to it explicitly. It was
+// not, which is why `ssh` produced a job held with "Job credentials are
+// not available" on an access point that requires them.
+func TestInteractiveSessionsGetTheCredentialBootstrap(t *testing.T) {
+	h, err := NewHandler(HandlerConfig{
+		ScheddName:   "test-schedd",
+		ScheddAddr:   "127.0.0.1:9618",
+		Logger:       testLogger(t),
+		OAuth2DBPath: t.TempDir() + "/sessions.db",
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	t.Cleanup(func() { h.mcpServer.Close() })
+
+	mgr := h.mcpServer.InteractiveManager()
+	if mgr == nil {
+		t.Fatal("the MCP server has no interactive manager")
+	}
+	if !mgr.HasBeforeSubmitForTest() {
+		t.Error("sessions would be submitted without the preparation every other submit path runs")
 	}
 }
