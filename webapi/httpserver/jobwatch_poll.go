@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -47,25 +48,49 @@ type jobWatchSource interface {
 
 // --- schedd polling fallback ---
 
-// jobPollHub runs one poll loop per distinct constraint, however many
-// watchers that constraint has.
+// jobPollHub runs one poll loop per distinct caller and constraint,
+// however many watchers that pair has.
 //
-// Keyed on the constraint rather than the job id on purpose: the
-// constraint carries the caller's owner scope (see jobOwnerScope), so two
-// callers entitled to see different things never share a subscription,
-// while the common case -- several viewers of the same job with the same
-// scope -- collapses to a single query per interval.
+// Keyed on the CALLER's credential as well as the constraint. An earlier
+// version keyed on the constraint alone, reasoning that the constraint
+// carries the caller's owner scope so two callers entitled to see
+// different things never share. That is not true: bulkOwnerScope returns
+// the constraint UNSCOPED both for a web UI admin and for any caller with
+// no session, so two such callers watching the same job produce byte-
+// identical constraints and shared one subscription -- and with it one
+// credential.
+//
+// The key is the credential's SecurityTag, which is what cedar already
+// partitions its own client sessions by, so this draws the boundary in
+// the same place the layer underneath does. A caller with no tag gets a
+// group of its own rather than joining one, because "no tag" is not an
+// identity and must not be treated as one shared between strangers.
+//
+// The sharing that remains is the case it was built for: several viewers
+// of the same job, as the same person, collapsing to one query per
+// interval.
 type jobPollHub struct {
 	interval time.Duration
 	query    func(ctx context.Context, constraint string) (*classad.ClassAd, error)
 	logger   *logging.Logger
 
 	mu     sync.Mutex
-	groups map[string]*jobPollGroup
+	groups map[pollKey]*jobPollGroup
+	// untagged numbers the groups that cannot be keyed by a credential,
+	// so each gets its own rather than colliding on the empty tag.
+	untagged uint64
+}
+
+// pollKey identifies a poll group: whose credential it runs on, and what
+// it asks for.
+type pollKey struct {
+	cred       string
+	constraint string
 }
 
 type jobPollGroup struct {
 	hub        *jobPollHub
+	key        pollKey
 	constraint string
 	cancel     context.CancelFunc
 
@@ -85,27 +110,38 @@ func newJobPollHub(interval time.Duration, logger *logging.Logger,
 		interval: interval,
 		query:    query,
 		logger:   logger,
-		groups:   map[string]*jobPollGroup{},
+		groups:   map[pollKey]*jobPollGroup{},
 	}
 }
 
-// Subscribe joins (or starts) the poll for constraint. The returned source
-// must be closed; the underlying poll stops when its last subscriber goes.
-func (h *jobPollHub) Subscribe(constraint string) jobWatchSource {
+// Subscribe joins (or starts) the poll for constraint, as the caller that
+// ctx carries. The returned source must be closed; the underlying poll
+// stops when its last subscriber goes.
+//
+// ctx is read for the caller's credential and is NOT retained: it belongs
+// to one HTTP request and the poll outlives it. The credential is copied
+// onto a fresh background context instead, which means the poll keeps
+// running on the authority the subscriber had when it joined, and does
+// not re-check it. That is deliberate -- a watch is a stream the caller
+// already opened, not a fresh act of authorization each tick.
+func (h *jobPollHub) Subscribe(ctx context.Context, constraint string) jobWatchSource {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	g := h.groups[constraint]
+	key, pollCtx := h.keyFor(ctx, constraint)
+
+	g := h.groups[key]
 	if g == nil {
-		ctx, cancel := context.WithCancel(context.Background())
+		gctx, cancel := context.WithCancel(pollCtx)
 		g = &jobPollGroup{
 			hub:        h,
+			key:        key,
 			constraint: constraint,
 			cancel:     cancel,
 			subs:       map[*jobPollSub]struct{}{},
 		}
-		h.groups[constraint] = g
-		go g.run(ctx)
+		h.groups[key] = g
+		go g.run(gctx)
 	}
 
 	// Buffered: a subscriber that is slow to read must not stall the poll
@@ -116,6 +152,40 @@ func (h *jobPollHub) Subscribe(constraint string) jobWatchSource {
 	g.subs[s] = struct{}{}
 	g.mu.Unlock()
 	return s
+}
+
+// keyFor derives a group key from the caller's credential and returns the
+// background context the group's polls run on.
+//
+// The poll context is built from Background rather than from the request,
+// because the group outlives the request that created it and a cancelled
+// parent would stop it for every other subscriber. It carries the
+// caller's security config so the query reaches the schedd as them, and
+// is marked as a caller's request so that a missing credential is refused
+// rather than falling through to this daemon's own.
+func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, context.Context) {
+	pollCtx := htcondor.WithUserRequest(context.Background(), "job watch poll")
+
+	// GetSecurityConfigFromContext hands back a copy, so the group holds
+	// its own and cannot be disturbed by whatever the request does next.
+	secCfg, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if ok {
+		cfg := secCfg
+		pollCtx = htcondor.WithSecurityConfig(pollCtx, &cfg)
+	}
+	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
+		pollCtx = htcondor.WithAuthenticatedUser(pollCtx, user)
+	}
+
+	if ok && secCfg.SecurityTag != "" {
+		return pollKey{cred: secCfg.SecurityTag, constraint: constraint}, pollCtx
+	}
+
+	// No credential to key on. Give this subscriber a group of its own:
+	// an empty tag is the absence of an identity, and treating it as one
+	// would put every such caller on a single shared poll.
+	h.untagged++
+	return pollKey{cred: fmt.Sprintf("\x00untagged-%d", h.untagged), constraint: constraint}, pollCtx
 }
 
 func (g *jobPollGroup) run(ctx context.Context) {
@@ -188,8 +258,8 @@ func (s *jobPollSub) Close() {
 		// server runs no job queries at all.
 		h := g.hub
 		h.mu.Lock()
-		if h.groups[g.constraint] == g {
-			delete(h.groups, g.constraint)
+		if h.groups[g.key] == g {
+			delete(h.groups, g.key)
 		}
 		h.mu.Unlock()
 		g.cancel()
