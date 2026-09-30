@@ -361,7 +361,22 @@ func BuildSubmitFile(a SubmitArgs) (string, error) {
 	}
 
 	fmt.Fprintf(&sb, "executable = %s\n", ExecutableName)
-	fmt.Fprintf(&sb, "transfer_executable = true\n\n")
+	fmt.Fprintf(&sb, "transfer_executable = true\n")
+	// Replace the image's ENTRYPOINT with our launcher rather than
+	// being appended to it.
+	//
+	// Without this the launcher never runs at all. HTCondor follows
+	// docker's own rule: with an entrypoint, the executable is passed
+	// as its FIRST ARGUMENT. codercom/code-server's entrypoint is
+	//
+	//     ["/usr/bin/entrypoint.sh", "--bind-addr", "0.0.0.0:8080", "."]
+	//
+	// so the container starts code-server with the image's own
+	// arguments and our script arrives as a folder to open: a server
+	// on a TCP port with authentication on, none of our flags, and no
+	// socket for the proxy to reach. It looks like the editor simply
+	// never connects.
+	fmt.Fprintf(&sb, "docker_override_entrypoint = true\n\n")
 	fmt.Fprintf(&sb, "should_transfer_files = YES\n")
 	fmt.Fprintf(&sb, "when_to_transfer_output = ON_EXIT\n\n")
 
