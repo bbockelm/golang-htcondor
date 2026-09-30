@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -35,14 +37,14 @@ const (
 	ExtAccount = "htcondor-account"
 	// ExtScopes is the space-separated granted scope list.
 	ExtScopes = "htcondor-scopes"
-	// ExtAccessToken is the OAuth2 access token the grant produced,
-	// which later becomes the HTCondor credential for this session.
-	ExtAccessToken = "htcondor-access-token"
-	// ExtRequestedTarget is the username the client asked for,
-	// VERBATIM AND UNTRUSTED. The gateway uses it to choose which job
-	// to attach to; it asserts nothing about identity, because
-	// anybody can type anything there.
-	ExtRequestedTarget = "htcondor-requested-target"
+	// Deliberately absent: the caller's OAuth2 access token, and the
+	// username they asked for.
+	//
+	// Nothing read either. The username is conn.User(), which the
+	// connection already carries, and the HTCondor credential is
+	// minted locally from the account and scopes -- so holding a live
+	// bearer token here for the life of a session bought nothing and
+	// put it in every heap dump.
 )
 
 // IdentityFunc resolves the local account for a completed grant.
@@ -72,6 +74,14 @@ type Options struct {
 	// code lifetime.
 	Timeout time.Duration
 
+	// MaxPerSource caps logins in flight from ONE address.
+	//
+	// The global cap alone is a denial-of-service primitive rather
+	// than a defence: sixty-four sockets from one host that answer the
+	// prompt and then go silent hold every slot for the full timeout,
+	// and nobody else can log in. Zero means DefaultMaxPerSource.
+	MaxPerSource int
+
 	// MaxConcurrent caps logins in flight. Every connection that
 	// reaches the prompt starts a device authorization and then waits
 	// minutes for a human, so without a cap an attacker opening
@@ -84,6 +94,7 @@ type Options struct {
 const (
 	DefaultTimeout       = 5 * time.Minute
 	DefaultMaxConcurrent = 64
+	DefaultMaxPerSource  = 4
 )
 
 // Authenticator turns an SSH keyboard-interactive exchange into an
@@ -91,6 +102,40 @@ const (
 type Authenticator struct {
 	opts  Options
 	slots chan struct{}
+
+	// inFlight counts logins per source address, so one host cannot
+	// take every global slot.
+	mu       sync.Mutex
+	inFlight map[string]int
+}
+
+// takeSource claims a per-source slot.
+func (a *Authenticator) takeSource(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inFlight[host] >= a.opts.MaxPerSource {
+		return false
+	}
+	a.inFlight[host]++
+	return true
+}
+
+func (a *Authenticator) releaseSource(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inFlight[host] <= 1 {
+		delete(a.inFlight, host)
+		return
+	}
+	a.inFlight[host]--
 }
 
 // NewAuthenticator validates opts and returns an Authenticator.
@@ -110,9 +155,13 @@ func NewAuthenticator(opts Options) (*Authenticator, error) {
 	if opts.MaxConcurrent <= 0 {
 		opts.MaxConcurrent = DefaultMaxConcurrent
 	}
+	if opts.MaxPerSource <= 0 {
+		opts.MaxPerSource = DefaultMaxPerSource
+	}
 	return &Authenticator{
-		opts:  opts,
-		slots: make(chan struct{}, opts.MaxConcurrent),
+		opts:     opts,
+		slots:    make(chan struct{}, opts.MaxConcurrent),
+		inFlight: make(map[string]int),
 	}, nil
 }
 
@@ -133,6 +182,13 @@ func (a *Authenticator) KeyboardInteractive(ctx context.Context) func(ssh.ConnMe
 }
 
 func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+	remote := conn.RemoteAddr().String()
+	if !a.takeSource(remote) {
+		a.tell(challenge, "Too many logins are already in progress from your address.")
+		return nil, fmt.Errorf("sshgateway: too many concurrent logins from %s", remote)
+	}
+	defer a.releaseSource(remote)
+
 	select {
 	case a.slots <- struct{}{}:
 		defer func() { <-a.slots }()
@@ -201,10 +257,8 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 
 	return &ssh.Permissions{
 		Extensions: map[string]string{
-			ExtAccount:         account,
-			ExtScopes:          strings.Join(grant.Scopes, " "),
-			ExtAccessToken:     grant.AccessToken,
-			ExtRequestedTarget: conn.User(),
+			ExtAccount: account,
+			ExtScopes:  strings.Join(grant.Scopes, " "),
 		},
 	}, nil
 }

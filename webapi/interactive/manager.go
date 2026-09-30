@@ -51,6 +51,11 @@ type Manager struct {
 	// one of the same name) while its goroutine is still live, and then
 	// nothing in the map can stop it -- Close would wait on it forever.
 	done chan struct{}
+
+	// createMu guards creating, which serializes Create per session
+	// name; see lockSession.
+	createMu sync.Mutex
+	creating map[string]*createLock
 }
 
 // Options configures a Manager. The zero value of every field has a
@@ -358,6 +363,46 @@ func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
 
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
+// lockSession serializes work on one (owner, name) and returns the
+// release.
+//
+// Keyed rather than global: a submit is a schedd round trip, and one
+// user starting a session must not make every other user queue behind
+// it. Entries are reference-counted so the map does not grow without
+// bound over a daemon's lifetime.
+func (m *Manager) lockSession(owner, name string) func() {
+	key := sessionKey(owner, name)
+
+	m.createMu.Lock()
+	if m.creating == nil {
+		m.creating = make(map[string]*createLock)
+	}
+	cl, ok := m.creating[key]
+	if !ok {
+		cl = &createLock{}
+		m.creating[key] = cl
+	}
+	cl.waiters++
+	m.createMu.Unlock()
+
+	cl.mu.Lock()
+	return func() {
+		cl.mu.Unlock()
+		m.createMu.Lock()
+		cl.waiters--
+		if cl.waiters == 0 {
+			delete(m.creating, key)
+		}
+		m.createMu.Unlock()
+	}
+}
+
+// createLock is one session name's serialization point.
+type createLock struct {
+	mu      sync.Mutex
+	waiters int
+}
+
 func (m *Manager) log() *logging.Logger { return m.opts.Logger }
 
 // Create submits a new session job and registers a lease for it. The
@@ -373,6 +418,18 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	if err := validateSpec(spec); err != nil {
 		return nil, err
 	}
+
+	// Serialized per (owner, name) across the check and the submit.
+	//
+	// The duplicate-name check and the per-owner limit below are both
+	// computed from a queue listing, and without this the window
+	// between listing and submitting is wide open -- it contains a
+	// schedd round trip. Two `ssh work@gateway` at once, or one client
+	// opening two session channels, which editors do routinely, both
+	// saw "no such session" and both submitted. That is a duplicate
+	// job per attempt and a per-owner cap that does not hold.
+	unlock := m.lockSession(caller.Owner, spec.Name)
+	defer unlock()
 
 	// Two separate limits, both checked against the queue rather than
 	// the in-process map: after a restart the map is empty but the

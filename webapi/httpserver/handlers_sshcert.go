@@ -16,8 +16,11 @@ package httpserver
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -134,6 +137,28 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A certificate buys sshGatewayScopes -- condor:/WRITE and a shell.
+	// A caller holding less than that must not be able to trade up.
+	//
+	// The distinction that matters is scoped versus unscoped, not
+	// present versus absent: an API key minted for HTTP-only scopes,
+	// or a grant the user approved for condor:/READ, is a deliberate
+	// restriction and issuing over it is an escalation. A browser
+	// session carries no scopes at all because that route has no scope
+	// model -- refusing those would refuse every human who came to
+	// enroll.
+	if scopes, scoped := scopedCredential(ctx); scoped {
+		if _, ok := scopes[sshCertRequiredScope]; !ok {
+			s.logger.Info(logging.DestinationHTTP,
+				"Refused an SSH certificate to an under-scoped credential",
+				"account", account, "required", sshCertRequiredScope)
+			s.writeError(w, http.StatusForbidden,
+				"This credential is not authorized for "+sshCertRequiredScope+
+					", which is what an SSH certificate grants")
+			return
+		}
+	}
+
 	ca := s.sshCASigner
 	if ca == nil {
 		s.writeError(w, http.StatusServiceUnavailable,
@@ -153,6 +178,10 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 			"public_key must be one line of authorized_keys, as in `ssh-ed25519 AAAA...`")
 		return
 	}
+	if err := acceptableUserKey(pub); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if _, isCert := pub.(*ssh.Certificate); isCert {
 		// Signing a certificate over a certificate produces something
 		// nothing will accept, and the request means the caller sent
@@ -162,12 +191,16 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clamped in SECONDS, before the multiply. time.Duration is
+	// nanoseconds, so a large lifetime_seconds wraps -- and a wrapped
+	// negative slips past a `> max` check entirely.
 	lifetime := sshCertDefaultLifetime
 	if req.LifetimeSeconds > 0 {
-		lifetime = time.Duration(req.LifetimeSeconds) * time.Second
-	}
-	if lifetime > sshCertMaxLifetime {
-		lifetime = sshCertMaxLifetime
+		secs := req.LifetimeSeconds
+		if capSecs := int(sshCertMaxLifetime / time.Second); secs > capSecs {
+			secs = capSecs
+		}
+		lifetime = time.Duration(secs) * time.Second
 	}
 
 	serial, err := sshCertSerial()
@@ -196,6 +229,46 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: ssh.FingerprintSHA256(pub),
 	})
 }
+
+// sshCertRequiredScope is what a certificate ends up granting, and so
+// what a caller must already hold to be given one.
+const sshCertRequiredScope = "condor:/WRITE"
+
+// acceptableUserKey refuses key types a certificate should not be
+// issued over.
+//
+// A certificate is public and long-lived, so a weak key under one is a
+// third-party-forgeable credential for that account rather than merely
+// the holder's own problem. ssh-dss is 1024-bit by construction and
+// deprecated; RSA below 3072 is too short to sign a credential that
+// names an account.
+func acceptableUserKey(pub ssh.PublicKey) error {
+	switch pub.Type() {
+	case ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519,
+		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoSKECDSA256:
+		return nil
+	case ssh.KeyAlgoRSA:
+		ck, ok := pub.(ssh.CryptoPublicKey)
+		if !ok {
+			return errors.New("public_key: this RSA key cannot be inspected")
+		}
+		rk, ok := ck.CryptoPublicKey().(*rsa.PublicKey)
+		if !ok {
+			return errors.New("public_key: this RSA key cannot be inspected")
+		}
+		if rk.N.BitLen() < minRSABits {
+			return fmt.Errorf("public_key: RSA keys must be at least %d bits, this one is %d",
+				minRSABits, rk.N.BitLen())
+		}
+		return nil
+	default:
+		return fmt.Errorf("public_key: %s keys are not accepted; use ed25519, ecdsa, or RSA of at least %d bits",
+			pub.Type(), minRSABits)
+	}
+}
+
+// minRSABits is the floor for an RSA key a certificate is issued over.
+const minRSABits = 3072
 
 // sshCertSerial returns a random serial.
 //

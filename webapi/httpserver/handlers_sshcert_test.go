@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -245,4 +246,130 @@ func TestSSHCAIsPublishedInAUsableForm(t *testing.T) {
 func quoteJSON(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// postCertScoped issues the request with a scoped credential attached,
+// the way an API key or an OAuth2 grant arrives.
+func postCertScoped(t *testing.T, h *Handler, user string, scopes []string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(withAPIKeyScopes(context.Background(), scopes),
+		http.MethodPost, "/api/v1/ssh/certificate", strings.NewReader(body))
+	req.Header.Set("X-Test-User", user)
+	rec := httptest.NewRecorder()
+	h.handleSSHCertificate(rec, req)
+	return rec
+}
+
+// A certificate grants condor:/WRITE and a shell. A credential holding
+// less must not be able to trade up to it.
+//
+// This is the escalation an adversarial review found: an API key
+// minted for HTTP-only scopes authenticates here perfectly well, and
+// without this gate it walked away with a 12-hour credential for the
+// schedd.
+func TestCertificateRefusesAnUnderScopedCredential(t *testing.T) {
+	h := sshCertHandler(t, true)
+	pub := userPublicKey(t)
+
+	for _, tc := range []struct {
+		name   string
+		scopes []string
+	}{
+		{"http-only api key", []string{"metrics:read"}},
+		{"read-only grant", []string{"openid", "condor:/READ"}},
+		{"mcp only", []string{"mcp:read", "mcp:write"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postCertScoped(t, h, "alice", tc.scopes, `{"public_key":"`+pub+`"}`)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCertificateAllowsACredentialHoldingTheScope(t *testing.T) {
+	h := sshCertHandler(t, true)
+	rec := postCertScoped(t, h, "alice", []string{"openid", "condor:/WRITE"},
+		`{"public_key":"`+userPublicKey(t)+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A browser session carries no scopes because that route has no scope
+// model. Refusing those would refuse every human who came to enroll.
+func TestCertificateAllowsAnUnscopedSession(t *testing.T) {
+	h := sshCertHandler(t, true)
+	if rec := postCert(t, h, "alice", `{"public_key":"`+userPublicKey(t)+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A certificate is public and long-lived, so a weak key under one is a
+// third-party-forgeable credential for that account rather than just
+// the holder's own problem.
+func TestCertificateRefusesWeakKeys(t *testing.T) {
+	h := sshCertHandler(t, true)
+
+	small, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa: %v", err)
+	}
+	pub, err := ssh.NewPublicKey(&small.PublicKey)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+
+	rec := postCert(t, h, "alice", `{"public_key":`+quoteJSON(line)+`}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("a 2048-bit RSA key was accepted: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "3072") {
+		t.Errorf("the refusal does not say what is required: %s", rec.Body.String())
+	}
+}
+
+func TestCertificateAcceptsAStrongRSAKey(t *testing.T) {
+	h := sshCertHandler(t, true)
+	big, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		t.Fatalf("generate rsa: %v", err)
+	}
+	pub, err := ssh.NewPublicKey(&big.PublicKey)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	if rec := postCert(t, h, "alice", `{"public_key":`+quoteJSON(line)+`}`); rec.Code != http.StatusOK {
+		t.Errorf("a 3072-bit RSA key was refused: %s", rec.Body.String())
+	}
+}
+
+// time.Duration is nanoseconds, so a large lifetime_seconds wraps --
+// and a wrapped negative slips past a `> max` check entirely. The
+// clamp is applied in seconds, before the multiply.
+func TestCertificateLifetimeCannotOverflow(t *testing.T) {
+	h := sshCertHandler(t, true)
+	for _, secs := range []string{"9223372036854775807", "9223372036", "604800"} {
+		t.Run(secs, func(t *testing.T) {
+			rec := postCert(t, h, "alice",
+				`{"public_key":"`+userPublicKey(t)+`","lifetime_seconds":`+secs+`}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var resp sshCertResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			d := time.Until(resp.ValidBefore)
+			if d > sshCertMaxLifetime+time.Minute {
+				t.Errorf("valid for %v, past the %v cap", d, sshCertMaxLifetime)
+			}
+			if d <= 0 {
+				t.Errorf("valid for %v -- the lifetime wrapped", d)
+			}
+		})
+	}
 }

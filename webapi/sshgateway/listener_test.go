@@ -16,6 +16,7 @@ package sshgateway
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -96,5 +97,61 @@ func TestBoundAddrReportsTheRealPort(t *testing.T) {
 	addr := l.BoundAddr()
 	if addr == "" || strings.HasSuffix(addr, ":0") {
 		t.Errorf("BoundAddr = %q, want the port actually bound", addr)
+	}
+}
+
+// One host must not be able to take every login slot.
+//
+// The global cap on its own is a denial-of-service primitive rather
+// than a defence: sockets that answer the prompt and go silent hold
+// slots for the full timeout, and nobody else gets in.
+func TestLoginsAreCappedPerSource(t *testing.T) {
+	a, err := NewAuthenticator(Options{
+		Flow:         newBlockingFlow(testAuth()),
+		Identity:     func(context.Context, *Grant) (string, error) { return "bbockelm", nil },
+		MaxPerSource: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+
+	if !a.takeSource("10.0.0.1:1001") || !a.takeSource("10.0.0.1:1002") {
+		t.Fatal("the first two logins from a source were refused")
+	}
+	if a.takeSource("10.0.0.1:1003") {
+		t.Error("a third login from the same source was allowed past the cap")
+	}
+	// A different host is unaffected, which is the whole point.
+	if !a.takeSource("10.0.0.2:1001") {
+		t.Error("another source was refused because of the first one's slots")
+	}
+	// Releasing frees the slot rather than leaking it.
+	a.releaseSource("10.0.0.1:1001")
+	if !a.takeSource("10.0.0.1:1004") {
+		t.Error("a released slot was not reusable")
+	}
+}
+
+// The per-source map must not grow for the life of the daemon.
+func TestPerSourceSlotsAreReleasedCompletely(t *testing.T) {
+	a, err := NewAuthenticator(Options{
+		Flow:     newBlockingFlow(testAuth()),
+		Identity: func(context.Context, *Grant) (string, error) { return "bbockelm", nil },
+	})
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	for i := 0; i < 100; i++ {
+		addr := fmt.Sprintf("10.0.0.%d:1000", i)
+		if !a.takeSource(addr) {
+			t.Fatalf("take %s", addr)
+		}
+		a.releaseSource(addr)
+	}
+	a.mu.Lock()
+	n := len(a.inFlight)
+	a.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d source entries left behind; the map grows forever", n)
 	}
 }

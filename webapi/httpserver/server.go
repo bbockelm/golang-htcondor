@@ -1300,6 +1300,11 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						if err != nil {
 							return nil, fmt.Errorf("failed to mint HTCondor token for %s: %w", username, err)
 						}
+						// Carry the grant's scopes so a handler can gate
+						// on them. Without this only API keys are
+						// scope-checkable, and an OAuth2 grant approved
+						// for less than it asks for looks unscoped.
+						ctx = withAPIKeyScopes(ctx, ar.GetGrantedScopes())
 						s.logger.Debug(logging.DestinationSecurity, "Validated opaque token via OAuth2 storage", "username", username)
 					} else {
 						// Both JWT parsing and opaque token introspection failed

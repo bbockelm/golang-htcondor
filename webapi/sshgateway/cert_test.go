@@ -349,3 +349,125 @@ func TestRealClientLogsInWithACertificateInBatchMode(t *testing.T) {
 		t.Errorf("the certificate path fell back to the device flow:\n%q", out)
 	}
 }
+
+// resignSigner re-signs f.cert after a test has altered it, so the
+// certificate is internally consistent and ONLY the altered field is
+// under test -- otherwise every such test would pass for the trivial
+// reason that the signature no longer matches.
+func (f *certFixture) resignSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	if err := f.cert.SignCert(cryptorand.Reader, f.ca); err != nil {
+		t.Fatalf("re-sign: %v", err)
+	}
+	cs, err := ssh.NewCertSigner(f.cert, f.userKey)
+	if err != nil {
+		t.Fatalf("cert signer: %v", err)
+	}
+	return cs
+}
+
+// A certificate whose signature does not verify must be refused.
+//
+// This is the failure the whole CA check rests on, and it was NOT
+// covered: the existing tests swap the authority, the clock or the
+// principals, all of which are caught before the signature is even
+// looked at. Corrupting the signature is the only one that exercises
+// the verification itself.
+func TestCorruptedCertificateSignatureIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mangle func(*ssh.Certificate)
+	}{
+		{"one flipped bit in the signature", func(c *ssh.Certificate) {
+			c.Signature.Blob[len(c.Signature.Blob)/2] ^= 0x01
+		}},
+		{"truncated signature", func(c *ssh.Certificate) {
+			c.Signature.Blob = c.Signature.Blob[:len(c.Signature.Blob)-1]
+		}},
+		{"empty signature", func(c *ssh.Certificate) {
+			c.Signature.Blob = nil
+		}},
+		{"principal changed after signing", func(c *ssh.Certificate) {
+			c.ValidPrincipals = []string{"root"}
+		}},
+		{"validity extended after signing", func(c *ssh.Certificate) {
+			c.ValidBefore = uint64(time.Now().Add(100 * time.Hour).Unix()) //nolint:gosec // a unix time in this century is positive
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCertFixture(t)
+			tr := &fakeTransport{}
+			addr := certGateway(t, tr, f.ca.PublicKey())
+
+			tc.mangle(f.cert)
+			// NOT re-signed: the point is that the signature no longer
+			// matches what it covers.
+			// NOT re-signed, and every case here still builds a
+			// usable signer -- so the rejection comes from the
+			// server, not from the client refusing to present it.
+			// (Swapping the certificate's Key is deliberately absent:
+			// NewCertSigner refuses that locally, so it would test
+			// x/crypto's client rather than this server.)
+			cs, err := ssh.NewCertSigner(f.cert, f.userKey)
+			if err != nil {
+				t.Fatalf("the client would not even present this certificate: %v", err)
+			}
+			if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(cs)); err == nil {
+				t.Fatal("a certificate with a broken signature logged in")
+			}
+		})
+	}
+}
+
+// A HOST certificate is not a user certificate, whatever it says in
+// its principals.
+func TestHostCertificateIsRefused(t *testing.T) {
+	f := newCertFixture(t)
+	tr := &fakeTransport{}
+	addr := certGateway(t, tr, f.ca.PublicKey())
+
+	f.cert.CertType = ssh.HostCert
+	if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(f.resignSigner(t))); err == nil {
+		t.Fatal("a host certificate logged in as a user")
+	}
+}
+
+// Not yet valid is as wrong as expired, and is the direction a client
+// with a fast clock produces.
+func TestNotYetValidCertificateIsRefused(t *testing.T) {
+	f := newCertFixture(t)
+	tr := &fakeTransport{}
+	addr := certGateway(t, tr, f.ca.PublicKey())
+
+	f.cert.ValidAfter = uint64(time.Now().Add(2 * time.Hour).Unix())  //nolint:gosec // positive
+	f.cert.ValidBefore = uint64(time.Now().Add(3 * time.Hour).Unix()) //nolint:gosec // positive
+	if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(f.resignSigner(t))); err == nil {
+		t.Fatal("a certificate that is not yet valid logged in")
+	}
+}
+
+// A critical option this server does not understand must refuse the
+// login rather than be ignored. CertChecker enforces this because
+// SupportedCriticalOptions is empty, and that emptiness is load-bearing
+// rather than an oversight.
+func TestUnknownCriticalOptionIsRefused(t *testing.T) {
+	f := newCertFixture(t)
+	tr := &fakeTransport{}
+	addr := certGateway(t, tr, f.ca.PublicKey())
+
+	f.cert.CriticalOptions = map[string]string{"force-command": "/bin/false"}
+	if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(f.resignSigner(t))); err == nil {
+		t.Fatal("a certificate carrying an unenforced critical option logged in")
+	}
+}
+
+func TestEmptyPrincipalIsRefused(t *testing.T) {
+	f := newCertFixture(t)
+	tr := &fakeTransport{}
+	addr := certGateway(t, tr, f.ca.PublicKey())
+
+	f.cert.ValidPrincipals = []string{""}
+	if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(f.resignSigner(t))); err == nil {
+		t.Fatal("a certificate naming an empty principal logged in")
+	}
+}

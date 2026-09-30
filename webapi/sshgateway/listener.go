@@ -27,6 +27,9 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
+// DefaultMaxConnections caps sockets served at once.
+const DefaultMaxConnections = 256
+
 // HandshakeTimeout bounds the SSH handshake, which includes the
 // device-flow login. It is generous because a human is reading a code
 // off their terminal and typing it into a browser.
@@ -66,7 +69,19 @@ type Listener struct {
 	// would refuse such a connection. It does not.
 	ConnContext func(ctx context.Context, conn *ssh.ServerConn) (context.Context, error)
 
+	// MaxConnections caps sockets being served at once. Zero means
+	// DefaultMaxConnections.
+	//
+	// Without one, a slowloris of sockets that never finish the
+	// handshake holds a goroutine and an fd each for HandshakeTimeout
+	// -- and this listener shares its process with the HTTP API, so
+	// running out of descriptors takes the REST and MCP surfaces down
+	// with it.
+	MaxConnections int
+
 	Logger *logging.Logger
+
+	connSlots chan struct{}
 
 	mu       sync.Mutex
 	ln       net.Listener
@@ -110,6 +125,11 @@ func (l *Listener) Listen(ctx context.Context) error {
 		cfg.MaxAuthTries = 32
 	}
 	cfg.AddHostKey(l.HostKey)
+
+	if l.MaxConnections <= 0 {
+		l.MaxConnections = DefaultMaxConnections
+	}
+	l.connSlots = make(chan struct{}, l.MaxConnections)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", l.Addr)
@@ -162,14 +182,28 @@ func (l *Listener) Serve(ctx context.Context) error {
 			deliberate := l.closed
 			l.mu.Unlock()
 			if deliberate {
-				l.conns.Wait()
+				// Close owns the wait now.
 				return nil
 			}
 			return fmt.Errorf("sshgateway: accept: %w", err)
 		}
+		select {
+		case l.connSlots <- struct{}{}:
+		default:
+			// Over the cap. Closing immediately is the honest answer:
+			// accepting and then stalling would look like the gateway
+			// is broken rather than busy.
+			l.debugf("SSH gateway refused a connection: at the concurrency limit",
+				"remote", nc.RemoteAddr().String(), "limit", l.MaxConnections)
+			_ = nc.Close()
+			continue
+		}
 		l.conns.Add(1)
 		go func() {
-			defer l.conns.Done()
+			defer func() {
+				<-l.connSlots
+				l.conns.Done()
+			}()
 			l.serveConn(ctx, nc, cfg)
 		}()
 	}
@@ -212,8 +246,33 @@ func (l *Listener) Close() error {
 	if ln == nil {
 		return nil
 	}
-	return ln.Close()
+	err := ln.Close()
+
+	// Wait for connections in flight, with a bound.
+	//
+	// The accept loop used to own this wait, in a goroutine nobody
+	// joined -- so Close returned immediately and a caller that
+	// shut the transports down next cut live sessions off
+	// mid-keystroke, which is exactly what its own comment said it
+	// was avoiding.
+	done := make(chan struct{})
+	go func() {
+		l.conns.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(ShutdownGrace):
+		l.logf("SSH gateway shut down with sessions still open", "grace", ShutdownGrace)
+	}
+	return err
 }
+
+// ShutdownGrace bounds how long Close waits for live sessions. Long
+// enough that a reload does not cut somebody off mid-command, short
+// enough that a shell somebody walked away from cannot block a
+// restart.
+const ShutdownGrace = 10 * time.Second
 
 func (l *Listener) serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig) {
 	// The handshake carries the whole login, so the deadline has to
@@ -232,6 +291,22 @@ func (l *Listener) serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerCo
 	}
 	defer func() { _ = conn.Close() }()
 	_ = nc.SetDeadline(time.Time{})
+
+	// Logged HERE rather than in an auth callback. x/crypto calls
+	// PublicKeyCallback on the public-key query, before the client has
+	// proved possession -- so logging a "login" there lets anyone
+	// holding a copy of somebody's certificate, which is public data,
+	// write that person's name into the audit log. By this point the
+	// handshake has completed.
+	account := ""
+	if conn.Permissions != nil {
+		account = conn.Permissions.Extensions[ExtAccount]
+	}
+	l.logf("SSH gateway connection authenticated",
+		"account", account,
+		"remote", conn.RemoteAddr().String(),
+		"requested_target", conn.User(),
+		"client", string(conn.ClientVersion()))
 
 	connCtx := ctx
 	if l.ConnContext != nil {

@@ -62,6 +62,25 @@ func (s *server) lastPermissions() *ssh.Permissions {
 	return s.perms
 }
 
+// awaitPermissions waits for the server to record a connection.
+//
+// A client's Dial returns when the CLIENT's handshake finishes; the
+// server records Permissions in its own goroutine, which can still be
+// running. Reading straight after Dial passes on a fast machine and
+// fails on a loaded CI runner, which is exactly what it did.
+func (s *server) awaitPermissions(t *testing.T) *ssh.Permissions {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if p := s.lastPermissions(); p != nil {
+			return p
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the server never recorded an authenticated connection")
+	return nil
+}
+
 func startServer(t *testing.T, a *Authenticator) *server {
 	t.Helper()
 
@@ -184,23 +203,20 @@ func TestApprovedLoginCarriesTheIdentityForward(t *testing.T) {
 		t.Errorf("the prompt does not name the service: %q", shown[0])
 	}
 
-	perms := srv.lastPermissions()
-	if perms == nil {
-		t.Fatal("no permissions recorded")
-	}
+	perms := srv.awaitPermissions(t)
 	if got := perms.Extensions[ExtAccount]; got != "bbockelm" {
 		t.Errorf("account = %q, want the mapped account", got)
 	}
 	if got := perms.Extensions[ExtScopes]; got != "openid condor:/WRITE" {
 		t.Errorf("scopes = %q", got)
 	}
-	if got := perms.Extensions[ExtAccessToken]; got != "at" {
-		t.Errorf("access token = %q", got)
-	}
-	// The SSH username is routing input, not identity: it is carried
-	// verbatim and separately from the account that was resolved.
-	if got := perms.Extensions[ExtRequestedTarget]; got != "12345.0" {
-		t.Errorf("requested target = %q, want the username verbatim", got)
+	// Nothing else is carried. The access token and the requested
+	// username used to be, and nothing read either: the username is
+	// conn.User() and the HTCondor credential is minted locally, so a
+	// live bearer token sat in Permissions for the life of a session
+	// buying nothing.
+	if len(perms.Extensions) != 2 {
+		t.Errorf("extensions = %v, want only the account and its scopes", perms.Extensions)
 	}
 }
 
@@ -469,9 +485,8 @@ func TestRealOpenSSHClientAuthenticates(t *testing.T) {
 				t.Fatalf("a real ssh client never showed the device code. prompted:\n%q\noutput:\n%s",
 					shown(), out)
 			}
-			perms := srv.lastPermissions()
-			if perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {
-				t.Fatalf("the real client did not authenticate: perms=%+v", perms)
+			if got := srv.awaitPermissions(t).Extensions[ExtAccount]; got != "bbockelm" {
+				t.Fatalf("the real client authenticated as %q", got)
 			}
 		})
 	}
@@ -507,9 +522,8 @@ func TestRealSCPAuthenticates(t *testing.T) {
 	if !strings.Contains(shown(), "WDJB-MJHT") {
 		t.Errorf("scp never showed the device code. prompted:\n%q", shown())
 	}
-	perms := srv.lastPermissions()
-	if perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {
-		t.Errorf("scp did not authenticate: perms=%+v", perms)
+	if got := srv.awaitPermissions(t).Extensions[ExtAccount]; got != "bbockelm" {
+		t.Errorf("scp authenticated as %q", got)
 	}
 }
 
@@ -551,7 +565,7 @@ func TestClientOfferingAKeyStillReachesThePrompt(t *testing.T) {
 	if len(shown) == 0 || !strings.Contains(shown[0], "WDJB-MJHT") {
 		t.Fatalf("the prompt was never reached: %q", shown)
 	}
-	if perms := srv.lastPermissions(); perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {
-		t.Errorf("the client did not authenticate: perms=%+v", perms)
+	if got := srv.awaitPermissions(t).Extensions[ExtAccount]; got != "bbockelm" {
+		t.Errorf("the client authenticated as %q", got)
 	}
 }

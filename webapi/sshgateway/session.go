@@ -84,25 +84,39 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 		return
 	}
 
+	// One authenticated connection must not be able to open unbounded
+	// channels: each session costs a schedd query and possibly a job
+	// submission, and each forward costs a dial into the sandbox.
+	slots := make(chan struct{}, MaxChannelsPerConnection)
+
 	var wg sync.WaitGroup
 	for nch := range chans {
 		switch nch.ChannelType() {
 		case "session":
+			if !takeSlot(slots, nch) {
+				continue
+			}
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
-				defer wg.Done()
+				defer func() { <-slots; wg.Done() }()
 				s.handleSession(ctx, account, conn.User(), nch)
 			}(nch)
 		case "direct-tcpip":
+			if !takeSlot(slots, nch) {
+				continue
+			}
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
-				defer wg.Done()
+				defer func() { <-slots; wg.Done() }()
 				s.handleDirectTCPIP(ctx, account, conn.User(), nch)
 			}(nch)
 		case streamLocalChannelType:
+			if !takeSlot(slots, nch) {
+				continue
+			}
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
-				defer wg.Done()
+				defer func() { <-slots; wg.Done() }()
 				s.handleStreamLocal(ctx, account, conn.User(), nch)
 			}(nch)
 		default:
@@ -111,6 +125,24 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 		}
 	}
 	wg.Wait()
+}
+
+// MaxChannelsPerConnection caps channels open at once on one
+// connection. Generous for a person -- ten terminals and a handful of
+// forwards -- and finite.
+const MaxChannelsPerConnection = 32
+
+// takeSlot claims a channel slot, rejecting the channel when there is
+// none.
+func takeSlot(slots chan struct{}, nch ssh.NewChannel) bool {
+	select {
+	case slots <- struct{}{}:
+		return true
+	default:
+		_ = nch.Reject(ssh.ResourceShortage,
+			"too many channels open on this connection")
+		return false
+	}
 }
 
 // resolve parses the username and finds the job behind it.

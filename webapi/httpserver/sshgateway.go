@@ -45,7 +45,13 @@ const sshGatewayClientID = "ssh-gateway"
 // GET_JOB_CONNECT_INFO at WRITE, so that one scope covers shell access
 // and there is no reason to ask for more. offline_access is what lets a
 // session outlive its access token.
-var sshGatewayScopes = []string{"openid", "offline_access", "condor:/WRITE"}
+//
+// condor:/READ because attaching to a session by name lists the
+// caller's jobs first, which is a READ command; WRITE alone would
+// leave that lookup refused. No offline_access: the HTCondor
+// credential is minted here per connection, so a refresh token would
+// be captured and never used.
+var sshGatewayScopes = []string{"openid", "condor:/READ", "condor:/WRITE"}
 
 // withCondorCredential attaches an HTCondor credential minted for
 // username with scopes, so everything done under the returned context
@@ -173,7 +179,6 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		certs = &sshgateway.CertAuth{
 			Authority: h.sshCASigner.PublicKey(),
 			Scopes:    sshGatewayScopes,
-			Logger:    h.logger,
 		}
 	}
 
@@ -300,10 +305,15 @@ func (h *Handler) sshGatewayIdentity(ctx context.Context, g *sshgateway.Grant) (
 	if err != nil {
 		return "", fmt.Errorf("introspecting the access token: %w", err)
 	}
-	// The same extraction the MCP surface uses, so the gateway and the
-	// API agree on who a token belongs to -- including the deployments
-	// where that is a mapped local account rather than the raw subject.
-	return h.extractUsernameFromToken(ar), nil
+	// ownerFromActor, the same truncation the certificate endpoint
+	// applies, so the two paths cannot disagree about who somebody is.
+	//
+	// It keeps the part before the last "@", which is what HTCondor
+	// calls an Owner -- a domain-qualified name matches no job and no
+	// session, so the device flow would create a fresh session on every
+	// connection and never find the one it just made. Which realm a
+	// subject came from is the issuer's business to keep unambiguous.
+	return ownerFromActor(h.extractUsernameFromToken(ar)), nil
 }
 
 // sshGatewayConnContext attaches the caller's HTCondor credential to

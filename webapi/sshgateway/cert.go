@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-
-	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // CertAuth accepts SSH certificates this deployment's CA signed.
@@ -44,8 +42,6 @@ type CertAuth struct {
 	// Scopes are granted to a certificate-authenticated session, since
 	// there is no OAuth2 grant to take them from.
 	Scopes []string
-
-	Logger *logging.Logger
 }
 
 // ErrNotACertificate is returned for a bare public key.
@@ -53,16 +49,16 @@ var ErrNotACertificate = errors.New("sshgateway: this gateway accepts certificat
 
 // Callback is the ssh.ServerConfig PublicKeyCallback.
 //
-// The account comes from the certificate's single valid principal, NOT
-// from conn.User(): the username on this gateway names the job to
-// reach, so tying the certificate to it would mean a separate
-// certificate per job.
+// The account comes from the certificate's single valid principal, and
+// the connection metadata is deliberately unused: the username on this
+// gateway names the job to reach, so tying the certificate to it would
+// mean a separate certificate per job.
 //
 // That is a deliberate departure from how OpenSSH uses principals, and
 // it is why the certificate must name exactly one. A certificate with
 // several would leave the gateway choosing an identity, and choosing
 // is the thing to never do.
-func (c *CertAuth) Callback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+func (c *CertAuth) Callback(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	cert, ok := key.(*ssh.Certificate)
 	if !ok {
 		return nil, ErrNotACertificate
@@ -109,23 +105,26 @@ func (c *CertAuth) Callback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Perm
 		return nil, fmt.Errorf("sshgateway: %w", err)
 	}
 
-	if c.Logger != nil {
-		c.Logger.Info(logging.DestinationHTTP, "SSH gateway certificate login",
-			"account", account,
-			"remote", conn.RemoteAddr().String(),
-			"requested_target", conn.User(),
-			"key_id", cert.KeyId,
-			"expires", time.Unix(int64(cert.ValidBefore), 0).UTC()) //nolint:gosec // bounded by the CA that signed it
-	}
+	// Deliberately not logged here. x/crypto calls PublicKeyCallback on
+	// the public-key QUERY, before the client has proved it holds the
+	// private key -- and a certificate is public data, sitting in
+	// ~/.ssh and returned over HTTP. Logging here lets anyone with a
+	// copy of somebody's certificate write "certificate login
+	// account=victim" into the audit log without authenticating.
+	// Listener.serveConn logs once the handshake has actually
+	// completed.
 
 	return &ssh.Permissions{
+		// Carried through so x/crypto can enforce them. CheckCert
+		// refuses every critical option this server does not support,
+		// with one exception it leaves to the caller: source-address,
+		// which serverAuthenticate reads off the Permissions returned
+		// here. Dropping them silently ignored an address restriction
+		// somebody had deliberately put on a certificate.
+		CriticalOptions: cert.CriticalOptions,
 		Extensions: map[string]string{
 			ExtAccount: account,
 			ExtScopes:  joinScopes(c.Scopes),
-			// No access token: there is no OAuth2 grant behind a
-			// certificate. Anything reading ExtAccessToken has to cope
-			// with it being absent.
-			ExtRequestedTarget: conn.User(),
 		},
 	}, nil
 }
