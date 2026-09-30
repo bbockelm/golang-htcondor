@@ -197,13 +197,22 @@ func (h *Handler) setupRoutes() {
 	// dispatcher (handleJupyterPath) can route on the verb segment. Note:
 	// no CORS wrapper — the proxy serves user-facing assets that often
 	// embed in an iframe and don't want extra CORS headers from us.
-	mux.HandleFunc("/api/v1/jupyter/", h.handleJupyterPath)
+	// Gated like every other route that reaches the schedd: this one
+	// submits jobs. An API key with no condor:/* scopes authenticates
+	// fine and reaches createAuthenticatedContext's API-key branch,
+	// which deliberately attaches no schedd credential -- so without
+	// this the submit fell through to GetSecurityConfigOrDefault and ran
+	// as THIS DAEMON, a queue superuser on a normal access point. The
+	// gate is a no-op for every other kind of credential.
+	mux.Handle("/api/v1/jupyter/", h.requireCondorScope(http.HandlerFunc(h.handleJupyterPath)))
 
 	// Apps: long-lived servers running inside a job, reached through
 	// the job proxy. Both forms, because the collection and a single
 	// app are different paths and ServeMux does not fold them.
-	mux.Handle("/api/v1/apps", cors(http.HandlerFunc(h.handleAppsPath)))
-	mux.Handle("/api/v1/apps/", cors(http.HandlerFunc(h.handleAppsPath)))
+	// Gated for the same reason as /api/v1/jupyter/ above: these submit
+	// and remove jobs.
+	mux.Handle("/api/v1/apps", cors(h.requireCondorScope(http.HandlerFunc(h.handleAppsPath))))
+	mux.Handle("/api/v1/apps/", cors(h.requireCondorScope(http.HandlerFunc(h.handleAppsPath))))
 
 	// Interactive batch jobs (terminal sessions backed by a vanilla-universe
 	// watchdog the SSH bridge heartbeats over the existing ssh.Client).
@@ -225,7 +234,10 @@ func (h *Handler) setupRoutes() {
 	// handlers themselves return 503 when the chat engine isn't
 	// configured; we always register so the SPA's /info probe
 	// gets a sensible answer regardless of feature state.
-	mux.Handle("/api/v1/chat", cors(http.HandlerFunc(h.handleChat)))
+	// The chat endpoint is gated too: its tools query and act on the
+	// queue, so it reaches the schedd exactly like the routes above.
+	// /chat/info answers a feature probe and touches nothing.
+	mux.Handle("/api/v1/chat", cors(h.requireCondorScope(http.HandlerFunc(h.handleChat))))
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
 
 	// Collector endpoints
