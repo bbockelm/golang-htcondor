@@ -75,6 +75,7 @@ func (f *fakeSession) RequestPty(string, int, int, ssh.TerminalModes) error { re
 func (f *fakeSession) WindowChange(int, int) error                          { return nil }
 func (f *fakeSession) Shell() error                                         { return nil }
 func (f *fakeSession) Start(string) error                                   { return nil }
+func (f *fakeSession) RequestSubsystem(string) error                        { return nil }
 func (f *fakeSession) Signal(ssh.Signal) error                              { return nil }
 func (f *fakeSession) Wait() error                                          { return nil }
 func (f *fakeSession) StdinPipe() (io.WriteCloser, error)                   { return nil, nil }

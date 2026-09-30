@@ -715,9 +715,12 @@ certificates usually work:
 
 ### Limits worth knowing
 
-- **`scp` and `sftp` do not work.** HTCondor's ssh-to-job wrapper turns a
-  subsystem request into `eval sftp`. The gateway says so rather than letting
-  it fail as "subsystem request failed".
+- **`scp` and `sftp` work**, and so does anything else that asks for a
+  subsystem: the gateway forwards the request to the job, whose sshd serves its
+  own `Subsystem` directive. This was documented as impossible, on the belief
+  that the forced command in `condor_ssh_to_job_shell_setup` turns a subsystem
+  request into `eval sftp`. It does not — a probe against a real job gets a
+  genuine `SSH_FXP_VERSION` reply from a real `sftp-server`.
 - **The device flow needs somewhere to prompt.** `BatchMode=yes` declines
   keyboard-interactive outright, and a client with no terminal has nowhere to
   show the code; both want a certificate instead. A remote terminal is not

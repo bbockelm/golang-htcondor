@@ -80,6 +80,10 @@ type JobSession interface {
 	WindowChange(h, w int) error
 	Shell() error
 	Start(cmd string) error
+	// RequestSubsystem starts a named subsystem, such as sftp. The
+	// job's sshd serves its own Subsystem directive, so this reaches a
+	// real sftp-server rather than the forced command.
+	RequestSubsystem(subsystem string) error
 	Signal(sig ssh.Signal) error
 	Wait() error
 	StdinPipe() (io.WriteCloser, error)
