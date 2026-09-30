@@ -146,7 +146,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 	// constraint with every other watcher of the same job.
 	var pollSrc jobWatchSource
 	if feedCh == nil {
-		pollSrc = s.jobPolls.Subscribe(constraint)
+		pollSrc = s.jobPolls.Subscribe(ctx, constraint)
 		defer pollSrc.Close()
 	}
 
@@ -203,7 +203,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 				feedCh = nil
 			}
 			if pollSrc == nil {
-				pollSrc = s.jobPolls.Subscribe(constraint)
+				pollSrc = s.jobPolls.Subscribe(ctx, constraint)
 				defer pollSrc.Close()
 			}
 			next, gone = fresh, fresh == nil
