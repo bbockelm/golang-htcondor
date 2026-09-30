@@ -373,3 +373,26 @@ func TestCertificateLifetimeCannotOverflow(t *testing.T) {
 		})
 	}
 }
+
+// A credential carrying NO scopes at all must still be refused.
+//
+// scopedCredential reports `scoped` as false for an empty scope set, so
+// a gate written only around it lets a zero-scope API key straight
+// through -- and that caller reaches the schedd with no credential of
+// its own, where GetSecurityConfigOrDefault falls back to this daemon's
+// configuration. Same shape as the gaps closed on /api/v1/jupyter,
+// /api/v1/chat and /api/v1/apps.
+func TestCertificateRefusesAZeroScopeAPIKey(t *testing.T) {
+	h := sshCertHandler(t, true)
+
+	body := `{"public_key": "` + userPublicKey(t) + `"}`
+	req := httptest.NewRequestWithContext(withAPIKeyMarker(context.Background()),
+		http.MethodPost, "/api/v1/ssh/certificate", strings.NewReader(body))
+	req.Header.Set("X-Test-User", "bbockelm")
+	rec := httptest.NewRecorder()
+	h.handleSSHCertificate(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}

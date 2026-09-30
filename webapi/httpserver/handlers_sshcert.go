@@ -148,7 +148,14 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 	// session carries no scopes at all because that route has no scope
 	// model -- refusing those would refuse every human who came to
 	// enroll.
-	if scopes, scoped := scopedCredential(ctx); scoped {
+	// `scoped` is false for a credential carrying NO scopes at all, so
+	// the API-key marker is checked too. Without it a zero-scope key
+	// slips past this gate entirely, arrives at the schedd with no
+	// credential of its own, and GetSecurityConfigOrDefault falls back
+	// to this daemon's configuration -- a queue superuser on a normal
+	// access point. That is the same shape as the three gaps closed in
+	// "close three authorization gaps on routes that reach HTCondor".
+	if scopes, scoped := scopedCredential(ctx); scoped || AuthenticatedViaAPIKey(ctx) {
 		if _, ok := scopes[sshCertRequiredScope]; !ok {
 			s.logger.Info(logging.DestinationHTTP,
 				"Refused an SSH certificate to an under-scoped credential",
