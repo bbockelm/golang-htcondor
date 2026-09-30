@@ -8,6 +8,7 @@
 // is the likeliest reason somebody gives up on this, so the page says
 // which it is rather than showing a blank frame.
 
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -32,6 +33,12 @@ export default function VSCodeDetailClient() {
     enabled: Boolean(id) && id !== '_',
   });
 
+  // Bumped to remount the iframe. The editor can come up before its
+  // extension host does, and an iframe that loaded a half-ready page
+  // stays that way -- the same failure the Jupyter client documents,
+  // where React reconciled the element and it never recovered.
+  const [reloads, setReloads] = useState(0);
+
   const remove = useMutation({
     mutationFn: () => api.apps.remove(id),
     onSuccess: () => {
@@ -53,6 +60,24 @@ export default function VSCodeDetailClient() {
           </Link>
         )}
         <div className="ml-auto flex items-center gap-3">
+          {data?.url && (
+            <>
+              <button
+                onClick={() => setReloads((n) => n + 1)}
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                Reload iframe
+              </button>
+              <a
+                href={data.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                Open in new tab ↗
+              </a>
+            </>
+          )}
           <Link href="/interactive" className="text-sm text-gray-600 hover:underline">
             All sessions
           </Link>
@@ -81,7 +106,7 @@ export default function VSCodeDetailClient() {
           // reusing one that loaded an error page while the server was
           // still coming up -- the failure JupyterLab hit here, where a
           // reconciled iframe stayed blank forever.
-          key={data.url}
+          key={`${data.url}#${reloads}`}
           src={data.url}
           title="VS Code"
           className="w-full rounded-sm border border-gray-200 bg-white"
