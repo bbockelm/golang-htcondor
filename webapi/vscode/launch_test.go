@@ -44,6 +44,14 @@ func runScript(t *testing.T, a ScriptArgs, scratch, fakeBin string) (string, err
 // turn on what $HOME is.
 func runScriptEnv(t *testing.T, a ScriptArgs, scratch, fakeBin string, env ...string) (string, error) {
 	t.Helper()
+	// A one-second poll, so a script whose server exits immediately --
+	// which is every fake server here -- ends in about a second rather
+	// than waiting out the production interval. The real defaults are
+	// asserted separately, in TestLaunchScriptCarriesItsTiming.
+	if a.PollSeconds == 0 {
+		a.PollSeconds = 1
+	}
+
 	path := filepath.Join(scratch, ExecutableName)
 	//nolint:gosec // G306: the launcher is the job's executable; running it is the test
 	if err := os.WriteFile(path, []byte(LaunchScript(a)), 0o700); err != nil {
@@ -89,7 +97,7 @@ exit 0
 	return dir
 }
 
-func TestLaunchScriptExecsTheServerOnAScratchSocket(t *testing.T) {
+func TestLaunchScriptStartsTheServerOnAScratchSocket(t *testing.T) {
 	scratch := shortScratch(t)
 	argvFile := filepath.Join(t.TempDir(), "argv")
 	bin := fakeServer(t, argvFile)
