@@ -70,11 +70,15 @@ func (f *fakeFlow) gaps() []time.Duration {
 
 func testAuth() *DeviceAuth {
 	return &DeviceAuth{
-		DeviceCode:      "dev-code",
-		UserCode:        "WDJB-MJHT",
-		VerificationURI: "https://ap.example.edu/mcp/oauth2/device",
-		ExpiresIn:       10 * time.Second,
-		Interval:        10 * time.Millisecond,
+		DeviceCode: "dev-code",
+		UserCode:   "WDJB-MJHT",
+		// The real server's shape, complete URI included. A fixture
+		// that omits it renders the fallback branch, which looks
+		// exactly like the one-click link having been lost.
+		VerificationURI:         "https://ap.example.edu/mcp/oauth2/device/verify",
+		VerificationURIComplete: "https://ap.example.edu/mcp/oauth2/device/verify?user_code=WDJB-MJHT",
+		ExpiresIn:               10 * time.Second,
+		Interval:                10 * time.Millisecond,
 	}
 }
 
