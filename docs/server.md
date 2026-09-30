@@ -752,6 +752,15 @@ The gateway signs them with a CA key resolved exactly like the host key:
 either, certificates are simply unavailable and the device flow still works —
 losing convenience, not access.
 
+That response also carries `gateway_host` and `gateway_port` when
+`HTTP_API_SSH_GATEWAY_HOST` names one, so a client can find the gateway without
+being told where it is. Both are omitted when it is unset: the listen address is
+not the answer, since a container on `:2222` usually sits behind a service
+publishing 22 somewhere else, and a guess would send clients to a closed port.
+The port is reported only when the operator wrote one — `ap.example.edu:2222` —
+and a client should read its absence as the SSH default rather than as an
+instruction.
+
 ```bash
 # The CA, so your client trusts the gateway's host key.
 curl -H "Authorization: Bearer $TOKEN" https://ap.example.edu/api/v1/ssh/ca

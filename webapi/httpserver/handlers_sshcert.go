@@ -53,6 +53,19 @@ type sshCAResponse struct {
 	KnownHostsLine string `json:"known_hosts_line"`
 	// Fingerprint is for comparing against what an operator published.
 	Fingerprint string `json:"fingerprint"`
+
+	// GatewayHost and GatewayPort say where to ssh, when the operator
+	// configured HTTP_API_SSH_GATEWAY_HOST.
+	//
+	// Published so a client needs no configuration of its own. This
+	// server already knows the name -- it is the host certificate's
+	// principal and the pattern in KnownHostsLine -- and until now kept
+	// it to itself, which left every client asking a human where the
+	// gateway is. Omitted rather than guessed when unset: the listen
+	// address is not the answer, since a container on :2222 sits behind
+	// a service publishing 22 somewhere else.
+	GatewayHost string `json:"gateway_host,omitempty"`
+	GatewayPort int    `json:"gateway_port,omitempty"`
 }
 
 type sshCertRequest struct {
@@ -99,6 +112,7 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 
 	pub := ca.PublicKey()
 	authorized := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	gatewayHost, gatewayPort := sshgateway.ParseGatewayAddress(s.sshGatewayPublicHost)
 	s.writeJSON(w, http.StatusOK, sshCAResponse{
 		PublicKey: authorized,
 		// Narrowed to the operator's configured names when there are
@@ -107,6 +121,8 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 		// silently stop working the first time somebody uses an alias.
 		KnownHostsLine: sshgateway.KnownHostsLine(pub, sshgateway.ParseHostNames(s.sshGatewayPublicHost)),
 		Fingerprint:    ssh.FingerprintSHA256(pub),
+		GatewayHost:    gatewayHost,
+		GatewayPort:    gatewayPort,
 	})
 }
 

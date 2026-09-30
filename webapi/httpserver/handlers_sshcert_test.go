@@ -396,3 +396,46 @@ func TestCertificateRefusesAZeroScopeAPIKey(t *testing.T) {
 		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 }
+
+// The CA response tells a client where the gateway is, so it needs no
+// configuration of its own. This server already knows the name -- it is
+// the certificate's principal -- and used to keep it to itself.
+func TestSSHCAAdvertisesTheGateway(t *testing.T) {
+	h := sshCertHandler(t, true)
+	h.sshGatewayPublicHost = "ap.example.edu:2222, alias.example.org"
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/ssh/ca", nil)
+	req.Header.Set("X-Test-User", "bbockelm")
+	rec := httptest.NewRecorder()
+	h.handleSSHCA(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		GatewayHost string `json:"gateway_host"`
+		GatewayPort int    `json:"gateway_port"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.GatewayHost != "ap.example.edu" || body.GatewayPort != 2222 {
+		t.Errorf("advertised %q:%d, want ap.example.edu:2222", body.GatewayHost, body.GatewayPort)
+	}
+}
+
+// Unset means unset. Guessing the listen address would send clients to
+// a port that is usually not the one open to them: a container on :2222
+// sits behind a service publishing 22 somewhere else.
+func TestSSHCAOmitsAnUnconfiguredGateway(t *testing.T) {
+	h := sshCertHandler(t, true)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/ssh/ca", nil)
+	req.Header.Set("X-Test-User", "bbockelm")
+	rec := httptest.NewRecorder()
+	h.handleSSHCA(rec, req)
+
+	if strings.Contains(rec.Body.String(), "gateway_host") {
+		t.Errorf("an unconfigured gateway was advertised anyway: %s", rec.Body.String())
+	}
+}

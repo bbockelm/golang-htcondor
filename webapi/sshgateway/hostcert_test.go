@@ -203,3 +203,57 @@ func TestConfiguredNameIsBothPrincipalAndPattern(t *testing.T) {
 		t.Error("the published line does not mention the configured name")
 	}
 }
+
+func TestParseGatewayAddress(t *testing.T) {
+	for _, tc := range []struct {
+		in       string
+		wantHost string
+		wantPort int
+	}{
+		{"", "", 0},
+		// No port stated. Zero, not 22: the client decides what
+		// "unstated" means, and the server guessing 22 would be
+		// indistinguishable from the operator saying so.
+		{"ap.example.edu", "ap.example.edu", 0},
+		{"ap.example.edu:2222", "ap.example.edu", 2222},
+		{"[ap.example.edu]:2222", "ap.example.edu", 2222},
+		// The first name is the one to connect to; the rest exist so
+		// the certificate and known_hosts cover every alias.
+		{"ap.example.edu:2222, alias.example.org", "ap.example.edu", 2222},
+		{"  spaced.example.edu:22  ", "spaced.example.edu", 22},
+		// A typo'd port still yields a usable host. net.SplitHostPort
+		// accepts a non-numeric port, so the name comes out clean and
+		// only the port is discarded -- which sends the client to the
+		// default rather than to a parse of garbage.
+		{"ap.example.edu:notaport", "ap.example.edu", 0},
+		{"ap.example.edu:0", "ap.example.edu", 0},
+		{"ap.example.edu:99999", "ap.example.edu", 0},
+	} {
+		host, port := ParseGatewayAddress(tc.in)
+		if host != tc.wantHost || port != tc.wantPort {
+			t.Errorf("ParseGatewayAddress(%q) = (%q, %d), want (%q, %d)",
+				tc.in, host, port, tc.wantHost, tc.wantPort)
+		}
+	}
+}
+
+// The host it advertises must be one the certificate actually names,
+// or a client follows the advertisement to a host it cannot verify.
+func TestAdvertisedHostIsACertificatePrincipal(t *testing.T) {
+	const configured = "ap.example.edu:2222, alias.example.org"
+	host, _ := ParseGatewayAddress(configured)
+
+	hostKey, ca := testSigner(t), testSigner(t)
+	signer, err := NewHostCertSigner(hostKey, ca, ParseHostNames(configured), time.Now())
+	if err != nil {
+		t.Fatalf("issuing a host certificate: %v", err)
+	}
+	checker := &ssh.CertChecker{
+		IsHostAuthority: func(auth ssh.PublicKey, _ string) bool {
+			return string(auth.Marshal()) == string(ca.PublicKey().Marshal())
+		},
+	}
+	if err := checker.CheckHostKey(host+":2222", nil, signer.PublicKey()); err != nil {
+		t.Errorf("the advertised host is not one the certificate names: %v", err)
+	}
+}
