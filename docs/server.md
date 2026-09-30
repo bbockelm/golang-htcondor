@@ -764,7 +764,18 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 Save the `certificate` field as `~/.ssh/id_ed25519-cert.pub`, beside the private
 key; `ssh` finds it on its own. Add the `known_hosts_line` to `~/.ssh/known_hosts`
-and the gateway's host key verifies without pinning it by hand.
+and the gateway's host key verifies without pinning it by hand: the gateway
+presents a host certificate signed by the same CA, so trusting the CA is enough.
+
+That host certificate lists no principals, which makes it valid for every name.
+This process does not know the names it is reached by — it binds `:2222` behind
+whatever the operator put in front of it — and a certificate naming the wrong one
+fails closed for everyone. The published `known_hosts_line` uses a matching `*`.
+
+The bare host key is still offered alongside it, so a client that pinned the key
+before certificates existed keeps connecting and notices nothing. A client that
+holds the CA line negotiates the certificate instead; OpenSSH prefers whichever
+algorithm it already knows something about for that host.
 
 Certificates last 12 hours by default and never more than 24. That is not
 conservatism for its own sake: **there is no revocation**. No CRL, no OCSP, no

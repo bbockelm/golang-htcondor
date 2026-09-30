@@ -104,7 +104,7 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 		// The wildcard is deliberate: a gateway may be reached by
 		// several names, and narrowing it here would silently stop
 		// working the first time somebody uses an alias.
-		KnownHostsLine: "@cert-authority * " + authorized,
+		KnownHostsLine: sshgateway.KnownHostsLine(pub, nil),
 		Fingerprint:    ssh.FingerprintSHA256(pub),
 	})
 }
