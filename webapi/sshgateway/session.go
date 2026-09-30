@@ -60,6 +60,23 @@ type Server struct {
 	Transport JobTransport
 	Resolve   ResolveFunc
 
+	// Credential attaches the caller's HTCondor credential to the
+	// context a channel's work runs under.
+	//
+	// Called once per CHANNEL, deliberately, not once per connection.
+	// The credential is a short-lived IDTOKEN -- five minutes, because
+	// over HTTP a fresh one is minted per request -- and an SSH
+	// connection is not short-lived at all. Minting it at accept time
+	// meant that any channel opened later carried an expired token,
+	// cedar fell back to this daemon's own pool credential, and the
+	// schedd refused the command with the daemon's name in the error.
+	// A client with ControlMaster reuses one connection for days, so
+	// this was not an edge case.
+	//
+	// Optional; without it a channel runs under the context given to
+	// Serve, which carries no caller credential.
+	Credential func(ctx context.Context, account string, scopes []string) (context.Context, error)
+
 	Logger *logging.Logger
 }
 
@@ -70,9 +87,10 @@ type Server struct {
 func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request) {
 	go ssh.DiscardRequests(reqs)
 
-	account := ""
+	account, scopes := "", []string(nil)
 	if conn.Permissions != nil {
 		account = conn.Permissions.Extensions[ExtAccount]
+		scopes = strings.Fields(conn.Permissions.Extensions[ExtScopes])
 	}
 	if account == "" {
 		// Defence in depth. The Authenticator refuses an unnamed
@@ -99,7 +117,7 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
 				defer func() { <-slots; wg.Done() }()
-				s.handleSession(ctx, account, conn.User(), nch)
+				s.handleSession(s.channelContext(ctx, account, scopes, nch), account, conn.User(), nch)
 			}(nch)
 		case "direct-tcpip":
 			if !takeSlot(slots, nch) {
@@ -108,7 +126,7 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
 				defer func() { <-slots; wg.Done() }()
-				s.handleDirectTCPIP(ctx, account, conn.User(), nch)
+				s.handleDirectTCPIP(s.channelContext(ctx, account, scopes, nch), account, conn.User(), nch)
 			}(nch)
 		case streamLocalChannelType:
 			if !takeSlot(slots, nch) {
@@ -117,7 +135,7 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 			wg.Add(1)
 			go func(nch ssh.NewChannel) {
 				defer func() { <-slots; wg.Done() }()
-				s.handleStreamLocal(ctx, account, conn.User(), nch)
+				s.handleStreamLocal(s.channelContext(ctx, account, scopes, nch), account, conn.User(), nch)
 			}(nch)
 		default:
 			_ = nch.Reject(ssh.UnknownChannelType,
@@ -125,6 +143,25 @@ func (s *Server) Serve(ctx context.Context, conn *ssh.ServerConn, chans <-chan s
 		}
 	}
 	wg.Wait()
+}
+
+// channelContext mints this channel's credential.
+//
+// A failure is logged and the bare context returned rather than the
+// channel refused: the handlers all fail closed on a context with no
+// credential -- the schedd refuses them -- and a rejection here would
+// lose the reason, which the handler can still write to the channel.
+func (s *Server) channelContext(ctx context.Context, account string, scopes []string, nch ssh.NewChannel) context.Context {
+	if s.Credential == nil {
+		return ctx
+	}
+	cctx, err := s.Credential(ctx, account, scopes)
+	if err != nil {
+		s.logf("Could not mint a credential for a channel",
+			"account", account, "channel", nch.ChannelType(), "error", err)
+		return ctx
+	}
+	return cctx
 }
 
 // MaxChannelsPerConnection caps channels open at once on one

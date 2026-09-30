@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/ory/fosite"
-	"golang.org/x/crypto/ssh"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -188,12 +187,12 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		Auth:    auth,
 		Certs:   certs,
 		Server: &sshgateway.Server{
-			Transport: cache,
-			Resolve:   h.sshGatewayResolve,
-			Logger:    h.logger,
+			Transport:  cache,
+			Resolve:    h.sshGatewayResolve,
+			Credential: h.sshGatewayCredential,
+			Logger:     h.logger,
 		},
-		ConnContext: h.sshGatewayConnContext,
-		Logger:      h.logger,
+		Logger: h.logger,
 	}
 
 	h.sshGateway = listener
@@ -316,33 +315,6 @@ func (h *Handler) sshGatewayIdentity(ctx context.Context, g *sshgateway.Grant) (
 	return ownerFromActor(h.extractUsernameFromToken(ar)), nil
 }
 
-// sshGatewayConnContext attaches the caller's HTCondor credential to
-// everything the connection goes on to do.
-func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerConn) (context.Context, error) {
-	if conn.Permissions == nil {
-		return nil, errors.New("the connection carries no permissions")
-	}
-	account := conn.Permissions.Extensions[sshgateway.ExtAccount]
-	if account == "" {
-		return nil, errors.New("the connection carries no account")
-	}
-	scopes := strings.Fields(conn.Permissions.Extensions[sshgateway.ExtScopes])
-
-	cctx, err := h.withCondorCredential(ctx, account, scopes)
-	if err != nil {
-		return nil, err
-	}
-	// Belt and braces with the startup check. withCondorCredential is
-	// deliberately lenient -- the MCP path forwards tokens it does not
-	// mint -- so a missing credential here has to be caught rather than
-	// carried, or the connection silently runs as this daemon.
-	if _, ok := htcondor.GetSecurityConfigFromContext(cctx); !ok {
-		return nil, fmt.Errorf("no HTCondor credential could be minted for %q; refusing to run the "+
-			"session as this daemon", account)
-	}
-	return cctx, nil
-}
-
 // sshGatewaySessionSize is what a session created by the gateway asks
 // for. A zero field means the interactive package's own default, so an
 // unset deployment gets exactly what it got before these knobs
@@ -361,10 +333,36 @@ type sshGatewaySessionSize struct {
 // they just asked for to start running.
 //
 // Generous because it covers a negotiation cycle and a sandbox setup,
-// and bounded because the caller is sitting at a terminal with no
-// indication anything is happening -- see the note on the silent wait
-// in sshGatewayResolve.
+// and bounded because the caller is sitting at a terminal.
 const sshGatewaySessionWait = 3 * time.Minute
+
+// sshGatewayCredential mints the caller's HTCondor credential.
+//
+// Called per channel rather than per connection: the IDTOKEN lasts five
+// minutes because over HTTP a fresh one is minted per request, and an
+// SSH connection lasts as long as somebody leaves a terminal open. A
+// credential minted at accept time is expired by the time a later
+// channel uses it, and an expired one does not fail closed -- cedar
+// falls back to this daemon's own pool credential and the schedd
+// refuses the command with the daemon's name in the error.
+func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scopes []string) (context.Context, error) {
+	if account == "" {
+		return nil, errors.New("no account to mint a credential for")
+	}
+	cctx, err := h.withCondorCredential(ctx, account, scopes)
+	if err != nil {
+		return nil, err
+	}
+	// Belt and braces with the startup check. withCondorCredential is
+	// deliberately lenient -- the MCP path forwards tokens it does not
+	// mint -- so a missing credential has to be caught rather than
+	// carried, or the channel silently runs as this daemon.
+	if _, ok := htcondor.GetSecurityConfigFromContext(cctx); !ok {
+		return nil, fmt.Errorf("no HTCondor credential could be minted for %q; refusing to run the "+
+			"session as this daemon", account)
+	}
+	return cctx, nil
+}
 
 // sshGatewayResolve turns a target into a job.
 //

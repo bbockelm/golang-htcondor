@@ -54,21 +54,6 @@ type Listener struct {
 	// in.
 	Certs *CertAuth
 
-	// ConnContext derives the context each connection's work runs
-	// under, from the identity the Authenticator resolved. This is
-	// where the caller's HTCondor credential is attached: everything
-	// the connection does afterwards runs as that person, so it must
-	// not be built from the SSH username.
-	//
-	// Optional, and a caller that serves real jobs must supply it.
-	// Without it the connection runs under the context passed to
-	// Listen, which carries no caller credential -- and a context with
-	// none does not fail closed downstream: HTCondor falls back to this
-	// daemon's own configuration, so the session would run as the
-	// daemon. An earlier version of this comment claimed the schedd
-	// would refuse such a connection. It does not.
-	ConnContext func(ctx context.Context, conn *ssh.ServerConn) (context.Context, error)
-
 	// MaxConnections caps sockets being served at once. Zero means
 	// DefaultMaxConnections.
 	//
@@ -308,17 +293,10 @@ func (l *Listener) serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerCo
 		"requested_target", conn.User(),
 		"client", string(conn.ClientVersion()))
 
-	connCtx := ctx
-	if l.ConnContext != nil {
-		connCtx, err = l.ConnContext(ctx, conn)
-		if err != nil {
-			l.logf("Could not prepare a connection's credentials",
-				"remote", conn.RemoteAddr().String(), "error", err)
-			return
-		}
-	}
-
-	l.Server.Serve(connCtx, conn, chans, reqs)
+	// No per-connection credential: Server mints one per channel,
+	// because the credential is short-lived and this connection is
+	// not.
+	l.Server.Serve(ctx, conn, chans, reqs)
 }
 
 func (l *Listener) logf(msg string, args ...any) {

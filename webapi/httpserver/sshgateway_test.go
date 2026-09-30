@@ -21,8 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/crypto/ssh"
-
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -237,29 +235,24 @@ func TestSSHGatewayRefusesToStartWithoutSigningConfig(t *testing.T) {
 	}
 }
 
-// And if one ever reaches a connection anyway, the connection is
-// refused rather than run as the daemon.
-func TestSSHGatewayConnContextRefusesAnUncredentialedSession(t *testing.T) {
+// And if one is ever asked for anyway, it is refused rather than
+// silently running as the daemon.
+func TestSSHGatewayCredentialRefusesWhenNothingCanBeMinted(t *testing.T) {
 	h := &Handler{logger: testLogger(t)} // no signing key: nothing to mint with
-	perms := &ssh.Permissions{Extensions: map[string]string{
-		sshgateway.ExtAccount: "alice",
-		sshgateway.ExtScopes:  "condor:/WRITE",
-	}}
 
-	_, err := h.sshGatewayConnContext(context.Background(), &ssh.ServerConn{
-		Conn:        fakeSSHConn{},
-		Permissions: perms,
-	})
+	_, err := h.sshGatewayCredential(context.Background(), "alice", []string{"condor:/WRITE"})
 	if err == nil {
-		t.Fatal("a connection with no mintable credential was allowed to proceed")
+		t.Fatal("a channel with no mintable credential was allowed to proceed")
 	}
 	if !strings.Contains(err.Error(), "alice") {
 		t.Errorf("the error does not name the account: %v", err)
 	}
 }
 
-// fakeSSHConn is the little of ssh.Conn that sshGatewayConnContext
-// touches.
-type fakeSSHConn struct{ ssh.Conn }
-
-func (fakeSSHConn) User() string { return "12345.0" }
+// An empty account never reaches a credential.
+func TestSSHGatewayCredentialRefusesAnEmptyAccount(t *testing.T) {
+	h := &Handler{logger: testLogger(t)}
+	if _, err := h.sshGatewayCredential(context.Background(), "", nil); err == nil {
+		t.Fatal("a credential was minted for nobody")
+	}
+}
