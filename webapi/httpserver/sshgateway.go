@@ -340,7 +340,7 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 	if t.IsJob() {
 		return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
-	return h.sshGatewaySession(ctx, account, t.Name, report)
+	return h.sshGatewaySession(ctx, account, t, report)
 }
 
 // sshGatewaySession attaches to the caller's named interactive session,
@@ -356,7 +356,8 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 // channel is accepted and there is nowhere to write until it is.
 // Moving it after Accept is what the progress display needs, and is
 // the next piece of work.
-func (h *Handler) sshGatewaySession(ctx context.Context, account, name string, report func(string)) (jobssh.Key, error) {
+func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
+	name := t.Name
 	mgr := h.mcpServer.InteractiveManager()
 	if mgr == nil {
 		return jobssh.Key{}, fmt.Errorf(
@@ -382,8 +383,21 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account, name string, r
 		return jobssh.Key{}, fmt.Errorf("starting session %q: %w", name, err)
 	}
 	h.logger.Info(logging.DestinationHTTP, "SSH gateway started an interactive session",
-		"account", account, "session", name, "job", info.JobID)
+		"account", account, "session", name, "job", info.JobID,
+		// The username when it is not the session name: a login like
+		// "_appstore" or one with a space is derived from, and an
+		// operator correlating a report to a job needs both.
+		"username", loggedUsername(t))
 	return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
+}
+
+// loggedUsername returns the raw username when the session name was
+// derived from it, and empty when they are the same.
+func loggedUsername(t sshgateway.Target) string {
+	if t.Raw == t.Name {
+		return ""
+	}
+	return t.Raw
 }
 
 // findInteractiveSession returns the caller's session called name, or

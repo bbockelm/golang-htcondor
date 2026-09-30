@@ -624,15 +624,57 @@ func TestUnresolvableTargetIsExplained(t *testing.T) {
 	}
 }
 
-// A username that names nothing at all is knowable without asking the
-// pool, so it still gets a proper channel rejection -- there is no
-// wait to make visible and a rejection reason is the clearer signal.
-func TestUnparseableTargetIsRejectedOutright(t *testing.T) {
+// The pre-Accept rejection path still exists, and an empty username is
+// now the only thing that reaches it.
+//
+// Every other username produces a session name, because a bare `ssh
+// gateway` sends whatever the local login happens to be. An empty one
+// is not a login and no ssh client sends it, but the protocol permits
+// it and refusing before Accept is the clearer answer: there is no
+// wait to make visible, so a rejection reason beats a message on a
+// channel.
+func TestEmptyUsernameIsRejectedOutright(t *testing.T) {
 	tr := &fakeTransport{}
-	client := gatewayClient(t, gateway(t, tr), "has space")
+	client := gatewayClient(t, gateway(t, tr), "")
 
 	if _, err := client.NewSession(); err == nil {
-		t.Fatal("a channel was accepted for an unusable username")
+		t.Fatal("a channel was accepted for an empty username")
+	}
+	tr.mu.Lock()
+	sessions := len(tr.sessions)
+	tr.mu.Unlock()
+	if sessions != 0 {
+		t.Errorf("a job session was opened for an empty username")
+	}
+}
+
+// A username that is not a job id reaches a session, whatever it looks
+// like -- the channel is accepted and the resolver is asked.
+func TestAwkwardUsernamesStillReachASession(t *testing.T) {
+	for _, user := range []string{"has space", "_appstore", "bob@wisc.edu", "-leading"} {
+		t.Run(user, func(t *testing.T) {
+			tr := &fakeTransport{}
+			client := gatewayClient(t, gateway(t, tr), user)
+
+			sess, err := client.NewSession()
+			if err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+			defer func() { _ = sess.Close() }()
+
+			// gateway()'s resolver only answers for job ids, so this
+			// reaching a refusal ON THE CHANNEL rather than a rejected
+			// channel is the point: the name resolved, and only the
+			// lookup failed.
+			stderrPipe, err := sess.StderrPipe()
+			if err != nil {
+				t.Fatalf("stderr pipe: %v", err)
+			}
+			_ = sess.Start("true")
+			if msg := readAvailable(t, stderrPipe); !strings.Contains(msg, "session") {
+				t.Errorf("the failure does not mention a session: %q", msg)
+			}
+		})
 	}
 }
 
