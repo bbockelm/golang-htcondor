@@ -175,7 +175,9 @@ func dial(t *testing.T, addr, user string) ([]string, error) {
 		Timeout:         10 * time.Second,
 		Auth: []ssh.AuthMethod{
 			ssh.KeyboardInteractive(func(_, instruction string, questions []string, _ []bool) ([]string, error) {
-				shown = append(shown, instruction)
+				// Both: the instruction is context and the prompt is
+				// where everything actionable lives.
+				shown = append(shown, instruction+strings.Join(questions, ""))
 				return make([]string, len(questions)), nil
 			}),
 		},
@@ -551,7 +553,9 @@ func TestClientOfferingAKeyStillReachesThePrompt(t *testing.T) {
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(testSigner(t)),
 			ssh.KeyboardInteractive(func(_, instruction string, questions []string, _ []bool) ([]string, error) {
-				shown = append(shown, instruction)
+				// Both: the instruction is context and the prompt is
+				// where everything actionable lives.
+				shown = append(shown, instruction+strings.Join(questions, ""))
 				return make([]string, len(questions)), nil
 			}),
 		},

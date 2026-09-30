@@ -161,8 +161,18 @@ func (p *progress) writeOnce(status string) {
 	p.lastLine = status
 }
 
-// stop ends the display and clears the line it was using, so whatever
-// runs next starts at column 0 on a clean line.
+// stop ends the display, clears the line the spinner was using, and
+// leaves behind how long the wait actually took.
+//
+// The elapsed time is kept rather than erased because it is the part
+// people want afterwards: it survives a copy-paste into a bug report,
+// and it answers "was that slow?" for somebody who looked away. The
+// spinner itself is erased -- it is motion, and motion does not belong
+// in a scrollback.
+//
+// Nothing is printed when nothing was ever drawn. Reaching a job that
+// is already running takes no measurable time, and "ready after 0:00"
+// is noise on every single connection.
 func (p *progress) stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -170,9 +180,13 @@ func (p *progress) stop() {
 		return
 	}
 	p.done = true
+	if !p.drawn && p.lastLine == "" {
+		return
+	}
 	if p.drawn {
 		_, _ = fmt.Fprint(p.w, "\r\x1b[K")
 	}
+	_, _ = fmt.Fprintf(p.w, "Ready after %s.\r\n", elapsed(time.Since(p.started)))
 }
 
 // elapsed formats a wait the way a person reads a clock.
