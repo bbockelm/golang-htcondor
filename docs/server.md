@@ -581,14 +581,13 @@ A user connects with a stock `ssh` and sees:
 
 ```
 $ ssh 12345.0@ap.example.edu -p 2222
-Sign in to ap.example.edu
-
-  Open  https://ap.example.edu/mcp/oauth2/device/verify?user_code=WDJB-MJHT
-
-  The page will show the code  WDJB-MJHT  -- check it matches this one.
-
-This session continues by itself once you approve it.
+Approve at https://ap.example.edu/mcp/oauth2/device/verify?user_code=WDJB-MJHT (code WDJB-MJHT), then press Enter:
 ```
+
+Approve in the browser, press Enter, and the session opens. Clients that
+render the longer RFC 4256 instruction show the URL and code on their own
+lines above that prompt; OpenSSH on Linux shows only the prompt, which is why
+everything needed to act is repeated there.
 
 No client configuration, no key to distribute: the prompt is an ordinary
 RFC 4256 keyboard-interactive challenge, which every SSH client already
@@ -708,9 +707,10 @@ certificates usually work:
 - **`scp` and `sftp` do not work.** HTCondor's ssh-to-job wrapper turns a
   subsystem request into `eval sftp`. The gateway says so rather than letting
   it fail as "subsystem request failed".
-- **`BatchMode=yes` cannot use the device flow.** The client declines
-  keyboard-interactive outright; use a certificate. A terminal is not required
-  otherwise — `ssh -T` and piped stdin both work.
+- **The device flow needs somewhere to prompt.** `BatchMode=yes` declines
+  keyboard-interactive outright, and a client with no terminal has nowhere to
+  show the code; both want a certificate instead. A remote terminal is not
+  required — `ssh -T` is fine, as long as the *local* end can prompt.
 - **Ten sessions per job.** The sshd HTCondor starts uses OpenSSH's default
   `MaxSessions`, and every terminal for one job shares it. Port and socket
   forwards do not count against it.

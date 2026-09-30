@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -195,3 +197,69 @@ func TestSSHGatewayPromptName(t *testing.T) {
 		t.Errorf("prompt = %q", got)
 	}
 }
+
+// The gateway must not start without the config it needs to mint a
+// per-caller HTCondor credential.
+//
+// This is the failure that looks safe and is not. withCondorCredential
+// returns the context unchanged when there is nothing to mint with,
+// and a context carrying no security config does NOT fail closed
+// downstream -- GetSecurityConfigOrDefault falls through to this
+// daemon's own configuration. Every session would then reach the
+// schedd as the daemon, which on a normal access point is a queue
+// superuser: any authenticated user could shell into anybody's job.
+func TestSSHGatewayRefusesToStartWithoutSigningConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		signingKey  string
+		trustDomain string
+	}{
+		{"no signing key", "", "test.htcondor.org"},
+		{"no trust domain", "/tmp/key", ""},
+		{"neither", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{
+				sshGatewayAddress: "127.0.0.1:0",
+				signingKeyPath:    tc.signingKey,
+				trustDomain:       tc.trustDomain,
+				oauth2Provider:    &OAuth2Provider{},
+				logger:            testLogger(t),
+			}
+			err := h.startSSHGateway(context.Background(), "https://ap.example.edu")
+			if err == nil {
+				t.Fatal("the gateway started with no way to mint a caller credential")
+			}
+			if !strings.Contains(err.Error(), "HTTP_API_SIGNING_KEY") {
+				t.Errorf("the error does not name what to set: %v", err)
+			}
+		})
+	}
+}
+
+// And if one ever reaches a connection anyway, the connection is
+// refused rather than run as the daemon.
+func TestSSHGatewayConnContextRefusesAnUncredentialedSession(t *testing.T) {
+	h := &Handler{logger: testLogger(t)} // no signing key: nothing to mint with
+	perms := &ssh.Permissions{Extensions: map[string]string{
+		sshgateway.ExtAccount: "alice",
+		sshgateway.ExtScopes:  "condor:/WRITE",
+	}}
+
+	_, err := h.sshGatewayConnContext(context.Background(), &ssh.ServerConn{
+		Conn:        fakeSSHConn{},
+		Permissions: perms,
+	})
+	if err == nil {
+		t.Fatal("a connection with no mintable credential was allowed to proceed")
+	}
+	if !strings.Contains(err.Error(), "alice") {
+		t.Errorf("the error does not name the account: %v", err)
+	}
+}
+
+// fakeSSHConn is the little of ssh.Conn that sshGatewayConnContext
+// touches.
+type fakeSSHConn struct{ ssh.Conn }
+
+func (fakeSSHConn) User() string { return "12345.0" }

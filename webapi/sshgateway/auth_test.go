@@ -343,29 +343,41 @@ func baseSSHArgs(portFlag, port string) []string {
 	}
 }
 
-// realSSHRaw runs the system ssh with only the flags every test needs,
-// leaving the authentication method to the caller.
-func realSSHRaw(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
+// askpass stages a helper that records the prompt ssh would have shown
+// a user, and answers it with an empty line.
+//
+// Needed because `go test` gives ssh no controlling terminal, and
+// without one OpenSSH has nowhere to write a prompt -- so a test that
+// merely runs ssh cannot see what a person would see. That gap is not
+// hypothetical: the zero-question challenge this package started with
+// printed nothing at all on Linux, and every test passed anyway
+// because none of them could observe a prompt in the first place.
+//
+// SSH_ASKPASS_REQUIRE=force is what makes ssh prefer the helper over a
+// terminal; DISPLAY is set because older clients check for it.
+func askpass(t *testing.T) (env []string, shown func() string) {
 	t.Helper()
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("split: %v", err)
+	dir := t.TempDir()
+	log := filepath.Join(dir, "prompts.txt")
+	script := filepath.Join(dir, "askpass.sh")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"" + log + "\"\necho\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // must be executable
+		t.Fatalf("write askpass: %v", err)
 	}
-	args := append(baseSSHArgs("-p", port), extra...)
-	for i, a := range tail {
-		tail[i] = strings.ReplaceAll(a, "HOST", host)
-	}
-	args = append(args, tail...)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	//nolint:gosec // fixed argv; the binary is resolved by LookPath in the caller
-	return exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	return []string{
+			"SSH_ASKPASS=" + script,
+			"SSH_ASKPASS_REQUIRE=force",
+			"DISPLAY=:0",
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + dir,
+		}, func() string {
+			b, _ := os.ReadFile(log) //nolint:gosec // a path this function just built under t.TempDir()
+			return string(b)
+		}
 }
 
-// realSSH runs the system ssh (or scp) against srv and returns its
-// combined output.
-func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
+// runSSH is the one place a client is actually launched.
+func runSSH(t *testing.T, bin, addr string, env, flags []string, tail ...string) ([]byte, error) {
 	t.Helper()
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -375,16 +387,7 @@ func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]
 	if strings.HasSuffix(bin, "scp") {
 		portFlag = "-P"
 	}
-	// The device-flow defaults. Options are appended AFTER these and
-	// OpenSSH takes the FIRST occurrence of each, so a caller cannot
-	// override them -- which is why the certificate tests use
-	// realSSHRaw instead of passing extra flags here.
-	args := []string{
-		"-o", "PubkeyAuthentication=no",
-		"-o", "PreferredAuthentications=keyboard-interactive",
-	}
-	args = append(args, baseSSHArgs(portFlag, port)...)
-	args = append(args, extra...)
+	args := append(baseSSHArgs(portFlag, port), flags...)
 	for i, a := range tail {
 		tail[i] = strings.ReplaceAll(a, "HOST", host)
 	}
@@ -392,9 +395,36 @@ func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// bin comes from exec.LookPath in the caller and the arguments are
-	// built here, not from input.
-	return exec.CommandContext(ctx, bin, args...).CombinedOutput() //nolint:gosec // test harness, fixed argv
+	//nolint:gosec // fixed argv; the binary is resolved by LookPath in the caller
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	return cmd.CombinedOutput()
+}
+
+// realSSHRaw leaves the authentication method to the caller, which is
+// what the certificate tests need: realSSH's device-flow defaults come
+// first in argv and OpenSSH takes the first occurrence of an option.
+func realSSHRaw(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
+	t.Helper()
+	return runSSH(t, bin, addr, nil, extra, tail...)
+}
+
+// realSSH runs a client with the device-flow defaults.
+func realSSH(t *testing.T, bin, addr string, extra []string, tail ...string) ([]byte, error) {
+	t.Helper()
+	return realSSHEnv(t, bin, addr, nil, extra, tail...)
+}
+
+// realSSHEnv is realSSH with an environment, for the askpass helper.
+func realSSHEnv(t *testing.T, bin, addr string, env, extra []string, tail ...string) ([]byte, error) {
+	t.Helper()
+	flags := append([]string{
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PreferredAuthentications=keyboard-interactive",
+	}, extra...)
+	return runSSH(t, bin, addr, env, flags, tail...)
 }
 
 // The experiment this whole approach rests on: a REAL OpenSSH client,
@@ -428,21 +458,16 @@ func TestRealOpenSSHClientAuthenticates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := grantingAuthenticator(t, "bbockelm", Options{Prompt: "ap.example.edu"})
 			srv := startServer(t, a)
+			env, shown := askpass(t)
 
-			out, err := realSSH(t, sshBin, srv.addr, tc.extra, "12345.0@HOST", "true")
-			t.Logf("ssh exit=%v output:\n%s", err, out)
+			out, err := realSSHEnv(t, sshBin, srv.addr, env, tc.extra, "12345.0@HOST", "true")
+			t.Logf("ssh exit=%v output:\n%s\nprompted:\n%s", err, out, shown())
 
-			if !strings.Contains(string(out), "WDJB-MJHT") {
-				t.Fatalf("a real ssh client did not print the device code; keyboard-interactive with "+
-					"no questions is not a usable channel for it. Output:\n%s", out)
-			}
-			// The fake flow carries no complete URI, so the prompt
-			// falls back to the plain URL and the code. Whether a
-			// one-click link is offered when the server sends one is
-			// TestOneClickLinkIsOfferedWithTheCodeToCheck's business,
-			// not this test's.
-			if !strings.Contains(string(out), "Enter the code") {
-				t.Errorf("the fallback prompt did not tell the user what to do:\n%s", out)
+			// What the USER would see, which is the prompt -- not the
+			// combined output, which is empty when ssh has no terminal.
+			if !strings.Contains(shown(), "WDJB-MJHT") {
+				t.Fatalf("a real ssh client never showed the device code. prompted:\n%q\noutput:\n%s",
+					shown(), out)
 			}
 			perms := srv.lastPermissions()
 			if perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {
@@ -469,17 +494,18 @@ func TestRealSCPAuthenticates(t *testing.T) {
 
 	a := grantingAuthenticator(t, "bbockelm", Options{Prompt: "ap.example.edu"})
 	srv := startServer(t, a)
+	env, shown := askpass(t)
 
 	src := filepath.Join(t.TempDir(), "payload")
 	if err := os.WriteFile(src, []byte("hi\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	out, _ := realSSH(t, scpBin, srv.addr, nil, src, "12345.0@HOST:/tmp/payload")
-	t.Logf("scp output:\n%s", out)
+	out, _ := realSSHEnv(t, scpBin, srv.addr, env, nil, src, "12345.0@HOST:/tmp/payload")
+	t.Logf("scp output:\n%s\nprompted:\n%s", out, shown())
 
-	if !strings.Contains(string(out), "WDJB-MJHT") {
-		t.Errorf("scp did not print the device code:\n%s", out)
+	if !strings.Contains(shown(), "WDJB-MJHT") {
+		t.Errorf("scp never showed the device code. prompted:\n%q", shown())
 	}
 	perms := srv.lastPermissions()
 	if perms == nil || perms.Extensions[ExtAccount] != "bbockelm" {

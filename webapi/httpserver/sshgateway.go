@@ -87,6 +87,20 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		return errors.New("the SSH gateway needs the OAuth2 provider, which is not configured; " +
 			"enable MCP/OAuth2 or unset HTTP_API_SSH_GATEWAY_ADDRESS")
 	}
+	// Without these there is nothing to mint a per-caller HTCondor
+	// credential with, and withCondorCredential hands back the context
+	// unchanged. That is NOT harmless here: a context with no security
+	// config falls through to GetSecurityConfig(cfg, ...) -- this
+	// daemon's own configuration -- so every session would reach the
+	// schedd as the daemon, which on a normal access point is a queue
+	// superuser. Every other credential-minting surface in this server
+	// refuses for the same reason; see apikey_condor.go and
+	// dbmirror_token.go.
+	if h.signingKeyPath == "" || h.trustDomain == "" {
+		return errors.New("the SSH gateway needs HTTP_API_SIGNING_KEY and a trust domain to mint " +
+			"per-caller HTCondor credentials; without them every session would authenticate as this " +
+			"daemon rather than as the person connecting")
+	}
 
 	hostKey, err := sshkeys.Resolve(ctx, sshkeys.HostKey, sshkeys.Options{
 		DB:          h.db,
@@ -303,7 +317,20 @@ func (h *Handler) sshGatewayConnContext(ctx context.Context, conn *ssh.ServerCon
 		return nil, errors.New("the connection carries no account")
 	}
 	scopes := strings.Fields(conn.Permissions.Extensions[sshgateway.ExtScopes])
-	return h.withCondorCredential(ctx, account, scopes)
+
+	cctx, err := h.withCondorCredential(ctx, account, scopes)
+	if err != nil {
+		return nil, err
+	}
+	// Belt and braces with the startup check. withCondorCredential is
+	// deliberately lenient -- the MCP path forwards tokens it does not
+	// mint -- so a missing credential here has to be caught rather than
+	// carried, or the connection silently runs as this daemon.
+	if _, ok := htcondor.GetSecurityConfigFromContext(cctx); !ok {
+		return nil, fmt.Errorf("no HTCondor credential could be minted for %q; refusing to run the "+
+			"session as this daemon", account)
+	}
+	return cctx, nil
 }
 
 // sshGatewaySessionSize is what a session created by the gateway asks

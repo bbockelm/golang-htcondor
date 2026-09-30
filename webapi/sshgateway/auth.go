@@ -153,11 +153,20 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 		return nil, fmt.Errorf("sshgateway: starting the device authorization: %w", err)
 	}
 
-	// One challenge with no questions: RFC 4256 lets the server send
-	// an instruction the client prints and answers immediately. So the
-	// user sees the code and the URL without having to press anything,
-	// and the session continues by itself once they approve.
-	if _, err := challenge("", loginInstruction(a.opts.Prompt, auth), nil, nil); err != nil {
+	// The code goes in a PROMPT, not only in the instruction.
+	//
+	// A zero-question challenge looked ideal -- the client prints the
+	// instruction and answers immediately, so the session continues by
+	// itself. OpenSSH 10.x on macOS does exactly that. OpenSSH 9.9 on
+	// Linux prints NOTHING and authenticates anyway, which is every
+	// HTCondor user seeing a blank screen. A prompt is displayed by
+	// every client because displaying it is what a prompt is for.
+	//
+	// The cost is one keypress. That is the whole trade: correctness on
+	// the platform the users are on, against elegance on the one this
+	// was developed on.
+	if _, err := challenge("", loginInstruction(a.opts.Prompt, auth),
+		[]string{loginPromptLine(auth)}, []bool{true}); err != nil {
 		return nil, fmt.Errorf("sshgateway: presenting the login prompt: %w", err)
 	}
 
@@ -219,14 +228,28 @@ func loginInstruction(service string, auth *DeviceAuth) string {
 
 	if auth.VerificationURIComplete != "" {
 		fmt.Fprintf(&b, "  Open  %s\r\n\r\n", auth.VerificationURIComplete)
-		fmt.Fprintf(&b, "  The page will show the code  %s  -- check it matches this one.\r\n\r\n", auth.UserCode)
+		fmt.Fprintf(&b, "  The page will show the code  %s  -- check it matches this one.\r\n", auth.UserCode)
 	} else {
 		fmt.Fprintf(&b, "  1. Open  %s\r\n", auth.VerificationURI)
-		fmt.Fprintf(&b, "  2. Enter the code  %s\r\n\r\n", auth.UserCode)
+		fmt.Fprintf(&b, "  2. Enter the code  %s\r\n", auth.UserCode)
 	}
-
-	b.WriteString("This session continues by itself once you approve it.\r\n")
 	return b.String()
+}
+
+// loginPromptLine is what the client actually has to render.
+//
+// Everything a user needs to act is repeated here rather than left in
+// the instruction, because a client that ignores instructions -- which
+// OpenSSH on Linux does for a zero-question challenge -- would
+// otherwise leave them with a bare cursor. The instruction stays for
+// the clients that do show it, where it reads as the fuller version of
+// this line.
+func loginPromptLine(auth *DeviceAuth) string {
+	where := auth.VerificationURIComplete
+	if where == "" {
+		where = auth.VerificationURI
+	}
+	return fmt.Sprintf("Approve at %s (code %s), then press Enter: ", where, auth.UserCode)
 }
 
 // waitFailureText explains a failed wait in the terminal, in terms of

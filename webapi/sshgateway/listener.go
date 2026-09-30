@@ -57,9 +57,13 @@ type Listener struct {
 	// the connection does afterwards runs as that person, so it must
 	// not be built from the SSH username.
 	//
-	// Optional; without it the connection runs under the context
-	// passed to ListenAndServe, which authenticates as this daemon and
-	// will therefore be refused by the schedd.
+	// Optional, and a caller that serves real jobs must supply it.
+	// Without it the connection runs under the context passed to
+	// Listen, which carries no caller credential -- and a context with
+	// none does not fail closed downstream: HTCondor falls back to this
+	// daemon's own configuration, so the session would run as the
+	// daemon. An earlier version of this comment claimed the schedd
+	// would refuse such a connection. It does not.
 	ConnContext func(ctx context.Context, conn *ssh.ServerConn) (context.Context, error)
 
 	Logger *logging.Logger
