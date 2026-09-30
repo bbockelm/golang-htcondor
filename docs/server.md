@@ -657,6 +657,7 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_GATEWAY_ISSUER` | OAuth2 issuer the device flow runs against. Defaults to the server's own issuer; set it when this process cannot reach its own public URL. |
 | `HTTP_API_SSH_HOST_KEY_FILE` | Host key clients pin. Generated and sealed in the DB when unset. |
 | `HTTP_API_SSH_CA_KEY_FILE` | CA key for signing user certificates. Same treatment; without it certificates are unavailable and the device flow still works. |
+| `HTTP_API_SSH_GATEWAY_HOST` | The name users actually `ssh` to, e.g. `ap.example.edu`. Purely cosmetic: it is what the web UI prints as the `ssh` command for a session. It cannot be derived, because the listen address is usually not what anybody types — a container listening on `:2222` sits behind a service publishing 22 on another address. Unset means no command is printed. |
 | `HTTP_API_SSH_GATEWAY_SESSION_CPUS` | CPUs a session created on demand requests. Default 1. |
 | `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
 | `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 1024. |
