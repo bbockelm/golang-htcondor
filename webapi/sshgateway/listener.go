@@ -44,6 +44,18 @@ type Listener struct {
 	// stable across restarts and replicas -- a new one presents as a
 	// man-in-the-middle to everybody who has connected before.
 	HostKey ssh.Signer
+	// HostCert, when set, is HostKey wrapped in a certificate signed
+	// by this deployment's CA, letting a client verify the gateway
+	// from the CA alone.
+	//
+	// Both are offered, and that is the point rather than an
+	// oversight. A client picks the host key algorithm it already
+	// knows something about: one holding the CA line negotiates the
+	// certificate, while one that pinned the bare key years ago
+	// negotiates that and notices nothing. Offering only the
+	// certificate would present every existing client with what looks
+	// like a brand new host.
+	HostCert ssh.Signer
 	// Auth and Server are required.
 	Auth   *Authenticator
 	Server *Server
@@ -116,6 +128,13 @@ func (l *Listener) Listen(ctx context.Context) error {
 		// anything meaningful: guessing a key is not a thing, and the
 		// device flow has its own concurrency cap.
 		cfg.MaxAuthTries = 32
+	}
+	// The certificate goes first: where a client is happy with either,
+	// x/crypto/ssh offers them in the order they were added, and the
+	// certificate is the one that needs no prior knowledge of this
+	// host.
+	if l.HostCert != nil {
+		cfg.AddHostKey(l.HostCert)
 	}
 	cfg.AddHostKey(l.HostKey)
 

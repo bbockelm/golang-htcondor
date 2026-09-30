@@ -20,6 +20,9 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func testListener(t *testing.T, addr string) *Listener {
@@ -154,4 +157,75 @@ func TestPerSourceSlotsAreReleasedCompletely(t *testing.T) {
 	if n != 0 {
 		t.Errorf("%d source entries left behind; the map grows forever", n)
 	}
+}
+
+// Both host key algorithms have to be on offer, and that is a
+// compatibility guarantee rather than a detail.
+//
+// A client that pinned the bare host key before certificates existed
+// must keep connecting without noticing anything. If the gateway
+// offered only the certificate, every such client would be met with
+// what looks like an entirely new host -- the loudest possible warning,
+// for a change that was supposed to remove a prompt.
+func TestBothHostKeyAlgorithmsAreOffered(t *testing.T) {
+	host, ca := testSigner(t), testSigner(t)
+	cert, err := NewHostCertSigner(host, ca, nil, time.Now())
+	if err != nil {
+		t.Fatalf("issuing a host certificate: %v", err)
+	}
+
+	l := testListener(t, "127.0.0.1:0")
+	l.HostKey = host
+	l.HostCert = cert
+	if err := l.Listen(context.Background()); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	go func() { _ = l.Serve(context.Background()) }()
+
+	// Each client insists on exactly one algorithm, so a successful
+	// handshake proves the server offered that one specifically.
+	for _, tc := range []struct {
+		name string
+		algo string
+		want ssh.PublicKey
+	}{
+		{"a client that trusts the CA", ssh.CertAlgoED25519v01, cert.PublicKey()},
+		{"a client that pinned the bare key", ssh.KeyAlgoED25519, host.PublicKey()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen ssh.PublicKey
+			_, _, _, err := sshDialHostKey(l.BoundAddr(), tc.algo, &seen)
+			// Authentication is expected to fail -- no credential is
+			// offered here -- but only AFTER the host key exchange,
+			// which is the part under test.
+			if seen == nil {
+				t.Fatalf("no host key was exchanged with %s: %v", tc.algo, err)
+			}
+			if string(seen.Marshal()) != string(tc.want.Marshal()) {
+				t.Errorf("server presented %s, want %s", seen.Type(), tc.want.Type())
+			}
+		})
+	}
+}
+
+// sshDialHostKey handshakes with one host key algorithm and records
+// what the server presented.
+func sshDialHostKey(addr, algo string, seen *ssh.PublicKey) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	nc, err := d.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = nc.Close() }()
+	return ssh.NewClientConn(nc, addr, &ssh.ClientConfig{
+		User:              "12345.0",
+		HostKeyAlgorithms: []string{algo},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			*seen = key
+			return nil
+		},
+		Auth:    []ssh.AuthMethod{},
+		Timeout: 5 * time.Second,
+	})
 }

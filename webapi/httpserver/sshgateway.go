@@ -32,6 +32,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/sshkeys"
+	"golang.org/x/crypto/ssh"
 )
 
 // sshGatewayClientID is the public OAuth2 client the gateway drives the
@@ -197,11 +198,36 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		}
 	}
 
+	// Present a host certificate when there is a CA to sign one with,
+	// so a client that trusts the CA verifies this gateway without
+	// pinning its host key. Falling back to the bare key is not a
+	// silent downgrade: it is the same thing the gateway did before
+	// host certificates existed, and it is what a deployment with no
+	// CA key has always had.
+	var hostCert ssh.Signer
+	if h.sshCASigner != nil {
+		// Principals are the operator's configured gateway names, and
+		// none when they configured none -- a certificate listing no
+		// principals is good for every name, which is what a server
+		// that does not know the names it is reached by has to say. It
+		// binds :2222 behind whatever the operator put in front of it,
+		// and a certificate naming the wrong name fails closed for
+		// everybody.
+		names := sshgateway.ParseHostNames(h.sshGatewayPublicHost)
+		signer, err := sshgateway.NewHostCertSigner(
+			hostKey.Signer, h.sshCASigner, names, time.Now())
+		if err != nil {
+			return fmt.Errorf("issuing the gateway's host certificate: %w", err)
+		}
+		hostCert = signer
+	}
+
 	listener := &sshgateway.Listener{
-		Addr:    h.sshGatewayAddress,
-		HostKey: hostKey.Signer,
-		Auth:    auth,
-		Certs:   certs,
+		Addr:     h.sshGatewayAddress,
+		HostKey:  hostKey.Signer,
+		HostCert: hostCert,
+		Auth:     auth,
+		Certs:    certs,
 		Server: &sshgateway.Server{
 			Transport:  cache,
 			Resolve:    h.sshGatewayResolve,
@@ -218,6 +244,8 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"issuer", gatewayIssuer,
 		"host_key", hostKey.Fingerprint,
 		"host_key_source", hostKey.Source,
+		"host_certificate", hostCert != nil,
+		"host_certificate_names", h.sshGatewayPublicHost,
 		"certificates", certs != nil,
 		"lockout", bans != nil)
 
