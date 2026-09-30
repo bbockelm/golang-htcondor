@@ -58,10 +58,12 @@ func getDefaultConfig() *config.Config {
 //
 // Method-list construction:
 //
-//   - Starts from GetSecurityConfigOrDefault, which reads
-//     SEC_<context>_AUTHENTICATION_METHODS (falling back to
-//     SEC_DEFAULT_*, then to a sensible compiled-in fallback that
-//     includes SSL alongside TOKEN/FS).
+//   - Starts from the configured SEC_<context>_AUTHENTICATION_METHODS
+//     (falling back to SEC_DEFAULT_*, then to a sensible compiled-in
+//     fallback that includes SSL alongside TOKEN/FS). Read through
+//     loadClientSecurityDefaults when a token was supplied, and through
+//     GetSecurityConfigOrDefault -- which may instead return a credential
+//     the context already carries -- when none was.
 //   - When a non-empty token is supplied, guarantees TOKEN appears in
 //     the method list — prepended if absent — so the supplied token is
 //     actually offered to the peer. AuthIDTokens already counts as
@@ -72,9 +74,8 @@ func getDefaultConfig() *config.Config {
 //   - Token: set when token != "".
 //   - SessionCache: set when sessionCache != nil; otherwise cedar uses
 //     its global cache.
-//   - PeerName: GetSecurityConfigOrDefault populates this from the
-//     argument, used for session-cache lookups and SSL hostname
-//     verification.
+//   - PeerName: populated from the argument, used for session-cache
+//     lookups and SSL hostname verification.
 //
 // Other security parameters (CryptoMethods, Authentication/Encryption/
 // Integrity levels, SSL credentials when SSL is configured) come from
@@ -99,7 +100,29 @@ func NewClientSecurityConfig(
 	if secContext == "" {
 		secContext = "CLIENT"
 	}
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, secContext, peerName)
+	// Two different questions used to share one call here. With an explicit
+	// token the caller has already decided whose credential this connection
+	// presents, so the only thing wanted from the configuration is the SEC_*
+	// base to overlay it on -- loadClientSecurityDefaults, which resolves no
+	// identity. Without one, this really is "authenticate as whoever the
+	// context says", which is GetSecurityConfigOrDefault's job.
+	//
+	// Consulting the context on the token path was also wrong on its own
+	// terms: it copied *someone else's* resolved config -- SessionCache,
+	// SecurityTag, SSL client cert, TokenDir -- and then swapped the token
+	// underneath it. Every caller that mints a token for a second identity
+	// (superuser impersonation, the SSH gateway, the authz probe) has had to
+	// remember to overwrite SecurityTag afterwards, because cedar's client
+	// session cache is keyed on it and inheriting one means resuming a
+	// session that was authenticated as somebody else. Not inheriting the
+	// config in the first place removes the thing they were compensating for.
+	var secConfig *security.SecurityConfig
+	var err error
+	if token != "" {
+		secConfig, err = loadClientSecurityDefaults(nil, command, secContext, peerName)
+	} else {
+		secConfig, err = GetSecurityConfigOrDefault(ctx, nil, command, secContext, peerName)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -771,7 +794,32 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 		return secConfig, nil
 	}
 
-	// 2. Try to load from HTCondor configuration if available
+	// 2. No caller credential on the context: everything below this point
+	// authenticates as this daemon.
+	return loadClientSecurityDefaults(cfg, command, secContext, peerName)
+}
+
+// loadClientSecurityDefaults builds a client SecurityConfig out of the
+// HTCondor configuration alone: the SEC_* method lists, crypto methods and
+// security levels, plus the credential material those methods need. It makes
+// no reference to a context and therefore resolves no identity.
+//
+// Split out of GetSecurityConfigOrDefault because those were two different
+// acts sharing one entry point. "Read SEC_CLIENT_AUTHENTICATION_METHODS" is a
+// configuration lookup; "decide whose credential goes on the wire" is an
+// identity decision, and only the second one has any business consulting the
+// context. A caller that already holds an explicit credential -- the token
+// argument to NewClientSecurityConfig -- has made the identity decision
+// itself and wants nothing from here but the configured base to overlay it
+// on.
+//
+// Note what this still returns when no configuration is reachable at all: a
+// method list containing FS, Authentication=OPTIONAL, and
+// daemonCredentialCache as the credential reader. On a same-host schedd that
+// combination authenticates as the daemon's OS user with no token involved,
+// so anything that wants to restrict the daemon identity has to sit in front
+// of this function rather than in front of GetSecurityConfig.
+func loadClientSecurityDefaults(cfg *config.Config, command int, secContext string, peerName string) (*security.SecurityConfig, error) {
 	// If cfg is nil, try the global default config
 	if cfg == nil {
 		cfg = getDefaultConfig()
@@ -789,7 +837,7 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 		return secConfig, nil
 	}
 
-	// 3. Fall back to sensible defaults
+	// Fall back to sensible defaults
 	return &security.SecurityConfig{
 		Command:        command,
 		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthFS},
