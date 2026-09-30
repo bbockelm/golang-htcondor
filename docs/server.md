@@ -1029,7 +1029,14 @@ at `/openapi.json`.
 
 **Health & metrics**
 - `GET /healthz` — liveness, always 200 if the process is up
-- `GET /api/v1/ping` — schedd + collector probe
+- `GET /api/v1/ping` — schedd + collector probe, **as the caller**. Needs a
+  credential and answers 401 without one: it reports an identity, an
+  authentication method, a session id and the daemon's valid commands, and
+  unauthenticated it answered for the service account. Use `/readyz` for an
+  unauthenticated health check — it reads the periodic pinger's cached
+  result and is what the Kubernetes probes use.
+- `GET /api/v1/schedd/ping`, `GET /api/v1/collector/ping` — the same, one
+  daemon each
 - `GET /metrics` — Prometheus exposition (requires the `metrics`
   scope unless `HTTP_API_METRICS_PUBLIC=true`)
 
@@ -1078,8 +1085,10 @@ curl -X POST http://localhost:8080/api/v1/jobs \
 curl 'http://localhost:8080/api/v1/jobs?constraint=Owner=="alice"' \
   -H "Authorization: Bearer $TOKEN"
 
-# Get health.
-curl http://localhost:8080/api/v1/ping
+# Get health. /readyz needs no credential; /api/v1/ping pings as you.
+curl http://localhost:8080/readyz
+curl http://localhost:8080/api/v1/ping \
+  -H "Authorization: Bearer $TOKEN"
 
 # Scrape metrics with an API key (mint via /admin/api-keys).
 curl http://localhost:8080/metrics \
