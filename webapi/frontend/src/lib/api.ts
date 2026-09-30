@@ -648,6 +648,16 @@ export interface InteractiveTerminalSummary {
   hold_reason_code?: number;
   hold_reason?: string;
   submitted_at?: string;
+  // kind is 'terminal' for a shell launched from this page, or
+  // 'session' for a named session started through MCP or `ssh`. A
+  // terminal ends when its last tab disconnects; a session keeps
+  // running until it is removed, so the two are not interchangeable.
+  kind: string;
+  // name is the session's name, for kind === 'session'.
+  name?: string;
+  // ssh_command reaches a session from a shell. Absent when the
+  // server has no SSH gateway to reach it through.
+  ssh_command?: string;
 }
 
 // JobBatchName prefix used by interactive terminal jobs. Mirrored from

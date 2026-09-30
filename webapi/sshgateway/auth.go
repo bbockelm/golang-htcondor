@@ -221,7 +221,7 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	// The cost is one keypress. That is the whole trade: correctness on
 	// the platform the users are on, against elegance on the one this
 	// was developed on.
-	if _, err := challenge("", loginInstruction(a.opts.Prompt, auth),
+	if _, err := challenge("", loginInstruction(a.opts.Prompt),
 		[]string{loginPromptLine(auth)}, []bool{true}); err != nil {
 		return nil, fmt.Errorf("sshgateway: presenting the login prompt: %w", err)
 	}
@@ -263,47 +263,41 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	}, nil
 }
 
-// loginInstruction is what the user reads in their terminal.
+// loginInstruction is the one line of context above the prompt.
 //
-// The one-click link is shown when the server offers one, because this
-// text reaches the user on the very terminal they typed `ssh` into --
-// the same-device, out-of-band delivery RFC 8628 section 3.3.1 offers
-// it for. The code is printed beside it so the user can check it
-// against what the approval page displays, which is the step that
-// catches somebody who followed a link they were sent rather than one
-// they were shown. See the DeviceAuth doc comment.
-func loginInstruction(service string, auth *DeviceAuth) string {
-	var b strings.Builder
-	if service != "" {
-		fmt.Fprintf(&b, "Sign in to %s\r\n\r\n", service)
-	} else {
-		b.WriteString("Sign in to continue\r\n\r\n")
+// Deliberately says nothing actionable. Everything a person has to DO
+// is in the prompt instead, because OpenSSH on Linux renders the
+// prompt and ignores the instruction -- so anything that lives only
+// here is invisible to most of the people who will use this. Saying it
+// in both places is what made the old splash screen repeat the URL and
+// the code three times over.
+func loginInstruction(service string) string {
+	if service == "" {
+		return "Sign in to continue.\r\n"
 	}
-
-	if auth.VerificationURIComplete != "" {
-		fmt.Fprintf(&b, "  Open  %s\r\n\r\n", auth.VerificationURIComplete)
-		fmt.Fprintf(&b, "  The page will show the code  %s  -- check it matches this one.\r\n", auth.UserCode)
-	} else {
-		fmt.Fprintf(&b, "  1. Open  %s\r\n", auth.VerificationURI)
-		fmt.Fprintf(&b, "  2. Enter the code  %s\r\n", auth.UserCode)
-	}
-	return b.String()
+	return fmt.Sprintf("Sign in to %s\r\n", service)
 }
 
-// loginPromptLine is what the client actually has to render.
+// loginPromptLine is what the client actually renders.
 //
-// Everything a user needs to act is repeated here rather than left in
-// the instruction, because a client that ignores instructions -- which
-// OpenSSH on Linux does for a zero-question challenge -- would
-// otherwise leave them with a bare cursor. The instruction stays for
-// the clients that do show it, where it reads as the fuller version of
-// this line.
+// Laid out over several lines on purpose. ssh prefixes the prompt with
+// "(user@host) ", so a single long line carrying a URL and a code
+// wraps in the middle of the URL on any normal terminal. Starting with
+// a newline leaves that prefix alone on its own line and puts the URL
+// and the code on lines of their own, where they can be
+// double-clicked and copied.
 func loginPromptLine(auth *DeviceAuth) string {
 	where := auth.VerificationURIComplete
 	if where == "" {
 		where = auth.VerificationURI
 	}
-	return fmt.Sprintf("Approve at %s (code %s), then press Enter: ", where, auth.UserCode)
+	var b strings.Builder
+	b.WriteString("\r\n")
+	fmt.Fprintf(&b, "  Approve:  %s\r\n", where)
+	fmt.Fprintf(&b, "  Code:     %s   (the page should show this)\r\n", auth.UserCode)
+	b.WriteString("\r\n")
+	b.WriteString("Press Enter once approved: ")
+	return b.String()
 }
 
 // waitFailureText explains a failed wait in the terminal, in terms of

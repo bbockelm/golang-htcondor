@@ -494,7 +494,7 @@ function TerminalSection() {
   return (
     <SectionCard
       title="Terminal"
-      hint="An interactive shell inside the pool. The session lasts as long as this tab stays connected, and ends shortly after you close it."
+      hint="An interactive shell inside the pool. A terminal lasts as long as this tab stays connected and ends shortly after you close it. A named session, started from ssh or an agent, keeps running until you remove it."
     >
       {termsQuery.isLoading && (
         <p className="text-gray-400 text-sm">Loading sessions…</p>
@@ -600,6 +600,7 @@ function TerminalTable({
         <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th className="px-3 py-2">Job</th>
+            <th className="px-3 py-2">Session</th>
             <th className="px-3 py-2">Status</th>
             <th className="px-3 py-2">Submitted</th>
             <th className="px-3 py-2"></th>
@@ -615,6 +616,22 @@ function TerminalTable({
                 >
                   {t.job_id}
                 </Link>
+              </td>
+              <td className="px-3 py-2">
+                {t.kind === 'session' ? (
+                  <div className="space-y-0.5">
+                    <div className="font-mono text-xs text-gray-700">
+                      {t.name}
+                    </div>
+                    {t.ssh_command && (
+                      <div className="font-mono text-[11px] text-gray-500 select-all">
+                        {t.ssh_command}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-xs text-gray-400">—</span>
+                )}
               </td>
               <td className="px-3 py-2">
                 {/* visualStatus remaps terminal 'executing' → 'ready'

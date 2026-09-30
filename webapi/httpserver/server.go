@@ -243,6 +243,8 @@ type Config struct {
 	// keys; empty means keep them sealed in the application database.
 	SSHHostKeyFile string
 	SSHCAKeyFile   string
+	// SSHGatewayPublicHost is the name users ssh to; see HandlerConfig.
+	SSHGatewayPublicHost string
 	// SSHGatewaySessionCpus/MemoryMB/DiskMB size a session the gateway
 	// creates on demand. Zero means the interactive default.
 	SSHGatewaySessionCpus     int
@@ -451,6 +453,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SSHGatewayIssuer:            cfg.SSHGatewayIssuer,
 		SSHHostKeyFile:              cfg.SSHHostKeyFile,
 		SSHCAKeyFile:                cfg.SSHCAKeyFile,
+		SSHGatewayPublicHost:        cfg.SSHGatewayPublicHost,
 		SSHGatewaySessionCpus:       cfg.SSHGatewaySessionCpus,
 		SSHGatewaySessionMemoryMB:   cfg.SSHGatewaySessionMemoryMB,
 		SSHGatewaySessionDiskMB:     cfg.SSHGatewaySessionDiskMB,

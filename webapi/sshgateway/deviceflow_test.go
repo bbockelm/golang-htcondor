@@ -272,16 +272,15 @@ func TestHTTPFlowAuthorizeAndPoll(t *testing.T) {
 	}
 }
 
-// The one-click link is offered, and the code is shown beside it.
+// The one-click link and the code are offered where the client will
+// actually render them: the PROMPT.
 //
-// This test previously asserted the opposite -- that the complete URI
-// was never carried. That was wrong: the device-authorize endpoint
-// authenticates no client, so an attacker builds the same URL without
-// our help, and the check that catches a phished victim is the
-// approval page asking whether the code matches their device. Dropping
-// the link cost every legitimate user a transcription and stopped
-// nothing.
-func TestOneClickLinkIsOfferedWithTheCodeToCheck(t *testing.T) {
+// Not the instruction. OpenSSH on Linux prints the prompt and ignores
+// a keyboard-interactive instruction entirely, so anything actionable
+// that lives only in the instruction is invisible to most users. The
+// instruction now carries no instructions -- which is why the splash
+// screen stopped repeating the URL and the code three times.
+func TestOneClickLinkIsOfferedInThePrompt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT",
@@ -300,32 +299,60 @@ func TestOneClickLinkIsOfferedWithTheCodeToCheck(t *testing.T) {
 		t.Fatal("the complete URI was dropped")
 	}
 
-	shown := loginInstruction("ap.example.edu", auth)
-	if !strings.Contains(shown, auth.VerificationURIComplete) {
-		t.Errorf("the one-click link is not offered:\n%s", shown)
+	prompt := loginPromptLine(auth)
+	if !strings.Contains(prompt, auth.VerificationURIComplete) {
+		t.Errorf("the prompt does not offer the link:\n%s", prompt)
 	}
-	// The code has to be there too, or there is nothing to compare
-	// against what the approval page displays.
-	if !strings.Contains(shown, "WDJB-MJHT") {
-		t.Errorf("the code to check against the page is missing:\n%s", shown)
+	if !strings.Contains(prompt, "WDJB-MJHT") {
+		t.Errorf("the prompt does not show the code:\n%s", prompt)
 	}
-	if !strings.Contains(strings.ToLower(shown), "matches") {
-		t.Errorf("the prompt does not ask the user to compare the code:\n%s", shown)
+
+	// The URL and the code each get a line of their own. ssh prefixes
+	// the prompt with "(user@host) ", so one long line wraps in the
+	// middle of the URL.
+	for _, line := range strings.Split(prompt, "\r\n") {
+		if len(line) > 100 {
+			t.Errorf("a prompt line is %d characters and will wrap: %q", len(line), line)
+		}
+	}
+	if !strings.HasPrefix(prompt, "\r\n") {
+		t.Errorf("the prompt does not start on its own line, so ssh's (user@host) prefix runs into it")
 	}
 }
 
-// A server that offers no complete URI still gets a usable prompt:
-// the plain URL and the code to type.
-func TestPromptFallsBackToTypingTheCode(t *testing.T) {
+// Everything actionable is in the prompt, so the instruction must not
+// repeat it. Repeating it is what put the URL and the code on screen
+// three times.
+func TestInstructionCarriesNothingActionable(t *testing.T) {
+	auth := &DeviceAuth{
+		UserCode:                "WDJB-MJHT",
+		VerificationURI:         "https://ap.example.edu/device",
+		VerificationURIComplete: "https://ap.example.edu/device?user_code=WDJB-MJHT",
+	}
+	instr := loginInstruction("ap.example.edu")
+
+	if strings.Contains(instr, auth.UserCode) {
+		t.Errorf("the instruction repeats the code:\n%s", instr)
+	}
+	if strings.Contains(instr, "ap.example.edu/device") {
+		t.Errorf("the instruction repeats the URL:\n%s", instr)
+	}
+	if !strings.Contains(instr, "ap.example.edu") {
+		t.Errorf("the instruction does not name the service:\n%s", instr)
+	}
+}
+
+// A server that offers no complete URI still gets a usable prompt.
+func TestPromptFallsBackToThePlainURL(t *testing.T) {
 	auth := &DeviceAuth{
 		UserCode:        "WDJB-MJHT",
 		VerificationURI: "https://ap.example.edu/device",
 	}
-	shown := loginInstruction("ap.example.edu", auth)
-	if !strings.Contains(shown, "https://ap.example.edu/device") {
-		t.Errorf("the verification URL is missing:\n%s", shown)
+	prompt := loginPromptLine(auth)
+	if !strings.Contains(prompt, "https://ap.example.edu/device") {
+		t.Errorf("the verification URL is missing:\n%s", prompt)
 	}
-	if !strings.Contains(shown, "WDJB-MJHT") {
-		t.Errorf("the code is missing:\n%s", shown)
+	if !strings.Contains(prompt, "WDJB-MJHT") {
+		t.Errorf("the code is missing:\n%s", prompt)
 	}
 }

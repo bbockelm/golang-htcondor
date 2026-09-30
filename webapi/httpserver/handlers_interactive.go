@@ -37,6 +37,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"golang.org/x/crypto/ssh"
 )
@@ -163,6 +164,63 @@ type InteractiveTerminalSummary struct {
 	HoldReasonCode               int    `json:"hold_reason_code,omitempty"`
 	HoldReason                   string `json:"hold_reason,omitempty"`
 	SubmittedAt                  string `json:"submitted_at,omitempty"` // RFC3339 from QDate
+
+	// Kind distinguishes a terminal launched from this web app
+	// ("terminal") from a named session started through MCP or the SSH
+	// gateway ("session"). They are both interactive jobs of this
+	// server's making and belong on the same page, but they are not
+	// interchangeable: a session outlives the connection that made it
+	// and is reached by name, so the UI should not offer it the
+	// terminal's close-on-disconnect affordances.
+	Kind string `json:"kind"`
+	// Name is the session's name, for Kind == "session". Empty for a
+	// terminal, which has only an opaque instance id.
+	Name string `json:"name,omitempty"`
+	// SSHCommand is how to reach a session from a shell, when the SSH
+	// gateway is configured. Empty otherwise.
+	SSHCommand string `json:"ssh_command,omitempty"`
+}
+
+// classifyInteractiveBatchName says which kind of interactive job a
+// JobBatchName denotes, and the session's name when it has one.
+//
+// Both kinds are this server's own work and belong on the same page.
+// They were separate surfaces with separate prefixes, so a session
+// started through MCP or `ssh` did not appear on the page that lists
+// interactive jobs -- which is exactly where somebody goes to find out
+// what they have running and to stop it.
+//
+// The kinds stay distinguished rather than merged, because they are
+// not interchangeable: a terminal is torn down when its last browser
+// tab leaves, and a session deliberately outlives the connection that
+// made it.
+func classifyInteractiveBatchName(batchName string) (kind, name string, ok bool) {
+	switch {
+	case strings.HasPrefix(batchName, interactiveTerminalBatchPrefix):
+		return "terminal", "", true
+	case strings.HasPrefix(batchName, interactive.SessionBatchPrefix):
+		return "session", strings.TrimPrefix(batchName, interactive.SessionBatchPrefix), true
+	default:
+		return "", "", false
+	}
+}
+
+// sshCommandForSession is the command that reaches a named session
+// from a shell, or empty when there is no SSH gateway to reach it
+// through.
+//
+// Rendered here rather than in the browser because only this server
+// knows whether the gateway is configured and on what address; a UI
+// that guessed would print a command that does not work.
+func (s *Handler) sshCommandForSession(kind, name string) string {
+	if kind != "session" || name == "" || s.sshGateway == nil {
+		return ""
+	}
+	host := s.sshGatewayPublicHost
+	if host == "" {
+		return ""
+	}
+	return fmt.Sprintf("ssh %s%s@%s", sshgateway.SessionPrefix, name, host)
 }
 
 // handleInteractiveTerminal dispatches /api/v1/interactive/terminal by
@@ -386,7 +444,11 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 	out := make([]InteractiveTerminalSummary, 0, len(ads))
 	for _, ad := range ads {
 		batchName, ok := ad.EvaluateAttrString("JobBatchName")
-		if !ok || !strings.HasPrefix(batchName, interactiveTerminalBatchPrefix) {
+		if !ok {
+			continue
+		}
+		kind, sessionName, ok := classifyInteractiveBatchName(batchName)
+		if !ok {
 			continue
 		}
 		clusterID, _ := ad.EvaluateAttrInt("ClusterId")
@@ -398,6 +460,9 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 		startExec, _ := ad.EvaluateAttrInt("JobCurrentStartExecutingDate")
 
 		summary := InteractiveTerminalSummary{
+			Kind:                         kind,
+			Name:                         sessionName,
+			SSHCommand:                   s.sshCommandForSession(kind, sessionName),
 			InstanceID:                   strings.TrimPrefix(batchName, interactiveTerminalBatchPrefix),
 			JobID:                        fmt.Sprintf("%d.%d", clusterID, procID),
 			ClusterID:                    int(clusterID),

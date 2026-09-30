@@ -175,6 +175,7 @@ type mcpConfig struct {
 	sshGatewayIssuer  string
 	sshHostKeyFile    string
 	sshCAKeyFile      string
+	sshGatewayHost    string
 	sshSessionCpus    int
 	sshSessionMemMB   int
 	sshSessionDiskMB  int
@@ -1210,6 +1211,7 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 	mcpCfg.sshGatewayIssuer, _ = cfg.Get("HTTP_API_SSH_GATEWAY_ISSUER")
 	mcpCfg.sshHostKeyFile, _ = cfg.Get("HTTP_API_SSH_HOST_KEY_FILE")
 	mcpCfg.sshCAKeyFile, _ = cfg.Get("HTTP_API_SSH_CA_KEY_FILE")
+	mcpCfg.sshGatewayHost, _ = cfg.Get("HTTP_API_SSH_GATEWAY_HOST")
 	mcpCfg.sshSessionCpus = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_CPUS", logger)
 	mcpCfg.sshSessionMemMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB", logger)
 	mcpCfg.sshSessionDiskMB = positiveConfigInt(cfg, "HTTP_API_SSH_GATEWAY_SESSION_DISK_MB", logger)
@@ -1923,6 +1925,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		SSHGatewayIssuer:           mcpCfg.sshGatewayIssuer,
 		SSHHostKeyFile:             mcpCfg.sshHostKeyFile,
 		SSHCAKeyFile:               mcpCfg.sshCAKeyFile,
+		SSHGatewayPublicHost:       mcpCfg.sshGatewayHost,
 		SSHGatewaySessionCpus:      mcpCfg.sshSessionCpus,
 		SSHGatewaySessionMemoryMB:  mcpCfg.sshSessionMemMB,
 		SSHGatewaySessionDiskMB:    mcpCfg.sshSessionDiskMB,

@@ -394,11 +394,12 @@ type Handler struct {
 
 	// The SSH gateway: an ssh listener that authenticates with the
 	// OAuth2 device flow and proxies into a job. Nil when unconfigured.
-	sshGateway        *sshgateway.Listener
-	sshGatewayAddress string
-	sshGatewayIssuer  string
-	sshHostKeyFile    string
-	sshCAKeyFile      string
+	sshGateway           *sshgateway.Listener
+	sshGatewayAddress    string
+	sshGatewayIssuer     string
+	sshHostKeyFile       string
+	sshGatewayPublicHost string
+	sshCAKeyFile         string
 	// What a session created on demand asks for; zero fields mean
 	// the interactive package's own defaults.
 	sshGatewaySessionSpec sshGatewaySessionSize
@@ -678,6 +679,15 @@ type HandlerConfig struct {
 	// and crash dumps both leak the environment, a secret volume does not.
 	SSHHostKeyFile string
 	SSHCAKeyFile   string
+	// SSHGatewayPublicHost is the name users actually ssh to, e.g.
+	// "ap2001-ssh.chtc.chtc.io".
+	//
+	// It cannot be derived: the container listens on :2222 behind a
+	// Service that publishes 22 on a different address entirely, so
+	// the listen address is not what anybody types. Empty means the
+	// web UI simply does not print an ssh command, which is better
+	// than printing one that does not work.
+	SSHGatewayPublicHost string
 
 	// SSHGatewaySessionCpus, SSHGatewaySessionMemoryMB and
 	// SSHGatewaySessionDiskMB size the session the gateway creates for
@@ -1398,6 +1408,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.sshGatewayIssuer = strings.TrimSpace(cfg.SSHGatewayIssuer)
 	h.sshHostKeyFile = strings.TrimSpace(cfg.SSHHostKeyFile)
 	h.sshCAKeyFile = strings.TrimSpace(cfg.SSHCAKeyFile)
+	h.sshGatewayPublicHost = strings.TrimSpace(cfg.SSHGatewayPublicHost)
 	h.sshGatewaySessionSpec = sshGatewaySessionSize{
 		Cpus:     cfg.SSHGatewaySessionCpus,
 		MemoryMB: cfg.SSHGatewaySessionMemoryMB,
