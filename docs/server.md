@@ -761,6 +761,18 @@ The port is reported only when the operator wrote one — `ap.example.edu:2222` 
 and a client should read its absence as the SSH default rather than as an
 instruction.
 
+The common deployment is worth spelling out. A container binds
+`HTTP_API_SSH_GATEWAY_ADDRESS = :2222` and a service publishes it as
+`ap.example.edu` on port 22. Set `HTTP_API_SSH_GATEWAY_HOST = ap.example.edu`
+and nothing else: the port is not 2222 as far as any client is concerned, and
+the listen address is never consulted for what is advertised. Write
+`ap.example.edu:8022` only if that is the port users really type.
+
+Leaving it unset is logged as a warning at startup, because what it costs is
+otherwise silent: no address is advertised, so every client has to be told by
+hand; the host certificate is issued for every name rather than this one; and
+the web UI prints no `ssh` command for a session.
+
 ```bash
 # The CA, so your client trusts the gateway's host key.
 curl -H "Authorization: Bearer $TOKEN" https://ap.example.edu/api/v1/ssh/ca

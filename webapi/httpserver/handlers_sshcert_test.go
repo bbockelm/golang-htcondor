@@ -439,3 +439,70 @@ func TestSSHCAOmitsAnUnconfiguredGateway(t *testing.T) {
 		t.Errorf("an unconfigured gateway was advertised anyway: %s", rec.Body.String())
 	}
 }
+
+// The deployment this has to get right: the gateway listens on :2222
+// inside a pod and users reach it at a different name on port 22.
+//
+// The listen address must never leak into what is advertised. A client
+// told "2222" would dial a port that is not published, and the failure
+// looks like a gateway that is down rather than a setting that is
+// wrong.
+func TestSSHCAAdvertisesTheExternalAddressNotTheListenAddress(t *testing.T) {
+	h := sshCertHandler(t, true)
+	h.sshGatewayAddress = ":2222"
+	h.sshGatewayPublicHost = "ap2001-ssh.chtcdev.chtc.io"
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/ssh/ca", nil)
+	req.Header.Set("X-Test-User", "bbockelm")
+	rec := httptest.NewRecorder()
+	h.handleSSHCA(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "2222") {
+		t.Errorf("the internal listen port reached the client: %s", body)
+	}
+
+	var parsed struct {
+		GatewayHost string `json:"gateway_host"`
+		GatewayPort int    `json:"gateway_port"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if parsed.GatewayHost != "ap2001-ssh.chtcdev.chtc.io" {
+		t.Errorf("advertised host %q", parsed.GatewayHost)
+	}
+	// Omitted, not 22. The operator said nothing about a port, so the
+	// client applies the SSH default -- and a server that filled in 22
+	// could not be told apart from one that was configured with it.
+	if parsed.GatewayPort != 0 {
+		t.Errorf("advertised port %d, want it omitted", parsed.GatewayPort)
+	}
+}
+
+// And when the external port genuinely is not 22, the operator says so
+// and that is what travels -- still not the listen address.
+func TestSSHCAAdvertisesAStatedExternalPort(t *testing.T) {
+	h := sshCertHandler(t, true)
+	h.sshGatewayAddress = ":2222"
+	h.sshGatewayPublicHost = "ap.example.edu:8022"
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/ssh/ca", nil)
+	req.Header.Set("X-Test-User", "bbockelm")
+	rec := httptest.NewRecorder()
+	h.handleSSHCA(rec, req)
+
+	var parsed struct {
+		GatewayHost string `json:"gateway_host"`
+		GatewayPort int    `json:"gateway_port"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if parsed.GatewayHost != "ap.example.edu" || parsed.GatewayPort != 8022 {
+		t.Errorf("advertised %q:%d, want ap.example.edu:8022", parsed.GatewayHost, parsed.GatewayPort)
+	}
+}
