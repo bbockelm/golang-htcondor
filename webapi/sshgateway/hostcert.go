@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,6 +130,36 @@ func ParseHostNames(configured string) []string {
 		}
 	}
 	return names
+}
+
+// ParseGatewayAddress reads the first configured name AND its port,
+// for telling a client where to connect.
+//
+// ParseHostNames deliberately drops the port, because a certificate
+// principal is a host name. This keeps it, because a client needs
+// somewhere to connect to -- and the port is the half the server
+// cannot guess. The listen address is usually not what anybody types:
+// a container listening on :2222 sits behind a service publishing 22
+// on another address, so advertising the bound port would send clients
+// to a port that is not open to them.
+//
+// A port is therefore reported only when the operator wrote one. Zero
+// means "unstated", which a client should read as the SSH default
+// rather than as an instruction.
+func ParseGatewayAddress(configured string) (host string, port int) {
+	names := ParseHostNames(configured)
+	if len(names) == 0 {
+		return "", 0
+	}
+	host = names[0]
+
+	first := strings.TrimSpace(strings.Split(configured, ",")[0])
+	if _, p, err := net.SplitHostPort(first); err == nil {
+		if n, cerr := strconv.Atoi(p); cerr == nil && n > 0 && n <= 65535 {
+			port = n
+		}
+	}
+	return host, port
 }
 
 // KnownHostsLine is the line a client adds so this gateway verifies

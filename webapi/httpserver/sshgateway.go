@@ -251,6 +251,25 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 		"certificates", certs != nil,
 		"lockout", bans != nil)
 
+	// Say so when the gateway has no public name, because everything it
+	// costs is silent.
+	//
+	// The listen address is not a substitute and is never used as one:
+	// a container binding :2222 is normally behind a service publishing
+	// 22 somewhere else, so the bound port is the one answer guaranteed
+	// to be wrong. Without the setting there is nothing else to go on,
+	// and three things quietly degrade: the CA response advertises no
+	// address, so every client has to be told by hand where to connect;
+	// the host certificate is issued for every name rather than this
+	// one; and the web UI prints no ssh command for a session.
+	if strings.TrimSpace(h.sshGatewayPublicHost) == "" {
+		h.logger.Warn(logging.DestinationHTTP,
+			"The SSH gateway has no public name, so clients cannot discover it",
+			"set", "HTTP_API_SSH_GATEWAY_HOST",
+			"to", "the name users ssh to, e.g. ap.example.edu (add :port only if it is not 22)",
+			"listening_on", h.sshGatewayAddress)
+	}
+
 	// Bind before returning, so a port already in use fails startup
 	// the way a missing host key does rather than leaving a listener
 	// that silently is not there.
