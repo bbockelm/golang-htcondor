@@ -38,6 +38,7 @@ import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
 import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
+import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import {
   applyBatchFilter,
   filterAdsByStatus,
@@ -51,7 +52,7 @@ import {
 // this -- an access point with 30k queued jobs is ordinary -- so the
 // number is a page size, not a ceiling, and the response's has_more tells
 // us when we are looking at a fraction of the queue.
-const PAGE_SIZE = 1000;
+const PAGE_SIZE = LISTING_PAGE_SIZE;
 
 // Auto-refresh cadence. Slower once the whole queue has been pulled in:
 // re-fetching every loaded page every 15s is cheap for one page and

@@ -208,7 +208,7 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 	// nothing. Translate the wildcard to the empty (all-attributes) projection so
 	// the mirror answers the same ad the schedd would.
 	projection = normalizeMirrorProjection(projection)
-	effLimit := dbmirror.ClampLimit(limit)
+	effLimit := dbmirror.ClampLimit(limit, dbmirror.Projected(projection))
 
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {

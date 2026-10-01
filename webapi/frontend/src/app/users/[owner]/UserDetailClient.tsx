@@ -16,6 +16,7 @@ import Link from 'next/link';
 import { api, ApiError, type DisplayStatus, type JobListResponse } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
+import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
@@ -28,7 +29,7 @@ import {
   BATCH_PROJECTION,
 } from '@/lib/batches';
 
-const PAGE_SIZE = 1000;
+const PAGE_SIZE = LISTING_PAGE_SIZE;
 const REFRESH_MS = 15_000;
 
 export default function UserDetailClient() {
