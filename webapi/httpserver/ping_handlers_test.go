@@ -54,25 +54,33 @@ func TestCollectorPingHandlerNoCollector(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	// Create a server without collector
+	// Create a server without collector, and identified: whether a
+	// collector is configured is a fact about this deployment, so the
+	// authentication check runs first and an anonymous caller is told
+	// nothing about it. This test used to ask anonymously and assert
+	// 501, which is what pinning the old ordering looks like.
 	cfg := newTestConfig(t)
 	cfg.Collector = nil
 	cfg.Logger = logger
+	cfg.UserHeader = "X-Test-User"
+	cfg.UserHeaderTrustAnyUnsafe = true
+	cfg.SigningKeyPath = writeSigningKey(t)
+	cfg.TrustDomain = "flock.example.org"
+	cfg.UIDDomain = "example.org"
 	server, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	// Create request
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/collector/ping", nil)
+	req.Header.Set("X-Test-User", "bbockelm")
 	w := httptest.NewRecorder()
 
-	// Call handler
 	server.handleCollectorPing(w, req)
 
 	// Should return 501 Not Implemented when collector is not configured
 	if w.Code != http.StatusNotImplemented {
-		t.Errorf("Expected status 501, got %d", w.Code)
+		t.Errorf("Expected status 501, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

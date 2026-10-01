@@ -3132,12 +3132,28 @@ func (s *Handler) handleCollectorPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pinged as the CALLER, not as this daemon.
+	//
+	// These endpoints report an identity, an authentication method, a
+	// session id and the daemon's valid commands. Unauthenticated, they
+	// answered for the service account -- which on an access point is a
+	// queue superuser -- so anyone who could reach the port learned who
+	// the daemon is and what it may do. Now the answer describes the
+	// person asking, which is both the useful answer and a safe one.
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+
+	// Only now: whether a collector is configured is a fact about this
+	// deployment, and an anonymous caller is told nothing about it.
 	if s.collector == nil {
 		s.writeError(w, http.StatusNotImplemented, "Collector not configured")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	result, err := s.collector.Ping(ctx)
@@ -3166,7 +3182,20 @@ func (s *Handler) handleScheddPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	// Pinged as the CALLER, not as this daemon.
+	//
+	// These endpoints report an identity, an authentication method, a
+	// session id and the daemon's valid commands. Unauthenticated, they
+	// answered for the service account -- which on an access point is a
+	// queue superuser -- so anyone who could reach the port learned who
+	// the daemon is and what it may do. Now the answer describes the
+	// person asking, which is both the useful answer and a safe one.
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	result, err := s.getSchedd().Ping(ctx)
@@ -3195,7 +3224,20 @@ func (s *Handler) handlePing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	// Pinged as the CALLER, not as this daemon.
+	//
+	// These endpoints report an identity, an authentication method, a
+	// session id and the daemon's valid commands. Unauthenticated, they
+	// answered for the service account -- which on an access point is a
+	// queue superuser -- so anyone who could reach the port learned who
+	// the daemon is and what it may do. Now the answer describes the
+	// person asking, which is both the useful answer and a safe one.
+	ctx, err := s.createAuthenticatedContext(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	response := make(map[string]interface{})
