@@ -320,9 +320,14 @@ func getOAuth2TokenWithCondorScopes(t *testing.T, httpClient *http.Client, baseU
 			t.Fatal("No state parameter in consent URL")
 		}
 
-		// Submit consent form
+		// Submit consent form, carrying the token the page rendered.
+		csrfToken := consentPageCSRF(t, httpClient, baseURL, consentURL.String(), username)
 		consentReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", bytes.NewBufferString(
-			fmt.Sprintf("state=%s&action=approve", state),
+			url.Values{
+				"state":      {state},
+				"action":     {"approve"},
+				"csrf_token": {csrfToken},
+			}.Encode(),
 		))
 		if err != nil {
 			t.Fatalf("Failed to create consent request: %v", err)

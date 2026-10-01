@@ -1020,6 +1020,10 @@ func getOAuth2TokenAuthCodeForClient(t *testing.T, httpClient *http.Client, base
 		consentForm.Set("action", "approve")
 		consentForm.Set("state", state)
 		consentForm.Set("scope", "openid profile email mcp:read mcp:write")
+		// The form is bound to the person and to this authorization, so
+		// submit the token the page rendered rather than a hand-built
+		// approval.
+		consentForm.Set("csrf_token", consentPageCSRF(t, httpClient, baseURL, location, username))
 
 		consentReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", strings.NewReader(consentForm.Encode()))
 		if err != nil {
@@ -1494,7 +1498,13 @@ func approveConsent(t *testing.T, client *http.Client, baseURL, consentURL strin
 		t.Fatalf("consent redirect carried no state: %s", consentURL)
 	}
 
-	form := url.Values{"state": {state}, "action": {"approve"}}
+	// Submit the token the page rendered: the form is bound to the person
+	// and to this authorization.
+	form := url.Values{
+		"state":      {state},
+		"action":     {"approve"},
+		"csrf_token": {consentPageCSRF(t, client, baseURL, consentURL, "")},
+	}
 	resp, err := client.PostForm(baseURL+"/mcp/oauth2/consent", form)
 	if err != nil {
 		t.Fatalf("approving consent: %v", err)

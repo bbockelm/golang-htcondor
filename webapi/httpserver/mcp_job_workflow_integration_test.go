@@ -279,6 +279,10 @@ func getWorkflowOAuth2Token(t *testing.T, httpClient *http.Client, baseURL, clie
 		consentForm.Set("action", "approve")
 		consentForm.Set("state", state)
 		consentForm.Set("scope", "openid profile email mcp:read mcp:write")
+		// The form is bound to the person and to this authorization, so
+		// submit the token the page rendered rather than a hand-built
+		// approval.
+		consentForm.Set("csrf_token", consentPageCSRF(t, httpClient, baseURL, location, username))
 
 		consentReq, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", strings.NewReader(consentForm.Encode()))
 		consentReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")

@@ -297,6 +297,7 @@ func getRefreshTokenViaAuthCode(t *testing.T, httpClient *http.Client, baseURL, 
 		form.Set("action", "approve")
 		form.Set("state", u.Query().Get("state"))
 		form.Set("scope", scope)
+		form.Set("csrf_token", consentPageCSRF(t, httpClient, baseURL, location, username))
 		creq, _ := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 		creq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		creq.Header.Set("X-Test-User", username)
@@ -528,6 +529,10 @@ func getOAuth2TokenAuthCode(t *testing.T, httpClient *http.Client, baseURL, clie
 		consentForm.Set("action", "approve")
 		consentForm.Set("state", state)
 		consentForm.Set("scope", "openid profile email mcp:read mcp:write")
+		// The form is bound to the person and to this authorization, so
+		// submit the token the page rendered rather than a hand-built
+		// approval.
+		consentForm.Set("csrf_token", consentPageCSRF(t, httpClient, baseURL, location, username))
 
 		consentReq, err := http.NewRequest("POST", baseURL+"/mcp/oauth2/consent", strings.NewReader(consentForm.Encode()))
 		if err != nil {
