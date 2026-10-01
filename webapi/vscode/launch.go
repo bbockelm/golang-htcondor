@@ -103,7 +103,30 @@ type ScriptArgs struct {
 
 	// ExtraArgs are appended to the server command verbatim.
 	ExtraArgs []string
+
+	// IdleGraceSeconds is how long the watchdog tolerates no editor
+	// before ending the session. Zero takes the default.
+	IdleGraceSeconds int
+
+	// PollSeconds is how often it looks. Zero takes the default.
+	PollSeconds int
 }
+
+// DefaultIdleGraceSeconds is how long the session survives with no
+// editor attached.
+//
+// Five minutes, and it is short on purpose because it is measured
+// AFTER VS Code's own reconnection grace has already expired -- three
+// hours by default. The extension host does not exit the moment a
+// laptop lid closes; it exits when the server has given up on the
+// client returning. By then nobody is coming back to this session, and
+// waiting longer only holds the slot.
+const DefaultIdleGraceSeconds = 300
+
+// DefaultPollSeconds is how often the watchdog scans /proc. A minute:
+// the thing it is waiting for took three hours to happen, so scanning
+// faster buys nothing and costs a wakeup per minute per session.
+const DefaultPollSeconds = 60
 
 // LaunchScript renders the shell script that runs inside the job.
 //
@@ -127,6 +150,22 @@ func LaunchScript(a ScriptArgs) string {
 	var extra string
 	if len(a.ExtraArgs) > 0 {
 		extra = " " + strings.Join(a.ExtraArgs, " ")
+	}
+
+	idleGrace := a.IdleGraceSeconds
+	if idleGrace <= 0 {
+		idleGrace = DefaultIdleGraceSeconds
+	}
+	pollInterval := a.PollSeconds
+	if pollInterval <= 0 {
+		pollInterval = DefaultPollSeconds
+	}
+	// How often the server's liveness is checked inside one poll
+	// interval. Never longer than the interval itself, or a short poll
+	// would overshoot it.
+	tick := 5
+	if pollInterval < tick {
+		tick = pollInterval
 	}
 
 	return fmt.Sprintf(`#!/bin/sh
@@ -238,7 +277,10 @@ mkdir -p "$STATE/extensions"
 # real execute node's local /tmp does not.
 umask 077
 
-exec %[1]s \
+# Started in the background rather than exec'd, so this script stays
+# alive to reap the job when the editor is gone. See the watchdog below
+# for why nothing else will do it.
+%[1]s \
 	--auth none \
 	--disable-telemetry \
 	--disable-update-check \
@@ -247,8 +289,116 @@ exec %[1]s \
 	--user-data-dir "$STATE" \
 	--extensions-dir "$STATE/extensions" \
 	--config "$STATE/config.yaml"%[5]s \
-	%[4]s
-`, cmd, SocketName, MaxSocketPath, shellQuote(workdir), extra)
+	%[4]s &
+SERVER_PID=$!
+
+# The idle watchdog.
+#
+# A VS Code server does not exit when everyone stops using it. Its own
+# idle shutdown is gated behind --enable-remote-auto-shutdown, and
+# code-server's CLI rejects that flag outright ("Unknown option"), so
+# passing it would break the session rather than fix this. Measured on
+# code-server 4.139.1.
+#
+# Without this, an abandoned session holds its slot until the
+# periodic_remove ceiling -- eight hours, whether the user left after
+# eight hours or after ten minutes. One observed session was dead from
+# 18:19 and would have held a slot until 21:41.
+#
+# The signal is the extension host PROCESS, not traffic. Traffic
+# measures the wrong thing: an open tab heartbeats forever, so a
+# traffic-based timer reaps the session someone closed and never the
+# one they abandoned. The extension host exits on its own when VS
+# Code's reconnection grace elapses -- three hours by default -- so its
+# absence means "nobody is attached AND the server has already given up
+# waiting". Anything this notices is a session the editor itself
+# considers over.
+#
+# Matching is done by reading /proc/<pid>/cmdline in the shell. Running
+# "grep extensionHost" instead would match the grep's OWN command line,
+# which is how that check reports a process that is only itself.
+IDLE_GRACE=%[6]d
+POLL=%[7]d
+TICK=%[8]d
+
+# Overridable so the loop below can be tested against a directory of
+# fixtures rather than only against a live kernel. Nothing sets it in
+# production, and a job that did would only be lying to its own
+# watchdog.
+PROC_ROOT="${VSCODE_WATCHDOG_PROC:-/proc}"
+
+extension_host_running() {
+	for d in "$PROC_ROOT"/[0-9]*; do
+		case "${d##*/}" in
+		$$) continue ;;
+		esac
+		c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+		case "$c" in
+		*--type=extensionHost*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+echo "[vscode-watchdog] started pid=$$ server=$SERVER_PID grace=${IDLE_GRACE}s poll=${POLL}s" >&2
+
+SEEN_HOST=0
+IDLE_SINCE=0
+
+# Sleep up to POLL seconds, returning early if the server goes away.
+#
+# The two intervals are different because they are waiting for
+# different things. The extension host takes hours to disappear, so
+# scanning for it once a minute is plenty. The server exiting is the
+# ordinary end of a session -- and the abnormal one, when it dies at
+# startup -- and a job that lingers a minute after its only process has
+# gone is a minute of a slot spent on nothing.
+wait_tick() {
+	waited=0
+	while [ "$waited" -lt "$POLL" ]; do
+		kill -0 "$SERVER_PID" 2>/dev/null || return 1
+		sleep "$TICK"
+		waited=$((waited + TICK))
+	done
+	kill -0 "$SERVER_PID" 2>/dev/null || return 1
+	return 0
+}
+
+while :; do
+	if ! wait_tick; then
+		wait "$SERVER_PID"
+		status=$?
+		echo "[vscode-watchdog] server exited status=$status" >&2
+		exit "$status"
+	fi
+
+	if extension_host_running; then
+		SEEN_HOST=1
+		IDLE_SINCE=0
+		continue
+	fi
+
+	# Nothing is reaped until an editor has attached at least once.
+	# Otherwise a session still starting up, or one nobody has opened
+	# yet, is killed before it can be used -- and the queue wait that
+	# preceded it is spent for nothing.
+	if [ "$SEEN_HOST" -eq 0 ]; then
+		continue
+	fi
+
+	now=$(date +%%s)
+	if [ "$IDLE_SINCE" -eq 0 ]; then
+		IDLE_SINCE=$now
+		continue
+	fi
+	if [ $((now - IDLE_SINCE)) -ge "$IDLE_GRACE" ]; then
+		echo "[vscode-watchdog] no editor for ${IDLE_GRACE}s; shutting the session down" >&2
+		kill "$SERVER_PID" 2>/dev/null || true
+		wait "$SERVER_PID" 2>/dev/null || true
+		exit 0
+	fi
+done
+`, cmd, SocketName, MaxSocketPath, shellQuote(workdir), extra, idleGrace, pollInterval, tick)
 }
 
 // shellQuote wraps s for /bin/sh. The workdir reaches here from a
