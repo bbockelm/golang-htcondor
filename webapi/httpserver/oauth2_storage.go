@@ -777,6 +777,23 @@ func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, user
 	request.RequestedAt = requestedAt
 	request.Client = client
 
+	// The stored form is handed back here and nowhere else. It is what
+	// carries the SSH workspace the device code was started for, which
+	// the verification page needs to know which screen to show. A
+	// column that is written and never read is a column that silently
+	// stops being written, so reading it is also what keeps it honest.
+	//
+	// Unparseable JSON leaves the form empty rather than failing the
+	// lookup: the form is decoration on this path, and refusing to
+	// show a consent page because of it would break logging in over a
+	// field nothing is required to contain.
+	if formData != "" {
+		var stored url.Values
+		if err := json.Unmarshal([]byte(formData), &stored); err == nil {
+			request.Form = stored
+		}
+	}
+
 	var scopesList []string
 	if err := json.Unmarshal([]byte(scopes), &scopesList); err != nil {
 		return "", nil, err
@@ -790,6 +807,28 @@ func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, user
 	request.GrantedScope = grantedScopesList
 
 	return deviceCode, request, nil
+}
+
+// DeviceCodeIsPending reports whether a user code names a device code
+// that is still waiting for a decision.
+//
+// A separate, deliberately narrow read rather than a status field on
+// GetDeviceCodeSessionByUserCode, which several pages share: that
+// lookup answers for a code in any state, and a consent surface that
+// told its caller which state would be an oracle for walking the
+// eight-character code space. This returns one bit and no error
+// detail for exactly that reason -- "not pending" covers absent,
+// expired, approved, denied and used alike.
+func (s *OAuth2Storage) DeviceCodeIsPending(ctx context.Context, userCode string) bool {
+	var status string
+	var expiresAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT status, expires_at FROM oauth2_device_codes WHERE user_code = ?
+	`, userCode).Scan(&status, &expiresAt)
+	if err != nil {
+		return false
+	}
+	return status == "pending" && time.Now().Before(expiresAt)
 }
 
 // ApproveDeviceCodeSession approves a device code (user authorized the device)

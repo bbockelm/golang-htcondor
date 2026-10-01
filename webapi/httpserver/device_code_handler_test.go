@@ -49,7 +49,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	t.Run("DeviceAuthorizationRequest", func(t *testing.T) {
 		// Test device authorization request
 		scopes := []string{"openid", "mcp:read", "mcp:write"}
-		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes, "")
 		if err != nil {
 			t.Fatalf("Device authorization failed: %v", err)
 		}
@@ -124,7 +124,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	t.Run("ExpiredDeviceCode", func(t *testing.T) {
 		// Create an expired device code
 		scopes := []string{"openid"}
-		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes, "")
 		if err != nil {
 			t.Fatalf("Device authorization failed: %v", err)
 		}
@@ -158,7 +158,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	t.Run("DeniedDeviceCode", func(t *testing.T) {
 		// Create a device code
 		scopes := []string{"openid"}
-		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+		resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, scopes, "")
 		if err != nil {
 			t.Fatalf("Device authorization failed: %v", err)
 		}
@@ -207,7 +207,7 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	handler := NewDeviceCodeHandler(storage, config)
 
 	// Create and approve device code
-	resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, []string{"openid"})
+	resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, []string{"openid"}, "")
 	if err != nil {
 		t.Fatalf("Device authorization failed: %v", err)
 	}

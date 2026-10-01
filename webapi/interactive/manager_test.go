@@ -74,6 +74,36 @@ func TestCreateRejectsDuplicateName(t *testing.T) {
 	}
 }
 
+// Losing the duplicate-name race has to be recognisable as that, and
+// has to say WHICH session won.
+//
+// Two things create a session by name now: the browser approving an
+// SSH login, and the gateway creating one on demand for the same
+// login. Whichever loses must attach to what the winner made rather
+// than fail the connection, and matching on the message would have
+// worked right up until somebody reworded it.
+func TestADuplicateCreateIsRecognisableAndNamesTheWinner(t *testing.T) {
+	schedd := newFakeSchedd()
+	mgr, _ := testManager(t, schedd, Options{})
+	first := mustCreate(t, mgr, schedd, alice, "build")
+	wantJob := fmt.Sprintf("%d.%d", first.cluster, first.proc)
+
+	_, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "build"})
+	if !errors.Is(err, ErrSessionExists) {
+		t.Fatalf("a duplicate Create did not report ErrSessionExists: %v", err)
+	}
+	var exists *SessionExistsError
+	if !errors.As(err, &exists) {
+		t.Fatalf("the error carries no session to attach to: %v", err)
+	}
+	if exists.Name != "build" {
+		t.Errorf("name = %q, want %q", exists.Name, "build")
+	}
+	if exists.Info.JobID != wantJob {
+		t.Errorf("job = %q, want the one that already exists (%q)", exists.Info.JobID, wantJob)
+	}
+}
+
 func TestCreateEnforcesPerOwnerLimit(t *testing.T) {
 	schedd := newFakeSchedd()
 	mgr, _ := testManager(t, schedd, Options{MaxPerOwner: 2})

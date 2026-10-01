@@ -213,7 +213,15 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	ctx, cancel := context.WithTimeout(ctx, a.opts.Timeout)
 	defer cancel()
 
-	auth, err := a.opts.Flow.Authorize(ctx)
+	// Parsed here as well as in the resolver, so the authorization can
+	// carry what the caller asked to reach. A username that does not
+	// parse yields the zero Target, which carries nothing: this is the
+	// wrong place to refuse, because the resolver's refusal names the
+	// forms that would have worked and this one would only say
+	// "Permission denied".
+	target, _ := ParseTarget(conn.User())
+
+	auth, err := a.opts.Flow.Authorize(ctx, target)
 	if err != nil {
 		a.logf("Could not start a device authorization", "remote", conn.RemoteAddr().String(), "error", err)
 		// The issuer's own words are for the log. What the user needs

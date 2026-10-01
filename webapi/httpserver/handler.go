@@ -355,6 +355,12 @@ type Handler struct {
 	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
 	pingInterval        time.Duration     // Interval for periodic daemon pings (0 = disabled)
 	pingHealth          *pingHealth       // Recent ping outcomes per daemon, drives /readyz
+
+	// sshConsentState holds the SSH approval screen's rate limiters and
+	// its per-process CSRF key, all built on first use. See
+	// handlers_ssh_consent.go.
+	sshConsentState
+
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
 	// Lazily initialized so a Handler with no collector configured pays

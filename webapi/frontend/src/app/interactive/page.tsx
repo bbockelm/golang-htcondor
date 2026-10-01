@@ -39,6 +39,7 @@ import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
 import {
   ResourceRequestPanel,
   DEFAULT_RESOURCE_REQUEST,
+  resourceRequestToApi,
   type ResourceRequest,
 } from '@/components/ResourceRequest';
 import { SubmitLinesField } from '@/components/SubmitLinesField';
@@ -531,36 +532,6 @@ function TerminalSection() {
       </div>
     </SectionCard>
   );
-}
-
-// resourceRequestToApi flattens a ResourceRequest into the optional-
-// field shape both interactive endpoints accept. GPU-related fields are
-// omitted when the user requested 0 GPUs so the JSON stays tidy.
-function resourceRequestToApi(r: ResourceRequest): {
-  cpus: number;
-  memory_mb: number;
-  disk_mb: number;
-  gpus?: number;
-  gpus_minimum_capability?: string;
-  gpus_minimum_memory?: number;
-  gpus_minimum_runtime?: string;
-  cuda_version?: string;
-  require_gpus?: string;
-} {
-  const out: ReturnType<typeof resourceRequestToApi> = {
-    cpus: r.cpus,
-    memory_mb: r.memoryMB,
-    disk_mb: r.diskMB,
-  };
-  if (r.gpus > 0) {
-    out.gpus = r.gpus;
-    if (r.gpuMinCapability) out.gpus_minimum_capability = r.gpuMinCapability;
-    if (r.gpuMinMemoryMB > 0) out.gpus_minimum_memory = r.gpuMinMemoryMB;
-    if (r.gpuMinRuntime) out.gpus_minimum_runtime = r.gpuMinRuntime;
-    if (r.cudaVersion) out.cuda_version = r.cudaVersion;
-    if (r.requireGpus) out.require_gpus = r.requireGpus;
-  }
-  return out;
 }
 
 // terminalRowStatus turns an InteractiveTerminalSummary into the
