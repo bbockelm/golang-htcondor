@@ -69,6 +69,11 @@ type Server struct {
 	// it while the poll is running.
 	skillsDir atomic.Pointer[string]
 	// skillsStop halts the reload poll; nil when none was started.
+	// stats counts tool calls; nil when the embedder wants none.
+	stats ToolStatsRecorder
+	// clients remembers what each MCP session declared at initialize,
+	// which is the only place MCP names the calling harness.
+	clients        *clientRegistry
 	skillsStop     chan struct{}
 	skillsStopOnce sync.Once
 	signingKeyPath string
@@ -228,6 +233,11 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// ToolStats, when set, is told about every tool call: which tool,
+	// for whom, from which client harness, the outcome and how long it
+	// took. Optional -- a nil recorder simply counts nothing, which is
+	// what a server built without the HTTP layer gets.
+	ToolStats ToolStatsRecorder
 	// SkillsReloadInterval is how often to re-read SkillsDir so a checkout
 	// updated underneath this process is noticed without a reconfigure.
 	// Zero disables the poll, leaving reloads to reconfigure alone. The
@@ -431,6 +441,8 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
+		stats:          cfg.ToolStats,
+		clients:        newClientRegistry(),
 		schedd:         schedd,
 		scheddProvider: cfg.ScheddProvider,
 		collector:      cfg.Collector,
@@ -749,7 +761,16 @@ func (s *Server) SetStdout(stdout io.Writer) io.Writer {
 }
 
 // handleInitialize handles the initialize request
-func (s *Server) handleInitialize(_ context.Context, _ json.RawMessage) interface{} {
+func (s *Server) handleInitialize(ctx context.Context, params json.RawMessage) interface{} {
+	// MCP names the calling harness exactly once, here. Remember it
+	// against the session so the tool calls that follow -- which carry
+	// only a session id -- can be attributed to it.
+	if name := clientInfoFromInitialize(params); name != "" {
+		s.clients.Remember(SessionIDFromContext(ctx), name)
+		s.logger.Info(logging.DestinationMCP, "MCP client identified itself",
+			"client", name, "session_id", SessionIDFromContext(ctx))
+	}
+
 	result := map[string]interface{}{
 		"protocolVersion": "2024-11-05",
 		"capabilities": map[string]interface{}{

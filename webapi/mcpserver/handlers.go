@@ -933,6 +933,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		err := errToolDisabled(request.Name)
 		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: disabled by configuration",
 			"tool", request.Name, "trace_id", traceID)
+		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, err
 	}
 
@@ -1038,6 +1039,13 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		case isCondorDocTool(request.Name):
 			result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
 		default:
+			// Counted, and counted as its own outcome. An agent calling
+			// a tool that does not exist is a fact worth seeing -- it
+			// means a stale catalogue or a hallucinated name -- and it
+			// is not the same event as a tool that ran and failed.
+			// The name is caller-controlled, which is why the tool
+			// label is bounded like the others (see toolstats).
+			s.recordToolCall(ctx, request.Name, toolstatsOutcomeUnknownTool, time.Since(started))
 			return nil, protocolErrorf("unknown tool: %s", request.Name)
 		}
 	}
@@ -1054,6 +1062,14 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	// Log the outcome either way. A failing tool used to produce no log
 	// line at all, which left an administrator with nothing to look at
 	// when a user reported that something "just failed".
+	// Counted beside the log line, from the same values, so the metric
+	// and the log can never disagree about what happened.
+	outcome := toolstatsOutcomeOK
+	if err != nil {
+		outcome = toolstatsOutcomeError
+	}
+	s.recordToolCall(ctx, request.Name, outcome, time.Since(started))
+
 	if err != nil {
 		s.logger.Error(logging.DestinationMCP, "MCP tool call failed",
 			"tool", request.Name,
