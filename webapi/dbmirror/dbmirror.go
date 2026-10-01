@@ -41,12 +41,32 @@ const SessionCommand = 74000
 const AdType = "HTCondorDB"
 
 const (
-	// DefaultLimit is the row cap applied when a caller asks for none.
+	// DefaultLimit is how many rows a caller that names no limit gets.
+	//
+	// Used by the MCP tools, where it is a real default -- a model asking
+	// an open question wants a readable answer, not the whole table. The
+	// REST layer never reaches it: it applies its own default long before
+	// the mirror sees the request, so a non-positive limit arriving here
+	// means "everything" rather than "unspecified". ClampLimit says what
+	// that maps to.
 	DefaultLimit = 200
-	// MaxLimit is the ceiling on any single mirror read. A mirror read
-	// is unpaginated, so this is what keeps one request from pulling an
-	// unbounded result set into memory.
+	// MaxLimit is the ceiling on a single mirror read of whole ads.
+	//
+	// A row here is an entire job ad -- seventy-odd attributes, tens of
+	// kilobytes -- so the ceiling is low because the rows are fat, not
+	// because the read is dangerous. It is not a memory bound: rows are
+	// parsed, encoded and written to the response one at a time
+	// (mirrorRowStream.write), so nothing accumulates whatever the limit
+	// says.
 	MaxLimit = 2000
+	// MaxProjectedLimit is the ceiling when the caller named the
+	// attributes it wants.
+	//
+	// A projected row is a few hundred bytes rather than tens of
+	// kilobytes, so the same response budget buys far more of them, and
+	// the listings that page through a queue all project. At 200 a
+	// 60,000-job queue is three hundred round trips; this makes it six.
+	MaxProjectedLimit = 10000
 	// InfoTTL is how long a discovered mirror ad is reused before the
 	// collector is asked again.
 	InfoTTL = 30 * time.Second
@@ -921,17 +941,42 @@ func RecencyKey(ad *classad.ClassAd) int64 {
 	return v
 }
 
-// ClampLimit bounds a caller-supplied row limit for a mirror read:
-// non-positive means "unspecified" (DefaultLimit), and anything above
-// MaxLimit is clamped.
-func ClampLimit(n int) int {
-	if n <= 0 {
-		return DefaultLimit
+// ClampLimit bounds a caller-supplied row limit for a mirror read.
+//
+// Non-positive means the caller asked for everything -- the REST layer
+// turns `limit=*` into -1, and gives a request that named no limit at
+// all the ordinary default long before this -- so it maps to the
+// ceiling. It used to map to a floor of 200, which inverted the request:
+// asking for the whole queue got the smallest page this server serves,
+// and a 60,000-job queue arrived 200 at a time.
+//
+// The ceiling depends on how wide a row is, because that is what the
+// budget is really in: whole ads are tens of kilobytes each, a projected
+// row is a few hundred bytes.
+func ClampLimit(n int, projected bool) int {
+	ceiling := MaxLimit
+	if projected {
+		ceiling = MaxProjectedLimit
 	}
-	if n > MaxLimit {
-		return MaxLimit
+	if n <= 0 || n > ceiling {
+		return ceiling
 	}
 	return n
+}
+
+// Projected reports whether a caller named the attributes it wants, as
+// opposed to asking for the whole ad (no projection, or the "*" the REST
+// layer passes through for one).
+func Projected(projection []string) bool {
+	if len(projection) == 0 {
+		return false
+	}
+	for _, a := range projection {
+		if a == "*" {
+			return false
+		}
+	}
+	return true
 }
 
 // Provenance renders the trailing "[source: ...]" note callers append to

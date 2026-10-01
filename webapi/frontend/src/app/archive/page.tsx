@@ -41,6 +41,7 @@ import { ChatPanel } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import { StatusStrip } from '@/components/StatusStrip';
+import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import {
   archiveStatus,
   archiveStatusCls,
@@ -60,10 +61,14 @@ import {
 const PROJECTION =
   'ClusterId,ProcId,Owner,QDate,JobStartDate,CompletionDate,RemoteWallClockTime,JobStatus,ExitCode,ExitBySignal,Cmd,Args,JobBatchName';
 
-// Page size for each fetch. Small enough that an idle "load on
-// scroll" doesn't pull more than a screenful at a time; large enough
-// that the user doesn't see one fetch per scroll-tick.
-const PAGE_SIZE = 100;
+// Page size for each fetch.
+//
+// Was a hundred, chosen so an idle "load on scroll" would not pull more
+// than a screenful at a time. That reasoning holds for a small archive
+// and inverts for a real one: on an access point with tens of thousands
+// of records, finding anything means scrolling, and scrolling meant a
+// round trip per screenful.
+const PAGE_SIZE = LISTING_PAGE_SIZE;
 
 interface PageCursor {
   beforeCluster?: number;
