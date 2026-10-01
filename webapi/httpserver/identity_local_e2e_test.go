@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -538,4 +539,101 @@ func approveSSOConsent(t *testing.T, baseURL, consentURL string) string {
 		t.Fatalf("consent approval did not redirect: status %d, body: %s", resp.StatusCode, string(body))
 	}
 	return loc
+}
+
+// Coming back from the identity provider must not finish with a 302.
+//
+// This is the production loop, pinned. A logged-out person opening an
+// SSH device code URL is sent to the IdP; the callback creates their
+// session and used to http.Redirect them onward. The session cookie is
+// SameSite=Strict, and a browser attributes a whole redirect chain to
+// whoever started it -- the IdP, cross-site -- so that last hop arrived
+// without the cookie just set. The page saw no session, sent them back
+// to the IdP, and the loop had no exit.
+//
+// Go cannot reproduce the loop: net/http/cookiejar ignores SameSite
+// entirely, so the flow passes here whatever the attribute says. What IS
+// observable, and what this asserts, is the shape of the answer: a page
+// this origin serves, which makes the next navigation same-site, rather
+// than a redirect that continues the IdP's chain.
+func TestSSOReturnDoesNotFinishWithARedirect(t *testing.T) {
+	localAccount, passwdPath, _ := e2eLocalAccount(t)
+	_ = localAccount
+
+	ssoServer, ssoStorage, ssoBaseURL := setupMockSSOServer(t, "")
+	t.Cleanup(func() { shutdownMockSSOServer(t, ssoServer) })
+	ssoStorage.userInfos["ssouser"] = map[string]interface{}{
+		"sub":   e2eAssertedSubject,
+		"email": "e2e@example.com",
+		"name":  "End To End",
+	}
+
+	_, baseURL := startIdentityMappedServer(t, ssoBaseURL, passwdPath, "", "")
+	ssoStorage.callbackURL = baseURL + "/mcp/oauth2/callback"
+
+	// The browser-session branch, not the authorize branch: a logged-out
+	// request for a page, which stores a return URL and sends the person
+	// to the IdP.
+	deviceURL := baseURL + "/oauth2/device/verify?user_code=WDJB-MJHT"
+	status, body := browserLoginReturn(t, baseURL, ssoBaseURL, deviceURL, "ssouser", "ssopassword")
+
+	if status == http.StatusFound || status == http.StatusSeeOther {
+		t.Fatalf("the callback answered with a %d redirect to %s; "+
+			"a Strict session cookie does not survive that hop", status, body)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("callback status %d: %s", status, body)
+	}
+	// It must still send the person where they were going, by a
+	// navigation this origin starts.
+	if !strings.Contains(body, "location.replace(") {
+		t.Errorf("the page does not navigate onward: %s", body)
+	}
+	if !strings.Contains(body, "user_code=WDJB-MJHT") {
+		t.Errorf("the destination was lost: %s", body)
+	}
+}
+
+// browserLoginReturn drives a logged-out request for startURL through
+// the mock IdP and returns what the callback answered with.
+func browserLoginReturn(t *testing.T, baseURL, ssoBaseURL, startURL, username, password string) (int, string) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	client := &http.Client{
+		Jar:           jar,
+		Timeout:       30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	resp := mustGet(t, client, startURL, "open the page logged out")
+	ssoAuth := location(t, resp, ssoBaseURL)
+
+	resp = mustGet(t, client, ssoAuth, "follow to SSO")
+	loginURL := location(t, resp, ssoBaseURL)
+
+	loginResp, err := client.PostForm(loginURL, url.Values{
+		"username": {username}, "password": {password},
+	})
+	if err != nil {
+		t.Fatalf("submit login: %v", err)
+	}
+	defer func() { _ = loginResp.Body.Close() }()
+	authorizeURL := location(t, loginResp, ssoBaseURL)
+
+	resp = mustGet(t, client, authorizeURL, "authorize after login")
+	callbackURL := location(t, resp, baseURL)
+
+	cbResp, err := client.Get(callbackURL) //nolint:noctx // helper drives a redirect chain
+	if err != nil {
+		t.Fatalf("follow callback: %v", err)
+	}
+	defer func() { _ = cbResp.Body.Close() }()
+	body, _ := io.ReadAll(cbResp.Body)
+	if loc := cbResp.Header.Get("Location"); loc != "" {
+		return cbResp.StatusCode, loc
+	}
+	return cbResp.StatusCode, string(body)
 }

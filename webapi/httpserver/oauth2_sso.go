@@ -452,7 +452,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Info(logging.DestinationHTTP, "Browser authentication successful, redirecting",
 			"subject", subject, "redirect_url", redirectURL)
-		http.Redirect(w, r, redirectURL, http.StatusFound)
+		// NOT http.Redirect: the cookie just set is SameSite=Strict and
+		// this request is the tail of a chain the IdP started, so a 302
+		// would arrive at redirectURL without it. See finishBrowserLogin.
+		s.finishBrowserLogin(w, redirectURL)
 		return
 	}
 
