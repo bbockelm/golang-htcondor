@@ -89,7 +89,10 @@ func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context
 	}
 
 	// Get verification URI from config (should be set by the caller)
-	verificationURI := h.config.AccessTokenIssuer + "/mcp/oauth2/device/verify"
+	// The path follows what this server actually serves; see
+	// OAuth2DeviceVerifyPath. Both paths are routed, so a code issued
+	// before an upgrade still resolves.
+	verificationURI := h.config.AccessTokenIssuer + deviceVerifyPath()
 
 	return &DeviceAuthorizationResponse{
 		DeviceCode:              deviceCode,

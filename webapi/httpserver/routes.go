@@ -287,7 +287,12 @@ func (h *Handler) setupRoutes() {
 
 		// Device code flow endpoints (RFC 8628)
 		mux.HandleFunc("/mcp/oauth2/device/authorize", h.handleOAuth2DeviceAuthorize)
-		mux.HandleFunc("/mcp/oauth2/device/verify", h.handleOAuth2DeviceVerify)
+		// Served at both paths whatever this server advertises
+		// (OAuth2DeviceVerifyPath): a device code issued before an
+		// upgrade carries the URL it was issued with, and its user has
+		// minutes to open it.
+		mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
+		mux.HandleFunc(webUIDeviceVerifyPath, h.handleOAuth2DeviceVerify)
 
 		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
 		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays
