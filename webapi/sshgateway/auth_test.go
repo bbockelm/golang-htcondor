@@ -329,7 +329,7 @@ func (b *blockingFlow) waitStarted(t *testing.T) {
 	}
 }
 
-func (b *blockingFlow) Authorize(ctx context.Context) (*DeviceAuth, error) {
+func (b *blockingFlow) Authorize(ctx context.Context, _ Target) (*DeviceAuth, error) {
 	b.once.Do(func() { close(b.started) })
 	select {
 	case <-b.release:
@@ -571,5 +571,43 @@ func TestClientOfferingAKeyStillReachesThePrompt(t *testing.T) {
 	}
 	if got := srv.awaitPermissions(t).Extensions[ExtAccount]; got != "bbockelm" {
 		t.Errorf("the client authenticated as %q", got)
+	}
+}
+
+// The workspace the user asked for has to reach the authorization, or
+// the approval page has nothing to show a screen for and falls back to
+// the generic consent form -- which is the whole thing this is for.
+//
+// `ssh +work@gateway` and a bare `ssh gateway` are both session
+// requests; a job id is not, and sends no workspace because there is
+// nothing to configure about a job that already exists.
+func TestTheRequestedTargetReachesTheAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		user string
+		want Target
+	}{
+		{"+work", Target{Raw: "+work", Name: "work", Explicit: true}},
+		{"bbockelm", Target{Raw: "bbockelm", Name: DefaultSessionName}},
+		{"12345.0", Target{Raw: "12345.0", Cluster: 12345, Proc: 0}},
+	} {
+		t.Run(tc.user, func(t *testing.T) {
+			flow := &fakeFlow{
+				auth:  testAuth(),
+				grant: &Grant{AccessToken: "at", Scopes: []string{"openid"}},
+			}
+			flow.auth.Interval = time.Millisecond
+			a := grantingAuthenticator(t, "bbockelm", Options{Flow: flow})
+			srv := startServer(t, a)
+
+			if _, err := dial(t, srv.addr, tc.user); err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			flow.mu.Lock()
+			got := flow.target
+			flow.mu.Unlock()
+			if got != tc.want {
+				t.Errorf("target = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

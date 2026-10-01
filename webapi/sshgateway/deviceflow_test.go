@@ -34,9 +34,15 @@ type fakeFlow struct {
 	replies []error // consumed in order; nil means "granted"
 	grant   *Grant
 	calls   []time.Time
+	// target records what Authorize was asked to reach, so a test can
+	// assert the SSH username travelled into the authorization.
+	target Target
 }
 
-func (f *fakeFlow) Authorize(context.Context) (*DeviceAuth, error) {
+func (f *fakeFlow) Authorize(_ context.Context, target Target) (*DeviceAuth, error) {
+	f.mu.Lock()
+	f.target = target
+	f.mu.Unlock()
 	if f.authErr != nil {
 		return nil, f.authErr
 	}
@@ -247,7 +253,7 @@ func TestHTTPFlowAuthorizeAndPoll(t *testing.T) {
 
 	f := &HTTPFlow{Issuer: srv.URL, ClientID: "gateway", Scopes: []string{"openid", "condor:/WRITE"}}
 
-	auth, err := f.Authorize(context.Background())
+	auth, err := f.Authorize(context.Background(), Target{})
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
@@ -295,7 +301,7 @@ func TestOneClickLinkIsOfferedInThePrompt(t *testing.T) {
 	defer srv.Close()
 
 	f := &HTTPFlow{Issuer: srv.URL, ClientID: "gateway"}
-	auth, err := f.Authorize(context.Background())
+	auth, err := f.Authorize(context.Background(), Target{})
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
@@ -358,5 +364,50 @@ func TestPromptFallsBackToThePlainURL(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "WDJB-MJHT") {
 		t.Errorf("the code is missing:\n%s", prompt)
+	}
+}
+
+// The workspace travels as a device-authorize form parameter, because
+// that is the only request in the flow the gateway composes and the
+// only one the verification page can read it back from.
+func TestTheSessionNameIsSentWithTheDeviceAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target Target
+		want   string
+	}{
+		{"named session", Target{Name: "work", Explicit: true}, "work"},
+		{"default session", Target{Name: DefaultSessionName}, DefaultSessionName},
+		{"a job id", Target{Cluster: 12345}, ""},
+		{"nothing parsed", Target{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawSession string
+			var present bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				sawSession = r.Form.Get(SessionFormField)
+				present = r.Form.Has(SessionFormField)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT",
+					"verification_uri":"https://ap.example.edu/device",
+					"expires_in":600,"interval":5}`))
+			}))
+			defer srv.Close()
+
+			f := &HTTPFlow{Issuer: srv.URL, ClientID: "gateway"}
+			if _, err := f.Authorize(context.Background(), tc.target); err != nil {
+				t.Fatalf("authorize: %v", err)
+			}
+			if sawSession != tc.want {
+				t.Errorf("%s = %q, want %q", SessionFormField, sawSession, tc.want)
+			}
+			// An empty-but-present field would be stored and then read
+			// back as "an SSH login for the workspace called nothing",
+			// so absence has to be absence.
+			if tc.want == "" && present {
+				t.Errorf("%s was sent empty rather than omitted", SessionFormField)
+			}
+		})
 	}
 }

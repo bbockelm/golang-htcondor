@@ -624,6 +624,49 @@ export interface InteractiveTerminalCreateRequest {
   submit_lines?: string;
 }
 
+// --- SSH login approval ---
+//
+// The screen at /ssh/approve, which the device verification endpoint
+// redirects an SSH login to. See httpserver/handlers_ssh_consent.go.
+
+export interface SSHConsentView {
+  user_code: string;
+  username: string;
+  client_id: string;
+  scopes: string[];
+  session: string;
+  session_exists: boolean;
+  can_create: boolean;
+  job_id?: string;
+  status?: string;
+  hold_reason?: string;
+  hold_reason_code?: number;
+  // What this access point would submit if the user changed nothing.
+  defaults: Required<
+    Pick<InteractiveTerminalCreateRequest, 'cpus' | 'memory_mb' | 'disk_mb'>
+  > &
+    InteractiveTerminalCreateRequest;
+  // Must be echoed back on the decision. The server mints it per
+  // (code, user) and will not accept an approval without it.
+  approval_token: string;
+}
+
+export interface SSHConsentDecision {
+  user_code: string;
+  action: 'approve' | 'deny';
+  approval_token: string;
+  // Omitted when the workspace already exists; the server ignores it
+  // in that case anyway, but not sending it keeps the intent clear.
+  create?: InteractiveTerminalCreateRequest;
+}
+
+export interface SSHConsentResult {
+  approved: boolean;
+  session?: string;
+  job_id?: string;
+  created: boolean;
+}
+
 export interface InteractiveTerminalCreateResponse {
   instance_id: string;
   cluster_id: number;
@@ -1493,6 +1536,25 @@ export const api = {
     // to round-trip a regexp constraint through the schedd.
     listTerminals: (): Promise<{ terminals: InteractiveTerminalSummary[] }> =>
       fetchJSON(`${BASE}/interactive/terminal`),
+  },
+
+  sshConsent: {
+    // GET /api/v1/ssh/device?user_code=… — what the pending SSH login
+    // is asking for. Deliberately not cached by the caller: the
+    // approval token it returns is single-purpose and the server
+    // charges a rate-limit attempt per call.
+    read: (userCode: string): Promise<SSHConsentView> =>
+      fetchJSON(
+        `${BASE}/ssh/device?user_code=${encodeURIComponent(userCode)}`,
+      ),
+
+    // POST /api/v1/ssh/device/approve — approve or refuse, and submit
+    // the workspace in the same request when one was configured.
+    decide: (d: SSHConsentDecision): Promise<SSHConsentResult> =>
+      fetchJSON(`${BASE}/ssh/device/approve`, {
+        method: 'POST',
+        body: JSON.stringify(d),
+      }),
   },
 
   templates: {

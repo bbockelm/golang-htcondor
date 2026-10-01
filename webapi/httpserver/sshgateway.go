@@ -462,6 +462,26 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 		MemoryMB: h.sshGatewaySessionSpec.MemoryMB,
 		DiskMB:   h.sshGatewaySessionSpec.DiskMB,
 	})
+	if errors.Is(err, interactive.ErrSessionExists) {
+		// Somebody else made it between the listing above and here,
+		// and on this path that somebody is almost always the browser
+		// that just approved this login: the approval screen submits
+		// the session the user configured, and the grant we waited on
+		// is recorded after it. Losing that race is the DESIGNED
+		// outcome, not a failure -- Create refusing is what stops the
+		// user ending up with two jobs -- so attach to what exists.
+		//
+		// The error carries the session it found, so no second listing
+		// is needed and there is no window in which it could vanish
+		// between the two.
+		var exists *interactive.SessionExistsError
+		if errors.As(err, &exists) {
+			h.logger.Info(logging.DestinationHTTP,
+				"SSH gateway attached to a session created while it was connecting",
+				"account", account, "session", name, "job", exists.Info.JobID)
+			return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, exists.Info, report)
+		}
+	}
 	if err != nil {
 		return jobssh.Key{}, fmt.Errorf("starting session %q: %w", name, err)
 	}

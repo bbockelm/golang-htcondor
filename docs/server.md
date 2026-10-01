@@ -622,6 +622,35 @@ While a newly created session waits in the queue, the terminal shows what it is
 waiting for and how long it has been waiting. Ctrl-C stops waiting; it does
 **not** remove the job, so reconnecting picks the session up once it starts.
 
+### The approval screen
+
+Where the web UI is built into the binary, the approval link opens a screen
+for the workspace the `ssh` command asked for rather than a generic "allow
+this device" page. The `ssh` client sends the workspace name along with the
+device authorization, and the verification endpoint redirects to
+`/ssh/approve`.
+
+If you already have a workspace by that name, the screen says what it is
+doing — queued, running, or held and why — and offers the sign-in alone.
+If you do not, it shows the same resource form as the **Interactive** page
+(CPUs, memory, disk, GPUs, extra submit lines), opened on what
+`HTTP_API_SSH_GATEWAY_SESSION_*` would have submitted. One button creates the
+workspace **and** approves the sign-in. Nothing is submitted if you refuse,
+and nothing is approved if the submission fails.
+
+The browser submits the job, as you, before the approval is recorded, so the
+gateway finds the workspace waiting and attaches to it. Creating on demand
+from the gateway remains the fallback for a deployment with no web UI and for
+an approval that created nothing; it cannot produce a second job, because the
+first one to submit a given name wins and the other attaches to it.
+
+The code is shown large at the top of the screen. It is the check that
+catches a login somebody else started: a code that matches nothing in your
+terminal is not yours to approve.
+
+A deployment without the web UI keeps the server-rendered consent page, and so
+does every device code that is not an SSH login.
+
 ### Host key and CA key
 
 Both are long-lived and both are dangerous to lose: replacing a host key trips

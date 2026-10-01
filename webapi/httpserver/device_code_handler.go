@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/ory/fosite"
+
+	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
 
 // Device flow error codes (RFC 8628)
@@ -53,8 +56,13 @@ func NewDeviceCodeHandler(storage *OAuth2Storage, config *fosite.Config) *Device
 	}
 }
 
-// HandleDeviceAuthorizationRequest handles the device authorization endpoint
-func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context, client fosite.Client, scopes []string) (*DeviceAuthorizationResponse, error) {
+// HandleDeviceAuthorizationRequest handles the device authorization endpoint.
+//
+// sshSession, when not empty, is the interactive session the caller is
+// trying to reach over SSH. It is stored on the request form so the
+// verification page can read it back and show that workspace rather
+// than a generic consent form; see sshSessionFromRequester.
+func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context, client fosite.Client, scopes []string, sshSession string) (*DeviceAuthorizationResponse, error) {
 	// Validate client
 	if client == nil {
 		return nil, fosite.ErrInvalidClient
@@ -78,6 +86,15 @@ func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context
 	request.Client = client
 	request.RequestedScope = scopes
 	request.GrantedScope = scopes // Initially grant requested scopes
+
+	// Only this one field, never the caller's whole HTTP form. The
+	// form is persisted verbatim in the device code row, so passing
+	// everything through would turn an endpoint that authenticates no
+	// client into a place anybody can write arbitrary key/value pairs
+	// to this server's database.
+	if sshSession != "" {
+		request.Form = url.Values{sshgateway.SessionFormField: []string{sshSession}}
+	}
 
 	// Calculate expiration
 	expiresIn := 10 * time.Minute // Default 10 minutes for device codes

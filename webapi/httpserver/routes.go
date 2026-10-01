@@ -124,6 +124,14 @@ func (h *Handler) setupRoutes() {
 	// that looks like an old build.
 	mux.Handle("/api/v1/ssh/ca", cors(http.HandlerFunc(h.handleSSHCA)))
 	mux.Handle("/api/v1/ssh/certificate", cors(http.HandlerFunc(h.handleSSHCertificate)))
+	// The SSH approval screen's own endpoints, deliberately NOT behind
+	// cors(). The rest of /api/v1 may be read by a separately-hosted
+	// SPA; these two hand out and consume a CSRF token, and echoing
+	// Access-Control-Allow-Credentials for them would make that token
+	// readable from whatever origin the operator configured -- which
+	// is the one thing the token exists to prevent.
+	mux.Handle(sshConsentReadPath, http.HandlerFunc(h.handleSSHConsentRead))
+	mux.Handle(sshConsentApprovePath, http.HandlerFunc(h.handleSSHConsentApprove))
 
 	// Web UI session endpoints (browser-session aware; cookie-only)
 	mux.Handle("/api/v1/auth/me", cors(http.HandlerFunc(h.handleAuthMe)))

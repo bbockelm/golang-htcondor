@@ -438,6 +438,33 @@ type createLock struct {
 
 func (m *Manager) log() *logging.Logger { return m.opts.Logger }
 
+// ErrSessionExists reports that the caller already has a session by
+// the name they asked to create.
+//
+// Typed because it is a RACE outcome, not only a user mistake. Two
+// things create sessions by name -- a browser approving an SSH login,
+// and the gateway creating on demand for the same login -- and the
+// loser of that race has to attach to what the winner made rather than
+// fail the connection. Matching on the message would have worked until
+// somebody reworded it.
+var ErrSessionExists = errors.New("session already exists")
+
+// SessionExistsError carries which session, and what is known about
+// it, so the loser of that race can attach without listing again.
+type SessionExistsError struct {
+	Name string
+	Info Info
+}
+
+func (e *SessionExistsError) Error() string {
+	return fmt.Sprintf("session %q already exists", e.Name)
+}
+
+// Is makes errors.Is(err, ErrSessionExists) true for this error, so a
+// caller can recognise the outcome without also having to unwrap the
+// concrete type when it does not need the session.
+func (e *SessionExistsError) Is(target error) bool { return target == ErrSessionExists }
+
 // Create submits a new session job and registers a lease for it. The
 // job is idle when this returns; Exec waits for it to start.
 func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*Info, error) {
@@ -474,8 +501,8 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	}
 	for _, info := range existing {
 		if info.Name == spec.Name {
-			return nil, fmt.Errorf("session %q already exists (job %s, %s); use it, or stop it first",
-				spec.Name, info.JobID, info.Status)
+			return nil, fmt.Errorf("%w (job %s, %s); use it, or stop it first",
+				&SessionExistsError{Name: spec.Name, Info: info}, info.JobID, info.Status)
 		}
 	}
 	if len(existing) >= m.opts.MaxPerOwner {

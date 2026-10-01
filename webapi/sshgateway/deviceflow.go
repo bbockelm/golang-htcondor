@@ -94,7 +94,16 @@ type Grant struct {
 // the retry policy in Wait is worth testing without a network.
 type DeviceFlow interface {
 	// Authorize starts a flow and returns the code to show the user.
-	Authorize(ctx context.Context) (*DeviceAuth, error)
+	//
+	// target is what the SSH username asked to reach. It is carried
+	// into the authorization so the approval page can show the person
+	// the workspace they are about to be let into -- and offer to
+	// create it when they have none by that name -- rather than a
+	// generic consent form that says only "a device wants in". It is
+	// a hint for the page and nothing more: nothing downstream trusts
+	// it, because the device-authorize endpoint authenticates no
+	// client and anybody can put any name in one.
+	Authorize(ctx context.Context, target Target) (*DeviceAuth, error)
 	// Poll reports the state of a started flow. A flow still waiting
 	// on the user returns ErrAuthorizationPending or ErrSlowDown.
 	Poll(ctx context.Context, deviceCode string) (*Grant, error)
@@ -178,6 +187,15 @@ type HTTPFlow struct {
 
 const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 
+// SessionFormField is the device-authorize parameter carrying the
+// interactive session the caller asked for.
+//
+// RFC 8628's request carries client_id and scope and nothing else that
+// fits; a custom parameter is the extension point the RFC leaves open.
+// It is named here rather than in the server so the two ends cannot
+// drift apart silently.
+const SessionFormField = "ssh_session"
+
 func (f *HTTPFlow) httpClient() *http.Client {
 	if f.HTTP != nil {
 		return f.HTTP
@@ -190,11 +208,18 @@ func (f *HTTPFlow) endpoint(path string) string {
 }
 
 // Authorize implements DeviceFlow.
-func (f *HTTPFlow) Authorize(ctx context.Context) (*DeviceAuth, error) {
+func (f *HTTPFlow) Authorize(ctx context.Context, target Target) (*DeviceAuth, error) {
 	form := url.Values{}
 	form.Set("client_id", f.ClientID)
 	if len(f.Scopes) > 0 {
 		form.Set("scope", strings.Join(f.Scopes, " "))
+	}
+	// Only a session name travels. A job id needs no workspace screen
+	// -- the job either exists or it does not, and there is nothing to
+	// configure -- so sending one would add an attacker-supplied
+	// integer to the device code record for no gain.
+	if !target.IsJob() && target.Name != "" {
+		form.Set(SessionFormField, target.Name)
 	}
 
 	body, status, err := f.post(ctx, f.endpoint("/mcp/oauth2/device/authorize"), form)

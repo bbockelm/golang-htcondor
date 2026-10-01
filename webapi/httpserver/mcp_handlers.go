@@ -18,7 +18,10 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/handler/openid"
@@ -1640,11 +1643,28 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 			"client_id", clientID, "scopes", strings.Join(scopes, " "))
 	}
 
+	// The SSH workspace this login is for, when the caller is the SSH
+	// gateway. Validated to a session name here rather than trusted:
+	// this endpoint authenticates no client, so the value is whatever
+	// somebody posted, and it is about to be stored and then rendered
+	// on a consent page. A name that does not pass is dropped, not
+	// refused -- the login itself is still a legitimate request, and
+	// the generic consent page is a correct answer for it.
+	sshSession := strings.TrimSpace(r.FormValue(sshgateway.SessionFormField))
+	if sshSession != "" {
+		if err := interactive.ValidateSessionName(sshSession); err != nil {
+			h.logger.Info(logging.DestinationHTTP,
+				"Dropping an unusable session name from a device authorization",
+				"client_id", clientID, "error", err)
+			sshSession = ""
+		}
+	}
+
 	// Create device code handler
 	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
 
 	// Handle device authorization
-	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes)
+	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes, sshSession)
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Device authorization failed", "error", err)
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Device authorization failed")
@@ -1804,6 +1824,17 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			if err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
 				h.writeHTMLError(w, "Invalid or expired user code")
+				return
+			}
+
+			// An SSH login gets the workspace screen instead, where
+			// the person can consent to what the session will ask
+			// for as well as to the login itself. The redirect goes
+			// out only where the SPA is compiled in, because
+			// otherwise it would point at a 404 and leave a user with
+			// no way to approve at all.
+			if to := sshConsentRedirect(sshSessionFromRequester(request), userCode, webui.IsEmbedded()); to != "" {
+				http.Redirect(w, r, to, http.StatusFound)
 				return
 			}
 
