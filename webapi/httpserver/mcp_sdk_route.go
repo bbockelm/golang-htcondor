@@ -6,6 +6,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/ory/fosite"
+
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // Routing /mcp through the upstream SDK's transport instead of the hand-rolled
@@ -83,6 +85,13 @@ func (h *Handler) mcpSDKAuth(next http.Handler) http.Handler {
 		}
 
 		ctx = withSDKTokenInfo(ctx, sdkTokenInfoFor(token))
+
+		// The SDK transport is stateless and answers initialize itself,
+		// so handleInitialize never runs and no session is remembered:
+		// the User-Agent is the only harness identity available on this
+		// path. Without this, every tool call served through the SDK
+		// transport is recorded as an unknown client.
+		ctx = mcpserver.WithClientInfo(ctx, mcpserver.NormalizeClientName(r.UserAgent(), ""))
 
 		// Keep the write deadline ahead of a call that is still running, so a
 		// tool that is deliberately waiting is bounded by the hard stop

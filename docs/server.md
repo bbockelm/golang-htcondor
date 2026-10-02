@@ -1132,7 +1132,16 @@ name). A refusal is kept apart from an error on purpose: one is a policy
 decision, the other a malfunction.
 
 `client` is what the harness called itself in the MCP `initialize`
-handshake, falling back to the HTTP `User-Agent` and then to `unknown`.
+handshake, falling back to the HTTP `User-Agent` and then to `unknown`. The
+server assigns the session that links an `initialize` to the calls that
+follow, so a client that declares itself is attributed to what it said
+rather than to its HTTP library. With `HTTP_API_MCP_TRANSPORT=sdk` only
+the `User-Agent` is available, because that transport answers
+`initialize` itself.
+
+These statistics cover the HTTP MCP surface. The standalone
+`condor-mcp` stdio server records nothing: it has no database to persist
+to and serves no `/metrics`.
 The duration histogram carries no `user` label: how long a tool takes is
 a property of the tool and the pool, and a histogram costs fourteen
 series per label combination.
