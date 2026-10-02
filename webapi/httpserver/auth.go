@@ -244,13 +244,50 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 // gate on Validated; code paths that only need a stable bucket key
 // (rate-limit per-token / per-username) can use Username directly.
 type TokenCacheEntry struct {
-	Token         string
-	Username      string // sub from the JWT — unverified until Validated == true
-	Validated     bool   // true once a schedd op authenticated successfully with this token
+	Token     string
+	Username  string // sub from the JWT — unverified until Validated == true
+	Validated bool   // true once a schedd op authenticated successfully with this token
+
+	// CondorCredential is what CEDAR should authenticate with for this
+	// bearer, when that is not the bearer itself.
+	//
+	// An opaque access token this server issued carries no signature
+	// the schedd knows, so one is minted from it. Minting happens once,
+	// on the request that first sees the token; without somewhere to
+	// keep the result, every later request for the same bearer hands
+	// CEDAR the opaque string instead -- which it cannot use, and which
+	// leaves it to fall through to whatever credential the daemon
+	// itself has.
+	//
+	// Empty for a bearer that is already a credential HTCondor can
+	// verify, where the bearer is used directly.
+	CondorCredential string
+
+	// Scopes are the scopes the grant behind this bearer carries, for
+	// the handlers that gate on them. Kept here for the same reason as
+	// CondorCredential: they are resolved once, and a later request
+	// that could not see them would read an approved-for-less grant as
+	// carrying no restriction at all.
+	Scopes []string
+
 	Expiration    time.Time
 	SessionCache  *security.SessionCache
 	expiryTimer   *time.Timer
 	cancelCleanup func()
+}
+
+// SetCondorCredential records the credential and scopes resolved for a
+// bearer, so later requests for it do not have to resolve them again --
+// and, more to the point, do not proceed without them.
+func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	entry, ok := tc.entries[token]
+	if !ok {
+		return
+	}
+	entry.CondorCredential = credential
+	entry.Scopes = append([]string(nil), scopes...)
 }
 
 // TokenCache manages validated tokens and their associated session caches
@@ -542,4 +579,30 @@ func (tc *TokenCache) ValidatedUsername(token string) string {
 		return ""
 	}
 	return entry.Username
+}
+
+// resolveCachedBearer reports the credential and scopes a request
+// should use for a bearer the cache already knows, given the bearer
+// itself as the fallback.
+//
+// Separated from createAuthenticatedContext so it can be tested:
+// that function cannot be driven through this branch in a unit test,
+// because resolving the caller pings a schedd.
+//
+// The empty case is the one that mattered. An opaque access token is
+// not a credential HTCondor can verify, so one is minted from it --
+// once, on the request that first sees the bearer. Returning the
+// bearer here when nothing was recorded is correct for a bearer that
+// IS already a usable credential, and was wrong for every opaque one,
+// because CEDAR then had nothing to present and fell through to
+// whatever credential the daemon itself has.
+func resolveCachedBearer(entry *TokenCacheEntry, bearer string) (credential string, scopes []string) {
+	if entry == nil {
+		return bearer, nil
+	}
+	credential = bearer
+	if entry.CondorCredential != "" {
+		credential = entry.CondorCredential
+	}
+	return credential, entry.Scopes
 }
