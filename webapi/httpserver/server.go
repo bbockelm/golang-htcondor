@@ -124,7 +124,14 @@ type Config struct {
 	// ToolStatsMaxLabelValues caps distinct values per /metrics label
 	// for tool statistics. Zero means the default.
 	ToolStatsMaxLabelValues int
-	MetricsCacheTTL         time.Duration // Metrics cache TTL (default: 10s)
+	// ToolStatsOmitUser renders every /metrics user label as a single
+	// placeholder, for a site that does not want usernames on a
+	// potentially public endpoint. The durable table is unaffected.
+	ToolStatsOmitUser bool
+	// ToolStatsMaxSeries caps how many distinct tool-call series are
+	// held at all. Zero means the default.
+	ToolStatsMaxSeries int
+	MetricsCacheTTL    time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
 	MetricsPublic bool
@@ -421,6 +428,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MetricsPublic:               cfg.MetricsPublic,
 		ToolStatsFlushInterval:      cfg.ToolStatsFlushInterval,
 		ToolStatsMaxLabelValues:     cfg.ToolStatsMaxLabelValues,
+		ToolStatsOmitUser:           cfg.ToolStatsOmitUser,
+		ToolStatsMaxSeries:          cfg.ToolStatsMaxSeries,
 		DBMirrorName:                cfg.DBMirrorName,
 		DBMirrorAddress:             cfg.DBMirrorAddress,
 		DBMirrorRequired:            cfg.DBMirrorRequired,

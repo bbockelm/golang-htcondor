@@ -126,7 +126,7 @@ func TestFlushingTwiceDoesNotDoubleTheTotals(t *testing.T) {
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	s.MarkDirty() // force a second write of the same state
+	s.MarkDirty(s.Snapshot()) // force a second write of the same state
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
@@ -299,5 +299,53 @@ func TestStoredRowsKeepTheVerbatimIdentity(t *testing.T) {
 			t.Errorf("stored actor %d = %q, want %q (SQLite must keep the real name)",
 				i, actors[i], want[i])
 		}
+	}
+}
+
+// TestAFlushWritesOnlyWhatChanged pins the narrowing.
+//
+// The flush used to rewrite the whole snapshot every time, costing
+// O(all history) however little moved -- ~4s at 100k series, on the one
+// connection every authenticated request also needs. Idleness alone
+// does not test this: a flush that rewrites everything still writes
+// nothing when nothing changed. So both stored rows are corrupted
+// behind the store's back, one series is recorded, and the untouched
+// row must still hold its sentinel.
+func TestAFlushWritesOnlyWhatChanged(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	s := toolstats.New()
+	s.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	s.Record("submit_job", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	if err := s.Flush(ctx, db); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE mcp_tool_stats SET calls = 999`); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	// Only one of the two series moves.
+	s.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	if err := s.Flush(ctx, db); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	var changed, untouched int
+	if err := db.QueryRowContext(ctx,
+		`SELECT calls FROM mcp_tool_stats WHERE tool = 'query_jobs'`).Scan(&changed); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT calls FROM mcp_tool_stats WHERE tool = 'submit_job'`).Scan(&untouched); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if changed != 2 {
+		t.Errorf("the changed series = %d, want 2", changed)
+	}
+	if untouched != 999 {
+		t.Errorf("the unchanged series was rewritten (calls = %d); the flush is still O(all rows)",
+			untouched)
 	}
 }

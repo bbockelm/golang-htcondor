@@ -82,10 +82,10 @@ func (s *Store) Flush(ctx context.Context, db *sql.DB) error {
 		return nil
 	}
 	if err := s.flush(ctx, db, snap); err != nil {
-		// Re-arm so the next tick retries; otherwise a transient
-		// failure would silently drop everything counted since the
-		// last success.
-		s.MarkDirty()
+		// Hand the series back so the next tick retries them;
+		// otherwise a transient failure would silently drop everything
+		// counted since the last success.
+		s.MarkDirty(snap)
 		return err
 	}
 	return nil

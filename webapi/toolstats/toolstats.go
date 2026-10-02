@@ -70,6 +70,31 @@ const (
 // distinct values than MaxLabelValues allows.
 const OtherLabel = "other"
 
+// DefaultMaxSeries bounds how many distinct (tool, user, client,
+// outcome) combinations the store will hold.
+//
+// This is the bound that matters, and it is the one the first version
+// of this package did not have. The per-label ceiling below applies at
+// RENDER time, so it bounded the Prometheus exposition while leaving
+// the in-memory map and the SQLite table to grow one entry per distinct
+// key forever -- and an unknown tool is recorded under the name the
+// CALLER sent. Capping here bounds all three at once, because the flush
+// writes exactly what the map holds.
+//
+// Set well above what a real access point produces: ~46 tools times its
+// users times a few harness strings times four outcomes. Past it, new
+// combinations fold into OtherLabel rather than being dropped, so the
+// totals stay right even when the detail stops. The store therefore
+// holds at most this many series plus the one overflow bucket.
+const DefaultMaxSeries = 10000
+
+// MaxToolNameLength bounds a recorded tool name.
+//
+// The name is caller-supplied on the unknown-tool path and the MCP body
+// limit is 16 MB, so without this one request could store a megabyte of
+// text -- three times over, once in the row and again in each index.
+const MaxToolNameLength = 64
+
 // DefaultMaxLabelValues bounds the distinct values any single label can
 // contribute to /metrics. It is a safety valve, not a policy: it sits
 // far above the number of users or client harnesses a real access point
@@ -135,6 +160,18 @@ type Store struct {
 	// maxLabelValues bounds each label's distinct values at render time.
 	maxLabelValues int
 
+	// maxSeries bounds how many distinct keys are held at all.
+	maxSeries int
+
+	// dirtyKeys are the series changed since the last successful flush.
+	//
+	// The flush used to rewrite the whole snapshot every time, which
+	// costs O(all series) however little changed -- measured at ~4s for
+	// 100k series, on the single connection every authenticated request
+	// also needs. Tracking what actually moved makes the common flush
+	// proportional to the traffic instead of to the history.
+	dirtyKeys map[Key]struct{}
+
 	// now is time.Now, replaced in tests. A stat with a timestamp in it
 	// is otherwise untestable without sleeping.
 	now func() time.Time
@@ -149,7 +186,9 @@ type Store struct {
 func New() *Store {
 	return &Store{
 		m:              map[Key]*Entry{},
+		dirtyKeys:      map[Key]struct{}{},
 		maxLabelValues: DefaultMaxLabelValues,
+		maxSeries:      DefaultMaxSeries,
 		now:            time.Now,
 	}
 }
@@ -188,6 +227,11 @@ func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
 	if outcome == "" {
 		outcome = OutcomeError
 	}
+	// The tool name is caller-supplied on the unknown-tool path. Clamp
+	// it before it becomes a map key, a primary key and a label.
+	if len(tool) > MaxToolNameLength {
+		tool = tool[:MaxToolNameLength]
+	}
 	key := Key{Tool: tool, User: user, Client: client, Outcome: outcome}
 
 	// A negative duration means a clock that went backwards mid-call.
@@ -202,8 +246,18 @@ func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
 	defer s.mu.Unlock()
 	e := s.m[key]
 	if e == nil {
-		e = &Entry{Buckets: make([]uint64, len(DurationBuckets))}
-		s.m[key] = e
+		if len(s.m) >= s.maxSeries {
+			// Full. Fold into a single catch-all rather than dropping
+			// the call: the totals stay correct, and only the detail
+			// is lost. Folding every field means the overflow cannot
+			// itself mint combinations.
+			key = Key{Tool: OtherLabel, User: OtherLabel, Client: OtherLabel, Outcome: outcome}
+			e = s.m[key]
+		}
+		if e == nil {
+			e = &Entry{Buckets: make([]uint64, len(DurationBuckets))}
+			s.m[key] = e
+		}
 	}
 	e.Calls++
 	e.DurationSum += secs
@@ -215,6 +269,7 @@ func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
 		}
 	}
 	s.dirty = true
+	s.dirtyKeys[key] = struct{}{}
 }
 
 // Snapshot returns a copy of every series, for flushing or for a test.
@@ -233,22 +288,42 @@ func (s *Store) snapshotLocked() map[Key]Entry {
 	return out
 }
 
-// SnapshotForFlush returns the series together with the dirty flag, and
-// clears the flag. The caller flushes only when dirty is true, and on
-// failure calls MarkDirty so the next tick tries again.
+// SnapshotForFlush returns only the series that changed since the last
+// successful flush, and takes the changed-set with it.
+//
+// Returning everything would make each flush cost O(all history) rather
+// than O(what happened), which at 100k series measured ~4s on the one
+// connection every authenticated request also needs. The totals are
+// absolute per row, so writing just the changed rows is complete: a row
+// nobody called is already correct on disk.
+//
+// On failure the caller hands the set back with MarkDirty, so nothing
+// is lost to a flush that did not land.
 func (s *Store) SnapshotForFlush() (map[Key]Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	dirty := s.dirty
+	if len(s.dirtyKeys) == 0 {
+		return nil, false
+	}
+	out := make(map[Key]Entry, len(s.dirtyKeys))
+	for k := range s.dirtyKeys {
+		if e, ok := s.m[k]; ok {
+			out[k] = e.clone()
+		}
+	}
+	s.dirtyKeys = map[Key]struct{}{}
 	s.dirty = false
-	return s.snapshotLocked(), dirty
+	return out, true
 }
 
-// MarkDirty re-arms the flush, after one failed.
-func (s *Store) MarkDirty() {
+// MarkDirty re-arms the series a failed flush did not write.
+func (s *Store) MarkDirty(keys map[Key]Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty = true
+	for k := range keys {
+		s.dirtyKeys[k] = struct{}{}
+	}
 }
 
 // Load installs persisted series, replacing anything already held.
@@ -315,4 +390,17 @@ func labelSpace(totals map[string]uint64, limit int) map[string]string {
 		}
 	}
 	return keep
+}
+
+// SetMaxSeries overrides how many distinct series the store will hold.
+// Zero or less restores the default rather than removing the bound: an
+// unbounded store is a memory and disk leak with a caller-facing
+// trigger, and should not be reachable by configuration.
+func (s *Store) SetMaxSeries(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n <= 0 {
+		n = DefaultMaxSeries
+	}
+	s.maxSeries = n
 }
