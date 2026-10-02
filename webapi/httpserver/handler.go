@@ -43,6 +43,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
+	"github.com/bbockelm/golang-htcondor/webapi/toolstats"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
@@ -316,9 +317,16 @@ type Handler struct {
 	// mcpActors caches the schedd-verified identity of forwarded
 	// HTCondor IDTOKENs presented to /mcp/message.
 	mcpActors        mcpActorCache
-	webuiAdminGroups *groupSet      // Required for Web UI admin pages (empty = no admin UI)
-	metricsPublic    bool           // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
-	htcondorConfig   *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+	webuiAdminGroups *groupSet // Required for Web UI admin pages (empty = no admin UI)
+	metricsPublic    bool      // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	// toolStats counts MCP tool calls for /metrics and for the durable
+	// table in the application database. See toolstats.go.
+	toolStats              *toolstats.Store
+	toolStatsFlushInterval time.Duration
+	toolStatsStop          chan struct{}
+	toolStatsStopOnce      sync.Once
+
+	htcondorConfig *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
 	// identityCookieKey signs the remembered-account hint. Derived from
 	// the application master key, which the pool signing keys wrap; empty
 	// when the deployment has no signing keys.
@@ -585,8 +593,19 @@ type HandlerConfig struct {
 	DBMirrorAddress  string // HTTP_API_DBMIRROR_ADDRESS: dial this sinful instead of the advertised one
 	DBMirrorRequired bool   // HTTP_API_DBMIRROR_REQUIRED: fail rather than fall back to the schedd
 
-	JobQueueLogPath string        // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
-	EnableMetrics   bool          // Enable /metrics endpoint (default: true if Collector is set)
+	JobQueueLogPath string // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
+	EnableMetrics   bool   // Enable /metrics endpoint (default: true if Collector is set)
+	// ToolStatsFlushInterval is how often MCP tool-call counters are
+	// written to the application database. Zero means
+	// DefaultToolStatsFlushInterval; the counters are also flushed at
+	// shutdown regardless.
+	ToolStatsFlushInterval time.Duration
+	// ToolStatsMaxLabelValues caps the distinct values any single
+	// /metrics label may take for tool statistics. Zero means
+	// toolstats.DefaultMaxLabelValues. The durable table is unaffected:
+	// it always records the verbatim user and client.
+	ToolStatsMaxLabelValues int
+
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
 	// only when network ACLs already isolate the endpoint (e.g. a
@@ -1243,6 +1262,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// disabled (no Collector configured). The metricsdAdapter is
 	// registered later, after metricsRegistry is built.
 	h.httpMetricsState = newHTTPMetrics()
+	h.toolStats = toolstats.New()
+	h.toolStatsFlushInterval = cfg.ToolStatsFlushInterval
+	if cfg.ToolStatsMaxLabelValues > 0 {
+		h.toolStats.SetMaxLabelValues(cfg.ToolStatsMaxLabelValues)
+	}
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.
@@ -1846,6 +1870,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		ToolStats:            h.toolStats,
 		SkillsDir:            h.mcpSkillsDir,
 		SkillsReloadInterval: h.mcpSkillsReloadInterval,
 		// A getter, not the handle: this server replaces its schedd when
@@ -1916,6 +1941,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	// Note: Routes will be set up by the Server or by the user calling SetupRoutes
 	h.mux = http.NewServeMux()
+
+	// Statistics last: everything it reads (the database, the metrics
+	// registry, the MCP server it counts for) is built by now.
+	h.startToolStats()
 
 	return h, nil
 }
@@ -2633,6 +2662,12 @@ func (h *Handler) startDBMirrorPoll(ctx context.Context) {
 // The background goroutines are responsible for watching their context and exiting when done.
 func (h *Handler) Stop(ctx context.Context) error {
 	h.logger.Info(logging.DestinationHTTP, "Stopping HTTP handler")
+
+	// Before cancelling anything: the final flush writes with its own
+	// context, but the counters it writes are only complete while the
+	// server has stopped accepting calls and not yet torn down the
+	// database handle.
+	h.StopToolStats()
 
 	// Cancel the handler's context if it's not already done.
 	h.cancelFunc()

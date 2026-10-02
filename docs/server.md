@@ -1113,6 +1113,65 @@ at `/openapi.json`.
 - `GET /metrics` — Prometheus exposition (requires the `metrics`
   scope unless `HTTP_API_METRICS_PUBLIC=true`)
 
+### MCP tool-call statistics
+
+`/metrics` also reports what the MCP surface is being asked to do, in
+the same `htcondor_api` namespace as the HTTP metrics:
+
+| Metric | Type | Labels | Answers |
+| --- | --- | --- | --- |
+| `htcondor_api_mcp_tool_calls_total` | counter | `tool`, `user`, `client`, `outcome` | what is called, by whom, from which harness |
+| `htcondor_api_mcp_tool_duration_seconds` | histogram | `tool`, `client`, `outcome` | how long it takes |
+| `htcondor_api_mcp_tool_users` | gauge | `tool` | how many distinct people use each tool |
+| `htcondor_api_mcp_tool_last_call_timestamp_seconds` | gauge | `tool` | whether a tool is used at all |
+
+`outcome` is `ok`, `error`, `refused` (disabled by
+`HTTP_API_MCP_DISABLED_TOOLS`) or `unknown_tool` (the client named a tool
+this server does not have — a stale catalogue, or an agent inventing a
+name). A refusal is kept apart from an error on purpose: one is a policy
+decision, the other a malfunction.
+
+`client` is what the harness called itself in the MCP `initialize`
+handshake, falling back to the HTTP `User-Agent` and then to `unknown`.
+The duration histogram carries no `user` label: how long a tool takes is
+a property of the tool and the pool, and a histogram costs fourteen
+series per label combination.
+
+**These counters survive a restart.** They are written to the
+application database every `HTTP_API_TOOL_STATS_FLUSH_INTERVAL`
+(default 5 minutes) and again at shutdown, and read back at startup, so
+`/metrics` reports the lifetime of the deployment rather than of the
+process. This is deliberately unlike a textbook Prometheus counter,
+which resets on restart and is handled by `rate()`; it is here so the
+numbers mean something before Prometheus exists.
+
+The durable table keeps the **verbatim** user and client, where
+`/metrics` renders a bounded label space (see below), so it answers
+questions directly:
+
+```sql
+-- Who uses this server, and for what?
+SELECT actor, tool, SUM(calls) AS calls,
+       ROUND(SUM(duration_sum_seconds), 1) AS seconds
+  FROM mcp_tool_stats GROUP BY actor, tool ORDER BY calls DESC LIMIT 20;
+
+-- Which harnesses are in use?
+SELECT client, SUM(calls) AS calls FROM mcp_tool_stats
+ GROUP BY client ORDER BY calls DESC;
+
+-- What is failing?
+SELECT tool, outcome, SUM(calls) AS calls FROM mcp_tool_stats
+ WHERE outcome <> 'ok' GROUP BY tool, outcome ORDER BY calls DESC;
+```
+
+A Prometheus label value is a time series, so each of `tool`, `user` and
+`client` is capped at 1000 distinct values on `/metrics`
+(`HTTP_API_TOOL_STATS_MAX_LABEL_VALUES`). Past the cap the quietest
+values render as `other` — ordered by call volume, so the busiest keep
+their identity — while the database still records every one of them
+exactly. The cap is a safety valve against a caller minting identities,
+not a limit a real access point is expected to reach.
+
 **Admin** (gated on `WebUIAdminGroup` membership)
 - `/api/v1/admin/oauth2/clients`, `/api/v1/admin/oauth2/tokens`
 - `/api/v1/admin/api-keys`, `/api/v1/admin/api-keys/{key_id}`
@@ -1306,6 +1365,8 @@ Frequently-used knobs:
 | `HTTP_API_WEBUI_ACCESS_GROUP` | Comma-separated group(s) permitted to log in to the web interface. Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. Reloaded on SIGHUP. See [Authorization groups](#authorization-groups). |
 | `HTTP_API_WEBUI_ADMIN_GROUP` | Comma-separated group(s) whose members can reach the admin pages. Unset disables the admin UI. Reloaded on SIGHUP. |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
+| `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
+| `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |

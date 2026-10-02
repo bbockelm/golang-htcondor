@@ -117,8 +117,14 @@ type Config struct {
 	// server mirrors it into a watch-enabled collection and serves
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
 	JobQueueLogPath string
-	EnableMetrics   bool          // Enable /metrics endpoint (default: true if Collector is set)
-	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
+	EnableMetrics   bool // Enable /metrics endpoint (default: true if Collector is set)
+	// ToolStatsFlushInterval is how often MCP tool-call counters are
+	// written to the application database. Zero means the default.
+	ToolStatsFlushInterval time.Duration
+	// ToolStatsMaxLabelValues caps distinct values per /metrics label
+	// for tool statistics. Zero means the default.
+	ToolStatsMaxLabelValues int
+	MetricsCacheTTL         time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
 	MetricsPublic bool
@@ -413,6 +419,8 @@ func NewServer(cfg Config) (*Server, error) {
 		JobQueueLogPath:             cfg.JobQueueLogPath,
 		EnableMetrics:               cfg.EnableMetrics,
 		MetricsPublic:               cfg.MetricsPublic,
+		ToolStatsFlushInterval:      cfg.ToolStatsFlushInterval,
+		ToolStatsMaxLabelValues:     cfg.ToolStatsMaxLabelValues,
 		DBMirrorName:                cfg.DBMirrorName,
 		DBMirrorAddress:             cfg.DBMirrorAddress,
 		DBMirrorRequired:            cfg.DBMirrorRequired,

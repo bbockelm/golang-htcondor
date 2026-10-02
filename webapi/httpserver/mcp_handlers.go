@@ -270,6 +270,14 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// session concept and leaves it empty.
 	ctx = mcpserver.WithSessionID(ctx, r.Header.Get("Mcp-Session-Id"))
 
+	// The User-Agent is the fallback identity for the calling harness,
+	// used when the session declared no clientInfo at initialize or
+	// when this process has forgotten the session (a restart loses the
+	// registry while clients keep their ids). It is NOT preferred over
+	// clientInfo: many MCP clients send a generic Go or Node agent
+	// string, which identifies the HTTP library and not the harness.
+	ctx = mcpserver.WithClientInfo(ctx, mcpserver.NormalizeClientName(r.UserAgent(), ""))
+
 	// One line per request, before dispatch, so a call that kills the
 	// process still leaves evidence that it arrived. The tool name and
 	// outcome are logged by the dispatcher, which is where they are

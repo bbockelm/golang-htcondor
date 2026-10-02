@@ -1851,6 +1851,31 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			strings.TrimSpace(v) == "1"
 	}
 
+	// MCP tool-call statistics. Both knobs have working defaults; they
+	// exist for an operator who has measured a reason to change them.
+	toolStatsFlush := time.Duration(0)
+	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_FLUSH_INTERVAL"); ok {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil || d <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_TOOL_STATS_FLUSH_INTERVAL; expected a positive duration like 5m",
+				"value", v, "error", err)
+		} else {
+			toolStatsFlush = d
+		}
+	}
+	toolStatsMaxLabels := 0
+	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_TOOL_STATS_MAX_LABEL_VALUES; expected a positive integer",
+				"value", v, "error", err)
+		} else {
+			toolStatsMaxLabels = n
+		}
+	}
+
 	// Create and start server.
 	//
 	// The CCB shared-port router comes first because the dial policy every
@@ -1979,6 +2004,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		LLMModel:                    llmModel,
 		LLMOperatorInstructionsFile: llmOperatorInstructions,
 		MetricsPublic:               metricsPublic,
+		ToolStatsFlushInterval:      toolStatsFlush,
+		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
