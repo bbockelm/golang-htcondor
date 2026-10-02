@@ -84,6 +84,19 @@ func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []strin
 	ctx, cancel := context.WithTimeout(ctx, oracleTimeout)
 	defer cancel()
 
+	// This query is the server's own, not the caller's.
+	//
+	// It asks whether a user has been disabled, which the user's own
+	// credential is the wrong thing to ask with -- and at the token
+	// endpoint, where this runs, there is no such credential anyway:
+	// the whole point is to decide whether to issue one. The context it
+	// inherits is a request's, marked as acting for somebody, so
+	// without this the connection is refused for having no caller
+	// credential and the oracle degrades to "no opinion" on every
+	// refresh. An oracle that never has an opinion is an oracle that
+	// is not running.
+	ctx = htcondor.WithDaemonCredential(ctx, "revocation oracle: schedd user record")
+
 	record, err := schedd.GetUserRecord(ctx, user)
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("querying user record for %s: %w", user, err)
