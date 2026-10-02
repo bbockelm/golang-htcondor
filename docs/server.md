@@ -1146,6 +1146,15 @@ The duration histogram carries no `user` label: how long a tool takes is
 a property of the tool and the pool, and a histogram costs fourteen
 series per label combination.
 
+**If the stored totals cannot be read, nothing is written.** A flush
+replaces a series' whole total rather than adding to it, which is only
+correct when the server was seeded from the rows it is about to
+overwrite. So a server whose startup read failed keeps counting in
+memory but persists nothing, and says so in the log; each flush retries
+the read, and on success merges what it counted in the meantime with
+what was stored. A single unreadable row is skipped and reported rather
+than abandoning the whole read.
+
 **These counters survive a restart.** They are written to the
 application database every `HTTP_API_TOOL_STATS_FLUSH_INTERVAL`
 (default 5 minutes) and again at shutdown, and read back at startup, so

@@ -349,3 +349,192 @@ func TestAFlushWritesOnlyWhatChanged(t *testing.T) {
 			untouched)
 	}
 }
+
+// TestAFailedLoadNeverOverwritesTheStoredTotals is the bug this change
+// exists for.
+//
+// A flush writes ABSOLUTE totals, which is only correct if the store
+// was seeded from the rows it is about to overwrite. When the load
+// failed the store is empty, so the old code wrote the deployment's
+// whole history away on the first flush after the first tool call --
+// 50,000 calls became 1. Nothing recovered it.
+func TestAFailedLoadNeverOverwritesTheStoredTotals(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	// A deployment with real history.
+	seed := toolstats.New()
+	for i := 0; i < 50000; i++ {
+		seed.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	}
+	if err := seed.Flush(ctx, db); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+
+	// A restart whose load fails with the table PRESENT -- the shape a
+	// contended connection, a timeout or a schema surprise has. (A
+	// missing table is a different, benign case: nothing to destroy.)
+	hideColumn(t, db)
+	restarted := toolstats.New()
+	if err := restarted.LoadFrom(ctx, db); err == nil {
+		t.Fatal("LoadFrom succeeded against an unreadable table")
+	}
+	showColumn(t, db)
+
+	// One call, then a flush. THIS is what used to destroy the record.
+	restarted.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	err := restarted.Flush(ctx, db)
+	if err == nil {
+		t.Error("the flush went ahead after a failed load")
+	} else if !toolstats.ErrFlushWithoutLoad(err) {
+		t.Errorf("flush error = %v; want the deliberate refusal", err)
+	}
+
+	var calls int
+	if err := db.QueryRowContext(ctx,
+		`SELECT calls FROM mcp_tool_stats WHERE tool = 'query_jobs'`).Scan(&calls); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if calls != 50000 {
+		t.Fatalf("stored calls = %d, want 50000 -- the history was overwritten", calls)
+	}
+}
+
+// Once the database can be read again, persistence resumes AND the
+// calls counted while it could not are kept: the store holds the new
+// half, the table holds the old half, and the answer is their sum.
+func TestRecoveryAddsTheCallsCountedWhileTheRecordWasUnreadable(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	seed := toolstats.New()
+	for i := 0; i < 100; i++ {
+		seed.Record("get_job", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	}
+	if err := seed.Flush(ctx, db); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+
+	hideColumn(t, db)
+	restarted := toolstats.New()
+	if err := restarted.LoadFrom(ctx, db); err == nil {
+		t.Fatal("LoadFrom succeeded against an unreadable table")
+	}
+	if !restarted.LoadFailed() {
+		t.Fatal("the store does not know its load failed")
+	}
+	// Seven calls happen while the record is unreadable.
+	for i := 0; i < 7; i++ {
+		restarted.Record("get_job", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	}
+	showColumn(t, db)
+
+	if err := restarted.ReloadFrom(ctx, db); err != nil {
+		t.Fatalf("ReloadFrom: %v", err)
+	}
+	if restarted.LoadFailed() {
+		t.Error("a successful reload did not clear the failure")
+	}
+	if err := restarted.Flush(ctx, db); err != nil {
+		t.Fatalf("flush after recovery: %v", err)
+	}
+
+	var calls int
+	if err := db.QueryRowContext(ctx,
+		`SELECT calls FROM mcp_tool_stats WHERE tool = 'get_job'`).Scan(&calls); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if calls != 107 {
+		t.Errorf("stored calls = %d, want 107 (100 persisted + 7 counted while unreadable)", calls)
+	}
+}
+
+// One unreadable cell used to abort the whole load, leaving the store
+// empty -- which then fed the overwrite above. SQLite is dynamically
+// typed, so a text value in an INTEGER-affinity column is storable.
+func TestOneUnreadableRowDoesNotDiscardTheRest(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	seed := toolstats.New()
+	seed.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	seed.Record("submit_job", "bob", "cc", toolstats.OutcomeOK, time.Second)
+	if err := seed.Flush(ctx, db); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO mcp_tool_stats (tool, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at)
+		 VALUES ('broken', 'x', 'y', 'ok', 'not-a-number', 0, '[]', 0)`); err != nil {
+		t.Fatalf("insert bad row: %v", err)
+	}
+
+	fresh := toolstats.New()
+	err := fresh.LoadFrom(ctx, db)
+	if err == nil {
+		t.Error("the skipped row was not reported")
+	}
+	if fresh.LoadFailed() {
+		t.Error("a skippable row blocked flushing; only an unreadable TABLE should")
+	}
+	snap := fresh.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("loaded %d series, want 2 (the good rows must survive): %+v", len(snap), snap)
+	}
+
+	// And the bad row is left alone rather than rewritten or dropped.
+	fresh.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	if err := fresh.Flush(ctx, db); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mcp_tool_stats WHERE tool = 'broken'`).Scan(&n); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("the unreadable row was destroyed (count = %d)", n)
+	}
+}
+
+// A database with no table at all is not a failed load: there is
+// nothing to destroy, so a first run must still persist.
+func TestAMissingTableStillAllowsFlushingLater(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `ALTER TABLE mcp_tool_stats RENAME TO hidden`); err != nil {
+		t.Fatalf("hide: %v", err)
+	}
+	s := toolstats.New()
+	if err := s.LoadFrom(ctx, db); err != nil {
+		t.Fatalf("LoadFrom on a missing table = %v, want nil", err)
+	}
+	if s.LoadFailed() {
+		t.Fatal("a missing table was treated as a failed load")
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE hidden RENAME TO mcp_tool_stats`); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	if err := s.Flush(ctx, db); err != nil {
+		t.Errorf("Flush after a missing-table load = %v, want nil", err)
+	}
+}
+
+// hideColumn / showColumn make the SELECT fail while the TABLE still
+// exists, which is the distinction the guard turns on: a missing table
+// is benign (nothing to overwrite), an unreadable one is not.
+func hideColumn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls TO calls_hidden`); err != nil {
+		t.Fatalf("hide column: %v", err)
+	}
+}
+
+func showColumn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls_hidden TO calls`); err != nil {
+		t.Fatalf("show column: %v", err)
+	}
+}

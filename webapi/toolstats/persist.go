@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,21 +18,51 @@ import (
 // zero rather than refusing to start. Statistics are not worth failing
 // a boot over.
 func (s *Store) LoadFrom(ctx context.Context, db *sql.DB) error {
+	out, err := s.readRows(ctx, db)
+	if out == nil {
+		return err
+	}
+	s.Load(out)
+	return err
+}
+
+// ReloadFrom is the recovery path: it re-reads the table after a failed
+// load and MERGES, so the calls counted while the database was
+// unreadable are added to the stored history rather than replacing it
+// or being thrown away.
+func (s *Store) ReloadFrom(ctx context.Context, db *sql.DB) error {
+	out, err := s.readRows(ctx, db)
+	if out == nil {
+		return err
+	}
+	s.Merge(out)
+	return err
+}
+
+// readRows reads the table. It returns a nil map when the caller must
+// not apply anything -- a read that failed, or no database at all --
+// and a non-nil map (with a possibly non-nil error naming skipped
+// rows) when what was read is safe to use.
+func (s *Store) readRows(ctx context.Context, db *sql.DB) (map[Key]Entry, error) {
 	if db == nil {
-		return nil
+		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx,
 		`SELECT tool, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at
 		   FROM mcp_tool_stats`)
 	if err != nil {
 		if isMissingTable(err) {
-			return nil
+			// Nothing to read and nothing to destroy: a database that
+			// predates this feature starts from zero and may flush.
+			return map[Key]Entry{}, nil
 		}
-		return fmt.Errorf("toolstats: load: %w", err)
+		s.markLoadFailed()
+		return nil, fmt.Errorf("toolstats: load: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	out := map[Key]Entry{}
+	skipped := 0
 	for rows.Next() {
 		var (
 			k           Key
@@ -41,7 +72,18 @@ func (s *Store) LoadFrom(ctx context.Context, db *sql.DB) error {
 		)
 		if err := rows.Scan(&k.Tool, &k.User, &k.Client, &k.Outcome,
 			&e.Calls, &e.DurationSum, &bucketsJSON, &lastCall); err != nil {
-			return fmt.Errorf("toolstats: load: %w", err)
+			// Skip the row, keep the rest. SQLite is dynamically
+			// typed, so a single cell holding the wrong kind of value
+			// -- written by hand, or by some future bug -- used to
+			// abort the whole load and leave the store empty, which a
+			// later flush then wrote back over every good row. One
+			// unreadable row costs that row.
+			//
+			// The skipped row is NOT dropped from the table: it is
+			// absent from the store, so no flush rewrites it, and an
+			// operator can still see and repair it.
+			skipped++
+			continue
 		}
 		// A row whose bucket array will not parse still has usable
 		// counts; losing its distribution is better than losing the
@@ -55,10 +97,17 @@ func (s *Store) LoadFrom(ctx context.Context, db *sql.DB) error {
 		out[k] = e
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("toolstats: load: %w", err)
+		// The iteration itself failed, so what was read is a partial
+		// prefix of the table rather than the table. Loading it would
+		// make the store disagree with the rows a flush overwrites.
+		s.markLoadFailed()
+		return nil, fmt.Errorf("toolstats: load: %w", err)
 	}
-	s.Load(out)
-	return nil
+	if skipped > 0 {
+		return out, fmt.Errorf("toolstats: load: %d unreadable row(s) skipped; %d loaded",
+			skipped, len(out))
+	}
+	return out, nil
 }
 
 // Flush writes the current totals.
@@ -76,6 +125,12 @@ func (s *Store) LoadFrom(ctx context.Context, db *sql.DB) error {
 func (s *Store) Flush(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return nil
+	}
+	// Never write absolute totals over a record this store failed to
+	// read: the store is empty or partial, and the upsert would
+	// replace the deployment's history with it.
+	if s.LoadFailed() {
+		return errFlushWithoutLoad
 	}
 	snap, dirty := s.SnapshotForFlush()
 	if !dirty {
@@ -138,3 +193,15 @@ func (s *Store) flush(ctx context.Context, db *sql.DB, snap map[Key]Entry) error
 func isMissingTable(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")
 }
+
+// errFlushWithoutLoad is returned instead of overwriting a durable
+// record that could not be read. Counting continues in memory, and a
+// later successful load lets the flush resume -- see LoadFailed.
+var errFlushWithoutLoad = errors.New(
+	"toolstats: refusing to flush: the persisted totals could not be read, " +
+		"so writing would replace them with this process's counts alone")
+
+// ErrFlushWithoutLoad reports whether err is that refusal, so a caller
+// can log it as the deliberate safety stop it is rather than as a
+// database failure.
+func ErrFlushWithoutLoad(err error) bool { return errors.Is(err, errFlushWithoutLoad) }

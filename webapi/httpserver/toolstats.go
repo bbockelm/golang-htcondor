@@ -35,8 +35,14 @@ func (h *Handler) startToolStats() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := h.toolStats.LoadFrom(ctx, h.db); err != nil {
+		// Not fatal, but not harmless either: until a load succeeds
+		// the store refuses to flush, because writing absolute totals
+		// from an empty store would destroy the record it could not
+		// read. Counting continues in memory and the next flush tick
+		// retries the load.
 		h.logger.Warn(logging.DestinationHTTP,
-			"Could not load persisted MCP tool statistics; counters start from zero",
+			"Could not load persisted MCP tool statistics; counting continues but "+
+				"nothing will be persisted until the stored totals can be read",
 			"error", err)
 	} else if n := len(h.toolStats.Snapshot()); n > 0 {
 		h.logger.Info(logging.DestinationMetrics,
@@ -77,6 +83,25 @@ func (h *Handler) flushToolStatsOnce(reason string) {
 	// context would drop the very write that shutdown exists to make.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// A store that failed to load cannot safely be written. Retry the
+	// read first: a load that failed on a contended connection or a
+	// slow disk usually succeeds later, and without this the process
+	// would count for days and persist none of it.
+	if h.toolStats.LoadFailed() {
+		// ReloadFrom, not LoadFrom: the store holds the calls counted
+		// since the failure, and a replacing load would discard them.
+		if err := h.toolStats.ReloadFrom(ctx, h.db); err != nil {
+			h.logger.Warn(logging.DestinationHTTP,
+				"Still cannot read the persisted MCP tool statistics; not persisting, "+
+					"because writing would replace them with this process's counts alone",
+				"reason", reason, "error", err)
+			return
+		}
+		h.logger.Info(logging.DestinationMetrics,
+			"Re-read the persisted MCP tool statistics; persistence resumes")
+	}
+
 	if err := h.toolStats.Flush(ctx, h.db); err != nil {
 		h.logger.Warn(logging.DestinationHTTP,
 			"Could not persist MCP tool statistics", "reason", reason, "error", err)
