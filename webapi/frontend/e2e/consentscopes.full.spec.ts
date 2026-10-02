@@ -86,7 +86,13 @@ async function approveConsent(page: any, baseURL: string, client: Client, untick
   // about Chromium's behaviour toward dead ports.
   const [resp] = await Promise.all([
     page.waitForResponse(
-      (r: any) => r.url().includes('/mcp/oauth2/consent') && r.request().method() === 'POST',
+      // Matched without the /mcp prefix, so this holds whichever path
+      // the server advertises: /mcp/oauth2/consent contains
+      // /oauth2/consent. The requests this test makes itself still name
+      // the /mcp paths deliberately -- they are what every client
+      // registered before the move uses, and driving them here is how
+      // we know they still work.
+      (r: any) => r.url().includes('/oauth2/consent') && r.request().method() === 'POST',
     ),
     approve.click(),
   ]);
