@@ -180,6 +180,20 @@ type Store struct {
 	// successful flush, so a periodic flush on an idle server does no
 	// SQLite writes at all.
 	dirty bool
+
+	// loadFailed records that a load was ATTEMPTED and did not succeed.
+	//
+	// It exists because a flush writes ABSOLUTE totals, which is only
+	// correct if this store was seeded from the same rows it is about
+	// to overwrite. A store that failed to load is empty, so flushing
+	// it replaces the deployment's whole history with whatever has
+	// been counted since the process started -- destroying the durable
+	// record rather than merely failing to add to it.
+	//
+	// It is "attempted and failed", not "never loaded": a store built
+	// and flushed without ever loading (a test, or a first run against
+	// an empty table) has nothing to destroy and must still work.
+	loadFailed bool
 }
 
 // New returns an empty Store.
@@ -340,17 +354,76 @@ func (s *Store) Load(entries map[Key]Entry) {
 	s.m = make(map[Key]*Entry, len(entries))
 	for k, e := range entries {
 		c := e.clone()
-		switch {
-		case len(c.Buckets) < len(DurationBuckets):
-			c.Buckets = append(c.Buckets, make([]uint64, len(DurationBuckets)-len(c.Buckets))...)
-		case len(c.Buckets) > len(DurationBuckets):
-			c.Buckets = c.Buckets[:len(DurationBuckets)]
-		}
+		resizeBuckets(&c)
 		s.m[k] = &c
 	}
 	// Loaded state is already in SQLite; flushing it straight back is
 	// pure write amplification on every restart of an idle server.
+	// The changed-set goes with it: Load REPLACES the map, so any key
+	// marked dirty against the old contents no longer describes
+	// anything this store would write.
 	s.dirty = false
+	s.dirtyKeys = map[Key]struct{}{}
+	// Whatever went wrong before, this store now matches the rows it
+	// would overwrite, so flushing is safe again.
+	s.loadFailed = false
+}
+
+// Merge adds persisted series to what the store already holds, rather
+// than replacing them.
+//
+// This is the recovery path, and the distinction matters. When a load
+// fails the store is left empty and counts only what has happened
+// since; the database holds everything before. Their sum is the
+// lifetime total, so a later successful read has to ADD. Replacing
+// would discard every call counted while the database was unreadable --
+// trading one kind of loss for another.
+//
+// It is only correct against a store that has not already loaded these
+// rows, which is why it is reached solely from the retry in
+// ReloadFrom: merging twice would double every count.
+func (s *Store) Merge(entries map[Key]Entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, e := range entries {
+		cur := s.m[k]
+		if cur == nil {
+			c := e.clone()
+			resizeBuckets(&c)
+			s.m[k] = &c
+			continue
+		}
+		cur.Calls += e.Calls
+		cur.DurationSum += e.DurationSum
+		for i := range cur.Buckets {
+			if i < len(e.Buckets) {
+				cur.Buckets[i] += e.Buckets[i]
+			}
+		}
+		if e.LastCall.After(cur.LastCall) {
+			cur.LastCall = e.LastCall
+		}
+	}
+	s.loadFailed = false
+	// The changed-set is deliberately NOT extended here. A merged key
+	// whose value now differs from the stored row is one this process
+	// recorded, and Record already marked it; a key with no calls since
+	// the failure merges back to exactly what is on disk, so writing it
+	// would be a no-op. Marking everything would turn each recovery
+	// into a full-table rewrite, which is what the changed-set exists
+	// to avoid.
+	s.dirty = true
+}
+
+// resizeBuckets fits a persisted bucket array to the current
+// boundaries. Shared by Load and Merge.
+func resizeBuckets(c *Entry) {
+	switch {
+	case len(c.Buckets) < len(DurationBuckets):
+		c.Buckets = append(c.Buckets, make([]uint64, len(DurationBuckets)-len(c.Buckets))...)
+	case len(c.Buckets) > len(DurationBuckets):
+		c.Buckets = c.Buckets[:len(DurationBuckets)]
+	}
 }
 
 // labelSpace decides, for one label, which values keep their own name
@@ -403,4 +476,21 @@ func (s *Store) SetMaxSeries(n int) {
 		n = DefaultMaxSeries
 	}
 	s.maxSeries = n
+}
+
+// markLoadFailed records that a load was attempted and failed, which
+// blocks flushing until a load succeeds.
+func (s *Store) markLoadFailed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadFailed = true
+}
+
+// LoadFailed reports whether the last load attempt failed, so the
+// caller can retry it before the next flush rather than leaving the
+// store unable to persist for the life of the process.
+func (s *Store) LoadFailed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadFailed
 }

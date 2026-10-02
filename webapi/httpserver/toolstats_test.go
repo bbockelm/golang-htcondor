@@ -265,3 +265,58 @@ func TestAServerStartsEvenWhenTheStatsTableIsUnusable(t *testing.T) {
 	h.toolStats.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
 	h.flushToolStatsOnce("test") // logs, does not panic or fail the test
 }
+
+// TestAFlushRetriesAReadThatFailedAtStartup covers the recovery half.
+//
+// The store refuses to flush after a failed load, which protects the
+// stored record but would leave a process counting for days and
+// persisting none of it. The flush path therefore re-reads first, and
+// merges, so the calls counted in the meantime are added rather than
+// discarded.
+func TestAFlushRetriesAReadThatFailedAtStartup(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+
+	// A deployment with history.
+	seed := statsHandlerAt(t, dbPath)
+	for i := 0; i < 40; i++ {
+		seed.toolStats.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	}
+	seed.StopToolStats()
+	if err := seed.db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Restart, and break the read with the table still present.
+	h := statsHandlerAt(t, dbPath)
+	t.Cleanup(func() { h.StopToolStats() })
+	if _, err := h.db.ExecContext(context.Background(),
+		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls TO calls_hidden`); err != nil {
+		t.Fatalf("hide column: %v", err)
+	}
+	h.toolStats = toolstats.New()
+	if err := h.toolStats.LoadFrom(context.Background(), h.db); err == nil {
+		t.Fatal("LoadFrom succeeded against an unreadable table")
+	}
+
+	// Calls happen while the record cannot be read; the flush must not
+	// write them over the history.
+	h.toolStats.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	h.flushToolStatsOnce("while unreadable")
+
+	if _, err := h.db.ExecContext(context.Background(),
+		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls_hidden TO calls`); err != nil {
+		t.Fatalf("show column: %v", err)
+	}
+
+	// Now it can be read: the flush re-reads, merges and persists.
+	h.flushToolStatsOnce("after recovery")
+
+	var calls int
+	if err := h.db.QueryRowContext(context.Background(),
+		`SELECT calls FROM mcp_tool_stats WHERE tool = 'query_jobs'`).Scan(&calls); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if calls != 41 {
+		t.Errorf("stored calls = %d, want 41 (40 persisted + 1 counted while unreadable)", calls)
+	}
+}
