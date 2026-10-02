@@ -103,7 +103,26 @@ func (s *Handler) validateGroupAccess(userGroups []string) error {
 //     (already verified by validateGroupAccess), grant the scope.
 //   - If no groups are configured at all, grant the scope to any authenticated user.
 func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []string) []string {
-	grantedScopes := []string{"openid"} // Always grant openid
+	// openid only when it was asked for.
+	//
+	// Granting it regardless produced a grant carrying a scope the
+	// client may not be registered for, and fosite checks the granted
+	// set against the registration on every refresh. Such a grant works
+	// once and then fails for ever with "The OAuth 2.0 Client is not
+	// allowed to request scope 'openid'" -- a message naming a scope
+	// the user never chose and the client never asked for.
+	//
+	// Nothing here needs it: this is an OAuth2 authorization server
+	// rather than an OIDC provider, and the id_token that once implied
+	// it is gone. A client that wants openid asks, and a registration
+	// made without a scope list already defaults to including it.
+	var grantedScopes []string
+	for _, scope := range requestedScopes {
+		if scope == "openid" {
+			grantedScopes = append(grantedScopes, scope)
+			break
+		}
+	}
 
 	// Check each requested scope
 	for _, scope := range requestedScopes {
