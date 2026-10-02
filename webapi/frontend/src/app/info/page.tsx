@@ -1,8 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type DBMirrorHealth, type DBMirrorTest } from "@/lib/api";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  api,
+  ApiError,
+  type DBMirrorHealth,
+  type DBMirrorTest,
+  type SSHCertificate,
+} from "@/lib/api";
 
 export default function InfoPage() {
   const {
@@ -60,8 +66,8 @@ export default function InfoPage() {
       <Section title="API documentation">
         <p className="text-sm text-gray-600">
           This access point serves an interactive OpenAPI browser: every
-          endpoint, its parameters, and a form to call it against this
-          server with your current session.
+          endpoint, its parameters, and a form to call it against this server
+          with your current session.
         </p>
         <p className="mt-3">
           <a
@@ -116,6 +122,8 @@ export default function InfoPage() {
         )}
       </Section>
 
+      {session?.authenticated && <SSHAccessSection />}
+
       {/* Admin-only: HTCondor config readout. Hidden entirely for
           non-admins (the endpoint also gates server-side, so a
           curious user crafting their own request still gets 403). */}
@@ -137,7 +145,7 @@ export default function InfoPage() {
 // which distinguish "a mirror exists" from "a mirror is answering".
 function DBMirrorSection() {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['dbmirror', 'status'],
+    queryKey: ["dbmirror", "status"],
     queryFn: api.dbmirror.status,
     refetchInterval: 30_000,
     retry: false,
@@ -154,10 +162,10 @@ function DBMirrorSection() {
 
       {data && !data.enabled && (
         <p className="text-sm text-gray-600">
-          Not configured. Every job and history read goes to the schedd.
-          Routing needs both a collector to discover the mirror through
-          and the HTCondor config whose <code className="font-mono text-xs">SEC_*</code>{' '}
-          settings authenticate the connection.
+          Not configured. Every job and history read goes to the schedd. Routing
+          needs both a collector to discover the mirror through and the HTCondor
+          config whose <code className="font-mono text-xs">SEC_*</code> settings
+          authenticate the connection.
         </p>
       )}
 
@@ -174,7 +182,7 @@ function DBMirrorSection() {
                 ) : (
                   <span>
                     <strong>{data.served_total.toLocaleString()}</strong> from
-                    the mirror,{' '}
+                    the mirror,{" "}
                     <strong>{data.declined_total.toLocaleString()}</strong> from
                     the schedd
                   </span>
@@ -211,12 +219,12 @@ function DBMirrorSection() {
                         <td className="px-3 py-1.5">
                           <span
                             className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                              row.decision === 'served'
-                                ? 'bg-green-100 text-green-800'
-                                : 'bg-gray-100 text-gray-700'
+                              row.decision === "served"
+                                ? "bg-green-100 text-green-800"
+                                : "bg-gray-100 text-gray-700"
                             }`}
                           >
-                            {row.decision === 'served' ? 'mirror' : 'schedd'}
+                            {row.decision === "served" ? "mirror" : "schedd"}
                           </span>
                         </td>
                         <td className="px-3 py-1.5 font-mono text-xs text-gray-600">
@@ -280,10 +288,11 @@ function MirrorTestButton() {
         disabled={running}
         className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
       >
-        {running ? 'Testing…' : 'Test connection'}
+        {running ? "Testing…" : "Test connection"}
       </button>
       <span className="ml-2 text-xs text-gray-500">
-        Runs a real read (discover → connect → query). The query matches nothing, so it is safe to repeat.
+        Runs a real read (discover → connect → query). The query matches
+        nothing, so it is safe to repeat.
       </span>
 
       {error && <p className="mt-2 text-sm text-red-700">{error}</p>}
@@ -292,12 +301,14 @@ function MirrorTestButton() {
         <div className="mt-2 rounded border border-gray-200">
           <div
             className={`px-3 py-1.5 text-sm font-medium ${
-              result.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'
+              result.ok
+                ? "bg-green-50 text-green-800"
+                : "bg-red-50 text-red-800"
             }`}
           >
             {result.ok
               ? `Mirror answered in ${result.total_millis} ms`
-              : 'Mirror did not answer — the failing stage is marked below'}
+              : "Mirror did not answer — the failing stage is marked below"}
           </div>
           {/* Reachable and used are different answers. Three green
               stages next to "live job reads: declined (never synced)"
@@ -311,9 +322,10 @@ function MirrorTestButton() {
                   .filter((r) => !r.use)
                   .map((r) => (
                     <li key={r.kind}>
-                      <span className="font-mono text-xs">{r.kind}</span> — declined
-                      {r.reason ? ` (${r.reason})` : ''}
-                      {r.note ? `: ${r.note}` : ''}
+                      <span className="font-mono text-xs">{r.kind}</span> —
+                      declined
+                      {r.reason ? ` (${r.reason})` : ""}
+                      {r.note ? `: ${r.note}` : ""}
                     </li>
                   ))}
               </ul>
@@ -323,7 +335,9 @@ function MirrorTestButton() {
             <tbody className="divide-y divide-gray-100">
               {result.stages.map((stage) => (
                 <tr key={stage.name}>
-                  <td className="px-3 py-1.5 font-mono text-xs">{stage.name}</td>
+                  <td className="px-3 py-1.5 font-mono text-xs">
+                    {stage.name}
+                  </td>
                   <td className="px-3 py-1.5">
                     {stage.ok ? (
                       <span className="text-green-700">ok</span>
@@ -356,21 +370,21 @@ function MirrorTestButton() {
 // number alone does not say whether it is a problem.
 function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
   const badge =
-    health.status === 'ok'
-      ? 'bg-green-100 text-green-800'
-      : health.status === 'warning'
-        ? 'bg-amber-100 text-amber-800'
-        : health.status === 'unknown'
-          ? 'bg-gray-100 text-gray-700'
-          : 'bg-red-100 text-red-800';
+    health.status === "ok"
+      ? "bg-green-100 text-green-800"
+      : health.status === "warning"
+        ? "bg-amber-100 text-amber-800"
+        : health.status === "unknown"
+          ? "bg-gray-100 text-gray-700"
+          : "bg-red-100 text-red-800";
   const statusText =
-    health.status === 'ok'
-      ? 'Serving'
-      : health.status === 'warning'
-        ? 'Discovered, not serving'
-        : health.status === 'unknown'
-          ? 'Not checked yet'
-          : 'Not reachable';
+    health.status === "ok"
+      ? "Serving"
+      : health.status === "warning"
+        ? "Discovered, not serving"
+        : health.status === "unknown"
+          ? "Not checked yet"
+          : "Not reachable";
 
   return (
     <>
@@ -398,7 +412,7 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
           mono
           value={[health.pinned_name, health.pinned_address]
             .filter(Boolean)
-            .join(' @ ')}
+            .join(" @ ")}
         />
       )}
       {health.discovered ? (
@@ -414,9 +428,8 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
                 // old zero-value rendering) read as a fresh mirror that
                 // was somehow also stale.
                 <span className="text-gray-600">
-                  not reported — this mirror does not advertise live-queue
-                  sync (it may mirror history only), so live job reads use
-                  the schedd
+                  not reported — this mirror does not advertise live-queue sync
+                  (it may mirror history only), so live job reads use the schedd
                 </span>
               ) : (
                 <StalenessValue
@@ -460,8 +473,8 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
           label="Freshness"
           value={
             <span className="text-gray-500">
-              Unknown — no mirror advertisement has been read, and the lag
-              is only ever reported by the mirror itself.
+              Unknown — no mirror advertisement has been read, and the lag is
+              only ever reported by the mirror itself.
             </span>
           }
         />
@@ -474,9 +487,9 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
               {new Date(health.last_attempt).toLocaleString()}
               {health.ad_age_seconds ? (
                 <span className="text-gray-400">
-                  {' '}
-                  · advertisement read{' '}
-                  {health.ad_age_seconds.toLocaleString()}s ago
+                  {" "}
+                  · advertisement read {health.ad_age_seconds.toLocaleString()}s
+                  ago
                 </span>
               ) : null}
             </span>
@@ -507,11 +520,11 @@ function MirrorHealthRows({ health }: { health: DBMirrorHealth }) {
               <span className="text-red-700">{health.dial_error}</span>
               <span className="block text-xs text-gray-400">
                 The mirror was found but could not be connected to, so reads
-                fall back to the schedd and are counted as{' '}
+                fall back to the schedd and are counted as{" "}
                 <code className="font-mono">dial_failed</code> below.
                 {health.dial_last_success
                   ? ` Last connected ${new Date(health.dial_last_success).toLocaleString()}.`
-                  : ' It has never connected since this server started.'}
+                  : " It has never connected since this server started."}
               </span>
             </span>
           }
@@ -545,18 +558,18 @@ function StalenessValue({
   if (seconds === undefined) {
     return (
       <span className="text-gray-500">
-        unknown{' '}
+        unknown{" "}
         <span className="text-gray-400">(routes below {tolerance}s)</span>
       </span>
     );
   }
   const over = seconds > tolerance;
   return (
-    <span className={over || !ok ? 'text-amber-700' : undefined}>
-      {seconds.toLocaleString()}s behind when last advertised{' '}
+    <span className={over || !ok ? "text-amber-700" : undefined}>
+      {seconds.toLocaleString()}s behind when last advertised{" "}
       <span className="text-gray-400">(routes below {tolerance}s)</span>
-      {!ok && notOkText ? ` — ${notOkText}` : ''}
-      {ok && okText && !over ? ` — ${okText}` : ''}
+      {!ok && notOkText ? ` — ${notOkText}` : ""}
+      {ok && okText && !over ? ` — ${okText}` : ""}
     </span>
   );
 }
@@ -767,5 +780,197 @@ function Row({
         {value}
       </dd>
     </>
+  );
+}
+
+// SSHAccessSection hands a browser user the two things they need to
+// reach a job over SSH: what to trust, and a certificate to present.
+//
+// Rendered only when a certificate authority exists. GET /ssh/ca answers
+// 503 when none is configured, which is a statement about the
+// deployment rather than a failure, so the section disappears instead of
+// showing an error -- an access point with no gateway should not have a
+// broken-looking panel about one.
+//
+// The public key is pasted rather than generated here. A browser cannot
+// read ~/.ssh/id_ed25519.pub, and generating a keypair in the page would
+// mean delivering a private key through a browser -- which is worse than
+// asking for one line, and a private key is the one thing this flow is
+// built never to move.
+function SSHAccessSection() {
+  const {
+    data: ca,
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: ["ssh", "ca"],
+    queryFn: api.ssh.ca,
+    retry: false,
+  });
+
+  const [publicKey, setPublicKey] = useState("");
+  const [lifetimeHours, setLifetimeHours] = useState(12);
+  const [cert, setCert] = useState<SSHCertificate | null>(null);
+  const [issueError, setIssueError] = useState<string | null>(null);
+
+  const issue = useMutation({
+    mutationFn: () =>
+      api.ssh.certificate(publicKey.trim(), lifetimeHours * 3600),
+    onMutate: () => {
+      setIssueError(null);
+      setCert(null);
+    },
+    onSuccess: (c) => setCert(c),
+    onError: (e) =>
+      setIssueError(e instanceof ApiError ? e.message : String(e)),
+  });
+
+  if (isLoading) return null;
+  // 503 is "this deployment has no certificate authority", not a fault.
+  if (error || !ca) return null;
+
+  const host = ca.gateway_host;
+  const port = ca.gateway_port && ca.gateway_port !== 22 ? ca.gateway_port : 0;
+  const sshCmd = host
+    ? `ssh ${port ? `-p ${port} ` : ""}${host}`
+    : "ssh <gateway host>";
+
+  return (
+    <Section title="SSH access">
+      <p className="text-sm text-gray-600">
+        Reach a job over SSH without approving a browser prompt each time. A
+        certificate is issued once and works until it expires.
+      </p>
+
+      <div className="mt-4 space-y-4">
+        <div>
+          <div className="text-sm font-medium text-gray-700">
+            1. Trust the gateway
+          </div>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Append this to <code>~/.ssh/known_hosts</code>. Without it the first
+            connection asks you to verify a fingerprint by hand.
+          </p>
+          <CopyableBlock text={ca.known_hosts_line} />
+          <p className="text-xs text-gray-500 mt-1">
+            CA fingerprint: <span className="font-mono">{ca.fingerprint}</span>
+          </p>
+        </div>
+
+        <div>
+          <div className="text-sm font-medium text-gray-700">
+            2. Get a certificate
+          </div>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Paste the <strong>public</strong> half of a key you already have —
+            the contents of <code>~/.ssh/id_ed25519.pub</code>. Your private key
+            stays on your machine and is never sent.
+          </p>
+          <textarea
+            value={publicKey}
+            onChange={(e) => setPublicKey(e.target.value)}
+            rows={3}
+            spellCheck={false}
+            placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... you@laptop"
+            className="mt-2 w-full rounded-sm border border-gray-300 px-3 py-2 font-mono text-xs"
+          />
+          <div className="mt-2 flex items-center gap-3">
+            <label className="text-xs text-gray-600">
+              Valid for{" "}
+              <select
+                value={lifetimeHours}
+                onChange={(e) => setLifetimeHours(Number(e.target.value))}
+                className="rounded-sm border border-gray-300 px-2 py-1 text-xs"
+              >
+                <option value={1}>1 hour</option>
+                <option value={12}>12 hours</option>
+                <option value={24}>24 hours</option>
+              </select>
+            </label>
+            <button
+              onClick={() => issue.mutate()}
+              disabled={!publicKey.trim() || issue.isPending}
+              className="rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+            >
+              {issue.isPending ? "Issuing…" : "Issue certificate"}
+            </button>
+          </div>
+          {issueError && (
+            <p className="mt-2 text-sm text-red-600">{issueError}</p>
+          )}
+        </div>
+
+        {cert && (
+          <div>
+            <div className="text-sm font-medium text-gray-700">
+              3. Save it beside your key
+            </div>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Save as <code>~/.ssh/id_ed25519-cert.pub</code> — the same name as
+              your private key with <code>-cert.pub</code> appended. ssh finds
+              it there on its own. Issued to{" "}
+              <span className="font-mono">{cert.principal}</span>, expires{" "}
+              {new Date(cert.valid_before).toLocaleString()}.
+            </p>
+            <CopyableBlock
+              text={cert.certificate}
+              download="id_ed25519-cert.pub"
+            />
+            <p className="text-xs text-gray-500 mt-2">
+              Then connect: <code className="font-mono">{sshCmd}</code>
+              {host
+                ? null
+                : " — ask your administrator for the gateway's name."}
+            </p>
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+// CopyableBlock shows one long line that a person has to get into a file
+// exactly, with both ways of doing that: the clipboard, and a download
+// for when the clipboard is not available or the line is long enough
+// that a failed paste would be silent.
+function CopyableBlock({
+  text,
+  download,
+}: {
+  text: string;
+  download?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="mt-2">
+      <pre className="overflow-x-auto rounded-sm border border-gray-200 bg-gray-50 p-2 font-mono text-xs whitespace-pre-wrap break-all">
+        {text}
+      </pre>
+      <div className="mt-1 flex gap-3">
+        <button
+          onClick={() => {
+            navigator.clipboard
+              .writeText(text)
+              .then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              })
+              .catch(() => setCopied(false));
+          }}
+          className="text-xs text-brand-700 hover:text-brand-900 underline"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+        {download && (
+          <a
+            href={`data:application/octet-stream;charset=utf-8,${encodeURIComponent(text + "\n")}`}
+            download={download}
+            className="text-xs text-brand-700 hover:text-brand-900 underline"
+          >
+            Download
+          </a>
+        )}
+      </div>
+    </div>
   );
 }
