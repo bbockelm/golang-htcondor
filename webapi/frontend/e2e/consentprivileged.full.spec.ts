@@ -63,7 +63,7 @@ async function openConsent(page: any, baseURL: string, client: Client) {
 async function approveAndExchange(page: any, request: any, baseURL: string, client: Client) {
   const [resp] = await Promise.all([
     page.waitForResponse(
-      (r: any) => r.url().includes('/mcp/oauth2/consent') && r.request().method() === 'POST',
+      (r: any) => r.url().includes('/oauth2/consent') && r.request().method() === 'POST',
     ),
     page.locator('#approveBtn').click(),
   ]);

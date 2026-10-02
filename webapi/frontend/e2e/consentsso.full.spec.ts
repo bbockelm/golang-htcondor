@@ -114,7 +114,7 @@ test("logging in through the IDP still stops at consent", async ({
     "authenticating through the IDP skipped the consent page and granted the request outright",
   ).toHaveCount(1);
   expect(page.url(), "expected to be on the consent page").toContain(
-    "/mcp/oauth2/consent",
+    "/oauth2/consent",
   );
 });
 
@@ -148,7 +148,7 @@ test("privileged scopes are still withheld by default on the SSO path", async ({
   const [resp] = await Promise.all([
     page.waitForResponse(
       (r: any) =>
-        r.url().includes("/mcp/oauth2/consent") &&
+        r.url().includes("/oauth2/consent") &&
         r.request().method() === "POST",
     ),
     page.locator("#approveBtn").click(),

@@ -67,7 +67,7 @@ async function authorizeAsUser(page: any, baseURL: string, client: Client): Prom
 
   const [resp] = await Promise.all([
     page.waitForResponse(
-      (r: any) => r.url().includes('/mcp/oauth2/consent') && r.request().method() === 'POST',
+      (r: any) => r.url().includes('/oauth2/consent') && r.request().method() === 'POST',
     ),
     approve.click(),
   ]);
