@@ -45,7 +45,7 @@ func TestDeviceApprovalKeepsTheScopesTheUserAccepted(t *testing.T) {
 	_ = request
 
 	// What the approve branch now computes.
-	got := narrowConsentScopes(request.GetRequestedScopes(), form, "consent_form_version")
+	got := narrowConsentScopes(request.GetRequestedScopes(), form)
 	sort.Strings(got)
 
 	want := append([]string(nil), requested...)

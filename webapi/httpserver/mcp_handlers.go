@@ -877,7 +877,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// and any OAuth2 helper that drives consent
 			// programmatically without rendering HTML).
 			requestedScopes := ar.GetRequestedScopes()
-			acceptedScopes := narrowConsentScopes(requestedScopes, r.Form, "consent_form_version")
+			acceptedScopes := narrowConsentScopes(requestedScopes, r.Form)
 
 			// Grant scopes based on group membership intersected
 			// with what the user accepted on the form.
@@ -1996,7 +1996,7 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			// instead -- a set nothing in this flow ever populates, so the
 			// intersection was always empty and every device login came back
 			// with "openid" alone.
-			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form, "consent_form_version")
+			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form)
 			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
 			acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
 			// The set an operator may later restore this grant to. Same
@@ -2678,7 +2678,15 @@ func (h *Handler) methodRequiresWrite(mcpRequest *mcpserver.MCPMessage) bool {
 // In both cases the caller will run the result through
 // getScopesForGroups for the final policy intersection; this
 // helper handles only the user-acceptance dimension.
-func narrowConsentScopes(requestedScopes []string, form url.Values, markerField string) []string {
+// consentFormVersionField marks a request as coming from the consent
+// page's own form, which carries one `scope` value per ticked box. A
+// client posting `action=approve` without it is approving the whole
+// request, which is how a programmatic client consents.
+const consentFormVersionField = "consent_form_version"
+
+func narrowConsentScopes(requestedScopes []string, form url.Values) []string {
+	const markerField = consentFormVersionField
+
 	if !form.Has(markerField) {
 		out := make([]string, len(requestedScopes))
 		copy(out, requestedScopes)
@@ -2688,7 +2696,15 @@ func narrowConsentScopes(requestedScopes []string, form url.Values, markerField 
 	for _, s := range requestedScopes {
 		requestedSet[s] = true
 	}
-	acceptedSet := map[string]bool{"openid": true}
+	// openid is accepted without a checkbox, because the consent page
+	// renders it as a fixed entry rather than one -- but only when the
+	// client actually requested it. Seeding it unconditionally put it
+	// back into a grant whose client may not be registered for it, which
+	// is the thing granting it unrequested already cost us.
+	acceptedSet := map[string]bool{}
+	if requestedSet["openid"] {
+		acceptedSet["openid"] = true
+	}
 	for _, s := range form["scope"] {
 		if requestedSet[s] {
 			acceptedSet[s] = true
