@@ -625,3 +625,30 @@ type sshConsentState struct {
 	sshApprovalKeyOnce  sync.Once
 	sshApprovalKeyBytes []byte
 }
+
+// csrfSafeMethod reports whether a method is read-only by definition and
+// so needs no cross-site check.
+//
+// The list is RFC 9110's safe methods. OPTIONS is here because a CORS
+// preflight is exactly a cross-origin OPTIONS and refusing it would
+// refuse the request it precedes before the real check ever ran.
+func csrfSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+// hasBearerCredential reports whether the request carries an
+// Authorization header, which exempts it from the cross-site check.
+//
+// Not "is it valid" -- that is the handler's job and happens later.
+// The question here is only whether a browser could have attached this
+// by itself, and it could not: cookies and proxy-set headers ride along
+// automatically, an Authorization header is put there by whoever built
+// the request. A forged one simply fails to authenticate.
+func hasBearerCredential(r *http.Request) bool {
+	return r.Header.Get("Authorization") != ""
+}

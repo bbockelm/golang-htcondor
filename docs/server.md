@@ -566,6 +566,29 @@ HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS = [ \
 | `identity_domain` | Local identity is `<sub>@this`. Defaults to the issuer's host. |
 | `allowed_scopes` | Ceiling of scopes a token from this issuer may obtain. |
 
+### Requests from other sites
+
+Every state-changing request -- anything that is not GET, HEAD, OPTIONS or
+TRACE -- must come from this site. If it carries an `Origin` header naming
+somewhere else, it is refused with 403 before it reaches a route.
+
+A request with no `Origin` is allowed: `curl`, scripts and the MCP stdio
+client do not send one, and a browser cannot suppress it on a cross-site
+request. A request carrying an `Authorization` header is also allowed,
+because a browser does not attach one by itself -- a request that has one
+was built by code that already held the credential, which is not the
+situation this is about. A forged header simply fails to authenticate.
+
+**Why it is not just cookies.** Session cookies are `SameSite=Lax`, which
+already blocks a cross-site POST, so cookie deployments were never
+exposed. But `SameSite` governs cookies, and `HTTP_API_USER_HEADER`
+authenticates with a header a trusted proxy attaches to *every* request a
+browser makes through it, cross-site included. In that mode, without this
+check, a page on any site could submit, hold or remove a reader's jobs.
+
+`HTTP_API_BASE_URL` is accepted alongside the request's own `Host`, so a
+deployment whose SPA is served from a different origin keeps working.
+
 ## SSH gateway
 
 An SSH port on the API server that authenticates with the OAuth2 device flow

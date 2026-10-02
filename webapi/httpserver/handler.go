@@ -1988,6 +1988,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// this daemon's own work says so with htcondor.WithDaemonCredential.
 	r = r.WithContext(htcondor.WithUserRequest(r.Context(),
 		"HTTP request "+r.Method+" "+r.URL.Path))
+
+	// And every state-changing request has to have come from this site,
+	// marked here for the same reason: a route added later inherits it.
+	//
+	// This is the CSRF defence for the whole server, and it did not have
+	// one. Session cookies are SameSite=Lax, which blocks a cross-site
+	// POST and is why cookie deployments were never exposed -- but
+	// SameSite governs cookies, and HTTP_API_USER_HEADER authenticates
+	// with a header a trusted proxy sets on every request the browser
+	// makes through it, cross-site included. In that mode a page on any
+	// site could submit, hold or remove a reader's jobs.
+	//
+	// A Bearer token is exempt because a browser does not attach one by
+	// itself: a request carrying it was built by code that already had
+	// the credential, which is not the situation CSRF describes.
+	if !csrfSafeMethod(r.Method) && !hasBearerCredential(r) {
+		if err := h.requireSameOrigin(r); err != nil {
+			h.logger.Warn(logging.DestinationSecurity,
+				"Refusing a state-changing request from another site",
+				"method", r.Method, "path", r.URL.Path,
+				"origin", r.Header.Get("Origin"), "host", r.Host)
+			h.writeError(sw, http.StatusForbidden,
+				"That request did not come from this site.")
+			return
+		}
+	}
 	if h.httpMetricsState != nil {
 		h.httpMetricsState.middleware(h.mux).ServeHTTP(sw, r)
 		return
