@@ -265,10 +265,24 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Carry the client's session id into the dispatch so tool-call logs
-	// can be tied together across requests from one client. Streamable
-	// HTTP clients send it on every call after initialize; stdio has no
-	// session concept and leaves it empty.
-	ctx = mcpserver.WithSessionID(ctx, r.Header.Get("Mcp-Session-Id"))
+	// can be tied together across requests from one client, and so the
+	// harness a client declares at initialize can be attributed to the
+	// calls that follow.
+	//
+	// The server ASSIGNS the id, because in streamable HTTP that is
+	// whose job it is: a client cannot send one on initialize, since it
+	// does not have one yet. Reading the header and never setting it --
+	// which is what this did -- meant initialize always arrived with an
+	// empty session, so the clientInfo it carries was remembered against
+	// nothing and every later call fell back to the User-Agent.
+	sessionID := r.Header.Get("Mcp-Session-Id")
+	if sessionID == "" && mcpRequest.Method == "initialize" {
+		sessionID = newMCPSessionID()
+		// Set before dispatch: WriteHeader comes after, and a header
+		// set afterwards is silently dropped.
+		w.Header().Set("Mcp-Session-Id", sessionID)
+	}
+	ctx = mcpserver.WithSessionID(ctx, sessionID)
 
 	// The User-Agent is the fallback identity for the calling harness,
 	// used when the session declared no clientInfo at initialize or
@@ -285,7 +299,7 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info(logging.DestinationMCP, "MCP request",
 		"method", mcpRequest.Method,
 		"rpc_id", fmt.Sprintf("%v", mcpRequest.ID),
-		"session_id", r.Header.Get("Mcp-Session-Id"),
+		"session_id", sessionID,
 		"remote_addr", r.RemoteAddr)
 
 	// Keep the write deadline ahead of a call that is still running, so a
@@ -2836,4 +2850,24 @@ func bearerFromRequest(r *http.Request) string {
 		return auth[len(prefix):]
 	}
 	return ""
+}
+
+// newMCPSessionID mints the session identifier this server hands a
+// client at initialize.
+//
+// Opaque and random: it is echoed back by the client on every later
+// request and appears in logs, so it must carry no meaning and must not
+// be guessable by anyone wanting to impersonate another session in the
+// records. It is NOT a credential -- authorization is the bearer token
+// on every request, exactly as before -- so a collision costs an
+// attribution, not an authorization.
+func newMCPSessionID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		// Falling back to time alone would make ids guessable; better
+		// to have no session than a predictable one, and the caller
+		// treats an empty id as "no session" throughout.
+		return ""
+	}
+	return hex.EncodeToString(b[:])
 }

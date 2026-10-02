@@ -30,10 +30,15 @@ type ToolStatsRecorder interface {
 //  2. what the transport could see about the request (the User-Agent),
 //  3. nothing, recorded as unknown.
 //
-// Step 2 is not a poor relation. stdio has no session at all, a
-// restarted server has forgotten every registration while its clients
-// keep using their session ids, and some clients send no clientInfo --
-// all ordinary, none of them a reason to lose the call.
+// Step 2 is not a poor relation: a restarted server has forgotten every
+// registration while its clients keep using their session ids, some
+// clients send no clientInfo, and the SDK transport answers initialize
+// itself so nothing is ever remembered there. All ordinary, none of
+// them a reason to lose the call.
+//
+// The stdio server records nothing at all -- it is built with no
+// recorder, having no database to persist to and no /metrics to serve
+// -- so neither step runs there.
 func (s *Server) recordToolCall(ctx context.Context, tool, outcome string, d time.Duration) {
 	if s.stats == nil || tool == "" {
 		return
