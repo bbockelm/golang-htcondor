@@ -1,6 +1,8 @@
 package toolstats
 
 import (
+	"unicode/utf8"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -26,6 +28,23 @@ const (
 type Collector struct {
 	store *Store
 
+	// omitUser replaces every rendered user label with a single
+	// placeholder.
+	//
+	// It exists because /metrics can be served unauthenticated
+	// (HTTP_API_METRICS_PUBLIC) and is otherwise reachable with an API
+	// key the codebase deliberately treats as low-value -- the stated
+	// risk of leaking one is "scrape /metrics". Putting real usernames
+	// there turns that key into a roster of who uses the access point
+	// and what for, which is a bigger thing to lose than it was. A site
+	// that does not want to make that trade can turn the label off and
+	// keep every other number.
+	//
+	// The durable table is unaffected: it still records the real name
+	// for the admin view and for SQL, both of which are already gated
+	// on more than a metrics key.
+	omitUser bool
+
 	callsDesc    *prometheus.Desc
 	durationDesc *prometheus.Desc
 	lastCallDesc *prometheus.Desc
@@ -33,9 +52,14 @@ type Collector struct {
 }
 
 // NewCollector returns a Collector over store.
-func NewCollector(store *Store) *Collector {
+func NewCollector(store *Store) *Collector { return NewCollectorWithOptions(store, false) }
+
+// NewCollectorWithOptions builds a collector that can omit the user
+// label. See Collector.omitUser.
+func NewCollectorWithOptions(store *Store, omitUser bool) *Collector {
 	return &Collector{
-		store: store,
+		store:    store,
+		omitUser: omitUser,
 		callsDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "tool_calls_total"),
 			"MCP tool calls, by tool, user, client harness and outcome (ok/error/refused). "+
@@ -52,14 +76,16 @@ func NewCollector(store *Store) *Collector {
 		),
 		lastCallDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "tool_last_call_timestamp_seconds"),
-			"Unix timestamp of the most recent call to each tool. A tool that is offered but "+
-				"never used is the one thing a counter cannot show, because it has no series at all.",
+			"Unix timestamp of the most recent call to each tool. Only tools that have been "+
+				"called appear here, so this answers \"how long since this was used\" and not "+
+				"\"is this tool used at all\" -- a tool nobody has ever called has no series.",
 			[]string{"tool"}, nil,
 		),
 		usersDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "tool_users"),
-			"Distinct users that have called each tool. Counted over the verbatim user names, "+
-				"so it stays accurate even where the user label has collapsed to \"other\".",
+			"Distinct users that have called each tool, over the whole retained history. "+
+				"Counted over the verbatim user names, so it stays accurate even where the user "+
+				"label has collapsed to \"other\" or been turned off.",
 			[]string{"tool"}, nil,
 		),
 	}
@@ -86,6 +112,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		toolTotals[k.Tool] += e.Calls
 	}
 	userLabel := labelSpace(userTotals, limit)
+	if c.omitUser {
+		// One value for everyone: the series still exist and still sum
+		// correctly, they just no longer say who.
+		userLabel = nil
+	}
 	clientLabel := labelSpace(clientTotals, limit)
 	// The tool name is bounded too, which looks odd for a value drawn
 	// from a fixed catalogue of ~46 -- until a client calls a tool that
@@ -108,7 +139,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	users := map[string]map[string]struct{}{}
 
 	for k, e := range snap {
-		ck := callKey{toolLabel[k.Tool], userLabel[k.User], clientLabel[k.Client], k.Outcome}
+		renderedUser := OmittedLabel
+		if userLabel != nil {
+			renderedUser = userLabel[k.User]
+		}
+		ck := callKey{toolLabel[k.Tool], renderedUser, clientLabel[k.Client], k.Outcome}
 		calls[ck] += e.Calls
 
 		hk := histKey{toolLabel[k.Tool], clientLabel[k.Client], k.Outcome}
@@ -145,7 +180,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	for k, n := range calls {
 		ch <- prometheus.MustNewConstMetric(c.callsDesc, prometheus.CounterValue,
-			float64(n), k.tool, k.user, k.client, k.outcome)
+			float64(n), safeLabel(k.tool), safeLabel(k.user), safeLabel(k.client), k.outcome)
 	}
 
 	for k, e := range hists {
@@ -156,15 +191,47 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			cum[b] = running
 		}
 		ch <- prometheus.MustNewConstHistogram(c.durationDesc,
-			e.Calls, e.DurationSum, cum, k.tool, k.client, k.outcome)
+			e.Calls, e.DurationSum, cum, safeLabel(k.tool), safeLabel(k.client), k.outcome)
 	}
 
 	for tool, ts := range lastCall {
-		ch <- prometheus.MustNewConstMetric(c.lastCallDesc, prometheus.GaugeValue, ts, tool)
+		ch <- prometheus.MustNewConstMetric(c.lastCallDesc, prometheus.GaugeValue, ts, safeLabel(tool))
 	}
 
 	for tool, set := range users {
 		ch <- prometheus.MustNewConstMetric(c.usersDesc, prometheus.GaugeValue,
-			float64(len(set)), tool)
+			float64(len(set)), safeLabel(tool))
 	}
 }
+
+// InvalidLabel replaces a label value that is not valid UTF-8.
+const InvalidLabel = "invalid-utf8"
+
+// safeLabel keeps an unrepresentable value from taking the whole
+// endpoint down.
+//
+// MustNewConstMetric PANICS on a label value that is not valid UTF-8.
+// client_golang recovers it, so the process survives -- but Collect
+// dies partway through its map iteration, and only the metrics already
+// pushed onto the channel survive. The scrape returns 200 with a
+// silently truncated body, and because the iteration order varies, a
+// different subset vanishes each time: series flap in and out, which
+// Prometheus reads as repeated counter resets.
+//
+// The `user` label is the exposed one. It is not sanitised the way
+// `client` is -- it comes from the authenticated identity, which is
+// normally valid UTF-8 but need not be: a passwd/GECOS-derived name is
+// bytes, and the value round-trips through SQLite, so one bad row makes
+// the damage permanent across restarts until somebody deletes it by
+// hand.
+func safeLabel(v string) string {
+	if utf8.ValidString(v) {
+		return v
+	}
+	return InvalidLabel
+}
+
+// OmittedLabel is the user label's value when the label is turned off.
+// A fixed string rather than an empty one, so a reader can tell
+// "suppressed" from "nobody".
+const OmittedLabel = "omitted"

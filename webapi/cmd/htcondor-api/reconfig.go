@@ -191,6 +191,14 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_BUILD_MAX_MEMORY_MB"},
 	{name: "HTTP_API_BUILD_MAX_DISK_MB"},
 
+	// Tool-usage statistics. The flush ticker is started once and the
+	// collector is registered once, both when the handler is built, so
+	// every one of these is read at startup and nowhere else.
+	{name: "HTTP_API_TOOL_STATS_FLUSH_INTERVAL"},
+	{name: "HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"},
+	{name: "HTTP_API_TOOL_STATS_MAX_SERIES"},
+	{name: "HTTP_API_TOOL_STATS_OMIT_USER"},
+
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},

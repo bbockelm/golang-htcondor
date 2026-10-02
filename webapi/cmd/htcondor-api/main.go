@@ -1864,6 +1864,22 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			toolStatsFlush = d
 		}
 	}
+	toolStatsOmitUser := false
+	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_OMIT_USER"); ok {
+		toolStatsOmitUser = strings.EqualFold(strings.TrimSpace(v), "true") ||
+			strings.TrimSpace(v) == "1"
+	}
+	toolStatsMaxSeries := 0
+	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_SERIES"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_TOOL_STATS_MAX_SERIES; expected a positive integer",
+				"value", v, "error", err)
+		} else {
+			toolStatsMaxSeries = n
+		}
+	}
 	toolStatsMaxLabels := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
@@ -2006,6 +2022,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MetricsPublic:               metricsPublic,
 		ToolStatsFlushInterval:      toolStatsFlush,
 		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
+		ToolStatsOmitUser:           toolStatsOmitUser,
+		ToolStatsMaxSeries:          toolStatsMaxSeries,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,

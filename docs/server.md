@@ -1167,10 +1167,33 @@ SELECT tool, outcome, SUM(calls) AS calls FROM mcp_tool_stats
 A Prometheus label value is a time series, so each of `tool`, `user` and
 `client` is capped at 1000 distinct values on `/metrics`
 (`HTTP_API_TOOL_STATS_MAX_LABEL_VALUES`). Past the cap the quietest
-values render as `other` — ordered by call volume, so the busiest keep
-their identity — while the database still records every one of them
-exactly. The cap is a safety valve against a caller minting identities,
-not a limit a real access point is expected to reach.
+values render as `other`, ordered by call volume so the busiest keep
+their identity.
+
+Separately — and this is the bound that protects memory and disk — the
+server holds at most `HTTP_API_TOOL_STATS_MAX_SERIES` (default 10000)
+distinct combinations, plus one overflow bucket. The flush writes
+exactly what is held, so this caps the table too. Past it, new
+combinations fold into `other` rather than being dropped: the totals
+stay right and only the detail stops. An unknown tool is recorded under
+the name the caller sent, truncated to 64 characters, which is why this
+bound exists at all.
+
+### Usernames on /metrics
+
+The `user` label puts real account names on `/metrics`, alongside what
+each one ran and when. That endpoint can be served unauthenticated with
+`HTTP_API_METRICS_PUBLIC`, and is otherwise reachable with an API key
+carrying the `metrics` scope — a credential this server deliberately
+treats as low-value, on the reasoning that the worst it permits is a
+scrape. Publishing a roster of who uses the access point changes that
+trade.
+
+Set `HTTP_API_TOOL_STATS_OMIT_USER=true` to render every user label as
+`omitted`. Counts and every other metric are unaffected, and the
+application database still records the real name, so the admin page and
+the SQL queries above keep working — both are gated on more than a
+metrics key.
 
 **Admin** (gated on `WebUIAdminGroup` membership)
 - `/api/v1/admin/oauth2/clients`, `/api/v1/admin/oauth2/tokens`
@@ -1367,6 +1390,8 @@ Frequently-used knobs:
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
 | `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
+| `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
+| `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |

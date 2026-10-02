@@ -325,6 +325,7 @@ type Handler struct {
 	toolStatsFlushInterval time.Duration
 	toolStatsStop          chan struct{}
 	toolStatsStopOnce      sync.Once
+	toolStatsOmitUser      bool
 
 	htcondorConfig *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
 	// identityCookieKey signs the remembered-account hint. Derived from
@@ -605,6 +606,14 @@ type HandlerConfig struct {
 	// toolstats.DefaultMaxLabelValues. The durable table is unaffected:
 	// it always records the verbatim user and client.
 	ToolStatsMaxLabelValues int
+	// ToolStatsOmitUser renders every /metrics user label as a single
+	// placeholder. The durable table still records the real name. See
+	// toolstats.Collector.
+	ToolStatsOmitUser bool
+	// ToolStatsMaxSeries caps how many distinct series the store holds
+	// at all -- which bounds memory and the table, not just the scrape.
+	// Zero means toolstats.DefaultMaxSeries.
+	ToolStatsMaxSeries int
 
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
@@ -1267,6 +1276,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.ToolStatsMaxLabelValues > 0 {
 		h.toolStats.SetMaxLabelValues(cfg.ToolStatsMaxLabelValues)
 	}
+	if cfg.ToolStatsMaxSeries > 0 {
+		h.toolStats.SetMaxSeries(cfg.ToolStatsMaxSeries)
+	}
+	h.toolStatsOmitUser = cfg.ToolStatsOmitUser
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.
