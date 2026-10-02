@@ -14,6 +14,13 @@ import (
 // consentCSRFField is the hidden input the consent forms carry.
 const consentCSRFField = "csrf_token"
 
+// consentCSRFKey is the consent forms' own subkey of the application
+// master. See purposeKey.
+func (h *Handler) consentCSRFKey() []byte {
+	return h.purposeKey(consentCSRFInfo, &h.consentCSRFKeyOnce, &h.consentCSRFKeyBytes,
+		"the consent form CSRF token")
+}
+
 // consentCSRFToken authenticates a consent form back to the person it was
 // rendered for.
 //
@@ -31,14 +38,13 @@ const consentCSRFField = "csrf_token"
 // for one person's form cannot approve another's, and a token minted for
 // one request cannot approve a different one.
 //
-// Keyed by the same per-process secret as the SSH approval token, so
-// there is one key to reason about rather than two. That means a form
-// rendered before a restart is refused afterwards: the deployments run a
-// single replica with a Recreate strategy, so the only way to meet this
-// is to have had the page open across a deploy, and the answer -- reload
-// and approve again -- is one the page states.
+// Keyed by its own HKDF subkey of the application master, not by the SSH
+// approval token's. Both descend from the same master, which is what
+// makes them manageable -- wrapped under the pool signing keys, stable
+// across restarts and replicas -- and the separate labels are what stop
+// a token minted for one from verifying against the other.
 func (h *Handler) consentCSRFToken(username, binding string) string {
-	mac := hmac.New(sha256.New, h.sshApprovalKey())
+	mac := hmac.New(sha256.New, h.consentCSRFKey())
 	// Length-prefixed rather than concatenated: with a separator alone,
 	// a crafted username could borrow part of the binding.
 	_, _ = fmt.Fprintf(mac, "consent:%d:%s%d:%s", len(username), username, len(binding), binding)

@@ -1,8 +1,11 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
+
 	"encoding/json"
+	"github.com/PelicanPlatform/classad/collections/crypt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -313,4 +316,70 @@ func startDeviceConsentServer(t *testing.T) *Server {
 		_ = s.Shutdown(ctx)
 	})
 	return s
+}
+
+// The key comes from the application master, so it survives a restart
+// and is the same on every replica.
+//
+// Two Handlers over one master stand in for two pods, or for the same
+// pod before and after a deploy. A per-process key -- what this used to
+// be -- gives them different answers, so a form rendered by one would be
+// refused by the other.
+//
+// The envelope itself (wrapping the master under each pool signing key,
+// recovering it, rotating one in) is TestTheMasterKeySurvivesAndRotates'
+// subject; this is about what hangs off it.
+func TestConsentCSRFKeyComesFromTheMaster(t *testing.T) {
+	master, err := crypt.NewMaster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := masterBackedHandler(t, master)
+	second := masterBackedHandler(t, master)
+
+	a := first.consentCSRFToken("alice", "state-1")
+	b := second.consentCSRFToken("alice", "state-1")
+	if a != b {
+		t.Fatalf("two Handlers over one master disagree:\n  %s\n  %s\n"+
+			"a form rendered by one would be refused by the other", a, b)
+	}
+
+	// A different master gives different answers, so the test above is
+	// not passing because the key is ignored.
+	other, err := crypt.NewMaster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := masterBackedHandler(t, other).consentCSRFToken("alice", "state-1"); c == a {
+		t.Error("a different master produced the same token; the key is not being used")
+	}
+
+	// Each purpose gets its own subkey, so a token minted for the SSH
+	// approval screen cannot verify as a consent token.
+	if bytes.Equal(first.consentCSRFKey(), first.sshApprovalKey()) {
+		t.Error("the consent form and the SSH approval screen share a key")
+	}
+}
+
+// Without pool signing keys there is no master, and the fallback is a
+// per-process key: the page still works, and the log says what was lost.
+func TestConsentCSRFFallsBackWithoutSigningKeys(t *testing.T) {
+	a := (&Handler{logger: testLogger(t)}).consentCSRFToken("alice", "state-1")
+	b := (&Handler{logger: testLogger(t)}).consentCSRFToken("alice", "state-1")
+	if a == b {
+		t.Fatal("two Handlers with no master produced the same key; " +
+			"the fallback is supposed to be per-process")
+	}
+	if a == "" {
+		t.Fatal("no token at all; the consent page would be unusable")
+	}
+}
+
+// masterBackedHandler returns a Handler already holding master, as one
+// that had opened the envelope would.
+func masterBackedHandler(t *testing.T, master []byte) *Handler {
+	t.Helper()
+	h := &Handler{logger: testLogger(t)}
+	h.masterKeyOnce.Do(func() { h.masterKeyBytes = master })
+	return h
 }

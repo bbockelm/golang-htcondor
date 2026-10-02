@@ -568,17 +568,57 @@ func (h *Handler) checkSSHApprovalToken(presented, userCode, username string) bo
 }
 
 func (h *Handler) sshApprovalKey() []byte {
-	h.sshApprovalKeyOnce.Do(func() {
+	return h.purposeKey(sshApprovalInfo, &h.sshApprovalKeyOnce, &h.sshApprovalKeyBytes,
+		"the SSH approval token")
+}
+
+// purposeKey resolves one purpose's key: derived from the application
+// master when this deployment has one, and otherwise minted for this
+// process alone.
+//
+// Derived is what we want. The master is wrapped in master_keys under
+// each pool signing key, so it survives a restart and is identical on
+// every replica reading that database -- which is how secrets are
+// managed here, and what a per-process key silently was not. A key that
+// rotates on every restart invalidates whatever it signed, and a key
+// that differs per replica means a form rendered by one pod cannot be
+// verified by another.
+//
+// The fallback exists because a deployment with no pool signing keys has
+// no master to derive from, and the alternative there is a consent page
+// that cannot work at all. It is logged at warn, once, naming the
+// consequence rather than the mechanism.
+func (h *Handler) purposeKey(label string, once *sync.Once, cached *[]byte, what string) []byte {
+	// Nil-tolerant: a Handler built field-by-field in a test has no
+	// logger, and a key accessor is the wrong place to insist on one.
+	warn := func(msg string, args ...any) {
+		if h.logger != nil {
+			h.logger.Warn(logging.DestinationSecurity, msg, args...)
+		}
+	}
+	once.Do(func() {
+		if key, err := h.masterSubkey(label); err != nil {
+			warn("Could not derive "+what+" from the application master key; "+
+				"it will not survive a restart and will differ between replicas",
+				"error", err)
+		} else if len(key) > 0 {
+			*cached = key
+			return
+		} else {
+			warn("No pool signing keys, so "+what+" cannot be derived from the application "+
+				"master key; it will not survive a restart and will differ between replicas",
+				"hint", "SEC_PASSWORD_DIRECTORY")
+		}
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			// A Handler that cannot read randomness cannot issue a
 			// token anybody can verify, and carrying on with a zero
 			// key would silently accept a forged one.
-			panic("httpserver: no randomness for the SSH approval key: " + err.Error())
+			panic("httpserver: no randomness for " + what + ": " + err.Error())
 		}
-		h.sshApprovalKeyBytes = key
+		*cached = key
 	})
-	return h.sshApprovalKeyBytes
+	return *cached
 }
 
 // requireSameOrigin refuses a state-changing request that a page on
@@ -624,6 +664,9 @@ type sshConsentState struct {
 
 	sshApprovalKeyOnce  sync.Once
 	sshApprovalKeyBytes []byte
+
+	consentCSRFKeyOnce  sync.Once
+	consentCSRFKeyBytes []byte
 }
 
 // csrfSafeMethod reports whether a method is read-only by definition and
