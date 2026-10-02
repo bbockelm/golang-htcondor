@@ -1280,6 +1280,21 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		if exists {
 			// Use the cached session cache
 			sessionCache = entry.SessionCache
+			// And the credential resolved when this bearer was first
+			// seen. Minting happens once, on that first request; every
+			// later one used to arrive here and hand CEDAR the opaque
+			// bearer instead, which it cannot use -- leaving it to fall
+			// through to whatever credential this daemon itself has. So
+			// the first request after a sign-in behaved differently
+			// from every one after it.
+			var cachedScopes []string
+			condorCredential, cachedScopes = resolveCachedBearer(entry, token)
+			if len(cachedScopes) > 0 {
+				// Same reasoning: a handler that gates on scopes would
+				// otherwise see an approved-for-less grant as carrying
+				// no restriction at all.
+				ctx = withAPIKeyScopes(ctx, cachedScopes)
+			}
 			s.logger.Debug(logging.DestinationSecurity, "Using cached session cache for token")
 		} else {
 			// First time seeing this token - attempt authentication
@@ -1334,6 +1349,9 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// scope-checkable, and an OAuth2 grant approved
 						// for less than it asks for looks unscoped.
 						ctx = withAPIKeyScopes(ctx, ar.GetGrantedScopes())
+						// Remember both, so the next request for this
+						// bearer resolves the same way this one did.
+						s.tokenCache.SetCondorCredential(token, condorCredential, ar.GetGrantedScopes())
 						s.logger.Debug(logging.DestinationSecurity, "Validated opaque token via OAuth2 storage", "username", username)
 					} else {
 						// Both JWT parsing and opaque token introspection failed

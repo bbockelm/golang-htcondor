@@ -540,3 +540,108 @@ func TestUserHeaderRequestCarriesASessionTag(t *testing.T) {
 		t.Error("a user-header request carries no session tag")
 	}
 }
+
+// The bug this guards: minting happens once, on the request that first
+// sees a bearer. Without somewhere to keep the result, every later
+// request handed CEDAR the opaque bearer instead -- which the schedd
+// cannot verify, leaving CEDAR to fall through to whatever credential
+// the daemon itself has. The first request after a sign-in behaved
+// differently from every one after it, which is the hardest shape of
+// bug to see from the outside.
+func TestMintedCredentialSurvivesACacheHit(t *testing.T) {
+	cache := NewTokenCache()
+	const bearer = "opaque-access-token"
+
+	if _, err := cache.AddValidated(bearer, "bbockelm", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("AddValidated: %v", err)
+	}
+	cache.SetCondorCredential(bearer, "minted-idtoken", []string{"condor:/WRITE", "offline_access"})
+
+	entry, ok := cache.Get(bearer)
+	if !ok {
+		t.Fatal("the bearer is not in the cache")
+	}
+	if entry.CondorCredential != "minted-idtoken" {
+		t.Errorf("CondorCredential = %q; a later request would present the opaque bearer", entry.CondorCredential)
+	}
+	if len(entry.Scopes) != 2 {
+		t.Errorf("Scopes = %v; a later request would read the grant as unscoped", entry.Scopes)
+	}
+}
+
+// The scopes are copied, not aliased: the caller's slice must not be
+// able to change what a later request gates on.
+func TestCachedScopesAreCopied(t *testing.T) {
+	cache := NewTokenCache()
+	const bearer = "opaque"
+	if _, err := cache.AddValidated(bearer, "someone", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("AddValidated: %v", err)
+	}
+
+	scopes := []string{"condor:/WRITE"}
+	cache.SetCondorCredential(bearer, "minted", scopes)
+	scopes[0] = "condor:/ADMINISTRATOR"
+
+	entry, _ := cache.Get(bearer)
+	if entry.Scopes[0] != "condor:/WRITE" {
+		t.Errorf("the cached scope changed under the cache: %q", entry.Scopes[0])
+	}
+}
+
+// A bearer the cache has never seen must not acquire one by accident.
+func TestSetCondorCredentialIgnoresAnUnknownBearer(t *testing.T) {
+	cache := NewTokenCache()
+	cache.SetCondorCredential("never-seen", "minted", []string{"condor:/WRITE"})
+	if _, ok := cache.Get("never-seen"); ok {
+		t.Error("an unknown bearer was added to the cache by setting a credential on it")
+	}
+}
+
+// A cached opaque bearer must resolve to the credential minted for it,
+// not to itself. Handing CEDAR the opaque string leaves it with nothing
+// it can present, and it falls through to the daemon's own credential.
+func TestResolveCachedBearerPrefersTheMintedCredential(t *testing.T) {
+	entry := &TokenCacheEntry{CondorCredential: "minted-idtoken", Scopes: []string{"condor:/WRITE"}}
+	cred, scopes := resolveCachedBearer(entry, "opaque-bearer")
+	if cred != "minted-idtoken" {
+		t.Errorf("credential = %q, want the minted one", cred)
+	}
+	if len(scopes) != 1 || scopes[0] != "condor:/WRITE" {
+		t.Errorf("scopes = %v, want the grant's", scopes)
+	}
+}
+
+// A bearer that is already a usable credential has none recorded, and
+// must still be used as itself.
+func TestResolveCachedBearerFallsBackToTheBearer(t *testing.T) {
+	cred, scopes := resolveCachedBearer(&TokenCacheEntry{}, "a-real-idtoken")
+	if cred != "a-real-idtoken" {
+		t.Errorf("credential = %q, want the bearer", cred)
+	}
+	if scopes != nil {
+		t.Errorf("scopes = %v, want none", scopes)
+	}
+	if cred, _ := resolveCachedBearer(nil, "a-real-idtoken"); cred != "a-real-idtoken" {
+		t.Errorf("a nil entry resolved to %q", cred)
+	}
+}
+
+// The round trip: what the minting branch records is what a later
+// request resolves.
+func TestRecordedCredentialIsWhatALaterRequestResolves(t *testing.T) {
+	cache := NewTokenCache()
+	const bearer = "opaque-access-token"
+	if _, err := cache.AddValidated(bearer, "bbockelm", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("AddValidated: %v", err)
+	}
+	cache.SetCondorCredential(bearer, "minted-idtoken", []string{"condor:/WRITE"})
+
+	entry, ok := cache.Get(bearer)
+	if !ok {
+		t.Fatal("the bearer is not in the cache")
+	}
+	cred, scopes := resolveCachedBearer(entry, bearer)
+	if cred != "minted-idtoken" || len(scopes) != 1 {
+		t.Errorf("a later request resolved to %q / %v", cred, scopes)
+	}
+}
