@@ -611,21 +611,13 @@ func approveDeviceViaBrowser(verificationURL, userCode, username, password, caPa
 	if err != nil {
 		return fmt.Errorf("failed to create verification page request: %w", err)
 	}
-	resp, err = client.Do(req)
+	pageBody, err := getFollowingReturnHop(client, req)
 	if err != nil {
 		return fmt.Errorf("failed to load the verification page: %w", err)
 	}
-	pageBody, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if readErr != nil {
-		return fmt.Errorf("failed to read the verification page: %w", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("verification page returned %d: %s", resp.StatusCode, string(pageBody))
-	}
-	csrfToken := hiddenFormValue(string(pageBody), "csrf_token")
+	csrfToken := hiddenFormValue(pageBody, "csrf_token")
 	if csrfToken == "" {
-		return fmt.Errorf("the verification page carried no csrf_token: %s", string(pageBody))
+		return fmt.Errorf("the verification page carried no csrf_token: %s", pageBody)
 	}
 
 	// Use url.Values for proper form encoding
@@ -747,4 +739,53 @@ func hiddenFormValue(body, name string) string {
 		return ""
 	}
 	return html.UnescapeString(m[1])
+}
+
+// returnHopTarget pulls the destination out of the page the server
+// renders at the end of a browser login, or returns "" for any other
+// page.
+//
+// That page is not a redirect: it is a 200 whose body navigates itself,
+// because the session cookie is SameSite=Strict and a 302 arriving from
+// the identity provider is cross-site, so the browser would withhold
+// the cookie it was just given. See finishBrowserLogin.
+//
+// An http.Client follows redirects and stops dead at a 200, so a helper
+// that claims to act like a browser has to perform this hop itself --
+// otherwise it reads the interstitial and concludes the real page was
+// malformed.
+var returnHopTarget = regexp.MustCompile(`<meta http-equiv="refresh" content="0; url=([^"]+)"`)
+
+// getFollowingReturnHop performs req and returns the body, following
+// any login return hops on the way.
+//
+// Bounded, because a page that hops to itself would otherwise spin.
+func getFollowingReturnHop(client *http.Client, req *http.Request) (string, error) {
+	for hop := 0; hop < 5; hop++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return "", readErr
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("%s returned %d: %s", req.URL, resp.StatusCode, body)
+		}
+		m := returnHopTarget.FindStringSubmatch(string(body))
+		if m == nil {
+			return string(body), nil
+		}
+		next, err := req.URL.Parse(html.UnescapeString(m[1]))
+		if err != nil {
+			return "", fmt.Errorf("parsing the login return hop %q: %w", m[1], err)
+		}
+		req, err = http.NewRequest(http.MethodGet, next.String(), nil)
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("the login return hop did not settle after 5 attempts")
 }
