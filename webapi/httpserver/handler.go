@@ -328,6 +328,12 @@ type Handler struct {
 	toolStatsOmitUser      bool
 
 	htcondorConfig *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+
+	// The application master key, opened once and shared by every
+	// purpose that derives a subkey from it. See masterSubkey.
+	masterKeyOnce  sync.Once
+	masterKeyBytes []byte
+	masterKeyErr   error
 	// identityCookieKey signs the remembered-account hint. Derived from
 	// the application master key, which the pool signing keys wrap; empty
 	// when the deployment has no signing keys.

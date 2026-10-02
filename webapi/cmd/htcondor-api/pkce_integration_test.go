@@ -306,12 +306,24 @@ SEC_PASSWORD_DIRECTORY = %s
 			body, _ := io.ReadAll(resp.Body)
 			t.Fatalf("consent page carried no state. URL: %s. Body: %s", resp.Request.URL.String(), body)
 		}
+		// The form carries a CSRF token bound to the person and to this
+		// authorization, so submit what the page rendered rather than a
+		// hand-built approval -- which is what a browser does.
+		pageBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("failed to read the consent page: %v", readErr)
+		}
+		csrfToken := hiddenFormValue(string(pageBody), "csrf_token")
+		if csrfToken == "" {
+			t.Fatalf("the consent page carried no csrf_token: %s", pageBody)
+		}
 		t.Logf("Reached the consent page; approving (state=%s)", consentState)
 
 		resp, err = client.PostForm(serverURL+"/mcp/oauth2/consent", url.Values{
-			"state":  {consentState},
-			"action": {"approve"},
+			"state":      {consentState},
+			"action":     {"approve"},
+			"csrf_token": {csrfToken},
 		})
 		if err != nil {
 			t.Fatalf("Failed to POST consent approval: %v", err)

@@ -833,13 +833,25 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			ClientID:        ar.GetClient().GetID(),
 			RequestedScopes: ar.GetRequestedScopes(),
 			FormAction:      "/mcp/oauth2/consent",
-			HiddenFields:    map[string]string{"state": state},
+			HiddenFields: map[string]string{
+				"state":          state,
+				consentCSRFField: h.consentCSRFToken(username, state),
+			},
 		})
 		return
 	}
 
 	if r.Method == http.MethodPost {
-		// Form already parsed above when getting state
+		// Form already parsed above when getting state.
+		//
+		// The token is checked before the action is even read: this
+		// page grants an application access to somebody's queue, and
+		// the state alone does not prove the person posting is the
+		// person the form was rendered for.
+		if !h.checkConsentCSRF(r, username, state) {
+			h.refuseStaleConsent(w, r, username, "authorization consent")
+			return
+		}
 		// Handle approval/denial
 		action := r.FormValue("action")
 
@@ -1952,6 +1964,16 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
+		// Checked once the username is known, because the token is
+		// bound to it: a token minted for one person's form must not
+		// approve another's. Before the action is read, because this
+		// page is what turns a code printed in somebody's terminal
+		// into a credential.
+		if !h.checkConsentCSRF(r, username, userCode) {
+			h.refuseStaleConsent(w, r, username, "device verification")
+			return
+		}
+
 		switch action {
 		case "approve":
 			// Create session for user. See the consent handler for why
@@ -2495,8 +2517,11 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 		ClientID:        request.GetClient().GetID(),
 		RequestedScopes: request.GetRequestedScopes(),
 		FormAction:      "/mcp/oauth2/device/verify",
-		HiddenFields:    map[string]string{"user_code": userCode},
-		DeviceCode:      userCode,
+		HiddenFields: map[string]string{
+			"user_code":      userCode,
+			consentCSRFField: h.consentCSRFToken(username, userCode),
+		},
+		DeviceCode: userCode,
 	})
 }
 

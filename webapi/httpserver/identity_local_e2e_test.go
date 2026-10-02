@@ -526,8 +526,15 @@ func approveSSOConsent(t *testing.T, baseURL, consentURL string) string {
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+	// Submit the token the page rendered rather than a hand-built
+	// approval; the form is bound to the person and to this
+	// authorization.
 	resp, err := client.PostForm(baseURL+"/mcp/oauth2/consent",
-		url.Values{"state": {state}, "action": {"approve"}})
+		url.Values{
+			"state":      {state},
+			"action":     {"approve"},
+			"csrf_token": {consentPageCSRF(t, client, baseURL, consentURL, "")},
+		})
 	if err != nil {
 		t.Fatalf("approving consent: %v", err)
 	}

@@ -210,6 +210,9 @@ func TestOAuth2ConsentPage_ApproveConsent(t *testing.T) {
 		form := url.Values{
 			"state":  []string{state},
 			"action": []string{"approve"},
+			// Bound to the person and to this authorization; see
+			// consentCSRFToken.
+			consentCSRFField: []string{server.consentCSRFToken(username, state)},
 		}
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -281,6 +284,9 @@ func TestOAuth2ConsentPage_DenyConsent(t *testing.T) {
 		form := url.Values{
 			"state":  []string{state},
 			"action": []string{"deny"},
+			// Denying is a state change too: without the token a
+			// cross-site page could refuse somebody's authorization.
+			consentCSRFField: []string{server.consentCSRFToken(username, state)},
 		}
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -567,8 +573,9 @@ func TestOAuth2ConsentPage_ScopeFiltering(t *testing.T) {
 
 			// Create approval request
 			form := url.Values{
-				"state":  []string{state},
-				"action": []string{"approve"},
+				"state":          []string{state},
+				"action":         []string{"approve"},
+				consentCSRFField: []string{server.consentCSRFToken(username, state)},
 			}
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp/oauth2/consent", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

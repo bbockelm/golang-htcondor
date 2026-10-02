@@ -35,6 +35,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -598,11 +599,40 @@ func approveDeviceViaBrowser(verificationURL, userCode, username, password, caPa
 		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Step 3: After login, approve the device by submitting the device verification form
+	// Step 3: After login, fetch the verification page and submit the form
+	// it renders.
+	//
+	// Fetching it is not ceremony: the form carries a CSRF token bound to
+	// the person and to this device code, and posting without it is
+	// refused. A browser gets that token by loading the page, so a helper
+	// called approveDeviceViaBrowser has to as well -- it previously
+	// posted a bare user_code and action, which no browser does.
+	req, err = http.NewRequest("GET", verificationURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create verification page request: %w", err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to load the verification page: %w", err)
+	}
+	pageBody, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("failed to read the verification page: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("verification page returned %d: %s", resp.StatusCode, string(pageBody))
+	}
+	csrfToken := hiddenFormValue(string(pageBody), "csrf_token")
+	if csrfToken == "" {
+		return fmt.Errorf("the verification page carried no csrf_token: %s", string(pageBody))
+	}
+
 	// Use url.Values for proper form encoding
 	approvalData := url.Values{}
 	approvalData.Set("user_code", userCode)
 	approvalData.Set("action", "approve")
+	approvalData.Set("csrf_token", csrfToken)
 
 	req, err = http.NewRequest("POST", verificationURL, strings.NewReader(approvalData.Encode()))
 	if err != nil {
@@ -703,4 +733,18 @@ func testMCPAPIWithToken(serverURL, token, caPath string) error {
 	}
 
 	return nil
+}
+
+// hiddenFormValue pulls one hidden input's value out of a rendered form.
+//
+// A regexp rather than an HTML parser because the markup is this
+// server's own and fixed; the point is to submit what the page says,
+// not to be a browser.
+func hiddenFormValue(body, name string) string {
+	re := regexp.MustCompile(`<input[^>]*type="hidden"[^>]*name="` + regexp.QuoteMeta(name) + `"[^>]*value="([^"]*)"`)
+	m := re.FindStringSubmatch(body)
+	if len(m) < 2 {
+		return ""
+	}
+	return html.UnescapeString(m[1])
 }

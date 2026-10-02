@@ -174,7 +174,14 @@ func (f *reauthFixture) consent(t *testing.T, username string, groups []string, 
 	f.server.oauth2StateStore.StoreWithUsername(state, ar, "", username, groups)
 
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/mcp/oauth2/consent",
-		strings.NewReader(url.Values{"state": {state}, "action": {"approve"}}.Encode()))
+		strings.NewReader(url.Values{
+			"state":  {state},
+			"action": {"approve"},
+			// The consent form carries a CSRF token bound to the person
+			// and to this authorization. Minted here rather than scraped
+			// from the rendered page, which this helper does not render.
+			consentCSRFField: {f.server.consentCSRFToken(username, state)},
+		}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	f.server.handleOAuth2Consent(w, req)

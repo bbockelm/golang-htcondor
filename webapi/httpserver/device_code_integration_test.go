@@ -328,6 +328,10 @@ func approveDevice(t *testing.T, httpClient *http.Client, verificationURI, userC
 	form.Set("action", "approve")
 	form.Set("username", username)
 	form.Set("consent_form_version", "1")
+	// And the token the page rendered: the form is bound to the person
+	// and to this device code, so an approval built entirely by hand is
+	// refused.
+	form.Set("csrf_token", consentPageCSRF(t, httpClient, verificationURI, verificationURI+"?user_code="+url.QueryEscape(userCode), username))
 	for _, s := range scopes {
 		form.Add("scope", s)
 	}

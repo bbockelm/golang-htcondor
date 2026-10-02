@@ -35,6 +35,20 @@ import (
 // to forge another's.
 const identityCookieInfo = "htcondor-api-identity-cookie-v1"
 
+// Labels for the other purposes that hang off the same master.
+//
+// Distinct per purpose on purpose: HKDF gives each one an independent
+// key, so a token minted for one can never verify against another even
+// though both descend from the same secret.
+const (
+	// sshApprovalInfo derives the key behind the SSH consent screen's
+	// approval token.
+	sshApprovalInfo = "htcondor-api-ssh-approval-v1"
+	// consentCSRFInfo derives the key behind the OAuth2 consent and
+	// device verification forms' CSRF token.
+	consentCSRFInfo = "htcondor-api-consent-csrf-v1"
+)
+
 // signingKEKs reads the pool signing keys as key-encryption keys.
 //
 // htcondor.LoadSigningKeys owns the details -- the 0xdeadbeef unscramble,
@@ -147,4 +161,40 @@ func saveMasterKeyRow(ctx context.Context, db *sql.DB, r crypt.MasterKeyRow) err
 		return fmt.Errorf("saving the master key wrapping for %q: %w", r.KeyID, err)
 	}
 	return nil
+}
+
+// masterSubkey derives a per-purpose key from the application master.
+//
+// The master is opened once and cached: it is wrapped in master_keys
+// under each pool signing key, so it survives a restart and is the same
+// for every replica reading that database. A per-process random key is
+// neither, which is how the SSH approval token came to be a secret this
+// deployment could not manage -- rotated by accident on every restart
+// and different on each replica.
+//
+// Returns (nil, nil) when the deployment has no signing keys and so no
+// master. The caller decides what to do without one; there is nothing
+// safe to invent here, because a key this function made up would be one
+// any reader of the database could make up too.
+func (h *Handler) masterSubkey(label string) ([]byte, error) {
+	h.masterKeyOnce.Do(func() {
+		keks, err := signingKEKs(h.htcondorConfig)
+		if err != nil {
+			h.masterKeyErr = fmt.Errorf("loading pool signing keys: %w", err)
+			return
+		}
+		master, err := openOrCreateMaster(context.Background(), h.db, keks)
+		if err != nil {
+			h.masterKeyErr = fmt.Errorf("opening the application master key: %w", err)
+			return
+		}
+		h.masterKeyBytes = master
+	})
+	if h.masterKeyErr != nil {
+		return nil, h.masterKeyErr
+	}
+	if len(h.masterKeyBytes) == 0 {
+		return nil, nil
+	}
+	return crypt.Subkey(h.masterKeyBytes, label)
 }
