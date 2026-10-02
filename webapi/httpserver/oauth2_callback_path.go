@@ -85,3 +85,49 @@ func deviceVerifyPathFor(embedded bool) string {
 // them asserts nothing. Found by mutation: reverting the composition to a
 // hardcoded "/mcp/oauth2/device/verify" broke nothing.
 var deviceVerifyPath = OAuth2DeviceVerifyPath
+
+// oauth2EndpointPathFor is the choice for every other OAuth2 endpoint:
+// the plain path when the web UI is compiled in, the MCP-scoped one
+// otherwise.
+//
+// Separated from how this build answers it for the same reason
+// deviceVerifyPathFor is -- test builds do not embed the frontend, so a
+// test calling the exported wrapper exercises one branch and asserts
+// whichever answer it got, which passes against a function that ignores
+// the flag entirely.
+func oauth2EndpointPathFor(embedded bool, name string) string {
+	if embedded {
+		return "/oauth2/" + name
+	}
+	return "/mcp/oauth2/" + name
+}
+
+// OAuth2EndpointPath is the path this server advertises for an OAuth2
+// endpoint, given its name ("authorize", "token", ...).
+//
+// Every OAuth2 endpoint sits under /mcp/ because MCP is what first
+// needed them, and the name has outlived the reason: these serve the web
+// UI, editor extensions and anything else that speaks OAuth2. The
+// callback and the device verification page already moved, being the
+// two a person reads; this is the rest.
+//
+// Both paths are always routed. A client discovers these once and keeps
+// them -- a dynamically registered client may hold them for as long as
+// its registration lasts -- so withdrawing the old one would strand
+// every client that registered before the change.
+func OAuth2EndpointPath(name string) string {
+	return oauth2EndpointPathFor(webui.IsEmbedded(), name)
+}
+
+// oauth2EndpointNames are the endpoints served under both prefixes.
+// The callback and device verification page are routed separately,
+// having moved first.
+var oauth2EndpointNames = []string{
+	"authorize",
+	"consent",
+	"token",
+	"introspect",
+	"revoke",
+	"register",
+	"device/authorize",
+}

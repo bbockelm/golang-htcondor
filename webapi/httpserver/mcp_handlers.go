@@ -682,7 +682,9 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	h.oauth2StateStore.StoreWithUsername(state, ar, "", username, userGroups)
 
 	// Redirect to consent page
-	consentURL := fmt.Sprintf("/mcp/oauth2/consent?state=%s", state)
+	// The path a person sees in the address bar while deciding
+	// whether to approve, so it follows what this server advertises.
+	consentURL := fmt.Sprintf("%s?state=%s", OAuth2EndpointPath("consent"), state)
 	http.Redirect(w, r, consentURL, http.StatusFound)
 }
 
@@ -832,7 +834,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			Username:        username,
 			ClientID:        ar.GetClient().GetID(),
 			RequestedScopes: ar.GetRequestedScopes(),
-			FormAction:      "/mcp/oauth2/consent",
+			FormAction:      OAuth2EndpointPath("consent"),
 			HiddenFields: map[string]string{
 				"state":          state,
 				consentCSRFField: h.consentCSRFToken(username, state),
@@ -1493,13 +1495,20 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 	issuer := h.oauth2Provider.config.AccessTokenIssuer
 
 	metadata := map[string]interface{}{
-		"issuer":                        issuer,
-		"authorization_endpoint":        issuer + "/mcp/oauth2/authorize",
-		"token_endpoint":                issuer + "/mcp/oauth2/token",
-		"registration_endpoint":         issuer + "/mcp/oauth2/register",
-		"introspection_endpoint":        issuer + "/mcp/oauth2/introspect",
-		"revocation_endpoint":           issuer + "/mcp/oauth2/revoke",
-		"device_authorization_endpoint": issuer + "/mcp/oauth2/device/authorize",
+		// The issuer is deliberately NOT derived from these: it is an
+		// identity rather than a location, every token already issued
+		// carries it, and changing it would invalidate all of them.
+		"issuer": issuer,
+		// The endpoints are advertised at the plain path where the web
+		// UI is compiled in. Both remain routed -- see
+		// OAuth2EndpointPath -- because a client discovers these once
+		// and keeps them.
+		"authorization_endpoint":        issuer + OAuth2EndpointPath("authorize"),
+		"token_endpoint":                issuer + OAuth2EndpointPath("token"),
+		"registration_endpoint":         issuer + OAuth2EndpointPath("register"),
+		"introspection_endpoint":        issuer + OAuth2EndpointPath("introspect"),
+		"revocation_endpoint":           issuer + OAuth2EndpointPath("revoke"),
+		"device_authorization_endpoint": issuer + OAuth2EndpointPath("device/authorize"),
 		// This is an OAuth2 authorization server (RFC 8414), not an
 		// OpenID Connect provider. It used to advertise otherwise --
 		// id_token response types, subject_types_supported and

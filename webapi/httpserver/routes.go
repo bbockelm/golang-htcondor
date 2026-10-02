@@ -280,21 +280,37 @@ func (h *Handler) setupRoutes() {
 		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
 		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
-		// OAuth2 endpoints
-		mux.HandleFunc("/mcp/oauth2/authorize", h.handleOAuth2Authorize)
-		mux.HandleFunc("/mcp/oauth2/consent", h.handleOAuth2Consent) // Consent page
+		// OAuth2 endpoints, each served under both prefixes.
+		//
+		// The /mcp/ prefix is historical: MCP is what first needed
+		// these, and they now serve the web UI, editor extensions and
+		// anything else that speaks OAuth2. The plain path is what gets
+		// advertised where the web UI is compiled in; the old one stays
+		// routed because a client discovers these once and keeps them.
+		oauth2Handlers := map[string]http.HandlerFunc{
+			"authorize":        h.handleOAuth2Authorize,
+			"consent":          h.handleOAuth2Consent,
+			"token":            h.handleOAuth2Token,
+			"introspect":       h.handleOAuth2Introspect,
+			"revoke":           h.handleOAuth2Revoke,
+			"register":         h.handleOAuth2Register, // RFC 7591
+			"device/authorize": h.handleOAuth2DeviceAuthorize,
+		}
+		for _, name := range oauth2EndpointNames {
+			handler, ok := oauth2Handlers[name]
+			if !ok {
+				continue
+			}
+			mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
+			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
+		}
 		// The SSO callback is served at both paths whatever the server
 		// advertises (OAuth2CallbackPath): an authorization started before
 		// an upgrade comes back to the path it began with.
 		mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
 		mux.HandleFunc(webUICallbackPath, h.handleOAuth2Callback)
-		mux.HandleFunc("/mcp/oauth2/token", h.handleOAuth2Token)
-		mux.HandleFunc("/mcp/oauth2/introspect", h.handleOAuth2Introspect)
-		mux.HandleFunc("/mcp/oauth2/revoke", h.handleOAuth2Revoke)
-		mux.HandleFunc("/mcp/oauth2/register", h.handleOAuth2Register) // Dynamic client registration (RFC 7591)
 
 		// Device code flow endpoints (RFC 8628)
-		mux.HandleFunc("/mcp/oauth2/device/authorize", h.handleOAuth2DeviceAuthorize)
 		// Served at both paths whatever this server advertises
 		// (OAuth2DeviceVerifyPath): a device code issued before an
 		// upgrade carries the URL it was issued with, and its user has
