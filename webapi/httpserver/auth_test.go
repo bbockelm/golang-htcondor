@@ -492,3 +492,51 @@ func TestUserHeaderModeDoesNotOfferFS(t *testing.T) {
 		t.Error("no auth methods offered at all; stripping FS must not empty the list")
 	}
 }
+
+// taggingHandler is the TestUserHeaderModeDoesNotOfferFS setup, reused
+// because the thing under test is what createAuthenticatedContext puts
+// on the context rather than anything about a particular route.
+func taggingHandler(t *testing.T) (*Handler, string) {
+	t.Helper()
+	keyDir := t.TempDir()
+	raw := []byte("session-tag-test-key")
+	deadbeef := []byte{0xde, 0xad, 0xbe, 0xef}
+	scrambled := make([]byte, len(raw))
+	for i := range raw {
+		scrambled[i] = raw[i] ^ deadbeef[i%len(deadbeef)]
+	}
+	keyPath := filepath.Join(keyDir, "POOL")
+	if err := os.WriteFile(keyPath, scrambled, 0o600); err != nil {
+		t.Fatalf("write signing key: %v", err)
+	}
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	return &Handler{
+		logger:                   logger,
+		userHeader:               "X-Test-User",
+		userHeaderUnsafeAllowAll: true,
+		signingKeyPath:           keyPath,
+		trustDomain:              "test.htcondor.org",
+		uidDomain:                "test.htcondor.org",
+		// The bearer path reaches for this; without it the branch
+		// under test panics before it runs.
+		tokenCache: NewTokenCache(),
+	}, keyDir
+}
+
+// A request with no bearer still gets one, by username.
+func TestUserHeaderRequestCarriesASessionTag(t *testing.T) {
+	h, _ := taggingHandler(t)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
+	r.Header.Set("X-Test-User", "alice")
+	ctx, err := h.createAuthenticatedContext(r)
+	if err != nil {
+		t.Fatalf("createAuthenticatedContext: %v", err)
+	}
+	cfg, _ := htcondor.GetSecurityConfigFromContext(ctx)
+	if cfg.SecurityTag == "" {
+		t.Error("a user-header request carries no session tag")
+	}
+}

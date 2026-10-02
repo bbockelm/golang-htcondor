@@ -1359,10 +1359,36 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}
-	if sessionTag != "" {
-		secConfig.SecurityTag = sessionTag
-	}
+	// Key this caller's cedar sessions to this caller, always.
+	//
+	// cedar's client session cache is keyed {SecurityTag, address,
+	// command}, and with an empty tag by {address, command} alone.
+	// Every REST caller reaches the same schedd with the same commands,
+	// so an untagged config lets one request resume a session another
+	// established and act as whoever authenticated it. The MCP path
+	// has tagged for this reason for a while; this is the same tag on
+	// the same cache.
+	//
+	// In user-header mode the tag is the username, because the token is
+	// regenerated per request -- new jti, new iat -- so a digest of it
+	// would differ every time and no session would ever be reused.
+	// Everywhere else the tag is a digest of the credential rather than
+	// a claim read out of it: a claim is attacker-chosen, and a forged
+	// one would select somebody else's session, which is the thing
+	// being prevented.
+	secConfig.SecurityTag = sessionTagFor(sessionTag, condorCredential)
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+
+	// What this request will present to HTCondor, for correlating a
+	// refusal with the credential that caused it. Debug level: it is
+	// one line per request and only useful when something is wrong.
+	if s.logger != nil {
+		s.logger.Debug(logging.DestinationSecurity, "Request credential prepared",
+			"path", r.URL.Path,
+			"credential", describeCredentialSubject(condorCredential),
+			"security_tag", shortTag(secConfig.SecurityTag),
+			"session_cache", map[bool]string{true: "per-token", false: "global"}[sessionCache != nil])
+	}
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)
 	var username string

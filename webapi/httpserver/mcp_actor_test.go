@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 )
@@ -124,5 +125,103 @@ func TestMCPActorKeyIsUsableAsASecurityTag(t *testing.T) {
 	}
 	if mcpActorKey(alice) == "" {
 		t.Error("tag must not be empty: cedar falls back to keying sessions by address alone")
+	}
+}
+
+// Two different credentials must never share a cedar session, which is
+// what the tag decides: the cache is keyed {SecurityTag, address,
+// command}, and every REST caller reaches the same address with the
+// same commands.
+func TestSessionTagsDifferPerCredential(t *testing.T) {
+	a := mcpActorKey("token-one")
+	b := mcpActorKey("token-two")
+	if a == b {
+		t.Fatal("two credentials produced the same session tag")
+	}
+	if a == "" || b == "" {
+		t.Fatal("an empty tag shares the cache with every other empty tag")
+	}
+	// Stable, or the same caller would never reuse a session.
+	if mcpActorKey("token-one") != a {
+		t.Error("the tag is not stable for one credential")
+	}
+}
+
+// The tag must not be derived from a claim: a claim is attacker-chosen,
+// so a forged `sub` would select somebody else's session.
+func TestSessionTagIsNotTheSubjectClaim(t *testing.T) {
+	// Two tokens with the same `sub` but different signatures.
+	one := jwtWithClaims(t, `{"sub":"victim@example.edu"}`, "sig-one")
+	two := jwtWithClaims(t, `{"sub":"victim@example.edu"}`, "sig-two")
+	if mcpActorKey(one) == mcpActorKey(two) {
+		t.Error("the tag collapses two distinct credentials that merely claim the same subject")
+	}
+}
+
+func TestDescribeCredentialSubject(t *testing.T) {
+	withIssuer := jwtWithClaims(t, `{"sub":"bbockelm@chtc.wisc.edu","iss":"ap.example.edu"}`, "x")
+	if got := describeCredentialSubject(withIssuer); got != "bbockelm@chtc.wisc.edu (iss ap.example.edu)" {
+		t.Errorf("describeCredentialSubject = %q", got)
+	}
+	if got := describeCredentialSubject("not-a-jwt"); got != "opaque" {
+		t.Errorf("an opaque token described as %q", got)
+	}
+	if got := describeCredentialSubject(jwtWithClaims(t, `{}`, "x")); got != "no subject" {
+		t.Errorf("a subjectless token described as %q", got)
+	}
+	// Never panics or leaks on rubbish: it runs on every request.
+	for _, bad := range []string{"", "a.b", "a.!!!.c", "a.e30.c.d"} {
+		_ = describeCredentialSubject(bad)
+	}
+}
+
+func jwtWithClaims(t *testing.T, claims, signature string) string {
+	t.Helper()
+	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	return enc(`{"alg":"HS256"}`) + "." + enc(claims) + "." + enc(signature)
+}
+
+// Every request must carry a tag, whichever branch it came through.
+// An empty one shares a cedar cache entry with every other empty one,
+// and every REST caller reaches the same schedd with the same commands.
+func TestSessionTagForIsNeverEmpty(t *testing.T) {
+	if got := sessionTagFor("", "some-credential"); got == "" {
+		t.Error("a bearer request would carry no tag")
+	}
+	if got := sessionTagFor("alice", ""); got != "alice" {
+		t.Errorf("user-header mode tagged %q, want the username", got)
+	}
+	// Even with nothing to go on, something rather than nothing.
+	if got := sessionTagFor("", ""); got == "" {
+		t.Error("an empty credential produced an empty tag")
+	}
+}
+
+func TestSessionTagForSeparatesCallers(t *testing.T) {
+	if sessionTagFor("", "token-alice") == sessionTagFor("", "token-bob") {
+		t.Error("two bearers share one tag")
+	}
+	if sessionTagFor("alice", "") == sessionTagFor("bob", "") {
+		t.Error("two users share one tag")
+	}
+	// And the same caller keeps one, or no session is ever reused.
+	// Computed into variables because the linter reads the inline form
+	// as comparing an expression with itself, which is exactly the
+	// stability being asserted.
+	first := sessionTagFor("", "token-alice")
+	second := sessionTagFor("", "token-alice")
+	if first != second {
+		t.Error("one bearer got two tags")
+	}
+}
+
+// user-header mode must not tag by the credential: the token is
+// regenerated per request, so the tag would differ every time and no
+// session would ever be reused.
+func TestUserHeaderModeTagsByUserNotCredential(t *testing.T) {
+	first := sessionTagFor("alice", "generated-token-1")
+	second := sessionTagFor("alice", "generated-token-2")
+	if first != second {
+		t.Errorf("one user got two tags across regenerated tokens, %q then %q", first, second)
 	}
 }

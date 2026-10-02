@@ -3,7 +3,10 @@ package httpserver
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -155,4 +158,67 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 	h.mcpActors.put(cacheKey, result.User, mcpActorTTL)
 	h.logger.Info(logging.DestinationHTTP, "Resolved caller identity with the schedd", "actor", result.User)
 	return result.User
+}
+
+// describeCredentialSubject reports the `sub` a credential carries, for
+// a log line that says which identity a request was about to present.
+//
+// Unverified by construction -- it is read straight out of the payload
+// without checking the signature -- so it is only ever used for
+// logging, never for a decision. Returns a short description rather
+// than an error, because a log line is not worth failing a request
+// over.
+func describeCredentialSubject(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "opaque"
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "unreadable"
+	}
+	var claims struct {
+		Subject string `json:"sub"`
+		Issuer  string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "unreadable"
+	}
+	if claims.Subject == "" {
+		return "no subject"
+	}
+	if claims.Issuer != "" {
+		return claims.Subject + " (iss " + claims.Issuer + ")"
+	}
+	return claims.Subject
+}
+
+// shortTag abbreviates a session tag for a log line. The full digest
+// says nothing a reader can use; the point is only whether two requests
+// share one.
+func shortTag(tag string) string {
+	if len(tag) > 12 {
+		return tag[:12]
+	}
+	return tag
+}
+
+// sessionTagFor decides the cedar session tag a request's credential
+// carries.
+//
+// cedar's client session cache is keyed {SecurityTag, address,
+// command}, and by {address, command} alone when the tag is empty.
+// Every REST caller reaches the same schedd with the same commands, so
+// an untagged config shares one cache entry across callers.
+//
+// userTag is the username, and is set only in user-header mode: there
+// the token is regenerated per request -- new jti, new iat -- so a
+// digest of it would differ every time and no session would ever be
+// reused. Everywhere else the tag is a digest of the credential rather
+// than a claim read out of it, because a claim is attacker-chosen.
+func sessionTagFor(userTag, credential string) string {
+	if userTag != "" {
+		return userTag
+	}
+	return mcpActorKey(credential)
 }
