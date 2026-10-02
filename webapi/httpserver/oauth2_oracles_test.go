@@ -335,3 +335,63 @@ func TestUserRecordOracleLookupErrorFailsOpen(t *testing.T) {
 		t.Errorf("a lookup failure must never read as a revocation")
 	}
 }
+
+// contextRecordingLookup captures the context the oracle hands down.
+type contextRecordingLookup struct{ got context.Context }
+
+func (l *contextRecordingLookup) GetUserRecord(ctx context.Context, _ string) (*htcondor.UserRecord, error) {
+	l.got = ctx
+	return nil, nil
+}
+
+// The oracle's query is the server's own: it asks whether a user has
+// been disabled, which the user's own credential is the wrong thing to
+// ask with -- and at the token endpoint, where this runs, there is no
+// such credential anyway, because the point is to decide whether to
+// issue one.
+//
+// The context it inherits is a request's, marked as acting for
+// somebody. Unmarked, the connection is refused for having no caller
+// credential and the oracle degrades to "no opinion" on every refresh.
+// An oracle that never has an opinion is an oracle that is not running.
+func TestUserRecordOracleQueriesAsTheDaemon(t *testing.T) {
+	lookup := &contextRecordingLookup{}
+	oracle := &UserRecordOracle{
+		Lookup:    func() UserRecordLookup { return lookup },
+		UIDDomain: "example.edu",
+	}
+
+	// A request context, exactly as the token endpoint provides.
+	ctx := htcondor.WithUserRequest(context.Background(), "HTTP request POST /mcp/oauth2/token")
+	if _, err := oracle.Check(ctx, "bbockelm", nil); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if lookup.got == nil {
+		t.Fatal("the lookup was never called")
+	}
+
+	origin, reason := htcondor.CredentialOriginFromContext(lookup.got)
+	if origin != htcondor.OriginDaemon {
+		t.Errorf("the query ran as %v (%q); the connection will be refused for having no caller credential",
+			origin, reason)
+	}
+}
+
+// The reclassification must not escape the oracle: the caller's context
+// is still a request's, and anything else done on it must still be
+// refused the daemon credential.
+func TestUserRecordOracleDoesNotReclassifyItsCaller(t *testing.T) {
+	lookup := &contextRecordingLookup{}
+	oracle := &UserRecordOracle{
+		Lookup:    func() UserRecordLookup { return lookup },
+		UIDDomain: "example.edu",
+	}
+
+	ctx := htcondor.WithUserRequest(context.Background(), "HTTP request POST /mcp/oauth2/token")
+	if _, err := oracle.Check(ctx, "bbockelm", nil); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if origin, _ := htcondor.CredentialOriginFromContext(ctx); origin != htcondor.OriginUser {
+		t.Errorf("the caller's own context became %v", origin)
+	}
+}
