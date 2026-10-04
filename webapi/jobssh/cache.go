@@ -260,6 +260,38 @@ func (c *Cache) DialJob(ctx context.Context, key Key, network, addr string) (net
 	return &trackedConn{Conn: raw, release: func() { c.release(e) }}, nil
 }
 
+// Warm opens the transport to a job if one is not open already, and
+// leaves it in the cache for whoever asks next.
+//
+// This exists for the SSH gateway. Establishing a transport is a
+// schedd query, a CEDAR connection to the starter and an SSH handshake
+// inside it, and that is seconds -- long enough that an editor opening
+// a remote window over the gateway can give up before the shell it
+// asked for exists. A client that knows it is about to connect can pay
+// that cost up front, over a request it controls the timeout of,
+// rather than inside somebody else's connection deadline.
+//
+// Reports whether a transport was already open, which is the
+// difference between "nothing to do" and "we just spent five seconds".
+// Only the transport is established: opening a session over a warm
+// transport is one SSH channel and is not the slow part.
+func (c *Cache) Warm(ctx context.Context, key Key) (reused bool, err error) {
+	c.mu.Lock()
+	existing, ok := c.entries[key]
+	reused = ok && existing.conn != nil
+	c.mu.Unlock()
+
+	e, err := c.acquire(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	// Released at once: this call wants the transport to exist, not to
+	// hold it. The idle clock that starts here is DefaultIdleTimeout
+	// long, which is many times what a client needs to follow up.
+	c.release(e)
+	return reused, nil
+}
+
 // acquire returns an entry with a reference already taken.
 func (c *Cache) acquire(ctx context.Context, key Key) (*entry, error) {
 	c.mu.Lock()

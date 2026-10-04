@@ -837,3 +837,98 @@ func TestAWorkingGuessIsRemembered(t *testing.T) {
 		t.Errorf("asked the sandbox %d times for a guess that works, want 1", reads)
 	}
 }
+
+// TestWarmOpensTheTransportOnce is what the SSH gateway gets out of
+// warming: the handshake is paid for by a request the client chose the
+// deadline of, and the connection that follows finds it done.
+func TestWarmOpensTheTransportOnce(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	reused, err := c.Warm(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if reused {
+		t.Error("the first warm cannot have reused anything")
+	}
+	if d.count() != 1 {
+		t.Fatalf("dials = %d, want 1", d.count())
+	}
+
+	reused, err = c.Warm(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("second Warm: %v", err)
+	}
+	if !reused {
+		t.Error("the second warm should report that there was nothing to do")
+	}
+	if d.count() != 1 {
+		t.Errorf("dials = %d after warming twice, want 1", d.count())
+	}
+}
+
+// TestConnectingAfterWarmDoesNotDialAgain is the claim the endpoint
+// makes to its caller. If this does not hold, warming costs a
+// handshake and saves nothing.
+func TestConnectingAfterWarmDoesNotDialAgain(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	if _, err := c.Warm(context.Background(), testKey); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	conn, err := c.DialJob(context.Background(), testKey, "tcp", "127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("DialJob: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if d.count() != 1 {
+		t.Errorf("dials = %d, want 1: the connection should have found a warm transport", d.count())
+	}
+}
+
+// TestWarmReportsAFailureRatherThanCachingIt. A job that cannot be
+// reached must not leave an entry behind claiming otherwise, or the
+// next caller is told it is warm and then fails anyway.
+func TestWarmReportsAFailureRatherThanCachingIt(t *testing.T) {
+	d := &fakeDialer{err: errors.New("no route to the execute node")}
+	c := newTestCache(t, d, nil)
+
+	if _, err := c.Warm(context.Background(), testKey); err == nil {
+		t.Fatal("Warm should have failed")
+	}
+	if n := c.Len(); n != 0 {
+		t.Errorf("cache holds %d entries after a failed warm, want 0", n)
+	}
+
+	d.mu.Lock()
+	d.err = nil
+	d.mu.Unlock()
+	reused, err := c.Warm(context.Background(), testKey)
+	if err != nil {
+		t.Fatalf("Warm after recovery: %v", err)
+	}
+	if reused {
+		t.Error("a failed warm must not look like a warm transport to the next caller")
+	}
+}
+
+// TestWarmDoesNotPinTheTransport: warming takes no reference, so the
+// reaper can still retire a transport nobody went on to use.
+func TestWarmDoesNotPinTheTransport(t *testing.T) {
+	now := time.Now()
+	d := &fakeDialer{}
+	c := newTestCache(t, d, func() time.Time { return now })
+
+	if _, err := c.Warm(context.Background(), testKey); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	c.reapOnce()
+
+	if n := c.Len(); n != 0 {
+		t.Errorf("cache holds %d entries after the idle timeout, want 0", n)
+	}
+}

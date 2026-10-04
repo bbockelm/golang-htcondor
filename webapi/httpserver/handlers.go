@@ -601,6 +601,11 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		case "ssh":
 			s.handleJobSSH(w, r)
 			return
+		case "warm":
+			// POST /api/v1/jobs/{id}/warm — open the transport now, so
+			// that whatever connects next does not have to.
+			s.handleJobWarm(w, r, jobID)
+			return
 		}
 	}
 
