@@ -215,7 +215,20 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.jobMirror == nil {
-		h.writeError(w, http.StatusServiceUnavailable, "job queue mirror not configured")
+		// No local job_queue.log to tail, but this access point may
+		// still be following its queue through the htcondordb mirror.
+		// That mirror is the one most deployments actually have -- an
+		// API server in its own container cannot read the schedd's
+		// spool -- and following the queue is a large part of what it
+		// is for. Refusing here while it sits there healthy was the
+		// endpoint ignoring the answer it already had.
+		if h.jobWatchFeed != nil && h.dbMirror.Enabled() {
+			h.streamJobsWatchFromMirror(ctx, w, r)
+			return
+		}
+		h.writeError(w, http.StatusServiceUnavailable,
+			"this access point is not following its job queue: it has neither a readable job_queue.log "+
+				"(HTTP_API_JOB_QUEUE_LOG) nor an htcondordb mirror")
 		return
 	}
 	ctx, cancel := context.WithCancel(ctx)
