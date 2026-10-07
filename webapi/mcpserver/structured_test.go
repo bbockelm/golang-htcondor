@@ -32,8 +32,8 @@ func TestEveryServedToolHasOutputSchema(t *testing.T) {
 // ship unschematised behind a feature flag.
 func TestOutputSchemaPolicyCoversConditionalTools(t *testing.T) {
 	conditional := []string{
-		"condor_doc_job_attributes", "condor_doc_machine_attributes",
-		"condor_doc_submit_syntax", "condor_doc_config_variables", "condor_doc_search",
+		"doc_job_attributes", "doc_machine_attributes",
+		"doc_submit_syntax", "doc_config_variables", "doc_search",
 		"skills_list", "skills_get",
 		"list_service_credentials", "get_credential_status",
 		"store_service_credential", "delete_service_credential",

@@ -128,22 +128,22 @@ func IsReadOnlyTool(name string) bool {
 // gate consumes this via IsReadOnlyTool. Adding a new MCP tool
 // without updating this map silently classifies it as write-only.
 var readOnlyMCPTools = map[string]bool{
-	"query_jobs":                    true,
-	"get_job":                       true,
-	"analyze_job_match":             true,
-	"query_job_archive":             true,
-	"query_job_epochs":              true,
-	"query_transfer_history":        true,
-	"list_service_credentials":      true,
-	"get_credential_status":         true,
-	"condor_doc_job_attributes":     true,
-	"condor_doc_machine_attributes": true,
-	"condor_doc_submit_syntax":      true,
-	"condor_doc_config_variables":   true,
-	"condor_doc_search":             true,
-	"query_history_db":              true,
-	"query_jobs_as_of":              true,
-	"aggregate_jobs":                true,
+	"query_jobs":               true,
+	"get_job":                  true,
+	"analyze_job_match":        true,
+	"query_job_archive":        true,
+	"query_job_epochs":         true,
+	"query_transfer_history":   true,
+	"list_service_credentials": true,
+	"get_credential_status":    true,
+	"doc_job_attributes":       true,
+	"doc_machine_attributes":   true,
+	"doc_submit_syntax":        true,
+	"doc_config_variables":     true,
+	"doc_search":               true,
+	"query_history_db":         true,
+	"query_jobs_as_of":         true,
+	"aggregate_jobs":           true,
 	// analyze_issues reads held jobs and run-attempt history and groups
 	// them; it changes nothing.
 	"analyze_issues": true,
@@ -1027,7 +1027,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		// Doc tools all share one handler — dispatching them here as
 		// a single default-arm fallback means the switch's
 		// cyclomatic-complexity score doesn't grow each time we add
-		// a new condor_doc_* tool.
+		// a new doc_* tool.
 		// Site skills share this arm for the same reason: two more cases
 		// in the switch above would grow its complexity score without
 		// making the dispatch any clearer.

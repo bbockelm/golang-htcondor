@@ -33,8 +33,8 @@ func TestEveryServedToolIsAnnotated(t *testing.T) {
 func TestToolAnnotationPolicyCoversConditionalTools(t *testing.T) {
 	conditional := []string{
 		// docs
-		"condor_doc_job_attributes", "condor_doc_machine_attributes",
-		"condor_doc_submit_syntax", "condor_doc_config_variables", "condor_doc_search",
+		"doc_job_attributes", "doc_machine_attributes",
+		"doc_submit_syntax", "doc_config_variables", "doc_search",
 		// skills
 		"skills_list", "skills_get",
 		// credd
@@ -90,7 +90,7 @@ func TestReadOnlyQueryAnnotations(t *testing.T) {
 		"get_job_stdout", "get_job_stderr", "get_job_output",
 		"query_job_archive", "query_job_epochs", "query_transfer_history",
 		"query_history_db", "query_jobs_as_of", "aggregate_jobs",
-		"condor_doc_search", "get_version",
+		"doc_search", "get_version",
 	}
 	for _, name := range readOnly {
 		ann := annotationsFor(name)
