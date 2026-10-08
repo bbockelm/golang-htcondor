@@ -24,7 +24,7 @@ import {
   applyBatchFilter,
   filterAdsByStatus,
   groupIntoBatches,
-  num,
+  adsInBatches,
   summarizeJobs,
   BATCH_PROJECTION,
   type BatchKey,
@@ -131,16 +131,7 @@ export default function UserDetailClient() {
   );
   const summary = useMemo(() => {
     if (!filter) return summarizeJobs(statusFiltered);
-    // A batch can span many clusters (a DAG folds a whole tree into one
-    // row), so keep every cluster the surviving batches cover, not just
-    // their representative id.
-    const clusters = new Set(batches.flatMap((b) => b.clusterIds));
-    return summarizeJobs(
-      statusFiltered.filter((j) => {
-        const c = num(j.ClusterId);
-        return c !== undefined && clusters.has(c);
-      }),
-    );
+    return summarizeJobs(adsInBatches(statusFiltered, batches));
   }, [statusFiltered, filter, batches]);
 
   return (

@@ -245,6 +245,22 @@ export function batchKey(b: Batch): BatchKey {
   return b.schedd ? `${b.schedd}\u0000${b.batchID}` : b.batchID;
 }
 
+// adsInBatches keeps the ads whose cluster one of batches covers, for a
+// summary that totals exactly what a filtered table shows. A batch can
+// span many clusters (a DAG folds a whole tree into one row), so every
+// cluster it covers counts, not just its representative id; and in
+// multi-AP mode a cluster is matched together with its access point,
+// because two access points each have a cluster 12.
+export function adsInBatches(ads: ClassAd[], batches: Batch[]): ClassAd[] {
+  const key = (schedd: string | undefined, cluster: number) =>
+    schedd ? `${schedd}\u0000${cluster}` : String(cluster);
+  const clusters = new Set(batches.flatMap((b) => b.clusterIds.map((c) => key(b.schedd, c))));
+  return ads.filter((j) => {
+    const c = num(j.ClusterId);
+    return c !== undefined && clusters.has(key(scheddOf(j), c));
+  });
+}
+
 // applyBatchFilter does the user-facing substring filter. Both the
 // filter input and the chat's `set_filter` tool drive this. We match
 // against a flat string built per batch — every field a user might
